@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../packages/contracts/src/wire-schema.ts"],
+  "sourcesContent": ["import wire from '../../../specs/schemas/hive-wire.schema.json' with { type: 'json' };\n\n/** The transport schema is kept as a leaf dependency for small native/host bundles. */\nexport const wireSchema = wire as Record<string, unknown>;\n"],
+  "mappings": ";;;;;AAGO,IAAM,aAAa;",
+  "names": []
+}
