@@ -1,0 +1,48 @@
+{
+  "name": "@ivy/sdk",
+  "version": "0.2.38",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.18.0 <25"
+  },
+  "exports": {
+    "./client": {
+      "types": "./types/sdk/src/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./service": {
+      "types": "./types/sdk/src/service.d.ts",
+      "default": "./dist/service.js"
+    },
+    "./node": {
+      "types": "./types/sdk/src/node.d.ts",
+      "default": "./dist/node.js"
+    },
+    "./host": {
+      "types": "./types/sdk/src/host.d.ts",
+      "default": "./dist/host.js"
+    },
+    "./codex-app-tools": {
+      "types": "./types/sdk/src/codex-app-tools.d.ts",
+      "default": "./dist/codex-app-tools.js"
+    },
+    ".": {
+      "types": "./types/sdk/src/client.d.ts",
+      "default": "./dist/client.js"
+    }
+  },
+  "files": [
+    "dist",
+    "types",
+    "ivy-source.json",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "ajv": "8.20.0",
+    "re2js": "2.8.6",
+    "ws": "8.21.3",
+    "zod": "4.6.5",
+    "@modelcontextprotocol/client": "2.0.0"
+  }
+}

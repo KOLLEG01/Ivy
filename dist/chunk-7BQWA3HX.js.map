@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../packages/contracts/src/canonical.ts"],
+  "sourcesContent": ["import { createHash } from 'node:crypto';\nimport { canonical } from './canonical-json.js';\nexport { canonical, encodeJson, validateJson, compareVersions } from './canonical-json.js';\nexport type { Json, JsonObject } from './canonical-json.js';\nexport const digest = (bytes: string | Uint8Array): string => 'sha256:' + createHash('sha256').update(bytes).digest('hex');\nexport const hashJson = (value: unknown): string => digest(canonical(value));\n"],
+  "mappings": ";;;;;AAAA,SAAS,kBAAkB;AAIpB,IAAM,SAAS,CAAC,UAAuC,YAAY,WAAW,QAAQ,EAAE,OAAO,KAAK,EAAE,OAAO,KAAK;AAClH,IAAM,WAAW,CAAC,UAA2B,OAAO,UAAU,KAAK,CAAC;",
+  "names": []
+}
