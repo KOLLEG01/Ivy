@@ -1,0 +1,564 @@
+{
+  "schemaVersion": 1,
+  "nativeVersion": "0.158.0",
+  "database": "state_5.sqlite",
+  "upstream": {
+    "tag": "rust-v0.158.0",
+    "tree": "962525adf43d50c9068b4ce3db9118bbccba0466",
+    "migrationLineEndings": "lf",
+    "source": "https://github.com/openai/codex/tree/rust-v0.158.0/codex-rs/state/migrations"
+  },
+  "migrations": [
+    {
+      "version": 1,
+      "description": "threads",
+      "checksum": "627ef19164c9bb298a0cd99945981c9b7bda3d9e6cf12eb35145e3b1d3bf7cf8740f0dbaa0b475185fc2993397078049"
+    },
+    {
+      "version": 2,
+      "description": "logs",
+      "checksum": "521b72cbc04c7d03b1e4aef8dc0fdee672f1f7f5881385a55a0e937e4ebe87a3f67bca4d3f6b59afbc9a7ca723c82856"
+    },
+    {
+      "version": 3,
+      "description": "logs thread id",
+      "checksum": "e58a2862bdb66d3274e60144a26dc9d68bbefff834cd29b82b740f38fcf95862934f412665d985715167839e8f0eb377"
+    },
+    {
+      "version": 4,
+      "description": "thread dynamic tools",
+      "checksum": "8adc251366e4c7e5ea78b620ac71f4c4bdfb8f048bf9f2fd7204226cfba54c8e83fc9d83fc1ec334bc683bb7f6d0d8a8"
+    },
+    {
+      "version": 5,
+      "description": "threads cli version",
+      "checksum": "1ac64f85e083e5b49b974bf498fc39c630f0032057fb4bf4cb31708619fac5a80189f261cf3e38dafd92dc406e73c220"
+    },
+    {
+      "version": 6,
+      "description": "memories",
+      "checksum": "a203fc4b597e1420bffdc4e00e214798b21cf7fc921d8bd6f089c75248fb6a4b4942c97a1f8e0271eca8cf3b3e5e7a80"
+    },
+    {
+      "version": 7,
+      "description": "threads first user message",
+      "checksum": "7e35a464df6d4c82694de50865ba3fe9104f9e1385a33be7d633ab4b8d6cf60b7f369fe083d31251fd77b75fa2d61f82"
+    },
+    {
+      "version": 8,
+      "description": "backfill state",
+      "checksum": "aa3f287f7a448554e7af01f259f0871ce90ace1a7d4b8ebbd74c87ae57c3e21119f7eec8b9c2e9f4a9e76e63a0f0b60a"
+    },
+    {
+      "version": 9,
+      "description": "stage1 outputs rollout slug",
+      "checksum": "8b469360777e6dd6c21d3f0eb93481251846b0a50e0a44eb0dbee4a0a32b7206768a5d83a5fcec30c6fd2e43d755ff1b"
+    },
+    {
+      "version": 10,
+      "description": "logs process id",
+      "checksum": "8adaf1365f8e5deeba68bdeee9fd83b094a87bdab364d95ab5c714f7b8bd95dc3b38576871470312154c9d41e8f10f93"
+    },
+    {
+      "version": 11,
+      "description": "logs partition prune indexes",
+      "checksum": "31ececbd07f04452d0dc5127d824ed183056b9900a31aa739387a4aef232016d975110829814841fb6bf3fd23634b799"
+    },
+    {
+      "version": 12,
+      "description": "logs estimated bytes",
+      "checksum": "0012a213ed25f2cf806c2530c487ebb00b4f102f5960d1a852154a0f77d25c9e9f7df29550faeb30ebaff15a26c7d604"
+    },
+    {
+      "version": 13,
+      "description": "threads agent nickname",
+      "checksum": "05526a0900a8430523a9a05932ea61302fce20782b245498565c1b9a2dfd10cf5c49932089b496ae23af44f6c5f76af4"
+    },
+    {
+      "version": 14,
+      "description": "agent jobs",
+      "checksum": "4d2fbb2442c5c5c7c47b4254b5b8dc2c52129f65c4a952a79f1ec5c40fb07483326429ce5acdbd372bc9262352cb6277"
+    },
+    {
+      "version": 15,
+      "description": "agent jobs max runtime seconds",
+      "checksum": "0eece6db59c948faa6608526af440a9f53f5a982d27f3e866cd9f1401c2e59bc61f8381b5a1c9744acb232f50db493e5"
+    },
+    {
+      "version": 16,
+      "description": "memory usage",
+      "checksum": "4768f743e981293735c6e07b0282ec8ace98af720059d68555b17979d28c94b0c893a97a950d5e32758bc6d92d8fe6ff"
+    },
+    {
+      "version": 17,
+      "description": "phase2 selection flag",
+      "checksum": "4cbdb2edfebf6040858ffc193cffa36e6b3fbf508f8418ad073081bbfcf59d53d423b6eb4c0ded206ab4d4c1a0efed94"
+    },
+    {
+      "version": 18,
+      "description": "phase2 selection snapshot",
+      "checksum": "a4363003bc44f0a4ae1eed53b536b7175f97863ea6881a059dc6642e70e2921576204697cec2345f560e65ff7fbf4455"
+    },
+    {
+      "version": 19,
+      "description": "thread dynamic tools defer loading",
+      "checksum": "3884c02f080f0184e92b620f870dfbb840a8ec5dfce2fe6455dd8197fcd27d7dd86e63ad6ec7c4091a1161d9ed199f8d"
+    },
+    {
+      "version": 20,
+      "description": "threads model reasoning effort",
+      "checksum": "07673f4859f740134569ab9606760d8173ed6df92da47c86fbd0ceeb333e18ab7ac91d525ab8c11503c42164fd4167ae"
+    },
+    {
+      "version": 21,
+      "description": "thread spawn edges",
+      "checksum": "ea1aebe4f5a1d56c8effcc15f705c272275dd8adfeb01bc97d3f7b283474a3b8c2b0c8c69de55786e8bda17cae6f4de7"
+    },
+    {
+      "version": 22,
+      "description": "threads agent path",
+      "checksum": "160fe01b757dd06f9573b9030952d021f2b148732bea5fc5f5ae09e9227f3f83ca676695edaf8502669fcb546119dc94"
+    },
+    {
+      "version": 23,
+      "description": "drop logs",
+      "checksum": "e6c748a9a18286e4c773ffe0dad659f16fb7e5b7b032235815991c405f2d32c068f3edde920d0fcf589b687bffcfee2e"
+    },
+    {
+      "version": 24,
+      "description": "remote control enrollments",
+      "checksum": "e92aa526b1f36e26f6221c04a671f07b27de2e7a5112d93a8c3af816a87846e7804d5fbad689e61cf4ec91fd79d3bd8a"
+    },
+    {
+      "version": 25,
+      "description": "thread timestamps millis",
+      "checksum": "d6fb51d79941b93c3278fe2a8a0c6fa882407b7b716e32d72329f0b7b60c181a42f49e56cd552315efb0402a111ede12"
+    },
+    {
+      "version": 26,
+      "description": "thread dynamic tools namespace",
+      "checksum": "6c62a325d3b9ca8e424eacb9e3890d8d9de57c3725e2d1fa30c3743ae779fca2969387174359dfb26e4920791ae7e831"
+    },
+    {
+      "version": 27,
+      "description": "threads cwd sort indexes",
+      "checksum": "d84dca6a039e004c0c7d06c5a16c2ccc363137537f3dd9898f50bb013ce9067140761b87d58ca742d769d35976863fc3"
+    },
+    {
+      "version": 28,
+      "description": "device key bindings",
+      "checksum": "ef44adaa291e40dfe6b74e3cd259711adae13f01c5594b177d08e2d2041a67ed3813feecf049662aaed0f636bd3f4ac3"
+    },
+    {
+      "version": 29,
+      "description": "thread goals",
+      "checksum": "e9ec76f97dbf41ce4949de324a2a26538c2025c0ac4f272b77a852970fb14b7ec970d6978a765f91ae171dce9c0e4149"
+    },
+    {
+      "version": 30,
+      "description": "threads thread source",
+      "checksum": "80c1cdacd4520b42b18b960164912685591a7ee041645f35609a2ee2792eb474b7b0b758366556982d8cde2acb583672"
+    },
+    {
+      "version": 31,
+      "description": "drop device key bindings",
+      "checksum": "943675a9b3dc92d0b2731ae7d2fe324ff1a40b6366b9d5d8b4cb47ca885c08beb6ebb1d776a5a47c878b4094dde70ea0"
+    },
+    {
+      "version": 32,
+      "description": "threads preview",
+      "checksum": "3c01d615c5e3aba0fd858b7168e73881598d7d33a0ecc41527bdf6595a199d1aec2ff9f3b3000a57241c500d81b34259"
+    },
+    {
+      "version": 33,
+      "description": "thread goal stopped statuses",
+      "checksum": "4904aae354e3d8ce32ac21d2ae579fd708446ae1dfb2649fc9dd22dc9279b91a2bbb02e6f01b3e0abd1088177bf2f030"
+    },
+    {
+      "version": 34,
+      "description": "drop thread goals",
+      "checksum": "d6fea739c76ebdef35a23f06e54efb5904d7987fb6b663db1ebc98eb9b192305f454932bfbaa2231aedca6209903a5f3"
+    },
+    {
+      "version": 35,
+      "description": "drop memory tables",
+      "checksum": "d7b56acb07c96858bdc7ca4c53db51eb71c6a19ef2c524ff68c2660a6fe0d23211a6d39cb905f01c42ffb7c8ee913bbc"
+    },
+    {
+      "version": 36,
+      "description": "threads visible sort indexes",
+      "checksum": "6381f7bb4c36be41c6106b8523ea6c68f5a00273a5522155b7b84bad26d152436f3375df7097ce3abf2421aec32641ed"
+    },
+    {
+      "version": 37,
+      "description": "remote control enrollments enabled",
+      "checksum": "f6a5ab0db36bb9e45ab5285b56090fb453df0a4d4d8d62eace234f0b557f4203c6c455fc67bd7d6e72623c3979ec9405"
+    },
+    {
+      "version": 38,
+      "description": "external agent config imports",
+      "checksum": "e7778522cbe529f5e2ba179b502aee8e5c21272ad820e672ab0a565f7edc9bd0f29171ccf9815c0acc0f89eae0a2b1fc"
+    },
+    {
+      "version": 39,
+      "description": "threads recency at",
+      "checksum": "c217b3d14c08c23603f485af11452ee2b68f65fa8dbaf215f33f53b608c092be8738de3f63d6a38f120edea5af247c17"
+    },
+    {
+      "version": 40,
+      "description": "threads history mode",
+      "checksum": "a7a99674f90a43184e43d66595c4f1da50ae8715a5bfcb1579a2b7b10668335d7f7ab6b6f2d7a7a379272773d803a914"
+    },
+    {
+      "version": 41,
+      "description": "threads name",
+      "checksum": "0dc734dbe4cbcc5ad5a8bbc2fdc1cf770ddea3cb53eb36c55a4da6fa2e8be4cc8e68672f43ac953e727e415e45c50a78"
+    },
+    {
+      "version": 42,
+      "description": "drop agent jobs",
+      "checksum": "cfdc4fd47328d1b67c0c7555125de4fb4add5b3b57fd31ac1987e4d8b0c99b1f5418db9ee7ec2158aed8a2e3dfcfd636"
+    },
+    {
+      "version": 43,
+      "description": "threads is pinned",
+      "checksum": "605128e722bd2521c7e979e9961c16706435e442b3e3a8efa36f6b16c42e3833090906d9a62fde097a109b78e29da830"
+    },
+    {
+      "version": 44,
+      "description": "external agent config imports provider id",
+      "checksum": "5d29223bd1cafe456a4af992a545e8ec420b71331eb12a7427e26512b8a44117d9445b83562f095b3a5a0f11c4f091d2"
+    },
+    {
+      "version": 45,
+      "description": "threads section",
+      "checksum": "a7fadc8caea8b6abeb108f588a91b8e5d1c9e2645ce990f2251b9f0234e6e53d78fc854f1c88c7217cc143016539d691"
+    },
+    {
+      "version": 46,
+      "description": "threads section order",
+      "checksum": "63addf6115c3fb1a22a886108ce6ebff5cd8408f219606dc2f8396836418e56d5be2a6de7b0df877119a28096ee67d22"
+    },
+    {
+      "version": 47,
+      "description": "rollout migration state",
+      "checksum": "1ae117e4ab40813de2b6cfed521585a5396a8dcb7277923d539ed111f5e76424787131ef1de353be5dd78e8228f204cc"
+    },
+    {
+      "version": 48,
+      "description": "thread section appearance",
+      "checksum": "9d298333f7523010502044685009ffe1ed18c3fed7f01fb200d62252f90ab0d897ccf05e478f90150b941ea6c0bd459c"
+    },
+    {
+      "version": 49,
+      "description": "projects",
+      "checksum": "faf45c392bb8572062bbd52f9702966cf62e3d195a1633f54cfe1b7dcb5865a3f951dc75c975179dc9a0ee639f7426a7"
+    },
+    {
+      "version": 50,
+      "description": "threads section empty preview indexes",
+      "checksum": "d2802e96f5fc1900fc6d3d595f040ebca8d25310ae9d1499a12b91f1635617adf5d2b4a93d0807203a22f4a6d4edb77e"
+    },
+    {
+      "version": 51,
+      "description": "thread artifacts",
+      "checksum": "23360a03a7fc307c3fd5bb8b432b66034dd8f8695cdba698b45278c20dd712c1af476b884e192237d80baa08a5f29505"
+    },
+    {
+      "version": 52,
+      "description": "projects recency",
+      "checksum": "071e96313d402e4c3d156f620f3f62b4a468da00ce30a47574d2594623e5e954f3ec2f1e54f043a8e4b602643e868b7d"
+    },
+    {
+      "version": 53,
+      "description": "threads originator",
+      "checksum": "e86ef7ccbcc891b1af27f6aedb26bfe36d79c9d405e48f302eb053cb57ff9b24dbeb0479b48b18e2076efb6bfc4a9287"
+    },
+    {
+      "version": 54,
+      "description": "threads daybreak enabled",
+      "checksum": "e62a9977d99c7eabf36b67b183d86443d062b0aa8d018c42d1299821de4bf59182e16494ab874fd2d4081ef510e759f1"
+    },
+    {
+      "version": 55,
+      "description": "thread attachments",
+      "checksum": "6daadc5527b3f57fa360c5d93199282ba54a42b7598558a9765bd6dcf11f555150fe678ed8163abb2e1861cb51d196c3"
+    },
+    {
+      "version": 56,
+      "description": "threads creator identity",
+      "checksum": "5de44fac5505249be66fcd640e9ac3d36550854c0db1272eb52cbb6c3d18b207db4cb782686d81089e77ebb57f6819b1"
+    },
+    {
+      "version": 57,
+      "description": "cleanup guardian thread metadata",
+      "checksum": "729562c57bfa8b43d5ae3476c99cef6e81a54709a74283057ce8d2d6f55cf8eae2594fdb7cff4238ebe1e481e7c049e6"
+    }
+  ],
+  "schema": [
+    {
+      "type": "index",
+      "name": "idx_projects_position",
+      "tableName": "projects",
+      "sql": "CREATE INDEX idx_projects_position\n    ON projects(position ASC, id ASC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_thread_attachments_thread_created_id",
+      "tableName": "thread_attachments",
+      "sql": "CREATE INDEX idx_thread_attachments_thread_created_id\n    ON thread_attachments(thread_id, created_at, id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_thread_dynamic_tools_thread",
+      "tableName": "thread_dynamic_tools",
+      "sql": "CREATE INDEX idx_thread_dynamic_tools_thread ON thread_dynamic_tools(thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "idx_thread_spawn_edges_parent_status",
+      "tableName": "thread_spawn_edges",
+      "sql": "CREATE INDEX idx_thread_spawn_edges_parent_status\n    ON thread_spawn_edges(parent_thread_id, status)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_archived",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_archived ON threads(archived)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_archived_cwd_created_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_archived_cwd_created_at_ms ON threads(archived, cwd, created_at_ms DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_archived_cwd_recency_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_archived_cwd_recency_at_ms\n    ON threads(archived, cwd, recency_at_ms DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_archived_cwd_updated_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_archived_cwd_updated_at_ms ON threads(archived, cwd, updated_at_ms DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_created_at",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_created_at ON threads(created_at DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_created_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_created_at_ms ON threads(created_at_ms DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_pinned_recency_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_pinned_recency_at_ms\n    ON threads(archived, recency_at_ms DESC, id DESC)\n    WHERE is_pinned = 1 AND preview <> ''"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_project_id",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_project_id\n    ON threads(project_id, archived, created_at_ms DESC, id DESC)\n    WHERE project_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_project_recency",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_project_recency\n    ON threads(project_id, recency_at_ms DESC)\n    WHERE archived = 0 AND project_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_provider",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_provider ON threads(model_provider)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_recency_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_recency_at_ms\n    ON threads(recency_at_ms DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_section_position",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_section_position\n    ON threads(archived, thread_section_id, section_position ASC, id ASC)\n    WHERE thread_section_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_section_recency_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_section_recency_at_ms\n    ON threads(archived, thread_section_id, recency_at_ms DESC, id DESC)\n    WHERE thread_section_id IS NOT NULL"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_source",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_source ON threads(source)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_updated_at",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_updated_at ON threads(updated_at DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_updated_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC)"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_visible_created_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_visible_created_at_ms\n    ON threads(archived, created_at_ms DESC)\n    WHERE preview <> ''"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_visible_recency_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_visible_recency_at_ms\n    ON threads(archived, recency_at_ms DESC, id DESC)\n    WHERE preview <> ''"
+    },
+    {
+      "type": "index",
+      "name": "idx_threads_visible_updated_at_ms",
+      "tableName": "threads",
+      "sql": "CREATE INDEX idx_threads_visible_updated_at_ms\n    ON threads(archived, updated_at_ms DESC)\n    WHERE preview <> ''"
+    },
+    {
+      "type": "table",
+      "name": "backfill_state",
+      "tableName": "backfill_state",
+      "sql": "CREATE TABLE backfill_state (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    status TEXT NOT NULL,\n    last_watermark TEXT,\n    last_success_at INTEGER,\n    updated_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "external_agent_config_imports",
+      "tableName": "external_agent_config_imports",
+      "sql": "CREATE TABLE external_agent_config_imports (\n    import_id TEXT PRIMARY KEY,\n    completed_at_ms INTEGER NOT NULL,\n    successes TEXT NOT NULL,\n    failures TEXT NOT NULL\n, provider_id TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "project_idempotency_keys",
+      "tableName": "project_idempotency_keys",
+      "sql": "CREATE TABLE project_idempotency_keys (\n    key TEXT PRIMARY KEY,\n    project_id TEXT NOT NULL,\n    created_at_ms INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "project_roots",
+      "tableName": "project_roots",
+      "sql": "CREATE TABLE project_roots (\n    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n    position INTEGER NOT NULL,\n    path TEXT NOT NULL,\n    PRIMARY KEY (project_id, position)\n)"
+    },
+    {
+      "type": "table",
+      "name": "projects",
+      "tableName": "projects",
+      "sql": "CREATE TABLE projects (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL,\n    metadata TEXT NOT NULL DEFAULT '{}',\n    position INTEGER NOT NULL,\n    created_at_ms INTEGER NOT NULL,\n    updated_at_ms INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "remote_control_enrollments",
+      "tableName": "remote_control_enrollments",
+      "sql": "CREATE TABLE remote_control_enrollments (\n    websocket_url TEXT NOT NULL,\n    account_id TEXT NOT NULL,\n    app_server_client_name TEXT NOT NULL,\n    server_id TEXT NOT NULL,\n    environment_id TEXT NOT NULL,\n    server_name TEXT NOT NULL,\n    updated_at INTEGER NOT NULL, remote_control_enabled INTEGER,\n    PRIMARY KEY (websocket_url, account_id, app_server_client_name)\n)"
+    },
+    {
+      "type": "table",
+      "name": "rollout_migration_skipped_rollouts",
+      "tableName": "rollout_migration_skipped_rollouts",
+      "sql": "CREATE TABLE rollout_migration_skipped_rollouts (\n    migration_id TEXT NOT NULL,\n    rollout_path TEXT NOT NULL,\n    rollout_size_bytes INTEGER NOT NULL,\n    rollout_modified_at_ns INTEGER NOT NULL,\n    skip_reason TEXT NOT NULL,\n    skipped_at INTEGER NOT NULL,\n    PRIMARY KEY (migration_id, rollout_path)\n)"
+    },
+    {
+      "type": "table",
+      "name": "rollout_migration_state",
+      "tableName": "rollout_migration_state",
+      "sql": "CREATE TABLE rollout_migration_state (\n    migration_id TEXT PRIMARY KEY,\n    last_checked_thread_created_at INTEGER,\n    last_checked_thread_id TEXT,\n    updated_at INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "sqlite_sequence",
+      "tableName": "sqlite_sequence",
+      "sql": "CREATE TABLE sqlite_sequence(name,seq)"
+    },
+    {
+      "type": "table",
+      "name": "thread_attachments",
+      "tableName": "thread_attachments",
+      "sql": "CREATE TABLE \"thread_attachments\" (\n    id TEXT PRIMARY KEY,\n    thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,\n    attachment_type TEXT NOT NULL,\n    identity_key TEXT NOT NULL,\n    payload TEXT NOT NULL,\n    created_at INTEGER NOT NULL,\n    UNIQUE (thread_id, attachment_type, identity_key)\n)"
+    },
+    {
+      "type": "table",
+      "name": "thread_dynamic_tools",
+      "tableName": "thread_dynamic_tools",
+      "sql": "CREATE TABLE thread_dynamic_tools (\n    thread_id TEXT NOT NULL,\n    position INTEGER NOT NULL,\n    name TEXT NOT NULL,\n    description TEXT NOT NULL,\n    input_schema TEXT NOT NULL, defer_loading INTEGER NOT NULL DEFAULT 0, namespace TEXT,\n    PRIMARY KEY(thread_id, position),\n    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE\n)"
+    },
+    {
+      "type": "table",
+      "name": "thread_sections",
+      "tableName": "thread_sections",
+      "sql": "CREATE TABLE thread_sections (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL\n, appearance TEXT)"
+    },
+    {
+      "type": "table",
+      "name": "thread_spawn_edges",
+      "tableName": "thread_spawn_edges",
+      "sql": "CREATE TABLE thread_spawn_edges (\n    parent_thread_id TEXT NOT NULL,\n    child_thread_id TEXT NOT NULL PRIMARY KEY,\n    status TEXT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "threads",
+      "tableName": "threads",
+      "sql": "CREATE TABLE threads (\n    id TEXT PRIMARY KEY,\n    rollout_path TEXT NOT NULL,\n    created_at INTEGER NOT NULL,\n    updated_at INTEGER NOT NULL,\n    source TEXT NOT NULL,\n    model_provider TEXT NOT NULL,\n    cwd TEXT NOT NULL,\n    title TEXT NOT NULL,\n    sandbox_policy TEXT NOT NULL,\n    approval_mode TEXT NOT NULL,\n    tokens_used INTEGER NOT NULL DEFAULT 0,\n    has_user_event INTEGER NOT NULL DEFAULT 0,\n    archived INTEGER NOT NULL DEFAULT 0,\n    archived_at INTEGER,\n    git_sha TEXT,\n    git_branch TEXT,\n    git_origin_url TEXT\n, cli_version TEXT NOT NULL DEFAULT '', first_user_message TEXT NOT NULL DEFAULT '', agent_nickname TEXT, agent_role TEXT, memory_mode TEXT NOT NULL DEFAULT 'enabled', model TEXT, reasoning_effort TEXT, agent_path TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, thread_source TEXT, preview TEXT NOT NULL DEFAULT '', recency_at INTEGER NOT NULL DEFAULT 0, recency_at_ms INTEGER NOT NULL DEFAULT 0, history_mode TEXT NOT NULL DEFAULT 'legacy', name TEXT, is_pinned INTEGER NOT NULL DEFAULT 0, thread_section_id TEXT\n    REFERENCES thread_sections(id) ON DELETE SET NULL, section_position INTEGER, section_entered_at_ms INTEGER, project_id TEXT\n    REFERENCES projects(id) ON DELETE SET NULL, originator TEXT, daybreak_enabled BOOLEAN, creator_user_id TEXT, creator_account_id TEXT)"
+    },
+    {
+      "type": "trigger",
+      "name": "threads_created_at_ms_after_insert",
+      "tableName": "threads",
+      "sql": "CREATE TRIGGER threads_created_at_ms_after_insert\nAFTER INSERT ON threads\nWHEN NEW.created_at_ms IS NULL\nBEGIN\n    UPDATE threads\n    SET created_at_ms = NEW.created_at * 1000\n    WHERE id = NEW.id;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "threads_created_at_ms_after_update",
+      "tableName": "threads",
+      "sql": "CREATE TRIGGER threads_created_at_ms_after_update\nAFTER UPDATE OF created_at ON threads\nWHEN NEW.created_at != OLD.created_at\n AND NEW.created_at_ms IS OLD.created_at_ms\nBEGIN\n    UPDATE threads\n    SET created_at_ms = NEW.created_at * 1000\n    WHERE id = NEW.id;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "threads_recency_at_after_insert",
+      "tableName": "threads",
+      "sql": "CREATE TRIGGER threads_recency_at_after_insert\nAFTER INSERT ON threads\nWHEN NEW.recency_at_ms = 0\nBEGIN\n    UPDATE threads\n    SET recency_at = NEW.updated_at,\n        recency_at_ms = COALESCE(NEW.updated_at_ms, NEW.updated_at * 1000)\n    WHERE id = NEW.id;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "threads_updated_at_ms_after_insert",
+      "tableName": "threads",
+      "sql": "CREATE TRIGGER threads_updated_at_ms_after_insert\nAFTER INSERT ON threads\nWHEN NEW.updated_at_ms IS NULL\nBEGIN\n    UPDATE threads\n    SET updated_at_ms = NEW.updated_at * 1000\n    WHERE id = NEW.id;\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "threads_updated_at_ms_after_update",
+      "tableName": "threads",
+      "sql": "CREATE TRIGGER threads_updated_at_ms_after_update\nAFTER UPDATE OF updated_at ON threads\nWHEN NEW.updated_at != OLD.updated_at\n AND NEW.updated_at_ms IS OLD.updated_at_ms\nBEGIN\n    UPDATE threads\n    SET updated_at_ms = NEW.updated_at * 1000\n    WHERE id = NEW.id;\nEND"
+    }
+  ],
+  "pathColumns": [
+    {
+      "table": "threads",
+      "column": "rollout_path",
+      "scope": "required-rollout"
+    },
+    {
+      "table": "rollout_migration_skipped_rollouts",
+      "column": "rollout_path",
+      "scope": "rollout-marker"
+    }
+  ]
+}
