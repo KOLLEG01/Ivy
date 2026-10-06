@@ -1,0 +1,32 @@
+{
+  "id": "froeling-heating",
+  "name": "Fröling heating",
+  "enabled": false,
+  "intervalSeconds": 60,
+  "timeoutSeconds": 30,
+  "memoryMb": 128,
+  "script": "@file:froeling.mjs",
+  "dependencies": {},
+  "config": {
+    "baseUrl": "https://connect-api.froeling.com",
+    "userId": "USER_ID",
+    "facilityId": "FACILITY_ID",
+    "usernameSecret": "froeling_username",
+    "passwordSecret": "froeling_password",
+    "components": {
+      "boiler": "1_100",
+      "buffer": "400_4100",
+      "circuit": "300_3110"
+    },
+    "thresholds": [
+      { "component": "boiler", "metric": "boilerTemp", "below": 60 },
+      { "component": "buffer", "metric": "bufferTempTop", "below": 70 }
+    ]
+  },
+  "secretNames": ["froeling_username", "froeling_password"],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

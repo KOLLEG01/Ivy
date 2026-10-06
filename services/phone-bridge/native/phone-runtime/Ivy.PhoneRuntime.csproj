@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <PlatformTarget>x64</PlatformTarget>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="micro-usbip-client.json" LogicalName="Ivy.PhoneBridge.MicroUsbClientPins" />
+    <EmbeddedResource Include="audio/waiting-marimba.wav" LogicalName="Ivy.PhoneBridge.WaitingMarimba" />
+    <InternalsVisibleTo Include="Ivy.PhoneRuntime.Tests" />
+    <None Update="licenses/**/*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <PackageReference Include="NAudio.Wasapi" Version="[3.0.0]" />
+    <PackageReference Include="SIPSorcery" Version="[10.0.15]" />
+    <Compile Include="../input/VoiceHotkey.cs" Link="Desktop/VoiceHotkey.cs" />
+    <Compile Include="../input/DesktopLaunch.cs" Link="Desktop/DesktopLaunch.cs" />
+    <Compile Include="../input/CaptureObservation.cs" Link="Desktop/CaptureObservation.cs" />
+    <Compile Include="../input/AudioProcessOwnership.cs" Link="Desktop/AudioProcessOwnership.cs" />
+  </ItemGroup>
+</Project>

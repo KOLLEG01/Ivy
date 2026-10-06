@@ -1,0 +1,15 @@
+{
+  "metadata": {
+    "uiId": "agent-ui",
+    "slug": "agents",
+    "priority": 400,
+    "displayName": "Agents",
+    "description": "Work with native Codex tasks on their owning hosts.",
+    "iconKey": "bot"
+  },
+  "entryPath": "index.html",
+  "requirements": { "hiveProtocol": 1, "contracts": [], "services": [
+    { "serviceName": "agent-manager", "namespace": "agent", "interfaceVersion": "1.0.0" }
+  ] },
+  "dataContracts": []
+}

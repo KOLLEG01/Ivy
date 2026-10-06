@@ -1,0 +1,63 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { HiveClient, discover, callBound, newOperationId } from '../dist/packages/sdk/src/node.js';
+import { atomicJson, validateHost, validateComponent } from '../dist/packages/sdk/src/host.js';
+import { settingsFor, rootObject, message, assessment, principal } from './secretary-fixture.mjs';
+
+test('a separate Secretary process exposes actual tools, retains source and decision through kill/restart and honors exact host shutdown', { timeout: 70000 }, async t => {
+  const base = process.env.IVY_TEST_HIVE_URL, credential = process.env.IVY_TEST_HIVE_CREDENTIAL;
+  assert.ok(base && credential); assert.equal(new URL(base).hostname, '127.0.0.1'); const client = new HiveClient(base, { credential }); assert.equal((await client.request('system.status', {})).version, 'isolated-consumer-test');
+  const root = await rootObject(client), directory = await mkdtemp(join(tmpdir(), 'ivy-secretary-process-')), id = randomUUID(), serviceNodeId = 'secretary-process-' + id;
+  const settings = settingsFor(root, serviceNodeId), build = JSON.parse(await readFile('dist/build-info.json', 'utf8'));
+  const config = { schemaVersion: 1, hostId: 'fixture', instanceId: id, serviceNodeId, componentId: 'secretary', publicBaseUrl: base, dataRoot: join(directory, 'data'), artifactRoot: resolve('.'), buildId: build.buildId, version: build.version, credential, settings };
+  validateHost('InstanceConfig', config); const path = join(directory, 'config.json'); await atomicJson(path, config);
+  const manifest = JSON.parse(await readFile('services/secretary/deploy.json', 'utf8'));
+  validateComponent(manifest);
+  let child, stopped, launch, output = ''; const launches = [];
+  const start = () => {
+    launch = randomUUID(); child = spawn(process.execPath, ['dist/services/secretary/src/main.js', '--config', path], { cwd: resolve('.'), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, IVY_LAUNCH_ID: launch } });
+    launches.push({ pid: child.pid, launch }); stopped = once(child, 'exit'); child.stdout.on('data', bytes => { output = (output + bytes).slice(-65536); }); child.stderr.on('data', bytes => { output = (output + bytes).slice(-65536); });
+  };
+  t.after(async () => { if (child?.exitCode === null && child?.signalCode === null) { child.kill('SIGKILL'); await stopped; } });
+  const until = async (observe, label) => {
+    const end = Date.now() + 20000; while (Date.now() < end) { if (child.exitCode !== null || child.signalCode !== null) throw Error('Secretary exited before ' + label + ': ' + output); const value = await observe(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 50)); }
+    throw Error('Secretary did not reach ' + label + ': ' + output);
+  };
+  const ready = () => until(async () => { try { const value = await client.request('serviceNodes.get', { serviceNodeId }); const health = await readFile(join(config.dataRoot, 'health.json'), 'utf8').then(JSON.parse).catch(() => null); return value.ready && health?.ready && health.pid === child.pid ? health : null; } catch (error) { if (error.code === 'not_found') return null; throw error; } }, 'live process readiness');
+  const call = async (name, args, operationId) => callBound(client, await discover(client, 'secretary.' + name, { serviceNodeId }), args, operationId);
+  start(); await ready();
+  const binding = await call('binding', {});
+  assert.equal(binding.serviceNodeId, serviceNodeId);
+  assert.equal(binding.hostId, 'fixture');
+  assert.equal(binding.available, true);
+  assert.deepEqual(binding.expectedScope, settings.identity.scope);
+  assert.match(binding.bindingHash, /^sha256:[0-9a-f]{64}$/);
+  const capture = { action: 'capture', operationId: await newOperationId(client), expectedScope: settings.identity.scope, sourceId: 'personal-inbox', message: message() };
+  const saved = await call('capture', capture, capture.operationId); assert.equal(saved.phase, 'succeeded');
+  const assess = { action: 'assess', operationId: await newOperationId(client), expectedScope: settings.identity.scope, item: saved.effect, assessment: assessment() };
+  const decided = await call('assess', assess, assess.operationId); assert.equal(decided.phase, 'succeeded');
+  child.kill('SIGKILL'); await stopped; start();
+  await ready();
+  assert.deepEqual(await call('capture', capture, capture.operationId), saved); assert.deepEqual(await call('assess', assess, assess.operationId), decided);
+  const current = await client.request('objects.read', { objectId: saved.effect.objectId }); assert.equal(current.content.value.decision.operationId, assess.operationId); assert.equal(current.content.value.notice.state, 'queued');
+  assert.deepEqual(await call('operation', { expectedScope: settings.identity.scope, operationId: assess.operationId }), decided);
+  const outcome = await call('operationRead', { expectedScope: settings.identity.scope, operationId: assess.operationId });
+  assert.deepEqual({ action: outcome.action, phase: outcome.phase, effect: outcome.effect }, { action: 'assess', phase: 'succeeded', effect: decided.effect });
+  const checkpoint = { action: 'checkpoint', operationId: await newOperationId(client), expectedScope: settings.identity.scope, sourceId: 'personal-inbox', previousCursor: null, nextCursor: 'source-page-1', captures: [capture.operationId] };
+  assert.equal((await call('checkpoint', checkpoint, checkpoint.operationId)).phase, 'succeeded');
+  const status = await call('status', { expectedScope: settings.identity.scope }); assert.equal(status.sources[0].data.cursor, 'source-page-1'); assert.equal(status.noticeConfigured, false); assert.deepEqual(status.recoveryIssues, []);
+  await assert.rejects(call('capture', { ...capture, operationId: await newOperationId(client) }, 'different-domain-id'), { code: 'invalid_arguments' });
+  await assert.rejects(call('status', { expectedScope: { ...settings.identity.scope, rootObjectId: randomUUID() } }), { code: 'secretary_scope_conflict' });
+  const check = spawnSync(process.execPath, ['dist/services/secretary/src/health.js', '--config', path], { cwd: resolve('.'), windowsHide: true, encoding: 'utf8', timeout: 10000 }); assert.equal(check.status, 0, check.stderr + check.stdout);
+  const health = JSON.parse(await readFile(join(config.dataRoot, 'health.json'), 'utf8')); assert.equal(health.pid, child.pid); assert.equal(health.launchId, launch);
+  await atomicJson(join(config.dataRoot, 'control.json'), { schemaVersion: 1, instanceId: id, launchId: launch, bootId: health.bootId, action: 'shutdown', requestedAt: new Date().toISOString() });
+  const timer = setTimeout(() => child.kill('SIGKILL'), 10000), [code, signal] = await stopped; clearTimeout(timer); assert.equal(code, 0); assert.equal(signal, null);
+  assert.equal(JSON.parse(await readFile(join(config.dataRoot, 'health.json'), 'utf8')).ready, false);
+  t.diagnostic(JSON.stringify({ directory, buildId: build.buildId, launches, captured: saved.effect, decision: decided.effect, native: false, installedRuntimeOwner: false }));
+});

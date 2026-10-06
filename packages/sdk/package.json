@@ -1,0 +1,7 @@
+{
+  "name": "@ivy/sdk",
+  "version": "0.2.39",
+  "private": true,
+  "license": "MIT",
+  "type": "module"
+}

@@ -1,0 +1,24 @@
+{
+  "id": "kdp-royalties",
+  "name": "KDP month-to-date estimated royalties",
+  "enabled": false,
+  "intervalSeconds": 3600,
+  "timeoutSeconds": 90,
+  "memoryMb": 512,
+  "script": "@file:royalties.mjs",
+  "dependencies": {
+    "parse5": "8.0.1",
+    "tough-cookie": "6.0.2",
+    "exceljs": "4.4.0"
+  },
+  "config": {
+    "usernameSecret": "kdp_username",
+    "passwordSecret": "kdp_password"
+  },
+  "secretNames": ["kdp_username", "kdp_password"],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "sourceMap": false,
+    "noEmit": false
+  },
+  "include": ["tests/**/*.ts", "ui/agent-ui/src/task-groups.ts"],
+  "exclude": ["node_modules", "dist", "packages/ui", "packages/ui-client", "services/hive/console"]
+}

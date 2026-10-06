@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "componentId": "hive",
+  "kind": "hive",
+  "version": "0.2.80",
+  "description": "Persistent Hive backend and bundled Console",
+  "connectsToHive": false,
+  "requirements": {
+    "node": ">=24.18.0 <25.0.0",
+    "os": ["linux"],
+    "arch": ["x64"],
+    "hiveProtocol": 1,
+    "contracts": []
+  },
+  "entrypoint": {
+    "executable": "node",
+    "args": ["dist/services/hive/src/main.js"],
+    "timeoutMs": 30000
+  },
+  "prepare": [
+    {
+      "executable": "node",
+      "args": ["tools/build/run-npm.mjs", "ci"],
+      "timeoutMs": 600000
+    },
+    {
+      "executable": "node",
+      "args": [
+        "--max-old-space-size=448",
+        "tools/build/build-deployment.mjs",
+        "--component",
+        "hive"
+      ],
+      "timeoutMs": 300000
+    }
+  ],
+  "checks": [],
+  "readiness": {
+    "timeoutMs": 180000,
+    "command": {
+      "executable": "node",
+      "args": ["dist/packages/host-runtime/src/health.js"],
+      "timeoutMs": 5000
+    }
+  },
+  "shutdown": {
+    "timeoutMs": 15000
+  },
+  "restart": {
+    "policy": "always",
+    "minimumDelayMs": 1000,
+    "maximumDelayMs": 60000
+  },
+  "storage": {
+    "minReadableFormat": 4,
+    "maxReadableFormat": 4,
+    "writeFormat": 4
+  },
+  "runtimeReset": {
+    "delete": [
+      {
+        "area": "data",
+        "path": "hive.sqlite"
+      },
+      {
+        "area": "data",
+        "path": "hive.sqlite-wal"
+      },
+      {
+        "area": "data",
+        "path": "hive.sqlite-shm"
+      },
+      {
+        "area": "data",
+        "path": "ui-releases"
+      },
+      {
+        "area": "data",
+        "path": "health.json"
+      },
+      {
+        "area": "data",
+        "path": "control.json"
+      },
+      {
+        "area": "data",
+        "path": "runtime-reset-bootstrap.json"
+      },
+      {
+        "area": "work",
+        "path": "."
+      },
+      {
+        "area": "logs",
+        "path": "."
+      }
+    ],
+    "preserve": []
+  }
+}

@@ -1,0 +1,599 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "VoiceDispatchResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "method",
+        "hotkey",
+        "micro"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "not_submitted",
+            "submitted",
+            "outcome_unknown"
+          ]
+        },
+        "method": {
+          "enum": [
+            "micro",
+            "hotkey",
+            "accessibility"
+          ]
+        },
+        "hotkey": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "phone-hotkey.schema.json#/$defs/DispatchResult"
+            }
+          ]
+        },
+        "micro": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/MicroGestureResult"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "micro"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hotkey": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "hotkey"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hotkey": {
+                "$ref": "phone-hotkey.schema.json#/$defs/DispatchResult"
+              },
+              "micro": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/MicroGestureResult"
+                      },
+                      {
+                        "properties": {
+                          "phase": {
+                            "enum": [
+                              "not_submitted",
+                              "submitted"
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "not_submitted"
+              },
+              "method": {
+                "const": "micro"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "micro": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/MicroGestureResult"
+                      },
+                      {
+                        "properties": {
+                          "phase": {
+                            "const": "not_submitted"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "outcome_unknown"
+              },
+              "method": {
+                "const": "micro"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "micro": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/MicroGestureResult"
+                  },
+                  {
+                    "properties": {
+                      "phase": {
+                        "const": "outcome_unknown"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "not_submitted"
+              },
+              "method": {
+                "const": "hotkey"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hotkey": {
+                "properties": {
+                  "phase": {
+                    "const": "not_submitted"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "submitted"
+              },
+              "method": {
+                "const": "hotkey"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hotkey": {
+                "properties": {
+                  "phase": {
+                    "const": "submitted"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "outcome_unknown"
+              },
+              "method": {
+                "const": "hotkey"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hotkey": {
+                "properties": {
+                  "phase": {
+                    "const": "outcome_unknown"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "submitted"
+              },
+              "method": {
+                "const": "micro"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "micro": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/MicroGestureResult"
+                  },
+                  {
+                    "properties": {
+                      "phase": {
+                        "const": "submitted"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "MicroInputReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "pressed",
+        "generation"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "not_submitted",
+            "submitted",
+            "outcome_unknown"
+          ]
+        },
+        "pressed": {
+          "type": "boolean"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "MicroGestureResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "press",
+        "release"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "not_submitted",
+            "submitted",
+            "outcome_unknown"
+          ]
+        },
+        "press": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/MicroInputReceipt"
+            },
+            {
+              "properties": {
+                "pressed": {
+                  "const": true
+                }
+              }
+            }
+          ]
+        },
+        "release": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/MicroInputReceipt"
+                },
+                {
+                  "properties": {
+                    "pressed": {
+                      "const": false
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "latchPress": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/MicroInputReceipt" },
+                { "properties": { "pressed": { "const": true } } }
+              ]
+            }
+          ]
+        },
+        "latchRelease": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "allOf": [
+                { "$ref": "#/$defs/MicroInputReceipt" },
+                { "properties": { "pressed": { "const": false } } }
+              ]
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "not_submitted"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "press": {
+                "properties": {
+                  "phase": {
+                    "const": "not_submitted"
+                  }
+                }
+              },
+              "release": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "submitted"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "press": {
+                "properties": {
+                  "phase": {
+                    "const": "submitted"
+                  },
+                  "pressed": {
+                    "const": true
+                  }
+                }
+              },
+              "release": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/MicroInputReceipt"
+                  },
+                  {
+                    "properties": {
+                      "phase": {
+                        "const": "submitted"
+                      },
+                      "pressed": {
+                        "const": false
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "VoiceInputSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "micro"
+      ],
+      "properties": {
+        "micro": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/MicroSettings" }
+          ]
+        },
+        "hotkeyFallback": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "phone-hotkey.schema.json#/$defs/Hotkey"
+            }
+          ]
+        },
+        "adoptExisting": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "MicroSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "usbipExecutable",
+        "executableHash",
+        "port"
+      ],
+      "properties": {
+        "usbipExecutable": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "executableHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 3241
+        }
+      }
+    },
+    "MicroAttachmentStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "generation",
+        "errorCode"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "starting",
+            "attached",
+            "ready",
+            "unavailable",
+            "outcome_unknown",
+            "closed"
+          ]
+        },
+        "generation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "errorCode": {
+          "enum": [
+            null,
+            "micro_client_unavailable",
+            "micro_client_changed",
+            "micro_query_failed",
+            "micro_attach_failed",
+            "micro_attach_unknown",
+            "micro_attachment_conflict",
+            "micro_transport_failed",
+            "micro_cleanup_unknown"
+          ]
+        }
+      }
+    },
+    "MicrophoneNotification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "m",
+        "p"
+      ],
+      "properties": {
+        "m": {
+          "const": "v.oai.hid"
+        },
+        "p": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "k",
+            "act"
+          ],
+          "properties": {
+            "k": {
+              "const": "ACT10"
+            },
+            "act": {
+              "enum": [
+                0,
+                1
+              ]
+            }
+          }
+        }
+      }
+    },
+    "DeviceStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "profile_index",
+        "layer_index",
+        "battery",
+        "is_charging"
+      ],
+      "properties": {
+        "version": {
+          "const": "1.0.0"
+        },
+        "profile_index": {
+          "const": 0
+        },
+        "layer_index": {
+          "const": 0
+        },
+        "battery": {
+          "const": 100
+        },
+        "is_charging": {
+          "const": false
+        }
+      }
+    }
+  }
+}

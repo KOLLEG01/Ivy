@@ -1,0 +1,316 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ivy.invalid/schemas/automation.schema.json",
+  "title": "Ivy SDK automation example contracts",
+  "$defs": {
+    "Date": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 10,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "LocalTime": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 5,
+      "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 24,
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$"
+    },
+    "Definition": {
+      "type": "object",
+      "properties": {
+        "scheduleId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "principalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "rootObjectId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeZone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "firstDate": {
+          "$ref": "#/$defs/Date"
+        },
+        "localTime": {
+          "$ref": "#/$defs/LocalTime"
+        },
+        "catchUp": {
+          "enum": [
+            "all",
+            "latest"
+          ]
+        },
+        "subscriptionName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "inputSource": {
+          "type": "string",
+          "minLength": 9,
+          "maxLength": 256,
+          "pattern": "^service:.+$"
+        },
+        "inputTopic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 192
+        },
+        "initialSequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "scheduleId",
+        "principalId",
+        "rootObjectId",
+        "timeZone",
+        "firstDate",
+        "localTime",
+        "catchUp",
+        "subscriptionName",
+        "inputSource",
+        "inputTopic",
+        "initialSequence"
+      ],
+      "additionalProperties": false
+    },
+    "Settings": {
+      "type": "object",
+      "properties": {
+        "definition": {
+          "$ref": "#/$defs/Definition"
+        },
+        "maximumPeriodsPerTick": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "pollMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 60000
+        }
+      },
+      "required": [
+        "definition",
+        "maximumPeriodsPerTick",
+        "pollMs"
+      ],
+      "additionalProperties": false
+    },
+    "Pending": {
+      "type": "object",
+      "properties": {
+        "periodDate": {
+          "$ref": "#/$defs/Date"
+        },
+        "advanceToDate": {
+          "$ref": "#/$defs/Date"
+        },
+        "skippedFromDate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Date"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skippedThroughDate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Date"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-operations.schema.json#/$defs/Status"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "periodDate",
+        "advanceToDate",
+        "skippedFromDate",
+        "skippedThroughDate",
+        "snapshot"
+      ],
+      "additionalProperties": false
+    },
+    "Checkpoint": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "definition": {
+          "$ref": "#/$defs/Definition"
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "nextDate": {
+          "$ref": "#/$defs/Date"
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Pending"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "definition",
+        "definitionHash",
+        "nextDate",
+        "pending"
+      ],
+      "additionalProperties": false
+    },
+    "Period": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "periodDate": {
+          "$ref": "#/$defs/Date"
+        },
+        "timeZone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "localTime": {
+          "$ref": "#/$defs/LocalTime"
+        },
+        "skippedFromDate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Date"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skippedThroughDate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Date"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot": {
+          "$ref": "https://ivy.invalid/schemas/hive-operations.schema.json#/$defs/Status"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "definitionHash",
+        "periodDate",
+        "timeZone",
+        "localTime",
+        "skippedFromDate",
+        "skippedThroughDate",
+        "snapshot"
+      ],
+      "additionalProperties": false
+    },
+    "EventReceipt": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 192
+        },
+        "topicVersion": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/ContractVersion"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 9,
+          "maxLength": 256,
+          "pattern": "^service:.+$"
+        },
+        "occurredAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "sourceMutationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "payloadHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "definitionHash",
+        "sequence",
+        "topic",
+        "topicVersion",
+        "source",
+        "occurredAt",
+        "sourceMutationId",
+        "payloadHash"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

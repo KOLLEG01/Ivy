@@ -1,0 +1,68 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { expect } from '@playwright/test';
+import { publishUi } from '../../dist/packages/cli/src/publish-ui.js';
+import { newOperationId } from '../../dist/packages/sdk/src/client.js';
+import { fixture } from './fixtures/fixture.mjs';
+import { taskBoardFixture } from './fixtures/task-board-fixture.mjs';
+
+test('Wiki archives and restores a page from its UI', { timeout: 90000 }, async t => {
+  const f = await fixture(t, false), directory = resolve('dist/apps/wiki-ui');
+  const definition = JSON.parse(await readFile(resolve(directory, 'ivy-ui.json'), 'utf8'));
+  await publishUi(f.client, { directory, definition, expectedReleaseId: null, mutationId: await newOperationId(f.client) });
+  await f.login(); await f.page.goto(f.base + '/ui/wiki-ui/#/new');
+  await f.page.getByLabel('Page title', { exact: true }).fill('Recoverable UI page');
+  await f.page.getByLabel('Markdown', { exact: true }).fill('Archive this page through the product UI.');
+  await expect(f.page).toHaveURL(/#\/page\?id=/, { timeout: 15000 });
+  await expect(f.page.getByRole('heading', { name: 'Recoverable UI page', exact: true })).toBeVisible();
+  const id = new URLSearchParams(new URL(f.page.url()).hash.split('?')[1]).get('id'); assert.ok(id);
+  f.page.once('dialog', dialog => dialog.accept());
+  await f.page.getByRole('button', { name: 'Page options', exact: true }).click();
+  await f.page.getByRole('menuitem', { name: 'Archive page', exact: true }).click();
+  await expect(f.page.getByText('Page archived.', { exact: true })).toBeVisible();
+  assert.equal((await f.client.request('objects.stat', { objectId: id })).effectivelyArchived, true);
+  await f.page.getByRole('button', { name: 'Page options', exact: true }).click();
+  await f.page.getByRole('menuitem', { name: 'Restore page', exact: true }).click();
+  await expect(f.page.getByText('Page restored.', { exact: true })).toBeVisible();
+  assert.equal((await f.client.request('objects.stat', { objectId: id })).effectivelyArchived, false);
+  assert.deepEqual(f.pageErrors, []); assert.deepEqual(f.externalRequests, []);
+});
+
+test('TaskBoard archives an idle task from its UI', { timeout: 90000 }, async t => {
+  const f = await taskBoardFixture(t); await f.open('#/new?node=browser-task-board');
+  await f.page.getByLabel('Title', { exact: true }).fill('Recoverable UI task');
+  await f.page.getByLabel('Description', { exact: true }).fill('Archive this idle task through the product UI.');
+  await f.page.getByRole('button', { name: 'Create task', exact: true }).click();
+  await expect(f.page.getByRole('heading', { name: /Recoverable UI task/ })).toBeVisible();
+  const id = new URLSearchParams(new URL(f.page.url()).hash.split('?')[1]).get('id'); assert.ok(id);
+  f.page.once('dialog', dialog => dialog.accept());
+  await f.page.getByRole('button', { name: 'More actions', exact: true }).click();
+  await f.page.getByRole('menuitem', { name: 'Archive task', exact: true }).click();
+  await expect.poll(async () => (await f.client.request('objects.stat', { objectId: id })).effectivelyArchived).toBe(true);
+  // The board has no page menu, and its archive is fetched only when opened.
+  let archiveQueried = false;
+  f.page.on('request', request => { if (request.postData()?.includes('"includeArchived":true')) archiveQueried = true; });
+  await f.page.goto(f.url + '#/tasks?node=browser-task-board');
+  await expect(f.page.getByRole('heading', { name: 'Task board', exact: true })).toBeVisible();
+  await expect(f.page.getByRole('navigation', { name: 'Page navigation' })).toHaveCount(0);
+  await expect(f.page.getByRole('button', { name: 'Toggle navigation', exact: true })).toBeHidden();
+  const archive = f.page.getByRole('button', { name: 'Archive', exact: true });
+  await expect(archive).toHaveAttribute('aria-expanded', 'false');
+  await expect(f.page.getByRole('link', { name: /Recoverable UI task/ })).toHaveCount(0);
+  assert.equal(archiveQueried, false);
+  await archive.click();
+  await f.page.getByRole('link', { name: /Recoverable UI task/ }).click();
+  f.page.once('dialog', dialog => dialog.accept());
+  await f.page.getByRole('dialog').getByRole('button', { name: 'More actions', exact: true }).click();
+  await f.page.getByRole('menuitem', { name: 'Restore task', exact: true }).click();
+  await expect.poll(async () => (await f.client.request('objects.stat', { objectId: id })).effectivelyArchived).toBe(false);
+  assert.equal(archiveQueried, true);
+  await f.page.setViewportSize({ width: 390, height: 844 });
+  await f.page.goto(f.url + '#/tasks?node=browser-task-board');
+  await f.page.getByRole('button', { name: 'Toggle navigation', exact: true }).click();
+  await expect(f.page.getByRole('dialog').getByRole('link', { name: 'TaskBoard', exact: true })).toBeVisible();
+  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.deepEqual(f.pageErrors, []); assert.deepEqual(f.externalRequests, []);
+});

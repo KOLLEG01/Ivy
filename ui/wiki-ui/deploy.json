@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "componentId": "wiki-ui",
+  "kind": "app",
+  "version": "0.2.37",
+  "description": "Static Ivy workspace UI",
+  "connectsToHive": false,
+  "requirements": {
+    "node": ">=24.18.0 <25.0.0",
+    "hiveProtocol": 1,
+    "contracts": []
+  },
+  "app": {
+    "appId": "wiki-ui",
+    "dist": "dist/apps/wiki-ui",
+    "entryPath": "index.html"
+  },
+  "prepare": [
+    { "executable": "node", "args": ["tools/build/run-npm.mjs", "ci"], "timeoutMs": 600000 },
+    { "executable": "node", "args": ["tools/build/build-deployment.mjs", "--component", "wiki-ui"], "timeoutMs": 300000 }
+  ],
+  "checks": []
+}

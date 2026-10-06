@@ -1,0 +1,24 @@
+{
+  admin unix//config/admin.sock
+  auto_https off
+  persist_config off
+  servers {
+    protocols h1 h2
+  }
+}
+
+# This separate edge uses an explicitly provisioned, read-only certificate pair. It does not
+# request certificates, change DNS, or bind the existing site's HTTP/HTTPS ports.
+https://{$IVY_EDGE_HOST}:{$IVY_EDGE_PORT} {
+  tls /certificate/{$IVY_EDGE_HOST}.crt /certificate/{$IVY_EDGE_HOST}.key
+  @hive path /ivy /ivy/*
+  handle @hive {
+    reverse_proxy 127.0.0.1:{$IVY_HIVE_PORT} {
+      header_up X-Ivy-Client-IP {remote_host}
+      stream_close_delay 5m
+    }
+  }
+  handle {
+    respond "Not found" 404
+  }
+}

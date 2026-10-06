@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "NativeOwner": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "epoch", "pid", "creationFileTime"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "epoch": { "type": "string", "format": "uuid" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "creationFileTime": { "type": "string", "pattern": "^[1-9][0-9]{0,18}$" }
+      }
+    }
+  }
+}

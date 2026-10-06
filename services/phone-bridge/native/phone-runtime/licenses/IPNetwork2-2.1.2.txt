@@ -1,0 +1,6 @@
+IPNetwork2 2.1.2
+Copyright 2017
+Authors: Luc Dvchosal
+Project: https://github.com/lduchosal/ipnetwork
+
+Full terms: IPNetwork2.txt

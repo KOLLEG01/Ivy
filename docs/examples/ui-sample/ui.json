@@ -1,0 +1,11 @@
+{
+  "metadata": {
+    "uiId": "ui-sample",
+    "displayName": "UI sample",
+    "description": "Inspect the shared Ivy frame and try a local Markdown preview.",
+    "iconKey": "ui"
+  },
+  "entryPath": "index.html",
+  "requirements": { "hiveProtocol": 1, "contracts": [], "services": [] },
+  "dataContracts": []
+}

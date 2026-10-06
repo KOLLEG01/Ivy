@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "componentId": "automation-example",
+  "kind": "service",
+  "version": "0.2.8",
+  "description": "SDK daily Hive observations and durable event receipts",
+  "connectsToHive": true,
+  "requirements": {
+    "node": ">=24.18.0 <25.0.0",
+    "hiveProtocol": 1,
+    "contracts": [
+      { "key": "automation-example/checkpoint", "readVersions": ["1.0.0"], "writeVersions": ["1.0.0"] },
+      { "key": "automation-example/period", "readVersions": ["1.0.0"], "writeVersions": ["1.0.0"] },
+      { "key": "automation-example/event-receipt", "readVersions": ["1.0.0"], "writeVersions": ["1.0.0"] }
+    ]
+  },
+  "entrypoint": {
+    "executable": "node",
+    "args": [
+      "dist/docs/examples/services/automation-example/src/main.js"
+    ],
+    "timeoutMs": 30000
+  },
+  "prepare": [
+    {"executable":"node","args":["tools/build/run-npm.mjs","ci"],"timeoutMs":600000},
+    {"executable":"node","args":["--max-old-space-size=448","tools/build/build-deployment.mjs","--component","automation-example"],"timeoutMs":300000}
+  ],
+  "checks": [],
+  "readiness": {
+    "timeoutMs": 30000,
+    "command": {
+      "executable": "node",
+      "args": [
+        "dist/packages/host-runtime/src/health.js"
+      ],
+      "timeoutMs": 5000
+    }
+  },
+  "shutdown": {
+    "timeoutMs": 15000
+  },
+  "restart": {
+    "policy": "always",
+    "minimumDelayMs": 1000,
+    "maximumDelayMs": 60000
+  },
+  "storage": {
+    "minReadableFormat": 1,
+    "maxReadableFormat": 1,
+    "writeFormat": 1
+  },
+  "runtimeReset": {
+    "delete": [
+      { "area": "data", "path": "automation-example.sqlite" },
+      { "area": "data", "path": "automation-example.sqlite-wal" },
+      { "area": "data", "path": "automation-example.sqlite-shm" },
+      { "area": "data", "path": "health.json" },
+      { "area": "data", "path": "control.json" },
+      { "area": "work", "path": "." },
+      { "area": "logs", "path": "." }
+    ],
+    "preserve": []
+  }
+}

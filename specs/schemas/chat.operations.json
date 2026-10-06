@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "namespace": "chat",
+  "schema": "https://ivy.invalid/schemas/chat.schema.json",
+  "contracts": [
+    {
+      "key": "chat-bridge/conversation",
+      "version": "1.1.0",
+      "definition": "#/$defs/Conversation"
+    },
+    {
+      "key": "chat-bridge/main",
+      "version": "1.1.0",
+      "definition": "#/$defs/Main"
+    },
+    {
+      "key": "chat-bridge/binding",
+      "version": "1.1.0",
+      "definition": "#/$defs/Binding"
+    },
+    {
+      "key": "chat-bridge/native-call",
+      "version": "1.1.0",
+      "definition": "#/$defs/NativeCall"
+    },
+    {
+      "key": "chat-bridge/input",
+      "version": "1.1.0",
+      "definition": "#/$defs/Input"
+    },
+    {
+      "key": "chat-bridge/evidence",
+      "version": "1.1.0",
+      "definition": "#/$defs/Evidence"
+    },
+    {
+      "key": "chat-bridge/collection",
+      "version": "1.1.0",
+      "definition": "#/$defs/Collection"
+    },
+    {
+      "key": "chat-bridge/result",
+      "version": "1.1.0",
+      "definition": "#/$defs/Result"
+    },
+    {
+      "key": "chat-bridge/reply",
+      "version": "1.1.0",
+      "definition": "#/$defs/Reply"
+    },
+    {
+      "key": "chat-bridge/offer",
+      "version": "1.1.0",
+      "definition": "#/$defs/Offer"
+    },
+    {
+      "key": "chat-bridge/acknowledgement",
+      "version": "1.1.0",
+      "definition": "#/$defs/Acknowledgement"
+    },
+    {
+      "key": "chat-bridge/operation",
+      "version": "1.1.0",
+      "definition": "#/$defs/Operation"
+    }
+  ],
+  "mediaContracts": [
+    {
+      "key": "chat-bridge/image-png",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "chat-bridge"
+      },
+      "mediaType": "image/png",
+      "specMarkdown": "# ChatBridge image-png 1.0.0\n\nPNG image, at most 2 MiB. Exact magic, declared length and complete hash must agree before native dispatch."
+    },
+    {
+      "key": "chat-bridge/image-jpeg",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "chat-bridge"
+      },
+      "mediaType": "image/jpeg",
+      "specMarkdown": "# ChatBridge image-jpeg 1.0.0\n\nJPEG image, at most 2 MiB. Exact magic, declared length and complete hash must agree before native dispatch."
+    },
+    {
+      "key": "chat-bridge/image-webp",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "chat-bridge"
+      },
+      "mediaType": "image/webp",
+      "specMarkdown": "# ChatBridge image-webp 1.0.0\n\nWebP image, at most 2 MiB. RIFF/WEBP header, complete RIFF length, declared length and complete hash must agree before native dispatch."
+    },
+    {
+      "key": "chat-bridge/evidence-chunk",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "chat-bridge"
+      },
+      "mediaType": "application/octet-stream",
+      "specMarkdown": "# ChatBridge evidence-chunk 1.0.0\n\nAt most 1 MiB exact canonical UTF-8 JSON bytes per chunk. Ordered manifests pin revisions, hashes and byte lengths. The reconstructed document is at most 16 MiB and must validate against its exact declared schema and original owner, caller and request identity. Bytes alone are never native proof or dispatch authority."
+    },
+    {
+      "key": "chat-bridge/result-text",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "chat-bridge"
+      },
+      "mediaType": "text/plain",
+      "specMarkdown": "# ChatBridge result-text 1.0.0\n\nAt most 1 MiB UTF-8 text per immutable part. Ordered Result parts retain the complete text, at most 64 MiB in total. Text is rendered inert. No result is silently truncated."
+    }
+  ],
+  "operations": {
+    "createMain": {
+      "input": "#/$defs/CreateMainRequest",
+      "output": "#/$defs/Operation",
+      "mutation": true
+    },
+    "send": {
+      "input": "#/$defs/SendRequest",
+      "output": "#/$defs/Operation",
+      "mutation": true
+    },
+    "cancel": {
+      "input": "#/$defs/CancelRequest",
+      "output": "#/$defs/Operation",
+      "mutation": true
+    },
+    "receive": {
+      "input": "#/$defs/ReceiveRequest",
+      "output": "#/$defs/Operation",
+      "mutation": true
+    },
+    "acknowledge": {
+      "input": "#/$defs/AcknowledgeRequest",
+      "output": "#/$defs/Operation",
+      "mutation": true
+    },
+    "notify": {
+      "input": "#/$defs/NotifyRequest",
+      "output": "#/$defs/Operation",
+      "mutation": true
+    },
+    "operation": {
+      "input": "#/$defs/OperationQuery",
+      "output": "#/$defs/Operation",
+      "mutation": false
+    },
+    "workspace": {
+      "input": "#/$defs/WorkspaceQuery",
+      "output": "#/$defs/WorkspaceInfo",
+      "mutation": false
+    },
+    "history": {
+      "input": "#/$defs/HistoryQuery",
+      "output": "#/$defs/HistoryPage",
+      "mutation": false
+    },
+    "input": {
+      "input": "#/$defs/InputQuery",
+      "output": "#/$defs/InputView",
+      "mutation": false
+    },
+    "notice": {
+      "input": "#/$defs/NoticeQuery",
+      "output": "#/$defs/ReplyView",
+      "mutation": false
+    },
+    "retryResult": {
+      "input": "#/$defs/RetryCollectionRequest",
+      "output": "#/$defs/Collection",
+      "mutation": true
+    }
+  }
+}

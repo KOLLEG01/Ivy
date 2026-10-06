@@ -1,0 +1,739 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ControlMethod": {
+      "description": "Methods admitted through the reserved IPC concurrency slots (48 total versus 32 ordinary requests). This does not bypass original call authorization or durable receipt limits.",
+      "enum": [
+        "heartbeat",
+        "status",
+        "call.hangup",
+        "call.desktop.stopVoice",
+        "call.release",
+        "shutdown"
+      ]
+    },
+    "PhoneCallTarget": {
+      "description": "Durable original, non-secret Desktop/audio/Voice input target saved before Voice or audio commands.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "desktop",
+        "audio",
+        "voiceInput",
+        "voiceArchive"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "desktop": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity"
+        },
+        "audio": {
+          "$ref": "phone-runtime.schema.json#/$defs/AudioSettings"
+        },
+        "voiceInput": {
+          "$ref": "phone-micro.schema.json#/$defs/VoiceInputSettings"
+        },
+        "voiceArchive": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhoneVoiceArchiveSettings"
+            }
+          ]
+        }
+      }
+    },
+    "ObserveCaptureOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "desktop",
+        "endpointId"
+      ],
+      "properties": {
+        "desktop": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity"
+        },
+        "endpointId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        }
+      }
+    },
+    "ObserveControls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "desktop",
+        "labels"
+      ],
+      "properties": {
+        "desktop": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity"
+        },
+        "labels": {
+          "$ref": "phone-desktop-controls.schema.json#/$defs/Labels"
+        }
+      }
+    },
+    "ObserveCapture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpointId"
+      ],
+      "properties": {
+        "endpointId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        }
+      }
+    },
+    "ObserveProcess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "desktop",
+        "pid"
+      ],
+      "properties": {
+        "desktop": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "ObserveDesktop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "appUserModelId"
+      ],
+      "properties": {
+        "appUserModelId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$"
+        }
+      }
+    },
+    "CallDesktopLaunch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "application"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "application": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopApplication"
+        }
+      }
+    },
+    "CallDesktopVoiceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "desktop",
+        "voiceInput"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "desktop": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity"
+        },
+        "voiceInput": {
+          "$ref": "phone-micro.schema.json#/$defs/VoiceInputSettings"
+        }
+      }
+    },
+    "CallDesktopResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "action",
+        "result"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "action": {
+          "enum": [
+            "launch",
+            "startVoice",
+            "stopVoice",
+            "pauseVoice",
+            "resumeVoice"
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "phone-launch.schema.json#/$defs/LaunchResult"
+            },
+            {
+              "$ref": "phone-voice-lifetime.schema.json#/$defs/VoiceLifetimeResult"
+            }
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      },
+      "if": {
+        "properties": {
+          "action": {
+            "const": "launch"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "$ref": "phone-launch.schema.json#/$defs/LaunchResult"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": {
+            "$ref": "phone-voice-lifetime.schema.json#/$defs/VoiceLifetimeResult"
+          }
+        }
+      }
+    },
+    "Status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "call",
+        "registration",
+        "endpoint",
+        "media"
+      ],
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "call": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "phone-runtime.schema.json#/$defs/SipCallObservation"
+            }
+          ]
+        },
+        "registration": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "phone-runtime.schema.json#/$defs/SipRegistrationObservation"
+            }
+          ]
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "media": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "closed",
+                "failed",
+                "sentPackets",
+                "receivedPackets",
+                "receive",
+                "audio"
+              ],
+              "properties": {
+                "closed": {
+                  "type": "boolean"
+                },
+                "failed": {
+                  "type": "boolean"
+                },
+                "sentPackets": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "receivedPackets": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "receive": {
+                  "$ref": "phone-runtime.schema.json#/$defs/RtpReceiveStatus"
+                },
+                "audio": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "phone-runtime.schema.json#/$defs/AudioAttachmentStatus"
+                    }
+                  ]
+                },
+                "diagnostics": {
+                  "type": "object"
+                },
+                "signalling": {
+                  "type": "object"
+                }
+              }
+            }
+          ]
+        },
+        "callIds": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "micro": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "phone-micro.schema.json#/$defs/MicroAttachmentStatus"
+            }
+          ]
+        }
+      }
+    },
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "epoch",
+        "requestId",
+        "operationId",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "epoch": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "requestId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "operationId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "method": {
+          "enum": [
+            "configure",
+            "heartbeat",
+            "status",
+            "desktop.observe",
+            "desktop.launch",
+            "desktop.capture",
+            "desktop.captureOwner",
+            "desktop.process",
+            "desktop.controls",
+            "call.desktop.launch",
+            "call.desktop.startVoice",
+            "call.desktop.stopVoice",
+            "call.prepare",
+            "call.audio.prepare",
+            "call.audio.rebind",
+            "call.dial",
+            "call.claim",
+            "call.answer",
+            "call.waiting.end",
+            "call.command.feedback",
+            "call.hangup",
+            "call.release",
+            "shutdown",
+            "call.features",
+            "call.windows.connect",
+            "call.codec.upgrade",
+            "call.screening.prepare",
+            "call.screening.bridge",
+            "call.screening.synthesize",
+            "registration.reconnect",
+            "inventory",
+            "call.desktop.pauseVoice",
+            "call.desktop.resumeVoice",
+            "codec.test",
+            "audio.probe"
+          ]
+        },
+        "params": {
+          "type": "object"
+        }
+      }
+    },
+    "Response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "epoch",
+        "requestId",
+        "ok",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "epoch": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "requestId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {},
+        "error": {
+          "enum": [
+            null,
+            "invalid_request",
+            "epoch_mismatch",
+            "operation_conflict",
+            "capacity_exceeded",
+            "runtime_not_ready",
+            "phone_offer_expired",
+            "operation_outcome_unknown",
+            "runtime_stopping",
+            "phone_access_limited"
+          ]
+        }
+      }
+    },
+    "Configure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding",
+        "codecs",
+        "incomingPeers",
+        "registration",
+        "password"
+      ],
+      "properties": {
+        "binding": {
+          "$ref": "phone-runtime.schema.json#/$defs/SipBinding"
+        },
+        "codecs": {
+          "$ref": "phone-runtime.schema.json#/$defs/CodecSettings"
+        },
+        "incomingPeers": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "registration": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "phone-runtime.schema.json#/$defs/SipRegistrationSettings"
+            }
+          ]
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "micro": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "phone-micro.schema.json#/$defs/MicroSettings" }
+          ]
+        }
+      }
+    },
+    "CallIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "Answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callId", "waiting"],
+      "properties": {
+        "callId": { "type": "string", "format": "uuid" },
+        "waiting": { "type": "boolean" }
+      }
+    },
+    "CommandFeedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callId", "commandSequence", "success"],
+      "properties": {
+        "callId": { "type": "string", "format": "uuid" },
+        "commandSequence": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "success": { "type": "boolean" }
+      }
+    },
+    "PrepareAudio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "settings",
+        "desktop"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "settings": {
+          "$ref": "phone-runtime.schema.json#/$defs/AudioSettings"
+        },
+        "desktop": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity"
+        }
+      }
+    },
+    "RebindAudio": {
+      "type": "object", "additionalProperties": false,
+      "required": ["callId", "desktop", "threadId"],
+      "properties": {
+        "callId": { "type": "string", "format": "uuid" },
+        "desktop": { "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity" },
+        "threadId": { "type": "string", "format": "uuid" }
+      }
+    },
+    "Dial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "destination",
+        "username",
+        "password",
+        "ringSeconds",
+        "waiting"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "ringSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        },
+        "waiting": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ConfigureFeatures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "challenge"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "challenge": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/CallAccessSettings"
+            }
+          ]
+        }
+      }
+    },
+    "ConnectWindows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "settings"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "settings": {
+          "$ref": "#/$defs/AudioSettings"
+        }
+      }
+    },
+    "PrepareScreening": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "settings"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wavPath",
+            "sha256",
+            "timeoutSeconds",
+            "repeatCount"
+          ],
+          "properties": {
+            "wavPath": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32767
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120
+            },
+            "repeatCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3
+            }
+          }
+        }
+      }
+    },
+    "CallDesktopVoiceTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "desktop",
+        "voiceInput",
+        "generation"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "desktop": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity"
+        },
+        "voiceInput": {
+          "$ref": "phone-micro.schema.json#/$defs/VoiceInputSettings"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      }
+    }
+  }
+}

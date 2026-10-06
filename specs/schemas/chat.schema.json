@@ -1,0 +1,2964 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ivy.invalid/schemas/chat.schema.json",
+  "title": "ChatBridge WhatsApp Main, original native delivery and acknowledged outbox",
+  "$defs": {
+    "NativePlan": {
+      "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/Plan"
+    },
+    "NativePlanDraft": {
+      "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/PlanDraft"
+    },
+    "NativeRequest": {
+      "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/InvocationDraft"
+    },
+    "ObjectPin": {
+      "type": "object",
+      "properties": {
+        "objectId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "objectId",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "Channel": {
+      "type": "object",
+      "properties": {
+        "adapter": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "accountId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "channelId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "adapter",
+        "accountId",
+        "channelId"
+      ],
+      "additionalProperties": false
+    },
+    "ChannelConfiguration": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "channel",
+        "displayName"
+      ],
+      "additionalProperties": false
+    },
+    "Definition": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "principalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "rootObjectId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/ResourceRef"
+        },
+        "nativePlan": {
+          "$ref": "#/$defs/NativePlan"
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WhatsAppChannelConfiguration"
+          },
+          "maxItems": 1,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "workspaceId",
+        "principalId",
+        "rootObjectId",
+        "project",
+        "nativePlan",
+        "channels"
+      ],
+      "additionalProperties": false
+    },
+    "Settings": {
+      "type": "object",
+      "properties": {
+        "definition": {
+          "$ref": "#/$defs/Definition"
+        },
+        "pollMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 60000
+        },
+        "whatsappConfigPath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "language": {
+          "enum": [
+            "en",
+            "de"
+          ]
+        }
+      },
+      "required": [
+        "definition",
+        "pollMs"
+      ],
+      "additionalProperties": false
+    },
+    "ExpectedBridge": {
+      "type": "object",
+      "properties": {
+        "principalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "callerPrincipalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "workspaceId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        }
+      },
+      "required": [
+        "principalId",
+        "callerPrincipalId",
+        "workspaceId",
+        "definitionHash"
+      ],
+      "additionalProperties": false
+    },
+    "Artifact": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "contentHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "object",
+        "contentHash",
+        "byteLength",
+        "mediaType",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "Image": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "contentHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2097152
+        },
+        "mediaType": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "object",
+        "contentHash",
+        "byteLength",
+        "mediaType",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "Payload": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 65536
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Image"
+          },
+          "maxItems": 2
+        },
+        "turnOptions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max",
+                    "ultra"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "serviceTier": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "fast",
+                    "flex"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "required": [
+        "text",
+        "images"
+      ],
+      "additionalProperties": false
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "outcome": {
+          "enum": [
+            "not_executed",
+            "unknown"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "code",
+        "outcome",
+        "detail"
+      ],
+      "additionalProperties": false
+    },
+    "InputIdentity": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "senderPrincipalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "messageId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "channel",
+        "senderPrincipalId",
+        "messageId"
+      ],
+      "additionalProperties": false
+    },
+    "WhatsAppChannelConfiguration": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "object",
+          "properties": {
+            "adapter": {
+              "const": "whatsapp"
+            },
+            "accountId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "channelId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            }
+          },
+          "required": [
+            "adapter",
+            "accountId",
+            "channelId"
+          ],
+          "additionalProperties": false
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "channel",
+        "displayName"
+      ],
+      "additionalProperties": false
+    },
+    "SavedDefinition": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "principalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "rootObjectId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/ResourceRef"
+        },
+        "nativePlan": {
+          "$ref": "#/$defs/NativePlan"
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChannelConfiguration"
+          },
+          "maxItems": 32,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "workspaceId",
+        "principalId",
+        "rootObjectId",
+        "project",
+        "nativePlan",
+        "channels"
+      ],
+      "additionalProperties": false
+    },
+    "CreateMainRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "createMain"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "expectedMainRevision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "resumeMain": {
+          "$ref": "#/$defs/ObjectPin"
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "expectedBridge",
+        "expectedMainRevision",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "SendRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "send"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "messageId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBinding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "$ref": "#/$defs/Payload"
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "expectedBridge",
+        "channel",
+        "messageId",
+        "expectedBinding",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "CancelRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "cancel"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "inputId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "expectedBridge",
+        "inputId",
+        "expectedRevision",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "ReceiveRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "receive"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "afterSequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "expectedBridge",
+        "channel",
+        "afterSequence",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "AcknowledgeRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "acknowledge"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "offerId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "replyIds": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "expectedBridge",
+        "offerId",
+        "replyIds"
+      ],
+      "additionalProperties": false
+    },
+    "OperationQuery": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        }
+      },
+      "required": [
+        "operationId",
+        "expectedBridge"
+      ],
+      "additionalProperties": false
+    },
+    "WorkspaceQuery": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "HistoryQuery": {
+      "type": "object",
+      "properties": {
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "afterSequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        }
+      },
+      "required": [
+        "expectedBridge",
+        "channel",
+        "afterSequence",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "InputQuery": {
+      "type": "object",
+      "properties": {
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "inputId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "expectedBridge",
+        "inputId"
+      ],
+      "additionalProperties": false
+    },
+    "NotifyRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "notify"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "source": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "source",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "NoticeQuery": {
+      "type": "object",
+      "properties": {
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        }
+      },
+      "required": [
+        "operationId"
+      ],
+      "additionalProperties": false
+    },
+    "AdmittedNotifyRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "notify"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "source": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "expectedBridge",
+        "channel",
+        "source",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "ActionRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/CreateMainRequest"
+        },
+        {
+          "$ref": "#/$defs/SendRequest"
+        },
+        {
+          "$ref": "#/$defs/CancelRequest"
+        },
+        {
+          "$ref": "#/$defs/ReceiveRequest"
+        },
+        {
+          "$ref": "#/$defs/AcknowledgeRequest"
+        },
+        {
+          "$ref": "#/$defs/NotifyRequest"
+        }
+      ]
+    },
+    "AdmittedActionRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/CreateMainRequest"
+        },
+        {
+          "$ref": "#/$defs/SendRequest"
+        },
+        {
+          "$ref": "#/$defs/CancelRequest"
+        },
+        {
+          "$ref": "#/$defs/ReceiveRequest"
+        },
+        {
+          "$ref": "#/$defs/AcknowledgeRequest"
+        },
+        {
+          "$ref": "#/$defs/AdmittedNotifyRequest"
+        }
+      ]
+    },
+    "Binding": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "workspaceId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "project": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/ResourceRef"
+        },
+        "primary": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/ResourceRef"
+        },
+        "nativePlan": {
+          "$ref": "#/$defs/NativePlan"
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "predecessor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "workspaceId",
+        "definitionHash",
+        "project",
+        "primary",
+        "nativePlan",
+        "createdAt",
+        "operationId",
+        "predecessor"
+      ],
+      "additionalProperties": false
+    },
+    "Ticket": {
+      "type": "object",
+      "properties": {
+        "inputId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "identity": {
+          "$ref": "#/$defs/InputIdentity"
+        },
+        "requestHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "binding": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "admittedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "inputId",
+        "identity",
+        "requestHash",
+        "binding",
+        "sequence",
+        "admittedAt"
+      ],
+      "additionalProperties": false
+    },
+    "Conversation": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "workspaceId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "workspaceId",
+        "definitionHash",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "ResultPublication": {
+      "type": "object",
+      "properties": {
+        "inputId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "collection": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "result": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "firstSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "partCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "publishedParts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "inputId",
+        "collection",
+        "result",
+        "firstSequence",
+        "partCount",
+        "publishedParts",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "Main": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "definition": {
+          "$ref": "#/$defs/SavedDefinition"
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "conversation": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pendingAction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultPublication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queue": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Ticket"
+          },
+          "maxItems": 64
+        },
+        "nextSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "definition",
+        "definitionHash",
+        "conversation",
+        "binding",
+        "pendingAction",
+        "publication",
+        "queue",
+        "nextSequence",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    },
+    "NativeCall": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "serviceNodeId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "callerPrincipalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "request": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "nativeVersion": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "catalogSourceHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "method": {
+          "enum": [
+            "thread/start",
+            "thread/resume",
+            "turn/start",
+            "turn/interrupt"
+          ]
+        },
+        "predecessor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preparedEpoch": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "expectedDefinitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "accepted",
+            "dispatched",
+            "succeeded",
+            "failed",
+            "outcome_unknown"
+          ]
+        },
+        "epoch": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "operationId",
+        "serviceNodeId",
+        "callerPrincipalId",
+        "request",
+        "nativeVersion",
+        "catalogSourceHash",
+        "method",
+        "predecessor",
+        "preparedEpoch",
+        "requestHash",
+        "expectedDefinitionHash",
+        "createdAt",
+        "state",
+        "epoch",
+        "evidence",
+        "code",
+        "updatedAt"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "prepared"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "epoch": {
+                "type": "null"
+              },
+              "evidence": {
+                "type": "null"
+              },
+              "code": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "accepted"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "epoch": {
+                "type": "null"
+              },
+              "evidence": {
+                "$ref": "#/$defs/ObjectPin"
+              },
+              "code": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "dispatched",
+                  "succeeded"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "epoch": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+              },
+              "evidence": {
+                "$ref": "#/$defs/ObjectPin"
+              },
+              "code": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "failed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "$ref": "#/$defs/ObjectPin"
+              },
+              "code": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "outcome_unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "code": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Input": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "workspaceId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "identity": {
+          "$ref": "#/$defs/InputIdentity"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "requestHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "binding": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "payload": {
+          "$ref": "#/$defs/Payload"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "preparing",
+            "delivering",
+            "running",
+            "waiting_input",
+            "collecting",
+            "completed",
+            "failed",
+            "cancel_requested",
+            "cancelled",
+            "outcome_unknown"
+          ]
+        },
+        "nativeCalls": {
+          "type": "object",
+          "properties": {
+            "resume": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ObjectPin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "turn": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ObjectPin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "interrupt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ObjectPin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "resume",
+            "turn",
+            "interrupt"
+          ],
+          "additionalProperties": false
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "epoch": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancellation": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "operationId": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                },
+                "callerPrincipalId": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "requestedAt": {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              },
+              "required": [
+                "operationId",
+                "callerPrincipalId",
+                "reason",
+                "requestedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "admittedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "finishedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "workspaceId",
+        "definitionHash",
+        "identity",
+        "operationId",
+        "requestHash",
+        "binding",
+        "sequence",
+        "payload",
+        "state",
+        "nativeCalls",
+        "turnId",
+        "epoch",
+        "result",
+        "error",
+        "cancellation",
+        "admittedAt",
+        "updatedAt",
+        "finishedAt"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "queued"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "turnId": {
+                "type": "null"
+              },
+              "epoch": {
+                "type": "null"
+              },
+              "result": {
+                "type": "null"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "queued",
+                  "preparing",
+                  "delivering",
+                  "running",
+                  "waiting_input",
+                  "collecting",
+                  "cancel_requested",
+                  "outcome_unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "finishedAt": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "running",
+                  "waiting_input",
+                  "collecting",
+                  "completed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "turnId": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+              },
+              "epoch": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "completed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/ObjectPin"
+              },
+              "finishedAt": {
+                "type": "string",
+                "minLength": 24,
+                "maxLength": 24,
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "failed",
+                  "cancelled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "finishedAt": {
+                "type": "string",
+                "minLength": 24,
+                "maxLength": 24,
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "failed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/Error"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "cancel_requested",
+                  "cancelled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "cancellation": {
+                "type": "object",
+                "properties": {
+                  "operationId": {
+                    "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                  },
+                  "callerPrincipalId": {
+                    "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "requestedAt": {
+                    "type": "string",
+                    "minLength": 24,
+                    "maxLength": 24,
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                  }
+                },
+                "required": [
+                  "operationId",
+                  "callerPrincipalId",
+                  "reason",
+                  "requestedAt"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "outcome_unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                  },
+                  "outcome": {
+                    "const": "unknown"
+                  },
+                  "detail": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  }
+                },
+                "required": [
+                  "code",
+                  "outcome",
+                  "detail"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "format": {
+          "enum": [
+            "native-request/canonical-json",
+            "agent-operation/canonical-json",
+            "agent-read-observation/canonical-json"
+          ]
+        },
+        "contentHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "chunks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "maxItems": 16,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "format",
+        "contentHash",
+        "byteLength",
+        "chunks"
+      ],
+      "additionalProperties": false
+    },
+    "Collection": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "input": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "binding": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "turnCall": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "turnId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "epoch": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "previousAttempt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObjectPin"
+          },
+          "maxItems": 1024
+        },
+        "nativeBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "state": {
+          "enum": [
+            "collecting",
+            "ready",
+            "complete",
+            "failed"
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "retryAuthorization": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "callerPrincipalId": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                },
+                "operationId": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "failed": {
+                  "$ref": "#/$defs/ObjectPin"
+                }
+              },
+              "required": [
+                "callerPrincipalId",
+                "operationId",
+                "reason",
+                "failed"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "input",
+        "binding",
+        "turnCall",
+        "turnId",
+        "epoch",
+        "attempt",
+        "previousAttempt",
+        "reads",
+        "nativeBytes",
+        "state",
+        "result",
+        "error",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "collecting",
+                  "ready"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "type": "null"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "ready",
+                  "complete"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reads": {
+                "minItems": 3
+              },
+              "nativeBytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 67108864
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "complete"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/ObjectPin"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "failed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": {
+                "type": "null"
+              },
+              "error": {
+                "$ref": "#/$defs/Error"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "attempt": {
+                "enum": [
+                  1
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "previousAttempt": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "attempt": {
+                "minimum": 2
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "previousAttempt": {
+                "$ref": "#/$defs/ObjectPin"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "RetryCollectionRequest": {
+      "type": "object",
+      "properties": {
+        "inputId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedCollection": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "inputId",
+        "expectedCollection",
+        "expectedBridge",
+        "operationId",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "inputId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "binding": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "turnId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "nativeState": {
+          "enum": [
+            "completed",
+            "failed",
+            "interrupted"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObjectPin"
+          },
+          "maxItems": 1024,
+          "minItems": 1
+        },
+        "textParts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "maxItems": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "inputId",
+        "binding",
+        "turnId",
+        "nativeState",
+        "evidence",
+        "textParts",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "ReplyOrigin": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "native"
+            },
+            "inputId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "binding": {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            "result": {
+              "$ref": "#/$defs/ObjectPin"
+            }
+          },
+          "required": [
+            "kind",
+            "inputId",
+            "binding",
+            "result"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "notice"
+            },
+            "operation": {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            "claim": {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            "producerPrincipalId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "source": {
+              "$ref": "#/$defs/ObjectPin"
+            }
+          },
+          "required": [
+            "kind",
+            "operation",
+            "claim",
+            "producerPrincipalId",
+            "source"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Reply": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "workspaceId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "origin": {
+          "$ref": "#/$defs/ReplyOrigin"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "partIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "text": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 16384
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Artifact"
+          },
+          "maxItems": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "immutableHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "outcome_unknown",
+            "confirmed"
+          ]
+        },
+        "firstOfferedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "confirmedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "workspaceId",
+        "definitionHash",
+        "channel",
+        "origin",
+        "sequence",
+        "partIndex",
+        "text",
+        "artifacts",
+        "createdAt",
+        "immutableHash",
+        "state",
+        "firstOfferedAt",
+        "confirmedAt"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "pending"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "firstOfferedAt": {
+                "type": "null"
+              },
+              "confirmedAt": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "outcome_unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "firstOfferedAt": {
+                "type": "string",
+                "minLength": 24,
+                "maxLength": 24,
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              },
+              "confirmedAt": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "confirmed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "firstOfferedAt": {
+                "type": "string",
+                "minLength": 24,
+                "maxLength": 24,
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              },
+              "confirmedAt": {
+                "type": "string",
+                "minLength": 24,
+                "maxLength": 24,
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Offer": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "callerPrincipalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "afterSequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "throughSequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "replies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObjectPin"
+          },
+          "maxItems": 8
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "operationId",
+        "callerPrincipalId",
+        "channel",
+        "afterSequence",
+        "throughSequence",
+        "replies",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "Acknowledgement": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "callerPrincipalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "offer": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "replyIds": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "operationId",
+        "callerPrincipalId",
+        "offer",
+        "replyIds",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "MainView": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "data": {
+          "$ref": "#/$defs/Main"
+        }
+      },
+      "required": [
+        "object",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "BindingView": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "data": {
+          "$ref": "#/$defs/Binding"
+        }
+      },
+      "required": [
+        "object",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "InputView": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "data": {
+          "$ref": "#/$defs/Input"
+        }
+      },
+      "required": [
+        "object",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "ReplyView": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "data": {
+          "$ref": "#/$defs/Reply"
+        }
+      },
+      "required": [
+        "object",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "OfferView": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "data": {
+          "$ref": "#/$defs/Offer"
+        }
+      },
+      "required": [
+        "object",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "AcknowledgementView": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "data": {
+          "$ref": "#/$defs/Acknowledgement"
+        }
+      },
+      "required": [
+        "object",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "ActionOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "createMain"
+            },
+            "operationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "binding": {
+              "$ref": "#/$defs/BindingView"
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "binding"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "send"
+            },
+            "operationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "input": {
+              "$ref": "#/$defs/InputView"
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "input"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "cancel"
+            },
+            "operationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "input": {
+              "$ref": "#/$defs/InputView"
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "input"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "receive"
+            },
+            "operationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "offer": {
+              "$ref": "#/$defs/OfferView"
+            },
+            "replies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ReplyView"
+              },
+              "maxItems": 8
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "offer",
+            "replies"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "acknowledge"
+            },
+            "operationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "acknowledgement": {
+              "$ref": "#/$defs/AcknowledgementView"
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "acknowledgement"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "notify"
+            },
+            "operationId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "reply": {
+              "$ref": "#/$defs/ReplyView"
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "reply"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Operation": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "workspaceId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "definitionHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "callerPrincipalId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "request": {
+          "$ref": "#/$defs/AdmittedActionRequest"
+        },
+        "requestHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        },
+        "phase": {
+          "enum": [
+            "accepted",
+            "applying",
+            "succeeded",
+            "failed",
+            "outcome_unknown"
+          ]
+        },
+        "nativeCall": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "workspaceId",
+        "definitionHash",
+        "callerPrincipalId",
+        "operationId",
+        "request",
+        "requestHash",
+        "phase",
+        "nativeCall",
+        "outcome",
+        "error",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "succeeded"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "outcome": {
+                "$ref": "#/$defs/ActionOutcome"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "accepted",
+                  "applying"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "outcome": {
+                "type": "null"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "outcome_unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                  },
+                  "outcome": {
+                    "const": "unknown"
+                  },
+                  "detail": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  }
+                },
+                "required": [
+                  "code",
+                  "outcome",
+                  "detail"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "failed",
+                  "outcome_unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "outcome": {
+                "type": "null"
+              },
+              "error": {
+                "$ref": "#/$defs/Error"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "WorkspaceInfo": {
+      "type": "object",
+      "properties": {
+        "expectedBridge": {
+          "$ref": "#/$defs/ExpectedBridge"
+        },
+        "project": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/ResourceRef"
+        },
+        "main": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MainView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BindingView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChannelConfiguration"
+          },
+          "maxItems": 32
+        },
+        "nativeOwnerReady": {
+          "type": "boolean"
+        },
+        "observedAt": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        }
+      },
+      "required": [
+        "expectedBridge",
+        "project",
+        "main",
+        "binding",
+        "channels",
+        "nativeOwnerReady",
+        "observedAt"
+      ],
+      "additionalProperties": false
+    },
+    "HistoryPage": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/InputView"
+              },
+              {
+                "$ref": "#/$defs/ReplyView"
+              }
+            ]
+          },
+          "maxItems": 8
+        },
+        "throughSequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "hasMore": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "throughSequence",
+        "hasMore"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

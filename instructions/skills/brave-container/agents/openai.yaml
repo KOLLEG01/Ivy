@@ -1,0 +1,4 @@
+interface:
+  display_name: "Brave Container"
+  short_description: "Inspect and open Brave containers locally"
+  default_prompt: "Use $brave-container to identify the container of a Brave tab."

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "DesktopCaptureIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instanceId", "pid", "processStartTimeUtcTicks"],
+      "properties": {
+        "instanceId": { "type": "string", "minLength": 1, "maxLength": 32767 },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "processStartTimeUtcTicks": { "type": "string", "pattern": "^[1-9][0-9]{0,18}$" }
+      }
+    },
+    "DesktopCaptureCorrelation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["endpointId", "state", "identity"],
+      "properties": {
+        "endpointId": { "type": "string", "minLength": 1, "maxLength": 32767 },
+        "state": { "enum": ["matched", "none", "ambiguous", "unavailable"] },
+        "identity": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/DesktopCaptureIdentity" }] }
+      },
+      "if": { "properties": { "state": { "const": "matched" } } },
+      "then": { "properties": { "identity": { "$ref": "#/$defs/DesktopCaptureIdentity" } } },
+      "else": { "properties": { "identity": { "type": "null" } } }
+    },
+    "ProcessOwnership": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pid", "state"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "state": { "enum": ["owned", "foreign", "unavailable"] }
+      }
+    },
+    "CaptureSession": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instanceId", "state", "pid", "singleProcess"],
+      "properties": {
+        "instanceId": { "type": "string", "minLength": 1, "maxLength": 32767 },
+        "state": { "enum": ["inactive", "active", "expired"] },
+        "pid": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "singleProcess": { "type": "boolean" }
+      }
+    },
+    "CaptureObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["endpointId", "state", "sessions"],
+      "properties": {
+        "endpointId": { "type": "string", "minLength": 1, "maxLength": 32767 },
+        "state": { "enum": ["observed", "unavailable"] },
+        "sessions": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/CaptureSession" } }
+      },
+      "if": { "properties": { "state": { "const": "unavailable" } } },
+      "then": { "properties": { "sessions": { "maxItems": 0 } } }
+    }
+  }
+}

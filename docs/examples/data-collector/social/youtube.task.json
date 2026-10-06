@@ -1,0 +1,29 @@
+{
+  "id": "social-youtube-example",
+  "name": "YouTube channel metrics",
+  "enabled": false,
+  "intervalSeconds": 21600,
+  "timeoutSeconds": 180,
+  "memoryMb": 128,
+  "script": "@file:youtube.mjs",
+  "dependencies": {},
+  "config": {
+    "accountLabel": "YouTube channel A",
+    "channelId": "replace-with-owner-channel-id",
+    "clientIdSecret": "youtube_oauth_client_id",
+    "clientSecretSecret": "youtube_oauth_client_secret",
+    "refreshTokenSecret": "youtube_channel_a_refresh_token",
+    "lookbackDays": 30,
+    "maxPages": 100
+  },
+  "secretNames": [
+    "youtube_oauth_client_id",
+    "youtube_oauth_client_secret",
+    "youtube_channel_a_refresh_token"
+  ],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

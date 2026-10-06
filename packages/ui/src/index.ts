@@ -1,0 +1,84 @@
+import { defineAsyncComponent } from "vue";
+export { default as IvyShell } from "./IvyShell.vue";
+export type { ShellApp, ShellNavigationItem } from "./IvyShell.vue";
+export { uiIcon } from "./lib/ui-icons";
+export { default as HierarchyTree } from "./patterns/HierarchyTree.vue";
+export { default as BreadcrumbTrail } from "./patterns/BreadcrumbTrail.vue";
+export { default as MarkdownEditor } from "./patterns/MarkdownEditor.vue";
+// Loads the editor on first use, for apps whose first view does not edit Markdown.
+export const LazyMarkdownEditor = /* @__PURE__ */ defineAsyncComponent(() => import("./patterns/MarkdownEditor.vue"));
+export type {
+  HierarchyNode,
+  HierarchyPage,
+  HierarchyLoader,
+  HierarchyReorder,
+  HierarchyMove,
+} from "./patterns/hierarchy";
+export { default as ContentView } from "./patterns/ContentView.vue";
+export { default as ImagePreview } from "./patterns/ImagePreview.vue";
+export { fileSize, attachmentMarkdown } from "./lib/attachments";
+export type { AttachmentInfo, UploadedAttachment } from "./lib/attachments";
+export { default as ConversationComposer } from "./patterns/ConversationComposer.vue";
+export { default as ComposerOptions } from "./patterns/ComposerOptions.vue";
+export { default as ComposerAddMenu } from "./patterns/ComposerAddMenu.vue";
+export { default as ComposerAttachments } from "./patterns/ComposerAttachments.vue";
+export { default as ComposerQueue } from "./patterns/ComposerQueue.vue";
+export { submitOnEnter } from "./lib/composer";
+export type { ComposerAttachment, QueuedMessage } from "./lib/composer";
+export { default as JsonTree } from "./patterns/JsonTree.vue";
+export { default as StatusBadge } from "./patterns/StatusBadge.vue";
+export { default as ActivityIndicator } from "./patterns/ActivityIndicator.vue";
+export { default as RemoteState } from "./patterns/RemoteState.vue";
+export { default as PageHeader } from "./patterns/PageHeader.vue";
+export { default as ToolbarContent } from "./patterns/ToolbarContent.vue";
+export { default as PageControls } from "./patterns/PageControls.vue";
+export { default as PropertyList } from "./patterns/PropertyList.vue";
+export { default as PropertyItem } from "./patterns/PropertyItem.vue";
+export { default as SearchDialog } from "./patterns/SearchDialog.vue";
+export { default as SearchResult } from "./patterns/SearchResult.vue";
+export { default as SettingsSection } from "./patterns/SettingsSection.vue";
+export { default as SegmentedControl } from "./patterns/SegmentedControl.vue";
+export { default as OptionSelect } from "./patterns/OptionSelect.vue";
+export { default as ChoiceChips } from "./patterns/ChoiceChips.vue";
+export { default as CreatableCombobox } from "./patterns/CreatableCombobox.vue";
+export { default as TagPicker } from "./patterns/TagPicker.vue";
+export type { TagOption } from "./patterns/TagPicker.vue";
+export { default as Disclosure } from "./patterns/Disclosure.vue";
+export { default as RevisionDiff } from "./patterns/RevisionDiff.vue";
+export { default as CommentCard } from "./patterns/CommentCard.vue";
+export { default as ChangeHistory } from "./patterns/ChangeHistory.vue";
+export type { ChangeEntry, FieldChange } from "./patterns/ChangeHistory.vue";
+export { useRemote, remoteUpdatesKey } from "./composables/remote";
+export type { RemoteUpdates, RemoteSource } from "./composables/remote";
+export { usePagePosition } from "./composables/page-position";
+export { cn } from "./lib/utils";
+export * from "./components/button";
+export * from "./components/input";
+export * from "./components/textarea";
+export * from "./components/label";
+export * from "./components/badge";
+export * from "./components/card";
+export * from "./components/dialog";
+export * from "./components/sheet";
+export * from "./components/popover";
+export * from "./components/dropdown-menu";
+export * from "./components/tabs";
+export * from "./components/tooltip";
+export * from "./components/table";
+export * from "./components/select";
+export * from "./components/separator";
+export * from "./components/skeleton";
+export * from "./components/native-select";
+export * from "./components/alert";
+export * from "./components/field";
+export * from "./components/item";
+export * from "./components/empty";
+export * from "./components/checkbox";
+export * from "./components/switch";
+export * from "./components/kbd";
+export * from "./components/breadcrumb";
+export * from "./components/collapsible";
+export * from "./components/sidebar";
+export * from "./components/combobox";
+export * from "./components/toggle";
+export * from "./components/toggle-group";

@@ -1,0 +1,394 @@
+diff --git a/src/mcp.mts b/src/mcp.mts
+index 368b80e..4108b2a 100644
+--- a/src/mcp.mts
++++ b/src/mcp.mts
+@@ -284,7 +284,7 @@ function parseMcpValue(raw: string): unknown {
+     return JSON.parse(trimmed)
+   }
+   if (existsSync(trimmed)) {
+-    return trimmed
++    return JSON.parse(readFileSync(trimmed, 'utf8'))
+   }
+   return JSON.parse(readFileSync(trimmed, 'utf8'))
+ }
+diff --git a/src/model-discovery.mts b/src/model-discovery.mts
+new file mode 100644
+index 0000000..3eefec9
+--- /dev/null
++++ b/src/model-discovery.mts
+@@ -0,0 +1,56 @@
++import type { RuntimeModel } from './types.mjs'
++
++/** Project only the CLI's current model and effort capabilities into the native picker. */
++export function runtimeModelList(
++  models: RuntimeModel[],
++  configuredModel: string,
++  configuredEffort: string,
++) {
++  const first = models[0]
++  if (!first) throw new Error('Claude CLI returned no available models')
++  const rows = new Map<string, RuntimeModel>()
++  const idOf = (model: RuntimeModel) =>
++    model.resolvedModel && !/\[.+\]$/.test(model.value) ? model.resolvedModel : model.value
++  const defaultId = idOf(
++    models.find((model) => model.value === configuredModel || idOf(model) === configuredModel) ??
++      models.find((model) => model.value === 'default') ??
++      first,
++  )
++  for (const model of models) {
++    const id = idOf(model)
++    if (!rows.has(id) || model.value !== 'default') rows.set(id, model)
++  }
++  return {
++    data: [...rows].map(([id, model]) => {
++      const efforts = model.supportsEffort === false ? [] : (model.supportedEffortLevels ?? [])
++      const version = /^claude-[a-z][a-z-]*-(\d+(?:-\d+)*)$/
++        .exec((model.resolvedModel ?? id).replace(/-\d{8}$/, ''))?.[1]
++        ?.replaceAll('-', '.')
++      return {
++        id,
++        model: id,
++        upgrade: null,
++        upgradeInfo: null,
++        availabilityNux: null,
++        displayName:
++          version && !model.displayName.includes(version)
++            ? `${model.displayName} ${version}`
++            : model.displayName,
++        description: model.description,
++        hidden: false,
++        supportedReasoningEfforts: efforts.map((reasoningEffort) => ({
++          reasoningEffort,
++          description: reasoningEffort,
++        })),
++        defaultReasoningEffort: efforts.includes(configuredEffort)
++          ? configuredEffort
++          : (efforts[0] ?? 'none'),
++        inputModalities: ['text', 'image'],
++        supportsPersonality: false,
++        additionalSpeedTiers: [],
++        isDefault: id === defaultId,
++      }
++    }),
++    nextCursor: null,
++  }
++}
+diff --git a/src/native-runtime.mts b/src/native-runtime.mts
+index 8fd8c36..ee0ecab 100644
+--- a/src/native-runtime.mts
++++ b/src/native-runtime.mts
+@@ -1,4 +1,4 @@
+-import { copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync } from 'node:fs'
++import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
+ import { homedir } from 'node:os'
+ import { join } from 'node:path'
+ 
+@@ -52,6 +52,33 @@ import {
+   type WorkflowLaunchInfo,
+ } from './workflow-subagents.mjs'
+ 
++const paidConfigurationKeys = [
++  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
++  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
++]
++
++function assertSubscriptionBilling(cwd: string): void {
++  if (process.env.CLAUDE_CODEX_SUBSCRIPTION_ONLY !== '1') return
++  if (!process.env.CLAUDE_CONFIG_DIR || paidConfigurationKeys.some((key) => process.env[key]))
++    throw new Error('Claude subscription mode conflicts with API or cloud gateway environment settings')
++  for (const path of [
++    join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'),
++    join(process.env.CLAUDE_CONFIG_DIR, 'settings.local.json'),
++    join(cwd, '.claude', 'settings.json'),
++    join(cwd, '.claude', 'settings.local.json'),
++  ]) {
++    if (!existsSync(path)) continue
++    const settings = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
++    if (!settings || typeof settings !== 'object' || Array.isArray(settings))
++      throw new Error('Claude settings must contain an object')
++    const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env)
++      ? settings.env as Record<string, unknown> : {}
++    if (paidConfigurationKeys.some((key) => Object.hasOwn(env, key)) ||
++      Object.hasOwn(settings, 'apiKeyHelper') || settings.forceLoginMethod === 'console')
++      throw new Error('Claude subscription mode conflicts with API or cloud gateway settings')
++  }
++}
++
+ type ClaudeSdk = typeof import('@anthropic-ai/claude-agent-sdk')
+ 
+ interface PendingTurn {
+@@ -121,6 +148,34 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+   private turns = new Map<string, PendingTurn>()
+   private permissions = new Map<string, PendingPermission>()
+ 
++  async supportedModels() {
++    assertSubscriptionBilling(process.cwd())
++    const sdk = await this.loadSdk()
++    const abort = new AbortController()
++    const query = sdk.query({
++      // An empty input stream initializes the CLI without submitting an inference turn.
++      prompt: (async function* () {})(),
++      options: {
++        cwd: process.cwd(),
++        settingSources: ['user', 'project', 'local'],
++        ...(process.env.CLAUDE_CODEX_CLI
++          ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODEX_CLI }
++          : {}),
++        persistSession: false,
++        tools: [],
++        mcpServers: {},
++        abortController: abort,
++      },
++    })
++    const timer = setTimeout(() => abort.abort(), 30_000)
++    try {
++      return await query.supportedModels()
++    } finally {
++      clearTimeout(timer)
++      query.close()
++    }
++  }
++
+   async runTurn(context: RuntimeTurnContext, handlers: RuntimeHandlers): Promise<void> {
+     const sdk = await this.loadSdk()
+     const abort = new AbortController()
+@@ -267,7 +322,9 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+     context: RuntimeTurnContext,
+     abort: AbortController,
+   ): Record<string, unknown> {
++    assertSubscriptionBilling(context.cwd)
+     const opts: Record<string, unknown> = {
++      settingSources: ['user', 'project', 'local'],
+       abortController: abort,
+       includePartialMessages: true,
+       includeHookEvents: true,
+@@ -324,12 +381,24 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+     // prompt append, preserving Claude Code's built-in preset.
+     // Re-render on resume so settings changes (including clearing an append)
+     // take effect on the next turn instead of waiting for SDK compaction.
++    const managedInstructions = process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE && existsSync(process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE)
++      ? readFileSync(process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE, 'utf8')
++      : ''
++    const includeLocal = /^@AGENTS\.md\s*$/m.test(managedInstructions)
++    const localInstructions = includeLocal && existsSync(join(context.cwd, 'AGENTS.md'))
++      ? readFileSync(join(context.cwd, 'AGENTS.md'), 'utf8')
++      : ''
++    const appendedInstructions = [
++      managedInstructions.replace(/^@AGENTS\.md\s*$/gm, '').trim(),
++      localInstructions.trim(),
++      context.systemPromptAddendum?.trim() ?? '',
++    ].filter(Boolean).join('\n\n')
+     opts.systemPrompt = {
+       type: 'preset',
+       preset: 'claude_code',
+       snapshot: false,
+-      ...(context.systemPromptAddendum?.trim()
+-        ? { append: context.systemPromptAddendum.trim() }
++      ...(appendedInstructions
++        ? { append: appendedInstructions }
+         : {}),
+     }
+ 
+diff --git a/src/runtime-factory.mts b/src/runtime-factory.mts
+index 4417278..af9c5ac 100644
+--- a/src/runtime-factory.mts
++++ b/src/runtime-factory.mts
+@@ -30,6 +30,11 @@ class SelectableRuntime implements ClaudeRuntime {
+     this.config = config
+   }
+ 
++  async supportedModels() {
++    const runtime = this.runtimeFor(this.config.type)
++    return runtime.supportedModels ? runtime.supportedModels() : null
++  }
++
+   async runTurn(context: RuntimeTurnContext, handlers: RuntimeHandlers): Promise<void> {
+     const requestedType = context.runtimeType ?? this.config.type
+     if (shouldHandleLocally(requestedType, context)) {
+@@ -86,6 +91,8 @@ class SelectableRuntime implements ClaudeRuntime {
+   }
+ 
+   private runtimeFor(type: RuntimeBackendType): ClaudeRuntime {
++    if (type === 'codex-proxy' && process.env.CLAUDE_CODEX_DISABLE_CODEX_PROXY === '1')
++      throw new Error('Codex proxy runtime is disabled for this Claude adapter')
+     const existing = this.runtimes.get(type)
+     if (existing) return existing
+     const runtime = instantiateRuntime(this.config, type)
+diff --git a/src/server-helpers.mts b/src/server-helpers.mts
+index e9c98ac..10048cc 100644
+--- a/src/server-helpers.mts
++++ b/src/server-helpers.mts
+@@ -125,11 +125,15 @@ export function allSelectableModelOptions(): Array<{
+ export function defaultSelectableModelId(): string {
+   const options = allSelectableModelOptions()
+   const defaultModel = process.env.CLAUDE_CODEX_DEFAULT_MODEL
++  if (defaultModel && process.env.CLAUDE_CODEX_DISABLE_CODEX_PROXY === '1' &&
++    !isCodexOpenAiModel(defaultModel)) return defaultModel
+   if (defaultModel && options.some((option) => option.id === defaultModel)) return defaultModel
+   return options.find((option) => option.isDefault === true)?.id ?? options[0]?.id ?? 'sonnet'
+ }
+ 
+ export function normalizeSelectableModelId(value: string, fallback: string): string {
++  if (value.trim() && process.env.CLAUDE_CODEX_DISABLE_CODEX_PROXY === '1' &&
++    !isCodexOpenAiModel(value)) return value
+   const options = allSelectableModelOptions()
+   const ids = new Set(options.map((option) => option.id))
+   if (ids.has(value)) return value
+@@ -151,7 +155,7 @@ export function modelFromParams(params: Record<string, unknown>, fallback: strin
+ export function reasoningEffortFromParams(
+   params: Record<string, unknown>,
+   fallback: string | null,
+-): 'low' | 'medium' | 'high' | 'xhigh' | null {
++): 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null {
+   const config = asRecord(params.config)
+   const effort =
+     typeof params.effort === 'string'
+diff --git a/src/server.mts b/src/server.mts
+index 5677d2a..1312033 100644
+--- a/src/server.mts
++++ b/src/server.mts
+@@ -5,6 +5,7 @@ import { join } from 'node:path'
+ import { fileURLToPath } from 'node:url'
+ import { promisify } from 'node:util'
+ import { listClaudeHooks, listClaudeSkills } from './claude-capabilities.mjs'
++import { runtimeModelList } from './model-discovery.mjs'
+ import { callMcpTool, listMcpServerStatuses, readMcpConfig, readMcpResource } from './mcp.mjs'
+ import { projectProviderLoopConfig } from './provider-loop-config.mjs'
+ import {
+@@ -356,6 +357,8 @@ export class CodexClaudeAppServer {
+         return this.threadRead(asRecord(params))
+       case 'thread/turns/list':
+         return this.threadTurnsList(asRecord(params))
++      case 'thread/items/list':
++        return this.threadItemsList(asRecord(params))
+       case 'thread/turns/items/list':
+         return this.threadTurnItemsList(asRecord(params))
+       case 'thread/name/set':
+@@ -620,6 +623,8 @@ export class CodexClaudeAppServer {
+     const requestedCwd = stringOr(params.cwd, process.cwd())
+     const cwd = maybeCreateThreadWorktree(id, requestedCwd).cwd
+     const model = modelFromParams(params, this.configModel)
++    if (process.env.CLAUDE_CODEX_DISABLE_CODEX_PROXY === '1' && isCodexOpenAiModel(model))
++      throw new Error('Codex proxy models are disabled for this Claude adapter')
+     const reasoningEffort = reasoningEffortFromParams(params, this.configReasoningEffort)
+     const permissionProfileId = permissionProfileIdFromParams(params)
+     const permissionProfile = permissionProfilePolicy(permissionProfileId)
+@@ -1000,6 +1005,33 @@ export class CodexClaudeAppServer {
+     }
+   }
+ 
++  // Ivy's shared transcript reader uses the newer paged item method. Read the
++  // adapter's persisted turn items; never synthesize a successful empty page.
++  private threadItemsList(params: Record<string, unknown>): unknown {
++    const threadId = stringOr(params.threadId, '')
++    if (!this.store.getThread(threadId)) throw new Error('unknown thread: ' + threadId)
++    const requestedTurnId = typeof params.turnId === 'string' ? params.turnId : null
++    const turns = this.store.listTurns(threadId)
++    if (requestedTurnId && !turns.some((turn) => turn.id === requestedTurnId))
++      throw new Error('turn does not belong to thread: ' + requestedTurnId)
++    const entries = turns
++      .filter((turn) => !requestedTurnId || turn.id === requestedTurnId)
++      .flatMap((turn) => turn.items.map((item) => ({ turnId: turn.id, item })))
++    if (params.sortDirection === 'desc') entries.reverse()
++    const offset = params.cursor == null ? 0 : Number(params.cursor)
++    if (!Number.isSafeInteger(offset) || offset < 0 || offset > entries.length)
++      throw new Error('invalid item cursor')
++    const limit = params.limit == null ? 100 : Number(params.limit)
++    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
++      throw new Error('invalid item limit')
++    const data = entries.slice(offset, offset + limit)
++    return {
++      data,
++      nextCursor: offset + data.length < entries.length ? String(offset + data.length) : null,
++      backwardsCursor: data.length ? String(offset) : null,
++    }
++  }
++
+   private threadTurnItemsList(params: Record<string, unknown>): unknown {
+     const turnId = stringOr(params.turnId, '')
+     const turn = this.store.getTurn(turnId)
+@@ -1384,6 +1416,7 @@ export class CodexClaudeAppServer {
+     const thread = this.store.getThread(threadId)
+     if (!thread) throw new Error(`unknown thread: ${threadId}`)
+     this.activePeerByThread.set(threadId, peer)
++
+     const turnId = newId()
+     const review = reviewLabel(params.target)
+     const prompt = reviewPrompt(params.target)
+@@ -1631,6 +1664,10 @@ export class CodexClaudeAppServer {
+     if (!thread) throw new Error(`unknown thread: ${threadId}`)
+     this.activePeerByThread.set(threadId, peer)
+ 
++    if (process.env.CLAUDE_CODEX_DISABLE_CODEX_PROXY === '1' &&
++      (thread.runtimeBackend === 'codex' || isCodexOpenAiModel(modelFromParams(params, thread.model))))
++      throw new Error('Codex proxy models are disabled for this Claude adapter')
++
+     const turnId = newId()
+     const input = Array.isArray(params.input) ? (params.input as UserInput[]) : []
+     // extractImageInputs splits user input into the text prompt and any image
+@@ -3368,7 +3405,7 @@ export class CodexClaudeAppServer {
+             options: [...options, { label: 'Other', description: 'Provide a free-form answer' }],
+           }
+     })
+-    const params = { threadId, turnId, itemId, questions: normalized }
++    const params = { threadId, turnId, itemId, questions: normalized, isBlocking: true }
+     let response: unknown
+     try {
+       response = await this.sendServerRequest(peer, 'item/tool/requestUserInput', requestId, params)
+@@ -3568,7 +3605,9 @@ export class CodexClaudeAppServer {
+     return providers
+   }
+ 
+-  private modelList(): unknown {
++  private async modelList(): Promise<unknown> {
++    const models = await this.runtime.supportedModels?.()
++    if (models) return runtimeModelList(models, this.configModel, this.configReasoningEffort)
+     const defaultModel = this.configModel
+     const claudeOptions = claudeModelOptions()
+     // When a real Codex CLI binary is available on the host (CODEX_REAL env
+@@ -4456,6 +4495,7 @@ export class CodexClaudeAppServer {
+       forkedFromId: thread.forkedFromId,
+       parentThreadId,
+       preview: thread.preview,
++      projectId: null,
+       ephemeral: thread.ephemeral,
+       modelProvider: thread.modelProvider,
+       createdAt: thread.createdAt,
+diff --git a/src/types.mts b/src/types.mts
+index f739a5d..1280c16 100644
+--- a/src/types.mts
++++ b/src/types.mts
+@@ -441,8 +441,18 @@ export interface RuntimeHandlers {
+ }
+ 
+ export interface ClaudeRuntime {
++  supportedModels?(): Promise<RuntimeModel[] | null>
+   runTurn(context: RuntimeTurnContext, handlers: RuntimeHandlers): Promise<void>
+   steer(threadId: string, prompt: string): Promise<void>
+   interrupt(threadId: string): Promise<void>
+   stop(): Promise<void>
+ }
++
++export interface RuntimeModel {
++  value: string
++  resolvedModel?: string
++  displayName: string
++  description: string
++  supportsEffort?: boolean
++  supportedEffortLevels?: string[]
++}
+diff --git a/src/util.mts b/src/util.mts
+index 1f3d713..e5cfdfa 100644
+--- a/src/util.mts
++++ b/src/util.mts
+@@ -496,8 +496,9 @@ export function claudeOutputFormat(outputSchema: unknown): unknown | null {
+ 
+ export function normalizeCodexReasoningEffort(
+   value: string | null | undefined,
+-): 'low' | 'medium' | 'high' | 'xhigh' | null {
++): 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null {
+   if (value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') return value
++  if (value === 'max') return value
+   if (value === 'minimal') return 'low'
+   return null
+ }

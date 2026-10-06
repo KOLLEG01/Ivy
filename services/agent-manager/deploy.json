@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "componentId": "agent-manager",
+  "kind": "service",
+  "version": "0.2.54",
+  "description": "Pinned public native Codex owner, complete projections, inventory and durable outcomes",
+  "connectsToHive": true,
+  "requirements": {
+    "node": ">=24.18.0 <25.0.0",
+    "hiveProtocol": 1,
+    "contracts": []
+  },
+  "entrypoint": {
+    "executable": "node",
+    "args": ["dist/services/agent-manager/src/main.js"],
+    "timeoutMs": 30000
+  },
+  "prepare": [
+    {
+      "executable": "node",
+      "args": ["tools/build/run-npm.mjs", "ci"],
+      "timeoutMs": 600000
+    },
+    {
+      "executable": "node",
+      "args": [
+        "--max-old-space-size=448",
+        "tools/build/build-deployment.mjs",
+        "--component",
+        "agent-manager"
+      ],
+      "timeoutMs": 300000
+    }
+  ],
+  "checks": [],
+  "readiness": {
+    "timeoutMs": 180000,
+    "command": {
+      "executable": "node",
+      "args": ["dist/packages/host-runtime/src/health.js"],
+      "timeoutMs": 5000
+    }
+  },
+  "shutdown": {
+    "timeoutMs": 15000
+  },
+  "restart": {
+    "policy": "always",
+    "minimumDelayMs": 1000,
+    "maximumDelayMs": 60000
+  },
+  "runtimeReset": {
+    "delete": [
+      { "area": "data", "path": "journal" },
+      { "area": "data", "path": "project-locations.sqlite" },
+      { "area": "data", "path": "project-locations.sqlite-wal" },
+      { "area": "data", "path": "project-locations.sqlite-shm" },
+      { "area": "data", "path": "project-backup-paths.json" },
+      { "area": "data", "path": "process-stop-fence.json" },
+      { "area": "data", "path": "owned-process-stops.json" },
+      { "area": "data", "path": "runtime-reset.json" },
+      { "area": "data", "path": "runtime-reset-applied.json" },
+      { "area": "data", "path": "health.json" },
+      { "area": "data", "path": "control.json" },
+      { "area": "work", "path": "." },
+      { "area": "logs", "path": "." }
+    ],
+    "preserve": [],
+    "completionMarker": "runtime-reset.json"
+  }
+}

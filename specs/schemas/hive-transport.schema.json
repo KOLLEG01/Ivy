@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ivy.invalid/schemas/hive-transport.schema.json",
+  "title": "Hive provider forwarding and transient notification frames",
+  "$defs": {
+    "ProviderCall": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "$ref": "hive-wire.schema.json#/$defs/Identifier"
+        },
+        "method": {
+          "const": "provider.invoke"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "qualifiedName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "arguments": {
+              "$ref": "hive-wire.schema.json#/$defs/Json"
+            },
+            "definitionHash": {
+              "$ref": "hive-wire.schema.json#/$defs/Hash"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "callerPrincipalId": {
+              "$ref": "hive-wire.schema.json#/$defs/Identifier"
+            },
+            "operationId": {
+              "$ref": "hive-wire.schema.json#/$defs/Identifier"
+            }
+          },
+          "required": [
+            "qualifiedName",
+            "arguments",
+            "definitionHash",
+            "generation",
+            "callerPrincipalId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    "ServiceNotification": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "service.notification"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 192
+            },
+            "version": {
+              "$ref": "hive-wire.schema.json#/$defs/ContractVersion"
+            },
+            "payload": {
+              "$ref": "hive-wire.schema.json#/$defs/Json"
+            }
+          },
+          "required": [
+            "namespace",
+            "name",
+            "version",
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false
+    },
+    "ProviderNotification": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "notifications.provider" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "namespace": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+            "name": { "type": "string", "minLength": 1, "maxLength": 192 },
+            "version": { "$ref": "hive-wire.schema.json#/$defs/ContractVersion" },
+            "payload": { "$ref": "hive-wire.schema.json#/$defs/Json" },
+            "serviceNodeId": { "$ref": "hive-wire.schema.json#/$defs/Identifier" },
+            "generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+          },
+          "required": ["namespace", "name", "version", "payload", "serviceNodeId", "generation"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "method", "params"],
+      "additionalProperties": false
+    },
+    "ChangeNotification": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "notifications.changed" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "scopes": {
+              "description": "An empty list is a liveness heartbeat; nonempty scopes invalidate matching UI reads.",
+              "type": "array", "maxItems": 64, "uniqueItems": true,
+              "items": { "type": "string", "maxLength": 512, "pattern": "^(objects(?:/[a-zA-Z0-9._/-]+)?|services|inventory|uis|system)$" }
+            }
+          },
+          "required": ["scopes"], "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "method", "params"], "additionalProperties": false
+    },
+    "EventAvailability": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "events.available" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "throughSequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+          },
+          "required": ["throughSequence"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "method", "params"],
+      "additionalProperties": false
+    }
+  }
+}

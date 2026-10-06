@@ -1,0 +1,498 @@
+{
+  "schemaVersion": 1,
+  "operations": {
+    "system.status": {
+      "input": "#/$defs/SystemStatusParams",
+      "output": "#/$defs/SystemStatusResult",
+      "access": "client",
+      "mutation": false
+    },
+    "system.instructions": {
+      "input": "#/$defs/SystemInstructionsParams",
+      "output": "#/$defs/SystemInstructionsResult",
+      "access": "client",
+      "mutation": false
+    },
+    "system.toolSchema": {
+      "input": "#/$defs/SystemToolSchemaParams",
+      "output": "#/$defs/SystemToolSchemaResult",
+      "access": "client",
+      "mutation": false
+    },
+    "system.inspectStorage": {
+      "input": "#/$defs/SystemInspectStorageParams",
+      "output": "#/$defs/SystemInspectStorageResult",
+      "access": "client",
+      "mutation": false
+    },
+    "system.diagnostics": {
+      "input": "#/$defs/SystemDiagnosticsParams",
+      "output": "#/$defs/SystemDiagnosticsResult",
+      "access": "client",
+      "mutation": false
+    },
+    "contracts.list": {
+      "input": "#/$defs/ContractsListParams",
+      "output": "#/$defs/ContractsListResult",
+      "access": "client",
+      "mutation": false,
+      "discoverable": false
+    },
+    "contracts.summaries": {
+      "input": "#/$defs/ContractsSummariesParams",
+      "output": "#/$defs/ContractsSummariesResult",
+      "access": "client",
+      "mutation": false
+    },
+    "contracts.get": {
+      "input": "#/$defs/ContractsGetParams",
+      "output": "#/$defs/ContractsGetResult",
+      "access": "client",
+      "mutation": false
+    },
+    "contracts.register": {
+      "input": "#/$defs/ContractsRegisterParams",
+      "output": "#/$defs/ContractsRegisterResult",
+      "access": "client",
+      "mutation": true
+    },
+    "contracts.validate": {
+      "input": "#/$defs/ContractsValidateParams",
+      "output": "#/$defs/ContractsValidateResult",
+      "access": "client",
+      "mutation": false
+    },
+    "objects.stat": {
+      "input": "#/$defs/ObjectsStatParams",
+      "output": "#/$defs/ObjectsStatResult",
+      "access": "client",
+      "mutation": false
+    },
+    "objects.read": {
+      "input": "#/$defs/ObjectsReadParams",
+      "output": "#/$defs/ObjectsReadResult",
+      "access": "client",
+      "mutation": false
+    },
+    "objects.write": {
+      "input": "#/$defs/ObjectsWriteParams",
+      "output": "#/$defs/ObjectsWriteResult",
+      "access": "client",
+      "mutation": true
+    },
+    "objects.writeReceipt": {
+      "input": "#/$defs/ObjectsWriteReceiptParams",
+      "output": "#/$defs/ObjectsWriteReceiptResult",
+      "access": "service",
+      "mutation": false,
+      "discoverable": false
+    },
+    "objects.history": {
+      "input": "#/$defs/ObjectsHistoryParams",
+      "output": "#/$defs/ObjectsHistoryResult",
+      "access": "client",
+      "mutation": false
+    },
+    "objects.pruneRevisions": {
+      "input": "#/$defs/ObjectsPruneRevisionsParams",
+      "output": "#/$defs/ObjectsPruneRevisionsResult",
+      "access": "service",
+      "mutation": true,
+      "discoverable": false
+    },
+    "objects.list": {
+      "input": "#/$defs/ObjectsListParams",
+      "output": "#/$defs/ObjectsListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "objects.tree": {
+      "input": "#/$defs/ObjectsTreeParams",
+      "output": "#/$defs/ObjectsTreeResult",
+      "access": "client",
+      "mutation": false
+    },
+    "objects.query": {
+      "input": "#/$defs/ObjectsQueryParams",
+      "output": "#/$defs/ObjectsQueryResult",
+      "access": "client",
+      "mutation": false
+    },
+    "objects.search": {
+      "input": "#/$defs/ObjectsSearchParams",
+      "output": "#/$defs/ObjectsSearchResult",
+      "access": "client",
+      "mutation": false
+    },
+    "retention.preview": {
+      "input": "#/$defs/RetentionPreviewParams",
+      "output": "#/$defs/RetentionPreviewResult",
+      "access": "client",
+      "mutation": false
+    },
+    "retention.status": {
+      "input": "#/$defs/RetentionStatusParams",
+      "output": "#/$defs/RetentionStatusResult",
+      "access": "client",
+      "mutation": false
+    },
+    "objects.move": {
+      "input": "#/$defs/ObjectsMoveParams",
+      "output": "#/$defs/ObjectsMoveResult",
+      "access": "client",
+      "mutation": true
+    },
+    "objects.reorder": {
+      "input": "#/$defs/ObjectsReorderParams",
+      "output": "#/$defs/ObjectsReorderResult",
+      "access": "client",
+      "mutation": true
+    },
+    "objects.archive": {
+      "input": "#/$defs/ObjectsArchiveParams",
+      "output": "#/$defs/ObjectsArchiveResult",
+      "access": "client",
+      "mutation": true
+    },
+    "objects.delete": {
+      "input": "#/$defs/ObjectsDeleteParams",
+      "output": "#/$defs/ObjectsDeleteResult",
+      "access": "client",
+      "mutation": true,
+      "discoverable": false
+    },
+    "service.connect": {
+      "input": "#/$defs/ServiceConnectParams",
+      "output": "#/$defs/ServiceConnectResult",
+      "access": "service",
+      "mutation": false
+    },
+    "registry.sync": {
+      "input": "#/$defs/RegistrySyncParams",
+      "output": "#/$defs/RegistrySyncResult",
+      "access": "service",
+      "mutation": false
+    },
+    "service.heartbeat": {
+      "input": "#/$defs/ServiceHeartbeatParams",
+      "output": "#/$defs/ServiceHeartbeatResult",
+      "access": "service",
+      "mutation": false
+    },
+    "hosts.list": {
+      "input": "#/$defs/HostsListParams",
+      "output": "#/$defs/HostsListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "hosts.report": {
+      "input": "#/$defs/HostsReportParams",
+      "output": "#/$defs/HostsReportResult",
+      "access": "service",
+      "mutation": false
+    },
+    "hosts.observations": {
+      "input": "#/$defs/HostsObservationsParams",
+      "output": "#/$defs/HostsObservationsResult",
+      "access": "client",
+      "mutation": false
+    },
+    "hostConfigurations.list": {
+      "input": "#/$defs/HostConfigurationsListParams",
+      "output": "#/$defs/HostConfigurationsListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "hostConfigurations.get": {
+      "input": "#/$defs/HostConfigurationsGetParams",
+      "output": "#/$defs/HostConfigurationsGetResult",
+      "access": "client",
+      "mutation": false
+    },
+    "hostConfigurations.put": {
+      "input": "#/$defs/HostConfigurationsPutParams",
+      "output": "#/$defs/HostConfigurationsPutResult",
+      "access": "client",
+      "mutation": true
+    },
+    "hostConfigurations.edit": {
+      "input": "#/$defs/HostConfigurationsEditParams",
+      "output": "#/$defs/HostConfigurationsEditResult",
+      "access": "client",
+      "mutation": false
+    },
+    "hostConfigurations.save": {
+      "input": "#/$defs/HostConfigurationsSaveParams",
+      "output": "#/$defs/HostConfigurationsSaveResult",
+      "access": "client",
+      "mutation": true
+    },
+    "hostConfigurations.history": {
+      "input": "#/$defs/HostConfigurationsHistoryParams",
+      "output": "#/$defs/HostConfigurationsHistoryResult",
+      "access": "client",
+      "mutation": false
+    },
+    "serviceNodes.list": {
+      "input": "#/$defs/ServiceNodesListParams",
+      "output": "#/$defs/ServiceNodesListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "serviceNodes.get": {
+      "input": "#/$defs/ServiceNodesGetParams",
+      "output": "#/$defs/ServiceNodesGetResult",
+      "access": "client",
+      "mutation": false
+    },
+    "serviceNodes.contracts": {
+      "input": "#/$defs/ServiceNodesContractsParams",
+      "output": "#/$defs/ServiceNodesContractsResult",
+      "access": "client",
+      "mutation": false
+    },
+    "namespaces.list": {
+      "input": "#/$defs/NamespacesListParams",
+      "output": "#/$defs/NamespacesListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "namespaces.get": {
+      "input": "#/$defs/NamespacesGetParams",
+      "output": "#/$defs/NamespacesGetResult",
+      "access": "client",
+      "mutation": false
+    },
+    "tools.list": {
+      "input": "#/$defs/ToolsListParams",
+      "output": "#/$defs/ToolsListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "topics.list": {
+      "input": "#/$defs/TopicsListParams",
+      "output": "#/$defs/TopicsListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "tools.call": {
+      "input": "#/$defs/ToolsCallParams",
+      "output": "#/$defs/ToolsCallResult",
+      "access": "client",
+      "mutation": false
+    },
+    "discovery.list": {
+      "input": "#/$defs/DiscoveryListParams",
+      "output": "#/$defs/DiscoveryListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "discovery.instructions": {
+      "input": "#/$defs/DiscoveryInstructionsParams",
+      "output": "#/$defs/DiscoveryInstructionsResult",
+      "access": "client",
+      "mutation": false,
+      "discoverable": false
+    },
+    "discovery.describe": {
+      "input": "#/$defs/DiscoveryDescribeParams",
+      "output": "#/$defs/DiscoveryDescribeResult",
+      "access": "client",
+      "mutation": false
+    },
+    "discovery.call": {
+      "input": "#/$defs/DiscoveryCallParams",
+      "output": "#/$defs/DiscoveryCallResult",
+      "access": "client",
+      "mutation": false
+    },
+    "inventory.list": {
+      "input": "#/$defs/InventoryListParams",
+      "output": "#/$defs/InventoryListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "inventory.get": {
+      "input": "#/$defs/InventoryGetParams",
+      "output": "#/$defs/InventoryGetResult",
+      "access": "client",
+      "mutation": false
+    },
+    "inventory.sync": {
+      "input": "#/$defs/InventorySyncParams",
+      "output": "#/$defs/InventorySyncResult",
+      "access": "service",
+      "mutation": false
+    },
+    "events.publish": {
+      "input": "#/$defs/EventsPublishParams",
+      "output": "#/$defs/EventsPublishResult",
+      "access": "service",
+      "mutation": true
+    },
+    "events.read": {
+      "input": "#/$defs/EventsReadParams",
+      "output": "#/$defs/EventsReadResult",
+      "access": "client",
+      "mutation": false
+    },
+    "events.head": {
+      "input": "#/$defs/EventsHeadParams",
+      "output": "#/$defs/EventsHeadResult",
+      "access": "service",
+      "mutation": false
+    },
+    "events.subscribe": {
+      "input": "#/$defs/EventsSubscribeParams",
+      "output": "#/$defs/EventsSubscribeResult",
+      "access": "service",
+      "mutation": false
+    },
+    "events.ack": {
+      "input": "#/$defs/EventsAckParams",
+      "output": "#/$defs/EventsAckResult",
+      "access": "service",
+      "mutation": false
+    },
+    "events.unsubscribe": {
+      "input": "#/$defs/EventsUnsubscribeParams",
+      "output": "#/$defs/EventsUnsubscribeResult",
+      "access": "service",
+      "mutation": true
+    },
+    "notifications.subscribe": {
+      "input": "#/$defs/NotificationsSubscribeParams",
+      "output": "#/$defs/NotificationsSubscribeResult",
+      "access": "client",
+      "mutation": false,
+      "discoverable": false
+    },
+    "packages.catalog": {
+      "input": "#/$defs/PackagesCatalogParams",
+      "output": "#/$defs/PackagesCatalogResult",
+      "access": "client",
+      "mutation": false
+    },
+    "packages.authorizeUpload": {
+      "input": "#/$defs/PackagesAuthorizeUploadParams",
+      "output": "#/$defs/PackagesAuthorizeUploadResult",
+      "access": "client",
+      "mutation": true
+    },
+    "uis.list": {
+      "input": "#/$defs/UisListParams",
+      "output": "#/$defs/UisListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "uis.get": {
+      "input": "#/$defs/UisGetParams",
+      "output": "#/$defs/UisGetResult",
+      "access": "client",
+      "mutation": false
+    },
+    "uis.catalog": {
+      "input": "#/$defs/UisCatalogParams",
+      "output": "#/$defs/UisCatalogResult",
+      "access": "client",
+      "mutation": false
+    },
+    "uis.releases": {
+      "input": "#/$defs/UisReleasesParams",
+      "output": "#/$defs/UisReleasesResult",
+      "access": "client",
+      "mutation": false
+    },
+    "uis.inspect": {
+      "input": "#/$defs/UisInspectParams",
+      "output": "#/$defs/UisInspectResult",
+      "access": "client",
+      "mutation": false
+    },
+    "uis.stageAsset": {
+      "input": "#/$defs/UisStageAssetParams",
+      "output": "#/$defs/UisStageAssetResult",
+      "access": "client",
+      "mutation": true,
+      "discoverable": false
+    },
+    "uis.deploy": {
+      "input": "#/$defs/UisDeployParams",
+      "output": "#/$defs/UisDeployResult",
+      "access": "client",
+      "mutation": true
+    },
+    "uis.rollback": {
+      "input": "#/$defs/UisRollbackParams",
+      "output": "#/$defs/UisRollbackResult",
+      "access": "client",
+      "mutation": true
+    },
+    "deployments.list": {
+      "input": "#/$defs/DeploymentsListParams",
+      "output": "#/$defs/DeploymentsListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "deployments.get": {
+      "input": "#/$defs/DeploymentsGetParams",
+      "output": "#/$defs/DeploymentsGetResult",
+      "access": "client",
+      "mutation": false
+    },
+    "deployments.report": {
+      "input": "#/$defs/DeploymentsReportParams",
+      "output": "#/$defs/DeploymentsReportResult",
+      "access": "service",
+      "mutation": false
+    },
+    "wiki.search": {
+      "input": "#/$defs/WikiSearchParams",
+      "output": "#/$defs/WikiSearchResult",
+      "access": "client",
+      "mutation": false
+    },
+    "wiki.list": {
+      "input": "#/$defs/WikiListParams",
+      "output": "#/$defs/WikiListResult",
+      "access": "client",
+      "mutation": false
+    },
+    "wiki.read": {
+      "input": "#/$defs/WikiReadParams",
+      "output": "#/$defs/WikiReadResult",
+      "access": "client",
+      "mutation": false
+    },
+    "wiki.create": {
+      "input": "#/$defs/WikiCreateParams",
+      "output": "#/$defs/WikiCreateResult",
+      "access": "client",
+      "mutation": true
+    },
+    "wiki.update": {
+      "input": "#/$defs/WikiUpdateParams",
+      "output": "#/$defs/WikiUpdateResult",
+      "access": "client",
+      "mutation": true
+    },
+    "wiki.history": {
+      "input": "#/$defs/WikiHistoryParams",
+      "output": "#/$defs/WikiHistoryResult",
+      "access": "client",
+      "mutation": false
+    },
+    "wiki.move": {
+      "input": "#/$defs/WikiMoveParams",
+      "output": "#/$defs/WikiMoveResult",
+      "access": "client",
+      "mutation": true
+    },
+    "wiki.archive": {
+      "input": "#/$defs/WikiArchiveParams",
+      "output": "#/$defs/WikiArchiveResult",
+      "access": "client",
+      "mutation": true
+    }
+  }
+}

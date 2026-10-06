@@ -1,0 +1,6 @@
+Makaretu.Dns.Multicast 0.27.0
+© 2018-2019 Richard Schneider
+Authors: Richard Schneider
+Project: https://github.com/richardschneider/net-mdns
+
+Full terms: Makaretu.Dns.Multicast.txt

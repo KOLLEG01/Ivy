@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "uiId": "dashboards-ui",
+    "slug": "dashboards",
+    "priority": 300,
+    "displayName": "Dashboards",
+    "description": "Build and view HTML dashboards with live Hive data.",
+    "iconKey": "presentation"
+  },
+  "entryPath": "index.html",
+  "requirements": {
+    "hiveProtocol": 1,
+    "contracts": [],
+    "services": [
+      {
+        "serviceName": "dashboards",
+        "namespace": "dashboards",
+        "interfaceVersion": "1.0.0"
+      }
+    ]
+  },
+  "dataContracts": []
+}

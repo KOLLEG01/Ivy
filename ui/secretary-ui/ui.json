@@ -1,0 +1,44 @@
+{
+  "metadata": {
+    "uiId": "secretary-ui",
+    "slug": "secretary",
+    "priority": 200,
+    "displayName": "Secretary",
+    "description": "Configure scheduled and event-driven assignments and follow their runs.",
+    "iconKey": "clipboard-clock"
+  },
+  "entryPath": "index.html",
+  "requirements": {
+    "hiveProtocol": 1,
+    "contracts": [
+      {
+        "key": "secretary/configuration",
+        "readVersions": ["1.0.0"],
+        "writeVersions": []
+      },
+      {
+        "key": "secretary/assignment",
+        "readVersions": ["1.0.0", "1.1.0", "1.2.0", "1.3.0"],
+        "writeVersions": []
+      },
+      {
+        "key": "secretary/execution",
+        "readVersions": ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"],
+        "writeVersions": []
+      }
+    ],
+    "services": [
+      {
+        "serviceName": "secretary",
+        "namespace": "secretary",
+        "interfaceVersion": "1.0.0"
+      },
+      {
+        "serviceName": "agent-manager",
+        "namespace": "agent",
+        "interfaceVersion": "1.0.0"
+      }
+    ]
+  },
+  "dataContracts": []
+}

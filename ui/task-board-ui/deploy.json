@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "componentId": "task-board-ui",
+  "kind": "app",
+  "version": "0.2.58",
+  "description": "Static TaskBoard task UI",
+  "connectsToHive": false,
+  "requirements": {
+    "node": ">=24.18.0 <25.0.0",
+    "hiveProtocol": 1,
+    "contracts": []
+  },
+  "app": {
+    "appId": "task-board-ui",
+    "dist": "dist/apps/task-board-ui",
+    "entryPath": "index.html"
+  },
+  "prepare": [
+    {
+      "executable": "node",
+      "args": [
+        "tools/build/run-npm.mjs",
+        "ci"
+      ],
+      "timeoutMs": 600000
+    },
+    {
+      "executable": "node",
+      "args": [
+        "tools/build/build-deployment.mjs",
+        "--component",
+        "task-board-ui"
+      ],
+      "timeoutMs": 300000
+    }
+  ],
+  "checks": []
+}

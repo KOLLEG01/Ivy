@@ -1,0 +1,34 @@
+# Runtime secrets and local state
+config.json
+config.*.local.json
+AGENTS.override.md
+.env
+.env.*
+!.env.example
+/runtime/
+/services/*/runtime/
+.local/
+.codex-remote-attachments/
+# Generated output and retired documentation paths.
+/output/
+/docs/reports/
+/docs/acceptance/
+/docs/PROGRESS.md
+/docs/IMPLEMENTATION-HANDOFF.md
+/docs/EXECUTION-PLAN.md
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+
+# Generated development output
+node_modules/
+dist/
+services/**/native/**/bin/
+services/**/native/**/obj/
+tests/native-phone/bin/
+tests/native-phone/obj/
+coverage/
+.DS_Store
+Thumbs.db

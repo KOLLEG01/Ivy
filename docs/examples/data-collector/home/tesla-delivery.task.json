@@ -1,0 +1,20 @@
+{
+  "id": "tesla-delivery",
+  "name": "Tesla order delivery (experimental)",
+  "enabled": false,
+  "intervalSeconds": 1800,
+  "timeoutSeconds": 30,
+  "memoryMb": 128,
+  "script": "@file:tesla-delivery.mjs",
+  "dependencies": { "parse5": "8.0.1" },
+  "config": {
+    "orderUrl": "https://www.tesla.com/en_US/teslaaccount/order/ORDER_NUMBER",
+    "cookieSecret": "tesla_session_cookie"
+  },
+  "secretNames": ["tesla_session_cookie"],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

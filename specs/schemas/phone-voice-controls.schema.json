@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "TimedVoiceControlObservation": {
+      "description": "Native-only monotonic timestamp from before original control refresh, never discovery or wall time.",
+      "type": "object", "additionalProperties": false, "required": ["timestamp", "observation"],
+      "properties": {
+        "timestamp": { "type": "integer" },
+        "observation": { "$ref": "#/$defs/VoiceControlObservation" }
+      }
+    },
+    "VoiceControlIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["window", "parentId", "microphoneId", "stopId"],
+      "properties": {
+        "window": { "type": "string", "pattern": "^[1-9][0-9]{0,18}$" },
+        "parentId": { "$ref": "phone-desktop-controls.schema.json#/$defs/RuntimeId" },
+        "microphoneId": { "$ref": "phone-desktop-controls.schema.json#/$defs/RuntimeId" },
+        "stopId": { "$ref": "phone-desktop-controls.schema.json#/$defs/RuntimeId" }
+      }
+    },
+    "VoiceControlObservation": {
+      "type": "object", "additionalProperties": false, "required": ["state", "identity"],
+      "properties": {
+        "state": { "enum": ["idle", "active", "muted", "transition", "ambiguous", "unavailable"] },
+        "identity": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/VoiceControlIdentity" }] }
+      },
+      "if": { "properties": { "state": { "enum": ["active", "muted"] } } },
+      "then": { "properties": { "identity": { "$ref": "#/$defs/VoiceControlIdentity" } } },
+      "else": { "properties": { "identity": { "type": "null" } } }
+    }
+  }
+}

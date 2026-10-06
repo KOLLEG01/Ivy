@@ -1,0 +1,31 @@
+{
+  "id": "rtsp-entrance",
+  "name": "RTSP entrance",
+  "enabled": false,
+  "intervalSeconds": 300,
+  "timeoutSeconds": 30,
+  "memoryMb": 128,
+  "script": "@file:rtsp.mjs",
+  "dependencies": {},
+  "config": {
+    "cameras": [
+      {
+        "id": "entrance",
+        "name": "Entrance",
+        "urlSecretName": "RTSP_ENTRANCE_URL"
+      }
+    ],
+    "ffmpegPath": "ffmpeg",
+    "transport": "tcp",
+    "captureTimeoutMs": 10000,
+    "width": 1280,
+    "quality": 7,
+    "maximumImageBytes": 524288
+  },
+  "secretNames": ["RTSP_ENTRANCE_URL"],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

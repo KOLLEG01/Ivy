@@ -1,0 +1,1023 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PhoneVoiceSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "reasoningEffort"],
+      "properties": {
+        "model": { "enum": ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"] },
+        "reasoningEffort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultra"] }
+      },
+      "not": { "properties": { "model": { "const": "gpt-6-luna" }, "reasoningEffort": { "const": "ultra" } } }
+    },
+    "PhoneServiceSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "native",
+        "binding",
+        "codecs",
+        "registration",
+        "credentialsPath",
+        "policy",
+        "application",
+        "audio",
+        "voiceInput",
+        "voiceArchive",
+        "ringSeconds",
+        "pollMs",
+        "incomingPrincipalId"
+      ],
+      "properties": {
+        "native": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "executable",
+            "executableHash"
+          ],
+          "properties": {
+            "executable": {
+              "const": "dist/native/phone/Ivy.PhoneRuntime.exe"
+            },
+            "executableHash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "binding": {
+          "$ref": "#/$defs/SipBinding"
+        },
+        "codecs": {
+          "$ref": "#/$defs/CodecSettings"
+        },
+        "registration": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/SipRegistrationSettings"
+            }
+          ]
+        },
+        "credentialsPath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "policy": {
+          "$ref": "#/$defs/PhonePolicy"
+        },
+        "application": {
+          "$ref": "#/$defs/DesktopApplication"
+        },
+        "audio": {
+          "$ref": "#/$defs/AudioSettings"
+        },
+        "voiceInput": {
+          "$ref": "#/$defs/VoiceInputSettings"
+        },
+        "voiceArchive": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhoneVoiceArchiveSettings"
+            }
+          ]
+        },
+        "ringSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        },
+        "pollMs": {
+          "type": "integer",
+          "minimum": 250,
+          "maximum": 5000
+        },
+        "incomingPrincipalId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhonePrincipal"
+            }
+          ]
+        },
+        "incomingRoute": {
+          "enum": [
+            "voice",
+            "windows"
+          ]
+        },
+        "incomingInitialPrompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "\\S",
+          "default": "Greet the user with \"Hi\""
+        },
+        "accessCodePath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "speech": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "credentialsPath",
+            "endpoint",
+            "model",
+            "voice"
+          ],
+          "properties": {
+            "credentialsPath": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32767
+            },
+            "endpoint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "voice": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "instructions": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "speed": {
+              "type": "number",
+              "minimum": 0.25,
+              "maximum": 4
+            }
+          }
+        },
+        "windowsAudio": {
+          "$ref": "#/$defs/AudioSettings"
+        },
+        "outgoingRoute": {
+          "enum": [
+            "voice",
+            "windows"
+          ],
+          "default": "windows"
+        }
+      }
+    },
+    "PhoneCredentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "username",
+        "password"
+      ],
+      "properties": {
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        }
+      }
+    },
+    "PhoneCallMethod": {
+      "enum": [
+        "call.prepare",
+        "call.claim",
+        "call.desktop.launch",
+        "call.audio.prepare",
+        "call.desktop.startVoice",
+        "call.dial",
+        "call.answer",
+        "call.hangup",
+        "call.desktop.stopVoice",
+        "call.archiveVoice",
+        "call.release",
+        "call.features",
+        "call.windows.connect",
+        "call.codec.upgrade",
+        "call.screening.prepare",
+        "call.screening.bridge",
+        "call.screening.synthesize",
+        "call.desktop.pauseVoice",
+        "call.desktop.resumeVoice",
+        "call.bindVoice",
+        "call.createVoice",
+        "call.promptVoice"
+      ]
+    },
+    "PhoneStatusQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "PhoneServiceStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "epoch",
+        "busy",
+        "registration",
+        "recipients",
+        "call",
+        "incoming"
+      ],
+      "properties": {
+        "epoch": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "busy": {
+          "type": "boolean"
+        },
+        "registration": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/SipRegistrationObservation"
+            }
+          ]
+        },
+        "recipients": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/PhonePrincipal"
+          }
+        },
+        "call": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhoneCall"
+            }
+          ]
+        },
+        "voiceSelection": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/PhoneVoiceSelection" }]
+        },
+        "incoming": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/SipCallObservation"
+            }
+          ]
+        },
+        "calls": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/PhoneCall"
+          }
+        },
+        "incomingCalls": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/SipCallObservation"
+          }
+        },
+        "configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "incomingRoute",
+            "outgoingRoute",
+            "screeningConfigured",
+            "accessChallengeConfigured",
+            "directDialConfigured"
+          ],
+          "properties": {
+            "incomingRoute": {
+              "enum": [
+                "voice",
+                "windows"
+              ]
+            },
+            "outgoingRoute": {
+              "enum": [
+                "voice",
+                "windows"
+              ]
+            },
+            "screeningConfigured": {
+              "type": "boolean"
+            },
+            "accessChallengeConfigured": {
+              "type": "boolean"
+            },
+            "directDialConfigured": {
+              "type": "boolean"
+            },
+            "voiceDefault": {
+              "$ref": "#/$defs/PhoneVoiceSelection"
+            }
+          }
+        },
+        "micro": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/MicroAttachmentStatus"
+            }
+          ]
+        }
+      }
+    },
+    "PhoneRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "recipientId": {
+          "$ref": "#/$defs/PhonePrincipal"
+        },
+        "route": {
+          "enum": [
+            "voice",
+            "windows"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 2048,
+          "pattern": "^(?:sips?:[^\\s\\x00-\\x20]+|\\+[1-9][0-9]{6,14})$"
+        },
+        "voicePrompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 3900
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "recipientId"
+          ],
+          "not": {
+            "required": [
+              "destination"
+            ]
+          }
+        },
+        {
+          "required": [
+            "destination",
+            "route"
+          ],
+          "properties": {
+            "route": {
+              "const": "windows"
+            }
+          },
+          "not": {
+            "required": [
+              "recipientId"
+            ]
+          }
+        }
+      ]
+    },
+    "PhoneVoiceCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "recipientId",
+        "initialPrompt"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "recipientId": {
+          "$ref": "#/$defs/PhonePrincipal"
+        },
+        "initialPrompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 3900,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "PhoneAccept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "callId"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "PhoneSelectVoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callId", "operationId", "model", "reasoningEffort"],
+      "properties": {
+        "callId": { "$ref": "#/$defs/Uuid" },
+        "operationId": { "$ref": "#/$defs/Uuid" },
+        "model": { "enum": ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"] },
+        "reasoningEffort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultra"] }
+      },
+      "not": { "properties": { "model": { "const": "gpt-6-luna" }, "reasoningEffort": { "const": "ultra" } } }
+    },
+    "PhoneRestartVoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callId", "operationId"],
+      "properties": {
+        "callId": { "$ref": "#/$defs/Uuid" },
+        "operationId": { "$ref": "#/$defs/Uuid" }
+      }
+    },
+    "PhoneCallQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId"
+      ],
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "PhoneCallView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "call",
+        "current",
+        "observation"
+      ],
+      "properties": {
+        "call": {
+          "$ref": "#/$defs/PhoneCall"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "observation": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/SipCallObservation"
+            }
+          ]
+        }
+      }
+    },
+    "PhoneOperationQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId"
+      ],
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "method": {
+          "$ref": "#/$defs/PhoneCallMethod"
+        },
+        "operationId": { "$ref": "#/$defs/Uuid" },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      },
+      "oneOf": [
+        { "required": ["method"], "not": { "required": ["operationId"] } },
+        { "required": ["operationId"], "not": { "anyOf": [{ "required": ["method"] }, { "required": ["generation"] }] } }
+      ]
+    },
+    "PhoneOperationResult": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/Operation"
+        }
+      ]
+    },
+    "PhoneScreen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "recipientId",
+        "announcement"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "recipientId": {
+          "$ref": "#/$defs/PhonePrincipal"
+        },
+        "announcement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        },
+        "repeatCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        }
+      }
+    },
+    "PhoneLogsQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId"
+      ],
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "PhoneLogs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "PhoneCalls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calls"
+      ],
+      "properties": {
+        "calls": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/PhoneCall"
+          }
+        }
+      }
+    },
+    "PhoneReconnect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "PhoneInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "devices",
+        "codecs",
+        "processLoopbackSupported"
+      ],
+      "properties": {
+        "processLoopbackSupported": {
+          "type": "boolean"
+        },
+        "devices": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name",
+              "direction",
+              "state"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "direction": {
+                "enum": [
+                  "capture",
+                  "render"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "muted": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "codecs": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "payload",
+              "pcmRate",
+              "rtpClockRate",
+              "channels"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "payload": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 127
+              },
+              "pcmRate": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 48000
+              },
+              "rtpClockRate": {
+                "type": "integer",
+                "minimum": 8000,
+                "maximum": 48000
+              },
+              "channels": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2
+              }
+            }
+          }
+        }
+      }
+    },
+    "PhoneArchiveQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId"
+      ],
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      }
+    },
+    "PhoneCodecTestResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "codecs"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "codecs": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "passed",
+              "frames",
+              "encodedBytes",
+              "decodedSamples",
+              "rms",
+              "error"
+            ],
+            "properties": {
+              "name": {
+                "enum": [
+                  "G722",
+                  "PCMA",
+                  "PCMU",
+                  "OPUS",
+                  "EVS"
+                ]
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "frames": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 25
+              },
+              "encodedBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 204800
+              },
+              "decodedSamples": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 24000
+              },
+              "rms": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "error": {
+                "enum": [
+                  null,
+                  "roundtrip_invalid",
+                  "codec_library_missing",
+                  "codec_library_incompatible",
+                  "codec_roundtrip_failed"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "PhoneAudioSetup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "processLoopbackSupported",
+        "routes"
+      ],
+      "properties": {
+        "processLoopbackSupported": {
+          "type": "boolean"
+        },
+        "routes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "route",
+              "sourceMode",
+              "ready",
+              "endpoints",
+              "mutePolicyConflict"
+            ],
+            "properties": {
+              "mutePolicyConflict": {
+                "type": "boolean"
+              },
+              "route": {
+                "enum": [
+                  "voice",
+                  "windows"
+                ]
+              },
+              "sourceMode": {
+                "enum": [
+                  "system_excluding_runtime",
+                  "desktop_process",
+                  "microphone",
+                  "virtual_speaker"
+                ]
+              },
+              "ready": {
+                "type": "boolean"
+              },
+              "endpoints": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "role",
+                    "id",
+                    "name",
+                    "state",
+                    "muted",
+                    "expectedMuted"
+                  ],
+                  "properties": {
+                    "role": {
+                      "enum": [
+                        "capture",
+                        "receive",
+                        "mutedOutput",
+                        "loopback"
+                      ]
+                    },
+                    "id": {
+                      "type": "string",
+                      "maxLength": 32767
+                    },
+                    "name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 256
+                    },
+                    "state": {
+                      "enum": [
+                        "ready",
+                        "missing",
+                        "ambiguous",
+                        "wrong_direction",
+                        "inactive",
+                        "mute_unknown",
+                        "mute_mismatch"
+                      ]
+                    },
+                    "muted": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "expectedMuted": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "PhoneLoopbackProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "detected",
+        "peak",
+        "samples",
+        "sampleRate",
+        "channels",
+        "excludedProcessId"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "completed",
+            "interrupted"
+          ]
+        },
+        "detected": {
+          "type": "boolean"
+        },
+        "peak": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "samples": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 960000
+        },
+        "sampleRate": {
+          "const": 48000
+        },
+        "channels": {
+          "const": 2
+        },
+        "excludedProcessId": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "PhoneHistoryQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "PhoneHistory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calls"
+      ],
+      "properties": {
+        "calls": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/PhoneCall"
+          }
+        }
+      }
+    }
+  }
+}

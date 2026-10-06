@@ -1,0 +1,18 @@
+{
+  "id": "washer",
+  "name": "Washer",
+  "enabled": false,
+  "intervalSeconds": 0,
+  "timeoutSeconds": 10,
+  "memoryMb": 128,
+  "script": "@file:laundry.mjs",
+  "dependencies": {},
+  "config": { "device": "washer" },
+  "secretNames": [],
+  "allowUnauthenticatedInput": true,
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

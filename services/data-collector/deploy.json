@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "componentId": "data-collector",
+  "kind": "service",
+  "version": "0.1.2",
+  "description": "Isolated script tasks and versioned collection results",
+  "connectsToHive": true,
+  "requirements": {
+    "node": ">=24.18.0 <25.0.0",
+    "hiveProtocol": 1,
+    "contracts": []
+  },
+  "entrypoint": {
+    "executable": "node",
+    "args": ["dist/services/data-collector/src/main.js"],
+    "timeoutMs": 30000
+  },
+  "prepare": [
+    {
+      "executable": "node",
+      "args": ["tools/build/run-npm.mjs", "ci"],
+      "timeoutMs": 600000
+    },
+    {
+      "executable": "node",
+      "args": [
+        "--max-old-space-size=448",
+        "tools/build/build-deployment.mjs",
+        "--component",
+        "data-collector"
+      ],
+      "timeoutMs": 300000
+    }
+  ],
+  "checks": [],
+  "readiness": {
+    "timeoutMs": 60000,
+    "command": {
+      "executable": "node",
+      "args": ["dist/packages/host-runtime/src/health.js"],
+      "timeoutMs": 5000
+    }
+  },
+  "shutdown": {
+    "timeoutMs": 15000
+  },
+  "restart": {
+    "policy": "always",
+    "minimumDelayMs": 1000,
+    "maximumDelayMs": 60000
+  },
+  "storage": {
+    "minReadableFormat": 1,
+    "maxReadableFormat": 1,
+    "writeFormat": 1
+  },
+  "runtimeReset": {
+    "delete": [
+      {
+        "path": "data-collector.sqlite",
+        "area": "data"
+      },
+      {
+        "path": "data-collector.sqlite-wal",
+        "area": "data"
+      },
+      {
+        "path": "data-collector.sqlite-shm",
+        "area": "data"
+      },
+      {
+        "path": "health.json",
+        "area": "data"
+      },
+      {
+        "path": "control.json",
+        "area": "data"
+      },
+      {
+        "path": "tasks",
+        "area": "work"
+      }
+    ],
+    "preserve": []
+  }
+}

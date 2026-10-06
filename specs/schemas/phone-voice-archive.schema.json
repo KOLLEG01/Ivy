@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PhoneVoiceArchiveSetupRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "databasePath",
+        "actorThreadId"
+      ],
+      "properties": {
+        "databasePath": {
+          "$ref": "#/$defs/Path"
+        },
+        "nodeExecutable": {
+          "$ref": "#/$defs/Path"
+        },
+        "serverPath": {
+          "$ref": "#/$defs/Path"
+        },
+        "pipePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "actorThreadId": {
+          "$ref": "#/$defs/ThreadId"
+        },
+        "internalProjectRoot": {
+          "$ref": "#/$defs/Path"
+        }
+      }
+    },
+    "PhoneVoiceArchiveSetupResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "voiceArchive",
+        "candidateCount",
+        "archived"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "voiceArchive": {
+          "$ref": "#/$defs/PhoneVoiceArchiveSettings"
+        },
+        "candidateCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "archived": {
+          "const": false
+        }
+      }
+    },
+    "PhoneVoiceArchiveSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "databasePath",
+        "appTools"
+      ],
+      "properties": {
+        "databasePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "appTools": {
+          "$ref": "#/$defs/AppToolsSettings"
+        }
+      }
+    },
+    "PhoneVoiceArchivePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "settings",
+        "candidates",
+        "operationIds"
+      ],
+      "properties": {
+        "settings": {
+          "$ref": "#/$defs/PhoneVoiceArchiveSettings"
+        },
+        "candidates": {
+          "$ref": "#/$defs/DesktopVoiceCandidates"
+        },
+        "operationIds": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ThreadId"
+          }
+        },
+        "threadId": {
+          "$ref": "#/$defs/ThreadId"
+        }
+      }
+    },
+    "PhoneVoiceArchiveResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "archivedIds",
+        "failedThreadId"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "archived",
+            "outcome_unknown"
+          ]
+        },
+        "archivedIds": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ThreadId"
+          }
+        },
+        "failedThreadId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ThreadId"
+            }
+          ]
+        }
+      }
+    },
+    "DesktopVoiceCandidates": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "threadId",
+          "descendantIds"
+        ],
+        "properties": {
+          "threadId": {
+            "$ref": "#/$defs/ThreadId"
+          },
+          "descendantIds": {
+            "type": "array",
+            "maxItems": 512,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/ThreadId"
+            }
+          }
+        }
+      }
+    },
+    "ThreadId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  }
+}

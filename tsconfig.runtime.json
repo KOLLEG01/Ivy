@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["packages/**/*.ts", "services/**/*.ts"],
+  "exclude": ["node_modules", "dist", "tests", "packages/ui", "packages/ui-client", "services/hive/console"]
+}

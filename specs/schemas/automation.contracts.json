@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "schema": "https://ivy.invalid/schemas/automation.schema.json",
+  "contracts": [
+    {
+      "key": "automation-example/checkpoint",
+      "definition": "#/$defs/Checkpoint"
+    },
+    {
+      "key": "automation-example/period",
+      "definition": "#/$defs/Period"
+    },
+    {
+      "key": "automation-example/event-receipt",
+      "definition": "#/$defs/EventReceipt"
+    }
+  ]
+}

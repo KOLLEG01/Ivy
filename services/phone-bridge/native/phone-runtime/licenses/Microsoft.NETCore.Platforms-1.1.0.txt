@@ -1,0 +1,6 @@
+Microsoft.NETCore.Platforms 1.1.0
+© Microsoft Corporation.  All rights reserved.
+Authors: Microsoft
+Project: https://dot.net/
+
+Full terms: DotNet-LICENSE.txt

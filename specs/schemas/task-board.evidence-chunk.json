@@ -1,0 +1,10 @@
+{
+  "key": "task-board/native-evidence-chunk",
+  "version": "1.0.0",
+  "owner": {
+    "kind": "service",
+    "serviceName": "task-board"
+  },
+  "mediaType": "application/octet-stream",
+  "specMarkdown": "# TaskBoard native evidence chunk 1.0.0\n\nExact binary bytes, at most 1 MiB per chunk. Evidence manifests and their chunks are direct children of their owning primary TaskBoard NativeCall or Run. The native-evidence JSON manifest pins every immutable chunk revision, hash and length, in order. Reassembled canonical UTF-8 JSON is at most 16 MiB and must validate as Agent.Operation and against its exact checked native catalog, original caller/node/request identity and method response. Unbound bytes are not native proof. No native dispatch is authorized by writing a chunk. Hive binary/JSON limits remain unchanged."
+}

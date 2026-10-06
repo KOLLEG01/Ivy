@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "tool-example",
+  "method": "tools.call",
+  "params": {
+    "qualifiedName": "agent.status",
+    "serviceNodeId": "example-agent-manager",
+    "expectedDefinitionHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "arguments": {}
+  }
+}

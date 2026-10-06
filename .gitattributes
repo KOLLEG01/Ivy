@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.woff2 binary
+services/agent-manager/claude/*.patch -whitespace
+.local export-ignore
+output export-ignore
+docs/acceptance export-ignore
+docs/PROGRESS.md export-ignore
+docs/IMPLEMENTATION-HANDOFF.md export-ignore
+docs/EXECUTION-PLAN.md export-ignore

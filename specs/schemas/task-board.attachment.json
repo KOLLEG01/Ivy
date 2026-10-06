@@ -1,0 +1,18 @@
+{
+  "key": "task-board/attachment",
+  "version": "1.0.0",
+  "owner": {
+    "kind": "service",
+    "serviceName": "task-board"
+  },
+  "mediaType": "application/octet-stream",
+  "retention": {
+    "objects": {
+      "mode": "owned"
+    },
+    "revisions": {
+      "mode": "current"
+    }
+  },
+  "specMarkdown": "# TaskBoard Task attachment 1.0.0\n\nExact immutable bytes owned by one retained TaskBoard Task. A Task revision references every published attachment. The Task embeds filename, declared media type, length, hash and uploader; unsupported media is download-only."
+}

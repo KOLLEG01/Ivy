@@ -1,0 +1,19 @@
+Waiting marimba audio
+
+Asset: audio/waiting-marimba.wav
+Source library: Versilian Studios Chamber Orchestra 2 Community Edition (VSCO 2 CE)
+Library recordings: Sam Gossner and Simon Dalzell
+Sample cutting: Elan Hickler / Soundemote
+License: CC0 1.0 Universal; full upstream text in VSCO-2-CE-CC0.txt.
+Project: https://versilian-studios.com/vsco-community/
+Repository: https://github.com/sgossner/VSCO-2-CE
+Source commit: 440300901dfe9275fd84e0b7763af1f8443ae62e
+Source file: Percussion/Marimba/Marimba_hit_Outrigger_F3_loud_01.wav
+Source SHA-256: 379e749add43b12959fae06cc272f1871899cc05460faf41ead77b93e5d01843
+
+Adapted for Ivy: downmixed to mono, linearly resampled to 48 kHz PCM16,
+pitched down eleven semitones by playback resampling, trimmed to six seconds,
+softened with a 40 ms raised-cosine attack and two-second release, and given
+an exp(0.6 * seconds) gain ramp to sustain the recorded decay. Peak amplitude
+is normalized to 0.08; the fundamental is approximately 185 Hz.
+The adapted sample is also released under CC0 1.0 Universal.

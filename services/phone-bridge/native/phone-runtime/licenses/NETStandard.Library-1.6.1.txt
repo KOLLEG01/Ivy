@@ -1,0 +1,6 @@
+NETStandard.Library 1.6.1
+© Microsoft Corporation.  All rights reserved.
+Authors: Microsoft
+Project: https://dot.net/
+
+Full terms: DotNet-LICENSE.txt

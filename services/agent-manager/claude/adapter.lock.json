@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/fuergaosi233/claude-codex.git",
+  "commit": "fb33a8c2181a96a1642855d6ae5cf583058e03c2",
+  "license": "MIT",
+  "protocolVersion": "0.142.3",
+  "agentSdkVersion": "0.3.283",
+  "patchHash": "sha256:75f729c135e3c931b00adffb4bdc3d6f559e2d20b1808ff9fa130cf9396d516d",
+  "bundleHash": "sha256:7111ee75ce47d26080345fc26531eefe0004f6bc621480e3d3ed7ca56f34489c"
+}

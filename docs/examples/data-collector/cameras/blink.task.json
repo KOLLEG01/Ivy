@@ -1,0 +1,40 @@
+{
+  "id": "blink-entrance",
+  "name": "Blink entrance",
+  "enabled": false,
+  "intervalSeconds": 300,
+  "timeoutSeconds": 60,
+  "memoryMb": 128,
+  "script": "@file:blink.mjs",
+  "dependencies": { "tough-cookie": "6.0.2", "parse5": "8.0.1" },
+  "config": {
+    "accountId": "12345",
+    "region": "u001",
+    "accessTokenSecretName": "BLINK_ACCESS_TOKEN",
+    "refreshTokenSecretName": "BLINK_REFRESH_TOKEN",
+    "hardwareIdSecretName": "BLINK_HARDWARE_ID",
+    "emailSecretName": "BLINK_EMAIL",
+    "passwordSecretName": "BLINK_PASSWORD",
+    "mfaCodeSecretName": "BLINK_MFA_CODE",
+    "discoveryOnly": false,
+    "cameras": [
+      {
+        "id": "123456",
+        "networkId": "12345",
+        "type": "camera",
+        "name": "Entrance"
+      }
+    ],
+    "freshSnapshots": true,
+    "motion": true,
+    "requestTimeoutMs": 10000,
+    "snapshotTimeoutMs": 20000,
+    "maximumImageBytes": 524288
+  },
+  "secretNames": ["BLINK_ACCESS_TOKEN"],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Hotkey": {
+      "type": "object", "additionalProperties": false, "required": ["modifiers", "keyCode", "focusBeforeHotkey"],
+      "properties": {
+        "focusBeforeHotkey": { "type": "boolean", "default": false },
+        "modifiers": { "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": { "enum": ["control", "alt", "shift", "windows"] } },
+        "keyCode": { "type": "integer", "enum": [32,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135] }
+      }
+    },
+    "DispatchResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phase", "requested", "submitted", "keyUpSubmitted", "errorCode"],
+      "properties": {
+        "phase": { "enum": ["not_submitted", "submitted", "outcome_unknown"] },
+        "requested": { "type": "integer", "minimum": 4, "maximum": 10 },
+        "submitted": { "type": ["integer", "null"], "minimum": 0, "maximum": 10 },
+        "keyUpSubmitted": { "type": "boolean" },
+        "errorCode": { "enum": [null, "desktop_owner_changed", "desktop_focus_failed", "keyboard_busy", "input_unavailable", "input_rejected", "partial_input", "input_outcome_unknown"] }
+      }
+    }
+  }
+}

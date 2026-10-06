@@ -1,0 +1,229 @@
+using System.Diagnostics;
+using System.Net;
+using Ivy.PhoneBridge;
+using SIPSorcery.Media;
+using SIPSorcery.SIP;
+using SIPSorcery.Net;
+using SIPSorcery.SIP.App;
+
+static partial class Program {
+    sealed class AudioPort : IPcmAudioPort {
+        public bool IsOpen { get; set; } = true;
+        public long Generation { get; set; } = 1;
+        public Action? OnRead;
+        public float Amplitude = .5f;
+        private long captured, received;
+        private readonly object sync = new();
+        private double energy;
+        public long Received { get { lock (sync) return received; } }
+        public double Rms { get { lock (sync) return received == 0 ? 0 : Math.Sqrt(energy / received); } }
+        public int ReadCaptured(Span<float> output) {
+            for (int i = 0; i < output.Length; i++) output[i] = Amplitude * (float)Math.Sin(2 * Math.PI * 440 * captured++ / 48000);
+            OnRead?.Invoke(); return output.Length;
+        }
+        public void WriteReceived(ReadOnlySpan<float> input) {
+            lock (sync) {
+                foreach (float sample in input) {
+                    Check(float.IsFinite(sample) && Math.Abs(sample) <= 1, "decoded PCM is finite and clipped to device bounds");
+                    energy += sample * sample;
+                }
+                received += input.Length;
+            }
+        }
+    }
+    static void Codecs() {
+        Reject(() => new CodecSettings(new[] { "PCMA", "PCMA" }).Validate(), "duplicate codec rejected");
+        Reject(() => new CodecSettings(new[] { "unknown" }).Validate(), "unknown codec rejected");
+        Reject(() => new CodecSettings(new[] { "PCMA" }, 40).Validate(), "noncontract packet duration rejected");
+        Reject(() => new CodecSettings(new[] { "PCMA" }, ReceiveReorderMs: -1).Validate(), "negative receive gap delay rejected");
+        Reject(() => new CodecSettings(new[] { "PCMA" }, ReceiveReorderMs: 61).Validate(), "unbounded receive gap delay rejected");
+        foreach (var format in new CodecSettings(new[] { "G722", "PCMA", "PCMU", "OPUS" }).Formats()) {
+            var source = new AudioPort(); var sink = new AudioPort();
+            using var tx = new MediaCodec(format, source); using var rx = new MediaCodec(format, sink);
+            using var independent = new AudioEncoder(includeOpus: true);
+            Check(tx.RtpDuration == (format.FormatName.Equals("opus", StringComparison.OrdinalIgnoreCase) ? 960u : 160u), "20ms RTP clock including G722");
+            for (int frame = 0; frame < 25; frame++) {
+                var packet = tx.Encode();
+                Check(independent.DecodeAudio(packet, format).Length == format.ClockRate / 50, "codec emits exactly20ms mono PCM, including opus/48000/2");
+                rx.Decode(packet);
+            }
+            Check(sink.Received is > 23000 and <= 24000 && sink.Rms is > .15 and < .55, "stream preserves duration and audible waveform after resampling");
+            source.OnRead = () => { source.IsOpen = false; source.Generation++; };
+            var revoked = tx.Encode();
+            using (var clean = new AudioEncoder(includeOpus: true))
+                Check(clean.DecodeAudio(revoked, format).All(sample => Math.Abs((int)sample) < 300), "mid-frame permit revocation discards speech and codec history");
+            source.OnRead = null;
+            using (var clean = new AudioEncoder(includeOpus: true))
+                Check(clean.DecodeAudio(tx.Encode(), format).All(sample => Math.Abs((int)sample) < 300), "closed port emits silence");
+            long before = sink.Received; sink.IsOpen = false; rx.Decode(revoked);
+            Check(sink.Received == before, "closed receive gate discards decoded media");
+            sink.IsOpen = true; sink.Generation++; source.IsOpen = true; source.Generation++; source.Amplitude = 0;
+            using (var clean = new AudioEncoder(includeOpus: true))
+                Check(clean.DecodeAudio(tx.Encode(), format).All(sample => Math.Abs((int)sample) < 300), "new generation clears predictive audio history");
+            Reject(() => rx.Decode(new byte[8193]), "oversized encoded payload rejected");
+            long oldGeneration = sink.Generation; before = sink.Received; sink.Generation++;
+            rx.Decode(revoked, oldGeneration);
+            Check(sink.Received == before, "queued payload cannot acquire the decoder's newer audio generation");
+        }
+    }
+    static async Task Until(Func<bool> condition, string message) {
+        var elapsed = Stopwatch.StartNew();
+        while (!condition() && elapsed.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(10);
+        Check(condition(), message);
+    }
+    static TaskCompletionSource<SipCall> Invitation() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    static async Task CodecPreferenceLoopback() {
+        foreach (bool fallback in new[] { false, true }) {
+            var firstSettings = new CodecSettings(["OPUS", "G722", "PCMA"]);
+            var secondSettings = new CodecSettings(fallback ? ["PCMA"] : ["G722", "PCMA", "OPUS"]);
+            var firstAudio = new AudioPort(); var secondAudio = new AudioPort();
+            await using var first = new SipMediaSession(firstSettings, firstAudio, IPAddress.Loopback);
+            await using var second = new SipMediaSession(secondSettings, secondAudio, IPAddress.Loopback);
+            var fromFirst = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var fromSecond = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            second.OnRtpPacketReceived += (_, media, packet) => { if (media == SDPMediaTypesEnum.audio) fromFirst.TrySetResult(packet.Header.PayloadType); };
+            first.OnRtpPacketReceived += (_, media, packet) => { if (media == SDPMediaTypesEnum.audio) fromSecond.TrySetResult(packet.Header.PayloadType); };
+            Check(second.SetRemoteDescription(SdpType.offer, first.CreateOffer(IPAddress.Loopback)) == SetDescriptionResultEnum.OK,
+                "real SDP offer negotiates overlapping configured codecs");
+            Check(first.SetRemoteDescription(SdpType.answer, second.CreateAnswer(IPAddress.Loopback)) == SetDescriptionResultEnum.OK,
+                "real SDP answer completes the agreed codec set");
+            firstSettings.Preferences[0] = "PCMU"; // Caller mutation cannot replace the admitted media policy.
+            await first.Start(); await second.Start();
+            int sentByFirst = await fromFirst.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            int sentBySecond = await fromSecond.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var allFormats = new CodecSettings(["OPUS", "G722", "PCMA"]).Formats();
+            int Expected(string name) => allFormats.Single(value => value.FormatName.Equals(name, StringComparison.OrdinalIgnoreCase)).FormatID;
+            Check(sentByFirst == Expected(fallback ? "PCMA" : "OPUS") && sentBySecond == Expected(fallback ? "PCMA" : "G722"),
+                "actual outgoing RTP uses each direction's highest configured common codec, with same-call fallback");
+            await Until(() => firstAudio.Received >= 4800 && secondAudio.Received >= 4800, "both chosen RTP payloads decode through the actual negotiated receive set");
+            Check(firstAudio.Rms > .1 && secondAudio.Rms > .1, "codec preference preserves bidirectional synthetic audio");
+        }
+    }
+    static async Task SipLoopback(bool includeRegistration = true) {
+        await CodecPreferenceLoopback();
+        if (includeRegistration) { await RegistrationLoopback(); await RegistrationLoopback(negotiatedLifetime: true); }
+        var codec = new CodecSettings(new[] { "G722", "PCMA", "PCMU", "OPUS" });
+        var portA = new AudioPort(); var portB = new AudioPort();
+        var binding = new SipBinding(IPAddress.Loopback.ToString(), 0, "udp");
+        await using var first = new SipTransportHost(binding, codec, _ => portA, _ => false);
+        await using var second = new SipTransportHost(binding, codec, _ => portB, incoming => incoming.PeerAddress == IPAddress.Loopback.ToString());
+        var invitation = Invitation(); second.Incoming += call => invitation.TrySetResult(call);
+        string destination = $"sip:fixture@127.0.0.1:{second.LocalEndpoint.Port}";
+        var outgoing = first.PrepareOutgoing(Guid.NewGuid().ToString());
+        Check(outgoing.Observation.SipCallId == outgoing.Observation.Id, "outgoing wire Call-ID is known before dispatch");
+        Reject(() => first.PrepareOutgoing(Guid.NewGuid().ToString()), "one admitted call per host");
+        var dial = outgoing.DialAsync(destination, null, null, 5);
+        var incoming = await invitation.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(incoming.Observation.State == "ringing", "incoming call awaits explicit answer");
+        var answered = incoming.AnswerAsync();
+        Check((await dial.WaitAsync(TimeSpan.FromSeconds(10))).State == "connected", "outgoing SIP200/ACK connects");
+        Check((await answered.WaitAsync(TimeSpan.FromSeconds(10))).State == "connected", "incoming SIP200/ACK connects");
+        Check(outgoing.Observation.SipCallId == incoming.Observation.SipCallId, "both peers correlate the original SIP Call-ID");
+        await Until(() => outgoing.Media.ReceivedPackets >= 8 && incoming.Media.ReceivedPackets >= 8, "real bidirectional localhost RTP");
+        Check(portA.Rms > .1 && portB.Rms > .1, "real RTP delivers synthetic audio both ways");
+        outgoing.Hangup();
+        await Until(() => incoming.Observation.State == "local_ended", "remote BYE closes the incoming call");
+        Check(outgoing.Media.IsClosed && incoming.Media.IsClosed, "hangup closes both media sessions");
+        await outgoing.Media.Start(); Check(outgoing.Media.IsClosed && outgoing.Media.CreateOffer() == null, "closed media cannot restart or offer after delayed DNS");
+        await first.ReleaseAsync(outgoing); await second.ReleaseAsync(incoming);
+
+        // Unknown callers are rejected before the audio factory or call admission runs.
+        int allocations = 0;
+        await using var denied = new SipTransportHost(binding, codec, _ => { allocations++; return new AudioPort(); }, _ => false);
+        var refused = first.PrepareOutgoing(Guid.NewGuid().ToString());
+        Check((await refused.DialAsync($"sip:fixture@127.0.0.1:{denied.LocalEndpoint.Port}", null, null, 3)).State == "local_ended", "forbidden caller cannot connect");
+        Check(allocations == 0, "no media allocation before admission"); await first.ReleaseAsync(refused);
+
+        // Ring timeout and cancellation operate on the same call; no replacement INVITE.
+        await using var ringing = new SipTransportHost(binding with { IncomingRingSeconds = 1 }, codec, _ => new AudioPort(), _ => true);
+        var ringInvitation = Invitation(); int invitations = 0;
+        ringing.Incoming += call => { Interlocked.Increment(ref invitations); ringInvitation.TrySetResult(call); };
+        var expired = first.PrepareOutgoing(Guid.NewGuid().ToString());
+        var expireDial = expired.DialAsync($"sip:fixture@127.0.0.1:{ringing.LocalEndpoint.Port}", null, null, 4);
+        var ringCall = await ringInvitation.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await using var third = new SipTransportHost(binding, codec, _ => new AudioPort(), _ => false);
+        var busy = third.PrepareOutgoing(Guid.NewGuid().ToString());
+        Check((await busy.DialAsync($"sip:fixture@127.0.0.1:{ringing.LocalEndpoint.Port}", null, null, 3)).State == "local_ended", "second caller receives busy");
+        Check((await expireDial.WaitAsync(TimeSpan.FromSeconds(6))).State == "local_ended", "unanswered ring deadline rejects call");
+        Check(invitations == 1 && ringCall.Media.IsClosed, "busy and retransmissions do not create another admission");
+        await first.ReleaseAsync(expired);
+        await Until(() => ringing.CurrentCall == null, "unclaimed expired offer releases its original owner automatically");
+
+        invitation = Invitation(); var cancelled = first.PrepareOutgoing(Guid.NewGuid().ToString());
+        var cancelledDial = cancelled.DialAsync(destination, null, null, 5);
+        incoming = await invitation.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancelled.Hangup(); await cancelledDial.WaitAsync(TimeSpan.FromSeconds(7));
+        await Until(() => incoming.Observation.State == "local_ended", "remote CANCEL ends ringing call");
+        bool duplicateRejected = false;
+        try { await cancelled.DialAsync(destination, null, null, 5); } catch (InvalidOperationException) { duplicateRejected = true; }
+        Check(duplicateRejected, "original call cannot be redialed after cancellation");
+        await first.ReleaseAsync(cancelled);
+        await Until(() => second.CurrentCall == null, "unclaimed cancelled offer releases its original owner automatically");
+    }
+    static async Task RegistrationLoopback(bool negotiatedLifetime = false) {
+        using var registrar = new SIPTransport();
+        var channel = new SIPUDPChannel(new IPEndPoint(IPAddress.Loopback, 0)); registrar.AddSIPChannel(channel);
+        int registrations = 0, removals = 0;
+        registrar.SIPTransportRequestReceived += async (local, remote, request) => {
+            Check(request.Method == SIPMethodsEnum.REGISTER && IPAddress.IsLoopback(remote.Address), "fixture only receives local REGISTER");
+            if (request.Header.Expires == 0) Interlocked.Increment(ref removals); else Interlocked.Increment(ref registrations);
+            var response = SIPResponse.GetResponse(request, SIPResponseStatusCodesEnum.Ok, null);
+            response.Header.Expires = request.Header.Expires; response.Header.Contact = request.Header.Contact;
+            if (negotiatedLifetime && request.Header.Expires != 0) {
+                response.Header.Expires = 0;
+                response.Header.Contact[0].Expires = 120;
+            }
+            await registrar.SendResponseAsync(response);
+        };
+        var settings = new SipRegistrationSettings("sip:fixture@127.0.0.1", $"sip:127.0.0.1:{channel.ListeningEndPoint.Port}", "fixture", "fixture", null, 60, 10);
+        Reject(() => (settings with { ExpirySeconds = 0 }).Validate(SIPProtocolsEnum.udp), "invalid registration expiry is rejected, not silently defaulted");
+        Reject(() => settings.Validate(SIPProtocolsEnum.tcp), "registration cannot silently switch transport");
+        await using var client = new SipTransportHost(new SipBinding("127.0.0.1", 0, "udp"), new CodecSettings(new[] { "PCMA" }), _ => new AudioPort(), _ => false);
+        var registration = client.StartRegistration(settings, "synthetic-fixture-only");
+        await Until(() => registration.Observation.State == "registered", "real localhost registration receives200");
+        await registration.SendKeepAliveAsync();
+        Check(registration.Observation.LastKeepAliveAt != null && registration.Observation.LastKeepAliveError == null &&
+            registration.Observation.RemoteEndpoint != null && registration.Observation.GrantedExpirySeconds > 0,
+            "keepalive succeeds through original registered socket and exposes flow diagnostics");
+        Reject(() => client.StartRegistration(settings, "synthetic-fixture-only"), "second registration on same host rejected");
+        registration = await client.ReconnectRegistrationAsync(settings, "synthetic-fixture-only");
+        await Until(() => registration.Observation.State == "registered", "explicit reconnect obtains a fresh registration without replacing SIP transport");
+        await registration.DisposeAsync();
+        Check(registrations == 2 && removals == 2 && registration.Observation.State == "stopped" && registration.Observation.RemoteRemoved == true,
+            "local stop sends exact zero-expiry registration and confirms removal");
+        await registration.DisposeAsync(); Check(removals == 2, "repeated dispose cannot send another unregister");
+    }
+    static async Task RegistrationRejectThenRecover() {
+        using var registrar = new SIPTransport();
+        var channel = new SIPUDPChannel(new IPEndPoint(IPAddress.Loopback, 0)); registrar.AddSIPChannel(channel);
+        int attempts = 0;
+        registrar.SIPTransportRequestReceived += async (_, _, request) => {
+            if (request.Method != SIPMethodsEnum.REGISTER) return;
+            int attempt = Interlocked.Increment(ref attempts);
+            var response = SIPResponse.GetResponse(request,
+                attempt == 1 ? SIPResponseStatusCodesEnum.Forbidden : SIPResponseStatusCodesEnum.Ok, null);
+            if (attempt != 1) { response.Header.Expires = request.Header.Expires; response.Header.Contact = request.Header.Contact; }
+            await registrar.SendResponseAsync(response);
+        };
+        await using var client = new SipTransportHost(new SipBinding("127.0.0.1", 0, "udp"),
+            new CodecSettings(new[] { "PCMA" }), _ => new AudioPort(), _ => false);
+        var settings = new SipRegistrationSettings("sip:fixture@127.0.0.1",
+            $"sip:127.0.0.1:{channel.ListeningEndPoint.Port}", "fixture", "fixture", null, 60, 10);
+        var registration = client.StartRegistration(settings, "synthetic-fixture-only");
+        var elapsed = Stopwatch.StartNew();
+        while (registration.Observation.State != "registered" && elapsed.Elapsed < TimeSpan.FromSeconds(20)) await Task.Delay(50);
+        Check(registration.Observation.State == "registered" && Volatile.Read(ref attempts) >= 2,
+            "one definite registrar refusal is retried and recovers without reconnecting the SIP host");
+        await registration.DisposeAsync();
+    }
+    static void RegistrationExpiry() {
+        var header = new SIPHeader { Expires = 0, Contact = [new SIPContactHeader(null, SIPURI.ParseSIPURI("sip:fixture@127.0.0.1")) { Expires = 120 }] };
+        Check(SipRegistration.EffectiveExpiry(header, 60) == 120, "contact expiry overrides zero global header and shorter requested lifetime");
+        header.Contact[0].Expires = 0; header.Expires = 120;
+        Check(SipRegistration.EffectiveExpiry(header, 60) == 0, "explicit contact removal cannot inherit positive global expiry");
+        header.Contact[0].Expires = -1;
+        Check(SipRegistration.EffectiveExpiry(header, 60) == 120, "absent contact expiry uses server header without requested cap");
+        header.Expires = -1;
+        Check(SipRegistration.EffectiveExpiry(header, 60) == 60, "absent server lifetime retains requested lifetime");
+    }
+}

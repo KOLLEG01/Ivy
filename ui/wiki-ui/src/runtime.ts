@@ -1,0 +1,3 @@
+import definition from '../ui.json';
+import { uiRuntime } from '../../../packages/ui-client/src/runtime';
+export const { base, client, uiUrl, live } = uiRuntime(definition.metadata);

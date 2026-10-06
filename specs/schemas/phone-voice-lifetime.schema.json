@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "VoiceLifetimeResult": {
+      "type": "object", "additionalProperties": false, "required": ["state", "dispatch", "reason"],
+      "properties": {
+        "reason": { "enum": [null, "voice_cancelled", "desktop_focus_failed", "desktop_owner_changed", "controls_not_idle", "capture_not_absent", "baseline_stale", "input_not_submitted", "input_outcome_unknown", "active_pair_unconfirmed", "voice_observation_failed", "capture_unconfirmed", "capture_owner_changed", "capture_ended"] },
+        "state": { "enum": ["not_started", "active", "stopped", "outcome_unknown"] },
+        "dispatch": { "anyOf": [{ "type": "null" }, { "$ref": "phone-micro.schema.json#/$defs/VoiceDispatchResult" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "enum": ["active", "stopped"] } } },
+          "then": { "properties": { "reason": { "type": "null" } } } },
+        { "if": { "properties": { "state": { "const": "active" } } },
+          "then": { "properties": { "dispatch": { "anyOf": [{ "type": "null" }, { "allOf": [
+            { "$ref": "phone-micro.schema.json#/$defs/VoiceDispatchResult" },
+            { "properties": { "phase": { "const": "submitted" } } }
+          ] }] } } } },
+        { "if": { "properties": { "state": { "const": "not_started" } } },
+          "then": { "properties": { "dispatch": { "anyOf": [{ "type": "null" }, {
+            "allOf": [{ "$ref": "phone-micro.schema.json#/$defs/VoiceDispatchResult" },
+              { "properties": { "phase": { "const": "not_submitted" } } }]
+          }] } } } }
+      ]
+    }
+  }
+}

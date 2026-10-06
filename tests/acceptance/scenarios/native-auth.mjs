@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { readFile, writeFile } from 'node:fs/promises';
+import { parseArgs } from 'node:util';
+import { HiveClient, discover, callBound } from '../../../dist/packages/sdk/src/client.js';
+import { digest } from '../../../dist/packages/contracts/src/canonical.js';
+// Establish only an explicit isolated native connection's ephemeral login. Never alter source auth.
+const { values } = parseArgs({ options: Object.fromEntries(['config', 'owner', 'epoch', 'auth-file', 'operation-id', 'evidence'].map(key => [key, { type: 'string' }])) });
+for (const key of ['config', 'owner', 'epoch', 'auth-file', 'operation-id', 'evidence']) assert.ok(values[key], 'Missing --' + key);
+const config = JSON.parse(await readFile(values.config, 'utf8')); assert.ok(config.hostId.endsWith('-acceptance'));
+assert.ok(config.instances.some(instance => instance.serviceNodeId === values.owner && instance.componentId === 'agent-manager'));
+const credential = config.instances.find(instance => instance.componentId === 'hive').settings.credentials[0].token;
+const client = new HiveClient(config.publicBaseUrl, { credential });
+const call = async (name, args, operationId) => callBound(client, await discover(client, name, { serviceNodeId: values.owner }), args, operationId);
+const before = await call('agent.status', {}); assert.equal(before.state, 'ready'); assert.equal(before.epoch, values.epoch);
+const bytes = await readFile(values['auth-file']), auth = JSON.parse(bytes).tokens; assert.ok(auth.access_token && auth.account_id);
+const result = await call('codex.account/login/start', { type: 'chatgptAuthTokens', accessToken: auth.access_token, chatgptAccountId: auth.account_id, chatgptPlanType: null }, values['operation-id']);
+assert.equal(result.type, 'chatgptAuthTokens');
+const after = await call('agent.status', {}); assert.equal(after.epoch, before.epoch);
+assert.equal(digest(await readFile(values['auth-file'])), digest(bytes));
+const report = { schemaVersion: 1, at: new Date().toISOString(), owner: values.owner, epoch: before.epoch, operationId: values['operation-id'], loginType: result.type, sourceAuthUnchanged: true };
+await writeFile(values.evidence, JSON.stringify(report, null, 2), { flag: 'wx' }); console.log(JSON.stringify(report));

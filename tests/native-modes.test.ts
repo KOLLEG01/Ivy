@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { nativeModesFrom, nativeModePayload } from '../packages/ui-client/src/native-modes.js';
+import { agentRegistry } from '../services/agent-manager/src/registry.js';
+import { hashJson } from '../packages/contracts/src/canonical.js';
+import { SchemaValidators } from '../packages/contracts/src/schema.js';
+import { schemaNode, record } from '../packages/ui-client/src/native.js';
+import type { Agent } from '../packages/contracts/src/generated.js';
+
+for (const version of ['0.154.0']) test('native working modes use the advertised capability, explicit model and exact ' + version + ' payload', () => {
+  const catalog = JSON.parse(readFileSync('specs/native/codex-' + version + '/catalog.json', 'utf8')) as Agent.Catalog;
+  const definition = agentRegistry(catalog).namespaces[0]!.tools.find(tool => tool.name === 'turn/start')!;
+  const binding = { serviceNodeId: 'owner', qualifiedName: 'codex.turn/start', definition, definitionHash: hashJson(definition) };
+  const response = { data: [{ mode: 'plan', name: 'Plan', model: null, reasoning_effort: 'medium' }, { mode: 'default', name: 'Default', model: null, reasoning_effort: null }, { mode: 'invented', name: 'Unrecognized', reasoning_effort: null }] };
+  const modes = nativeModesFrom(binding, response); assert.deepEqual(modes.map(mode => mode.mode), ['plan', 'default']);
+  const model = { id: 'model', model: 'explicit-native-model', name: 'Model', description: '', efforts: ['low', 'medium'], defaultEffort: 'low', isDefault: true, hidden: false };
+  assert.equal(nativeModePayload(binding, modes[0], undefined, ''), null);
+  assert.equal(nativeModePayload(binding, modes[0], { ...model, model: '' }, ''), null);
+  const payload = nativeModePayload(binding, modes[0], model, '');
+  assert.deepEqual(payload, { mode: 'plan', settings: { model: model.model, reasoning_effort: 'medium', developer_instructions: null } });
+  new SchemaValidators().validate(definition.inputSchema, { threadId: 'thread', input: [{ type: 'text', text: 'A native question.' }], collaborationMode: payload });
+  assert.deepEqual(nativeModePayload(binding, modes[1], model, ''), { mode: 'default', settings: { model: model.model, reasoning_effort: null, developer_instructions: null } });
+  assert.equal(nativeModePayload(binding, modes[0], { ...model, efforts: ['low'] }, ''), null);
+  assert.ok(nativeModePayload(binding, modes[0], { ...model, efforts: ['low'] }, 'low'));
+  assert.equal(nativeModePayload(binding, modes[0], model, 'invented'), null);
+  assert.deepEqual(nativeModesFrom(undefined, response), []);
+  const changed = structuredClone(binding), root = schemaNode(changed.definition.inputSchema, changed.definition.inputSchema);
+  const mode = schemaNode(record(root.properties).collaborationMode, changed.definition.inputSchema);
+  const object = mode.properties ? mode : schemaNode((mode.anyOf as unknown[]).find(value => record(schemaNode(value, changed.definition.inputSchema)).properties), changed.definition.inputSchema);
+  const settings = schemaNode(record(object.properties).settings, changed.definition.inputSchema);
+  settings.required = [...(settings.required as string[]), 'unrecognizedRequiredSetting'];
+  assert.deepEqual(nativeModesFrom(changed, response), []);
+});

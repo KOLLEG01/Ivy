@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "uiId": "wiki-ui",
+    "slug": "wiki",
+    "priority": 600,
+    "displayName": "Wiki",
+    "description": "Write, connect and revisit your workspace knowledge.",
+    "iconKey": "notebook-text"
+  },
+  "entryPath": "index.html",
+  "requirements": {
+    "hiveProtocol": 1,
+    "contracts": [
+      { "key": "wiki/page", "readVersions": ["1.0.0"], "writeVersions": ["1.0.0"] },
+      { "key": "wiki/attachment", "readVersions": ["1.0.0"], "writeVersions": ["1.0.0"] }
+    ],
+    "services": []
+  },
+  "dataContracts": [
+    {
+      "key": "wiki/page", "version": "1.0.0", "owner": { "kind": "agent" }, "mediaType": "text/markdown", "retention": { "objects": { "mode": "retain" }, "revisions": { "mode": "bounded", "maximumCount": 500 } },
+      "specMarkdown": "# Wiki page 1.0.0\n\nContent is UTF-8 Markdown, bounded by Hive's 1 MiB text limit. The Object name is the page title and its parent is the navigation parent; page children may be pages or attachments. Links within Wiki use #/page?id=OBJECT_ID and may pin &revision=N. Object IDs remain stable when names or locations change. Raw HTML and automatic external images are not rendered. Every edit names this exact contract version and the revision of the most recent explicit page read. Conflicts preserve drafts; opening historical or unsupported content never writes or upgrades it."
+    },
+    {
+      "key": "wiki/attachment", "version": "1.0.0", "owner": { "kind": "agent" }, "mediaType": "application/octet-stream", "retention": { "objects": { "mode": "owned" }, "revisions": { "mode": "bounded", "maximumCount": 500 } },
+      "specMarkdown": "# Wiki attachment 1.0.0\n\nContent is exact binary bytes, bounded by Hive's 8 MiB binary limit. The Object name is the original display filename and its parent is the owning Wiki page. Downloads verify the selected revision's hash and byte length and use application/octet-stream; the file does not execute as browser content. References use #/page?id=OBJECT_ID&revision=N to retain exact identity. Replacement, if explicitly requested, uses a new immutable revision with CAS; uploads with uncertain outcomes retain their original mutation identity."
+    }
+  ]
+}

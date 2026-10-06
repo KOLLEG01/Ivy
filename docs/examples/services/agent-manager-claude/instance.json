@@ -1,0 +1,35 @@
+{
+  "instanceId": "agent-manager-claude-example",
+  "serviceNodeId": "example-host.agent-manager-claude",
+  "componentId": "agent-manager",
+  "enabled": false,
+  "engine": "process",
+  "credential": "<separate-service-credential>",
+  "paths": {
+    "data": "<absolute-instance-data-root>",
+    "work": "<absolute-instance-work-root>",
+    "logs": "<absolute-instance-logs-root>"
+  },
+  "settings": {
+    "nativeExecutable": "<absolute-node-executable>",
+    "nativeVersion": "0.142.3",
+    "nativeExecutableHash": "<catalog-bundle-hash>",
+    "codexHome": "<absolute-instance-data-root>/codex-home",
+    "patcherEnabled": true,
+    "appServer": {
+      "mode": "claude-adapter",
+      "adapterRoot": "<absolute-built-adapter-root>",
+      "nodeExecutableHash": "<sha256-of-node-executable>",
+      "claudeExecutable": "<absolute-official-claude-executable>",
+      "claudeExecutableHash": "<sha256-of-official-claude-executable>",
+      "defaultModel": "<verified-claude-model-id>"
+    },
+    "projects": [],
+    "limits": {
+      "maxOperations": 100000,
+      "maxJournalBytes": 536870912,
+      "maxPendingInputs": 64,
+      "maxNotificationBytes": 16777216
+    }
+  }
+}

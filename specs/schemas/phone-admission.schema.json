@@ -1,0 +1,292 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PhonePrincipal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "PhoneDestination": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 2048,
+      "pattern": "^sips?:[^\\s\\x00-\\x20]+$"
+    },
+    "PhonePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recipients",
+        "incoming"
+      ],
+      "properties": {
+        "recipients": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "destination"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/PhonePrincipal"
+              },
+              "destination": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 2048,
+                "pattern": "^(?:sips?:[^\\s\\x00-\\x20]+|\\+[1-9][0-9]{6,14})$"
+              }
+            }
+          }
+        },
+        "incoming": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "peerAddress",
+              "transport",
+              "fromUri"
+            ],
+            "properties": {
+              "peerAddress": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "transport": {
+                "enum": [
+                  "udp",
+                  "tcp",
+                  "tls"
+                ]
+              },
+              "fromUri": {
+                "$ref": "#/$defs/PhoneDestination"
+              },
+              "expectedAssertedNumber": {
+                "type": "string",
+                "pattern": "^\\+[1-9][0-9]{6,14}$"
+              }
+            }
+          }
+        },
+        "challengedIncoming": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "peerAddress",
+              "transport"
+            ],
+            "properties": {
+              "peerAddress": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "transport": {
+                "enum": [
+                  "udp",
+                  "tcp",
+                  "tls"
+                ]
+              }
+            }
+          }
+        },
+        "allowDirectDial": {
+          "type": "boolean"
+        },
+        "dialDomain": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$"
+        }
+      }
+    },
+    "PhoneCallAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "epoch",
+        "principalId",
+        "policyHash",
+        "direction",
+        "callId",
+        "recipientId",
+        "destination",
+        "incoming"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "epoch": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "principalId": {
+          "$ref": "#/$defs/PhonePrincipal"
+        },
+        "policyHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "direction": {
+          "enum": [
+            "incoming",
+            "outgoing"
+          ]
+        },
+        "callId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Uuid"
+            }
+          ]
+        },
+        "recipientId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhonePrincipal"
+            }
+          ]
+        },
+        "destination": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhoneDestination"
+            }
+          ]
+        },
+        "incoming": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/SipIncoming"
+            }
+          ]
+        },
+        "route": {
+          "enum": [
+            "voice",
+            "windows"
+          ]
+        },
+        "screening": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "announcement",
+            "timeoutSeconds",
+            "repeatCount"
+          ],
+          "properties": {
+            "announcement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120
+            },
+            "repeatCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3
+            }
+          }
+        },
+        "voicePrompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "direction": {
+                "const": "incoming"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "callId": {
+                "$ref": "#/$defs/Uuid"
+              },
+              "recipientId": {
+                "type": "null"
+              },
+              "destination": {
+                "type": "null"
+              },
+              "incoming": {
+                "$ref": "#/$defs/SipIncoming"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "recipientId": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/PhonePrincipal"
+                  }
+                ]
+              },
+              "destination": {
+                "$ref": "#/$defs/PhoneDestination"
+              },
+              "incoming": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PhoneCall": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/PhoneCallAdmission"
+        },
+        {
+          "properties": {
+            "callId": {
+              "$ref": "#/$defs/Uuid"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

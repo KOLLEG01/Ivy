@@ -1,0 +1,6 @@
+Makaretu.Dns 2.0.1
+© 2018-2019 Richard Schneider
+Authors: Richard Schneider
+Project: https://github.com/richardschneider/net-dns
+
+Full terms: Makaretu.Dns.txt

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "VoiceAudioBinding": {
+      "description": "Native-only original binding selected by the admitted call controller after its own Voice start; not caller-asserted IPC authority.",
+      "type": "object", "additionalProperties": false,
+      "required": ["callId", "endpointId", "voice", "capture"],
+      "properties": {
+        "callId": { "type": "string", "format": "uuid" },
+        "endpointId": { "type": "string", "minLength": 1, "maxLength": 32767 },
+        "voice": { "$ref": "phone-voice-controls.schema.json#/$defs/VoiceControlIdentity" },
+        "capture": { "$ref": "phone-capture.schema.json#/$defs/DesktopCaptureIdentity" }
+      }
+    }
+  }
+}

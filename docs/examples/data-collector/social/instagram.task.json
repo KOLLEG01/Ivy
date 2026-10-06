@@ -1,0 +1,27 @@
+{
+  "id": "social-instagram-example",
+  "name": "Instagram account metrics",
+  "enabled": false,
+  "intervalSeconds": 21600,
+  "timeoutSeconds": 180,
+  "memoryMb": 128,
+  "script": "@file:instagram.mjs",
+  "dependencies": {},
+  "config": {
+    "accountLabel": "Instagram account A",
+    "accountId": "00000000000000000",
+    "login": "instagram",
+    "apiVersion": "v26.0",
+    "authMode": "token",
+    "accessTokenSecret": "instagram_account_a_access_token",
+    "lookbackDays": 30,
+    "maxPages": 100,
+    "collectInsights": true
+  },
+  "secretNames": ["instagram_account_a_access_token"],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

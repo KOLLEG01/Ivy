@@ -1,0 +1,6 @@
+DnsClient 1.8.0
+Copyright (c) 2024 Michael Conrad
+Authors: MichaCo
+Project: http://dnsclient.michaco.net/
+
+Apache License 2.0. Full terms: Apache-2.0.txt

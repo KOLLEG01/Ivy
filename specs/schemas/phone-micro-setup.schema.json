@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "MicroDriverVerification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["release", "installerHash", "driverFiles", "kernelCatalogChecks", "installed"],
+      "properties": {
+        "release": { "const": "v.0.9.8.0" },
+        "installerHash": { "const": "sha256:81f426741f7ee2ed991febe24a22daca8400b6ae2f171054e3fb404897e15d39" },
+        "driverFiles": {
+          "type": "object", "additionalProperties": false,
+          "required": ["usbip2_filter.cat", "usbip2_filter.inf", "usbip2_filter.sys", "usbip2_ude.cat", "usbip2_ude.inf", "usbip2_ude.sys"],
+          "properties": {
+            "usbip2_filter.cat": { "$ref": "#/$defs/Hash" }, "usbip2_filter.inf": { "$ref": "#/$defs/Hash" },
+            "usbip2_filter.sys": { "$ref": "#/$defs/Hash" }, "usbip2_ude.cat": { "$ref": "#/$defs/Hash" },
+            "usbip2_ude.inf": { "$ref": "#/$defs/Hash" }, "usbip2_ude.sys": { "$ref": "#/$defs/Hash" }
+          }
+        },
+        "kernelCatalogChecks": { "const": 4 }, "installed": { "const": false }
+      }
+    },
+    "Hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "note": "Illustrative schema/state cases only. IDs, times and zero digests are synthetic; no native or browser delivery is claimed.",
+  "cases": [
+    {
+      "name": "one accepted input keeps its original channel and Main binding",
+      "definition": "Input",
+      "valid": true,
+      "value": {
+        "schemaVersion": 1,
+        "workspaceId": "example-chat",
+        "definitionHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "identity": { "channel": { "adapter": "whatsapp", "accountId": "example-account", "channelId": "example-channel" }, "senderPrincipalId": "example-user", "messageId": "input-one" },
+        "operationId": "send-one",
+        "requestHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "binding": { "objectId": "original-main-binding", "revision": 1 },
+        "sequence": 1,
+        "payload": { "text": "A synthetic acceptance message.", "images": [] },
+        "state": "queued",
+        "nativeCalls": { "resume": null, "turn": null, "interrupt": null },
+        "turnId": null,
+        "epoch": null,
+        "result": null,
+        "error": null,
+        "cancellation": null,
+        "admittedAt": "2026-09-07T03:00:00.000Z",
+        "updatedAt": "2026-09-07T03:00:00.000Z",
+        "finishedAt": null
+      }
+    },
+    {
+      "name": "native completion produces a pending reply to the original channel",
+      "definition": "Reply",
+      "valid": true,
+      "value": {
+        "schemaVersion": 1,
+        "workspaceId": "example-chat",
+        "definitionHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "channel": { "adapter": "whatsapp", "accountId": "example-account", "channelId": "example-channel" },
+        "origin": {
+          "kind": "native",
+          "inputId": "input-one",
+          "binding": { "objectId": "original-main-binding", "revision": 1 },
+          "result": { "objectId": "saved-result-one", "revision": 1 }
+        },
+        "sequence": 2,
+        "partIndex": 0,
+        "text": "A delayed synthetic reply.",
+        "artifacts": [],
+        "createdAt": "2026-09-07T03:01:00.000Z",
+        "immutableHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "state": "pending",
+        "firstOfferedAt": null,
+        "confirmedAt": null
+      }
+    },
+    {
+      "name": "persisted offer is retained even if the browser response is lost",
+      "definition": "Offer",
+      "valid": true,
+      "value": {
+        "schemaVersion": 1,
+        "operationId": "receive-one",
+        "callerPrincipalId": "example-user",
+        "channel": { "adapter": "whatsapp", "accountId": "example-account", "channelId": "example-channel" },
+        "afterSequence": 1,
+        "throughSequence": 2,
+        "replies": [{ "objectId": "reply-one", "revision": 1 }],
+        "createdAt": "2026-09-07T03:02:00.000Z"
+      }
+    },
+    {
+      "name": "browser acknowledgement names exact offered replies",
+      "definition": "AcknowledgeRequest",
+      "valid": true,
+      "value": {
+        "action": "acknowledge",
+        "operationId": "ack-one",
+        "expectedBridge": { "principalId": "example-chat-service", "callerPrincipalId": "example-user", "workspaceId": "example-chat", "definitionHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+        "offerId": "offer-one",
+        "replyIds": ["reply-one"]
+      }
+    },
+    {
+      "name": "arbitrary local paths are not image artifacts",
+      "definition": "Image",
+      "valid": false,
+      "value": { "path": "C:/unapproved/image.png", "mediaType": "image/png" }
+    }
+  ],
+  "semanticTransitions": [
+    { "from": "unbound", "action": "createMain", "guard": "exact expected revision and no pending action", "effect": "retain original native thread/start identity before dispatch; publish a binding only from its verified success" },
+    { "from": "bound", "action": "send", "guard": "exact admitted sender/channel, unchanged binding, original payload identity, queue capacity", "effect": "CAS one admission intent; publish original input and queue ticket before acknowledging" },
+    { "from": "delivering", "action": "lost native response", "guard": "original owner evidence unavailable", "effect": "outcome_unknown retains original call and blocks the next turn" },
+    { "from": "pending reply", "action": "receive", "guard": "same admitted caller/channel and stable receive identity", "effect": "save original offered reply pins; unconfirmed delivery becomes outcome_unknown" },
+    { "from": "outcome_unknown reply", "action": "acknowledge", "guard": "exact reply belongs to original caller's persisted offer", "effect": "confirmed once; replay does not emit another reply or native turn" },
+    { "from": "bound with empty execution queue", "action": "createMain", "guard": "explicit replacement and expected Main revision", "effect": "retain previous binding and pending replies; publish new binding from original native outcome" }
+  ]
+}

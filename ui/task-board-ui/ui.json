@@ -1,0 +1,27 @@
+{
+  "metadata": {
+    "uiId": "task-board-ui",
+    "slug": "taskboard",
+    "priority": 500,
+    "displayName": "TaskBoard",
+    "description": "Plan work, discuss progress and complete tasks.",
+    "iconKey": "layout-dashboard"
+  },
+  "entryPath": "index.html",
+  "requirements": {
+    "hiveProtocol": 1,
+    "contracts": [
+      { "key": "task-board/configuration", "readVersions": ["1.0.0", "1.1.0", "1.2.0"], "writeVersions": [] },
+      { "key": "task-board/task", "readVersions": ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"], "writeVersions": [] },
+      { "key": "task-board/run", "readVersions": ["1.0.0", "1.1.0"], "writeVersions": [] },
+      { "key": "task-board/result", "readVersions": ["1.0.0"], "writeVersions": [] },
+      { "key": "task-board/delivery", "readVersions": ["1.0.0", "1.1.0"], "writeVersions": [] },
+      { "key": "task-board/review", "readVersions": ["1.0.0"], "writeVersions": [] },
+      { "key": "task-board/history", "readVersions": ["1.0.0"], "writeVersions": [] }
+    ],
+    "services": [
+      { "serviceName": "task-board", "namespace": "task-board", "interfaceVersion": "1.0.0" }
+    ]
+  },
+  "dataContracts": []
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Verify and reload the certificate of the isolated Ivy HTTPS edge
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/ivy-next/https-edge/edge.env
+ExecStart=/usr/bin/python3 /opt/ivy-next/https-edge/reload-certificate.py --container ${IVY_EDGE_CONTAINER} --hostname ${IVY_EDGE_HOST} --port ${IVY_EDGE_PORT} --certificate ${IVY_EDGE_CERTIFICATE} --state /opt/ivy-next/https-edge/renewal/certificate.sha256
+TimeoutStartSec=90
+MemoryMax=100M
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/ivy-next/https-edge/renewal
+UMask=0077

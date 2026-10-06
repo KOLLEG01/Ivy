@@ -1,0 +1,6 @@
+Common.Logging.Core 3.4.1
+
+Authors: Aleksandar Seovic, Mark Pollack, Erich Eichinger, Stephen Bohlen
+Project: http://net-commons.github.io/common-logging/
+
+Full terms: Common.Logging.txt

@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "uiId": "data-collector-ui",
+    "slug": "datacollector",
+    "priority": 100,
+    "displayName": "DataCollector",
+    "description": "Edit script tasks and browse versioned results.",
+    "iconKey": "funnel"
+  },
+  "entryPath": "index.html",
+  "requirements": {
+    "hiveProtocol": 1,
+    "contracts": [
+      {
+        "key": "data-collector/result",
+        "readVersions": ["1.0.0"],
+        "writeVersions": []
+      }
+    ],
+    "services": [
+      {
+        "serviceName": "data-collector",
+        "namespace": "data-collector",
+        "interfaceVersion": "1.0.0"
+      }
+    ]
+  },
+  "dataContracts": []
+}

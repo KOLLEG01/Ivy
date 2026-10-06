@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "DesktopApplication": {
+      "type": "object", "additionalProperties": false, "required": ["appUserModelId", "startIfMissing"],
+      "properties": {
+        "appUserModelId": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$" },
+        "startIfMissing": { "type": "boolean" }
+      }
+    },
+    "DesktopIdentity": {
+      "type": "object", "additionalProperties": false, "required": ["pid", "startTimeUtcTicks", "imagePath", "appUserModelId"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "startTimeUtcTicks": { "type": "string", "pattern": "^[1-9][0-9]{0,18}$" },
+        "imagePath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+        "appUserModelId": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+![A-Za-z0-9_.-]+$" }
+      }
+    },
+    "DesktopObservation": {
+      "type": "object", "additionalProperties": false, "required": ["state", "identity"],
+      "properties": {
+        "state": { "enum": ["absent", "waiting", "ready", "ambiguous", "unavailable"] },
+        "identity": { "anyOf": [{ "$ref": "#/$defs/DesktopIdentity" }, { "type": "null" }] }
+      },
+      "if": { "properties": { "state": { "const": "ready" } } },
+      "then": { "properties": { "identity": { "$ref": "#/$defs/DesktopIdentity" } } },
+      "else": { "properties": { "identity": { "type": "null" } } }
+    },
+    "LaunchResult": {
+      "type": "object", "additionalProperties": false, "required": ["phase", "identity", "activationPid", "errorCode"],
+      "properties": {
+        "phase": { "enum": ["ready", "waiting", "not_submitted", "submitted", "outcome_unknown"] },
+        "identity": { "anyOf": [{ "$ref": "#/$defs/DesktopIdentity" }, { "type": "null" }] },
+        "activationPid": { "type": ["integer", "null"], "minimum": 1, "maximum": 2147483647 },
+        "errorCode": { "enum": [null, "desktop_missing", "desktop_ambiguous", "desktop_observation_unavailable", "desktop_launch_outcome_unknown"] }
+      }
+    }
+  }
+}

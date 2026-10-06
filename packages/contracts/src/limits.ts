@@ -1,0 +1,26 @@
+/** Complete canonical UTF-8 management/transport document, including envelope. Decision0047. */
+export const managementFrameBytes = 33554432;
+// Permit a complete management frame alongside concurrent replies and control
+// traffic, while bounding the aggregate bytes awaiting socket writes.
+export const managementSocketBufferBytes = 2 * managementFrameBytes;
+
+/** Canonical UTF-8 bytes admitted for one JSON Object content value. */
+export const jsonObjectContentBytes = 1048576;
+/** UTF-8 bytes admitted for one text Object content value. */
+export const textObjectContentBytes = 1048576;
+/** Decoded bytes admitted for one binary Object before base64 expansion. */
+export const binaryObjectContentBytes = 8388608;
+/** Concurrent requests admitted for one HTTP, WebSocket, or SDK connection. */
+export const connectionInFlightRequests = 64;
+/** Aggregate reservations for one authenticated credential or original HTTP client address. */
+export const consumerInFlightRequests = 256;
+
+/** Mutation outcomes retained for the complete 24-hour replay window. */
+export const mutationReceiptCount = 100000;
+/** Total encoded mutation-journal storage retained across all principals. */
+export const mutationReceiptJournalBytes = 256 * 1024 * 1024;
+/** Maximum canonical result retained by one mutation receipt. */
+export const mutationReceiptResultBytes = 65536;
+
+/** Complete serialized MCP tools/list result, including cursors and cache metadata. */
+export const mcpDiscoveryResultBytes = 512 * 1024;

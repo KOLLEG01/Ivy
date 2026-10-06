@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "Intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "epoch",
+        "operationId",
+        "callId",
+        "method",
+        "requestHash"
+      ],
+      "properties": {
+        "epoch": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "callId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Uuid"
+            }
+          ]
+        },
+        "method": {
+          "enum": [
+            "configure",
+            "desktop.launch",
+            "call.desktop.launch",
+            "call.desktop.startVoice",
+            "call.desktop.stopVoice",
+            "call.archiveVoice",
+            "call.prepare",
+            "call.audio.prepare",
+            "call.audio.rebind",
+            "call.dial",
+            "call.claim",
+            "call.answer",
+            "call.waiting.end",
+            "call.command.feedback",
+            "call.hangup",
+            "call.release",
+            "shutdown",
+            "call.features",
+            "call.windows.connect",
+            "call.codec.upgrade",
+            "call.screening.prepare",
+            "call.screening.bridge",
+            "call.screening.synthesize",
+            "registration.reconnect",
+            "call.desktop.pauseVoice",
+            "call.desktop.resumeVoice",
+            "call.bindVoice",
+            "call.createVoice",
+            "call.promptVoice",
+            "call.selectVoice",
+            "call.restartVoice"
+          ]
+        },
+        "archivePlan": {
+          "$ref": "#/$defs/PhoneVoiceArchivePlan"
+        },
+        "requestHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "voiceGeneration": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "commandSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "threadId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "reasoningEffort": {
+          "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "call.archiveVoice"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "archivePlan"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "archivePlan"
+              ]
+            }
+          }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["call.bindVoice", "call.promptVoice", "call.selectVoice"] } } },
+          "then": { "required": ["threadId"] },
+          "else": { "not": { "required": ["threadId"] } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["call.promptVoice", "call.selectVoice"] } } },
+          "then": { "required": ["prompt"] },
+          "else": { "not": { "required": ["prompt"] } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "call.createVoice" } } },
+          "then": { "required": ["model", "reasoningEffort"] }
+        },
+        {
+          "if": { "properties": { "method": { "const": "call.command.feedback" } } },
+          "then": { "required": ["commandSequence"] }
+        },
+        {
+          "if": { "properties": { "method": { "not": { "enum": ["call.selectVoice", "call.command.feedback"] } } } },
+          "then": { "not": { "required": ["commandSequence"] } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "call.selectVoice" } } },
+          "then": { "required": ["model", "reasoningEffort"] }
+        },
+        {
+          "if": { "properties": { "method": { "const": "call.restartVoice" } } },
+          "then": { "required": ["voiceGeneration", "model", "reasoningEffort"], "properties": { "voiceGeneration": { "minimum": 1 } } }
+        }
+      ]
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ok",
+        "result",
+        "error"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {},
+        "error": {
+          "enum": [
+            null,
+            "invalid_request",
+            "epoch_mismatch",
+            "operation_conflict",
+            "capacity_exceeded",
+            "runtime_not_ready",
+            "phone_offer_expired",
+            "operation_outcome_unknown",
+            "runtime_stopping"
+          ]
+        }
+      }
+    },
+    "PhoneVoiceBindingResult": {
+      "type": "object", "additionalProperties": false, "required": ["threadId", "bound"],
+      "properties": { "threadId": { "$ref": "#/$defs/Uuid" }, "bound": { "const": true } }
+    },
+    "PhoneVoiceCreationResult": {
+      "type": "object", "additionalProperties": false, "required": ["threadId", "created"],
+      "properties": { "threadId": { "$ref": "#/$defs/Uuid" }, "created": { "const": true } }
+    },
+    "PhoneVoicePromptResult": {
+      "type": "object", "additionalProperties": false, "required": ["threadId", "state"],
+      "properties": { "threadId": { "$ref": "#/$defs/Uuid" }, "state": { "enum": ["sent", "outcome_unknown"] } }
+    },
+    "Operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "intent",
+        "phase",
+        "receipt",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "intent": {
+          "$ref": "#/$defs/Intent"
+        },
+        "phase": {
+          "enum": [
+            "submitted",
+            "result",
+            "outcome_unknown"
+          ]
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Receipt"
+            }
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 32
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 32
+        },
+        "archiveResolution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "checkedAt"
+          ],
+          "properties": {
+            "state": {
+              "const": "observed_archived"
+            },
+            "checkedAt": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "const": "result"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/Receipt"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "receipt": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "archiveResolution"
+            ]
+          },
+          "then": {
+            "properties": {
+              "intent": {
+                "properties": {
+                  "method": {
+                    "const": "call.archiveVoice"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

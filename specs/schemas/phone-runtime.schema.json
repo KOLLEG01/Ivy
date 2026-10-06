@@ -1,0 +1,739 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "SipRegistrationSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accountUri",
+        "registrarUri",
+        "contactUser",
+        "authUsername",
+        "realm",
+        "expirySeconds",
+        "retrySeconds"
+      ],
+      "properties": {
+        "accountUri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "registrarUri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "contactUser": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "authUsername": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "realm": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "expirySeconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 7200
+        },
+        "retrySeconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 600
+        },
+        "keepAliveIntervalSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 300,
+          "default": 20
+        }
+      }
+    },
+    "SipRegistrationObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "responseCode",
+        "remoteRemoved"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "registering",
+            "registered",
+            "failed",
+            "stopped"
+          ]
+        },
+        "responseCode": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 100,
+          "maximum": 699
+        },
+        "remoteRemoved": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "localEndpoint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "remoteEndpoint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "grantedExpirySeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "lastKeepAliveAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "lastKeepAliveError": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        }
+      }
+    },
+    "SipBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "address",
+        "port",
+        "transport"
+      ],
+      "properties": {
+        "address": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "transport": {
+          "enum": [
+            "udp",
+            "tcp",
+            "tls"
+          ]
+        },
+        "incomingRingSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120,
+          "default": 30
+        },
+        "outgoingOfferMode": {
+          "enum": [
+            "initial",
+            "delayed",
+            "auto"
+          ],
+          "default": "initial"
+        },
+        "rtpPortRangeStart": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65534,
+          "multipleOf": 2,
+          "default": 30000
+        },
+        "rtpPortRangeEnd": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65534,
+          "multipleOf": 2,
+          "default": 31000
+        },
+        "outboundProxy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "maxConcurrentCalls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 1
+        }
+      }
+    },
+    "SipIncoming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sipCallId",
+        "fromUri",
+        "peerAddress",
+        "peerPort",
+        "transport"
+      ],
+      "properties": {
+        "sipCallId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "fromUri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "assertedNumbers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^\\+[1-9][0-9]{6,14}$"
+          }
+        },
+        "peerAddress": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "peerPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "transport": {
+          "enum": [
+            "udp",
+            "tcp",
+            "tls"
+          ]
+        },
+        "registrationPeer": {
+          "type": "boolean"
+        }
+      }
+    },
+    "SipCallObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "direction",
+        "state",
+        "sipCallId",
+        "error",
+        "incoming"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "direction": {
+          "enum": [
+            "incoming",
+            "outgoing"
+          ]
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "ringing",
+            "dialing",
+            "connected",
+            "local_ended",
+            "outcome_unknown"
+          ]
+        },
+        "sipCallId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024
+        },
+        "error": {
+          "enum": [
+            null,
+            "sip_dial_not_connected",
+            "sip_answer_not_connected",
+            "sip_operation_outcome_unknown",
+            "media_failed"
+          ]
+        },
+        "incoming": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/SipIncoming"
+            }
+          ]
+        },
+        "features": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/CallFeatures"
+            }
+          ]
+        }
+      }
+    },
+    "CodecSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preferences",
+        "packetMs"
+      ],
+      "properties": {
+        "preferences": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "G722",
+              "PCMA",
+              "PCMU",
+              "OPUS",
+              "EVS"
+            ]
+          }
+        },
+        "packetMs": {
+          "const": 20
+        },
+        "receiveReorderMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60,
+          "default": 20
+        }
+      }
+    },
+    "RtpReceiveStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queuedPackets",
+        "maximumPackets",
+        "reorderMs",
+        "duplicatePackets",
+        "latePackets",
+        "overflowPackets",
+        "foreignPackets",
+        "gatedPackets",
+        "missingPackets",
+        "maximumResidenceMs"
+      ],
+      "properties": {
+        "queuedPackets": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "maximumPackets": {
+          "const": 8
+        },
+        "reorderMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60
+        },
+        "duplicatePackets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "latePackets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "overflowPackets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "foreignPackets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gatedPackets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missingPackets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximumResidenceMs": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "AudioSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captureEndpointId",
+        "renderEndpointId",
+        "sourceMode",
+        "captureBufferMs",
+        "renderLatencyMs",
+        "queueMs"
+      ],
+      "properties": {
+        "captureEndpointId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "renderEndpointId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "sourceMode": {
+          "enum": [
+            "system_excluding_runtime",
+            "desktop_process",
+            "microphone",
+            "virtual_speaker"
+          ]
+        },
+        "captureBufferMs": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 100
+        },
+        "renderLatencyMs": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 100
+        },
+        "queueMs": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 200
+        },
+        "playbackPrebufferMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200,
+          "default": 20
+        },
+        "enableWasapiLowLatency": {
+          "type": "boolean",
+          "default": true
+        },
+        "mutePolicy": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mutedRenderEndpointId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 1,
+                  "maxLength": 32767
+                },
+                "unmuteReceive": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "intervalSeconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600,
+                  "default": 60
+                }
+              }
+            }
+          ]
+        },
+        "loopbackRenderEndpointId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        }
+      }
+    },
+    "AudioAttachmentStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "state",
+        "route"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "state": {
+          "enum": [
+            "unprepared",
+            "preparing",
+            "suspended",
+            "open",
+            "revoked",
+            "failed",
+            "closed"
+          ]
+        },
+        "route": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/MediaStatus"
+            }
+          ]
+        }
+      }
+    },
+    "MediaStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "sourceMode",
+        "sampleRate",
+        "channels",
+        "captureDroppedSamples",
+        "renderDroppedSamples",
+        "captureQueuedSamples",
+        "renderQueuedSamples",
+        "renderLatencyMs"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "closed",
+            "suspended",
+            "open",
+            "failed"
+          ]
+        },
+        "sourceMode": {
+          "enum": [
+            "system_excluding_runtime",
+            "desktop_process",
+            "microphone",
+            "virtual_speaker"
+          ]
+        },
+        "sampleRate": {
+          "const": 48000
+        },
+        "channels": {
+          "const": 1
+        },
+        "captureDroppedSamples": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "renderDroppedSamples": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "captureQueuedSamples": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9600
+        },
+        "renderQueuedSamples": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9600
+        },
+        "lowLatencyActive": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "lowLatencyUnavailableReason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024
+        },
+        "renderLatencyMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "CallFeatures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "access",
+        "disableCodecUpgrade",
+        "screening",
+        "command",
+        "commandSequence",
+        "commands",
+        "commandOverflow"
+      ],
+      "properties": {
+        "access": {
+          "enum": [
+            "trusted",
+            "awaiting_code",
+            "authenticated",
+            "invalid_code",
+            "timeout"
+          ]
+        },
+        "disableCodecUpgrade": {
+          "type": "boolean"
+        },
+        "screening": {
+          "enum": [
+            "none",
+            "waiting",
+            "accepted",
+            "declined",
+            "bridged",
+            "timeout"
+          ]
+        },
+        "command": {
+          "enum": [
+            null,
+            "new_voice",
+            "select_voice"
+          ]
+        },
+        "commandSequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "commandState": {
+          "enum": [
+            null,
+            "pending"
+          ]
+        },
+        "model": {
+          "enum": [null, "luna", "sol", "astra"]
+        },
+        "reasoningEffort": {
+          "enum": [null, "low", "medium", "high", "xhigh", "max", "ultra"]
+        },
+        "commands": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "sequence", "model", "reasoningEffort"],
+            "properties": {
+              "command": { "enum": ["new_voice", "select_voice"] },
+              "sequence": { "type": "integer", "minimum": 1 },
+              "model": { "enum": [null, "luna", "sol", "astra"] },
+              "reasoningEffort": { "enum": [null, "low", "medium", "high", "xhigh", "max", "ultra"] }
+            }
+          }
+        },
+        "commandOverflow": {
+          "type": "boolean"
+        }
+      }
+    },
+    "CallAccessSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^\\*[0-9A-Da-d]+#$"
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120
+        },
+        "maxFailedAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "failedAttemptWindowSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "failureResponseDelayMilliseconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        }
+      }
+    }
+  }
+}

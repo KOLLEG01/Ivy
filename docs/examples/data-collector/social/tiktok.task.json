@@ -1,0 +1,24 @@
+{
+  "id": "social-tiktok-example",
+  "name": "TikTok account metrics",
+  "enabled": false,
+  "intervalSeconds": 21600,
+  "timeoutSeconds": 180,
+  "memoryMb": 128,
+  "script": "@file:tiktok.mjs",
+  "dependencies": {},
+  "config": {
+    "accountLabel": "TikTok account A",
+    "openId": "replace-with-authorized-open-id",
+    "authMode": "token",
+    "accessTokenSecret": "tiktok_account_a_access_token",
+    "lookbackDays": 30,
+    "maxPages": 100
+  },
+  "secretNames": ["tiktok_account_a_access_token"],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

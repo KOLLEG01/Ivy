@@ -1,0 +1,75 @@
+{
+  "NAudio.Wasapi/3.0.0": [
+    "NAudio.Wasapi-3.0.0.txt"
+  ],
+  "SIPSorcery/10.0.15": [
+    "SIPSorcery-10.0.15.txt"
+  ],
+  "BouncyCastle.Cryptography/2.6.2": [
+    "BouncyCastle.Cryptography-2.6.2.txt"
+  ],
+  "Common.Logging/3.4.1": [
+    "Common.Logging-3.4.1.txt",
+    "Common.Logging.txt"
+  ],
+  "Common.Logging.Core/3.4.1": [
+    "Common.Logging.Core-3.4.1.txt",
+    "Common.Logging.txt"
+  ],
+  "Concentus/2.2.2": [
+    "Concentus-2.2.2.txt"
+  ],
+  "DnsClient/1.8.0": [
+    "DnsClient-1.8.0.txt",
+    "Apache-2.0.txt"
+  ],
+  "IPNetwork2/2.1.2": [
+    "IPNetwork2-2.1.2.txt",
+    "IPNetwork2.txt"
+  ],
+  "Makaretu.Dns/2.0.1": [
+    "Makaretu.Dns-2.0.1.txt",
+    "Makaretu.Dns.txt"
+  ],
+  "Makaretu.Dns.Multicast/0.27.0": [
+    "Makaretu.Dns.Multicast-0.27.0.txt",
+    "Makaretu.Dns.Multicast.txt"
+  ],
+  "Microsoft.Extensions.DependencyInjection.Abstractions/10.0.10": [
+    "Microsoft.Extensions.DependencyInjection.Abstractions-10.0.10.txt"
+  ],
+  "Microsoft.Extensions.Logging.Abstractions/10.0.10": [
+    "Microsoft.Extensions.Logging.Abstractions-10.0.10.txt"
+  ],
+  "Microsoft.NETCore.Platforms/1.1.0": [
+    "Microsoft.NETCore.Platforms-1.1.0.txt",
+    "DotNet-LICENSE.txt"
+  ],
+  "NAudio.Core/3.0.0": [
+    "NAudio.Core-3.0.0.txt"
+  ],
+  "NETStandard.Library/1.6.1": [
+    "NETStandard.Library-1.6.1.txt",
+    "DotNet-LICENSE.txt"
+  ],
+  "SimpleBase/1.3.1": [
+    "SimpleBase-1.3.1.txt",
+    "SimpleBase.txt"
+  ],
+  "SIPSorcery.WebSocketSharp/0.0.1": [
+    "SIPSorcery.WebSocketSharp-0.0.1.txt"
+  ],
+  "SIPSorceryMedia.Abstractions/10.0.15": [
+    "SIPSorceryMedia.Abstractions-10.0.15.txt"
+  ],
+  "System.Numerics.Tensors/9.0.0": [
+    "System.Numerics.Tensors-9.0.0.txt"
+  ],
+  "Tmds.LibC/0.2.0": [
+    "Tmds.LibC-0.2.0.txt"
+  ],
+  "Microsoft.NETCore.App.Runtime.win-x64/10.0.10": [
+    "DotNet-LICENSE.txt",
+    "DotNet-THIRD-PARTY-NOTICES.txt"
+  ]
+}

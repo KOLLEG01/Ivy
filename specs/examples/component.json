@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "componentId": "task-board",
+  "kind": "service",
+  "version": "0.1.0",
+  "description": "Task execution and review workflow",
+  "connectsToHive": true,
+  "requirements": {
+    "node": ">=24.18.0 <25.0.0",
+    "hiveProtocol": 1,
+    "contracts": [
+      {
+        "key": "task-board/task",
+        "readVersions": [
+          "1.0.0"
+        ],
+        "writeVersions": [
+          "1.0.0"
+        ]
+      },
+      {
+        "key": "task-board/run",
+        "readVersions": [
+          "1.0.0"
+        ],
+        "writeVersions": [
+          "1.0.0"
+        ]
+      }
+    ]
+  },
+  "entrypoint": {
+    "executable": "node",
+    "args": [
+      "dist/main.js"
+    ],
+    "cwd": ".",
+    "timeoutMs": 30000
+  },
+  "prepare": [],
+  "checks": [],
+  "readiness": {
+    "timeoutMs": 30000,
+    "command": {
+      "executable": "node",
+      "args": [
+        "dist/health.js"
+      ],
+      "cwd": ".",
+      "timeoutMs": 5000
+    }
+  },
+  "shutdown": {
+    "timeoutMs": 15000
+  },
+  "restart": {
+    "policy": "on-failure",
+    "minimumDelayMs": 1000,
+    "maximumDelayMs": 60000
+  }
+}

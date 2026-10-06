@@ -1,0 +1,8 @@
+{
+  "IPNetwork2.txt": "https://raw.githubusercontent.com/lduchosal/ipnetwork/09614c5d334751f3f4a75872a3f6760c33ccff93/LICENSE",
+  "Makaretu.Dns.Multicast.txt": "https://raw.githubusercontent.com/richardschneider/net-mdns/b9f2f8158052568a19d09536179ceaf5cae9b23e/LICENSE",
+  "Apache-2.0.txt": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+  "Makaretu.Dns.txt": "https://raw.githubusercontent.com/richardschneider/net-dns/701463d2091e6d98d4cc4490abb0e0ead8ae2985/LICENSE",
+  "Common.Logging.txt": "https://raw.githubusercontent.com/net-commons/common-logging/8f8a3ac5bf3fba04e8962abaf8668d31897a2363/license.txt",
+  "SimpleBase.txt": "https://raw.githubusercontent.com/ssg/SimpleBase/3d4d446a37b7d937ab7ef2da8474ecffb750fa88/LICENSE.txt"
+}

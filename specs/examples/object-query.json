@@ -1,0 +1,37 @@
+{
+  "jsonrpc": "2.0",
+  "id": "query-example",
+  "method": "objects.query",
+  "params": {
+    "contractKey": "task-board/task",
+    "where": {
+      "op": "and",
+      "args": [
+        {
+          "op": "in",
+          "field": "data:/workflowState",
+          "value": [
+            "todo",
+            "in_progress"
+          ]
+        },
+        {
+          "op": "gte",
+          "field": "data:/fields/priority",
+          "value": 2
+        }
+      ]
+    },
+    "select": [
+      "data:/fields/title",
+      "data:/workflowState"
+    ],
+    "orderBy": [
+      {
+        "field": "object.updatedAt",
+        "direction": "asc"
+      }
+    ],
+    "limit": 50
+  }
+}

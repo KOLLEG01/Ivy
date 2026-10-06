@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "CallRequest": {
+      "type": "object", "required": ["sdp", "session"], "additionalProperties": false,
+      "properties": {
+        "sdp": { "type": "string", "minLength": 1, "maxLength": 262144 },
+        "session": { "type": "object", "required": ["model"], "properties": { "model": { "type": "string", "minLength": 1, "maxLength": 256 } }, "additionalProperties": true }
+      }
+    },
+    "CallReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "requestHash", "authorizationHash", "forwardedHash", "startedAt", "state", "response"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "requestHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "authorizationHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "forwardedHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "startedAt": { "type": "string" },
+        "state": { "enum": ["forwarding", "received", "outcome_unknown"] },
+        "response": { "anyOf": [{ "type": "null" }, {
+          "type": "object", "additionalProperties": false, "required": ["status", "contentType", "location", "bodyHash", "bytes", "bodyBase64"],
+          "properties": {
+            "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+            "contentType": { "type": ["string", "null"] }, "location": { "type": ["string", "null"] },
+            "bodyHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "bytes": { "type": "integer", "minimum": 0, "maximum": 1048576 }, "bodyBase64": { "type": "string", "maxLength": 1398104 }
+          }
+        }] }
+      }
+    }
+  }
+}

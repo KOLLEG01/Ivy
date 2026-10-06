@@ -1,0 +1,17 @@
+# Generated contracts and defaults
+packages/contracts/src/generated.ts
+services/agent-manager/src/environment-defaults.json
+specs/schemas/*.schema.json
+
+# Native or third-party sources
+services/**/native/**
+packages/host-runtime/native/**
+**/vendor/**
+
+# Build output and runtime data
+node_modules/**
+dist/**
+runtime/**
+services/*/runtime/**
+.local/**
+coverage/**

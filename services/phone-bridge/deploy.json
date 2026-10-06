@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "componentId": "phone-bridge",
+  "kind": "service",
+  "version": "0.2.69",
+  "description": "Authorized SIP calls, Windows audio, Micro Voice, Codex App Tools task control and announcement screening with durable outcomes",
+  "connectsToHive": true,
+  "requirements": {
+    "node": ">=24.18.0 <25.0.0",
+    "os": ["win32"],
+    "arch": ["x64"],
+    "hiveProtocol": 1,
+    "contracts": []
+  },
+  "entrypoint": {
+    "executable": "node",
+    "args": ["dist/services/phone-bridge/src/main.js"],
+    "timeoutMs": 90000
+  },
+  "prepare": [
+    {
+      "args": ["tools/build/run-npm.mjs", "ci"],
+      "executable": "node",
+      "timeoutMs": 600000
+    },
+    {
+      "args": [
+        "tools/build/build-deployment.mjs",
+        "--component",
+        "phone-bridge"
+      ],
+      "executable": "node",
+      "timeoutMs": 300000
+    },
+    {
+      "args": ["tools/build/build-phone-runtime.mjs"],
+      "executable": "node",
+      "timeoutMs": 600000
+    }
+  ],
+  "checks": [],
+  "readiness": {
+    "timeoutMs": 90000,
+    "command": {
+      "executable": "node",
+      "args": ["dist/packages/host-runtime/src/health.js"],
+      "timeoutMs": 5000
+    }
+  },
+  "shutdown": {
+    "timeoutMs": 60000
+  },
+  "restart": {
+    "policy": "always",
+    "minimumDelayMs": 1000,
+    "maximumDelayMs": 60000
+  },
+  "storage": {
+    "minReadableFormat": 7,
+    "maxReadableFormat": 7,
+    "writeFormat": 7
+  },
+  "runtimeReset": {
+    "delete": [
+      { "area": "data", "path": "phone-commands.sqlite" },
+      { "area": "data", "path": "phone-commands.sqlite-wal" },
+      { "area": "data", "path": "phone-commands.sqlite-shm" },
+      { "area": "data", "path": "phone-diagnostics.sqlite" },
+      { "area": "data", "path": "phone-diagnostics.sqlite-wal" },
+      { "area": "data", "path": "phone-diagnostics.sqlite-shm" },
+      { "area": "data", "path": "announcements" },
+      { "area": "data", "path": "phone-native-owner.json" },
+      { "area": "data", "path": "phone-native.lock" },
+      { "area": "data", "path": "process-stop-fence.json" },
+      { "area": "data", "path": "health.json" },
+      { "area": "data", "path": "control.json" },
+      { "area": "work", "path": "." },
+      { "area": "logs", "path": "." }
+    ],
+    "preserve": []
+  }
+}

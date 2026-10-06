@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the isolated Ivy HTTPS certificate after boot and hourly
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+Unit=ivy-next-certificate.service
+
+[Install]
+WantedBy=timers.target

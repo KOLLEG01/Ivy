@@ -1,0 +1,251 @@
+{
+  "schemaVersion": 1,
+  "namespace": "task-board",
+  "schema": "https://ivy.invalid/schemas/task-board.schema.json",
+  "contracts": [
+    {
+      "key": "task-board/configuration",
+      "version": "1.2.0",
+      "definition": "#/$defs/Configuration"
+    },
+    {
+      "key": "task-board/task",
+      "version": "1.7.0",
+      "definition": "#/$defs/Task"
+    },
+    {
+      "key": "task-board/run",
+      "version": "1.1.0",
+      "definition": "#/$defs/Run"
+    },
+    {
+      "key": "task-board/result",
+      "version": "1.0.0",
+      "definition": "#/$defs/Result"
+    },
+    {
+      "key": "task-board/review",
+      "version": "1.0.0",
+      "definition": "#/$defs/Review"
+    },
+    {
+      "key": "task-board/history",
+      "version": "1.0.0",
+      "definition": "#/$defs/History"
+    },
+    {
+      "key": "task-board/delivery",
+      "version": "1.1.0",
+      "definition": "#/$defs/Delivery"
+    },
+    {
+      "key": "task-board/native-plan",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativePlan"
+    },
+    {
+      "key": "task-board/native-call",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeCall"
+    },
+    {
+      "key": "task-board/task-key-sequence",
+      "version": "1.0.0",
+      "definition": "#/$defs/TaskKeySequence"
+    },
+    {
+      "key": "task-board/task-key-allocation",
+      "version": "1.0.0",
+      "definition": "#/$defs/TaskKeyAllocation"
+    },
+    {
+      "key": "task-board/comment-read-state",
+      "version": "1.0.0",
+      "definition": "#/$defs/CommentReadState"
+    },
+    {
+      "key": "task-board/operation",
+      "version": "1.0.0",
+      "definition": "#/$defs/Operation"
+    },
+    {
+      "key": "task-board/coordination",
+      "version": "1.0.0",
+      "definition": "#/$defs/Coordination"
+    },
+    {
+      "key": "task-board/native-evidence",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeEvidence"
+    },
+    {
+      "key": "task-board/native-read-evidence",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeReadEvidence"
+    },
+    {
+      "key": "task-board/native-signals",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeSignals"
+    },
+    {
+      "key": "task-board/scan-cursor",
+      "version": "1.0.0",
+      "definition": "#/$defs/ScanCursor"
+    },
+    {
+      "key": "task-board/scheduler-attempt",
+      "version": "1.0.0",
+      "definition": "#/$defs/SchedulerAttempt"
+    },
+    {
+      "key": "task-board/native-turn-search",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeTurnSearch"
+    },
+    {
+      "key": "task-board/native-turn-snapshot",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeTurnSnapshot"
+    },
+    {
+      "key": "task-board/native-result-page",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeResultPage"
+    },
+    {
+      "key": "task-board/native-transcript",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeTranscript"
+    },
+    {
+      "key": "task-board/native-full-turn-transcript",
+      "version": "1.0.0",
+      "definition": "#/$defs/NativeFullTurnTranscript"
+    }
+  ],
+  "binaryContracts": [
+    {
+      "key": "task-board/attachment",
+      "version": "1.0.0",
+      "definitionFile": "task-board.attachment.json"
+    },
+    {
+      "key": "task-board/native-evidence-chunk",
+      "version": "1.0.0",
+      "definitionFile": "task-board.evidence-chunk.json"
+    },
+    {
+      "key": "task-board/native-read-evidence-chunk",
+      "version": "1.0.0",
+      "definitionFile": "task-board.read-evidence-chunk.json"
+    }
+  ],
+  "operations": {
+    "configure": {
+      "input": "#/$defs/ConfigureRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "savePlan": {
+      "input": "#/$defs/SavePlanInput",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "create": {
+      "input": "#/$defs/CreateRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "edit": {
+      "input": "#/$defs/EditRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "transition": {
+      "input": "#/$defs/TransitionRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "defer": {
+      "input": "#/$defs/DeferRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "reassign": {
+      "input": "#/$defs/ReassignRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "newThread": {
+      "input": "#/$defs/NewThreadRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "cancel": {
+      "input": "#/$defs/CancelRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "review": {
+      "input": "#/$defs/ReviewRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "saveResult": {
+      "input": "#/$defs/SaveResultRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "comment": {
+      "input": "#/$defs/CommentActionRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "uploadAttachment": {
+      "input": "#/$defs/UploadAttachmentRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "operation": {
+      "input": "#/$defs/OperationQuery",
+      "output": "#/$defs/Operation",
+      "mutation": false
+    },
+    "workspace": {
+      "input": "#/$defs/WorkspaceQuery",
+      "output": "#/$defs/WorkspaceInfo",
+      "mutation": false
+    },
+    "configuration": {
+      "input": "#/$defs/ConfigurationQuery",
+      "output": "#/$defs/ConfigurationView",
+      "mutation": false
+    },
+    "categories": {
+      "input": "#/$defs/CategoriesQuery",
+      "output": "#/$defs/CategoriesResult",
+      "mutation": false
+    },
+    "read": {
+      "input": "#/$defs/TaskQuery",
+      "output": "#/$defs/TaskView",
+      "mutation": false
+    },
+    "list": {
+      "input": "#/$defs/TaskListQuery",
+      "output": "#/$defs/TaskListResult",
+      "mutation": false
+    },
+    "markCommentsRead": {
+      "input": "#/$defs/MarkCommentsReadRequest",
+      "output": "#/$defs/MarkCommentsReadResult",
+      "mutation": true
+    },
+    "archive": {
+      "input": "#/$defs/ArchiveRequest",
+      "output": "#/$defs/ArchiveResult",
+      "mutation": true
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "AppThreadObservation": {
+      "type": "object", "additionalProperties": false, "required": ["id", "hostId", "kind", "status"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ThreadId" }, "hostId": { "const": "local" }, "kind": { "const": "codex" },
+        "status": {
+          "type": "object", "additionalProperties": false, "required": ["type", "activeFlags"],
+          "properties": {
+            "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "activeFlags": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+          }
+        }
+      }
+    },
+    "AppArchiveAcknowledgement": {
+      "type": "object", "additionalProperties": false, "required": ["threadId", "archived"],
+      "properties": { "threadId": { "$ref": "#/$defs/ThreadId" }, "archived": { "const": true } }
+    },
+    "AppPromptAcknowledgement": {
+      "type": "object", "additionalProperties": false, "required": ["threadId", "sent"],
+      "properties": { "threadId": { "$ref": "#/$defs/ThreadId" }, "sent": { "const": true } }
+    },
+    "AppThreadList": {
+      "type": "array", "maxItems": 256,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "hostId", "kind", "status"],
+        "properties": {
+          "id": { "$ref": "#/$defs/ThreadId" }, "hostId": { "const": "local" }, "kind": { "const": "codex" },
+          "status": { "type": "string", "minLength": 1, "maxLength": 64 }
+        }
+      }
+    },
+    "ThreadId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "AppToolsSettings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pipePath", "actorThreadId"],
+      "properties": {
+        "nodeExecutable": { "$ref": "#/$defs/Path", "deprecated": true, "description": "Optional explicit test/runtime override. Ignored for bundled App Tools." },
+        "nodeExecutableHash": { "$ref": "#/$defs/Hash", "deprecated": true, "description": "Ignored legacy setup pin." },
+        "serverPath": { "$ref": "#/$defs/Path", "deprecated": true, "description": "Optional explicit test/runtime override. Bundled App Tools always use the newest installed version." },
+        "serverHash": { "$ref": "#/$defs/Hash", "deprecated": true, "description": "Ignored legacy setup pin." },
+        "pipePath": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "actorThreadId": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "inputSchemasHash": { "$ref": "#/$defs/Hash", "deprecated": true, "description": "Ignored legacy setup snapshot; accepted for existing instance configurations." },
+        "internalProjectRoot": { "$ref": "#/$defs/Path" }
+      }
+    },
+    "Path": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "Hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

@@ -1,0 +1,10 @@
+import {readFile,writeFile} from 'node:fs/promises';
+import {parseArgs} from 'node:util';
+import {join,resolve} from 'node:path';
+import QRCode from 'qrcode';
+const {values}=parseArgs({options:{'data-root':{type:'string'},output:{type:'string'}}});
+if(!values['data-root']||!values.output)throw Error('Use --data-root and --output (absolute local PNG path).');
+const value=JSON.parse(await readFile(join(resolve(values['data-root']),'whatsapp-pairing.json'),'utf8'));
+if(!value.qr||Date.parse(value.expiresAt)<=Date.now())throw Error('No current QR; inspect whatsapp-status.json.');
+await writeFile(resolve(values.output),await QRCode.toBuffer(value.qr,{type:'png',width:420,margin:4}),{mode:0o600});
+console.log(JSON.stringify({image:resolve(values.output),expiresAt:value.expiresAt}));

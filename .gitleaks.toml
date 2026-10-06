@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public contract IDs and a documentation placeholder, not credentials"
+regexTarget = "secret"
+regexes = [
+  '''^secretary/execution$''',
+  '''^fixture/journal$''',
+  '''^replace-with-actual-issuance-ISO8601$''',
+]
