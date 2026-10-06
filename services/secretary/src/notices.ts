@@ -6,7 +6,7 @@ import type { Document } from './store.js';
 import { mutation } from './store.js';
 import type { SecretaryEngine } from './engine.js';
 import { ignored, quiet, suppression } from './policy.js';
-import { voicePrompt } from './assignment-voice.js';
+import { forwardedVoiceOutcome, voicePrompt } from './assignment-voice.js';
 import { secretaryBrowserNotice } from './browser-notice.js';
 const chatVersions=new Set(['1.2.0', '1.3.0']);
 interface NoticeRetry { failedOperationId: string; attempts: number; nextAt: number; expiresAt: number | null }
@@ -65,12 +65,25 @@ export class SecretaryNotices {
       if (!callId) {
         const result = await callBound(this.engine.client, bound, { operationId: voice.operationId, recipientId: escalation!.recipientId, route: 'voice', voicePrompt: voicePrompt(notice.text) }, voice.operationId) as Record<string, Wire.Json>;
         callId = typeof result['callId'] === 'string' ? result['callId'] : null;
-        need(callId && result['operationId'] === voice.operationId && result['recipientId'] === escalation!.recipientId &&
-          result['principalId'] === this.engine.settings.identity.principalId, 'secretary_voice_unresolved', 'Phone admission changed the original call.');
+        need(callId, 'secretary_voice_unresolved', 'PhoneBridge returned no original call identity.');
+        if (result['operationId'] !== voice.operationId) {
+          const operation = await serviceTools(this.engine.client, escalation!.serviceNodeId, [{ namespace: 'phone', interfaceVersion: '1.0.0' }]).binding('phone.operation');
+          const forwarded = await callBound(this.engine.client, operation, { callId, operationId: voice.operationId }) as Record<string, Wire.Json> | null;
+          need(forwarded, 'secretary_voice_unresolved', 'PhoneBridge returned no forwarded request outcome.');
+          forwardedVoiceOutcome(forwarded, callId, voice.operationId, voicePrompt(notice.text));
+        } else need(result['recipientId'] === escalation!.recipientId && result['principalId'] === this.engine.settings.identity.principalId,
+          'secretary_voice_unresolved', 'Phone admission changed the original call.');
         await this.update(item, { ...notice, voice: { ...voice, state: 'queued', callId, errorCode: null }, updatedAt: this.engine.now().toISOString() });
         return;
       }
       const operation = await serviceTools(this.engine.client, escalation!.serviceNodeId, [{ namespace: 'phone', interfaceVersion: '1.0.0' }]).binding('phone.operation');
+      const forwarded = await callBound(this.engine.client, operation, { callId, operationId: voice.operationId }) as Record<string, Wire.Json> | null;
+      if (forwarded) {
+        const outcome = forwardedVoiceOutcome(forwarded, callId, voice.operationId, voicePrompt(notice.text));
+        if (outcome === 'pending') return;
+        await this.update(item, { ...notice, voice: { ...voice, state: 'confirmed', callId, errorCode: null }, updatedAt: this.engine.now().toISOString() });
+        return;
+      }
       const dial = await callBound(this.engine.client, operation, { callId, method: 'call.dial' }) as Record<string, Wire.Json> | null;
       if (!dial || dial['phase'] === 'submitted') return;
       const dialReceipt = dial['receipt'] as Record<string, Wire.Json> | null, observed = dialReceipt?.['result'] as Record<string, Wire.Json> | null;

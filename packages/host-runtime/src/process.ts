@@ -34,6 +34,8 @@ export async function startProcess(command: Command, root: string, executables: 
   executionCwd?: string;
   /** Read-only helper probes can opt out of the service job; service processes stay job-owned. */
   useJobLauncher?: boolean;
+  /** Stable Windows job identity for observing and excluding a previous owned tree. */
+  jobName?: string;
   /** Only the shared Codex lifecycle may explicitly detach a descendant from this job. */
   allowWindowsBreakaway?: boolean;
 } = {}): Promise<RunningProcess> {
@@ -45,8 +47,11 @@ export async function startProcess(command: Command, root: string, executables: 
   const resolved = await resolveCommand(command, root, executables);
   const windows = process.platform === 'win32';
   const useJobLauncher = windows && options.useJobLauncher !== false;
+  requireThat(options.jobName === undefined || (useJobLauncher && /^Global\\Ivy\.[a-zA-Z0-9._-]{1,128}$/.test(options.jobName)),
+    'invalid_arguments', 'A named process job requires the Windows job launcher.');
   const launcher = useJobLauncher ? await realpath(options.jobLauncher ?? join(root, 'dist', 'native', 'ivy-job.exe')) : resolved.executable;
-  const args = useJobLauncher ? ['--parent', String(process.pid), ...(options.allowWindowsBreakaway ? ['--allow-breakaway'] : []), resolved.executable, ...resolved.args] : resolved.args;
+  const args = useJobLauncher ? ['--parent', String(process.pid), ...(options.allowWindowsBreakaway ? ['--allow-breakaway'] : []),
+    ...(options.jobName ? ['--job-name', options.jobName] : []), resolved.executable, ...resolved.args] : resolved.args;
   const cwd = options.executionCwd === undefined ? resolved.cwd : await realpath(options.executionCwd);
   const child = spawn(launcher, args, { cwd, env: runtimeEnvironment(options.environment), windowsHide: true, detached: !windows, stdio: ['pipe', 'pipe', 'pipe'] });
   let ended = false, errorCode: string | null = null, truncated = false;
@@ -111,6 +116,16 @@ export async function startProcess(command: Command, root: string, executables: 
     return stopping;
   };
   return { child, completion, stop };
+}
+/** Absence of the exact named job proves that its handles and descendants have ended. */
+export async function windowsJobStopped(name: string, root: string): Promise<boolean> {
+  requireThat(process.platform === 'win32' && /^Global\\Ivy\.[a-zA-Z0-9._-]{1,128}$/.test(name),
+    'invalid_arguments', 'Invalid Windows process job identity.');
+  const result = await runCommand({ executable: 'dist/native/ivy-job.exe', args: ['--probe-job', name], timeoutMs: 5000 },
+    root, {}, { useJobLauncher: false });
+  const observed = JSON.parse(result.stdout) as { stopped?: unknown };
+  requireThat(typeof observed.stopped === 'boolean', 'invalid_response', 'Process job observation is unavailable.');
+  return observed.stopped;
 }
 export async function runCommand(command: Command, root: string, executables: Record<string, string>, options: Parameters<typeof startProcess>[3] & { input?: string } = {}): Promise<ProcessResult> {
   requireThat(options.input === undefined || Buffer.byteLength(options.input) <= 65536, 'limit_exceeded', 'Command input exceeds its bounded size.');

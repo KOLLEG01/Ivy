@@ -20,7 +20,7 @@ export type PhoneJournalIntent = PhoneIntent |
   (Omit<PhoneIntent, 'method'> & { method: 'call.archiveVoice'; archivePlan: PhoneVoiceArchivePlan }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.createVoice'; model: string; reasoningEffort: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.bindVoice'; threadId: string }) |
-  (Omit<PhoneIntent, 'method'> & { method: 'call.promptVoice'; threadId: string; prompt: string; model?: string; reasoningEffort?: string }) |
+  (Omit<PhoneIntent, 'method'> & { method: 'call.promptVoice' | 'call.forwardVoice'; threadId: string; prompt: string; model?: string; reasoningEffort?: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.selectVoice'; threadId: string; prompt: string; model: string; reasoningEffort: string; commandSequence?: number }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.restartVoice'; voiceGeneration: number; model: string; reasoningEffort: string });
 
@@ -49,7 +49,7 @@ function validate(name: string, value: unknown): void {
 }
 function intentShape(intent: PhoneJournalIntent): void {
   validate('Intent', intent);
-  requireThat(intent.voiceGeneration === undefined || ['call.desktop.pauseVoice', 'call.desktop.resumeVoice', 'call.archiveVoice', 'call.createVoice', 'call.bindVoice', 'call.promptVoice', 'call.restartVoice'].includes(intent.method),
+  requireThat(intent.voiceGeneration === undefined || ['call.desktop.pauseVoice', 'call.desktop.resumeVoice', 'call.archiveVoice', 'call.createVoice', 'call.bindVoice', 'call.promptVoice', 'call.forwardVoice', 'call.restartVoice'].includes(intent.method),
     'invalid_arguments', 'Only Voice generation operations may carry a generation.');
   requireThat(intent.method.startsWith('call.') === (intent.callId !== null), 'invalid_arguments', 'Phone call commands require their original call identity.');
   if (intent.method === 'call.archiveVoice') requireThat(intent.requestHash === digest(canonical(intent.archivePlan, phoneArchivePlanBytes)),
@@ -531,7 +531,7 @@ export class PhoneJournal {
     const result = { threadId, created: true as const }; validate('PhoneVoiceCreationResult', result);
     return this.finishReceipt(intent, { ok: true, result, error: null });
   }
-  finishVoicePrompt(intent: PhoneJournalIntent & { method: 'call.promptVoice' }, state: 'sent' | 'outcome_unknown'): PhoneOperation {
+  finishVoicePrompt(intent: PhoneJournalIntent & { method: 'call.promptVoice' | 'call.forwardVoice' }, state: 'sent' | 'outcome_unknown'): PhoneOperation {
     const result = { threadId: intent.threadId, state }; validate('PhoneVoicePromptResult', result);
     return this.finishReceipt(intent, { ok: true, result, error: null });
   }

@@ -2,7 +2,10 @@ import { mkdir, writeFile, readFile, stat, rm } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { dirname, join, resolve, relative } from "node:path";
 import { createHash } from "node:crypto";
-import { startProcess } from "../../../packages/host-runtime/src/process.js";
+import {
+  startProcess,
+  windowsJobStopped,
+} from "../../../packages/host-runtime/src/process.js";
 import { requireThat } from "../../../packages/sdk/src/node.js";
 import { outputSchema } from "./schema.js";
 import type { Output, Settings, Task } from "./schema.js";
@@ -35,6 +38,19 @@ export class TaskRunner {
     readonly artifactRoot: string,
     readonly settings: Settings,
   ) {}
+  private jobName(taskId: string) {
+    return (
+      "Global\\Ivy.Collector." +
+      createHash("sha256")
+        .update(resolve(this.workRoot, taskId).toLowerCase())
+        .digest("hex")
+    );
+  }
+  async stopped(taskId: string, jobName: string) {
+    if (process.platform !== "win32" || jobName !== this.jobName(taskId))
+      return false;
+    return windowsJobStopped(jobName, this.artifactRoot);
+  }
   clearAuthentication(taskId: string) {
     const root = resolve(this.workRoot),
       directory = resolve(root, taskId);
@@ -52,6 +68,7 @@ export class TaskRunner {
     timeoutMs: number,
     signal: AbortSignal,
     input = "",
+    jobName?: string,
   ) {
     signal.throwIfAborted();
     const run = await startProcess(
@@ -69,6 +86,7 @@ export class TaskRunner {
           NPM_CONFIG_CACHE: join(cwd, ".npm-cache"),
         },
         maxOutputBytes: 65536,
+        ...(jobName ? { jobName } : {}),
       },
     );
     let expired = false;
@@ -124,7 +142,12 @@ export class TaskRunner {
     state: unknown,
     input: unknown,
     signal: AbortSignal,
+    registerJob?: (name: string) => void,
   ): Promise<Output> {
+    const jobName =
+      process.platform === "win32" ? this.jobName(task.id) : undefined;
+    // Persist ownership before either dependency preparation or the user script can start.
+    if (jobName) registerJob?.(jobName);
     const cwd = resolve(this.workRoot, task.id);
     await mkdir(cwd, { recursive: true });
     const dependencies = JSON.stringify(task.dependencies),
@@ -173,6 +196,8 @@ export class TaskRunner {
           ],
           120000,
           signal,
+          "",
+          jobName,
         );
       } else if (installed)
         await rm(join(cwd, "node_modules"), { recursive: true, force: true });
@@ -203,6 +228,7 @@ export class TaskRunner {
       timeoutMs,
       signal,
       JSON.stringify({ config: task.config, secrets, state, input, timeoutMs }),
+      jobName,
     );
     const resultPath = join(cwd, "result.json");
     requireThat(

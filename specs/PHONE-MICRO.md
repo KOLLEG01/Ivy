@@ -32,6 +32,9 @@ Implementation: [native runtime](../services/phone-bridge/native/phone-runtime),
   readiness can precede that session; a previous session cannot satisfy the check.
   Missing realtime readiness suppresses the greeting without ending an already
   bound call; the conversation remains available.
+  A confirmed local task may still be `notLoaded` while its realtime session is
+  active. Do not wait for task loading before binding or prompt delivery; sending
+  the complete prompt starts its task turn and preserves the conversation context.
   The default is `Greet the user with "Hi"`. Outgoing
   calls keep their greeting followed by their configured `voicePrompt`. Binding
   follows an early incoming answer. The caller hears locally generated progress audio
@@ -39,7 +42,15 @@ Implementation: [native runtime](../services/phone-bridge/native/phone-runtime),
   original task is bound. Outgoing Voice calls use the same signal after answer. The
   progress audio ends before prompt submission so its spoken reply can reach the
   caller. Journal before mutation; unknown outcomes never authorize another send.
-- The default for a new PhoneBridge task is GPT-6 Sol / high. Authenticated
+- Outgoing Voice requests with a prompt reuse an admitted incoming or outgoing
+  Voice call to the same configured recipient. Wait for current call setup or task
+  control, then send the prompt unchanged to the latest bound task without dialing
+  or adding a greeting. Return the existing call identity. Retain the send under
+  the request's operation ID and original admission arguments; a retry returns its
+  confirmed result or unknown outcome without another send, including after the
+  call ends. Windows and screening calls retain their existing admission behavior.
+- The default for a new PhoneBridge task is GPT-6 Sol / high; `voiceDefault` may
+  configure a different supported model and reasoning selection. Authenticated
   `*1<M><R>#` updates the current call selection without restarting
   its task: M=1 Luna, 2 Sol, 3 Astra; R=1 low, 2 medium, 3 high, 4 xhigh, 5 max,
   6 ultra (not Luna). PhoneBridge submits one journaled App Tools follow-up with

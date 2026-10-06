@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { canonical, digest, IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
-import type { PhoneCall, PhoneScreening } from "./admission.js";
+import type { PhoneCall, PhoneCallAdmission, PhoneScreening } from "./admission.js";
 import { PhoneCallCommands } from "./calls.js";
 import type { PhoneCallTarget, PhoneOperation } from "./journal.js";
 import type { PhoneJournalIntent } from "./journal.js";
@@ -27,6 +27,7 @@ type PhoneVoiceControl = { action: 'select'; selection: PhoneVoiceSelection } | 
 export interface PhoneFlowSettings {
   incomingRoute?: "voice" | "windows";
   incomingInitialPrompt?: string;
+  voiceDefault?: PhoneVoiceSelection;
   outgoingRoute?: "voice" | "windows";
   accessCodePath?: string | null;
   speech?: PhoneSpeechSettings;
@@ -159,10 +160,30 @@ export class PhoneFlow {
     voicePrompt?: string,
   ): Promise<PhoneCall> {
     const selectedRoute = route ?? this.settings.outgoingRoute ?? "windows";
+    const forwarded = this.calls.journal.get(operationId);
+    if (forwarded) {
+      requireThat(forwarded.intent.method === 'call.forwardVoice' && forwarded.intent.callId,
+        'mutation_conflict', 'Phone request operation belongs to another command.');
+      const admission = this.calls.admission.outgoing(forwarded.intent.epoch, operationId, principalId,
+        recipientId, selectedRoute, undefined, destination, voicePrompt);
+      requireThat(forwarded.intent.requestHash === digest(canonical(admission)),
+        'mutation_conflict', 'Original forwarded Phone request changed.');
+      const call = this.original(principalId, forwarded.intent.callId, 'read');
+      return this.admit(() => this.forwardVoiceRequest(call, admission));
+    }
     if (selectedRoute === 'voice' && !this.calls.journal.callForOperation(operationId)) {
       requireThat(this.settings.voiceArchive &&
         (this.settings.voiceInput['micro'] || this.settings.voiceInput['hotkeyFallback']),
         'phone_voice_unconfigured', 'Voice calls require configured task control and Voice input before dialing.');
+      if (voicePrompt && recipientId) {
+        const call = this.calls.journal.currentCalls().find(candidate => this.callRoute(candidate) === 'voice' &&
+          this.calls.admission.matchesRecipient(candidate, recipientId));
+        if (call) {
+          const admission = this.calls.admission.outgoing(this.native.epoch, operationId, principalId,
+            recipientId, selectedRoute, undefined, destination, voicePrompt);
+          return this.admit(() => this.forwardVoiceRequest(call, admission));
+        }
+      }
     }
     return this.admit(() =>
       this.calls.admitOutgoing(
@@ -175,6 +196,38 @@ export class PhoneFlow {
         voicePrompt,
       ),
     );
+  }
+  private async forwardVoiceRequest(call: PhoneCall, admission: PhoneCallAdmission): Promise<PhoneCall> {
+    // Setup, task switches and other prompts share the same per-call execution slot.
+    while (this.work.has(call.callId)) await this.work.get(call.callId)!.catch(() => undefined);
+    const requestHash = digest(canonical(admission));
+    const prior = this.calls.journal.get(admission.operationId);
+    if (prior) {
+      requireThat(prior.intent.method === 'call.forwardVoice' && prior.intent.callId === call.callId &&
+        prior.intent.requestHash === requestHash,
+        'mutation_conflict', 'Original forwarded Phone request changed.');
+      const state = (prior.receipt?.result as { state?: unknown } | null)?.state;
+      if (prior.phase === 'result' && prior.receipt?.ok && state === 'sent') return call;
+      throw new IvyError('phone_voice_prompt_unknown',
+        'Original forwarded Voice prompt remains unknown and cannot be repeated.', 'unknown');
+    }
+    this.continuing(call);
+    const pending = Promise.resolve().then(async () => {
+      this.continuing(call);
+      const target = this.calls.journal.target(call.callId);
+      const generation = this.calls.journal.latestVoiceGeneration(call.callId);
+      requireThat(target?.voiceArchive && generation !== null,
+        'phone_voice_task_missing', 'The current call has no bound Voice task.');
+      const threadId = this.calls.journal.voiceTask(call.callId, generation);
+      requireThat(threadId, 'phone_voice_task_missing', 'The current Voice task is unavailable.');
+      await this.voiceTasks.prompt(call, target.voiceArchive.databasePath, target.voiceArchive.appTools,
+        generation, threadId, admission.voicePrompt!, async () => {
+          await this.confirmConnectedForVoice(call);
+        }, this.voiceSelection(call.callId), { operationId: admission.operationId, requestHash });
+    }).finally(() => this.work.delete(call.callId));
+    this.work.set(call.callId, pending);
+    await pending;
+    return call;
   }
   screen(
     principalId: string,
@@ -257,11 +310,11 @@ export class PhoneFlow {
         !!this.calls.admission.definition.challengedIncoming?.length,
       directDialConfigured:
         this.calls.admission.definition.allowDirectDial === true,
-      voiceDefault: defaultPhoneVoiceSelection,
+      voiceDefault: this.settings.voiceDefault ?? defaultPhoneVoiceSelection,
     };
   }
   voiceSelection(callId: string): PhoneVoiceSelection {
-    return this.voiceSelections.get(callId) ?? defaultPhoneVoiceSelection;
+    return this.voiceSelections.get(callId) ?? this.settings.voiceDefault ?? defaultPhoneVoiceSelection;
   }
   callRoute(call: PhoneCall): 'voice' | 'windows' {
     return call.route ?? (call.direction === 'incoming'
@@ -744,6 +797,7 @@ export class PhoneFlow {
       if (dialed.status === 'rejected') throw dialed.reason;
       this.callResult(call, dialed.value, ["connected"]);
       if (prewarmed.status === 'rejected') throw prewarmed.reason;
+      preparedThreadId = prewarmed.value;
     } else if (!earlyAnswer) {
       this.callResult(
         call,
@@ -756,7 +810,7 @@ export class PhoneFlow {
     } catch { /* Diagnostics cannot change a connected call. */ }
     if (call.screening) return;
     if (call.direction === "outgoing" && selected) {
-      preparedThreadId = await this.startVoice(call, selected);
+      preparedThreadId = await this.startVoice(call, selected, 0, preparedThreadId);
       voiceStarted = true;
     }
     if (voiceStarted && selected) {

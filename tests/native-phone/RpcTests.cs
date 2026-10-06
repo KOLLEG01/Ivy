@@ -143,7 +143,7 @@ static partial class Program {
         string endpoint = configured.Result!.Value.GetProperty("endpoint").GetString()!, callId = Guid.NewGuid().ToString();
         Check((await caller.Send("call.prepare", new { callId }, Guid.NewGuid().ToString())).Ok, "child prepares original call");
         string dialOperation = Guid.NewGuid().ToString();
-        var dialArgs = new { callId, destination = "sip:fixture@" + endpoint, username = (string?)null, password = (string?)null, ringSeconds = 5 };
+        var dialArgs = new { callId, destination = "sip:fixture@" + endpoint, username = (string?)null, password = (string?)null, ringSeconds = 5, waiting = false };
         var dial = caller.Send("call.dial", dialArgs, dialOperation); var retry = caller.Send("call.dial", dialArgs, dialOperation);
         var wait = Stopwatch.StartNew(); bool ringing = false;
         while (wait.Elapsed < TimeSpan.FromSeconds(3)) {

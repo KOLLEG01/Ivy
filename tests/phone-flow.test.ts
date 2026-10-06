@@ -41,9 +41,10 @@ async function until(condition: () => boolean) {
 }
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
 type Request = { method: string; requestId: number; params: Record<string, unknown> };
-function fixture(t: TestContext, maxBytes = 512 * 1024 * 1024, maxConcurrentCalls = 1) {
+function fixture(t: TestContext, maxBytes = 512 * 1024 * 1024, maxConcurrentCalls = 1,
+  policyDefinition?: ConstructorParameters<typeof PhoneAdmission>[0]) {
   const root = mkdtempSync(join(tmpdir(), 'ivy-phone-flow-'));
-  const policy = new PhoneAdmission({
+  const policy = new PhoneAdmission(policyDefinition ?? {
     recipients: [{ id: 'personal', destination: 'sip:personal@127.0.0.1' }],
     incoming: [{ peerAddress: '127.0.0.1', transport: 'udp', fromUri: 'sip:known@fixture' }] });
   const journal = new PhoneJournal(root, { hostId: 'fixture', serviceNodeId: 'phone' }, { maxOperations: 100, maxBytes, maxEpochs: 100 }, maxConcurrentCalls);
@@ -86,7 +87,7 @@ function fixture(t: TestContext, maxBytes = 512 * 1024 * 1024, maxConcurrentCall
         media: activeId ? { closed: state === 'local_ended', failed: false, sentPackets: 0, receivedPackets: 0,
           receive: { queuedPackets: 0, maximumPackets: 8, reorderMs: 20, duplicatePackets: 0, latePackets: 0, overflowPackets: 0,
             foreignPackets: 0, gatedPackets: 0, missingPackets: 0, maximumResidenceMs: 0 }, audio: { callId: activeId, state: audioState, route: null } } : null }; break;
-      case 'call.prepare': activeId = String(r.params['callId']); result = observation(); break;
+      case 'call.prepare': activeId = String(r.params['callId']); direction = 'outgoing'; state = 'prepared'; result = observation(); break;
       case 'call.claim': assert.equal(r.params['callId'], activeId); assert.equal(direction, 'incoming'); result = observation(); break;
       case 'call.desktop.launch': result = { callId: activeId, action: 'launch', result: { phase: launchPhase,
         identity: launchPhase === 'ready' ? desktop : null, activationPid: launchPhase === 'submitted' ? 123 : null, errorCode: null } }; break;
@@ -126,14 +127,15 @@ function fixture(t: TestContext, maxBytes = 512 * 1024 * 1024, maxConcurrentCall
       }
       return threadId;
     },
-    async prompt(call, _database, _settings, generation, threadId, prompt, beforeSubmit, selection) {
+    async prompt(call, _database, _settings, generation, threadId, prompt, beforeSubmit, selection, forwarded) {
       await beforeSubmit();
       if (failPrompt) throw new IvyError(promptError, 'The greeting is unavailable.');
       prompts.push({ generation, threadId, prompt });
       promptSelections.push(selection);
-      if (!journal.callCommand(call.callId, 'call.promptVoice', generation)) {
-        const intent = { epoch: call.epoch, callId: call.callId, operationId: randomUUID(), method: 'call.promptVoice' as const,
-          ...(generation ? { voiceGeneration: generation } : {}), threadId, prompt, requestHash: 'sha256:' + '0'.repeat(64) };
+      if (forwarded || !journal.callCommand(call.callId, 'call.promptVoice', generation)) {
+        const intent = { epoch: call.epoch, callId: call.callId, operationId: forwarded?.operationId ?? randomUUID(),
+          method: forwarded ? 'call.forwardVoice' as const : 'call.promptVoice' as const,
+          ...(generation ? { voiceGeneration: generation } : {}), threadId, prompt, requestHash: forwarded?.requestHash ?? 'sha256:' + '0'.repeat(64) };
         journal.submit(intent); journal.finishVoicePrompt(intent, 'sent');
       }
     },
@@ -276,7 +278,7 @@ test('Phone flow retains its target before audio, connects once and cleans up th
   f.intercept(async r => {
     if (r.method === 'call.audio.prepare' || r.method === 'call.desktop.startVoice')
       assert.deepEqual(f.journal.target(String(r.params['callId']))?.desktop, desktop);
-    if (r.method === 'call.desktop.startVoice') assert.equal(f.voicePrepares(), 2, 'App controller is prewarmed while ringing and reverified before Micro starts');
+    if (r.method === 'call.desktop.startVoice') assert.equal(f.voicePrepares(), 1, 'the prepared controller is retained while ringing');
   });
   const call = await flow.request('main', operation, 'personal');
   await until(() => f.journal.callCommand(call.callId, 'call.waiting.end')?.phase === 'result'); await tick();
@@ -290,6 +292,23 @@ test('Phone flow retains its target before audio, connects once and cleans up th
   assert.deepEqual(f.requests.find(r => r.method === 'call.desktop.stopVoice')?.params['voiceInput'], settings.voiceInput);
   assert.equal(f.journal.currentCall(), null); assert.deepEqual(f.errors, []);
   assert.ok(!JSON.stringify(f.journal.target(call.callId)).includes('never-retained'));
+});
+
+test('configured Voice defaults reach the complete first prompt and explicit selection can override them', async t => {
+  const f = fixture(t), voiceDefault = { model: 'gpt-6-sol', reasoningEffort: 'low' } as const;
+  const flow = f.flow({ ...settings, voiceDefault });
+  assert.deepEqual(flow.configuration().voiceDefault, voiceDefault);
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice', undefined,
+    'Ask whether Tuesday at 10 or Thursday at 15 works, then confirm the caller\'s choice.');
+  await until(() => f.journal.callCommand(call.callId, 'call.promptVoice')?.phase === 'result');
+  await tick();
+  assert.deepEqual(flow.voiceSelection(call.callId), voiceDefault);
+  assert.deepEqual(f.promptSelections, [voiceDefault]);
+  assert.ok(f.prompts[0]!.prompt.includes('Tuesday at 10 or Thursday at 15'));
+  await flow.controlVoice('main', call.callId, randomUUID(),
+    { action: 'select', selection: { model: 'gpt-6-sol', reasoningEffort: 'high' } });
+  assert.deepEqual(flow.voiceSelection(call.callId), { model: 'gpt-6-sol', reasoningEffort: 'high' });
+  await flow.hangup('main', call.callId);
 });
 
 test('a timed-out call creation waits for its original native owner before spending hangup', async t => {
@@ -311,6 +330,72 @@ test('a timed-out call creation waits for its original native owner before spend
   if (f.journal.currentCall(call.callId)) await flow.observe();
   assert.equal(f.journal.currentCall(call.callId), null);
   assert.equal(f.methods().filter(method => method === 'call.hangup').length, 1);
+});
+
+for (const direction of ['incoming', 'outgoing'] as const) test('Voice call requests forward to the active task once: ' + direction, async t => {
+  const f = fixture(t, undefined, undefined, {
+    recipients: [{ id: 'personal', destination: 'sip:known@fixture' }],
+    incoming: [{ peerAddress: '127.0.0.1', transport: 'udp', fromUri: 'sip:known@fixture' }],
+  }), flow = f.flow();
+  const call = direction === 'incoming' ? await flow.accept('main', randomUUID(), f.incoming())
+    : await flow.request('main', randomUUID(), 'personal', 'voice', undefined, 'Opening request');
+  await until(() => f.journal.callCommand(call.callId, 'call.promptVoice')?.phase === 'result');
+  await tick();
+  await flow.controlVoice('main', call.callId, randomUUID(), { action: 'select', selection: { model: 'gpt-6-luna', reasoningEffort: 'low' } });
+  await flow.controlVoice('main', call.callId, randomUUID(), { action: 'restart' });
+  const threadId = f.journal.voiceTask(call.callId, 1), baseline = f.prompts.length;
+  const operationId = randomUUID();
+  const forwarded = await Promise.all([
+    flow.request('another-agent', operationId, 'personal', 'voice', undefined, 'Additional request'),
+    flow.request('another-agent', operationId, 'personal', 'voice', undefined, 'Additional request'),
+    flow.request('main', randomUUID(), 'personal', 'voice', undefined, 'Another request'),
+  ]);
+  assert.ok(forwarded.every(value => value.callId === call.callId));
+  assert.deepEqual(f.prompts.slice(baseline), [
+    { generation: 1, threadId, prompt: 'Additional request' },
+    { generation: 1, threadId, prompt: 'Another request' },
+  ]);
+  assert.deepEqual(f.promptSelections.slice(baseline), Array(2).fill({ model: 'gpt-6-luna', reasoningEffort: 'low' }));
+  assert.equal(f.methods().filter(method => method === 'call.dial').length, direction === 'outgoing' ? 1 : 0);
+  assert.equal(f.journal.get(operationId)?.intent.method, 'call.forwardVoice');
+  assert.throws(() => flow.request('another-agent', operationId, 'personal', 'voice', undefined, 'Changed request'), { code: 'mutation_conflict' });
+  assert.throws(() => flow.request('different-agent', operationId, 'personal', 'voice', undefined, 'Additional request'), { code: 'mutation_conflict' });
+  await flow.hangup('main', call.callId);
+  assert.equal((await flow.request('another-agent', operationId, 'personal', 'voice', undefined, 'Additional request')).callId, call.callId);
+  assert.equal(f.prompts.length, baseline + 2);
+  assert.equal(f.journal.currentCall(), null);
+});
+
+test('Voice prompt forwarding waits for original setup and refuses a call that ends before submission', async t => {
+  const f = fixture(t), flow = f.flow(), entered = deferred(), resume = deferred();
+  f.intercept(async request => { if (request.method === 'call.dial') { entered.resolve(); await resume.promise; } });
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice', undefined, 'Opening request');
+  await entered.promise;
+  const forwarded = flow.request('main', randomUUID(), 'personal', 'voice', undefined, 'After setup');
+  assert.equal(f.prompts.length, 0);
+  resume.resolve();
+  assert.equal((await forwarded).callId, call.callId);
+  assert.equal(f.prompts.at(-1)?.prompt, 'After setup');
+  f.ended();
+  await assert.rejects(flow.request('main', randomUUID(), 'personal', 'voice', undefined, 'Too late'), { code: 'phone_call_cancelled' });
+  assert.equal(f.prompts.length, 2);
+  assert.equal(f.methods().filter(method => method === 'call.dial').length, 1);
+});
+
+test('Voice forwarding requires the same recipient and leaves Windows call admission unchanged', async t => {
+  const f = fixture(t, undefined, undefined, {
+    recipients: [{ id: 'personal', destination: 'sip:personal@fixture' }, { id: 'other', destination: 'sip:other@fixture' }], incoming: [],
+  }), flow = f.flow();
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice', undefined, 'Opening request');
+  await until(() => f.journal.callCommand(call.callId, 'call.promptVoice')?.phase === 'result'); await tick();
+  await assert.rejects(flow.request('main', randomUUID(), 'other', 'voice', undefined, 'For someone else'), { code: 'phone_call_busy' });
+  await assert.rejects(flow.request('main', randomUUID(), 'personal', 'windows'), { code: 'phone_call_busy' });
+  assert.equal(f.prompts.length, 1);
+  await flow.hangup('main', call.callId);
+  const windows = await flow.request('main', randomUUID(), 'personal', 'windows');
+  await until(() => f.journal.callCommand(windows.callId, 'call.windows.connect')?.phase === 'result'); await tick();
+  await assert.rejects(flow.request('main', randomUUID(), 'personal', 'voice', undefined, 'Needs Voice'), { code: 'phone_call_busy' });
+  assert.equal(f.prompts.length, 1);
 });
 
 test('Voice keypad selection keeps the current task and *0# transfers Voice to a new generation', async t => {
@@ -503,7 +588,7 @@ test('outgoing Voice and its prompt wait for the peer to answer', async t => {
   connected.resolve();
   await until(() => f.journal.callCommand(call.callId, 'call.promptVoice')?.phase === 'result');
   assert.ok(f.methods().indexOf('call.dial') < f.methods().indexOf('call.desktop.startVoice'));
-  assert.equal(f.voicePrepares(), 2);
+  assert.equal(f.voicePrepares(), 1);
   assert.deepEqual(f.prompts.map(value => value.prompt),
     ['Begrüße die angerufene Person zuerst kurz auf Deutsch.\n\nHow was your weekend?']);
   await flow.hangup('main', call.callId);

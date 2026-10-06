@@ -104,7 +104,8 @@ export class PhoneVoiceTasks {
       this.owner(call);
       if (!this.voiceSessions.has(key))
         this.voiceSessions.set(key, readDesktopVoiceSession(databasePath, threadId)?.sessionId ?? null);
-      // Keep the live Voice page open until the explicit transfer is confirmed.
+      // An unloaded conversation can be transferred into without first navigating
+      // away from Voice. Loading it here would put the full task startup on the call.
       const deadline = performance.now() + 60000;
       while (true) {
         const observed = await port.readThread(threadId);
@@ -112,7 +113,7 @@ export class PhoneVoiceTasks {
         // A returning caller may reach the same task while its previous turn is
         // still running. Voice can attach to that task without resubmitting work.
         if (observed.id === threadId && observed.hostId === 'local' && observed.kind === 'codex' &&
-          ['idle', 'active'].includes(observed.status.type) && observed.status.activeFlags.length === 0) break;
+          ['idle', 'active', 'notLoaded'].includes(observed.status.type) && observed.status.activeFlags.length === 0) break;
         requireThat(performance.now() < deadline, 'phone_voice_task_not_loaded',
           'Desktop did not finish loading the prepared task before Micro startup.');
         await delay(100);
@@ -176,7 +177,7 @@ export class PhoneVoiceTasks {
     try {
       // Capture can precede the new root and the persisted reference can still
       // name the reusable chat. Do not mistake that stale value for resumed Voice.
-      if (generation === 0) await this.waitStartedThread(call, databasePath);
+      if (generation === 0) await this.waitStartedThread(call, databasePath, preparedThreadId);
       const retainedReference = await this.reference(databasePath, true);
       // Micro can create a new Voice task before Desktop flushes its last-task setting.
       // Only the single new Voice root since this call's preparation is eligible.
@@ -200,7 +201,10 @@ export class PhoneVoiceTasks {
         }
         // Native capture becomes active before the App publishes its realtime session.
         // Only a definite negative acknowledgement permits another transfer attempt.
-        const transferDeadline = performance.now() + 10000;
+        // Wait on the local readiness record, rather than repeatedly asking the
+        // App to transfer a session it has not published yet.
+        await this.waitVoiceSession(call, databasePath, generation, sourceThreadId);
+        const transferDeadline = performance.now() + (generation === 0 ? 1000 : 10000);
         while (true) {
           this.owner(call);
           // Capture can become active before the new Voice thread is persisted.
@@ -234,7 +238,7 @@ export class PhoneVoiceTasks {
                 port = null;
                 return await this.bindStarted(call, databasePath, resolved, retainForPrompt);
               }
-              await delay(200);
+              await delay(100);
               continue;
             }
             // A transport or malformed App reply might follow a completed transfer.
@@ -278,7 +282,7 @@ export class PhoneVoiceTasks {
           const observed = await port.readThread(preparedThreadId);
           requireThat(
             observed.id === preparedThreadId &&
-              ["idle", "active"].includes(observed.status.type) &&
+              ["idle", "active", "notLoaded"].includes(observed.status.type) &&
               observed.status.activeFlags.length === 0,
             "phone_voice_task_missing",
             "Prepared Desktop Voice task is unavailable after Micro startup.",
@@ -346,7 +350,7 @@ export class PhoneVoiceTasks {
           }
           const observed = await port.readThread(threadId);
           requireThat(observed.id === threadId && observed.hostId === 'local' && observed.kind === 'codex' &&
-            ['idle', 'active'].includes(observed.status.type) && observed.status.activeFlags.length === 0,
+            ['idle', 'active', 'notLoaded'].includes(observed.status.type) && observed.status.activeFlags.length === 0,
             'phone_voice_task_missing', 'Desktop Voice chat is not available yet.');
         } catch (error) {
           if (port) await port.close().catch(() => undefined);
@@ -390,10 +394,15 @@ export class PhoneVoiceTasks {
     return roots[0] ?? null;
   }
 
-  private async waitStartedThread(call: PhoneCall, databasePath: string): Promise<string> {
+  private async waitStartedThread(call: PhoneCall, databasePath: string, resumedThreadId?: string): Promise<string> {
     const deadline = performance.now() + 15000;
     let threadId: string | null;
     while (!(threadId = await this.startedThread(call, databasePath))) {
+      if (resumedThreadId && await this.reference(databasePath) === resumedThreadId) {
+        const session = readDesktopVoiceSession(databasePath, resumedThreadId);
+        if (session?.active && session.sessionId !== this.voiceSessions.get(this.key(call.callId, 0)))
+          return resumedThreadId;
+      }
       requireThat(performance.now() < deadline, 'phone_voice_task_missing',
         'Desktop did not publish the Voice chat started by Micro.');
       await delay(100);
@@ -422,6 +431,7 @@ export class PhoneVoiceTasks {
     prompt: string,
     beforeSubmit: () => Promise<void>,
     selection: PhoneVoiceSelection = defaultPhoneVoiceSelection,
+    forwarded?: { operationId: string; requestHash: string },
   ): Promise<void> {
     let port = this.take(call.callId, generation);
     try {
@@ -432,14 +442,17 @@ export class PhoneVoiceTasks {
         "phone_voice_task_changed",
         "Prompt target is not the bound Voice generation.",
       );
-      const prior = this.journal.callCommand(
+      const method = forwarded ? 'call.forwardVoice' : 'call.promptVoice';
+      const prior = forwarded ? this.journal.get(forwarded.operationId) : this.journal.callCommand(
         call.callId,
         "call.promptVoice",
         generation,
       );
       if (prior) {
         requireThat(
-          prior.intent.method === "call.promptVoice" &&
+          prior.intent.method === method &&
+            prior.intent.callId === call.callId &&
+            (!forwarded || prior.intent.requestHash === forwarded.requestHash) &&
             prior.intent.threadId === threadId &&
             prior.intent.prompt === prompt &&
             prior.intent.model === selection.model &&
@@ -456,17 +469,17 @@ export class PhoneVoiceTasks {
           "unknown",
         );
       }
-      const intent: PhoneJournalIntent & { method: "call.promptVoice" } = {
+      const intent: PhoneJournalIntent & { method: 'call.promptVoice' | 'call.forwardVoice' } = {
         epoch: call.epoch,
         callId: call.callId,
-        operationId: randomUUID(),
-        method: "call.promptVoice",
+        operationId: forwarded?.operationId ?? randomUUID(),
+        method,
         ...(generation ? { voiceGeneration: generation } : {}),
         threadId,
         prompt,
         model: selection.model,
         reasoningEffort: selection.reasoningEffort,
-        requestHash: digest(canonical({ generation, threadId, prompt,
+        requestHash: forwarded?.requestHash ?? digest(canonical({ generation, threadId, prompt,
           model: selection.model, reasoningEffort: selection.reasoningEffort })),
       };
       // A slow/missing realtime session suppresses only the greeting. Binding
@@ -479,7 +492,7 @@ export class PhoneVoiceTasks {
         const observed = await port.readThread(threadId);
         requireThat(
           observed.id === threadId &&
-            ["idle", "active"].includes(observed.status.type) &&
+            ["idle", "active", "notLoaded"].includes(observed.status.type) &&
             observed.status.activeFlags.length === 0,
           "phone_voice_task_inactive",
           "Bound Voice task is unavailable for prompt delivery.",
@@ -496,6 +509,9 @@ export class PhoneVoiceTasks {
           async () => {
             await beforeSubmit();
             this.owner(call);
+            requireThat(!forwarded || this.journal.latestVoiceGeneration(call.callId) === generation &&
+              readDesktopVoiceReference(databasePath) === threadId,
+              'phone_voice_task_changed', 'Desktop Voice changed its task before prompt submission.');
             this.journal.submit(intent);
             submitted = true;
           },

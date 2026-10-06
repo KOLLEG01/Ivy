@@ -33,6 +33,7 @@ internal static class JobLauncher {
     [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr Process, Thread; public uint ProcessId, ThreadId; }
     [StructLayout(LayoutKind.Sequential)] struct StartupInfoEx { public StartupInfo Startup; public IntPtr Attributes; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int kind, ref ExtendedLimits information, uint length);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool InitializeProcThreadAttributeList(IntPtr attributes, uint count, uint flags, ref UIntPtr size);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool UpdateProcThreadAttribute(IntPtr attributes, uint flags, UIntPtr key, IntPtr value, UIntPtr size, IntPtr previous, IntPtr returned);
@@ -49,6 +50,10 @@ internal static class JobLauncher {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr attributes, uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     static void Check(bool success) { if (!success) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+    static void ValidateJobName(string name) {
+        if (name == null || !System.Text.RegularExpressions.Regex.IsMatch(name, @"^Global\\Ivy\.[a-zA-Z0-9._-]{1,128}$"))
+            throw new ArgumentException("Invalid process job name.");
+    }
     static string Quote(string value) {
         var result = new StringBuilder("\""); int slashes = 0;
         foreach (char character in value) {
@@ -63,13 +68,31 @@ internal static class JobLauncher {
         IntPtr job = IntPtr.Zero, parent = IntPtr.Zero, nul = IntPtr.Zero, attributes = IntPtr.Zero, jobList = IntPtr.Zero;
         bool attributesInitialized = false; var child = new ProcessInfo();
         try {
+            if (args.Length == 2 && args[0] == "--probe-job") {
+                ValidateJobName(args[1]);
+                job = OpenJobObject(4, false, args[1]); // JOB_OBJECT_QUERY; never signal a probed job.
+                if (job == IntPtr.Zero && Marshal.GetLastWin32Error() != 2)
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                // A named job survives until its last handle and all associated processes are gone.
+                Console.WriteLine(job == IntPtr.Zero ? "{\"stopped\":true}" : "{\"stopped\":false}");
+                return 0;
+            }
             if (args.Length < 3 || args[0] != "--parent") throw new ArgumentException("Expected --parent PID executable [args...].");
             uint parentId = UInt32.Parse(args[1]);
             if (parentId != 0) { parent = OpenProcess(0x00100000, false, parentId); Check(parent != IntPtr.Zero); }
-            bool allowBreakaway = args[2] == "--allow-breakaway";
-            int executableIndex = allowBreakaway ? 3 : 2;
+            bool allowBreakaway = false;
+            string jobName = null;
+            int executableIndex = 2;
+            if (args[executableIndex] == "--allow-breakaway") { allowBreakaway = true; executableIndex++; }
+            if (args.Length > executableIndex && args[executableIndex] == "--job-name") {
+                if (args.Length <= executableIndex + 1) throw new ArgumentException("Missing process job name.");
+                jobName = args[executableIndex + 1]; ValidateJobName(jobName); executableIndex += 2;
+            }
             if (args.Length <= executableIndex) throw new ArgumentException("Missing executable.");
-            job = CreateJobObject(IntPtr.Zero, null); Check(job != IntPtr.Zero);
+            job = CreateJobObject(IntPtr.Zero, jobName); Check(job != IntPtr.Zero);
+            // A delayed launcher must not join or replace a task's previous process tree.
+            if (jobName != null && Marshal.GetLastWin32Error() == 183)
+                throw new InvalidOperationException("The process job is already owned.");
             // Keep ordinary descendants owned. Only CREATE_BREAKAWAY_FROM_JOB can opt out,
             // and every enclosing Ivy AgentManager job must explicitly permit it.
             var limits = new ExtendedLimits(); limits.Basic.LimitFlags = 0x00002000U | (allowBreakaway ? 0x00000800U : 0U);
@@ -101,6 +124,8 @@ internal static class JobLauncher {
             DeleteProcThreadAttributeList(attributes); attributesInitialized = false;
             Marshal.FreeHGlobal(attributes); attributes = IntPtr.Zero;
             Marshal.FreeHGlobal(jobList); jobList = IntPtr.Zero;
+            if (parent != IntPtr.Zero && WaitForMultipleObjects(1, new[] { parent }, false, 0) != 258)
+                throw new InvalidOperationException("The process owner has exited.");
             Check(ResumeThread(child.Thread) != UInt32.MaxValue);
             var waits = parent == IntPtr.Zero ? new[] { child.Process } : new[] { child.Process, parent };
             uint outcome = WaitForMultipleObjects((uint)waits.Length, waits, false, UInt32.MaxValue);

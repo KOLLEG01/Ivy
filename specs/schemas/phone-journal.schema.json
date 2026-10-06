@@ -63,6 +63,7 @@
             "call.bindVoice",
             "call.createVoice",
             "call.promptVoice",
+            "call.forwardVoice",
             "call.selectVoice",
             "call.restartVoice"
           ]
@@ -124,12 +125,12 @@
           }
         },
         {
-          "if": { "properties": { "method": { "enum": ["call.bindVoice", "call.promptVoice", "call.selectVoice"] } } },
+          "if": { "properties": { "method": { "enum": ["call.bindVoice", "call.promptVoice", "call.forwardVoice", "call.selectVoice"] } } },
           "then": { "required": ["threadId"] },
           "else": { "not": { "required": ["threadId"] } }
         },
         {
-          "if": { "properties": { "method": { "enum": ["call.promptVoice", "call.selectVoice"] } } },
+          "if": { "properties": { "method": { "enum": ["call.promptVoice", "call.forwardVoice", "call.selectVoice"] } } },
           "then": { "required": ["prompt"] },
           "else": { "not": { "required": ["prompt"] } }
         },

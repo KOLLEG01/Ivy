@@ -39,6 +39,7 @@ function fixture(t: test.TestContext) {
   let onRead: ((id: string) => void) | null = null;
   let onTransfer: (() => void) | null = null;
   let sessionDelay = 0;
+  let status = 'idle';
   const session = (id: string, active = true) => {
     const path = join(root, id + '.jsonl');
     if (!db.prepare('SELECT rollout_path FROM threads WHERE id=?').get(id)?.['rollout_path']) {
@@ -49,7 +50,7 @@ function fixture(t: test.TestContext) {
       type: active ? 'realtime_session_started' : 'realtime_session_closed', realtime_session_id: randomUUID(),
     } }) + '\n');
   };
-  const observation = (id: string) => ({ id, hostId: 'local', kind: 'codex', status: { type: 'idle', activeFlags: [] } });
+  const observation = (id: string) => ({ id, hostId: 'local', kind: 'codex', status: { type: status, activeFlags: [] } });
   const open = (value: AppToolsSettings) => {
     opened.push(value.actorThreadId);
     return {
@@ -84,6 +85,7 @@ function fixture(t: test.TestContext) {
     root, db, databasePath, settings, actor, previous, voice, prompts, transfers, created, opened, tasks, start, reference, cancel,
     get journal() { return journal; }, get call() { return call; }, get reads() { return reads; }, get closes() { return closes; },
     fail(value: typeof failure) { failure = value; }, session, delaySession(ms: number) { sessionDelay = ms; },
+    status(value: string) { status = value; },
     onRead(value: typeof onRead) { onRead = value; }, onTransfer(value: typeof onTransfer) { onTransfer = value; },
     restartJournal(principalId = 'main') {
       const intent = { epoch, callId: call.callId, operationId: randomUUID(), method: 'call.release' as const, requestHash: digest('release') };
@@ -165,6 +167,18 @@ for (const failure of ['observation', 'journal', 'reference', 'cancellation'] as
   });
 }
 
+test('a fresh Voice chat accepts its complete prompt while its task is notLoaded', async t => {
+  const f = fixture(t), tasks = f.tasks();
+  await tasks.prepare(f.call, f.databasePath, f.settings);
+  f.start(); f.status('notLoaded');
+  assert.equal(await tasks.bind(f.call, f.databasePath, f.settings, 0, null, true), f.voice);
+  const prompt = 'Ask which appointment the caller prefers: Tuesday at 10 or Thursday at 15. '
+    + 'The caller is answering this question; preserve these options as conversation context.';
+  await tasks.prompt(f.call, f.databasePath, f.settings, 0, f.voice, prompt, async () => undefined);
+  assert.deepEqual(f.prompts.map(value => value.prompt), [prompt]);
+  assert.deepEqual(f.prompts[0]?.selection, { model: 'gpt-6-sol', reasoningEffort: 'high' });
+});
+
 test('archived App controller is replaced without moving the Voice conversation', async t => {
   const f = fixture(t), replacement = randomUUID();
   f.db.prepare('UPDATE threads SET archived=1 WHERE id=?').run(f.actor);
@@ -201,6 +215,44 @@ test('model selection keeps the original chat; an explicit restart alone creates
   assert.equal(idleChecks, 1, 'original chat retention still checks that capture stopped');
   assert.equal(f.db.prepare('SELECT archived FROM threads WHERE id=?').get(f.voice)?.['archived'], 0);
   assert.equal(f.journal.retiredVoiceTask(f.voice), null, 'the original Voice chat is never queued for archival');
+});
+
+for (const lostReply of [false, true]) test('forwarded Voice prompts retain each request without repeating a send: ' + lostReply, async t => {
+  const f = fixture(t), tasks = f.tasks();
+  await tasks.prepare(f.call, f.databasePath, f.settings); f.start();
+  await tasks.bind(f.call, f.databasePath, f.settings, 0, null, true);
+  await tasks.prompt(f.call, f.databasePath, f.settings, 0, f.voice, 'Greeting', async () => undefined);
+  const forwarded = { operationId: randomUUID(), requestHash: digest('forwarded request') };
+  const send = (request = forwarded) => tasks.prompt(f.call, f.databasePath, f.settings, 0, f.voice,
+    'Unchanged request text', async () => undefined, undefined, request);
+  f.fail(lostReply ? 'prompt' : null);
+  if (lostReply) await assert.rejects(send());
+  else await send();
+  const operation = f.journal.get(forwarded.operationId);
+  assert.equal(operation?.intent.method, 'call.forwardVoice');
+  assert.equal((operation?.receipt?.result as { state: string }).state, lostReply ? 'outcome_unknown' : 'sent');
+  f.fail(null);
+  if (lostReply) await assert.rejects(send(), { code: 'phone_voice_prompt_unknown' });
+  else await send();
+  assert.equal(f.prompts.length, 2);
+  await assert.rejects(send({ ...forwarded, requestHash: digest('changed request') }), { code: 'mutation_conflict' });
+  await send({ operationId: randomUUID(), requestHash: digest('another request') });
+  assert.equal(f.prompts.length, 3);
+  assert.equal(f.prompts[1]?.prompt, 'Unchanged request text');
+  assert.equal(f.prompts[2]?.prompt, 'Unchanged request text');
+  assert.equal(f.journal.callCommand(f.call.callId, 'call.promptVoice')?.intent.method, 'call.promptVoice');
+});
+
+test('forwarded Voice prompt refuses a Desktop task switch before submission', async t => {
+  const f = fixture(t), tasks = f.tasks();
+  await tasks.prepare(f.call, f.databasePath, f.settings); f.start();
+  await tasks.bind(f.call, f.databasePath, f.settings, 0, null);
+  const forwarded = { operationId: randomUUID(), requestHash: digest('forwarded request') };
+  f.onRead(() => f.reference(f.previous));
+  await assert.rejects(tasks.prompt(f.call, f.databasePath, f.settings, 0, f.voice,
+    'Request text', async () => undefined, undefined, forwarded), { code: 'phone_voice_task_changed' });
+  assert.equal(f.prompts.length, 0);
+  assert.equal(f.journal.get(forwarded.operationId), null);
 });
 
 test('unknown prompt, model change and creation acknowledgements never repeat their mutations', async t => {
@@ -281,9 +333,34 @@ test('definitely rejected reuse preserves the exact startup chat and both histor
   assert.equal(f.journal.reusableVoiceTask('main'), startup);
   assert.equal(f.journal.retiredVoiceTask(startup), null);
   assert.equal(f.journal.retiredVoiceTask(f.voice), null);
-  assert.ok(f.transfers.length > 1);
+  assert.ok(f.transfers.length > 0);
   assert.equal(f.journal.callCommand(f.call.callId, 'call.hangup'), null);
   assert.equal(f.created.length, 0);
+});
+
+test('an unloaded reused chat does not delay preparation and a fresh resumed session needs no transfer', async t => {
+  const f = fixture(t); let tasks = f.tasks();
+  await tasks.prepare(f.call, f.databasePath, f.settings); f.start();
+  await tasks.bind(f.call, f.databasePath, f.settings, 0, null);
+  await tasks.release(f.call.callId); f.restartJournal(); tasks = f.tasks();
+  f.status('notLoaded');
+  const target = await tasks.prepare(f.call, f.databasePath, f.settings); assert.equal(target, f.voice);
+  f.status('idle'); f.session(f.voice);
+  assert.equal(await tasks.bind(f.call, f.databasePath, f.settings, 0, target, true), target);
+  await tasks.prompt(f.call, f.databasePath, f.settings, 0, target!, 'Greeting', async () => undefined);
+  assert.equal(f.transfers.length, 0);
+  assert.equal(f.prompts.length, 1);
+});
+
+test('a previous active session cannot prove that the reused chat resumed', async t => {
+  const f = fixture(t); let tasks = f.tasks();
+  await tasks.prepare(f.call, f.databasePath, f.settings); f.start();
+  await tasks.bind(f.call, f.databasePath, f.settings, 0, null);
+  await tasks.release(f.call.callId); f.restartJournal(); tasks = f.tasks();
+  const target = await tasks.prepare(f.call, f.databasePath, f.settings);
+  let clock = 0; t.mock.method(performance, 'now', () => clock += 16000);
+  await assert.rejects(tasks.bind(f.call, f.databasePath, f.settings, 0, target), { code: 'phone_voice_task_missing' });
+  assert.equal(f.transfers.length, 0);
 });
 
 test('realtime readiness timeout keeps the confirmed reused binding and never sends an inaudible greeting', async t => {

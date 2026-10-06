@@ -71,6 +71,12 @@ export class PhoneAdmission {
     requireThat(/^sips?:[^\s\x00-\x20]+$/.test(value) && value.length <= 2048, 'invalid_arguments', 'Expected E.164 or SIP destination.');
     return value;
   }
+  matchesRecipient(call: PhoneCall, recipientId: string): boolean {
+    const recipient = this.definition.recipients.find(item => item.id === recipientId);
+    return !!recipient && (call.direction === 'outgoing'
+      ? call.recipientId === recipientId
+      : sameCaller(this.resolveDestination(recipient.destination), call.incoming!.fromUri));
+  }
   incoming(epoch: string, operationId: string, principalId: string, observation: {
     id: string; direction: string; state: string; sipCallId: string | null; error: string | null; incoming: PhoneIncoming | null;
   }): PhoneCallAdmission {

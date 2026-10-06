@@ -169,6 +169,16 @@ export class TaskBoardDeliveries {
       await this.update(current, { ...value, state, deliveryEvidence: reply.object, code, updatedAt: new Date().toISOString() });
     } catch (error) { await this.uncertain(current, error); }
   }
+  private async forwardedPhonePrompt(value: TaskBoard.Delivery, target: TaskBoard.PhoneTarget, callId: string): Promise<Record<string, unknown> | null> {
+    const request = value.phoneRequest!;
+    const operation = await this.phoneCall('operation', target, { callId, operationId: request.operationId }) as Record<string, unknown> | null;
+    if (!operation) return null;
+    const intent = operation['intent'] as Record<string, unknown> | null;
+    requireThat(intent?.['method'] === 'call.forwardVoice' && intent['callId'] === callId &&
+      intent['operationId'] === request.operationId && intent['prompt'] === request.voicePrompt,
+      'task_board_delivery_mismatch', 'The forwarded prompt differs from the original Phone request.');
+    return operation;
+  }
   private async phone(current: Document<'task-board/delivery'>): Promise<void> {
     const value = current.value, target = value.phoneTarget ?? this.engine.settings.phoneTarget;
     if (!target) return this.fallback(current, 'task_board_phone_unconfigured');
@@ -180,12 +190,24 @@ export class TaskBoardDeliveries {
     if (!value.phoneCallId) {
       try {
         const result = await this.phoneCall('request', target, value.phoneRequest as unknown as Wire.Json, value.phoneRequest.operationId) as Record<string, unknown>;
-        requireThat(result['operationId'] === value.phoneRequest.operationId && typeof result['callId'] === 'string', 'task_board_delivery_mismatch', 'Phone admission changed its original identity.');
+        requireThat(typeof result['callId'] === 'string' && (result['operationId'] === value.phoneRequest.operationId ||
+          await this.forwardedPhonePrompt(value, target, result['callId'])),
+          'task_board_delivery_mismatch', 'Phone admission changed its original identity.');
         await this.update(current, { ...value, phoneCallId: result['callId'], code: 'awaiting_phone', updatedAt: new Date().toISOString() }); return;
       } catch (error) {
         const failure = IvyError.from(error); if (failure.outcome === 'not_executed') return this.fallback(current, failure.code);
         return this.uncertain(current, error);
       }
+    }
+    const forwarded = await this.forwardedPhonePrompt(value, target, value.phoneCallId);
+    if (forwarded) {
+      if (forwarded['phase'] === 'submitted') return;
+      const receipt = forwarded['receipt'] as Record<string, unknown> | null;
+      const result = receipt?.['result'] as Record<string, unknown> | null;
+      if (forwarded['phase'] !== 'result' || receipt?.['ok'] !== true || result?.['state'] !== 'sent')
+        return this.uncertain(current, new IvyError('phone_prompt_outcome_unknown', 'The forwarded Voice prompt outcome is unknown.', 'unknown'));
+      await this.update(current, { ...value, state: 'confirmed', code: null, updatedAt: new Date().toISOString() });
+      return;
     }
     const dial = await this.phoneCall('operation', target, { callId: value.phoneCallId, method: 'call.dial' }) as Record<string, unknown> | null;
     if (!dial || dial['phase'] === 'submitted') { if (value.code !== 'awaiting_phone') await this.update(current, { ...value, code: 'awaiting_phone', updatedAt: new Date().toISOString() }); return; }

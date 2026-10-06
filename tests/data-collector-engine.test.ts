@@ -178,7 +178,13 @@ async function fixture(
   const hive = new HiveFixture();
   const engine = new CollectorEngine(
     store,
-    { run, clearAuthentication() {} } as unknown as TaskRunner,
+    {
+      run,
+      clearAuthentication() {},
+      async stopped() {
+        return false;
+      },
+    } as unknown as TaskRunner,
     settings(),
   );
   await engine.attach(hive.client);
@@ -693,12 +699,44 @@ test("Crash recovery keeps publication work but bounds interrupted execution rec
     output: { data: {} },
     finishedAt: new Date().toISOString(),
   });
+  const scheduled = task("named-worker", {
+    enabled: true,
+    intervalSeconds: 60,
+  });
+  store.save({
+    task: scheduled,
+    revision: 1,
+    resultObjectId: null,
+    nextAt: 0,
+    state: { kept: true },
+    deleted: false,
+    lastRunId: "named-running",
+    retentionWarning: null,
+  });
+  store.saveRun({
+    ...base,
+    id: "named-running",
+    taskId: scheduled.id,
+    task: scheduled,
+    workerJobName: "Global\\Ivy.Collector.fixture",
+  });
   store.close();
   store = new CollectorStore(path);
   const recovered = store.run("running")!;
   assert.equal(recovered.status, "interrupted");
   assert.equal(recovered.error, "outcome_unknown");
   assert.equal(store.get(first.id)!.task.enabled, false);
+  assert.equal(
+    store.get(scheduled.id)!.task.enabled,
+    true,
+    "An observable worker keeps its schedule after a crash",
+  );
+  assert.equal(store.get(scheduled.id)!.revision, 1);
+  assert.equal(store.run("named-running")!.status, "interrupted");
+  assert.equal(
+    store.run("named-running")!.workerJobName,
+    "Global\\Ivy.Collector.fixture",
+  );
   const restored = new CollectorEngine(store, {} as TaskRunner, settings());
   assert.throws(
     () =>
@@ -725,6 +763,86 @@ test("Crash recovery keeps publication work but bounds interrupted execution rec
   store.save(row);
   store.cleanup();
   assert.equal(store.run("running"), null, "An older terminal run expires");
+});
+
+test("Named worker recovery waits for actual termination, preserves pauses and never replays interrupted input", async (t) => {
+  const { engine, store } = await fixture(t);
+  const startedAt = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now: startedAt });
+  for (const [id, enabled] of [
+    ["scheduled", true],
+    ["manual", false],
+  ] as const) {
+    save(engine, task(id, { enabled, intervalSeconds: enabled ? 60 : 0 }));
+    const row = store.get(id)!;
+    row.lastRunId = id + "-interrupted";
+    row.state = { kept: true };
+    store.save(row);
+    store.saveRun({
+      id: row.lastRunId,
+      taskId: id,
+      task: row.task,
+      status: "interrupted",
+      input: { neverReplay: true },
+      output: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      eventIndex: 0,
+      error: "outcome_unknown",
+      workerJobName: "Global\\Ivy.Collector." + id,
+    });
+  }
+  let observation: boolean | Error = false;
+  t.mock.method(engine.runner, "stopped", async () => {
+    if (observation instanceof Error) throw observation;
+    return observation;
+  });
+  await engine.tick();
+  assert.equal(store.run("scheduled-interrupted")!.error, "outcome_unknown");
+  assert.equal(store.get("scheduled")!.task.enabled, true);
+  assert.throws(
+    () =>
+      engine.update({
+        action: "run",
+        id: "scheduled",
+        operationId: "too-early",
+      }),
+    (error: unknown) =>
+      error instanceof IvyError && error.code === "outcome_unknown",
+  );
+  observation = new Error("Unavailable process observation");
+  t.mock.timers.setTime(startedAt + 2001);
+  await engine.tick();
+  assert.equal(store.run("scheduled-interrupted")!.error, "outcome_unknown");
+  observation = true;
+  t.mock.timers.setTime(startedAt + 4002);
+  // A pause made while recovery was pending must remain authoritative.
+  engine.update({
+    action: "disable",
+    id: "scheduled",
+    expectedRevision: 1,
+    operationId: "pause-pending-recovery",
+  });
+  await engine.tick();
+  for (const id of ["scheduled", "manual"]) {
+    assert.equal(store.get(id)!.task.enabled, false);
+    assert.deepEqual(store.get(id)!.state, { kept: true });
+    assert.equal(store.run(id + "-interrupted")!.status, "interrupted");
+    assert.notEqual(store.run(id + "-interrupted")!.error, "outcome_unknown");
+  }
+  assert.equal(store.runs("queued").length, 0);
+  engine.update({
+    action: "enable",
+    id: "scheduled",
+    expectedRevision: 2,
+    operationId: "resume-verified-worker",
+  });
+  t.mock.timers.setTime(startedAt + 64003);
+  await engine.tick();
+  await Promise.all([...engine.active.values()].map((entry) => entry.work));
+  assert.equal(store.runs("publishing").length, 1);
+  assert.notEqual(store.get("scheduled")!.lastRunId, "scheduled-interrupted");
+  assert.equal(store.get("manual")!.lastRunId, "manual-interrupted");
 });
 
 test("An unconfirmed worker cannot block other tasks after a crash before its disable was saved", async (t) => {

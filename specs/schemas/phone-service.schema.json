@@ -126,6 +126,10 @@
           "pattern": "\\S",
           "default": "Greet the user with \"Hi\""
         },
+        "voiceDefault": {
+          "$ref": "#/$defs/PhoneVoiceSelection",
+          "description": "Default model and reasoning for Phone Voice tasks. Defaults to Sol/high when omitted."
+        },
         "accessCodePath": {
           "type": [
             "string",
@@ -234,7 +238,8 @@
         "call.desktop.resumeVoice",
         "call.bindVoice",
         "call.createVoice",
-        "call.promptVoice"
+        "call.promptVoice",
+        "call.forwardVoice"
       ]
     },
     "PhoneStatusQuery": {

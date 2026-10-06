@@ -49,6 +49,7 @@ export class CollectorEngine {
   private ticking = false;
   private closing = false;
   private lastMaintenance = 0;
+  private nextRecoveryAt = 0;
   constructor(
     readonly store: CollectorStore,
     readonly runner: TaskRunner,
@@ -348,6 +349,7 @@ export class CollectorEngine {
     if (this.ticking || !this.client || this.closing) return;
     this.ticking = true;
     try {
+      await this.recoverWorkers();
       for (const run of this.store.runs("publishing")) {
         try {
           await this.publish(run);
@@ -409,6 +411,10 @@ export class CollectorEngine {
         row.state,
         run.input,
         signal,
+        (name) => {
+          run.workerJobName = name;
+          this.store.saveRun(run);
+        },
       );
       signal.throwIfAborted();
       run.finishedAt = new Date().toISOString();
@@ -437,10 +443,40 @@ export class CollectorEngine {
     }
     this.store.saveRun(run);
     const current = this.store.get(run.taskId);
-    if (current && run.error === "outcome_unknown") {
+    if (current && run.error === "outcome_unknown" && !run.workerJobName) {
       current.task.enabled = false;
       current.revision++;
       this.store.save(current);
+    }
+  }
+  private async recoverWorkers() {
+    if (Date.now() < this.nextRecoveryAt) return;
+    for (const row of this.store.list()) {
+      if (!this.unconfirmed(row) || this.active.has(row.task.id)) continue;
+      const run = this.store.run(row.lastRunId!)!;
+      if (!run.workerJobName) continue;
+      this.nextRecoveryAt = Date.now() + 2000;
+      try {
+        if (!(await this.runner.stopped(row.task.id, run.workerJobName)))
+          continue;
+        const current = this.store.get(row.task.id);
+        if (
+          current?.lastRunId !== run.id ||
+          this.active.has(row.task.id) ||
+          !this.unconfirmed(current)
+        )
+          continue;
+        this.store.transaction(() => {
+          run.error =
+            "Worker termination verified; execution outcome remains unknown.";
+          this.store.saveRun(run);
+          // Never replay the interrupted input; only the next scheduled observation may run.
+          current.nextAt = Date.now() + current.task.intervalSeconds * 1000;
+          this.store.save(current);
+        });
+      } catch {
+        // A failed observation is retried without assuming that the old tree is stopped.
+      }
     }
   }
   private async publish(run: Run) {

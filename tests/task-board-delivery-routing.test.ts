@@ -54,20 +54,32 @@ test('Phone preparation sends the exact Task and comment context as the initial 
 });
 
 test('a connected Voice call with a confirmed initial prompt completes without Chat fallback', async () => {
-  const f = worker([{ phase: 'result', receipt: { ok: true, result: { state: 'connected' } } }, { phase: 'result', receipt: { ok: true, result: { prompted: true } } }]);
+  const f = worker([null, { phase: 'result', receipt: { ok: true, result: { state: 'connected' } } }, { phase: 'result', receipt: { ok: true, result: { prompted: true } } }]);
   await (f.instance as unknown as { phone: (current: unknown) => Promise<void> }).phone(document(value()));
   assert.equal(f.updates.at(-1)?.state, 'confirmed'); assert.equal(f.updates.at(-1)?.activeRoute, 'phone'); assert.equal(f.updates.at(-1)?.chatRequest, null);
 });
 
+for (const state of ['sent', 'outcome_unknown'] as const) test('Phone delivery follows the forwarded request in an existing incoming call: ' + state, async () => {
+  const operation = { intent: { method: 'call.forwardVoice', callId: 'call', operationId: 'phone-operation', prompt: 'Prompt' },
+    phase: 'result', receipt: { ok: true, result: { state } } };
+  const f = worker([{ operationId: 'original-incoming-call', callId: 'call' }, operation, operation]);
+  await (f.instance as unknown as { phone: (current: unknown) => Promise<void> }).phone(document({ ...value(), phoneCallId: null }));
+  assert.equal(f.updates.at(-1)?.phoneCallId, 'call');
+  await (f.instance as unknown as { phone: (current: unknown) => Promise<void> }).phone(document(f.updates.at(-1)!));
+  assert.equal(f.updates.at(-1)?.state, state === 'sent' ? 'confirmed' : 'outcome_unknown');
+  assert.equal(f.updates.at(-1)?.activeRoute, 'phone');
+  assert.equal(f.updates.at(-1)?.chatRequest, null);
+});
+
 test('a conclusively unanswered Voice call falls back to the current Main Chat and retains Phone evidence', async () => {
-  const f = worker([{ phase: 'result', receipt: { ok: true, result: { state: 'local_ended', error: 'no_answer' } } }]);
+  const f = worker([null, { phase: 'result', receipt: { ok: true, result: { state: 'local_ended', error: 'no_answer' } } }]);
   await (f.instance as unknown as { phone: (current: unknown) => Promise<void> }).phone(document(value()));
   assert.equal(f.updates.at(-1)?.state, 'pending'); assert.equal(f.updates.at(-1)?.activeRoute, 'chat');
   assert.equal(f.updates.at(-1)?.phoneRequest?.operationId, 'phone-operation'); assert.equal(f.updates.at(-1)?.phoneCallId, 'call');
 });
 
 test('an unknown Voice connection outcome is fenced and never falls back to Chat', async () => {
-  const f = worker([{ phase: 'outcome_unknown', receipt: null }]);
+  const f = worker([null, { phase: 'outcome_unknown', receipt: null }]);
   await (f.instance as unknown as { phone: (current: unknown) => Promise<void> }).phone(document(value()));
   assert.equal(f.updates.at(-1)?.state, 'outcome_unknown'); assert.equal(f.updates.at(-1)?.activeRoute, 'phone'); assert.equal(f.updates.at(-1)?.chatRequest, null);
 });

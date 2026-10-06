@@ -25,6 +25,7 @@ export interface Run {
   finishedAt: string | null;
   eventIndex: number;
   error: string | null;
+  workerJobName?: string;
 }
 export class CollectorStore {
   readonly db: DatabaseSync;
@@ -39,12 +40,12 @@ export class CollectorStore {
     for (const run of this.runs("running")) {
       run.status = "interrupted";
       run.finishedAt = new Date().toISOString();
-      // A worker can outlive an abrupt service exit, particularly on POSIX.
+      // Preserve the schedule when a named process tree can be reconciled by the engine.
       run.error = "outcome_unknown";
       this.transaction(() => {
         this.saveRun(run);
         const row = this.get(run.taskId);
-        if (row) {
+        if (row && !run.workerJobName) {
           row.task.enabled = false;
           row.revision++;
           this.save(row);

@@ -178,7 +178,7 @@ export const phoneTools = [
     output: "PhoneCall",
     readOnly: false,
     description:
-      "Call a configured recipient through the voice agent. initialPrompt is required and is delivered to the agent after connection. Sol/high is the default task selection. Success means admitted; use phone_bridge_status to check connection and outcome.",
+      "Call a configured recipient through the voice agent. initialPrompt is required. If that recipient already has a Voice call, send the prompt to its current task and return that call instead of dialing again. Reusing operationId never sends twice. Otherwise deliver the prompt after connection; Sol/high is the default task selection. Use phone_bridge_status to check connection and the retained operation outcome.",
   },
   {
     name: "selectVoice",
@@ -261,6 +261,7 @@ export function phoneRegistry(): Wire.RegistrySync {
         guideMarkdown:
           "Use phone_bridge_status for readiness, configured recipient IDs, original call state, current Voice model selection and original operation outcomes. phone_bridge_call requires recipientId, operationId and a nonempty initialPrompt. PhoneBridge creates a local task with Sol/high by default and sends the prompt after connection. During the call, *1<M><R># selects model 1 Luna, 2 Sol or 3 Astra and reasoning 1 low, 2 medium, 3 high, 4 xhigh, 5 max or 6 ultra (not Luna). Selection leaves the current task running; *0# creates a new task with the selected model and reasoning, then starts Voice there. Use phone_bridge_hangup to end the call. "
           + "phone_bridge_select_voice changes model and reasoningEffort in the current task; phone_bridge_restart_voice creates and transfers to a new task with that selection. Both require callId and operationId, keep the phone connection, and return the retained operation. Use a new operationId only for a new action; read a lost reply via phone_bridge_status with callId and operationId. "
+          + "If the recipient already has an incoming or outgoing Voice call, phone_bridge_call forwards initialPrompt unchanged to its current task and returns the existing callId. It waits for setup or a task switch and retains the send under the request operationId, so retries cannot duplicate it. "
           + "The internal phone.request method also supports the Windows audio route and authorized direct destinations. "
           + "phone.screen plays an announcement and collects 1/2; phone.bridgeScreening connects an accepted call to Windows audio. "
           + "Keep operationId and callId after lost replies. Admission does not prove connection: inspect the original call or operation through phone_bridge_status. Development operators can use ivy_dev diagnostics and reconnect tools for recovery.",

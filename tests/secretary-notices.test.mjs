@@ -71,6 +71,39 @@ test('Secretary waits until the configured minimum message age before handing a 
   assert.equal(prepared.state, 'dispatching'); assert.equal(prepared.reason, null); assert.ok(prepared.request);
 });
 
+for (const state of ['sent', 'outcome_unknown']) test('a critical legacy Voice notice follows its forwarded prompt: ' + state, async () => {
+  const operationId = '00000000-0000-4000-8000-000000000001', callId = '00000000-0000-4000-8000-000000000002';
+  const serviceNodeId = 'fixture.phone-bridge', definitionHash = 'sha256:' + '1'.repeat(64), updates = [], reads = [];
+  let request;
+  const client = { async request(method, args) {
+    if (method === 'serviceNodes.get') return { serviceName: 'phone-bridge', connected: true, synced: true, ready: true };
+    if (method === 'tools.list') return { provider: { node: { serviceNodeId } }, items: [{ qualifiedName: 'phone.' + args.namePrefix,
+      definition: { interfaceVersion: '1.0.0' }, definitionHash }], nextCursor: null };
+    if (method === 'tools.call' && args.qualifiedName === 'phone.request') {
+      request = args.arguments;
+      return { callId, operationId: 'original-incoming-call', direction: 'incoming', recipientId: null, principalId: 'user', route: 'voice' };
+    }
+    if (method === 'tools.call' && args.qualifiedName === 'phone.operation') {
+      reads.push(args.arguments);
+      assert.equal(args.arguments.operationId, operationId);
+      return { intent: { method: 'call.forwardVoice', callId, operationId, prompt: request.voicePrompt },
+        phase: 'result', receipt: { ok: true, result: { state } } };
+    }
+    assert.fail('Unexpected RPC method: ' + method);
+  } };
+  const escalation = { serviceNodeId, recipientId: 'personal', requestDefinitionHash: definitionHash };
+  const notice = { text: 'Critical event.', voice: { operationId, callId: null, state: 'queued', errorCode: null } };
+  const item = { pin: { objectId: 'item', revision: 2 }, value: { notice,
+    decision: { operationId: 'decision', assessment: { notification: 'voice', urgency: 'critical' }, policy: { voiceEscalation: escalation } } } };
+  const engine = { client, settings: { identity: { principalId: 'secretary' } }, async verifyOwner() {}, now: () => new Date('2026-09-25T10:00:00.000Z'),
+    store: { async write(_key, value) { updates.push(value.notice); } } };
+  const notices = new SecretaryNotices(engine);
+  await notices.voice(item, notice);
+  if (state === 'sent') await notices.voice({ ...item, value: { ...item.value, notice: updates.at(-1) } }, updates.at(-1));
+  assert.equal(updates.at(-1).voice.state, state === 'sent' ? 'confirmed' : 'outcome_unknown');
+  assert.ok(reads.every(read => !read.method));
+});
+
 test('a critical legacy Voice assessment retains a PhoneBridge UUID before dispatch', { timeout: 60000 }, async t => {
   const f = await fixture(t);
   f.settings.policy.voiceEscalation = { serviceNodeId: 'fixture.phone-bridge', recipientId: 'personal', requestDefinitionHash: 'sha256:' + '0'.repeat(64) };

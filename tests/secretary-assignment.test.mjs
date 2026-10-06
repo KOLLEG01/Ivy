@@ -401,6 +401,47 @@ test('assignment decisions are explicit and Main contact respects the local time
   assert.equal(contactWindowOpen(rule, new Date('2026-09-25T22:00:00.000Z')), false);
 });
 
+for (const state of ['sent', 'outcome_unknown']) test('a critical Voice assignment handles a forwarded prompt in an existing incoming call: ' + state, async () => {
+  const serviceNodeId = 'fixture.phone-bridge', callId = randomUUID(), requests = [], reads = [];
+  let request;
+  const client = { async request(method, args) {
+    if (method === 'serviceNodes.get') return { serviceName: 'phone-bridge', connected: true, synced: true, ready: true };
+    if (method === 'tools.list') return { provider: { node: { serviceNodeId } }, items: [{ qualifiedName: 'phone.' + args.namePrefix,
+      definition: { interfaceVersion: '1.0.0' }, definitionHash: 'sha256:' + '1'.repeat(64) }], nextCursor: null };
+    if (method === 'tools.call' && args.qualifiedName === 'phone.request') {
+      request = args.arguments; requests.push(request);
+      return { callId, operationId: randomUUID(), direction: 'incoming', recipientId: null, principalId: 'user', route: 'voice' };
+    }
+    if (method === 'tools.call' && args.qualifiedName === 'phone.operation') {
+      reads.push(args.arguments);
+      assert.equal(args.arguments.operationId, request.operationId);
+      return { intent: { method: 'call.forwardVoice', callId, operationId: request.operationId, prompt: request.voicePrompt },
+        phase: 'result', receipt: { ok: true, result: { state } } };
+    }
+    assert.fail('Unexpected RPC method: ' + method);
+  } };
+  const execution = { pin: { objectId: randomUUID(), revision: 2 }, value: { executionId: 'critical-forwarded-event', result: 'retained-decision' } };
+  let saved = execution;
+  const store = { technicalNamed: () => null, async read() { return saved; }, async amend(current, _key, value) {
+    saved = { pin: { ...current.pin, revision: current.pin.revision + 1 }, value }; return saved;
+  } };
+  const engine = { client, store, settings: { identity: { principalId: 'secretary' }, policy: { voiceEscalation: {
+    serviceNodeId, recipientId: 'personal', requestDefinitionHash: 'sha256:' + '1'.repeat(64),
+  } } }, now: () => new Date('2026-09-25T10:00:00.000Z'), async verifyOwner() {} };
+  const voice = new AssignmentVoice(engine), decision = { schemaVersion: 1, urgency: 'critical', notification: 'voice', text: 'Critical event.', reason: 'Urgent' };
+  if (state === 'sent') {
+    assert.equal(await voice.step(execution, decision, true), 'confirmed');
+    assert.equal(await voice.step(execution, decision, false), 'confirmed');
+    assert.equal(saved.value.voice.callId, callId);
+    assert.equal(saved.value.voice.state, 'confirmed');
+  } else {
+    await assert.rejects(voice.step(execution, decision, true), { code: 'secretary_voice_prompt_outcome_unknown' });
+    assert.equal(saved.value.voice.state, 'outcome_unknown');
+  }
+  assert.equal(requests.length, 1);
+  assert.ok(reads.every(read => !read.method));
+});
+
 test('the sole registered PhoneBridge is the default and a critical Voice call is reconciled once', async () => {
   const serviceNodeId = 'fixture.phone-bridge', recipientId = 'personal', definitionHash = 'sha256:' + '1'.repeat(64), callId = randomUUID();
   let stage = 0, registrationState = 'registered', recipients = [recipientId]; const requests = [];
@@ -415,6 +456,7 @@ test('the sole registered PhoneBridge is the default and a critical Voice call i
       requests.push(args.arguments); return { ...args.arguments, callId: requests.length === 1 ? callId : randomUUID(), principalId: 'secretary' };
     }
     if (method === 'tools.call' && args.qualifiedName === 'phone.operation') {
+      if (args.arguments.operationId) return null;
       if (stage === -1 && args.arguments.method === 'call.dial') return { phase: 'result', receipt: { ok: true, result: { state: 'local_ended' } } };
       if (args.arguments.method === 'call.dial') return stage === 0 ? null : { phase: 'result', receipt: { ok: true, result: { state: 'connected' } } };
       return stage === 1 ? null : { phase: 'result', receipt: { ok: true, result: { state: stage === 3 ? 'outcome_unknown' : 'sent' } } };

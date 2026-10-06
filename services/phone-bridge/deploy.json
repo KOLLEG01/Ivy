@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "phone-bridge",
   "kind": "service",
-  "version": "0.2.69",
+  "version": "0.2.73",
   "description": "Authorized SIP calls, Windows audio, Micro Voice, Codex App Tools task control and announcement screening with durable outcomes",
   "connectsToHive": true,
   "requirements": {

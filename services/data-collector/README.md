@@ -88,11 +88,17 @@ finishes. A stable `Idempotency-Key` prevents duplicate acceptance within the
 receipt window; senders may omit it. Input is limited to 256 KiB.
 Disabling cancels an active process; changes and
 deletion require the task to finish first. A run interrupted by an abrupt service
-exit is not replayed and needs the termination check below before it can run again.
+exit is never replayed. Windows workers use a named Job Object per task; the name
+is stored before execution, and a second launcher cannot join the same job.
+After interruption, DataCollector checks that the exact job has disappeared,
+preserves the task's enabled setting and resumes its next scheduled observation.
+Manual and input runs remain interrupted and are not automatically repeated.
+Unavailable observations are retried; they do not establish worker termination.
 
 If process termination returns `outcome_unknown`, the task stays blocked for
-run, save, enable and delete, including after a service restart. Other tasks can
-continue. Stop and verify all of that task's workers on the host first. Then read
+run, save, enable and delete until worker termination is verified. Other tasks can
+continue. Runs without a verifiable named Windows job require an operator to
+stop and verify all of that task's workers on the host first. Then read
 its `lastRunId` and current revision and call `data_collector_update` with
 `action: "disable"`, `id`, `expectedRevision`, a new `operationId`, and
 `confirmedStoppedRunId: "<lastRunId>"`. This is the operator's explicit confirmation

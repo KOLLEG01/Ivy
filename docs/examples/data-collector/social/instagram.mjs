@@ -181,7 +181,12 @@ async function instagramToken(config, secrets, signal) {
   return auth.accessToken;
 }
 
-export default async function collectInstagram({ config, secrets, signal }) {
+export default async function collectInstagram({
+  config,
+  secrets,
+  state,
+  signal,
+}) {
   const version = config.apiVersion;
   if (typeof version !== "string" || !/^v\d+\.0$/.test(version)) {
     throw failure(
@@ -208,6 +213,22 @@ export default async function collectInstagram({ config, secrets, signal }) {
     throw failure("configuration_invalid", "lookbackDays must be 1..365.");
   if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 1000)
     throw failure("configuration_invalid", "maxPages must be 1..1000.");
+  for (const name of ["collectComments", "collectMessages", "notifyInitial"])
+    if (config[name] !== undefined && typeof config[name] !== "boolean")
+      throw failure("configuration_invalid", `${name} must be a boolean.`);
+  if (config.collectMessages && login !== "instagram")
+    throw failure(
+      "configuration_invalid",
+      "Message collection requires Instagram Login; Facebook Login needs a separate Page grant.",
+    );
+  const maxInboxRequests = config.maxInboxRequests ?? 100;
+  const maxInboxItems = config.maxInboxItems ?? 500;
+  for (const [name, value] of Object.entries({
+    maxInboxRequests,
+    maxInboxItems,
+  }))
+    if (!Number.isInteger(value) || value < 1 || value > 1000)
+      throw failure("configuration_invalid", `${name} must be 1..1000.`);
   const token = await instagramToken(config, secrets, signal);
   const collectedAt = new Date().toISOString();
   const end = Date.parse(collectedAt);
@@ -280,6 +301,7 @@ export default async function collectInstagram({ config, secrets, signal }) {
       "Instagram returned an unexpected account ID.",
     );
   const posts = new Map();
+  const mediaIds = new Set();
   const seenCursors = new Set();
   let after;
   let complete = false;
@@ -305,6 +327,7 @@ export default async function collectInstagram({ config, secrets, signal }) {
           "Instagram returned a media item without a valid ID or timestamp.",
         );
       }
+      mediaIds.add(media.id);
       if (published < start || published > end || posts.has(media.id)) continue;
       let views = unavailable(
         "Insights collection is disabled in config.collectInsights.",
@@ -358,6 +381,23 @@ export default async function collectInstagram({ config, secrets, signal }) {
     seenCursors.add(next);
     after = next;
   }
+  const inbox =
+    config.collectComments || config.collectMessages
+      ? await collectInbox({
+          get,
+          accountId,
+          login,
+          mediaIds,
+          mediaComplete: complete,
+          config,
+          state,
+          collectedAt,
+          start,
+          end,
+          maxInboxRequests,
+          maxInboxItems,
+        })
+      : null;
   return {
     data: {
       platform: "instagram",
@@ -387,6 +427,290 @@ export default async function collectInstagram({ config, secrets, signal }) {
           b.publishedAt.localeCompare(a.publishedAt),
         ),
       },
+      ...(inbox ? { inbox: inbox.data } : {}),
     },
+    ...(inbox ? { state: inbox.state, events: inbox.events } : {}),
+  };
+}
+
+async function collectInbox({
+  get,
+  accountId,
+  login,
+  mediaIds,
+  mediaComplete,
+  config,
+  state,
+  collectedAt,
+  start,
+  end,
+  maxInboxRequests,
+  maxInboxItems,
+}) {
+  const scope = `${login}:${accountId}`;
+  const previous = state?.inbox?.scope === scope ? state.inbox : null;
+  const startedAt = previous?.startedAt ?? collectedAt;
+  const seen = Object.fromEntries(
+    Object.entries(previous?.seen ?? {}).filter(
+      ([, item]) => Number.isFinite(item.at) && item.at >= start,
+    ),
+  );
+  const changes = [];
+  const encoded = (id) => {
+    if (typeof id !== "string" || !id || id.length > 1024)
+      throw failure(
+        "provider_unavailable",
+        "Instagram returned an invalid inbox ID.",
+      );
+    return encodeURIComponent(id);
+  };
+  const digest = (value) =>
+    createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const section = (enabled) => ({
+    status: enabled ? "available" : "disabled",
+    complete: enabled,
+    reason: enabled
+      ? null
+      : "Collection is disabled in the task configuration.",
+    items: [],
+  });
+  const comments = section(config.collectComments === true);
+  const messages = section(config.collectMessages === true);
+  const limited = (target, reason) => {
+    target.complete = false;
+    target.reason = reason;
+  };
+  const capture = (target, item) => {
+    const at = Date.parse(item.createdAt);
+    if (!Number.isFinite(at))
+      throw failure(
+        "provider_unavailable",
+        "Instagram returned an invalid inbox timestamp.",
+      );
+    if (at < start || at > end) return;
+    item = { ...item, createdAt: new Date(at).toISOString() };
+    const key = digest([scope, item.kind, item.id]);
+    const hash = digest([scope, item]);
+    if (target.items.some((entry) => entry.id === item.id)) return;
+    if (target.items.length >= maxInboxItems) {
+      limited(target, "Inbox collection reached maxInboxItems.");
+      return;
+    }
+    const known = seen[key];
+    const notify = config.notifyInitial === true || at >= Date.parse(startedAt);
+    if (
+      known?.hash !== hash &&
+      (known || notify) &&
+      item.direction !== "outgoing"
+    )
+      changes.push({ kind: item.kind, id: item.id, changeId: hash });
+    seen[key] = { hash, at };
+    target.items.push({ ...item, changeId: hash });
+  };
+  // Always rebuild requests on the authorized Graph host. Never follow paging URLs
+  // carrying tokens, or trust a provider-supplied next host/path.
+  const walk = async (path, params, target, budget, visit, nested) => {
+    let after;
+    const cursors = new Set();
+    while (true) {
+      if (budget.remaining-- <= 0 || target.items.length >= maxInboxItems) {
+        limited(target, "Inbox collection reached its request or item limit.");
+        return;
+      }
+      const response = await get(path, {
+        ...params,
+        ...(after ? { after } : {}),
+      });
+      const page = nested ? response[nested] : response;
+      if (!Array.isArray(page?.data))
+        throw failure(
+          "provider_unavailable",
+          "Instagram returned an invalid inbox page.",
+        );
+      for (const item of page.data) await visit(item);
+      if (!page.paging?.next) return;
+      const next = page.paging?.cursors?.after;
+      if (typeof next !== "string" || !next || cursors.has(next))
+        throw failure(
+          "provider_unavailable",
+          "Instagram returned a repeated inbox cursor.",
+        );
+      cursors.add(next);
+      after = next;
+      if (nested) {
+        // The first conversation response expands messages; subsequent pages use
+        // the messages edge with the same validated conversation ID.
+        path += "/messages";
+        nested = null;
+        params = { fields: "id,created_time", limit: 100 };
+      }
+    }
+  };
+  if (config.collectComments) {
+    const budget = { remaining: maxInboxRequests };
+    const commentFields = "id,text,timestamp,from";
+    const addComment = (item, mediaId, parentId) => {
+      encoded(item.id);
+      capture(comments, {
+        kind: "comment",
+        id: item.id,
+        mediaId,
+        parentId,
+        createdAt: item.timestamp,
+        text: typeof item.text === "string" ? item.text : null,
+        from: typeof item.from?.id === "string" ? item.from.id : null,
+        username:
+          typeof item.from?.username === "string" ? item.from.username : null,
+        direction: item.from?.id === accountId ? "outgoing" : "incoming",
+      });
+    };
+    // Comments on old posts can be new. Scan all discovered media, including media
+    // outside the metrics window, and inspect replies to old parent comments.
+    for (const mediaId of mediaIds) {
+      if (budget.remaining <= 0 || comments.items.length >= maxInboxItems) {
+        limited(
+          comments,
+          "Not all media comments fit within the inbox limits.",
+        );
+        break;
+      }
+      await walk(
+        `${mediaId}/comments`,
+        { fields: commentFields, limit: 100 },
+        comments,
+        budget,
+        async (comment) => {
+          addComment(comment, mediaId, null);
+          await walk(
+            `${encoded(comment.id)}/replies`,
+            { fields: commentFields, limit: 100 },
+            comments,
+            budget,
+            (reply) => addComment(reply, mediaId, comment.id),
+          );
+        },
+      );
+    }
+    if (!mediaComplete)
+      limited(comments, "The media traversal did not cover every post.");
+  }
+  if (config.collectMessages) {
+    const budget = { remaining: maxInboxRequests };
+    await walk(
+      `${accountId}/conversations`,
+      { fields: "id,updated_time", limit: 100 },
+      messages,
+      budget,
+      async (conversation) => {
+        const conversationId = encoded(conversation.id);
+        await walk(
+          conversationId,
+          { fields: "messages" },
+          messages,
+          budget,
+          async (entry) => {
+            const id = encoded(entry.id);
+            const at = Date.parse(entry.created_time);
+            if (Number.isFinite(at) && (at < start || at > end)) return;
+            if (
+              budget.remaining-- <= 0 ||
+              messages.items.length >= maxInboxItems
+            ) {
+              limited(
+                messages,
+                "Not all messages fit within the inbox limits.",
+              );
+              return;
+            }
+            let message;
+            try {
+              message = await get(id, {
+                fields: "id,created_time,from,to,message",
+              });
+            } catch (error) {
+              if (error.apiCode !== 9000001 || error.httpStatus !== 400)
+                throw error;
+              limited(
+                messages,
+                "Meta did not make some message content available.",
+              );
+              return;
+            }
+            if (message.id !== entry.id)
+              throw failure(
+                "provider_unavailable",
+                "Instagram returned an unexpected message ID.",
+              );
+            const recipients = message.to?.data;
+            if (
+              !Array.isArray(recipients) ||
+              !recipients.length ||
+              recipients.some(
+                (recipient) =>
+                  typeof recipient?.id !== "string" || !recipient.id,
+              ) ||
+              typeof message.from?.id !== "string" ||
+              !message.from.id
+            )
+              throw failure(
+                "provider_unavailable",
+                "Instagram omitted message participants.",
+              );
+            const outgoing = message.from.id === accountId;
+            if (
+              !outgoing &&
+              !recipients.some((recipient) => recipient.id === accountId)
+            )
+              throw failure(
+                "authentication_required",
+                "A message does not belong to the configured account.",
+              );
+            capture(messages, {
+              kind: "direct_message",
+              id: message.id,
+              conversationId: conversation.id,
+              createdAt: message.created_time,
+              text:
+                typeof message.message === "string" ? message.message : null,
+              from: message.from.id,
+              to: recipients.map((recipient) => recipient.id).sort(),
+              direction: outgoing ? "outgoing" : "incoming",
+            });
+          },
+          "messages",
+        );
+      },
+    );
+    messages.coverage =
+      "Only conversations and message content currently exposed by Meta; inactive Requests and older message content may be omitted.";
+  }
+  if (Object.keys(seen).length > 2000)
+    throw failure(
+      "configuration_invalid",
+      "Inbox deduplication exceeds 2000 items; reduce lookbackDays.",
+    );
+  return {
+    data: { comments, messages, changes },
+    state: { ...state, inbox: { scope, startedAt, seen } },
+    // The collector commits the complete result before publishing this bounded,
+    // text-free notification. Consumers retrieve the saved run for the content.
+    events: changes.length
+      ? [
+          {
+            name: "social.inbox.changed",
+            payload: {
+              platform: "instagram",
+              accountId,
+              comments: changes.filter((item) => item.kind === "comment")
+                .length,
+              directMessages: changes.filter(
+                (item) => item.kind === "direct_message",
+              ).length,
+              changeIds: changes.slice(0, 32).map((item) => item.changeId),
+              additionalChanges: Math.max(0, changes.length - 32),
+            },
+          },
+        ]
+      : [],
   };
 }

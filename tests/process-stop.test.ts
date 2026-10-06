@@ -5,7 +5,8 @@ import { access, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { join, resolve, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
-import { startProcess, runCommand } from '../packages/host-runtime/src/process.js';
+import { startProcess, runCommand, windowsJobStopped } from '../packages/host-runtime/src/process.js';
+import { randomUUID } from 'node:crypto';
 import { processStopFence, recordProcessStopFence, requireClearProcessStopFence } from '../packages/host-runtime/src/process-fence.js';
 import { startNativeProcess } from '../services/agent-manager/src/process.js';
 import { reconcilePhoneProcessStopFence } from '../services/phone-bridge/src/runtime/process.js';
@@ -28,6 +29,31 @@ async function escapedPipe(t: TestContext) {
   const code = 'const cp=require("node:child_process");const child=cp.spawn(process.execPath,[process.argv[1],process.argv[2]],{detached:true,stdio:"inherit"});child.unref();process.stdout.write("root-exit\\n");';
   return { root, pidPath, command: { executable: 'node', args: ['-e', code, helper, pidPath], timeoutMs: 3000 } };
 }
+
+test('a named Windows job fences duplicate launches and remains observable until its tree ends',
+  { skip: process.platform !== 'win32', timeout: 15_000 }, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'ivy-named-job-test-'));
+    const name = 'Global\\Ivy.Test.' + randomUUID(), marker = join(root, 'started'), duplicate = join(root, 'duplicate');
+    t.after(async () => { assert.ok(relative(tmpdir(), root).startsWith('ivy-named-job-test-')); await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
+    assert.equal(await windowsJobStopped(name, resolve('.')), true);
+    const command = { executable: 'node', args: ['-e', 'require("node:fs").writeFileSync(process.argv[1],"started");setInterval(()=>{},1000);', marker], timeoutMs: 10_000 };
+    const running = await startProcess(command, resolve('.'), { node: process.execPath }, { jobName: name });
+    t.after(() => running.stop(0));
+    await until(() => readFile(marker, 'utf8').then(() => true, () => false), 5000);
+    assert.equal(await windowsJobStopped(name, resolve('.')), false);
+    const second = await startProcess({ ...command, args: [...command.args.slice(0, -1), duplicate] }, resolve('.'), { node: process.execPath }, { jobName: name });
+    t.after(() => second.stop(0));
+    const refused = await second.completion;
+    assert.notEqual(refused.exitCode, 0);
+    assert.equal(await readFile(duplicate, 'utf8').then(() => true, () => false), false);
+    assert.equal(await windowsJobStopped(name, resolve('.')), false);
+    running.child.kill(); // Exercise abrupt launcher death, not a clean worker response.
+    await running.completion;
+    await until(() => windowsJobStopped(name, resolve('.')), 5000);
+    const replacement = await startProcess({ executable: 'node', args: ['-e', ''], timeoutMs: 5000 }, resolve('.'), { node: process.execPath }, { jobName: name });
+    t.after(() => replacement.stop(0));
+    assert.equal((await replacement.completion).exitCode, 0);
+  });
 
 test('actual escaped Linux pipe yields one finite unknown stop even after the root exited', { skip: process.platform !== 'linux', timeout: 15_000 }, async t => {
   const f = await escapedPipe(t), running = await startProcess(f.command, resolve('.'), { node: process.execPath });

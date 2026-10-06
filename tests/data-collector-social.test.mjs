@@ -850,6 +850,274 @@ test("Collectors fail promptly on cancellation and missing secret references", a
   assert.equal(noFetch.mock.callCount(), 0);
 });
 
+test("Instagram inbox captures new replies on old posts and deduplicates incoming messages without inventing unread state", async (t) => {
+  const batch = (newItems) => [
+    { path: "/v25.0/123", body: { user_id: "123", username: "owner" } },
+    { path: "/v25.0/123/media", body: { data: [igMedia("1", 31)] } },
+    {
+      path: "/v25.0/1/comments",
+      body: {
+        data: [{ id: "parent", timestamp: stamp(31), text: "An old parent" }],
+      },
+    },
+    {
+      path: "/v25.0/parent/replies",
+      body: {
+        data: [
+          {
+            id: "reply",
+            timestamp: stamp(1),
+            text: "Baseline reply",
+            from: { id: "9", username: "reader" },
+          },
+          ...(newItems
+            ? [
+                {
+                  id: "new-reply",
+                  timestamp: stamp(0),
+                  text: "A new reply",
+                  from: { id: "9" },
+                },
+              ]
+            : []),
+        ],
+      },
+    },
+    { path: "/v25.0/123/conversations", body: { data: [{ id: "thread" }] } },
+    {
+      path: "/v25.0/thread",
+      check: (url) => assert.equal(url.searchParams.get("fields"), "messages"),
+      body: {
+        messages: {
+          data: [
+            { id: "incoming", created_time: stamp(1) },
+            { id: "outgoing", created_time: stamp(1) },
+            ...(newItems
+              ? [{ id: "new-message", created_time: stamp(0) }]
+              : []),
+          ],
+        },
+      },
+    },
+    {
+      path: "/v25.0/incoming",
+      body: {
+        id: "incoming",
+        created_time: stamp(1),
+        from: { id: "9" },
+        to: { data: [{ id: "123" }] },
+        message: "Baseline message",
+      },
+    },
+    {
+      path: "/v25.0/outgoing",
+      body: {
+        id: "outgoing",
+        created_time: stamp(1),
+        from: { id: "123" },
+        to: { data: [{ id: "9" }] },
+        message: "Owner response",
+      },
+    },
+    ...(newItems
+      ? [
+          {
+            path: "/v25.0/new-message",
+            body: {
+              id: "new-message",
+              created_time: stamp(0),
+              from: { id: "9" },
+              to: { data: [{ id: "123" }] },
+              message: "A new message",
+            },
+          },
+        ]
+      : []),
+  ];
+  fixture(t, [...batch(false), ...batch(true), ...batch(true)]);
+  const context = {
+    config: { ...igConfig, collectComments: true, collectMessages: true },
+    secrets: tokenSecrets,
+  };
+  const baseline = await instagram(context);
+  assert.equal(baseline.data.posts.items.length, 0);
+  assert.deepEqual(
+    baseline.data.inbox.comments.items.map((item) => item.id),
+    ["reply"],
+  );
+  assert.equal(baseline.data.inbox.comments.complete, true);
+  assert.equal(baseline.data.inbox.messages.complete, true);
+  assert.deepEqual(baseline.events, []);
+  const updated = await instagram({ ...context, state: baseline.state });
+  assert.equal(updated.events.length, 1);
+  assert.equal(updated.events[0].name, "social.inbox.changed");
+  assert.equal(updated.events[0].payload.comments, 1);
+  assert.equal(updated.events[0].payload.directMessages, 1);
+  assert.equal(updated.data.unreadMessages.status, "unavailable");
+  assert.equal(updated.data.unreadMessages.value, null);
+  assert.equal(JSON.stringify(updated.events).includes("A new message"), false);
+  assert.equal(
+    JSON.stringify(updated.state).includes("Baseline message"),
+    false,
+  );
+  assert.equal(JSON.stringify(updated).includes(tokenSecrets.token), false);
+  const replay = await instagram({ ...context, state: updated.state });
+  assert.deepEqual(replay.events, []);
+});
+
+test("Instagram inbox reconstructs pagination on the Graph host and exposes bounded coverage", async (t) => {
+  fixture(t, [
+    { path: "/v25.0/123", body: { user_id: "123" } },
+    { path: "/v25.0/123/media", body: { data: [] } },
+    { path: "/v25.0/123/conversations", body: { data: [{ id: "thread" }] } },
+    {
+      path: "/v25.0/thread",
+      body: {
+        messages: {
+          data: [],
+          paging: {
+            next: "https://untrusted.invalid/?access_token=do-not-use",
+            cursors: { after: "message-cursor" },
+          },
+        },
+      },
+    },
+    {
+      path: "/v25.0/thread/messages",
+      host: "graph.instagram.com",
+      check: (url) =>
+        assert.equal(url.searchParams.get("after"), "message-cursor"),
+      body: { data: [{ id: "message", created_time: stamp(1) }] },
+    },
+  ]);
+  const result = await instagram({
+    config: { ...igConfig, collectMessages: true, maxInboxRequests: 3 },
+    secrets: tokenSecrets,
+  });
+  assert.equal(result.data.inbox.messages.complete, false);
+  assert.match(result.data.inbox.messages.reason, /limits/);
+  assert.equal(result.data.inbox.messages.items.length, 0);
+  assert.deepEqual(result.events, []);
+});
+
+test("Instagram inbox rejects repeated cursors and API permission failures rather than returning empty success", async (t) => {
+  fixture(t, [
+    { path: "/v25.0/123", body: { user_id: "123" } },
+    { path: "/v25.0/123/media", body: { data: [] } },
+    {
+      path: "/v25.0/123/conversations",
+      body: {
+        data: [],
+        paging: { next: "unused", cursors: { after: "repeat" } },
+      },
+    },
+    {
+      path: "/v25.0/123/conversations",
+      body: {
+        data: [],
+        paging: { next: "unused", cursors: { after: "repeat" } },
+      },
+    },
+    { path: "/v25.0/123", body: { user_id: "123" } },
+    { path: "/v25.0/123/media", body: { data: [] } },
+    {
+      path: "/v25.0/123/conversations",
+      status: 403,
+      body: { error: { code: 200, message: tokenSecrets.token } },
+    },
+  ]);
+  const context = {
+    config: { ...igConfig, collectMessages: true },
+    secrets: tokenSecrets,
+  };
+  await assert.rejects(instagram(context), /repeated inbox cursor/);
+  await assert.rejects(
+    instagram(context),
+    (error) =>
+      error.code === "authentication_required" &&
+      !error.message.includes(tokenSecrets.token),
+  );
+});
+
+test("Instagram inbox rejects foreign-account messages and unsupported login configuration", async (t) => {
+  fixture(t, [
+    { path: "/v25.0/123", body: { user_id: "123" } },
+    { path: "/v25.0/123/media", body: { data: [] } },
+    { path: "/v25.0/123/conversations", body: { data: [{ id: "thread" }] } },
+    {
+      path: "/v25.0/thread",
+      body: { messages: { data: [{ id: "message", created_time: stamp(1) }] } },
+    },
+    {
+      path: "/v25.0/message",
+      body: {
+        id: "message",
+        created_time: stamp(1),
+        from: { id: "9" },
+        to: { data: [{ id: "different-owner" }] },
+      },
+    },
+  ]);
+  await assert.rejects(
+    instagram({
+      config: { ...igConfig, collectMessages: true },
+      secrets: tokenSecrets,
+    }),
+    { code: "authentication_required" },
+  );
+  await assert.rejects(
+    instagram({
+      config: { ...igConfig, login: "facebook", collectMessages: true },
+      secrets: tokenSecrets,
+    }),
+    { code: "configuration_invalid" },
+  );
+});
+
+test("Instagram inbox notifications stay within the Hive envelope budget and suppress outgoing messages", async (t) => {
+  const ids = Array.from({ length: 80 }, (_, index) => `message-${index}`);
+  fixture(t, [
+    { path: "/v25.0/123", body: { user_id: "123" } },
+    { path: "/v25.0/123/media", body: { data: [] } },
+    { path: "/v25.0/123/conversations", body: { data: [{ id: "thread" }] } },
+    {
+      path: "/v25.0/thread",
+      body: {
+        messages: { data: ids.map((id) => ({ id, created_time: stamp(1) })) },
+      },
+    },
+    ...ids.map((id, index) => ({
+      path: `/v25.0/${id}`,
+      body: {
+        id,
+        created_time: stamp(1),
+        from: { id: index === 0 ? "123" : "9" },
+        to: { data: [{ id: index === 0 ? "9" : "123" }] },
+        message: "x".repeat(2000),
+      },
+    })),
+  ]);
+  const result = await instagram({
+    config: { ...igConfig, collectMessages: true, notifyInitial: true },
+    secrets: tokenSecrets,
+  });
+  const event = result.events[0];
+  assert.equal(event.payload.directMessages, 79);
+  assert.equal(event.payload.changeIds.length, 32);
+  assert.equal(event.payload.additionalChanges, 47);
+  assert.ok(
+    Buffer.byteLength(
+      JSON.stringify({
+        kind: "collected",
+        taskId: "x".repeat(64),
+        runId: "x".repeat(36),
+        eventIndex: 0,
+        ...event,
+      }),
+    ) <= 4096,
+  );
+});
+
 test("Account task templates stay disabled and reference external secret names", async () => {
   for (const platform of ["instagram", "tiktok", "youtube"]) {
     const task = JSON.parse(

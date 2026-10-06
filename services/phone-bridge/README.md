@@ -36,6 +36,13 @@ Zuordnung unklar oder schlägt der Neuaufbau fehl, wird der Anruf beendet.
 liest mit `callId` den Anrufzustand, `phone_bridge_hangup` beendet ihn. Der interne
 `phone.request`-Aufruf unterstützt weiterhin Windows-Audio und direktes Wählen.
 
+Hat derselbe Empfänger bereits einen eingehenden oder ausgehenden Voice-Anruf,
+sendet `phone_bridge_call` das neue `initialPrompt` unverändert an dessen aktuellen
+Task und gibt die bestehende `callId` zurück. Ein laufender Verbindungsaufbau oder
+Task-Wechsel wird zuerst abgeschlossen. Eine Wiederholung derselben `operationId`
+sendet den Prompt nicht erneut; ihr Ergebnis ist über `phone_bridge_status` mit
+dieser ID und der zurückgegebenen `callId` abrufbar.
+
 Für Voice-Anrufe gilt zunächst **Sol / high**. Ein Folgeanruf desselben Anrufers
 verwendet seinen letzten nicht archivierten PhoneBridge-Task erneut. Während des
 Anrufs wählt `*1<M><R>#` das Modell (1 Luna, 2 Sol, 3 Astra) und Reasoning

@@ -179,11 +179,15 @@ test('Phone admission rollback and fresh-only storage format prevent partial own
 
 test('caller numbers survive URI formatting changes while asserted identity and peers remain required', () => {
   const rule = { ...definition.incoming[0]!, fromUri: 'sip:+491701234567@tel.example', expectedAssertedNumber: '+491701234567' };
-  const guarded = new PhoneAdmission({ ...definition, incoming: [rule] });
+  const guarded = new PhoneAdmission({ ...definition, incoming: [rule],
+    dialDomain: 'outbound.example', recipients: [{ id: 'personal', destination: '+491701234567' }] });
   const observation = incoming(); observation.incoming.assertedNumbers = ['+491701234567'];
   for (const fromUri of ['sip:+491701234567@TEL.EXAMPLE;user=phone', 'sips:+491701234567@another.example']) {
     observation.incoming.fromUri = fromUri;
-    assert.equal(guarded.incoming(randomUUID(), randomUUID(), 'secretary', observation).callId, observation.id);
+    const admitted = guarded.incoming(randomUUID(), randomUUID(), 'secretary', observation);
+    assert.equal(admitted.callId, observation.id);
+    assert.equal(guarded.matchesRecipient({ ...admitted, callId: observation.id }, 'personal'), true);
+    assert.equal(guarded.matchesRecipient({ ...admitted, callId: observation.id }, 'other'), false);
   }
   observation.incoming.fromUri = 'sip:+491701234568@tel.example';
   assert.throws(() => guarded.incoming(randomUUID(), randomUUID(), 'secretary', observation), { code: 'phone_caller_refused' });
