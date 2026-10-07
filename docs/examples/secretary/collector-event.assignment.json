@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "assignmentId": "mcp-collector-transition",
+  "name": "MCP collector transition",
+  "description": "Assess activity.changed events from a custom collector using public MCP reads.",
+  "enabled": false,
+  "minimumNotificationAgeMinutes": 0,
+  "trigger": {
+    "kind": "event",
+    "topic": "data-collector.event",
+    "topicVersion": "1.0.0",
+    "sourceServiceNodeId": "host.data-collector",
+    "eventKind": "collected"
+  },
+  "prompt": "Inspect the collected event envelope. Proceed only when taskId is m365-account and name is activity.changed; return no notification for other events. Check the pair runId and eventIndex against retained assessment history and return no notification for an already assessed event.\n\nRead the current Hive result object collector-result-object-id. Review only account keys outlook:work, teams:work and gmail:personal. Require data.observation.complete to be true and data.observation.observedAt to be no more than 180 seconds old. If evidence is unavailable, incomplete or stale, record that limitation and return no notification. Use public Outlook, Teams and Gmail MCP read tools to verify relevant original messages and conversation context. Consider only incoming activity that remains unread and unresolved, and assess whether there is a consequential request, deadline or useful new information.\n\nReturn the Secretary decision and let Secretary apply its contact rules. Source-account access is limited to reading; sending, replying and modifying messages are outside this assignment.",
+  "preflight": null,
+  "rules": {
+    "voice": { "enabled": false }
+  },
+  "execution": { "model": null, "effort": null, "reuse": "new" },
+  "createdAt": "2000-01-01T00:00:00.000Z",
+  "updatedAt": "2000-01-01T00:00:00.000Z"
+}

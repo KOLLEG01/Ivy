@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "assignmentId": "mcp-inbox-briefing",
+  "name": "Daily MCP inbox briefing",
+  "description": "Review actionable Outlook, Teams and Gmail activity each morning.",
+  "enabled": false,
+  "minimumNotificationAgeMinutes": 0,
+  "trigger": {
+    "kind": "schedule",
+    "timeZone": "Etc/UTC",
+    "cadence": "daily",
+    "intervalMinutes": null,
+    "localTime": "09:00",
+    "weekdays": []
+  },
+  "prompt": "Read the current Hive result object collector-result-object-id. Review only account keys outlook:work, teams:work and gmail:personal. Require data.observation.complete to be true and data.observation.observedAt to be no more than 180 seconds old. If evidence is unavailable, incomplete or stale, record that limitation and return no notification.\n\nUse public Outlook, Teams and Gmail MCP read tools to retrieve relevant original messages and conversation context. Consider only incoming activity that remains unread and unresolved. Prepare a concise briefing of consequential requests, deadlines and useful new information, avoiding repeats from previous briefings unless something has materially changed. Identify the source and include useful native links.\n\nReturn the Secretary decision and let Secretary apply its contact rules. Source-account access is limited to reading; sending, replying and modifying messages are outside this assignment.",
+  "preflight": null,
+  "rules": {
+    "voice": { "enabled": false }
+  },
+  "execution": { "model": null, "effort": null, "reuse": "assignment" },
+  "createdAt": "2000-01-01T00:00:00.000Z",
+  "updatedAt": "2000-01-01T00:00:00.000Z"
+}

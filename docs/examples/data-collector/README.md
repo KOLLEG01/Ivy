@@ -5,8 +5,13 @@ provider-specific: an OAuth access token is not a permanent personal access toke
 (PAT). Some providers require a one-time interactive OAuth consent during setup.
 The collectors do not replace that consent with an account password.
 
+The [MCP automation recipes](../README.md) show how to combine a public MCP
+integration, versioned Hive results and scheduled or change-triggered Secretary
+assignments.
+
 | Source                       | Authentication                                                          | Setup instructions                           |
 | ---------------------------- | ----------------------------------------------------------------------- | -------------------------------------------- |
+| Outlook / Teams / Gmail      | Public MCP plugins connected on the selected native owner               | [MCP accounts](m365/README.md)               |
 | Fröling                      | Existing bearer token, or Connect username/password                     | [Heating](home/README.md#froling-setup)      |
 | Washer / dryer               | Direct, unauthenticated JSON push to DataCollector's configured port    | [Appliances](home/README.md#appliance-setup) |
 | Tesla delivery               | Explicitly provisioned account session cookie; experimental             | [Tesla](home/README.md#tesla-setup)          |

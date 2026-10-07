@@ -37,28 +37,13 @@ and attachments through the native references. `data.observation` provides the
 freshness and completeness needed before assessment. A failed or capped scan
 preserves prior counts/activity and explicitly marks the observation incomplete.
 
-A Secretary assignment can watch the selected account's stable activity with this
-trigger. Replace the object ID and `work` account suffix with the published result
-and configured account key. Add `/data/activity/gmail:personal` when watching Gmail.
-Apply the intended notification rules to the assignment.
-
-```json
-{
-  "kind": "object-change",
-  "objectIds": ["published-result-object-id"],
-  "paths": ["/data/activity/outlook:work", "/data/activity/teams:work"],
-  "delaySeconds": 300,
-  "observation": {
-    "completePath": "/data/observation/complete",
-    "observedAtPath": "/data/observation/observedAt",
-    "maximumAgeSeconds": 180
-  }
-}
-```
-
-Before assessing a batch, re-read the current complete result and consider only
-incoming activity still unread. Fetch details through the original native tools.
-The generic trigger and grouping rules are described in [Secretary](../../../../specs/SECRETARY.md).
+Use the disabled [Secretary object-change assignment](../../secretary/unread-activity.assignment.json)
+to watch stable Outlook, Teams and Gmail activity. Replace its result object ID
+and account suffixes with the published result and your configured account keys.
+The [Secretary recipes](../../secretary/README.md) explain grouping, fresh unread
+evidence and a scheduled briefing using the same collector. The
+[pipeline overview](../../README.md) connects collection, status consumers and
+assessment through public MCP integrations.
 
 Teams chat and message lists currently cap at 100. Reaching either cap prevents a
 claim of complete coverage. Channel unread state and incoming call events are

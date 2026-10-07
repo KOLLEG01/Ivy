@@ -166,7 +166,9 @@ interfaces; the public repository does not need to import or know their implemen
    declare sensitive service settings with `secretPaths` in the host configuration.
 
 For script-based integrations, [DataCollector examples](docs/examples/data-collector)
-show how to collect data without writing a new long-running service. Private
+show how to collect data without writing a new long-running service. The
+[MCP automation recipes](docs/examples/README.md) combine public MCP account reads,
+versioned Hive results and Secretary schedules or change-triggered assessments. Private
 extensions are optional; a standard installation uses this repository alone.
 
 ## Development
