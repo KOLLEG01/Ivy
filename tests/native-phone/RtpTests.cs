@@ -28,6 +28,14 @@ static partial class Program {
         Check(!queue.Add(Packet(1)) && queue.TryTake(out var expired, out gap) && expired.Sequence == 2 && gap,
             "an arrival at the expired gap deadline cannot restore stale audio before the next timer tick");
 
+        clock = new Clock(); queue = new RtpReceiveQueue(20, clock); queue.Add(Packet(0)); queue.TryTake(out _, out _);
+        queue.Add(Packet(2));
+        Check(!queue.TryTake(out _, out _), "a queued gap retains its reorder window while PCM has reserve");
+        Check(queue.TryTake(out var due, out gap, playoutDeadline: true) && due.Sequence == 2 && gap && queue.Status.MissingPackets == 1,
+            "an actual PCM deadline releases the next packet for codec concealment without a silence frame");
+        Check(!queue.Add(Packet(1)) && queue.Status.LatePackets == 1 && !queue.TryTake(out _, out _),
+            "a deadline-concealed packet cannot replay after arriving late");
+
         clock = new Clock(); queue = new RtpReceiveQueue(60, clock); queue.Add(Packet(0)); queue.TryTake(out _, out _);
         for (ushort seq = 2; seq <= 9; seq++) queue.Add(Packet(seq));
         Check(queue.Status.QueuedPackets == 8 && !queue.Add(Packet(10)), "packet/byte backlog stays bounded under a gap flood");

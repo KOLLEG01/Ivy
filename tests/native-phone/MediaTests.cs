@@ -46,6 +46,59 @@ static partial class Program {
             foreach (float value in input) { queue.Enqueue(value); Samples.Add(value); }
         }
     }
+    sealed class PlayoutPort : IPcmAudioPort {
+        public readonly AudioQueue Queue = new(3840, 48 * WebRtcAudioRoute.PlayoutPrebufferMs,
+            rebufferAfterUnderrun: true, smoothDiscontinuities: true);
+        public bool IsOpen => true;
+        public long Generation => 1;
+        public int ReadCaptured(Span<float> output) => Queue.Read(output);
+        public void WriteReceived(ReadOnlySpan<float> input) => Queue.Write(input);
+    }
+    static void OpusJitterPlayout() {
+        var format = new CodecSettings(["OPUS"]).Formats().Single();
+        const int frames = 140;
+        var source = new ContinuityPort(true);
+        using var tx = new MediaCodec(format, source);
+        var arrivals = Enumerable.Range(0, frames).Select(frame => new {
+            Frame = frame, Due = frame * 20 + (frame % 17 == 7 || frame % 9 == 3 ? 12 : 0),
+            Packet = new RtpAudioPacket((ushort)frame, (uint)(frame * 960), 1, format.FormatID, tx.Encode(), 1)
+        }).Where(value => value.Frame % 17 != 6).OrderBy(value => value.Due).ToArray();
+        foreach (int phase in new[] { 0, 7, 19 }) {
+            var clock = new Clock(); var packets = new RtpReceiveQueue(20, clock);
+            var sink = new PlayoutPort(); using var rx = new MediaCodec(format, sink);
+            void Drain(int playoutSamples = 0) {
+                while (packets.TryTake(out var packet, out _, playoutDeadline: sink.Queue.Count < playoutSamples)) {
+                    try { rx.DecodeRtp(packet); } finally { Array.Clear(packet.Payload); }
+                }
+            }
+            int next = 0, played = 0;
+            float previous = 0;
+            var output = new float[960];
+            for (int time = 0; time <= frames * 20 + 100 && played < frames; time++) {
+                clock.Ticks = time;
+                while (next < arrivals.Length && arrivals[next].Due <= time) { packets.Add(arrivals[next++].Packet); Drain(); }
+                // The WebRTC send clock and SIP playout clock have independent phases.
+                if (time % 20 == 5) Drain();
+                if (time % 20 != phase) continue;
+                Drain(output.Length);
+                int count = sink.ReadCaptured(output);
+                if (played == 0 && count == 0) continue;
+                Check(count == 960, $"loss plus 12 ms jitter cannot insert a playout gap: phase={phase}, time={time}, frame={played}, samples={count}");
+                double energy = 0;
+                foreach (float value in output) {
+                    Check(Math.Abs(value - previous) < .15f, "jitter recovery cannot introduce a PCM boundary click");
+                    energy += value * value; previous = value;
+                }
+                Check(energy / output.Length > .0001, "isolated packet loss conceals audible speech instead of a silent frame");
+                played++;
+            }
+            Check(played == frames && sink.Queue.Dropped == 0 && sink.Queue.Underruns == 0,
+                "independent clocks preserve every Opus playout frame through isolated loss and jitter");
+            Check(rx.ConcealedSamples == packets.Status.MissingPackets * 960 && packets.Status.MissingPackets == frames - arrivals.Length,
+                "deadline recovery reconstructs each lost frame once without extending the audio timeline");
+        }
+        Console.WriteLine("phone_opus_jitter_playout_passed: isolated loss plus12ms jitter across independent audio clock phases");
+    }
     static void CodecContinuity() {
         var opus = new CodecSettings(["OPUS"]).Formats().Single();
         foreach (string name in new[] { "G722", "PCMA", "PCMU", "EVS" }) {
@@ -109,6 +162,7 @@ static partial class Program {
             Check(sink.Samples.Count - before == 1920 && rx.ConcealedSamples - concealed == 960,
                 "RTP timestamp wrap preserves exactly one lost frame without resetting the decoder");
         } finally { rx.Dispose(); }
+        OpusJitterPlayout();
     }
     static void Codecs() {
         Reject(() => new CodecSettings(new[] { "PCMA", "PCMA" }).Validate(), "duplicate codec rejected");

@@ -45,7 +45,7 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   Startup skips workspace/history scanning; the current call's full context is
   already supplied explicitly.
 - Each call and generation owns its bounded PCM/Opus queues, DTLS/SRTP transport
-  and cleanup. PCM playback keeps a 40 ms jitter reserve, capped by the configured
+  and cleanup. PCM playback uses a 60 ms startup threshold, capped by the configured
   queue size, and rearms after starvation or speech pauses. Startup RTP sequence
   probation excludes isolated transport probes
   before seeding the encrypted replay window. Revoked or suspended authority
@@ -56,8 +56,9 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   Realtime queues blend actual PCM cuts over 5 ms within the existing frame;
   continuous samples stay unchanged and authority reset discards blend history.
   Packet gaps preserve decoder/filter state and recover up to 120 ms from
-  RTP timestamps with codec FEC/PLC. Longer gaps reset the stream instead of
-  replaying old speech. Native media diagnostics include WebRTC receive counters,
+  RTP timestamps with codec FEC/PLC. At the PCM playout deadline, queued following
+  packets can supply recovery before the reorder window expires. Longer gaps reset
+  the stream instead of replaying old speech. Native media diagnostics include WebRTC receive counters,
   concealed samples and PCM underruns separately from telephone RTP counters.
 - A forwarded prompt uses the existing recipient's active call and task, with its
   original operation ID. A model selection affects following task turns. Restart

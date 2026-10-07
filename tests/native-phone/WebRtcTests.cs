@@ -82,6 +82,10 @@ static partial class Program {
         var firstFrame = Enumerable.Repeat(1f, 960).ToArray();
         Check(route.ReadCaptured(firstFrame) == 0 && firstFrame.All(value => value == 0),
             "WebRTC holds its first packet until a short jitter reserve is available");
+        SendTone();
+        await Until(() => route.Status.CaptureQueuedSamples >= 1920, "two authenticated packets reach the playout queue");
+        Check(route.ReadCaptured(firstFrame) == 0 && route.Status.CaptureQueuedSamples == 1920,
+            "WebRTC retains enough reserve for a lost packet followed by sender jitter");
         var deadline = DateTime.UtcNow.AddSeconds(5);
         bool incoming = false;
         while (DateTime.UtcNow < deadline && (!incoming || !received.Task.IsCompletedSuccessfully)) {
@@ -94,7 +98,7 @@ static partial class Program {
         Check(incoming && received.Task.IsCompletedSuccessfully, "actual DTLS/SRTP/Opus carries both PCM directions");
         route.Suspend(); route.Resume();
         SendTone(); SendTone(); SendTone();
-        await Until(() => route.Status.CaptureQueuedSamples >= 1920, "loss fixture has a short initial playout reserve");
+        await Until(() => route.Status.CaptureQueuedSamples >= 2880, "loss fixture has a short initial playout reserve");
         var recovered = new float[960];
         Check(route.ReadCaptured(recovered) == 960, "loss fixture begins with a full frame");
         for (int frame = 0; frame < 60; frame++) {

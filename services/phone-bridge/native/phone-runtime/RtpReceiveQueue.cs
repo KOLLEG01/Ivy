@@ -56,19 +56,21 @@ public sealed class RtpReceiveQueue {
         }
         queued.Add(packet.Sequence, new(packet with { Payload = packet.Payload.ToArray() }, now)); return true;
     }
-    public bool TryTake(out RtpAudioPacket packet, out bool discontinuity) {
+    public bool TryTake(out RtpAudioPacket packet, out bool discontinuity, bool playoutDeadline = false) {
         packet = null; discontinuity = false; long now = Now();
         if (queued.Count == 0) return false;
-        ExpireGap(now);
+        ExpireGap(now, playoutDeadline);
         if (!queued.TryGetValue(expected.Value, out var entry)) return false;
         queued.Remove(expected.Value); expected = unchecked((ushort)(expected.Value + 1));
         maximumResidence = Math.Max(maximumResidence, clock.GetElapsedTime(entry.Arrived, now).TotalMilliseconds);
         packet = entry.Packet; discontinuity = resetDecoder; resetDecoder = false; return true;
     }
-    private void ExpireGap(long now) {
+    private void ExpireGap(long now, bool playoutDeadline = false) {
         if (queued.Count == 0 || queued.ContainsKey(expected.Value)) return;
         long oldest = queued.Values.Min(value => value.Arrived);
-        if (clock.GetElapsedTime(oldest, now).TotalMilliseconds < reorderMs) return;
+        // A PCM consumer with no remaining reserve cannot wait for reordering.
+        // Release the following packet now so its codec can conceal the gap.
+        if (!playoutDeadline && clock.GetElapsedTime(oldest, now).TotalMilliseconds < reorderMs) return;
         var nearest = queued.Values.MinBy(value => Distance(value.Packet.Sequence));
         missing += Distance(nearest.Packet.Sequence); expected = nearest.Packet.Sequence; resetDecoder = true;
     }

@@ -9,6 +9,7 @@ namespace Ivy.PhoneBridge;
 // Digital call audio only: no Windows endpoints, browser, or Desktop session.
 // Both directions remain bounded and are discarded whenever call authority closes.
 public sealed class WebRtcAudioRoute : ICallAudioRoute {
+    internal const int PlayoutPrebufferMs = 60;
     private readonly object sync = new();
     private readonly Func<bool> permitted;
     private readonly RTCPeerConnection peer = new AudioPeer();
@@ -66,7 +67,7 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
         int capacity = AudioSettings.SampleRate * queueMs / 1000;
         // Keep a short playout reserve for packet/sender jitter. Re-arm after a
         // speech pause or starvation so each new utterance has the same reserve.
-        int prebuffer = AudioSettings.SampleRate * Math.Min(40, queueMs) / 1000;
+        int prebuffer = AudioSettings.SampleRate * Math.Min(PlayoutPrebufferMs, queueMs) / 1000;
         received = new(capacity, prebuffer, rebufferAfterUnderrun: true, smoothDiscontinuities: true);
         outgoing = new(capacity, prebuffer, rebufferAfterUnderrun: true, smoothDiscontinuities: true);
         using var audio = new AudioEncoder(includeOpus: true);
@@ -139,7 +140,13 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
     public void Resume() { lock (sync) { if (closed || failed) throw new NativeRpcException("phone_webrtc_failed"); resumed = true; } }
     public void Suspend() { lock (sync) { resumed = false; Clear(true); } }
     public int ReadCaptured(Span<float> output) {
-        lock (sync) { if (!IsOpen) { Clear(); output.Clear(); return 0; } return received.Read(output); }
+        lock (sync) {
+            if (!IsOpen) { Clear(); output.Clear(); return 0; }
+            // SIP and WebRTC have independent clock phases. Recover a queued
+            // gap at the actual playout deadline, before padding PCM with silence.
+            Drain(output.Length);
+            return received.Read(output);
+        }
     }
     public void WriteReceived(ReadOnlySpan<float> input) { lock (sync) { if (IsOpen) outgoing.Write(input); else Clear(); } }
     private void Receive(IPEndPoint endpoint, SDPMediaTypesEnum media, RTPPacket packet) {
@@ -152,8 +159,8 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
             Drain();
         }
     }
-    private void Drain() {
-        while (packets.TryTake(out var packet, out _)) {
+    private void Drain(int playoutSamples = 0) {
+        while (packets.TryTake(out var packet, out _, playoutDeadline: received.Count < playoutSamples)) {
             try {
                 decoder.DecodeRtp(packet); receivedPackets++;
             } finally { Array.Clear(packet.Payload); }
