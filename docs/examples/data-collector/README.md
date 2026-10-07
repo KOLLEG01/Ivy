@@ -5,15 +5,16 @@ provider-specific: an OAuth access token is not a permanent personal access toke
 (PAT). Some providers require a one-time interactive OAuth consent during setup.
 The collectors do not replace that consent with an account password.
 
-| Source                       | Authentication                                                          | Setup instructions                           |
-| ---------------------------- | ----------------------------------------------------------------------- | -------------------------------------------- |
-| Fröling                      | Existing bearer token, or Connect username/password                     | [Heating](home/README.md#froling-setup)      |
-| Washer / dryer               | Direct, unauthenticated JSON push to DataCollector's configured port    | [Appliances](home/README.md#appliance-setup) |
-| Tesla delivery               | Explicitly provisioned account session cookie; experimental             | [Tesla](home/README.md#tesla-setup)          |
-| Blink                        | OAuth token/refresh token, or email/password with provider verification | [Cameras](cameras/README.md)                 |
-| RTSP                         | Camera stream URL with camera credentials                               | [Cameras](cameras/README.md#rtsp)            |
-| Instagram / TikTok / YouTube | Account-authorized API tokens; supported refresh flows                  | [Social accounts](social/README.md)          |
-| KDP                          | Amazon credentials, or an explicitly provisioned session; experimental  | [KDP](kdp/README.md)                         |
+| Source                       | Authentication                                                          | Setup instructions                                    |
+| ---------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------- |
+| Fröling                      | Existing bearer token, or Connect username/password                     | [Heating](home/README.md#froling-setup)               |
+| Washer / dryer               | Direct, unauthenticated JSON push to DataCollector's configured port    | [Appliances](home/README.md#appliance-setup)          |
+| Tesla active orders          | Registered Fleet API application and authorized refresh token           | [Tesla Fleet API](home/README.md#tesla-fleet-setup)   |
+| Tesla delivery HTML          | Explicitly provisioned account session cookie; experimental             | [Tesla account HTML](home/README.md#tesla-html-setup) |
+| Blink                        | OAuth token/refresh token, or email/password with provider verification | [Cameras](cameras/README.md)                          |
+| RTSP                         | Camera stream URL with camera credentials                               | [Cameras](cameras/README.md#rtsp)                     |
+| Instagram / TikTok / YouTube | Account-authorized API tokens; supported refresh flows                  | [Social accounts](social/README.md)                   |
+| KDP                          | Amazon credentials, or an explicitly provisioned session; experimental  | [KDP](kdp/README.md)                                  |
 
 ## Store credentials
 

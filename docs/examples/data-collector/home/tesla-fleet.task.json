@@ -1,0 +1,22 @@
+{
+  "id": "tesla-api",
+  "name": "Tesla active orders (Fleet API)",
+  "enabled": false,
+  "intervalSeconds": 1800,
+  "timeoutSeconds": 60,
+  "memoryMb": 128,
+  "script": "@file:tesla-fleet.mjs",
+  "dependencies": {},
+  "config": {
+    "region": "eu",
+    "expectedEmail": "owner@example.com",
+    "clientIdSecret": "tesla_client_id",
+    "refreshTokenSecret": "tesla_refresh_token"
+  },
+  "secretNames": ["tesla_client_id", "tesla_refresh_token"],
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 10485760
+  }
+}
