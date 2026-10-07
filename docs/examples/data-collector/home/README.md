@@ -10,7 +10,6 @@ persistent transition state and optional events; no adapter sends notifications.
 | `froeling.task.json`       | Fröling Connect HTTP            | Bearer token or account secrets, user/facility IDs, installed component IDs |
 | `washer.task.json`         | Appliance JSON push             | DataCollector's standalone HTTP port; no token required                     |
 | `dryer.task.json`          | Appliance JSON push             | DataCollector's standalone HTTP port; no token required                     |
-| `tesla-fleet.task.json`    | Tesla Fleet API active orders   | Registered application, authorized refresh token and expected account email |
 | `tesla-delivery.task.json` | Experimental Tesla account HTML | Order-page URL and assigned account session-cookie secret                   |
 
 Fröling uses the web login and component-read protocol, which has no public API
@@ -47,9 +46,8 @@ redirects require session renewal; a client-rendered shell without a delivery
 window fails explicitly and needs a verified order API. This undocumented account
 surface must be checked with an authenticated response before enablement; HTML
 fixtures do not establish backend API parity or live availability.
-The documented [Fleet API user endpoints](https://developer.tesla.com/docs/fleet-api/endpoints/user-endpoints)
-include active orders. Their documentation does not guarantee an estimated-delivery
-field; inspect an authenticated response before mapping delivery data.
+Tesla's documented [Fleet API endpoints](https://developer.tesla.com/docs/fleet-api/endpoints/vehicle-endpoints)
+cover vehicles and provide no equivalent order-delivery endpoint.
 
 ## Froling setup
 
@@ -120,69 +118,7 @@ tasks that need authentication, use `inputSecretName` instead of
 `allowUnauthenticatedInput` as described in the
 [service guide](../../../../services/data-collector/README.md#execution-and-installation).
 
-## Tesla Fleet setup
-
-`tesla-fleet.task.json` reads `/api/1/users/me` to verify `expectedEmail`, then
-`/api/1/users/orders`. It returns the active-order list without assuming undocumented
-delivery fields. A first observation establishes a baseline; later order changes
-emit `tesla.orders.changed`. API list/key reordering does not count as a change.
-It uses no browser during collection and sends no vehicle commands.
-
-1. Obtain credentials for a registered application through
-   [Tesla app onboarding](https://www.tesla.com/support/third-party-app-onboarding).
-   A consumer account alone does not supply application credentials. Application
-   registration belongs to the developer; the product owner separately grants read
-   access through Tesla's consumer authorization flow. Do not enroll the product
-   owner in Tesla for Business or an installer program. Register an HTTPS callback
-   URI and the read scopes `user_data` and `vehicle_device_data`. Complete the
-   application's [regional registration](https://developer.tesla.com/docs/fleet-api/endpoints/partner-endpoints),
-   including hosting its public key. Regions `eu` and `na` use their respective
-   Fleet API origins; this template does not implement China's separate authorization.
-2. Put the application's `clientId` and `clientSecret` in a private local JSON file.
-   The helper follows Tesla's [third-party OAuth flow](https://developer.tesla.com/docs/fleet-api/authentication/third-party-tokens):
-
-   ```sh
-   node tools/operations/tesla-fleet-authorize.mjs begin --client-file /private/client.json --redirect-uri https://example.com/tesla/callback --region eu --session-file /private/authorization.json
-   ```
-
-   Open its `authorizationUrl`, sign in and grant the requested read access. The
-   callback URI must exactly match the application registration. Save the complete
-   resulting redirect URL in a private text file; do not put its code in chat or
-   command arguments. The callback page itself need not exchange or display tokens.
-
-   ```sh
-   node tools/operations/tesla-fleet-authorize.mjs finish --client-file /private/client.json --session-file /private/authorization.json --callback-file /private/callback.txt --output /private/collector-secrets.json
-   ```
-
-   The helper verifies the callback URI and state, exchanges the code at Tesla's
-   Fleet authentication server, and writes the client ID and refresh token only to
-   the new private output file. Output files are never overwritten. Delete temporary
-   callback/session files after successful provisioning.
-
-3. Add `tesla_client_id` and `tesla_refresh_token` to the owning collector's protected
-   `settings.secrets`, using the [source setup guide](../README.md#store-credentials).
-   Set the task's `region` and actual `expectedEmail`, then materialize and save it
-   disabled. Run manually and verify the returned account and order list before
-   enabling its 30-minute schedule.
-
-Rotated tokens live in the task's private `.auth/tesla-fleet.json`, committed before
-data requests. The cache survives failed collection and restarts. Changing bootstrap
-credentials or region starts a new authorization cache. The client secret is needed
-only for initial code exchange and is not assigned to the task. Expired/revoked grants
-require authorization again; a rejected API access token triggers at most one renewal
-per run. HTTP 403 reports `interaction_required`: check application registration and
-granted access. HTML/challenge responses are errors, never order observations.
-
-After verifying an actual response, optional
-`orderSelector: {"path":"/referenceNumber","value":"RN..."}` selects an order, and
-`deliveryPointer` maps its observed field using a JSON pointer. These are explicit
-mappings, not assertions about Tesla's response schema. Delivery reports
-`not_configured`, `order_not_found`, `field_missing` or `available`; only an available
-string populates `estimatedDelivery`. A changed string emits `tesla.delivery.changed`.
-If the API does not expose the delivery window, this collector cannot replace a
-portal-derived delivery observation.
-
-## Tesla HTML setup
+## Tesla setup
 
 The accepted exception is a manually provisioned account session. The collector
 itself uses Node HTTP and does not open a browser.
