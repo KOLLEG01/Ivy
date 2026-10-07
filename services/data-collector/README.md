@@ -17,6 +17,13 @@ retained for seven days; do not retry an old operation after that window.
 Each task exports `default async ({ config, secrets, state, input, signal })` and
 returns `{ data, state?, events?: [{ name, payload }] }`. `data` is any JSON value.
 `state` is private durable task state; it advances only after successful publication.
+An optional task `mcp` binding selects an AgentManager node, absolute project `cwd`,
+MCP `server` and explicit `tools` list. The worker receives `mcp.call(tool, args)`;
+DataCollector forwards granted calls through the existing native owner in an
+ephemeral context without starting a model turn. Hive and plugin credentials stay
+in their owning processes. The bridge exists only for that run and closes with it.
+The [Microsoft 365 example](../../docs/examples/data-collector/m365/README.md)
+shows account identity checks, status results and stable activity for object watchers.
 Use assigned secret names, never literal credentials in task configuration or output.
 The source [setup guide](../../docs/examples/data-collector/README.md) explains
 provider credentials, token renewal and private task-local authentication caches.
@@ -29,6 +36,8 @@ fit Hive's 4,096-byte UTF-8 limit. All events are checked before writing a resul
 an oversized event fails the run and leaves the task editable. No user notification is sent unless a separate subscriber
 is configured to handle the event.
 
+Multiple instances can connect to the same Hive; each keeps its own task store.
+Use `rootName` or `rootObjectId` to select each instance's result root.
 One Hive root contains one result object per task. Each successful run writes a
 new revision; a failed or cancelled run leaves the last successful result current.
 Task definitions, scheduling, state and pending publication are stored in the

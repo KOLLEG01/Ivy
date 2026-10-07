@@ -48,6 +48,29 @@ export function validateConfiguration(value: SecretaryConfiguration): void {
 export function validateTrigger(value: AssignmentTrigger): void {
   validate('AssignmentTrigger', value);
   if (value.kind === 'event') return;
+  if (value.kind === "object-change") {
+    need(
+      new Set(value.objectIds).size === value.objectIds.length &&
+        new Set(value.paths).size === value.paths.length,
+      'secretary_assignment_invalid',
+      "Observed objects and paths must be unique.",
+    );
+    const paths = [
+      ...value.paths,
+      ...(value.observation
+        ? [value.observation.completePath, value.observation.observedAtPath]
+        : []),
+    ];
+    need(
+      paths.every(
+        (path) =>
+          path === "" || (path.startsWith("/") && !/~(?![01])/u.test(path)),
+      ),
+      'secretary_assignment_invalid',
+      "Observed paths must be JSON Pointers.",
+    );
+    return;
+  }
   timeZone(value.timeZone);
   need(value.cadence === 'interval'
     ? value.intervalMinutes !== null && value.localTime === null && value.weekdays.length === 0

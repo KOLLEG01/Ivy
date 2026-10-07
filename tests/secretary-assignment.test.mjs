@@ -146,8 +146,11 @@ test('channel decisions require complete fresh source evidence', () => {
   assert.equal(messageChannel({ messageChannel: { key: 'alice', occurredAt: at } }), null);
 });
 
-test('event scheduler reports an old gap and still processes every retained page', async () => {
-  const assignment = { ...assignmentFor(at), enabled: true };
+for (const predatesAssignment of [false, true]) test(predatesAssignment
+  ? 'event scheduler ignores pruned history before creation and activates on the retained assignment event'
+  : 'event scheduler reports an old gap and still processes every retained page', async () => {
+  const createdAt = predatesAssignment ? '2026-09-22T08:01:30.000Z' : at;
+  const assignment = { ...assignmentFor(createdAt), enabled: true };
   const configuration = defaultConfiguration(settingsFor(randomUUID(), 'secretary'), at, executionTarget);
   const stored = new Map(), executions = [], acknowledgements = [], issues = new Map();
   const batches = [
@@ -155,6 +158,14 @@ test('event scheduler reports an old gap and still processes every retained page
     { items: [{ sequence: 1101, topic: 'test.events', topicVersion: '1.0.0', source: 'service:test-producer', mutationId: 'event-one',
       occurredAt: '2026-09-22T08:01:00.000Z', payload: { kind: assignment.trigger.eventKind } }], throughSequence: 1101, hasMore: false, gap: null },
   ];
+  if (predatesAssignment) {
+    batches[1].items.push(
+      { sequence: 1102, topic: 'hive.object.changed', topicVersion: '1.0.0', source: 'principal:secretary', mutationId: 'assignment-create',
+        occurredAt: createdAt, payload: { objectId: 'assignment-object', revision: 1 } },
+      { ...batches[1].items[0], sequence: 1103, mutationId: 'event-after-creation', occurredAt: '2026-09-22T08:01:45.000Z' },
+    );
+    batches[1].throughSequence = 1103;
+  }
   const client = { async request(method, args) {
     if (method === 'objects.query') return { items: [{ objectId: 'bad-assignment', revision: 1 }, { objectId: 'assignment-object', revision: 1 }], nextCursor: null };
     if (method === 'events.subscribe') { assert.equal(args.initialSequence, 0); assert.equal(args.durable, true); return batches.shift(); }
@@ -166,7 +177,7 @@ test('event scheduler reports an old gap and still processes every retained page
     root: 'root', async named(key, name) { return key === 'secretary/configuration' ? { pin: { objectId: 'configuration', revision: 1 }, value: configuration }
       : stored.get(key + ':' + name) ?? null; },
     async read(_key, pin) { if (pin.objectId === 'bad-assignment') throw new IvyError('secretary_evidence_conflict', 'bad assignment');
-      return { pin: { objectId: 'assignment-object', revision: 1 }, value: assignment, writtenAt: at }; },
+      return { pin: { objectId: 'assignment-object', revision: 1 }, value: assignment, writtenAt: createdAt }; },
     async original(_key, document) { return document; },
     async create(key, name, value) { if (key === 'secretary/execution') executions.push(value);
       const saved = { pin: { objectId: key + ':' + name, revision: 1 }, value }; stored.set(key + ':' + name, saved); return saved; },
@@ -176,14 +187,16 @@ test('event scheduler reports an old gap and still processes every retained page
     technicalNamed(key, name) { return stored.get(key + ':' + name) ?? null; },
     technicalCreate(key, name, value) { const saved = { pin: { objectId: key + ':' + name, revision: 1 }, name, value }; stored.set(key + ':' + name, saved); return saved; },
     technicalAmend(key, saved, value) { const next = { ...saved, value }; stored.set(key + ':' + saved.name, next); return next; },
+    technicalDelete(key, id) { for (const [name, row] of stored) if (name.startsWith(key + ':') && row.pin.objectId === id) stored.delete(name); },
   };
   const engine = { client, store, settings: { recordsPerTick: 2, identity: { scope: { secretaryId: 'secretary' } } }, now: () => new Date('2026-09-22T08:02:00.000Z'),
     signal: new AbortController().signal, recoveryIssues: issues, verifyOwner: async () => {}, issue(key, code) { issues.set(key, code); } };
   await new AssignmentScheduler(engine).tick();
   assert.equal(executions.length, 1);
-  assert.deepEqual(acknowledgements.map(value => value.throughSequence), [1100, 1101]);
+  assert.deepEqual(acknowledgements.map(value => value.throughSequence), [1100, predatesAssignment ? 1103 : 1101]);
   assert.equal(acknowledgements[0].gapThroughSequence, 1100);
-  assert.equal(issues.get('event-gap:' + assignment.assignmentId), 'secretary_event_gap');
+  assert.equal(issues.get('event-gap:' + assignment.assignmentId), predatesAssignment ? undefined : 'secretary_event_gap');
+  assert.equal(executions[0].trigger.occurredAt, predatesAssignment ? '2026-09-22T08:01:45.000Z' : '2026-09-22T08:01:00.000Z');
   assert.equal(issues.get('assignment-record:bad-assignment'), 'secretary_evidence_conflict');
 });
 

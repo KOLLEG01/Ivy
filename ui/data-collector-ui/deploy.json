@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "data-collector-ui",
   "kind": "app",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "DataCollector task editor and result viewer",
   "connectsToHive": false,
   "requirements": {

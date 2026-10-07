@@ -595,7 +595,8 @@ export namespace Secretary {
   export type SecretaryConfiguration = { "schemaVersion": 1; "rules": Secretary.GlobalRules; "execution": (Secretary.ExecutionTarget) | (null); "updatedAt": string; };
   export type ScheduleTrigger = { "kind": "schedule"; "timeZone": string; "cadence": "interval" | "daily" | "weekly"; "intervalMinutes": (number) | (null); "localTime": (string) | (null); "weekdays": Array<number>; };
   export type EventTrigger = { "kind": "event"; "topic": string; "topicVersion": string; "sourceServiceNodeId": (string) | (null); "eventKind": (string) | (null); };
-  export type AssignmentTrigger = (Secretary.ScheduleTrigger) | (Secretary.EventTrigger);
+  export type ObjectTrigger = { "kind": "object-change"; "objectIds": Array<string>; "paths": Array<string>; "delaySeconds": number; "observation": ({ "completePath": string; "observedAtPath": string; "maximumAgeSeconds": number; }) | (null); };
+  export type AssignmentTrigger = (Secretary.ScheduleTrigger) | (Secretary.EventTrigger) | (Secretary.ObjectTrigger);
   export type Preflight = { "executable": string; "args": Array<string>; "timeoutMs": number; };
   export type AssignmentExecution = { "model": (string) | (null); "effort": ("low" | "medium" | "high" | "xhigh") | (null); "reuse": "main" | "assignment" | "new"; };
   export type Assignment = { "schemaVersion": 1; "assignmentId": string; "name": string; "description": string; "enabled": boolean; "builtInKey"?: (string) | (null); "minimumNotificationAgeMinutes"?: number; "trigger": Secretary.AssignmentTrigger; "prompt": string; "preflight": (Secretary.Preflight) | (null); "rules": Secretary.RuleOverrides; "execution"?: Secretary.AssignmentExecution; "createdAt": string; "updatedAt": string; };
@@ -627,7 +628,7 @@ export namespace Secretary {
   export type StatusRequest = { "expectedScope": Secretary.Scope; };
   export type BindingRequest = {  };
   export type BindingResponse = { "serviceNodeId": string; "hostId": string; "available": true; "expectedScope": Secretary.Scope; "generation": number; "bindingHash": string; "observedAt": string; };
-  export type ListAssignmentsRequest = { "expectedScope": Secretary.Scope; "assignmentId"?: string; "cursor"?: (string) | (null); "limit"?: number; "enabled"?: boolean; "triggerKind"?: "schedule" | "event"; };
+  export type ListAssignmentsRequest = { "expectedScope": Secretary.Scope; "assignmentId"?: string; "cursor"?: (string) | (null); "limit"?: number; "enabled"?: boolean; "triggerKind"?: "schedule" | "event" | "object-change"; };
   export type AssignmentEntry = { "pin": Secretary.Pin; "assignment": Secretary.Assignment; };
   export type AssignmentPage = { "assignments": Array<Secretary.AssignmentEntry>; "nextCursor": (string) | (null); "observedAt": string; };
   export type GetAssignmentRequest = { "expectedScope": Secretary.Scope; "assignmentId": string; };

@@ -17,6 +17,7 @@ import { CollectorEngine } from "./engine.js";
 import { CollectorStore } from "./store.js";
 import { TaskRunner } from "./runner.js";
 import { settingsSchema, registry } from "./schema.js";
+import { NativeMcpSession } from "./native-mcp.js";
 
 export async function startDataCollector(path: string) {
   const config = await instanceConfig(path),
@@ -28,12 +29,20 @@ export async function startDataCollector(path: string) {
   );
   const health = new HealthFile(config),
     store = new CollectorStore(join(config.dataRoot, "data-collector.sqlite"));
-  const engine = new CollectorEngine(
+  const engine: CollectorEngine = new CollectorEngine(
     store,
     new TaskRunner(
       join(config.workRoot ?? config.dataRoot, "tasks"),
       config.artifactRoot,
       settings,
+      (binding, signal) => {
+        requireThat(
+          engine.client,
+          "provider_unavailable",
+          "Hive connection is not ready for MCP calls.",
+        );
+        return new NativeMcpSession(engine.client, binding, signal);
+      },
     ),
     settings,
   );
@@ -56,7 +65,7 @@ export async function startDataCollector(path: string) {
     identity: {
       serviceNodeId: config.serviceNodeId,
       serviceName: "data-collector",
-      instanceMode: "singleton",
+      instanceMode: "multiple",
       hostId: config.hostId,
       version: config.version,
       buildId: config.buildId,

@@ -25,7 +25,18 @@ export interface NativeTarget { serviceNodeId: string; hostId: string; nativeVer
 export interface SecretaryConfiguration { schemaVersion: 1; rules: GlobalRules; execution: ExecutionTarget | null; updatedAt: string }
 export interface ScheduleTrigger { kind: 'schedule'; timeZone: string; cadence: 'interval' | 'daily' | 'weekly'; intervalMinutes: number | null; localTime: string | null; weekdays: number[] }
 export interface EventTrigger { kind: 'event'; topic: string; topicVersion: string; sourceServiceNodeId: string | null; eventKind: string | null }
-export type AssignmentTrigger = ScheduleTrigger | EventTrigger;
+export interface ObjectTrigger {
+  kind: "object-change";
+  objectIds: string[];
+  paths: string[];
+  delaySeconds: number;
+  observation: {
+    completePath: string;
+    observedAtPath: string;
+    maximumAgeSeconds: number;
+  } | null;
+}
+export type AssignmentTrigger = ScheduleTrigger | EventTrigger | ObjectTrigger;
 export interface Preflight { executable: string; args: string[]; timeoutMs: number }
 export interface AssignmentExecution { model: string | null; effort: ExecutionTarget['effort'] | null; reuse: 'main' | 'assignment' | 'new' }
 export interface Assignment { schemaVersion: 1; assignmentId: string; name: string; description: string; enabled: boolean; builtInKey?: string | null; minimumNotificationAgeMinutes?: number; trigger: AssignmentTrigger; prompt: string; preflight: Preflight | null; rules: RuleOverrides; execution?: AssignmentExecution; createdAt: string; updatedAt: string }
@@ -75,10 +86,18 @@ export const same = (a: unknown, b: unknown) => hashJson(a) === hashJson(b);
 export const version = '1.0.0';
 const histories: Record<string, string[]> = {
   'secretary/item': ['1.0.0', '1.1.0', '1.2.0', '1.3.0'],
-  'secretary/assignment': ['1.0.0', '1.1.0', '1.2.0', '1.3.0'],
-  'secretary/schedule-progress': ['1.0.0', '1.1.0'],
-  'secretary/event-progress': ['1.0.0', '1.1.0'],
-  'secretary/execution': ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0'],
+  'secretary/assignment': ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0'],
+  'secretary/schedule-progress': ['1.0.0', '1.1.0', '1.2.0'],
+  'secretary/event-progress': ['1.0.0', '1.1.0', '1.2.0'],
+  'secretary/execution': [
+    '1.0.0',
+    '1.1.0',
+    '1.2.0',
+    '1.3.0',
+    '1.4.0',
+    '1.5.0',
+    "1.6.0",
+  ],
 };
 export const readableVersions = (key: string): string[] => histories[key] ?? [version];
 export const contractVersion = (key: string) => readableVersions(key).at(-1)!;
@@ -101,13 +120,24 @@ export function secretaryRegistry(): Wire.RegistrySync {
     return [current];
   });
   const mcpTitles: Record<string, string> = { operation: 'Read inbox action outcome', operationRead: 'Read Secretary operation outcome', status: 'Check Secretary sources', binding: 'Read Secretary binding', listAssignments: 'List assignments', saveConfiguration: 'Configure assignments' };
-  const tools: Wire.ToolDefinition[] = Object.entries(catalog.operations).map(([name, operation]) => ({ namespace: 'secretary', name, interfaceVersion: version, description: ({ capture: 'Capture one original source observation.', assess: 'Record the decision for one original unassessed item.', attach: 'Attach acquired media evidence to one original inbox item.', checkpoint: 'Advance one source cursor after saved capture receipts.', operation: 'Read the recorded outcome of an inbox action by its operation ID.', operationRead: 'Read the caller-owned outcome of an inbox or assignment operation by its original ID.', status: 'Read source collection checkpoints, notification settings, and recovery issues.', binding: 'Read the current service node, host and expected scope without a prior scope value.', listAssignments: 'List assignments triggered by schedules or events, with current revisions for updates.', getAssignment: 'Read one current Secretary assignment and its exact revision pin.', saveConfiguration: 'Set default execution targets and contact rules for Secretary assignments.', saveAssignment: 'Create or update one exact Secretary schedule, reminder or event-triggered assignment.' })[name]!,
-    ...((name === 'listAssignments' || name === 'binding' || name === 'status' || name === 'saveConfiguration' || name === 'operation' || name === 'operationRead') ? { discovery: { keywords: [], mcp: {
+  const tools: Wire.ToolDefinition[] = Object.entries(catalog.operations).map(
+    ([name, operation]) => ({
+      namespace: 'secretary',
+      name,
+      interfaceVersion: version,
+      description: { capture: 'Capture one original source observation.', assess: 'Record the decision for one original unassessed item.', attach: 'Attach acquired media evidence to one original inbox item.', checkpoint: 'Advance one source cursor after saved capture receipts.', operation: 'Read the recorded outcome of an inbox action by its operation ID.', operationRead: 'Read the caller-owned outcome of an inbox or assignment operation by its original ID.', status: 'Read source collection checkpoints, notification settings, and recovery issues.', binding: 'Read the current service node, host and expected scope without a prior scope value.', listAssignments: 'List assignments triggered by schedules or events, with current revisions for updates.', getAssignment: 'Read one current Secretary assignment and its exact revision pin.', saveConfiguration: 'Set default execution targets and contact rules for Secretary assignments.', saveAssignment: 'Create or update one exact Secretary schedule, reminder or event-triggered assignment.' }[name]!,
+      ...(name === 'listAssignments' || name === 'binding' || name === 'status' || name === 'saveConfiguration' || name === 'operation' || name === 'operationRead'
+        ? { discovery: { keywords: [], mcp: {
       name: name === 'operation' ? 'secretary_history' : name === 'operationRead' ? 'secretary_operation_read' : name === 'saveConfiguration' ? 'secretary_configure_execution' : 'secretary_' + name.replace(/[A-Z]/g, letter => '_' + letter.toLowerCase()),
       surface: name === 'listAssignments' || name === 'binding' || name === 'operationRead' ? 'ivy' : 'ivy_dev',
-    } } } : {}),
-    inputSchema: bundled(operation.input), outputSchema: bundled(operation.output), annotations: { readOnlyHint: !operation.mutation, idempotentHint: true,
-      ...(mcpTitles[name] ? { title: mcpTitles[name], openWorldHint: false } : {}) } }));
+    } } }
+        : {}),
+      inputSchema: bundled(operation.input),
+      outputSchema: bundled(operation.output),
+      annotations: { readOnlyHint: !operation.mutation, idempotentHint: true,
+      ...(mcpTitles[name] ? { title: mcpTitles[name], openWorldHint: false } : {}) },
+    }),
+  );
   const assignmentInput = (creating: boolean) => {
     const schema = structuredClone(bundled('SaveAssignmentRequest')) as Record<string, unknown>;
     const definitions = schema['$defs'] as Record<string, Record<string, unknown>>;

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "data-collector",
   "kind": "service",
-  "version": "0.1.3",
+  "version": "0.1.6",
   "description": "Isolated script tasks and versioned collection results",
   "connectsToHive": true,
   "requirements": {

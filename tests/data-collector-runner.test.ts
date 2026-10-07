@@ -65,6 +65,54 @@ async function tempRoot(t: TestContext) {
 }
 
 test(
+  "collector MCP workers use a run-local bridge and never receive service credentials",
+  processOptions,
+  async (t) => {
+    const root = await tempRoot(t);
+    let closed = 0;
+    const calls: string[] = [];
+    const runner = new TaskRunner(
+      root,
+      resolve("."),
+      settings,
+      (configuration) => ({
+        async call(tool, args) {
+          assert.ok(configuration.tools.includes(tool));
+          calls.push(tool);
+          assert.deepEqual(args, { unread: true });
+          return { value: [{ id: "fixture-message" }] };
+        },
+        async close() {
+          closed++;
+        },
+      }),
+    );
+    const value = task(
+      "export default async ({mcp,secrets}) => ({data:{result:await mcp.call('mail.list',{unread:true}),keys:Object.keys(mcp),secrets:Object.keys(secrets)}})",
+    );
+    value.mcp = {
+      serviceNodeId: "fixture.agent-manager",
+      cwd: root,
+      server: "fixture",
+      tools: ["mail.list"],
+    };
+    const result = await runner.run(
+      value,
+      null,
+      null,
+      new AbortController().signal,
+    );
+    assert.deepEqual(result.data, {
+      result: { value: [{ id: "fixture-message" }] },
+      keys: ["call"],
+      secrets: [],
+    });
+    assert.deepEqual(calls, ["mail.list"]);
+    assert.equal(closed, 1);
+  },
+);
+
+test(
   "collector workers receive only selected secrets and use their task working directory",
   processOptions,
   async (t) => {

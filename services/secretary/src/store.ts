@@ -12,6 +12,26 @@ const definitions = { 'secretary/item': 'Item', 'secretary/source': 'Source', 's
   'secretary/schedule-progress': 'ScheduleProgress', 'secretary/event-progress': 'EventProgress', 'secretary/execution': 'Execution' } as const;
 const localKeys = new Set<keyof Values>(['secretary/source', 'secretary/operation']);
 
+function recordReferences<K extends keyof Values>(key: K, value: Values[K]): Record<string, Pin> {
+  if (key === 'secretary/item')
+    return Object.fromEntries((value as Values['secretary/item']).media.flatMap((entry, index) => entry.pin ? [['media-' + index, entry.pin] as const] : []));
+  if (key === 'secretary/execution') {
+    const execution = value as Values['secretary/execution'];
+    const payload = execution.trigger.payload as Record<string, Wire.Json>;
+    return {
+      assignment: execution.assignment,
+      ...(payload?.['kind'] === 'secretary.object.batch' && typeof payload['objectId'] === 'string' &&
+        typeof payload['revision'] === 'number' && typeof payload['beforeRevision'] === 'number'
+        ? { before: { objectId: payload['objectId'], revision: payload['beforeRevision'] },
+          input: { objectId: payload['objectId'], revision: payload['revision'] } }
+        : {}),
+    };
+  }
+  if (key === 'secretary/schedule-progress' || key === 'secretary/event-progress')
+    return { assignment: (value as Values['secretary/schedule-progress' | 'secretary/event-progress']).assignment };
+  return {};
+}
+
 function operationIdentity(value: unknown): string | null {
   if (typeof value === 'string') { try { return parseOperationId(value).issuedAtUnixMs >= 1_000_000_000_000 ? value : null; } catch { return null; } }
   if (Array.isArray(value)) for (const part of value) { const found = operationIdentity(part); if (found) return found; }
@@ -60,13 +80,16 @@ export class SecretaryStore {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const ids = this.db.prepare("SELECT id,value_json,completed_at FROM documents WHERE key='secretary/operation' AND completed_at<=?").all(cutoff)
-        .filter(row => {
+        .filter((row) => {
           const completedAt = Number(row['completed_at']);
           try {
             const value = JSON.parse(String(row['value_json'])) as Values['secretary/operation'];
-            return now >= Math.max(parseOperationId(value.operationId).issuedAtUnixMs + 24 * 60 * 60 * 1000, completedAt + 24 * 60 * 60 * 1000);
+            return (
+              now >= Math.max(parseOperationId(value.operationId).issuedAtUnixMs + 24 * 60 * 60 * 1000, completedAt + 24 * 60 * 60 * 1000)
+            );
           } catch { return completedAt <= cutoff; }
-        }).map(row => String(row['id']));
+        })
+        .map(row => String(row['id']));
       for (const id of ids) { this.db.prepare('DELETE FROM revisions WHERE id=?').run(id); this.db.prepare('DELETE FROM documents WHERE id=?').run(id); }
       const technical = this.db.prepare('SELECT root_id FROM technical_cleanup WHERE delete_after<=?').all(now).map(row => String(row['root_id']));
       if (technical.length) {
@@ -96,11 +119,15 @@ export class SecretaryStore {
       }
       for (const key of ['secretary/follow-up-context', 'secretary/follow-up', 'secretary/public-operation', 'secretary/assignment-handoff', 'secretary/assignment-voice', 'secretary/notice-retry', 'secretary/execution-retry', 'secretary/browser-notice']) {
         const expired = this.db.prepare('SELECT id,value_json FROM technical_documents WHERE key=?').all(key)
-          .filter(row => {
-            try { const expiresAt = (JSON.parse(String(row['value_json'])) as { expiresAt?: unknown }).expiresAt;
-              return typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt <= now; }
-            catch { return false; }
-          }).map(row => String(row['id']));
+          .filter((row) => {
+            try {
+              const expiresAt = (JSON.parse(String(row['value_json'])) as { expiresAt?: unknown }).expiresAt;
+              return (
+                typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt <= now
+              );
+            } catch { return false; }
+          })
+          .map(row => String(row['id']));
         for (const id of expired) {
           this.db.prepare('DELETE FROM technical_revisions WHERE id=?').run(id);
           this.db.prepare('DELETE FROM technical_documents WHERE id=? AND key=?').run(id, key);
@@ -108,7 +135,8 @@ export class SecretaryStore {
       }
       const previous = Number(this.db.prepare("SELECT value FROM journal_state WHERE key='expiredBefore'").get()?.['value'] ?? 0);
       this.db.prepare("INSERT INTO journal_state(key,value) VALUES('expiredBefore',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(Math.max(previous, cutoff)));
-      this.db.exec('COMMIT'); this.lastCleanupAt = now;
+      this.db.exec('COMMIT');
+      this.lastCleanupAt = now;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   expiredBefore(): number { return Number(this.db.prepare("SELECT value FROM journal_state WHERE key='expiredBefore'").get()?.['value'] ?? 0); }
@@ -119,13 +147,7 @@ export class SecretaryStore {
     need(!localKeys.has(key) && read.object.parentId === this.root && !read.object.effectivelyArchived && read.object.contractKey === key && readableVersions(key).includes(read.revision.contractVersion) && read.revision.mediaType === 'application/json' && read.content.encoding === 'json', 'secretary_scope_conflict', 'The Secretary record must remain in its original active root and exact contract.');
     need(hashJson(read.content.value) === read.revision.contentHash && Buffer.byteLength(canonical(read.content.value)) === read.revision.byteLength, 'secretary_evidence_conflict', 'The saved record does not match its declared bytes.');
     validate(definitions[key], read.content.value);
-    const expectedReferences = key === 'secretary/item'
-      ? Object.fromEntries((read.content.value as unknown as Values['secretary/item']).media.flatMap((entry, index) => entry.pin ? [['media-' + index, entry.pin] as const] : []))
-      : key === 'secretary/execution'
-        ? { assignment: (read.content.value as unknown as Values['secretary/execution']).assignment }
-        : key === 'secretary/schedule-progress' || key === 'secretary/event-progress'
-          ? { assignment: (read.content.value as unknown as Values['secretary/schedule-progress' | 'secretary/event-progress']).assignment }
-        : {};
+    const expectedReferences = recordReferences(key, read.content.value as unknown as Values[K]);
     need(same(read.revision.references, expectedReferences), 'secretary_evidence_conflict', 'The Secretary record references must match its exact revision content.');
     return { pin: { objectId: read.object.id, revision: read.revision.revision }, value: read.content.value as unknown as Values[K], writtenAt: read.revision.createdAt };
   }
@@ -163,14 +185,16 @@ export class SecretaryStore {
     }
     return this.writePrepared(this.objectWriteRequest(key, value, destination, id));
   }
-  objectWriteRequest<K extends keyof Values>(key: K, value: Values[K], destination: Destination, id: string): Wire.ObjectWrite {
+  objectWriteRequest<K extends keyof Values>(
+    key: K,
+    value: Values[K],
+    destination: Destination,
+    id: string,
+  ): Wire.ObjectWrite {
     need(!localKeys.has(key), 'invalid_arguments', 'Local Secretary records do not have Hive write receipts.');
-    validate(definitions[key], value); parseOperationId(id);
-    const references = key === 'secretary/item'
-      ? Object.fromEntries((value as Values['secretary/item']).media.flatMap((entry, index) => entry.pin ? [['media-' + index, entry.pin] as const] : []))
-      : key === 'secretary/execution' ? { assignment: (value as Values['secretary/execution']).assignment }
-        : key === 'secretary/schedule-progress' || key === 'secretary/event-progress'
-          ? { assignment: (value as Values['secretary/schedule-progress' | 'secretary/event-progress']).assignment } : {};
+    validate(definitions[key], value);
+    parseOperationId(id);
+    const references = recordReferences(key, value);
     return { mutationId: id, contractVersion: contractVersion(key), references,
       ...('createName' in destination ? { create: { contractKey: key, parentId: this.root, name: destination.createName, ownerObjectId: null } } : { objectId: destination.object.objectId, expectedRevision: destination.object.revision }),
       content: { encoding: 'json', value: value as unknown as Wire.Json } };

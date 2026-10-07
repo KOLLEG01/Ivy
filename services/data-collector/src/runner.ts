@@ -9,6 +9,8 @@ import {
 import { requireThat } from "../../../packages/sdk/src/node.js";
 import { outputSchema } from "./schema.js";
 import type { Output, Settings, Task } from "./schema.js";
+import { openMcpBridge } from "./mcp-bridge.js";
+import type { TaskMcp } from "./mcp-bridge.js";
 
 const taskErrors: Record<string, string> = {
   authentication_required: "Renew the configured credentials or token.",
@@ -24,6 +26,15 @@ const worker = `import {writeFileSync} from 'node:fs';
 process.stdin.setEncoding('utf8');
 let input=''; for await (const chunk of process.stdin) input+=chunk;
 const context=JSON.parse(input); context.signal=AbortSignal.timeout(context.timeoutMs);
+if(context.mcp) {
+const connection=context.mcp;
+context.mcp={call:async(tool,args={})=>{
+const response=await fetch(connection.url,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+connection.token},body:JSON.stringify({tool,arguments:args}),signal:context.signal});
+const reply=await response.json();
+if(!response.ok||reply.error) throw Object.assign(new Error('MCP request failed.'),{code:reply.error?.code??'provider_unavailable'});
+return reply.result;
+}};
+}
 try { const {default:run}=await import('./task.mjs');
 const output=JSON.stringify(await run(context));
 if(typeof output!=='string'||Buffer.byteLength(output)>1000000) process.exit(79);
@@ -37,6 +48,10 @@ export class TaskRunner {
     readonly workRoot: string,
     readonly artifactRoot: string,
     readonly settings: Settings,
+    readonly mcpSession?: (
+      configuration: NonNullable<Task["mcp"]>,
+      signal: AbortSignal,
+    ) => TaskMcp,
   ) {}
   private jobName(taskId: string) {
     return (
@@ -218,28 +233,55 @@ export class TaskRunner {
     }
     const timeoutMs =
       Math.min(task.timeoutSeconds, this.settings.maximumTimeoutSeconds) * 1000;
-    await this.execute(
-      cwd,
-      [
-        "--max-old-space-size=" +
-          Math.min(task.memoryMb, this.settings.maximumMemoryMb),
-        "worker.mjs",
-      ],
-      timeoutMs,
+    const taskSignal = AbortSignal.any([
       signal,
-      JSON.stringify({ config: task.config, secrets, state, input, timeoutMs }),
-      jobName,
-    );
-    const resultPath = join(cwd, "result.json");
-    requireThat(
-      (await stat(resultPath)).size <= 1000000,
-      "limit_exceeded",
-      "Task result exceeds 1 MB.",
-    );
-    const output = outputSchema.parse(
-      JSON.parse(await readFile(resultPath, "utf8")),
-    );
-    await rm(resultPath, { force: true });
-    return output;
+      AbortSignal.timeout(timeoutMs),
+    ]);
+    const bridge = task.mcp
+      ? await openMcpBridge(
+          this.mcpSession
+            ? this.mcpSession(task.mcp, taskSignal)
+            : (() => {
+                throw Object.assign(new Error("Task MCP is not configured."), {
+                  code: "configuration_invalid",
+                });
+              })(),
+          taskSignal,
+        )
+      : null;
+    try {
+      await this.execute(
+        cwd,
+        [
+          "--max-old-space-size=" +
+            Math.min(task.memoryMb, this.settings.maximumMemoryMb),
+          "worker.mjs",
+        ],
+        timeoutMs,
+        signal,
+        JSON.stringify({
+          config: task.config,
+          secrets,
+          state,
+          input,
+          timeoutMs,
+          ...(bridge ? { mcp: bridge.context } : {}),
+        }),
+        jobName,
+      );
+      const resultPath = join(cwd, "result.json");
+      requireThat(
+        (await stat(resultPath)).size <= 1000000,
+        "limit_exceeded",
+        "Task result exceeds 1 MB.",
+      );
+      const output = outputSchema.parse(
+        JSON.parse(await readFile(resultPath, "utf8")),
+      );
+      await rm(resultPath, { force: true });
+      return output;
+    } finally {
+      await bridge?.close();
+    }
   }
 }

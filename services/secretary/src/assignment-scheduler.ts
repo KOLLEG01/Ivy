@@ -7,6 +7,12 @@ import { defaultConfiguration, effectiveRules, executionName, unifiedMainRules, 
 import { need, same } from './schema.js';
 import { messageBatchKind, messageChannel, messageWindowKey, messageWindowMs } from './assignment-message.js';
 import type { MessageWindow, MessageWindowState } from './assignment-message.js';
+import {
+  objectWindowKey,
+  objectProjection,
+  observationReady,
+} from "./assignment-object.js";
+import type { ObjectWindowState } from "./assignment-object.js";
 
 const weekdays = new Map([['Sun', 0], ['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6]]);
 const pageLimit = 100;
@@ -27,35 +33,41 @@ export class AssignmentScheduler {
 
   private async defaultExecution(): Promise<ExecutionTarget | null> {
     if (this.fallbackExecution) { validateExecutionTarget(this.fallbackExecution); return structuredClone(this.fallbackExecution); }
-    const nodes: Operation.ServiceNode[] = []; let cursor: string | undefined;
+    const nodes: Operation.ServiceNode[] = [];
+    let cursor: string | undefined;
     do {
       const page = await this.engine.client.request('serviceNodes.list', { serviceName: 'agent-manager', limit: 200, ...(cursor ? { cursor } : {}) });
       nodes.push(...page.items); cursor = page.nextCursor ?? undefined;
     } while (cursor);
     const manager = selectDefaultAgentManager(nodes, this.engine.settings.identity.hostId);
     if (!manager) return null;
-    const location = await serviceTools(this.engine.client, manager.serviceNodeId, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).call('agent.resolveProject', {
+    const location = (await serviceTools(this.engine.client, manager.serviceNodeId, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).call('agent.resolveProject', {
       selection: { kind: 'internal', key: 'secretary-' + hashJson(this.engine.settings.identity.scope.secretaryId).slice(7, 23), name: 'Secretary assignments' }
-    }) as unknown as Agent.ProjectLocation;
+    })) as unknown as Agent.ProjectLocation;
     const target: ExecutionTarget = { serviceNodeId: manager.serviceNodeId, threadCwd: location.cwd, model: null, effort: 'medium', permissions: ':read-only' };
-    validateExecutionTarget(target); return target;
+    validateExecutionTarget(target);
+    return target;
   }
 
   async initialize(): Promise<void> {
-    await this.engine.verifyOwner(); const now = this.engine.now().toISOString();
+    await this.engine.verifyOwner();
+    const now = this.engine.now().toISOString();
     let configuration = await this.engine.store.named('secretary/configuration', 'configuration');
     if (!configuration) {
       const execution = await this.defaultExecution();
       configuration = await this.engine.store.create('secretary/configuration', 'configuration', defaultConfiguration(this.engine.settings, now, execution), await this.operation('configuration'));
     } else {
       const rules = unifiedMainRules(configuration.value.rules);
-      const execution = configuration.value.execution ?? await this.defaultExecution();
-      if (!same(rules, configuration.value.rules) || execution && !configuration.value.execution) {
+      const execution =
+        configuration.value.execution ?? (await this.defaultExecution());
+      if (
+        !same(rules, configuration.value.rules) ||
+        (execution && !configuration.value.execution)
+      ) {
         const value = { ...configuration.value, rules, execution, updatedAt: now };
         validateConfiguration(value); configuration = await this.engine.store.amend(configuration, 'secretary/configuration', value);
       }
     }
-
   }
 
   async configuration(): Promise<Document<'secretary/configuration'>> {
@@ -83,7 +95,11 @@ export class AssignmentScheduler {
     return result;
   }
 
-  private occurrences(assignment: Assignment, now: Date, checkedAt: string): { items: ExecutionTrigger[]; checkedAt: string } {
+  private occurrences(
+    assignment: Assignment,
+    now: Date,
+    checkedAt: string,
+  ): { items: ExecutionTrigger[]; checkedAt: string } {
     const trigger = assignment.trigger;
     const since = Date.parse(checkedAt);
     need(Number.isFinite(since), 'secretary_schedule_progress_invalid', 'The retained schedule cursor has an invalid time.');
@@ -105,8 +121,15 @@ export class AssignmentScheduler {
       return { date: `${parts['year']}-${parts['month']}-${parts['day']}`, time: `${parts['hour']}:${parts['minute']}`, day: weekdays.get(parts['weekday']!) };
     };
     let previous = local(Math.floor(since / 60_000) * 60_000);
-    for (let at = (Math.floor(since / 60_000) + 1) * 60_000; at <= end; at += 60_000) {
-      const current = local(at), eligible = trigger.cadence === 'daily' || current.day !== undefined && trigger.weekdays.includes(current.day);
+    for (
+      let at = (Math.floor(since / 60_000) + 1) * 60_000;
+      at <= end;
+      at += 60_000
+    ) {
+      const current = local(at),
+        eligible =
+          trigger.cadence === 'daily' ||
+          (current.day !== undefined && trigger.weekdays.includes(current.day));
       if (eligible && current.time >= trigger.localTime! && (current.date !== previous.date || previous.time < trigger.localTime!))
         items.push({ kind: 'schedule', key: `${trigger.cadence}:${trigger.timeZone}:${current.date}:${trigger.localTime}`, occurredAt: new Date(at).toISOString(),
           payload: { cadence: trigger.cadence, localDate: current.date, localTime: trigger.localTime, timeZone: trigger.timeZone } });
@@ -115,13 +138,20 @@ export class AssignmentScheduler {
     return { items, checkedAt: new Date(end).toISOString() };
   }
 
-  private async schedules(assignment: Document<'secretary/assignment'>, configuration: SecretaryConfiguration, now: Date): Promise<void> {
+  private async schedules(
+    assignment: Document<'secretary/assignment'>,
+    configuration: SecretaryConfiguration,
+    now: Date,
+  ): Promise<void> {
     const name = 'schedule-' + hashJson(assignment.value.assignmentId).slice('sha256:'.length);
     let saved = await this.engine.store.named('secretary/schedule-progress', name);
     if (!saved) {
       const legacy = this.engine.store.technicalNamed<{ updatedAt: string; checkedAt: string }>('secretary/schedule-cursor', assignment.value.assignmentId);
       const original = legacy?.value.updatedAt === assignment.value.updatedAt ? assignment : await this.engine.store.original('secretary/assignment', assignment);
-      const checkedAt = original === assignment && legacy ? legacy.value.checkedAt : original.writtenAt ?? original.value.createdAt;
+      const checkedAt =
+        original === assignment && legacy
+          ? legacy.value.checkedAt
+          : (original.writtenAt ?? original.value.createdAt);
       const progress: ScheduleProgress = { schemaVersion: 1, assignmentId: assignment.value.assignmentId, assignment: original.pin,
         assignmentSnapshot: structuredClone(original.value), checkedAt, updatedAt: now.toISOString() };
       saved = await this.engine.store.create('secretary/schedule-progress', name, progress, await this.operation('schedule-progress', assignment.value.assignmentId));
@@ -153,11 +183,32 @@ export class AssignmentScheduler {
     }
   }
 
-  private eventMatches(assignment: Assignment, event: Operation.Event): boolean {
-    const trigger = assignment.trigger; if (trigger.kind !== 'event' || event.topic !== trigger.topic || event.topicVersion !== trigger.topicVersion) return false;
+  private eventMatches(
+    assignment: Assignment,
+    event: Operation.Event,
+  ): boolean {
+    const trigger = assignment.trigger;
+    if (trigger.kind === "object-change") {
+      if (
+        event.topic !== 'hive.object.changed' ||
+        event.source === 'principal:' + this.engine.settings.identity.principalId
+      )
+        return false;
+      const payload = event.payload as Record<string, Wire.Json>;
+      return (
+        payload &&
+        payload["operation"] === "write" &&
+        typeof payload['objectId'] === 'string' &&
+        trigger.objectIds.includes(payload['objectId'])
+      );
+    }
+    if (trigger.kind !== 'event' || event.topic !== trigger.topic || event.topicVersion !== trigger.topicVersion) return false;
     if (event.topic === 'hive.object.changed' && event.source === 'principal:' + this.engine.settings.identity.principalId) return false;
     if (trigger.sourceServiceNodeId && event.source !== eventSource(trigger.sourceServiceNodeId)) return false;
-    const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload) ? event.payload as Record<string, Wire.Json> : {};
+    const payload =
+      event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+        ? (event.payload as Record<string, Wire.Json>)
+        : {};
     return !trigger.eventKind || payload['kind'] === trigger.eventKind;
   }
 
@@ -175,6 +226,152 @@ export class AssignmentScheduler {
     return await this.engine.store.create('secretary/execution', name, execution, await this.operation('execution', assignment.value.assignmentId, trigger.key));
   }
 
+  private async collectObjectEvent(
+    assignment: Document<'secretary/assignment'>,
+    event: Operation.Event,
+  ): Promise<void> {
+    const trigger = assignment.value.trigger;
+    if (trigger.kind !== "object-change") return;
+    const payload = event.payload as Record<string, Wire.Json>,
+      objectId = String(payload['objectId']),
+      revision = Number(payload['revision']);
+    need(
+      Number.isSafeInteger(revision) && revision > 0,
+      "secretary_object_event_invalid",
+      "Object change has no valid revision.",
+    );
+    const name = hashJson([
+      assignment.value.assignmentId,
+      assignment.pin.revision,
+      objectId,
+    ]);
+    let saved = this.engine.store.technicalNamed<ObjectWindowState>(
+      objectWindowKey,
+      name,
+    );
+    if (saved && event.sequence <= saved.value.lastSequence) return;
+    const read = await this.engine.client.request("objects.read", {
+      objectId,
+      revision,
+    });
+    need(
+      read.content.encoding === "json",
+      "secretary_object_content_invalid",
+      "Observed object must contain JSON.",
+    );
+    const projection = objectProjection(read.content.value, trigger),
+      fingerprint = hashJson(projection);
+    if (!saved) {
+      let previous = projection,
+        previousRevision = revision;
+      if (revision > 1) {
+        const prior = await this.engine.client.request("objects.read", {
+          objectId,
+          revision: revision - 1,
+        });
+        need(
+          prior.content.encoding === "json",
+          "secretary_object_content_invalid",
+          "Previous observed revision must contain JSON.",
+        );
+        previous = objectProjection(prior.content.value, trigger);
+        previousRevision = revision - 1;
+      }
+      saved = this.engine.store.technicalCreate<ObjectWindowState>(
+        objectWindowKey,
+        name,
+        {
+          assignmentId: assignment.value.assignmentId,
+          objectId,
+          lastSequence: 0,
+          fingerprint: hashJson(previous),
+          projection: previous,
+          revision: previousRevision,
+          pending: null,
+        },
+      );
+    }
+    const state = saved.value;
+    let pending = state.pending;
+    if (fingerprint !== state.fingerprint) {
+      if (!pending)
+        pending = {
+          assignment: assignment.pin,
+          assignmentSnapshot: structuredClone(assignment.value),
+          objectId,
+          firstSequence: event.sequence,
+          firstRevision: state.revision,
+          lastRevision: revision,
+          occurredAt: event.occurredAt,
+          dueAt: new Date(
+            Date.parse(event.occurredAt) + trigger.delaySeconds * 1000,
+          ).toISOString(),
+          before: state.projection,
+          after: projection,
+        };
+      else pending = { ...pending, lastRevision: revision, after: projection };
+      if (hashJson(pending.before) === fingerprint) pending = null;
+    }
+    this.engine.store.technicalAmend(objectWindowKey, saved, {
+      ...state,
+      lastSequence: event.sequence,
+      fingerprint,
+      projection,
+      revision,
+      pending,
+    });
+  }
+
+  private async flushDueObjectWindows(
+    assignment: Document<'secretary/assignment'>,
+    configuration: SecretaryConfiguration,
+    now: Date,
+  ): Promise<void> {
+    for (const saved of this.engine.store.technicalList<ObjectWindowState>(
+      objectWindowKey,
+    )) {
+      if (saved.value.assignmentId !== assignment.value.assignmentId) continue;
+      const pending = saved.value.pending;
+      if (!pending || Date.parse(pending.dueAt) > now.getTime()) continue;
+      const trigger = pending.assignmentSnapshot.trigger;
+      if (trigger.kind !== "object-change") continue;
+      const current = await this.engine.client.request("objects.read", {
+        objectId: pending.objectId,
+      });
+      need(
+        !current.object.effectivelyArchived &&
+          current.content.encoding === "json",
+        "secretary_object_content_invalid",
+        "Observed object is unavailable or has no JSON content.",
+      );
+      const projection = objectProjection(current.content.value, trigger);
+      // A write racing the journal pass is collected on the next pass before admission.
+      if (hashJson(projection) !== saved.value.fingerprint) continue;
+      if (!observationReady(current.content.value, trigger, pending.dueAt, now))
+        continue;
+      await this.enqueue(
+        { pin: pending.assignment, value: pending.assignmentSnapshot },
+        {
+          kind: 'event',
+          key: `object-batch:${pending.firstSequence}:${pending.objectId}`,
+          occurredAt: pending.occurredAt,
+          payload: {
+            kind: "secretary.object.batch",
+            objectId: pending.objectId,
+            beforeRevision: pending.firstRevision,
+            revision: current.revision.revision,
+            dueAt: pending.dueAt,
+            paths: trigger.paths,
+            before: pending.before,
+            after: projection,
+          },
+        },
+        configuration,
+      );
+      this.engine.store.technicalAmend(objectWindowKey, saved, { ...saved.value, pending: null });
+    }
+  }
+
   private async flushMessageWindow(saved: { pin: { objectId: string; revision: number }; value: MessageWindowState }, configuration: SecretaryConfiguration): Promise<void> {
     const window = saved.value.pending;
     if (!window) return;
@@ -187,10 +384,15 @@ export class AssignmentScheduler {
     this.engine.store.technicalAmend(messageWindowKey, saved, { ...saved.value, pending: null });
   }
 
-  private async collectMessageEvent(assignment: Document<'secretary/assignment'>, event: Operation.Event,
-    configuration: SecretaryConfiguration): Promise<void> {
-    const payload = event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
-      ? event.payload as Record<string, Wire.Json> : {};
+  private async collectMessageEvent(
+    assignment: Document<'secretary/assignment'>,
+    event: Operation.Event,
+    configuration: SecretaryConfiguration,
+  ): Promise<void> {
+    const payload =
+      event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+        ? (event.payload as Record<string, Wire.Json>)
+        : {};
     const eventId = payload['eventId'], channel = messageChannel(payload);
     need(typeof eventId === 'string' && channel && event.source.startsWith('service:'),
       'secretary_message_event_invalid', 'The message event has no source identity or channel.');
@@ -234,12 +436,20 @@ export class AssignmentScheduler {
     return null;
   }
 
-  private async events(assignment: Document<'secretary/assignment'>, configuration: SecretaryConfiguration, budget: number): Promise<boolean> {
+  private async events(
+    assignment: Document<'secretary/assignment'>,
+    configuration: SecretaryConfiguration,
+    budget: number,
+  ): Promise<boolean> {
     const key = assignment.value.assignmentId;
     const name = 'secretary-assignment-' + hashJson(key).slice('sha256:'.length, 48);
     const progressName = 'event-' + hashJson(key).slice('sha256:'.length);
     let progress = await this.engine.store.named('secretary/event-progress', progressName);
-    if (!progress && assignment.pin.revision === 1 && assignment.value.trigger.kind !== 'event') return true;
+    if (
+      !progress && assignment.pin.revision === 1 &&
+      assignment.value.trigger.kind === 'schedule'
+    )
+      return true;
     for (let page = 0; page < budget; page++) {
       const batch = await this.engine.client.request('events.subscribe', { name, filter: {}, initialSequence: 0, durable: true, limit: pageLimit });
       if (!progress) {
@@ -257,16 +467,27 @@ export class AssignmentScheduler {
         let next = structuredClone(progress.value);
         let stateChanged = false;
         if (batch.gap) {
-          const prior = this.engine.store.technicalNamed<{ prunedThroughSequence: number }>('secretary/event-gap', key);
-          const value = { prunedThroughSequence: batch.gap.prunedThroughSequence };
+          const prior = this.engine.store.technicalNamed<{ prunedThroughSequence: number; relevant?: boolean | null }>('secretary/event-gap', key);
+          const value = { prunedThroughSequence: batch.gap.prunedThroughSequence,
+            relevant: prior?.value.relevant === true || progress.value.active ? true : null };
           if (prior) this.engine.store.technicalAmend('secretary/event-gap', prior, value);
           else this.engine.store.technicalCreate('secretary/event-gap', key, value);
-          this.engine.issue('event-gap:' + key, 'secretary_event_gap');
+          if (value.relevant) this.engine.issue('event-gap:' + key, 'secretary_event_gap');
           next.needsRebase = true;
           stateChanged = true;
         }
         if (next.needsRebase && batch.items.length) {
           const rebased = await this.revisionAt(assignment, batch.items[0]!.occurredAt);
+          const gap = this.engine.store.technicalNamed<{ prunedThroughSequence: number; relevant?: boolean | null }>('secretary/event-gap', key);
+          if (gap) {
+            if (!rebased && gap.value.relevant !== true) {
+              this.engine.store.technicalDelete('secretary/event-gap', gap.pin.objectId);
+              this.engine.recoveryIssues.delete('event-gap:' + key);
+            } else {
+              this.engine.store.technicalAmend('secretary/event-gap', gap, { ...gap.value, relevant: true });
+              this.engine.issue('event-gap:' + key, 'secretary_event_gap');
+            }
+          }
           next.assignment = rebased?.pin ?? next.assignment;
           next.assignmentSnapshot = structuredClone(rebased?.value ?? next.assignmentSnapshot);
           next.active = rebased !== null;
@@ -275,9 +496,13 @@ export class AssignmentScheduler {
         }
         for (const event of batch.items) {
           if (event.sequence <= progress.value.processedThrough) continue;
-          if (next.active && next.assignmentSnapshot.enabled && this.eventMatches(next.assignmentSnapshot, event)) {
+          if (
+            next.active && next.assignmentSnapshot.enabled && this.eventMatches(next.assignmentSnapshot, event)
+          ) {
             const selected = { pin: next.assignment, value: next.assignmentSnapshot };
-            if (event.source.startsWith('service:') && messageChannel(event.payload)) await this.collectMessageEvent(selected, event, configuration);
+            if (selected.value.trigger.kind === "object-change")
+              await this.collectObjectEvent(selected, event);
+            else if (event.source.startsWith('service:') && messageChannel(event.payload)) await this.collectMessageEvent(selected, event, configuration);
             else await this.enqueue(selected,
               { kind: 'event', key: `event:${event.sequence}:${event.mutationId}`, occurredAt: event.occurredAt,
                 payload: { topic: event.topic, topicVersion: event.topicVersion, source: event.source, mutationId: event.mutationId, data: event.payload } }, configuration);
@@ -313,7 +538,9 @@ export class AssignmentScheduler {
   }
 
   async tick(): Promise<void> {
-    await this.engine.verifyOwner(); let configuration = await this.configuration(); const now = this.engine.now();
+    await this.engine.verifyOwner();
+    let configuration = await this.configuration();
+    const now = this.engine.now();
     if (!configuration.value.execution) {
       const execution = await this.defaultExecution();
       if (execution) configuration = await this.engine.store.amend(configuration, 'secretary/configuration', { ...configuration.value, execution, updatedAt: now.toISOString() });
@@ -322,10 +549,27 @@ export class AssignmentScheduler {
     for (const assignment of assignments) {
       const key = 'assignment:' + assignment.value.assignmentId;
       try {
-        const gap = this.engine.store.technicalNamed('secretary/event-gap', assignment.value.assignmentId);
-        if (gap) this.engine.issue('event-gap:' + assignment.value.assignmentId, 'secretary_event_gap');
+        const gap = this.engine.store.technicalNamed<{ prunedThroughSequence: number; relevant?: boolean | null }>('secretary/event-gap', assignment.value.assignmentId);
+        if (gap && gap.value.relevant === undefined) {
+          const first = await this.engine.client.request('events.read', { afterSequence: gap.value.prunedThroughSequence, filter: {}, limit: 1 });
+          const original = await this.engine.store.original('secretary/assignment', assignment);
+          if (!first.gap && first.items[0] && Date.parse(first.items[0].occurredAt) < Date.parse(original.writtenAt ?? original.value.createdAt)) {
+            this.engine.store.technicalDelete('secretary/event-gap', gap.pin.objectId);
+            this.engine.recoveryIssues.delete('event-gap:' + assignment.value.assignmentId);
+          } else {
+            this.engine.store.technicalAmend('secretary/event-gap', gap, { ...gap.value, relevant: true });
+            this.engine.issue('event-gap:' + assignment.value.assignmentId, 'secretary_event_gap');
+          }
+        } else if (gap?.value.relevant === true) this.engine.issue('event-gap:' + assignment.value.assignmentId, 'secretary_event_gap');
         const eventsCaughtUp = await this.events(assignment, configuration.value, eventBudget);
-        if (eventsCaughtUp) await this.flushDueMessageWindows(assignment, configuration.value, now);
+        if (eventsCaughtUp) {
+          await this.flushDueMessageWindows(assignment, configuration.value, now);
+          await this.flushDueObjectWindows(
+            assignment,
+            configuration.value,
+            now,
+          );
+        }
         await this.schedules(assignment, configuration.value, now);
         this.engine.recoveryIssues.delete(key);
       } catch (error) {

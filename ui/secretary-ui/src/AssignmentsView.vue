@@ -41,6 +41,7 @@ import type {
   ContactWindow,
   Document,
   EventTrigger,
+  ObjectTrigger,
   RuleOverrides,
   ScheduleTrigger,
 } from "./types";
@@ -74,13 +75,47 @@ const schedule = computed(() =>
 const event = computed(() =>
   draft.value?.trigger.kind === "event" ? draft.value.trigger : null,
 );
+const objects = computed(() =>
+  draft.value?.trigger.kind === "object-change" ? draft.value.trigger : null,
+);
+const objectIds = computed({
+  get: () => objects.value?.objectIds.join("\n") ?? "",
+  set: (value: string) => {
+    if (objects.value)
+      objects.value.objectIds = value
+        .split(/[\n,]+/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+  },
+});
+const objectPaths = computed({
+  get: () => objects.value?.paths.join("\n") ?? "",
+  set: (value: string) => {
+    if (objects.value)
+      objects.value.paths = value
+        .split(/\n+/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+  },
+});
+const setObservation = (enabled: boolean) => {
+  if (!objects.value) return;
+  objects.value.observation = enabled
+    ? {
+        completePath: "/data/observation/complete",
+        observedAtPath: "/data/observation/observedAt",
+        maximumAgeSeconds: 180,
+      }
+    : null;
+};
 const selectedTopic = computed<TopicChoice | null>(() => {
   if (!event.value) return null;
   return (
     topics.value.value?.find(
       (choice) =>
         (!event.value?.sourceServiceNodeId ||
-          choice.provider?.node.serviceNodeId === event.value.sourceServiceNodeId) &&
+          choice.provider?.node.serviceNodeId ===
+            event.value.sourceServiceNodeId) &&
         choice.definition.topic === event.value?.topic &&
         choice.definition.version === event.value?.topicVersion,
     ) ?? null
@@ -152,10 +187,20 @@ const setNotificationAge = (value: string | number) => {
 const startExample = (kind: "schedule" | "event") => {
   create();
   setKind(kind);
-  draft.value!.name = kind === "schedule" ? tr("Regelmäßiger Überblick", "Regular overview") : tr("Auf Ereignisse reagieren", "Respond to events");
-  draft.value!.prompt = kind === "schedule"
-    ? tr("Prüfe die Informationen zu [Thema] und fasse relevante Änderungen zusammen. Benachrichtige mich, wenn ich etwas tun oder wissen sollte.", "Review information about [topic] and summarize relevant changes. Notify me when there is something I should do or know.")
-    : tr("Prüfe das auslösende Ereignis. Erledige [Aufgabe] und benachrichtige mich, wenn meine Aufmerksamkeit nötig ist.", "Inspect the triggering event. Carry out [task] and notify me when my attention is needed.");
+  draft.value!.name =
+    kind === "schedule"
+      ? tr("Regelmäßiger Überblick", "Regular overview")
+      : tr("Auf Ereignisse reagieren", "Respond to events");
+  draft.value!.prompt =
+    kind === "schedule"
+      ? tr(
+          "Prüfe die Informationen zu [Thema] und fasse relevante Änderungen zusammen. Benachrichtige mich, wenn ich etwas tun oder wissen sollte.",
+          "Review information about [topic] and summarize relevant changes. Notify me when there is something I should do or know.",
+        )
+      : tr(
+          "Prüfe das auslösende Ereignis. Erledige [Aufgabe] und benachrichtige mich, wenn meine Aufmerksamkeit nötig ist.",
+          "Inspect the triggering event. Carry out [task] and notify me when my attention is needed.",
+        );
 };
 const setKind = (kind: string) => {
   if (!draft.value || draft.value.trigger.kind === kind) return;
@@ -170,13 +215,21 @@ const setKind = (kind: string) => {
           timeZone:
             Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Berlin",
         }
-      : {
-          kind: "event",
-          topic: "",
-          topicVersion: "1.0.0",
-          sourceServiceNodeId: null,
-          eventKind: null,
-        };
+      : kind === "object-change"
+        ? ({
+            kind: "object-change",
+            objectIds: [],
+            paths: [],
+            delaySeconds: 0,
+            observation: null,
+          } satisfies ObjectTrigger)
+        : {
+            kind: "event",
+            topic: "",
+            topicVersion: "1.0.0",
+            sourceServiceNodeId: null,
+            eventKind: null,
+          };
 };
 const chooseTopic = (key: string) => {
   if (!event.value) return;
@@ -184,11 +237,17 @@ const chooseTopic = (key: string) => {
     (candidate) => topicChoiceKey(candidate) === key,
   );
   if (!choice) return;
-  const changed = event.value.topic !== choice.definition.topic || event.value.topicVersion !== choice.definition.version;
+  const changed =
+    event.value.topic !== choice.definition.topic ||
+    event.value.topicVersion !== choice.definition.version;
   event.value.sourceServiceNodeId = choice.provider?.node.serviceNodeId ?? null;
   event.value.topic = choice.definition.topic;
   event.value.topicVersion = choice.definition.version;
-  if (changed) event.value.eventKind = choice.definition.eventKinds.length === 1 ? choice.definition.eventKinds[0]!.kind : null;
+  if (changed)
+    event.value.eventKind =
+      choice.definition.eventKinds.length === 1
+        ? choice.definition.eventKinds[0]!.kind
+        : null;
 };
 const setCadence = (value: string) => {
   if (!schedule.value) return;
@@ -213,11 +272,18 @@ const close = () => {
 const kinds = computed(() => [
   { value: "schedule", label: tr("Zeitplan", "Schedule") },
   { value: "event", label: tr("Ereignis", "Event") },
+  { value: "object-change", label: tr("Objektänderung", "Object change") },
 ]);
 const triggerSummary = (value: Assignment) => {
   const trigger = value.trigger;
   if (trigger.kind === "event")
     return tr("Bei Ereignis", "On event") + " · " + trigger.topic;
+  if (trigger.kind === "object-change")
+    return (
+      tr("Bei Objektänderung", "On object change") +
+      " · " +
+      trigger.objectIds.length
+    );
   if (trigger.cadence === "interval")
     return tr(
       `Alle ${trigger.intervalMinutes} Minuten`,
@@ -283,6 +349,10 @@ async function save() {
         event.value.sourceServiceNodeId?.trim() || null;
       event.value.eventKind = event.value.eventKind?.trim() || null;
     }
+    if (objects.value) {
+      objects.value.objectIds = [...new Set(objects.value.objectIds)];
+      objects.value.paths = [...new Set(objects.value.paths)];
+    }
     const pin = await saveAssignment(
         props.node,
         selected.value?.pin ?? null,
@@ -324,7 +394,10 @@ async function toggle(row: Document<Assignment>) {
     :title="tr('Aufträge', 'Assignments')"
     :loading="assignments.loading.value"
     :updated-at="assignments.updatedAt.value"
-    ><Button variant="outline" size="sm" @click="showIdeas = !showIdeas">{{ tr("Ideen", "Ideas") }}</Button><Button
+    ><Button variant="outline" size="sm" @click="showIdeas = !showIdeas">{{
+      tr("Ideen", "Ideas")
+    }}</Button
+    ><Button
       size="sm"
       :aria-label="tr('Neuer Auftrag', 'New assignment')"
       @click="create"
@@ -334,16 +407,66 @@ async function toggle(row: Document<Assignment>) {
     ></PageHeader
   >
   <section class="mx-auto w-full max-w-4xl space-y-4">
-    <div v-if="assignments.value.value && (showIdeas || assignments.value.value.items.length === 0)" class="grid gap-4 sm:grid-cols-2">
+    <div
+      v-if="
+        assignments.value.value &&
+        (showIdeas || assignments.value.value.items.length === 0)
+      "
+      class="grid gap-4 sm:grid-cols-2"
+    >
       <Card>
-        <CardHeader><CalendarClock class="size-5 text-muted-foreground" aria-hidden="true" /><CardTitle>{{ tr("Regelmäßig prüfen und zusammenfassen", "Check and summarize regularly") }}</CardTitle><CardDescription>{{ tr("Zum Beispiel täglich einen Überblick zu einem Thema erhalten oder offene Aufgaben prüfen.", "Get a daily overview of a topic or review pending tasks.") }}</CardDescription></CardHeader>
-        <CardContent><Button variant="outline" @click="startExample('schedule')">{{ tr("Zeitplan entwerfen", "Draft a schedule") }}</Button></CardContent>
+        <CardHeader
+          ><CalendarClock
+            class="size-5 text-muted-foreground"
+            aria-hidden="true"
+          /><CardTitle>{{
+            tr(
+              "Regelmäßig prüfen und zusammenfassen",
+              "Check and summarize regularly",
+            )
+          }}</CardTitle
+          ><CardDescription>{{
+            tr(
+              "Zum Beispiel täglich einen Überblick zu einem Thema erhalten oder offene Aufgaben prüfen.",
+              "Get a daily overview of a topic or review pending tasks.",
+            )
+          }}</CardDescription></CardHeader
+        >
+        <CardContent
+          ><Button variant="outline" @click="startExample('schedule')">{{
+            tr("Zeitplan entwerfen", "Draft a schedule")
+          }}</Button></CardContent
+        >
       </Card>
       <Card>
-        <CardHeader><Zap class="size-5 text-muted-foreground" aria-hidden="true" /><CardTitle>{{ tr("Auf ein Ereignis reagieren", "Respond to an event") }}</CardTitle><CardDescription>{{ tr("Einen Auftrag starten, wenn ein verbundener Dienst etwas meldet. Die verfügbaren Ereignisse kommen aus deiner Registry.", "Start an assignment when a connected service reports something. Available events come from your registry.") }}</CardDescription></CardHeader>
-        <CardContent><Button variant="outline" @click="startExample('event')">{{ tr("Ereignisauftrag entwerfen", "Draft an event assignment") }}</Button></CardContent>
+        <CardHeader
+          ><Zap
+            class="size-5 text-muted-foreground"
+            aria-hidden="true"
+          /><CardTitle>{{
+            tr("Auf ein Ereignis reagieren", "Respond to an event")
+          }}</CardTitle
+          ><CardDescription>{{
+            tr(
+              "Einen Auftrag starten, wenn ein verbundener Dienst etwas meldet. Die verfügbaren Ereignisse kommen aus deiner Registry.",
+              "Start an assignment when a connected service reports something. Available events come from your registry.",
+            )
+          }}</CardDescription></CardHeader
+        >
+        <CardContent
+          ><Button variant="outline" @click="startExample('event')">{{
+            tr("Ereignisauftrag entwerfen", "Draft an event assignment")
+          }}</Button></CardContent
+        >
       </Card>
-      <p class="text-sm text-muted-foreground sm:col-span-2">{{ tr("Das öffnet einen Entwurf. Erst speichern und aktivieren startet den Auftrag.", "This opens a draft. Save and enable it to start the assignment.") }}</p>
+      <p class="text-sm text-muted-foreground sm:col-span-2">
+        {{
+          tr(
+            "Das öffnet einen Entwurf. Erst speichern und aktivieren startet den Auftrag.",
+            "This opens a draft. Save and enable it to start the assignment.",
+          )
+        }}
+      </p>
     </div>
     <RemoteState
       :loading="assignments.loading.value"
@@ -602,6 +725,117 @@ async function toggle(row: Document<Assignment>) {
                 ><Input id="schedule-zone" v-model="schedule.timeZone" required
               /></Field>
             </div>
+            <div v-if="objects" class="space-y-4">
+              <Field>
+                <Label for="trigger-objects">{{
+                  tr("Hive-Objekte", "Hive objects")
+                }}</Label>
+                <Textarea
+                  id="trigger-objects"
+                  v-model="objectIds"
+                  rows="3"
+                  required
+                />
+                <FieldDescription>{{
+                  tr(
+                    "Eine Objekt-ID pro Zeile. Die erste Beobachtung legt den Ausgangszustand fest.",
+                    "One object ID per line. The first observation establishes the baseline.",
+                  )
+                }}</FieldDescription>
+              </Field>
+              <Field>
+                <Label for="trigger-paths">{{
+                  tr("Beobachtete Inhalte", "Observed content")
+                }}</Label>
+                <Textarea
+                  id="trigger-paths"
+                  v-model="objectPaths"
+                  rows="3"
+                  placeholder="/data/activity"
+                />
+                <FieldDescription>{{
+                  tr(
+                    "Ein JSON Pointer pro Zeile. Leer beobachtet das gesamte Objekt. Wähle Inhaltsfelder, um laufende Zeitstempel auszuschließen.",
+                    "One JSON Pointer per line. Leave blank to observe the whole object. Select content fields to exclude changing timestamps.",
+                  )
+                }}</FieldDescription>
+              </Field>
+              <Field>
+                <Label for="trigger-delay">{{
+                  tr("Änderungen bündeln (Sekunden)", "Group changes (seconds)")
+                }}</Label>
+                <Input
+                  id="trigger-delay"
+                  :model-value="objects.delaySeconds"
+                  type="number"
+                  min="0"
+                  max="3600"
+                  @update:model-value="objects!.delaySeconds = Number($event)"
+                />
+              </Field>
+              <Field orientation="horizontal">
+                <Label for="trigger-observation">{{
+                  tr(
+                    "Vollständige, aktuelle Beobachtung abwarten",
+                    "Wait for a complete, recent observation",
+                  )
+                }}</Label>
+                <Switch
+                  id="trigger-observation"
+                  :model-value="!!objects.observation"
+                  @update:model-value="setObservation($event)"
+                />
+              </Field>
+              <div v-if="objects.observation" class="grid gap-4 sm:grid-cols-2">
+                <Field>
+                  <Label for="trigger-complete">{{
+                    tr("Pfad zur Vollständigkeit", "Completeness path")
+                  }}</Label>
+                  <Input
+                    id="trigger-complete"
+                    v-model="objects.observation.completePath"
+                    required
+                  />
+                </Field>
+                <Field>
+                  <Label for="trigger-observed">{{
+                    tr(
+                      "Pfad zum Beobachtungszeitpunkt",
+                      "Observation time path",
+                    )
+                  }}</Label>
+                  <Input
+                    id="trigger-observed"
+                    v-model="objects.observation.observedAtPath"
+                    required
+                  />
+                </Field>
+                <Field>
+                  <Label for="trigger-age">{{
+                    tr(
+                      "Maximales Beobachtungsalter (Sekunden)",
+                      "Maximum observation age (seconds)",
+                    )
+                  }}</Label>
+                  <Input
+                    id="trigger-age"
+                    :model-value="objects.observation.maximumAgeSeconds"
+                    type="number"
+                    min="1"
+                    max="86400"
+                    @update:model-value="
+                      objects!.observation!.maximumAgeSeconds = Number($event)
+                    "
+                  />
+                </Field>
+              </div>
+              <FieldDescription>{{
+                tr(
+                  "Änderungen lösen einen normalen Secretary-Auftrag aus. Während der Bündelung zurückgenommene Änderungen lösen keinen Auftrag aus.",
+                  "Changes start a regular Secretary assignment. Changes reverted during grouping do not start an assignment.",
+                )
+              }}</FieldDescription>
+            </div>
             <div v-if="event" class="space-y-4">
               <RemoteState
                 :loading="topics.loading.value"
@@ -631,10 +865,13 @@ async function toggle(row: Document<Assignment>) {
                     :key="topicChoiceKey(choice)"
                     :value="topicChoiceKey(choice)"
                   >
-                    {{ choice.definition.title }} · {{ choice.definition.version }} ·
+                    {{ choice.definition.title }} ·
+                    {{ choice.definition.version }} ·
                     {{ choice.provider?.node.serviceName ?? "Hive" }} ·
                     {{ choice.provider?.node.hostId ?? ""
-                    }}{{ choice.provider?.eligible !== false ? "" : " · offline" }}
+                    }}{{
+                      choice.provider?.eligible !== false ? "" : " · offline"
+                    }}
                   </option></OptionSelect
                 ><FieldDescription v-if="selectedTopic">{{
                   selectedTopic.definition.description
@@ -663,11 +900,19 @@ async function toggle(row: Document<Assignment>) {
                   </option></OptionSelect
                 ></Field
               >
-              <Disclosure v-if="selectedTopic" :title="tr('Ereignisdaten', 'Event data')"><JsonTree :value="selectedTopic.definition.payloadSchema" /></Disclosure>
-              <p v-if="selectedTopic" class="text-sm text-muted-foreground">{{ tr(
-                'Nachrichtenereignisse mit messageChannel werden je Unterhaltung fünf Minuten gebündelt. Secretary prüft danach den Lesestatus beim Quelldienst; gelesene Unterhaltungen lösen keinen Auftrag aus.',
-                'Message events with messageChannel are grouped per conversation for five minutes. Secretary then checks unread state with the source; read conversations do not start an assignment.'
-              ) }}</p>
+              <Disclosure
+                v-if="selectedTopic"
+                :title="tr('Ereignisdaten', 'Event data')"
+                ><JsonTree :value="selectedTopic.definition.payloadSchema"
+              /></Disclosure>
+              <p v-if="selectedTopic" class="text-sm text-muted-foreground">
+                {{
+                  tr(
+                    "Nachrichtenereignisse mit messageChannel werden je Unterhaltung fünf Minuten gebündelt. Secretary prüft danach den Lesestatus beim Quelldienst; gelesene Unterhaltungen lösen keinen Auftrag aus.",
+                    "Message events with messageChannel are grouped per conversation for five minutes. Secretary then checks unread state with the source; read conversations do not start an assignment.",
+                  )
+                }}
+              </p>
               <Alert v-if="unavailableTopic"
                 ><AlertDescription>{{
                   tr(
@@ -680,9 +925,26 @@ async function toggle(row: Document<Assignment>) {
           </FieldSet>
 
           <Field>
-            <Label for="notification-age">{{ tr("Mindestalter vor Main-Benachrichtigung (Minuten)", "Minimum age before Main notification (minutes)") }}</Label>
-            <Input id="notification-age" type="number" min="0" max="1440" :model-value="draft.minimumNotificationAgeMinutes ?? ''" @update:model-value="setNotificationAge" />
-            <FieldDescription>{{ tr("Leer übernimmt den Dienststandard. 0 bedeutet sofort. Dringende Anrufe warten nicht auf diese Frist.", "Leave blank to use the service default. 0 means immediately. Urgent calls do not wait for this delay.") }}</FieldDescription>
+            <Label for="notification-age">{{
+              tr(
+                "Mindestalter vor Main-Benachrichtigung (Minuten)",
+                "Minimum age before Main notification (minutes)",
+              )
+            }}</Label>
+            <Input
+              id="notification-age"
+              type="number"
+              min="0"
+              max="1440"
+              :model-value="draft.minimumNotificationAgeMinutes ?? ''"
+              @update:model-value="setNotificationAge"
+            />
+            <FieldDescription>{{
+              tr(
+                "Leer übernimmt den Dienststandard. 0 bedeutet sofort. Dringende Anrufe warten nicht auf diese Frist.",
+                "Leave blank to use the service default. 0 means immediately. Urgent calls do not wait for this delay.",
+              )
+            }}</FieldDescription>
           </Field>
           <Collapsible v-model:open="advancedOpen">
             <CollapsibleTrigger as-child

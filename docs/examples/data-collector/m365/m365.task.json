@@ -1,0 +1,58 @@
+{
+  "id": "m365-account",
+  "name": "Microsoft 365 and Gmail",
+  "enabled": false,
+  "intervalSeconds": 60,
+  "timeoutSeconds": 180,
+  "memoryMb": 128,
+  "script": "@file:m365.mjs",
+  "dependencies": {},
+  "secretNames": [],
+  "mcp": {
+    "serviceNodeId": "host.agent-manager",
+    "cwd": "/absolute/internal-project",
+    "server": "codex_apps",
+    "tools": [
+      "microsoft_outlook_email.get_profile",
+      "microsoft_outlook_email.list_mail_folders",
+      "microsoft_outlook_email.list_messages",
+      "microsoft_teams.get_profile",
+      "microsoft_teams.list_chats",
+      "microsoft_teams.list_chat_messages",
+      "microsoft_teams.get_chat_members",
+      "gmail.get_profile",
+      "gmail.list_labels",
+      "gmail.search_emails"
+    ]
+  },
+  "config": {
+    "accountKey": "work",
+    "displayName": "Work",
+    "profile": {
+      "id": "expected-microsoft-user-id",
+      "email": "user@example.test"
+    },
+    "outlook": { "displayName": "WorkMail", "folderName": "Inbox" },
+    "teams": {
+      "displayName": "Work",
+      "groupPolicy": "small-groups-or-mentions",
+      "maximumGroupMembersExclusive": 5,
+      "excludedChatIds": []
+    },
+    "gmail": {
+      "accountKey": "personal",
+      "displayName": "Gmail",
+      "profile": {
+        "id": "expected-google-user-id",
+        "email": "user@example.test"
+      }
+    },
+    "maximumPages": 50,
+    "maximumPreviews": 50
+  },
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

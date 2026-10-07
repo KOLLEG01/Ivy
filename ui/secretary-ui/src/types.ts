@@ -10,6 +10,7 @@ export type ExecutionTarget = Secretary.ExecutionTarget;
 export type SecretaryConfiguration = Secretary.SecretaryConfiguration;
 export type ScheduleTrigger = Secretary.ScheduleTrigger;
 export type EventTrigger = Secretary.EventTrigger;
+export type ObjectTrigger = Secretary.ObjectTrigger;
 export type AssignmentTrigger = Secretary.AssignmentTrigger;
 export type Assignment = Secretary.Assignment;
 export type Execution = Secretary.Execution;

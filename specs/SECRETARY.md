@@ -13,6 +13,11 @@ Contracts: [inbox](schemas/secretary.schema.json), [triage](schemas/secretary-tr
   execution is admitted; the resulting effective rules are retained with that execution.
 - Schedule triggers use explicit interval, daily or weekly fields plus an IANA time zone. Event
   triggers consume exact Hive topics and optionally bind one source service node and event kind.
+  Object-change triggers select exact JSON objects and optional JSON Pointer paths. Poll metadata
+  outside those paths does not trigger execution. Changes are grouped for a configured window;
+  a return to the original selected content cancels pending work. Optional completeness and
+  observation-time paths require a fresh complete observation after the window before admission.
+  First object creation establishes a baseline. Executions retain before/current revision pins.
   A producer may advertise `messageChannel` in its event payload with a stable channel key,
   opaque reference, first-message time and optional captured item ID. Secretary groups matching
   events per source and channel for five minutes, then calls that source's read-only

@@ -32,6 +32,11 @@ const form = reactive({
   inputSecret: initial.inputSecretName ?? "",
   allowUnauthenticated: initial.allowUnauthenticatedInput === true,
   retentionMb: Math.round(initial.retention.maximumBytes / 1048576),
+  useMcp: !!initial.mcp,
+  mcpNode: initial.mcp?.serviceNodeId ?? "",
+  mcpDirectory: initial.mcp?.cwd ?? "",
+  mcpServer: initial.mcp?.server ?? "",
+  mcpTools: initial.mcp?.tools.join("\n") ?? "",
 });
 const config = ref(JSON.stringify(initial.config, null, 2)),
   dependencies = ref(JSON.stringify(initial.dependencies, null, 2));
@@ -74,6 +79,11 @@ const valid = computed(
     !idError.value &&
     !configState.value.error &&
     !dependencyState.value.error &&
+    (!form.useMcp ||
+      (!!form.mcpNode.trim() &&
+        !!form.mcpDirectory.trim() &&
+        !!form.mcpServer.trim() &&
+        !!form.mcpTools.trim())) &&
     !!form.script.trim(),
 );
 const submit = () => {
@@ -93,6 +103,16 @@ const submit = () => {
     dependencies: dependencyState.value.value!,
     config: configState.value.value!,
     secretNames,
+    ...(form.useMcp
+      ? {
+          mcp: {
+            serviceNodeId: form.mcpNode.trim(),
+            cwd: form.mcpDirectory.trim(),
+            server: form.mcpServer.trim(),
+            tools: [...new Set(form.mcpTools.split(/[\s,]+/).filter(Boolean))],
+          },
+        }
+      : {}),
     ...(form.inputSecret ? { inputSecretName: form.inputSecret } : {}),
     ...(form.allowUnauthenticated && !form.inputSecret
       ? { allowUnauthenticatedInput: true }
@@ -154,6 +174,61 @@ const submit = () => {
           )
         }}</FieldLabel>
       </Field>
+    </FieldSet>
+
+    <FieldSet>
+      <FieldLegend>{{
+        tr("Verbundene MCP-Tools", "Connected MCP tools")
+      }}</FieldLegend>
+      <Field orientation="horizontal">
+        <Switch id="task-mcp" v-model="form.useMcp" :disabled="busy" />
+        <FieldLabel for="task-mcp">{{
+          tr(
+            "MCP-Zugriff für dieses Script freigeben",
+            "Grant this script MCP access",
+          )
+        }}</FieldLabel>
+      </Field>
+      <FieldGroup v-if="form.useMcp" class="grid gap-4 md:grid-cols-2">
+        <Field
+          ><FieldLabel for="task-mcp-node">AgentManager</FieldLabel
+          ><Input id="task-mcp-node" v-model="form.mcpNode" :disabled="busy"
+        /></Field>
+        <Field
+          ><FieldLabel for="task-mcp-directory">{{
+            tr("Projektverzeichnis", "Project directory")
+          }}</FieldLabel
+          ><Input
+            id="task-mcp-directory"
+            v-model="form.mcpDirectory"
+            :disabled="busy"
+        /></Field>
+        <Field
+          ><FieldLabel for="task-mcp-server">{{
+            tr("MCP-Server", "MCP server")
+          }}</FieldLabel
+          ><Input
+            id="task-mcp-server"
+            v-model="form.mcpServer"
+            :disabled="busy"
+        /></Field>
+        <Field
+          ><FieldLabel for="task-mcp-tools">{{
+            tr("Freigegebene Tools", "Granted tools")
+          }}</FieldLabel
+          ><Textarea
+            id="task-mcp-tools"
+            v-model="form.mcpTools"
+            :disabled="busy"
+          />
+          <FieldDescription>{{
+            tr(
+              "Ein Toolname pro Zeile. Verwendet die bestehende Plugin-Anmeldung ohne Model-Turn.",
+              "One tool name per line. Uses the existing plugin sign-in without a model turn.",
+            )
+          }}</FieldDescription>
+        </Field>
+      </FieldGroup>
     </FieldSet>
 
     <FieldSet>

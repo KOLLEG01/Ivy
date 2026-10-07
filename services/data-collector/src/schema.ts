@@ -15,6 +15,18 @@ export const defaultRetention = {
 };
 const slug = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/);
 const secretName = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]{0,127}$/);
+export const mcpSchema = z
+  .object({
+    serviceNodeId: z.string().min(1).max(256),
+    cwd: z.string().min(1).max(4096),
+    server: z.string().min(1).max(256),
+    tools: z.array(z.string().min(1).max(256)).min(1).max(100),
+  })
+  .strict()
+  .refine(
+    (value) => new Set(value.tools).size === value.tools.length,
+    "MCP tool names must be unique.",
+  );
 export const taskSchema = z
   .object({
     id: slug,
@@ -30,6 +42,7 @@ export const taskSchema = z
     ),
     config: z.record(z.string(), z.json()),
     secretNames: z.array(secretName).max(50),
+    mcp: mcpSchema.optional(),
     inputSecretName: secretName.nullable().optional(),
     allowUnauthenticatedInput: z.boolean().optional(),
     retention: retentionSchema,
