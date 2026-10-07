@@ -16,10 +16,7 @@ import { PhoneCallCommands } from "../../../services/phone-bridge/src/runtime/ca
 import { PhoneFlow } from "../../../services/phone-bridge/src/runtime/flow.js";
 import { PhoneJournal } from "../../../services/phone-bridge/src/runtime/journal.js";
 import { PhoneBridge } from "../../../services/phone-bridge/src/runtime/bridge.js";
-import {
-  PhoneDiagnostics,
-  phoneMicroReady,
-} from "../../../services/phone-bridge/src/runtime/diagnostics.js";
+import { PhoneDiagnostics } from "../../../services/phone-bridge/src/runtime/diagnostics.js";
 import { startPhoneProcess } from "../../../services/phone-bridge/src/runtime/process.js";
 import {
   phoneRegistry,
@@ -32,28 +29,7 @@ import {
 import { validatePhone } from "../../../services/phone-bridge/src/runtime/native.js";
 import type { PhoneNativeClient } from "../../../services/phone-bridge/src/runtime/native.js";
 import { PhoneCallLogs } from "../../../services/phone-bridge/src/runtime/call-logs.js";
-import { PhoneVoiceRetention } from "../../../services/phone-bridge/src/runtime/desktop-voice-retention.js";
-
-export async function ensureDesktopRunning(
-  native: Pick<PhoneNativeClient, "observeDesktop" | "launchDesktop">,
-  application: { appUserModelId: string; startIfMissing: boolean },
-) {
-  const desktop = await native.observeDesktop(application.appUserModelId);
-  requireThat(
-    ["ready", "waiting", "absent"].includes(desktop.state),
-    "phone_desktop_unavailable",
-    "Configured Desktop observation is unavailable or ambiguous.",
-  );
-  if (desktop.state !== "absent" || !application.startIfMissing)
-    return desktop.state;
-  const launched = await native.launchDesktop(application, randomUUID());
-  requireThat(
-    ["ready", "waiting", "submitted"].includes(launched.phase),
-    "phone_desktop_unavailable",
-    "Configured Desktop activation did not start.",
-  );
-  return launched.phase;
-}
+import { PhoneCodexVoice } from "./runtime/codex-voice.js";
 
 export async function startPhoneBridge(path: string) {
   const config = await instanceConfig(path),
@@ -79,15 +55,8 @@ export async function startPhoneBridge(path: string) {
   let active: Promise<void> | null = null,
     closing: Promise<void> | null = null,
     stopped = false;
-  let maintenance: Promise<void> | null = null,
-    desktopWork: Promise<void> | null = null,
-    appToolsWork: Promise<void> | null = null,
-    lastAppToolsCheck = 0;
-  const retention = settings.voiceArchive ? new PhoneVoiceRetention(
-    journal, settings.voiceArchive,
-    undefined, undefined, undefined,
-    (threadId, code) => process.stderr.write(JSON.stringify({ event: 'phone_voice_retention_issue', threadId, code }) + '\n'),
-  ) : null;
+  let voiceWork: Promise<void> | null = null,
+    lastVoiceCheck = 0;
   let rotating = false;
   const diagnostics = new PhoneDiagnostics(config.serviceNodeId);
   let healthWork: Promise<void> = Promise.resolve();
@@ -116,21 +85,39 @@ export async function startPhoneBridge(path: string) {
       );
     return healthWork;
   };
-  const checkAppTools = () => {
-    if (!settings.voiceArchive || !flow || stopped || appToolsWork) return;
+  const checkVoice = () => {
+    if (
+      !settings.codexVoice ||
+      !settings.incomingPrincipalId ||
+      !flow ||
+      stopped ||
+      voiceWork
+    )
+      return;
     const selected = flow;
-    lastAppToolsCheck = Date.now();
-    appToolsWork = selected.prewarmAppTools()
-      .then(() => {
-        if (selected === flow && diagnostics.appToolsSucceeded())
-          process.stdout.write(JSON.stringify({ event: 'phone_app_tools_recovered' }) + '\n');
-      }, error => {
-        if (selected !== flow || stopped) return;
-        const code = IvyError.from(error).code;
-        if (diagnostics.appToolsFailed(code))
-          process.stderr.write(JSON.stringify({ event: 'phone_app_tools_unavailable', code }) + '\n');
-      })
-      .finally(() => { appToolsWork = null; });
+    lastVoiceCheck = Date.now();
+    voiceWork = selected
+      .prewarmVoice(settings.incomingPrincipalId)
+      .then(
+        () => {
+          if (selected === flow && diagnostics.voiceSucceeded())
+            process.stdout.write(
+              JSON.stringify({ event: "phone_codex_voice_recovered" }) + "\n",
+            );
+        },
+        (error) => {
+          if (selected !== flow || stopped) return;
+          const code = IvyError.from(error).code;
+          if (diagnostics.voiceFailed(code))
+            process.stderr.write(
+              JSON.stringify({ event: "phone_codex_voice_unavailable", code }) +
+                "\n",
+            );
+        },
+      )
+      .finally(() => {
+        voiceWork = null;
+      });
   };
   const close = (): Promise<void> => {
     if (closing) return closing;
@@ -146,7 +133,9 @@ export async function startPhoneBridge(path: string) {
         }
       } finally {
         await active?.catch(() => undefined);
-        await Promise.allSettled([maintenance, desktopWork, appToolsWork].filter((work): work is Promise<void> => work !== null));
+        await Promise.allSettled(
+          [voiceWork].filter((work): work is Promise<void> => work !== null),
+        );
         await healthWork.catch(() => undefined);
         logs.close();
         journal.close();
@@ -181,7 +170,6 @@ export async function startPhoneBridge(path: string) {
       const configuration = {
         binding: settings.binding,
         codecs: settings.codecs,
-        micro: settings.voiceInput["micro"],
         incomingPeers: [
           ...new Set(
             [
@@ -208,6 +196,18 @@ export async function startPhoneBridge(path: string) {
         "phone_configuration_failed",
         "Original native configuration did not complete.",
       );
+      const voice = settings.codexVoice
+        ? new PhoneCodexVoice(
+            settings.codexVoice,
+            journal,
+            {
+              artifactRoot: config.artifactRoot,
+              dataRoot: config.dataRoot,
+              credential: config.credential!,
+            },
+            (code) => diagnostics.voiceFailed(code),
+          )
+        : null;
       flow = new PhoneFlow(
         new PhoneCallCommands(admission, journal, native),
         native,
@@ -215,20 +215,16 @@ export async function startPhoneBridge(path: string) {
         () => phoneCredentials(settings.credentialsPath),
         (callId, code) => {
           diagnostics.callFailed(callId, code);
-          if (code.startsWith('app_tools_') && diagnostics.appToolsFailed(code))
-            process.stderr.write(JSON.stringify({ event: 'phone_app_tools_unavailable', code }) + '\n');
           process.stderr.write(
             JSON.stringify({ event: "phone_call_failed", callId, code }) + "\n",
           );
         },
-        undefined,
-        logs,
-        undefined,
         (callId) => diagnostics.callSucceeded(callId),
+        voice,
+        logs,
       );
-      // App Tools may be unavailable during a Desktop update. SIP and the Windows
-      // route still need to start; Voice calls will use the same checked pool.
-      checkAppTools();
+      // SIP starts independently; prepare the configured caller's durable task off the call path.
+      checkVoice();
       bridge = new PhoneBridge(flow, native);
       const original = processOwner;
       process.stdout.write(
@@ -295,20 +291,21 @@ export async function startPhoneBridge(path: string) {
         const currentDiagnostics = diagnostics.snapshot(
           journal.currentCalls().map((call) => call.callId),
         );
-        const appToolsIssue = currentDiagnostics.find(item =>
-          item.resource !== null &&
-          typeof item.resource === "object" &&
-          !Array.isArray(item.resource) &&
-          item.resource.scope === "app_tools",
+        const voiceIssue = currentDiagnostics.find(
+          (item) =>
+            item.resource !== null &&
+            typeof item.resource === "object" &&
+            !Array.isArray(item.resource) &&
+            item.resource.scope === "codex_voice",
         );
         await writeHealth(
           true,
           connection.generation,
-          appToolsIssue
-            ? `Codex App Tools unavailable (${appToolsIssue.code}); SIP remains active.`
+          voiceIssue
+            ? `Codex Voice unavailable (${voiceIssue.code}); SIP remains active.`
             : currentDiagnostics.length
-            ? "Original Phone results remain available; Phone needs attention."
-            : "Phone calls and original outcome queries are available.",
+              ? "Original Phone results remain available; Phone needs attention."
+              : "Phone calls and original outcome queries are available.",
         );
         return { ready: true, diagnostics: currentDiagnostics };
       },
@@ -317,7 +314,7 @@ export async function startPhoneBridge(path: string) {
           void writeHealth(
             !stopped && !rotating && journal.epoch === native.epoch,
             state.generation ?? null,
-            "Local Phone owner remains active during Hive reconnect; Hive tools are unavailable.",
+            `Local Phone owner remains active during Hive reconnect; Hive tools are unavailable${state.code ? ` (${state.code})` : ""}.`,
           ).catch(() => undefined);
       },
     });
@@ -337,14 +334,15 @@ export async function startPhoneBridge(path: string) {
           settings.registration !== null,
           observed.registration,
         );
-        if (observed.micro && !phoneMicroReady(observed.micro.state))
-          diagnostics.pollFailed(
-            observed.micro.errorCode ?? "phone_micro_not_ready",
-          );
-        else diagnostics.pollSucceeded();
+        diagnostics.pollSucceeded();
         // SIP admission is local to this fenced native owner. A Hive reconnect
         // must not consume the provider's ringing window.
-        if (!stopped && !rotating && journal.epoch === native.epoch && settings.incomingPrincipalId) {
+        if (
+          !stopped &&
+          !rotating &&
+          journal.epoch === native.epoch &&
+          settings.incomingPrincipalId
+        ) {
           for (const id of observed.callIds ??
             (observed.call ? [observed.call.id] : [])) {
             if (
@@ -373,16 +371,11 @@ export async function startPhoneBridge(path: string) {
           }
         }
         await flow!.observe(observed);
-        if (service?.ready && retention && !maintenance)
-          maintenance = retention.tick()
-            .catch(error => { diagnostics.pollFailed(IvyError.from(error).code); })
-            .finally(() => { maintenance = null; });
-        if (!journal.currentCalls().length && Date.now() - lastAppToolsCheck >= 60_000)
-          checkAppTools();
-        if (settings.application.startIfMissing && !desktopWork)
-          desktopWork = ensureDesktopRunning(native, settings.application)
-            .then(() => undefined, error => { diagnostics.pollFailed(IvyError.from(error).code); })
-            .finally(() => { desktopWork = null; });
+        if (
+          !journal.currentCalls().length &&
+          Date.now() - lastVoiceCheck >= 60_000
+        )
+          checkVoice();
         // Rotate only the owned SIP process, between calls, before its bounded receipt map fills.
         // Closing the flow first fences admissions that raced with the idle observation.
         if (

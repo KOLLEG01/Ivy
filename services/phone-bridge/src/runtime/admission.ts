@@ -25,7 +25,7 @@ export interface PhonePolicyDefinition {
   challengedIncoming?: { peerAddress: string; transport: PhoneIncoming['transport'] }[];
 }
 const validate = phoneValidator({ ...runtime.$defs, Uuid: journal.$defs.Uuid, ...definition.$defs });
-export const phoneCallReservation = 16 * 1024;
+export const phoneCallReservation = 64 * 1024;
 export function validatePhoneAdmission(name: string, value: unknown): void {
   validate(name, value, name === 'PhonePolicy' ? 256 * 1024 : phoneCallReservation);
 }
@@ -54,8 +54,8 @@ export class PhoneAdmission {
     requireThat(recipient && destination === undefined || direct && destination, 'phone_destination_refused', 'The Phone destination or route is not configured.');
     requireThat(voicePrompt === undefined || route === 'voice' && !screening && recipient !== undefined,
       'phone_caller_refused', 'A Voice prompt requires an admitted configured Voice recipient.');
-    requireThat(voicePrompt === undefined || voicePrompt.length <= 3900,
-      'invalid_arguments', 'A Voice prompt must leave room for the opening greeting.');
+    requireThat(voicePrompt === undefined || voicePrompt.length <= 30000 && Buffer.byteLength(voicePrompt) <= 32000,
+      'invalid_arguments', 'A Voice prompt must fit the native session startup text bound.');
     const resolved = this.resolveDestination(recipient?.destination ?? destination!);
     const value: PhoneCallAdmission = { epoch, operationId, principalId, policyHash: this.hash, direction: 'outgoing', callId: null,
       recipientId, destination: resolved, incoming: null, ...(route ? { route } : {}), ...(screening ? { screening } : {}),

@@ -77,6 +77,22 @@ export function validatePhoneService(name: string, value: unknown): void {
 }
 export const phoneTools = [
   {
+    name: "voiceInputs",
+    input: "PhoneCallQuery",
+    output: "PhoneVoiceInputs",
+    readOnly: true,
+    description:
+      "Read up to four pending native approvals or questions for the original Voice task, including their exact reply schemas. Nothing is approved automatically.",
+  },
+  {
+    name: "answerVoiceInput",
+    input: "PhoneVoiceInputAnswer",
+    output: "PhoneVoiceInputSubmitted",
+    readOnly: false,
+    description:
+      "Submit one reply to a current native Voice task input using its exact id and reply schema. A consumed or ended input cannot be sent again; submitted does not confirm the requested task action completed.",
+  },
+  {
     name: "probeLoopback",
     input: "PhoneStatusQuery",
     output: "PhoneLoopbackProbe",
@@ -90,7 +106,7 @@ export const phoneTools = [
     output: "PhoneAudioSetup",
     readOnly: true,
     description:
-      "Check audio device availability and mute settings for Voice and Windows routes (administrator only). Readiness covers device checks, not a live audio test; does not change devices.",
+      "Check audio device availability and mute settings for Windows routes (administrator only). Readiness covers device checks, not a live audio test; does not change devices.",
   },
   {
     name: "codecTest",
@@ -228,43 +244,56 @@ export const phoneTools = [
     description:
       "End the original call or screening and release its audio resources. Uncertain cleanup remains blocked for recovery.",
   },
-  {
-    name: "reconcileArchive",
-    input: "PhoneArchiveQuery",
-    output: "PhoneOperationResult",
-    readOnly: false,
-    description:
-      "Check whether the original Voice task was archived and save the observed resolution. Does not submit or repeat archival.",
-  },
 ] as const;
 export type PhoneTool = (typeof phoneTools)[number]["name"];
-function phoneMcp(name: PhoneTool): { name: string; surface: 'ivy' | 'ivy_dev' } | null {
+function phoneMcp(
+  name: PhoneTool,
+): { name: string; surface: "ivy" | "ivy_dev" } | null {
   if (name === "request") return null;
-  if (["status", "call", "operation"].includes(name)) return { name: "phone_bridge_status", surface: "ivy" };
-  if (name === "voiceCall") return { name: "phone_bridge_call", surface: "ivy" };
+  if (["status", "call", "operation"].includes(name))
+    return { name: "phone_bridge_status", surface: "ivy" };
+  if (name === "voiceCall")
+    return { name: "phone_bridge_call", surface: "ivy" };
   if (name === "hangup") return { name: "phone_bridge_hangup", surface: "ivy" };
-  if (name === "selectVoice") return { name: "phone_bridge_select_voice", surface: "ivy" };
-  if (name === "restartVoice") return { name: "phone_bridge_restart_voice", surface: "ivy" };
-  if (["probeLoopback", "audioSetup", "codecTest", "inventory", "logs", "reconcileArchive"].includes(name))
+  if (name === "selectVoice")
+    return { name: "phone_bridge_select_voice", surface: "ivy" };
+  if (name === "restartVoice")
+    return { name: "phone_bridge_restart_voice", surface: "ivy" };
+  if (name === "voiceInputs")
+    return { name: "phone_bridge_voice_inputs", surface: "ivy" };
+  if (name === "answerVoiceInput")
+    return { name: "phone_bridge_answer_voice_input", surface: "ivy" };
+  if (
+    ["probeLoopback", "audioSetup", "codecTest", "inventory", "logs"].includes(
+      name,
+    )
+  )
     return { name: "phone_bridge_diagnostics", surface: "ivy_dev" };
-  if (name === "reconnect") return { name: "phone_bridge_reconnect", surface: "ivy_dev" };
-  return { name: "phone_bridge_" + name.replace(/[A-Z]/g, letter => "_" + letter.toLowerCase()), surface: "ivy_dev" };
+  if (name === "reconnect")
+    return { name: "phone_bridge_reconnect", surface: "ivy_dev" };
+  return {
+    name:
+      "phone_bridge_" +
+      name.replace(/[A-Z]/g, (letter) => "_" + letter.toLowerCase()),
+    surface: "ivy_dev",
+  };
 }
 export function phoneRegistry(): Wire.RegistrySync {
   return {
-    discoveryHint: "PhoneBridge lets agents call configured recipients through a voice agent. Use phone_bridge_status, phone_bridge_call with initialPrompt, phone_bridge_select_voice, phone_bridge_restart_voice and phone_bridge_hangup.",
+    discoveryHint:
+      "PhoneBridge lets agents call configured recipients through a voice agent. Use phone_bridge_status, phone_bridge_call with initialPrompt, phone_bridge_select_voice, phone_bridge_restart_voice and phone_bridge_hangup. Native approvals and questions are available through phone_bridge_voice_inputs and phone_bridge_answer_voice_input.",
     namespaces: [
       {
         namespace: "phone",
         description:
           "Phone calls with a voice model, Windows audio or automated announcements",
         guideMarkdown:
-          "Use phone_bridge_status for readiness, configured recipient IDs, original call state, current Voice model selection and original operation outcomes. phone_bridge_call requires recipientId, operationId and a nonempty initialPrompt. PhoneBridge creates a local task with Sol/high by default and sends the prompt after connection. During the call, *1<M><R># selects model 1 Luna, 2 Sol or 3 Astra and reasoning 1 low, 2 medium, 3 high, 4 xhigh, 5 max or 6 ultra (not Luna). Selection leaves the current task running; *0# creates a new task with the selected model and reasoning, then starts Voice there. Use phone_bridge_hangup to end the call. "
-          + "phone_bridge_select_voice changes model and reasoningEffort in the current task; phone_bridge_restart_voice creates and transfers to a new task with that selection. Both require callId and operationId, keep the phone connection, and return the retained operation. Use a new operationId only for a new action; read a lost reply via phone_bridge_status with callId and operationId. "
-          + "If the recipient already has an incoming or outgoing Voice call, phone_bridge_call forwards initialPrompt unchanged to its current task and returns the existing callId. It waits for setup or a task switch and retains the send under the request operationId, so retries cannot duplicate it. "
-          + "The internal phone.request method also supports the Windows audio route and authorized direct destinations. "
-          + "phone.screen plays an announcement and collects 1/2; phone.bridgeScreening connects an accepted call to Windows audio. "
-          + "Keep operationId and callId after lost replies. Admission does not prove connection: inspect the original call or operation through phone_bridge_status. Development operators can use ivy_dev diagnostics and reconnect tools for recovery.",
+          "Use phone_bridge_status for readiness, configured recipient IDs, original call state, current Voice model selection and original operation outcomes. phone_bridge_call requires recipientId, operationId and a nonempty initialPrompt. PhoneBridge creates a local task with Sol/high by default and sends the prompt after connection. During the call, *1<M><R># selects model 1 Luna, 2 Sol or 3 Astra and reasoning 1 low, 2 medium, 3 high, 4 xhigh, 5 max or 6 ultra (not Luna). Selection leaves the current task running; *0# creates a new task with the selected model and reasoning, then starts Voice there. Use phone_bridge_hangup to end the call. " +
+          "phone_bridge_select_voice changes model and reasoningEffort in the current task; phone_bridge_restart_voice creates and transfers to a new task with that selection. Both require callId and operationId, keep the phone connection, and return the retained operation. Use a new operationId only for a new action; read a lost reply via phone_bridge_status with callId and operationId. " +
+          "If the recipient already has an incoming or outgoing Voice call, phone_bridge_call forwards initialPrompt unchanged to its current task and returns the existing callId. It waits for setup or a task switch and retains the send under the request operationId, so retries cannot duplicate it. " +
+          "The internal phone.request method also supports the Windows audio route and authorized direct destinations. " +
+          "phone.screen plays an announcement and collects 1/2; phone.bridgeScreening connects an accepted call to Windows audio. " +
+          "Keep operationId and callId after lost replies. Admission does not prove connection: inspect the original call or operation through phone_bridge_status. Development operators can use ivy_dev diagnostics and reconnect tools for recovery.",
         tools: phoneTools.map((tool) => {
           const mcp = phoneMcp(tool.name);
           return {

@@ -1,5 +1,1 @@
-/** Canonical UTF-8 bytes, excluding the JSONL newline. */
-export const nativeRequestFrameBytes = 6291456;
-export const nativeFrameBytes = 25165824;
-export const nativeAnswerFrameBytes = 4194304;
-export { managementFrameBytes } from '../../../packages/sdk/src/node.js';
+export * from '../../../packages/host-runtime/src/codex-limits.js';

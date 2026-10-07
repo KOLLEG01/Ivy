@@ -9,7 +9,8 @@
         "call.hangup",
         "call.desktop.stopVoice",
         "call.release",
-        "shutdown"
+        "shutdown",
+        "call.realtime.stop"
       ]
     },
     "PhoneCallTarget": {
@@ -411,7 +412,10 @@
             "call.desktop.pauseVoice",
             "call.desktop.resumeVoice",
             "codec.test",
-            "audio.probe"
+            "audio.probe",
+            "call.realtime.prepare",
+            "call.realtime.answer",
+            "call.realtime.stop"
           ]
         },
         "params": {
@@ -509,8 +513,12 @@
         },
         "micro": {
           "anyOf": [
-            { "type": "null" },
-            { "$ref": "phone-micro.schema.json#/$defs/MicroSettings" }
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "phone-micro.schema.json#/$defs/MicroSettings"
+            }
           ]
         }
       }
@@ -531,20 +539,41 @@
     "Answer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["callId", "waiting"],
+      "required": [
+        "callId",
+        "waiting"
+      ],
       "properties": {
-        "callId": { "type": "string", "format": "uuid" },
-        "waiting": { "type": "boolean" }
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "waiting": {
+          "type": "boolean"
+        }
       }
     },
     "CommandFeedback": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["callId", "commandSequence", "success"],
+      "required": [
+        "callId",
+        "commandSequence",
+        "success"
+      ],
       "properties": {
-        "callId": { "type": "string", "format": "uuid" },
-        "commandSequence": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
-        "success": { "type": "boolean" }
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "commandSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "success": {
+          "type": "boolean"
+        }
       }
     },
     "PrepareAudio": {
@@ -569,12 +598,25 @@
       }
     },
     "RebindAudio": {
-      "type": "object", "additionalProperties": false,
-      "required": ["callId", "desktop", "threadId"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "desktop",
+        "threadId"
+      ],
       "properties": {
-        "callId": { "type": "string", "format": "uuid" },
-        "desktop": { "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity" },
-        "threadId": { "type": "string", "format": "uuid" }
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "desktop": {
+          "$ref": "phone-launch.schema.json#/$defs/DesktopIdentity"
+        },
+        "threadId": {
+          "type": "string",
+          "format": "uuid"
+        }
       }
     },
     "Dial": {
@@ -727,6 +769,75 @@
         },
         "voiceInput": {
           "$ref": "phone-micro.schema.json#/$defs/VoiceInputSettings"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        }
+      }
+    },
+    "PrepareRealtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "generation",
+        "queueMs"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "queueMs": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 200
+        }
+      }
+    },
+    "AnswerRealtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "generation",
+        "sdp"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "sdp": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 48000
+        }
+      }
+    },
+    "StopRealtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "generation"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string",
+          "format": "uuid"
         },
         "generation": {
           "type": "integer",

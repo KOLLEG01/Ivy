@@ -1,13 +1,10 @@
 import type { Wire } from "../../../../packages/sdk/src/node.js";
 
-export const phoneMicroReady = (state: string): boolean =>
-  state === "attached" || state === "ready";
-
 /** Bounded telemetry only. Call ownership and outcomes remain exclusively in PhoneJournal. */
 export class PhoneDiagnostics {
   private readonly calls = new Map<string, Wire.Diagnostic>();
   private poll: Wire.Diagnostic | null = null;
-  private appTools: Wire.Diagnostic | null = null;
+  private voice: Wire.Diagnostic | null = null;
   private registration: Wire.Diagnostic | null = null;
   constructor(
     private readonly serviceNodeId: string,
@@ -16,7 +13,7 @@ export class PhoneDiagnostics {
   private observation(
     code: string,
     prior: Wire.Diagnostic | null,
-    scope: "call" | "poll" | "registration" | "app_tools",
+    scope: "call" | "poll" | "registration" | "codex_voice",
   ): Wire.Diagnostic {
     const at = this.now();
     return {
@@ -32,8 +29,8 @@ export class PhoneDiagnostics {
           ? "The original Phone call needs attention. Inspect its retained command outcomes; do not repeat the call."
           : scope === "registration"
             ? "Phone SIP registration or its keepalive needs attention. Inspect phone.status; existing call outcomes remain available."
-            : scope === "app_tools"
-              ? "Codex App Tools cannot control Voice tasks. SIP remains available; inspect the App Tools error and the installed bundled plugin."
+            : scope === "codex_voice"
+              ? "Codex Voice is unavailable. SIP remains available; inspect the configured CLI runtime and its original task outcome."
             : "Phone observation is unavailable. Original command outcomes remain available.",
     };
   }
@@ -56,14 +53,14 @@ export class PhoneDiagnostics {
   pollSucceeded(): void {
     this.poll = null;
   }
-  appToolsFailed(code: string): boolean {
-    const changed = this.appTools?.code !== code;
-    this.appTools = this.observation(code, this.appTools, "app_tools");
+  voiceFailed(code: string): boolean {
+    const changed = this.voice?.code !== code;
+    this.voice = this.observation(code, this.voice, "codex_voice");
     return changed;
   }
-  appToolsSucceeded(): boolean {
-    const recovered = this.appTools !== null;
-    this.appTools = null;
+  voiceSucceeded(): boolean {
+    const recovered = this.voice !== null;
+    this.voice = null;
     return recovered;
   }
   registrationObserved(
@@ -87,7 +84,7 @@ export class PhoneDiagnostics {
     return structuredClone([
       ...this.calls.values(),
       ...(this.poll ? [this.poll] : []),
-      ...(this.appTools ? [this.appTools] : []),
+      ...(this.voice ? [this.voice] : []),
       ...(this.registration ? [this.registration] : []),
     ]);
   }

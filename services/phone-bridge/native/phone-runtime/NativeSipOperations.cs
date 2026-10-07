@@ -21,6 +21,9 @@ public sealed record NativeDesktopIdentity(int Pid, string StartTimeUtcTicks, st
 public sealed record NativePrepareAudio(string CallId, AudioSettings Settings, NativeDesktopIdentity Desktop);
 public sealed record NativeRebindAudio(string CallId, NativeDesktopIdentity Desktop, string ThreadId);
 public sealed record NativeDial(string CallId, string Destination, string Username, string Password, int RingSeconds, bool Waiting);
+public sealed record NativeRealtimePrepare(string CallId, int Generation, int QueueMs);
+public sealed record NativeRealtimeAnswer(string CallId, int Generation, string Sdp);
+public sealed record NativeRealtimeIdentity(string CallId, int Generation);
 
 // SIP command ownership shared by the real pipe executable and isolated synthetic-PCM fixtures.
 // Audio ports start closed; the separate Desktop/media owner must grant their live audio authority.
@@ -172,6 +175,26 @@ public sealed class NativeSipOperations : IAsyncDisposable {
                     desktopWork = call.ConnectWindowsAsync(args.GetProperty("settings").Deserialize<AudioSettings>(NativeRpc.Json)); break;
                 }
                 case "call.codec.upgrade": desktopWork = Original(args).UpgradeCodecAsync(); break;
+                case "call.realtime.prepare": {
+                    var value = Read<NativeRealtimePrepare>(args, "callId", "generation", "queueMs");
+                    if (call == null || call.Observation.Id != value.CallId || call.Media.CallAudio == null)
+                        throw new NativeRpcException("runtime_not_ready");
+                    var port = call.Media.CallAudio;
+                    desktopWork = PrepareRealtimeAsync(port, value.Generation, value.QueueMs); break;
+                }
+                case "call.realtime.answer": {
+                    var value = Read<NativeRealtimeAnswer>(args, "callId", "generation", "sdp");
+                    if (call == null || call.Observation.Id != value.CallId || call.Observation.State != "connected" ||
+                        call.Observation.Features?.Access is not ("trusted" or "authenticated") || call.Media.CallAudio == null)
+                        throw new NativeRpcException("runtime_not_ready");
+                    desktopWork = AcceptRealtimeAsync(call.Media.CallAudio, value.Generation, value.Sdp); break;
+                }
+                case "call.realtime.stop": {
+                    var value = Read<NativeRealtimeIdentity>(args, "callId", "generation");
+                    if (call == null || call.Observation.Id != value.CallId || call.Media.CallAudio == null)
+                        throw new NativeRpcException("runtime_not_ready");
+                    desktopWork = StopRealtimeAsync(call.Media.CallAudio, value.Generation); break;
+                }
                 case "call.prepare": {
                     var value = Read<NativeCallIdentity>(args, "callId");
                     if (host.FindCall(value.CallId) != null) throw new NativeRpcException("operation_conflict");
@@ -239,6 +262,16 @@ public sealed class NativeSipOperations : IAsyncDisposable {
         var next = await host.ReconnectRegistrationAsync(registrationSettings, registrationPassword);
         lock (sync) registration = next;
         return next.Observation;
+    }
+    private static async Task<object> PrepareRealtimeAsync(CallAudioPort port, int generation, int queueMs) =>
+        new { callId = port.CallId, generation, sdp = await port.PrepareRealtimeAsync(generation, queueMs) };
+    private static async Task<object> AcceptRealtimeAsync(CallAudioPort port, int generation, string sdp) {
+        await port.AcceptRealtimeAsync(generation, sdp);
+        return new { callId = port.CallId, connected = true };
+    }
+    private static async Task<object> StopRealtimeAsync(CallAudioPort port, int generation) {
+        await port.StopRealtimeAsync(generation);
+        return new { callId = port.CallId, stopped = true };
     }
     public ValueTask DisposeAsync() {
         lock (sync) { disposal ??= DisposeCoreAsync(); return new ValueTask(disposal); }

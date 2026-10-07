@@ -96,16 +96,25 @@ export class PhoneCallCommands {
   stopVoice(principalId: string, callId: string, desktop: Record<string, unknown>, voiceInput: Record<string, unknown>): Promise<PhoneOperation> {
     return this.invoke(principalId, callId, 'call.desktop.stopVoice', { callId, desktop, voiceInput }, 25000);
   }
+  prepareRealtime(principalId: string, callId: string, generation: number, queueMs = 80): Promise<PhoneOperation> {
+    return this.invoke(principalId, callId, 'call.realtime.prepare', { callId, generation, queueMs }, 15000);
+  }
+  answerRealtime(principalId: string, callId: string, generation: number, sdp: string): Promise<PhoneOperation> {
+    return this.invoke(principalId, callId, 'call.realtime.answer', { callId, generation, sdp }, 20000);
+  }
+  stopRealtime(principalId: string, callId: string, generation: number): Promise<PhoneOperation> {
+    return this.invoke(principalId, callId, 'call.realtime.stop', { callId, generation }, 20000);
+  }
   hangup(principalId: string, callId: string): Promise<PhoneOperation> { return this.invoke(principalId, callId, 'call.hangup', { callId }); }
   release(principalId: string, callId: string): Promise<PhoneOperation> { return this.invoke(principalId, callId, 'call.release', { callId }, 30000); }
   cancelUnprepared(principalId: string, callId: string): void {
     this.call(principalId, callId, 'cleanup'); this.journal.discardUnpreparedCall(callId);
   }
   private invoke(principalId: string, callId: string, method: PhoneMethod, params: Record<string, unknown>, timeoutMs = 15000): Promise<PhoneOperation> {
-    const cleanup = method === 'call.hangup' || method === 'call.release' || method === 'call.desktop.stopVoice';
+    const cleanup = method === 'call.hangup' || method === 'call.release' || method === 'call.desktop.stopVoice' || method === 'call.realtime.stop';
     const call = this.call(principalId, callId, cleanup ? 'cleanup' : 'connect');
     const requestHash = digest(canonical({ method, params }, phoneFrameBytes));
-    const generation = ['call.desktop.pauseVoice', 'call.desktop.resumeVoice'].includes(method) ? Number(params['generation']) : 0;
+    const generation = ['call.desktop.pauseVoice', 'call.desktop.resumeVoice'].includes(method) || method.startsWith('call.realtime.') ? Number(params['generation']) : 0;
     const prior = method === 'call.command.feedback'
       ? this.journal.feedbackCommand(callId, Number(params['commandSequence']))
       : this.journal.callCommand(callId, method, generation);

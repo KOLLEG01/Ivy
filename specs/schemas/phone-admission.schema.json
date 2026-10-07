@@ -223,7 +223,7 @@
         "voicePrompt": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 30000
         }
       },
       "allOf": [

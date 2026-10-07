@@ -65,7 +65,11 @@
             "call.promptVoice",
             "call.forwardVoice",
             "call.selectVoice",
-            "call.restartVoice"
+            "call.restartVoice",
+            "call.realtime.prepare",
+            "call.realtime.answer",
+            "call.realtime.stop",
+            "call.stopVoice"
           ]
         },
         "archivePlan": {
@@ -91,7 +95,7 @@
         "prompt": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 32000
         },
         "model": {
           "type": "string",
@@ -99,7 +103,16 @@
           "maxLength": 128
         },
         "reasoningEffort": {
-          "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+          "enum": [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
         }
       },
       "allOf": [
@@ -125,34 +138,142 @@
           }
         },
         {
-          "if": { "properties": { "method": { "enum": ["call.bindVoice", "call.promptVoice", "call.forwardVoice", "call.selectVoice"] } } },
-          "then": { "required": ["threadId"] },
-          "else": { "not": { "required": ["threadId"] } }
+          "if": {
+            "properties": {
+              "method": {
+                "enum": [
+                  "call.bindVoice",
+                  "call.promptVoice",
+                  "call.forwardVoice",
+                  "call.selectVoice",
+                  "call.stopVoice"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "threadId"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "threadId"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "method": { "enum": ["call.promptVoice", "call.forwardVoice", "call.selectVoice"] } } },
-          "then": { "required": ["prompt"] },
-          "else": { "not": { "required": ["prompt"] } }
+          "if": {
+            "properties": {
+              "method": {
+                "enum": [
+                  "call.promptVoice",
+                  "call.forwardVoice",
+                  "call.selectVoice"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "prompt"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "prompt"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "method": { "const": "call.createVoice" } } },
-          "then": { "required": ["model", "reasoningEffort"] }
+          "if": {
+            "properties": {
+              "method": {
+                "const": "call.createVoice"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "model",
+              "reasoningEffort"
+            ]
+          }
         },
         {
-          "if": { "properties": { "method": { "const": "call.command.feedback" } } },
-          "then": { "required": ["commandSequence"] }
+          "if": {
+            "properties": {
+              "method": {
+                "const": "call.command.feedback"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "commandSequence"
+            ]
+          }
         },
         {
-          "if": { "properties": { "method": { "not": { "enum": ["call.selectVoice", "call.command.feedback"] } } } },
-          "then": { "not": { "required": ["commandSequence"] } }
+          "if": {
+            "properties": {
+              "method": {
+                "not": {
+                  "enum": [
+                    "call.selectVoice",
+                    "call.command.feedback"
+                  ]
+                }
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "commandSequence"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "method": { "const": "call.selectVoice" } } },
-          "then": { "required": ["model", "reasoningEffort"] }
+          "if": {
+            "properties": {
+              "method": {
+                "const": "call.selectVoice"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "model",
+              "reasoningEffort"
+            ]
+          }
         },
         {
-          "if": { "properties": { "method": { "const": "call.restartVoice" } } },
-          "then": { "required": ["voiceGeneration", "model", "reasoningEffort"], "properties": { "voiceGeneration": { "minimum": 1 } } }
+          "if": {
+            "properties": {
+              "method": {
+                "const": "call.restartVoice"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "voiceGeneration",
+              "model",
+              "reasoningEffort"
+            ],
+            "properties": {
+              "voiceGeneration": {
+                "minimum": 1
+              }
+            }
+          }
         }
       ]
     },
@@ -185,16 +306,55 @@
       }
     },
     "PhoneVoiceBindingResult": {
-      "type": "object", "additionalProperties": false, "required": ["threadId", "bound"],
-      "properties": { "threadId": { "$ref": "#/$defs/Uuid" }, "bound": { "const": true } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "threadId",
+        "bound"
+      ],
+      "properties": {
+        "threadId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "bound": {
+          "const": true
+        }
+      }
     },
     "PhoneVoiceCreationResult": {
-      "type": "object", "additionalProperties": false, "required": ["threadId", "created"],
-      "properties": { "threadId": { "$ref": "#/$defs/Uuid" }, "created": { "const": true } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "threadId",
+        "created"
+      ],
+      "properties": {
+        "threadId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "created": {
+          "const": true
+        }
+      }
     },
     "PhoneVoicePromptResult": {
-      "type": "object", "additionalProperties": false, "required": ["threadId", "state"],
-      "properties": { "threadId": { "$ref": "#/$defs/Uuid" }, "state": { "enum": ["sent", "outcome_unknown"] } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "threadId",
+        "state"
+      ],
+      "properties": {
+        "threadId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "state": {
+          "enum": [
+            "sent",
+            "outcome_unknown"
+          ]
+        }
+      }
     },
     "Operation": {
       "type": "object",

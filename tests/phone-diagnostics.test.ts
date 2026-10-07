@@ -1,17 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  PhoneDiagnostics,
-  phoneMicroReady,
-} from "../services/phone-bridge/src/runtime/diagnostics.js";
+import { PhoneDiagnostics } from "../services/phone-bridge/src/runtime/diagnostics.js";
 import { validateShared } from "../packages/contracts/src/validation.js";
-
-test("both attached and ready Micro states are healthy", () => {
-  assert.equal(phoneMicroReady("attached"), true);
-  assert.equal(phoneMicroReady("ready"), true);
-  assert.equal(phoneMicroReady("starting"), false);
-  assert.equal(phoneMicroReady("unavailable"), false);
-});
 
 test("registration warnings survive healthy polling and clear only on observed recovery or disabled registration", () => {
   const diagnostics = new PhoneDiagnostics("phone");
@@ -45,14 +35,17 @@ test("registration warnings survive healthy polling and clear only on observed r
 
 test("App Tools failure remains visible through healthy SIP polls until a successful probe", () => {
   const diagnostics = new PhoneDiagnostics("phone");
-  assert.equal(diagnostics.appToolsFailed("app_tools_unavailable"), true);
-  assert.equal(diagnostics.appToolsFailed("app_tools_unavailable"), false);
+  assert.equal(diagnostics.voiceFailed("phone_voice_unavailable"), true);
+  assert.equal(diagnostics.voiceFailed("phone_voice_unavailable"), false);
   diagnostics.pollSucceeded();
   diagnostics.callSucceeded("another-call");
   const warnings = diagnostics.snapshot([]);
-  assert.deepEqual(warnings.map(item => item.code), ["app_tools_unavailable"]);
+  assert.deepEqual(
+    warnings.map((item) => item.code),
+    ["phone_voice_unavailable"],
+  );
   validateShared("Diagnostic", warnings[0]);
-  assert.equal(diagnostics.appToolsSucceeded(), true);
+  assert.equal(diagnostics.voiceSucceeded(), true);
   assert.deepEqual(diagnostics.snapshot([]), []);
 });
 

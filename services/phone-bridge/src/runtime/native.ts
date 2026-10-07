@@ -17,7 +17,7 @@ import archive from '../../../../specs/schemas/phone-voice-archive.schema.json' 
 import appTools from '../../../../specs/schemas/codex-app-tools.schema.json' with { type: 'json' };
 
 export const phoneFrameBytes = 65536;
-export type PhoneMethod = 'call.desktop.pauseVoice' | 'call.desktop.resumeVoice' | 'audio.probe' | 'codec.test' | 'inventory' | 'registration.reconnect' | 'configure' | 'heartbeat' | 'status' | 'desktop.observe' | 'desktop.launch' | 'desktop.capture' | 'desktop.captureOwner' | 'desktop.process' | 'desktop.controls' | 'call.desktop.launch' | 'call.desktop.startVoice' | 'call.desktop.stopVoice' |
+export type PhoneMethod = 'call.realtime.prepare' | 'call.realtime.answer' | 'call.realtime.stop' | 'call.desktop.pauseVoice' | 'call.desktop.resumeVoice' | 'audio.probe' | 'codec.test' | 'inventory' | 'registration.reconnect' | 'configure' | 'heartbeat' | 'status' | 'desktop.observe' | 'desktop.launch' | 'desktop.capture' | 'desktop.captureOwner' | 'desktop.process' | 'desktop.controls' | 'call.desktop.launch' | 'call.desktop.startVoice' | 'call.desktop.stopVoice' |
   'call.screening.prepare' | 'call.screening.bridge' | 'call.screening.synthesize' | 'call.features' | 'call.windows.connect' | 'call.codec.upgrade' | 'call.prepare' | 'call.claim' | 'call.audio.prepare' | 'call.audio.rebind' | 'call.dial' | 'call.answer' | 'call.waiting.end' | 'call.command.feedback' | 'call.hangup' | 'call.release' | 'shutdown';
 export interface PhoneReply { version: 1; epoch: string; requestId: number; ok: boolean; result: unknown; error: string | null }
 export interface PhoneIntent { epoch: string; operationId: string; callId: string | null; method: PhoneMethod; requestHash: string; voiceGeneration?: number; commandSequence?: number }
@@ -189,7 +189,8 @@ export class PhoneNativeClient {
     const requestId = ++this.sequence, params = JSON.parse(canonical(args, phoneFrameBytes)) as Record<string, unknown>;
     const request = { version: 1, epoch: this.epoch, requestId, operationId, method, params };
     validatePhone('Request', request);
-    const shape = method === 'call.desktop.pauseVoice' || method === 'call.desktop.resumeVoice' ? 'CallDesktopVoiceTransition' :
+    const shape = method === 'call.realtime.prepare' ? 'PrepareRealtime' : method === 'call.realtime.answer' ? 'AnswerRealtime' : method === 'call.realtime.stop' ? 'StopRealtime' :
+      method === 'call.desktop.pauseVoice' || method === 'call.desktop.resumeVoice' ? 'CallDesktopVoiceTransition' :
       method === 'status' && params['callId'] ? 'CallIdentity' : method === 'call.screening.prepare' ? 'PrepareScreening' : method === 'call.features' ? 'ConfigureFeatures' :
       method === 'call.windows.connect' || method === 'call.screening.bridge' ? 'ConnectWindows' :
       method === 'configure' ? 'Configure' : method === 'call.dial' ? 'Dial' : method === 'call.answer' ? 'Answer' : method === 'call.command.feedback' ? 'CommandFeedback' : method === 'call.audio.prepare' ? 'PrepareAudio' : method === 'call.audio.rebind' ? 'RebindAudio' :
@@ -200,7 +201,7 @@ export class PhoneNativeClient {
     if (method.startsWith('call.')) requireThat(typeof params['callId'] === 'string' && identifiers.test(params['callId']), 'invalid_arguments', 'Phone commands require the exact call UUID.');
     const encoded = canonical(request, phoneFrameBytes), intent: PhoneIntent | null = operationId === null ? null :
       { epoch: this.epoch, operationId, callId: method.startsWith('call.') ? params['callId'] as string : null, method,
-        ...(['call.desktop.pauseVoice', 'call.desktop.resumeVoice'].includes(method) ? { voiceGeneration: Number(params['generation']) } : {}),
+        ...(['call.desktop.pauseVoice', 'call.desktop.resumeVoice'].includes(method) || method.startsWith('call.realtime.') ? { voiceGeneration: Number(params['generation']) } : {}),
         ...(method === 'call.command.feedback' ? { commandSequence: Number(params['commandSequence']) } : {}),
         requestHash: digest(canonical({ method, params }, phoneFrameBytes)) };
     if (intent) await this.hooks.beforeSend(intent);

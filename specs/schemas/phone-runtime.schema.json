@@ -573,7 +573,8 @@
             "system_excluding_runtime",
             "desktop_process",
             "microphone",
-            "virtual_speaker"
+            "virtual_speaker",
+            "webrtc"
           ]
         },
         "sampleRate": {
@@ -675,10 +676,23 @@
           ]
         },
         "model": {
-          "enum": [null, "luna", "sol", "astra"]
+          "enum": [
+            null,
+            "luna",
+            "sol",
+            "astra"
+          ]
         },
         "reasoningEffort": {
-          "enum": [null, "low", "medium", "high", "xhigh", "max", "ultra"]
+          "enum": [
+            null,
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
         },
         "commands": {
           "type": "array",
@@ -686,12 +700,42 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["command", "sequence", "model", "reasoningEffort"],
+            "required": [
+              "command",
+              "sequence",
+              "model",
+              "reasoningEffort"
+            ],
             "properties": {
-              "command": { "enum": ["new_voice", "select_voice"] },
-              "sequence": { "type": "integer", "minimum": 1 },
-              "model": { "enum": [null, "luna", "sol", "astra"] },
-              "reasoningEffort": { "enum": [null, "low", "medium", "high", "xhigh", "max", "ultra"] }
+              "command": {
+                "enum": [
+                  "new_voice",
+                  "select_voice"
+                ]
+              },
+              "sequence": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "model": {
+                "enum": [
+                  null,
+                  "luna",
+                  "sol",
+                  "astra"
+                ]
+              },
+              "reasoningEffort": {
+                "enum": [
+                  null,
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                  "ultra"
+                ]
+              }
             }
           }
         },

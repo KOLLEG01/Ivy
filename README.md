@@ -204,6 +204,6 @@ identities, times and hashes with current discovered values before live use.
 - [Deployment and configuration](specs/DEPLOYMENT.md)
 - [Services](specs/SERVICES.md), [TaskBoard](specs/TASK-BOARD.md) and [agent environments](specs/AGENT-INSTRUCTIONS.md)
 - [Secretary](specs/SECRETARY.md)
-- [Web UIs](specs/UI.md) and [Voice input](specs/PHONE-MICRO.md)
+- [Web UIs](specs/UI.md) and [Voice input](specs/PHONE-VOICE.md)
 
 Ivy is available under the [MIT license](LICENSE).

@@ -36,6 +36,8 @@ public sealed class CallAudioPort : ICallAudioPort {
     private DesktopIdentity preparedDesktop;
     private AudioSettings preparedSettings;
     private bool authorityBound;
+    private int realtimeGeneration = -1;
+    private Exception realtimeCleanupError;
     public string CallId { get; }
     public CallAudioPort(string callId, AudioPermit permit, RouteFactory factory = null) {
         if (!Guid.TryParseExact(callId, "D", out _)) throw new ArgumentException("Original audio call UUID required.");
@@ -72,6 +74,58 @@ public sealed class CallAudioPort : ICallAudioPort {
     }
     public bool IsOpen { get { lock (sync) return !Failed && Permitted() && route != null && route.IsOpen; } }
     public long Generation { get { lock (sync) return route?.Generation ?? 0; } }
+    internal WebRtcAudioRoute Realtime { get { lock (sync) return route as WebRtcAudioRoute; } }
+    public async Task<string> PrepareRealtimeAsync(int generation, int queueMs = 80) {
+        Task work;
+        lock (sync) {
+            if (revoked != 0 || closed || Failed || preparation != null || route != null || generation != realtimeGeneration + 1 || generation > 128)
+                throw new NativeRpcException("runtime_not_ready");
+            realtimeGeneration = generation;
+            work = preparation = PrepareRealtimeCoreAsync(queueMs);
+        }
+        await work;
+        lock (sync) return Realtime?.Offer ?? throw new NativeRpcException("runtime_not_ready");
+    }
+    private async Task PrepareRealtimeCoreAsync(int queueMs) {
+        await Task.Yield();
+        var opened = new WebRtcAudioRoute(Permitted, queueMs);
+        try {
+            await opened.PrepareAsync(stop.Token);
+            lock (sync) {
+                if (revoked != 0 || closed) throw new OperationCanceledException(stop.Token);
+                route = opened; opened = null;
+            }
+        } catch (Exception error) {
+            if (opened != null) {
+                await opened.DisposeAsync(); opened = null;
+                throw new AudioPreparationReleasedException(error);
+            }
+            throw;
+        } finally { if (opened != null) await opened.DisposeAsync(); }
+    }
+    public async Task AcceptRealtimeAsync(int generation, string sdp) {
+        WebRtcAudioRoute selected;
+        lock (sync) {
+            if (generation != realtimeGeneration) throw new NativeRpcException("runtime_not_ready");
+            selected = Realtime ?? throw new NativeRpcException("runtime_not_ready");
+            // Authority comes from the connected original SIP call checked by the command owner.
+            GrantAuthority();
+        }
+        await selected.AcceptAsync(sdp, stop.Token);
+        lock (sync) if (revoked != 0 || closed || !IsOpen) throw new NativeRpcException("runtime_not_ready");
+    }
+    public async Task StopRealtimeAsync(int generation) {
+        Task preparing; WebRtcAudioRoute selected;
+        lock (sync) {
+            if (generation != realtimeGeneration) throw new NativeRpcException("runtime_not_ready");
+            ClearAuthority(); preparing = preparation;
+        }
+        if (preparing != null) try { await preparing; } catch { }
+        lock (sync) { selected = Realtime; if (selected != null) route = null; }
+        if (selected != null) try { await selected.DisposeAsync(); }
+        catch (Exception error) { lock (sync) { realtimeCleanupError = error; failed = true; } throw; }
+        lock (sync) { if (!closed && revoked == 0) preparation = null; }
+    }
     public Task PrepareAsync(AudioSettings settings, DesktopIdentity desktop, CancellationToken cancellationToken = default) {
         ArgumentNullException.ThrowIfNull(settings); settings.Validate();
         if (desktop == null && settings.SourceMode == "desktop_process") throw new ArgumentException("Desktop process capture requires its owner.");
@@ -221,6 +275,7 @@ public sealed class CallAudioPort : ICallAudioPort {
             await cancellation;
             if (revocationError != null) throw revocationError;
             if (rebindCleanupError != null) throw rebindCleanupError;
+            if (realtimeCleanupError != null) throw realtimeCleanupError;
             if (failure != null) throw failure;
             lock (sync) closed = true;
         } catch { lock (sync) failed = true; throw; }

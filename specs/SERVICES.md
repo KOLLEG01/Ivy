@@ -61,9 +61,9 @@ the original transport result or stays unknown. Transport retention and recovery
 `de` for ChatBridge-authored WhatsApp copy; omission uses English. It is a presentation setting,
 not part of the workspace `Definition` or the separate transcription-language setting.
 
-[PhoneBridge](PHONE-MICRO.md) owns SIP, audio and its native runtime. Call admission, screening,
+[PhoneBridge](PHONE-VOICE.md) owns SIP, audio and its native runtime. Call admission, screening,
 routing and shutdown must use the exact principal/peer/call identity. Voice task operations use
-the Desktop App Tools boundary; they do not route through AgentManager. Actual device/media
+the configured Codex CLI and native WebRTC boundary. Actual device/media
 readiness is required before reporting an active call. See [call checks](../tests/phone-calls.test.ts).
 
 The [automation example](../docs/examples/services/automation-example/src) demonstrates durable

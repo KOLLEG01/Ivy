@@ -19,7 +19,7 @@ import { ReceiptArchive } from '../../../../packages/sdk/src/receipt-archive.js'
 export type PhoneJournalIntent = PhoneIntent |
   (Omit<PhoneIntent, 'method'> & { method: 'call.archiveVoice'; archivePlan: PhoneVoiceArchivePlan }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.createVoice'; model: string; reasoningEffort: string }) |
-  (Omit<PhoneIntent, 'method'> & { method: 'call.bindVoice'; threadId: string }) |
+  (Omit<PhoneIntent, 'method'> & { method: 'call.bindVoice' | 'call.stopVoice'; threadId: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.promptVoice' | 'call.forwardVoice'; threadId: string; prompt: string; model?: string; reasoningEffort?: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.selectVoice'; threadId: string; prompt: string; model: string; reasoningEffort: string; commandSequence?: number }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.restartVoice'; voiceGeneration: number; model: string; reasoningEffort: string });
@@ -43,13 +43,14 @@ export interface PhoneCallTarget {
   callId: string; desktop: Record<string, unknown>; audio: Record<string, unknown>; voiceInput: Record<string, unknown>;
   voiceArchive: PhoneVoiceArchiveSettings | null;
 }
+export interface PhoneCodexTaskCache { fingerprint: string; threadId: string | null; creationOperationId: string | null }
 const validateContract = phoneValidator({ ...appToolsContract.$defs, ...archiveContract.$defs, ...contract.$defs });
 function validate(name: string, value: unknown): void {
   validateContract(name, value, phoneOutcomeReservation);
 }
 function intentShape(intent: PhoneJournalIntent): void {
   validate('Intent', intent);
-  requireThat(intent.voiceGeneration === undefined || ['call.desktop.pauseVoice', 'call.desktop.resumeVoice', 'call.archiveVoice', 'call.createVoice', 'call.bindVoice', 'call.promptVoice', 'call.forwardVoice', 'call.restartVoice'].includes(intent.method),
+  requireThat(intent.voiceGeneration === undefined || ['call.stopVoice', 'call.realtime.prepare', 'call.realtime.answer', 'call.realtime.stop', 'call.desktop.pauseVoice', 'call.desktop.resumeVoice', 'call.archiveVoice', 'call.createVoice', 'call.bindVoice', 'call.promptVoice', 'call.forwardVoice', 'call.restartVoice'].includes(intent.method),
     'invalid_arguments', 'Only Voice generation operations may carry a generation.');
   requireThat(intent.method.startsWith('call.') === (intent.callId !== null), 'invalid_arguments', 'Phone call commands require their original call identity.');
   if (intent.method === 'call.archiveVoice') requireThat(intent.requestHash === digest(canonical(intent.archivePlan, phoneArchivePlanBytes)),
@@ -135,6 +136,26 @@ export class PhoneJournal {
   }
   private meta(key: string): string | null { const row = this.statement('SELECT value FROM meta WHERE key=?').get(key); return row ? String(row['value']) : null; }
   private setMeta(key: string, value: string): void { this.statement('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value); }
+  codexTaskCache(principalId: string, fingerprint: string): PhoneCodexTaskCache | null {
+    validateShared('Identifier', principalId);
+    const value = this.meta(`codexVoice:${principalId}:${fingerprint}`);
+    if (!value) return null;
+    const cache = JSON.parse(value) as PhoneCodexTaskCache;
+    requireThat(cache.fingerprint === fingerprint && (cache.threadId === null || typeof cache.threadId === 'string') &&
+      (cache.creationOperationId === null || typeof cache.creationOperationId === 'string'),
+    'phone_storage_invalid', 'Cached Codex Voice task has invalid ownership.');
+    if (cache.threadId) validate('Uuid', cache.threadId);
+    if (cache.creationOperationId) validate('Uuid', cache.creationOperationId);
+    return cache;
+  }
+  retainCodexTask(principalId: string, cache: PhoneCodexTaskCache): void {
+    validateShared('Identifier', principalId);
+    if (cache.threadId) validate('Uuid', cache.threadId);
+    if (cache.creationOperationId) validate('Uuid', cache.creationOperationId);
+    requireThat(/^sha256:[0-9a-f]{64}$/.test(cache.fingerprint) && !!cache.threadId !== !!cache.creationOperationId,
+      'invalid_arguments', 'Cached Voice task must identify either a created task or its original pending creation.');
+    this.setMeta(`codexVoice:${principalId}:${cache.fingerprint}`, canonical(cache));
+  }
   get epoch(): string | null { return this.meta('epoch') || null; }
   get epochOperations(): number { return Number(this.meta('epochOperations') ?? 0); }
   status(): { operations: number; calls: number; reservedBytes: number; epochs: number } {
@@ -385,7 +406,6 @@ export class PhoneJournal {
       requireThat(admission.epoch === this.epoch, 'phone_epoch_mismatch', 'Call admission requires the current native epoch.');
       const active = this.currentCalls();
       requireThat(active.length < this.maxConcurrentCalls, 'phone_call_busy', 'Configured call concurrency is occupied.');
-      requireThat(admission.route === 'windows' || !active.some(call => call.route !== 'windows'), 'phone_call_busy', 'One Desktop Voice owner may be active at a time.');
       requireThat(!admission.callId || !this.getCall(admission.callId), 'phone_call_conflict', 'An incoming call already has its original admission.');
       const usage = this.status();
       requireThat(usage.calls < this.limits.maxOperations && usage.operations + active.length * 4 + 16 <= this.limits.maxOperations &&
@@ -468,7 +488,7 @@ export class PhoneJournal {
       requireThat(intent.epoch === this.epoch, 'phone_epoch_mismatch', 'Only the active Phone process can admit a command.');
       if (intent.callId !== null) {
         const admitted = this.getCall(intent.callId);
-        if (admitted && !['call.hangup', 'call.release', 'call.desktop.stopVoice'].includes(intent.method)) {
+        if (admitted && !['call.hangup', 'call.release', 'call.stopVoice', 'call.realtime.stop', 'call.desktop.stopVoice'].includes(intent.method)) {
           requireThat(this.currentCall(admitted.callId) && admitted.epoch === intent.epoch,
             'phone_call_conflict', 'Only the original active admission can issue another positive call action.');
           requireThat(admitted.direction === 'outgoing' ? intent.method !== 'call.answer' : !['call.prepare', 'call.dial'].includes(intent.method),
@@ -476,7 +496,7 @@ export class PhoneJournal {
         }
         const previous = this.statement('SELECT epoch FROM commands WHERE call_id=? LIMIT 1').get(intent.callId);
         requireThat((!admitted || admitted.epoch === intent.epoch) && (!previous || previous['epoch'] === intent.epoch), 'phone_call_conflict', 'A Phone call identity cannot move to another process epoch.');
-        if (intent.method.startsWith('call.screening.') || ['call.features', 'call.windows.connect', 'call.codec.upgrade', 'call.waiting.end', 'call.archiveVoice', 'call.createVoice', 'call.bindVoice', 'call.promptVoice'].includes(intent.method) || intent.method.startsWith('call.desktop.') || intent.method === 'call.prepare' || intent.method === 'call.claim' || intent.method === 'call.audio.prepare' || intent.method === 'call.audio.rebind' || intent.method === 'call.dial' || intent.method === 'call.answer') {
+        if (intent.method.startsWith('call.realtime.') || intent.method.startsWith('call.screening.') || ['call.stopVoice', 'call.features', 'call.windows.connect', 'call.codec.upgrade', 'call.waiting.end', 'call.archiveVoice', 'call.createVoice', 'call.bindVoice', 'call.promptVoice'].includes(intent.method) || intent.method.startsWith('call.desktop.') || intent.method === 'call.prepare' || intent.method === 'call.claim' || intent.method === 'call.audio.prepare' || intent.method === 'call.audio.rebind' || intent.method === 'call.dial' || intent.method === 'call.answer') {
           const methods = intent.method === 'call.dial' || intent.method === 'call.answer' ? ['call.dial', 'call.answer'] : [intent.method, intent.method];
           requireThat(!this.statement("SELECT operation_id FROM commands WHERE call_id=? AND method IN (?,?) AND COALESCE(json_extract(value,'$.intent.voiceGeneration'),0)=? LIMIT 1").get(intent.callId, ...methods, intent.voiceGeneration ?? 0),
             'phone_call_conflict', 'The original call already has its prepare or connect attempt; a new operation cannot repeat it.');
@@ -492,7 +512,7 @@ export class PhoneJournal {
             'phone_call_conflict', 'This original keypad command already has feedback.');
       }
       const usage = this.status();
-      const cleanup = ['call.hangup', 'call.release', 'call.desktop.stopVoice', 'call.archiveVoice'].includes(intent.method);
+      const cleanup = ['call.hangup', 'call.release', 'call.stopVoice', 'call.realtime.stop', 'call.desktop.stopVoice', 'call.archiveVoice'].includes(intent.method);
       const reserve = Math.max(0, this.currentCalls().length * 4 - (cleanup ? 4 : 0));
       requireThat(usage.operations + reserve < this.limits.maxOperations && usage.reservedBytes + (reserve + 1) * phoneOutcomeReservation <= this.limits.maxBytes,
         'phone_journal_capacity', 'Phone cannot reserve another complete command outcome.');
@@ -530,6 +550,9 @@ export class PhoneJournal {
   finishVoiceCreation(intent: PhoneJournalIntent & { method: 'call.createVoice' }, threadId: string): PhoneOperation {
     const result = { threadId, created: true as const }; validate('PhoneVoiceCreationResult', result);
     return this.finishReceipt(intent, { ok: true, result, error: null });
+  }
+  finishVoiceStop(intent: PhoneJournalIntent & { method: 'call.stopVoice' }): PhoneOperation {
+    return this.finishReceipt(intent, { ok: true, result: { threadId: intent.threadId, stopped: true }, error: null });
   }
   finishVoicePrompt(intent: PhoneJournalIntent & { method: 'call.promptVoice' | 'call.forwardVoice' }, state: 'sent' | 'outcome_unknown'): PhoneOperation {
     const result = { threadId: intent.threadId, state }; validate('PhoneVoicePromptResult', result);

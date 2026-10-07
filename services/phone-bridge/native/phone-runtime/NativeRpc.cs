@@ -49,7 +49,7 @@ public sealed class NativeRpc {
         if (!properties.SetEquals(new[] { "version", "epoch", "requestId", "operationId", "method", "params" })) throw new JsonException("Exact envelope required.");
         var request = document.RootElement.Deserialize<NativeRequest>(Json);
         if (request == null || request.Version != 1 || !Guid.TryParseExact(request.Epoch, "D", out _) || request.RequestId is < 1 or > 9007199254740991 ||
-            request.Params.ValueKind != JsonValueKind.Object || request.Method is not ("audio.probe" or "codec.test" or "inventory" or "registration.reconnect" or "configure" or "heartbeat" or "status" or "desktop.observe" or "desktop.launch" or "desktop.capture" or "desktop.captureOwner" or "desktop.process" or "desktop.controls" or "call.desktop.launch" or "call.desktop.startVoice" or "call.desktop.pauseVoice" or "call.desktop.resumeVoice" or "call.desktop.stopVoice" or "call.screening.prepare" or "call.screening.bridge" or "call.features" or "call.windows.connect" or "call.codec.upgrade" or "call.prepare" or "call.audio.prepare" or "call.audio.rebind" or "call.dial" or "call.claim" or "call.answer" or "call.waiting.end" or "call.command.feedback" or "call.hangup" or "call.release" or "shutdown") ||
+            request.Params.ValueKind != JsonValueKind.Object || request.Method is not ("audio.probe" or "codec.test" or "inventory" or "registration.reconnect" or "configure" or "heartbeat" or "status" or "desktop.observe" or "desktop.launch" or "desktop.capture" or "desktop.captureOwner" or "desktop.process" or "desktop.controls" or "call.desktop.launch" or "call.desktop.startVoice" or "call.desktop.pauseVoice" or "call.desktop.resumeVoice" or "call.desktop.stopVoice" or "call.screening.prepare" or "call.screening.bridge" or "call.features" or "call.windows.connect" or "call.codec.upgrade" or "call.realtime.prepare" or "call.realtime.answer" or "call.realtime.stop" or "call.prepare" or "call.audio.prepare" or "call.audio.rebind" or "call.dial" or "call.claim" or "call.answer" or "call.waiting.end" or "call.command.feedback" or "call.hangup" or "call.release" or "shutdown") ||
             (ReadOnly(request.Method) ? request.OperationId != null : !Guid.TryParseExact(request.OperationId, "D", out _))) throw new JsonException("Invalid native envelope.");
         return request;
     }
@@ -67,7 +67,7 @@ public sealed class NativeRpc {
                     if (receipt.Hash != hash) return Error(request, "operation_conflict");
                     pending = receipt.Result;
                 } else {
-                    bool cleanup = request.Method is "call.hangup" or "call.release" or "call.desktop.stopVoice" or "shutdown";
+                    bool cleanup = request.Method is "call.hangup" or "call.release" or "call.desktop.stopVoice" or "call.realtime.stop" or "shutdown";
                     int required = Math.Clamp(cleanupSlots?.Invoke() ?? 4, 0, 128);
                     int reserve = Math.Min(Math.Max(0, required - (cleanup ? 4 : 0)), Math.Max(0, capacity - 1));
                     if (receipts.Count >= capacity - reserve) return Error(request, "capacity_exceeded");

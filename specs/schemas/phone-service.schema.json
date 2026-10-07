@@ -4,12 +4,39 @@
     "PhoneVoiceSelection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["model", "reasoningEffort"],
+      "required": [
+        "model",
+        "reasoningEffort"
+      ],
       "properties": {
-        "model": { "enum": ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"] },
-        "reasoningEffort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultra"] }
+        "model": {
+          "enum": [
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6-astra"
+          ]
+        },
+        "reasoningEffort": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        }
       },
-      "not": { "properties": { "model": { "const": "gpt-6-luna" }, "reasoningEffort": { "const": "ultra" } } }
+      "not": {
+        "properties": {
+          "model": {
+            "const": "gpt-6-luna"
+          },
+          "reasoningEffort": {
+            "const": "ultra"
+          }
+        }
+      }
     },
     "PhoneServiceSettings": {
       "type": "object",
@@ -21,13 +48,10 @@
         "registration",
         "credentialsPath",
         "policy",
-        "application",
-        "audio",
-        "voiceInput",
-        "voiceArchive",
         "ringSeconds",
         "pollMs",
-        "incomingPrincipalId"
+        "incomingPrincipalId",
+        "codexVoice"
       ],
       "properties": {
         "native": {
@@ -74,25 +98,6 @@
         "policy": {
           "$ref": "#/$defs/PhonePolicy"
         },
-        "application": {
-          "$ref": "#/$defs/DesktopApplication"
-        },
-        "audio": {
-          "$ref": "#/$defs/AudioSettings"
-        },
-        "voiceInput": {
-          "$ref": "#/$defs/VoiceInputSettings"
-        },
-        "voiceArchive": {
-          "anyOf": [
-            {
-              "type": "null"
-            },
-            {
-              "$ref": "#/$defs/PhoneVoiceArchiveSettings"
-            }
-          ]
-        },
         "ringSeconds": {
           "type": "integer",
           "minimum": 1,
@@ -122,7 +127,7 @@
         "incomingInitialPrompt": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4000,
+          "maxLength": 32000,
           "pattern": "\\S",
           "default": "Greet the user with \"Hi\""
         },
@@ -179,15 +184,25 @@
             }
           }
         },
-        "windowsAudio": {
-          "$ref": "#/$defs/AudioSettings"
-        },
         "outgoingRoute": {
           "enum": [
             "voice",
             "windows"
           ],
           "default": "windows"
+        },
+        "codexVoice": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhoneCodexVoiceSettings"
+            }
+          ]
+        },
+        "audio": {
+          "$ref": "#/$defs/AudioSettings"
         }
       }
     },
@@ -239,7 +254,11 @@
         "call.bindVoice",
         "call.createVoice",
         "call.promptVoice",
-        "call.forwardVoice"
+        "call.forwardVoice",
+        "call.realtime.prepare",
+        "call.realtime.answer",
+        "call.realtime.stop",
+        "call.stopVoice"
       ]
     },
     "PhoneStatusQuery": {
@@ -293,7 +312,14 @@
           ]
         },
         "voiceSelection": {
-          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/PhoneVoiceSelection" }]
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PhoneVoiceSelection"
+            }
+          ]
         },
         "incoming": {
           "anyOf": [
@@ -396,7 +422,7 @@
         "voicePrompt": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 3900
+          "maxLength": 30000
         }
       },
       "oneOf": [
@@ -446,7 +472,7 @@
         "initialPrompt": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 3900,
+          "maxLength": 30000,
           "pattern": "\\S"
         }
       }
@@ -470,22 +496,62 @@
     "PhoneSelectVoice": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["callId", "operationId", "model", "reasoningEffort"],
+      "required": [
+        "callId",
+        "operationId",
+        "model",
+        "reasoningEffort"
+      ],
       "properties": {
-        "callId": { "$ref": "#/$defs/Uuid" },
-        "operationId": { "$ref": "#/$defs/Uuid" },
-        "model": { "enum": ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"] },
-        "reasoningEffort": { "enum": ["low", "medium", "high", "xhigh", "max", "ultra"] }
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "model": {
+          "enum": [
+            "gpt-6-luna",
+            "gpt-6-sol",
+            "gpt-6-astra"
+          ]
+        },
+        "reasoningEffort": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        }
       },
-      "not": { "properties": { "model": { "const": "gpt-6-luna" }, "reasoningEffort": { "const": "ultra" } } }
+      "not": {
+        "properties": {
+          "model": {
+            "const": "gpt-6-luna"
+          },
+          "reasoningEffort": {
+            "const": "ultra"
+          }
+        }
+      }
     },
     "PhoneRestartVoice": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["callId", "operationId"],
+      "required": [
+        "callId",
+        "operationId"
+      ],
       "properties": {
-        "callId": { "$ref": "#/$defs/Uuid" },
-        "operationId": { "$ref": "#/$defs/Uuid" }
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        }
       }
     },
     "PhoneCallQuery": {
@@ -540,7 +606,9 @@
         "method": {
           "$ref": "#/$defs/PhoneCallMethod"
         },
-        "operationId": { "$ref": "#/$defs/Uuid" },
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
         "generation": {
           "type": "integer",
           "minimum": 0,
@@ -548,8 +616,35 @@
         }
       },
       "oneOf": [
-        { "required": ["method"], "not": { "required": ["operationId"] } },
-        { "required": ["operationId"], "not": { "anyOf": [{ "required": ["method"] }, { "required": ["generation"] }] } }
+        {
+          "required": [
+            "method"
+          ],
+          "not": {
+            "required": [
+              "operationId"
+            ]
+          }
+        },
+        {
+          "required": [
+            "operationId"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "method"
+                ]
+              },
+              {
+                "required": [
+                  "generation"
+                ]
+              }
+            ]
+          }
+        }
       ]
     },
     "PhoneOperationResult": {
@@ -854,8 +949,8 @@
         },
         "routes": {
           "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
+          "minItems": 0,
+          "maxItems": 1,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -871,10 +966,7 @@
                 "type": "boolean"
               },
               "route": {
-                "enum": [
-                  "voice",
-                  "windows"
-                ]
+                "const": "windows"
               },
               "sourceMode": {
                 "enum": [
@@ -1021,6 +1113,242 @@
           "items": {
             "$ref": "#/$defs/PhoneCall"
           }
+        }
+      }
+    },
+    "PhoneCodexVoiceSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nativeExecutable",
+        "nativeExecutableHash",
+        "nativeVersion",
+        "cwd"
+      ],
+      "properties": {
+        "nativeExecutable": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "nativeExecutableHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "nativeVersion": {
+          "type": "string",
+          "pattern": "^0\\.\\d+\\.\\d+$"
+        },
+        "codexHome": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "nativeHome": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "projectId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "keepTaskLoaded": {
+          "type": "boolean",
+          "default": true
+        },
+        "queueMs": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 200,
+          "default": 80
+        },
+        "voice": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "realtimeModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "windowsShell": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "executable",
+            "executableHash"
+          ],
+          "properties": {
+            "executable": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32767
+            },
+            "executableHash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        },
+        "appServer": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "owned-stdio"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "external-proxy"
+                },
+                "socketPath": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32767
+                },
+                "expectedCodexHome": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32767
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "PhoneVoiceInputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inputs"
+      ],
+      "properties": {
+        "inputs": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "method",
+              "params",
+              "replySchema"
+            ],
+            "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "integer"
+                ]
+              },
+              "method": {
+                "type": "string"
+              },
+              "params": {},
+              "replySchema": {}
+            }
+          }
+        }
+      }
+    },
+    "PhoneVoiceInputAnswer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "id",
+        "reply"
+      ],
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "id": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "reply": {
+          "type": "object",
+          "oneOf": [
+            {
+              "required": [
+                "result"
+              ],
+              "properties": {
+                "result": {}
+              },
+              "additionalProperties": false
+            },
+            {
+              "required": [
+                "error"
+              ],
+              "properties": {
+                "error": {
+                  "type": "object",
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {}
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
+    },
+    "PhoneVoiceInputSubmitted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "const": "submitted"
         }
       }
     }

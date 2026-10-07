@@ -149,6 +149,7 @@ const nativeCatalogComponents = new Set([
   "agent-manager",
   "chat-bridge",
   "task-board",
+  "phone-bridge",
 ]);
 const bootstrapAssetComponents = new Set(["host-executor", "service-manager"]);
 

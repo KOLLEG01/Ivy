@@ -94,6 +94,17 @@ static partial class Program {
             Reject(settings.Validate, "invalid routing/latency rejected");
     }
     static async Task<int> Main(string[] args) {
+        if (args.SequenceEqual(new[] { "--sip-voice-peer" })) {
+            await SipVoicePeer(); return 0;
+        }
+        if (args.SequenceEqual(new[] { "--webrtc-voice-probe" })) {
+            await WebRtcVoiceProbe(); return 0;
+        }
+        if (args.SequenceEqual(new[] { "--webrtc-only" })) {
+            await WebRtcAudio();
+            Console.WriteLine("phone_webrtc_passed: native SDP/DTLS/SRTP, bidirectional Opus PCM, call authority and cleanup; no audio devices");
+            return 0;
+        }
         if (args.SequenceEqual(new[] { "--micro-usb-only" })) {
             MicroProtocolChecks(); MicroGestures(); await MicroUsbChecks(); await MicroAttachments();
             Console.WriteLine("phone_micro_usb_passed: actual loopback USB/IP import, descriptors, HID/RPC, cancelled reads, generation replacement and malformed transfer refusal; no driver or Desktop");
