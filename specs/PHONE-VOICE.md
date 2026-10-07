@@ -27,6 +27,22 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   prepare the next unused task in the background; keep completed call/task history.
   A recovered used task must confirm its previous Voice stop before replacement.
   This prevents earlier call instructions from entering a new backing model session.
+- `codexVoice.resumeIncomingConversation` optionally continues the last confirmed
+  stopped conversation when an admitted incoming caller has the same E.164/SIP
+  identity. Keep the exact native task and transfer its latest committed speech
+  segments (at most 126 items / 24 KB) into the new realtime session. Context is
+  captured during the call, without a summarizing turn or a startup workspace scan.
+  The configured incoming initial prompt still runs, including its greeting.
+  Restored startup history alone does not request a spoken reply reliably; send
+  the current incoming prompt once after media connects, retaining the original
+  startup intent and acknowledgement. An unknown greeting is never repeated.
+  Outgoing Ivy calls and `*0#` always use fresh tasks. A reset clears the continuation
+  pointer; an uncertain stop cannot publish a resumable context. Caller admission
+  and any access challenge remain required before voice startup.
+- `codexVoice.rememberReasoning` retains a confirmed DTMF/MCP reasoning selection
+  across calls and service restarts. It changes the next session's effort while
+  retaining the configured default model. Disabling it restores `voiceDefault`.
+  An effort unsupported by that default model falls back to its configured effort.
 - A confirmed missing task or dead native agent loop replaces only its idle cache.
   Earlier call/task identities remain retained. Other errors cannot create another task.
 - Reuse requires the configured home, directory and project and exclusive ownership
@@ -45,8 +61,10 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   Startup skips workspace/history scanning; the current call's full context is
   already supplied explicitly.
 - Each call and generation owns its bounded PCM/Opus queues, DTLS/SRTP transport
-  and cleanup. PCM playback uses a 60 ms startup threshold, capped by the configured
-  queue size, and rearms after starvation or speech pauses. Startup RTP sequence
+  and cleanup. `codexVoice.playbackPrebufferMs` controls the PCM startup threshold
+  in each direction (default min(60, `queueMs`)); an explicit value cannot exceed
+  the queue capacity. `queueMs` bounds the capacity, not constant added latency.
+  The reserve rearms after starvation or speech pauses. Startup RTP sequence
   probation excludes isolated transport probes
   before seeding the encrypted replay window. Revoked or suspended authority
   discards audio and codec backlog; it cannot replay into another call.

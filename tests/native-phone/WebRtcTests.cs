@@ -36,8 +36,14 @@ static partial class Program {
         Check(heard, "actual Voice returns audible decoded native audio");
     }
     static async Task WebRtcAudio() {
+        await WebRtcAudio(60, 80);
+        await WebRtcAudio(100, 160);
+        Reject(() => new WebRtcAudioRoute(() => true, 80, 100), "explicit reserve cannot exceed queue capacity");
+    }
+    static async Task WebRtcAudio(int prebufferMs, int queueMs) {
         bool permitted = true;
-        await using var route = new WebRtcAudioRoute(() => Volatile.Read(ref permitted), 80);
+        await using var route = new WebRtcAudioRoute(() => Volatile.Read(ref permitted), queueMs, prebufferMs);
+        Check(route.PlaybackPrebufferMs == prebufferMs && route.QueueMs == queueMs, "actual route keeps its configured playout reserve");
         using var remote = new RTCPeerConnection(null);
         using var audio = new AudioEncoder(includeOpus: true);
         AudioFormat format = audio.SupportedFormats.Single(value => value.FormatName.Equals("opus", StringComparison.OrdinalIgnoreCase));
@@ -86,6 +92,12 @@ static partial class Program {
         await Until(() => route.Status.CaptureQueuedSamples >= 1920, "two authenticated packets reach the playout queue");
         Check(route.ReadCaptured(firstFrame) == 0 && route.Status.CaptureQueuedSamples == 1920,
             "WebRTC retains enough reserve for a lost packet followed by sender jitter");
+        if (prebufferMs == 100) {
+            SendTone(); SendTone();
+            await Until(() => route.Status.CaptureQueuedSamples == 3840, "four authenticated packets reach the 100 ms playout queue");
+            Check(route.ReadCaptured(firstFrame) == 0 && route.Status.CaptureQueuedSamples == 3840,
+                "100 ms reserve holds four packets without consuming speech");
+        }
         var deadline = DateTime.UtcNow.AddSeconds(5);
         bool incoming = false;
         while (DateTime.UtcNow < deadline && (!incoming || !received.Task.IsCompletedSuccessfully)) {
@@ -97,8 +109,8 @@ static partial class Program {
         }
         Check(incoming && received.Task.IsCompletedSuccessfully, "actual DTLS/SRTP/Opus carries both PCM directions");
         route.Suspend(); route.Resume();
-        SendTone(); SendTone(); SendTone();
-        await Until(() => route.Status.CaptureQueuedSamples >= 2880, "loss fixture has a short initial playout reserve");
+        for (int frame = 0; frame < prebufferMs / 20; frame++) SendTone();
+        await Until(() => route.Status.CaptureQueuedSamples >= 48 * prebufferMs, "loss fixture has its configured initial playout reserve");
         var recovered = new float[960];
         Check(route.ReadCaptured(recovered) == 960, "loss fixture begins with a full frame");
         for (int frame = 0; frame < 60; frame++) {

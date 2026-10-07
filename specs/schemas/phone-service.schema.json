@@ -379,6 +379,25 @@
             },
             "voiceDefault": {
               "$ref": "#/$defs/PhoneVoiceSelection"
+            },
+            "voiceEffectiveDefault": {
+              "$ref": "#/$defs/PhoneVoiceSelection"
+            },
+            "voicePlaybackPrebufferMs": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 200
+            },
+            "voiceQueueMs": {
+              "type": ["integer", "null"],
+              "minimum": 20,
+              "maximum": 200
+            },
+            "rememberVoiceReasoning": {
+              "type": "boolean"
+            },
+            "resumeIncomingConversation": {
+              "type": "boolean"
             }
           }
         },
@@ -1171,6 +1190,20 @@
           "minimum": 20,
           "maximum": 200,
           "default": 80
+        },
+        "playbackPrebufferMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200,
+          "description": "Voice playout reserve; defaults to min(60, queueMs) and cannot exceed queueMs."
+        },
+        "rememberReasoning": {
+          "type": "boolean",
+          "default": false
+        },
+        "resumeIncomingConversation": {
+          "type": "boolean",
+          "default": false
         },
         "voice": {
           "type": "string",

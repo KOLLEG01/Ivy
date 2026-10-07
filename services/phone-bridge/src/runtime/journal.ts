@@ -15,6 +15,7 @@ import archiveContract from '../../../../specs/schemas/phone-voice-archive.schem
 import appToolsContract from '../../../../specs/schemas/codex-app-tools.schema.json' with { type: 'json' };
 import type { PhoneVoiceArchivePlan, PhoneVoiceArchiveResult, PhoneVoiceArchiveSettings } from './desktop-voice-archive.js';
 import { ReceiptArchive } from '../../../../packages/sdk/src/receipt-archive.js';
+import type { PhoneVoiceSelection } from './voice-selection.js';
 
 export type PhoneJournalIntent = PhoneIntent |
   (Omit<PhoneIntent, 'method'> & { method: 'call.archiveVoice'; archivePlan: PhoneVoiceArchivePlan }) |
@@ -46,6 +47,11 @@ export interface PhoneCallTarget {
 export interface PhoneCodexTaskCache {
   fingerprint: string; threadId: string | null; creationOperationId: string | null;
   preparationOperationId?: string; preparationTurnId?: string;
+}
+export interface PhoneVoiceText { role: 'user' | 'assistant'; text: string }
+export interface PhoneConversation {
+  fingerprint: string; partyKey: string; threadId: string; callId: string; generation: number;
+  items: PhoneVoiceText[];
 }
 const validateContract = phoneValidator({ ...appToolsContract.$defs, ...archiveContract.$defs, ...contract.$defs });
 function validate(name: string, value: unknown): void {
@@ -139,6 +145,45 @@ export class PhoneJournal {
   }
   private meta(key: string): string | null { const row = this.statement('SELECT value FROM meta WHERE key=?').get(key); return row ? String(row['value']) : null; }
   private setMeta(key: string, value: string): void { this.statement('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value); }
+  rememberedVoiceReasoning(): PhoneVoiceSelection['reasoningEffort'] | null {
+    const value = this.meta('voiceReasoning');
+    requireThat(value === null || ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value),
+      'phone_storage_invalid', 'Remembered Voice reasoning is invalid.');
+    return value as PhoneVoiceSelection['reasoningEffort'] | null;
+  }
+  rememberVoiceReasoning(value: PhoneVoiceSelection['reasoningEffort']): void {
+    requireThat(['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value),
+      'invalid_arguments', 'Unsupported Voice reasoning.');
+    this.setMeta('voiceReasoning', value);
+  }
+  voiceConversation(fingerprint: string): PhoneConversation | null {
+    const value = this.meta(`voiceConversation:${fingerprint}`);
+    if (!value) return null;
+    const context = JSON.parse(value) as PhoneConversation;
+    this.validateConversation(context);
+    requireThat(context.fingerprint === fingerprint, 'phone_storage_invalid', 'Voice context belongs to another runtime.');
+    return context;
+  }
+  retainVoiceConversation(context: PhoneConversation): void {
+    this.validateConversation(context);
+    const stop = this.callCommand(context.callId, 'call.stopVoice', context.generation);
+    requireThat(stop?.phase === 'result' && stop.receipt?.ok &&
+      stop.intent.method === 'call.stopVoice' && stop.intent.threadId === context.threadId,
+      'phone_voice_stop_unknown', 'Only a positively stopped Voice session may be continued.');
+    this.setMeta(`voiceConversation:${context.fingerprint}`, canonical(context, 128 * 1024));
+  }
+  forgetVoiceConversation(fingerprint: string): void {
+    this.statement('DELETE FROM meta WHERE key=?').run(`voiceConversation:${fingerprint}`);
+  }
+  private validateConversation(context: PhoneConversation): void {
+    validate('Uuid', context.threadId); validate('Uuid', context.callId);
+    requireThat(/^sha256:[0-9a-f]{64}$/.test(context.fingerprint) && /^sha256:[0-9a-f]{64}$/.test(context.partyKey) &&
+      Number.isInteger(context.generation) && context.generation >= 0 && context.generation <= 128 &&
+      Array.isArray(context.items) && context.items.length <= 126 && context.items.every(item =>
+        item && ['user', 'assistant'].includes(item.role) && typeof item.text === 'string') &&
+      context.items.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0) <= 24000,
+      'phone_storage_invalid', 'Voice continuation exceeds its bounded transcript context.');
+  }
   codexTaskCache(principalId: string, fingerprint: string): PhoneCodexTaskCache | null {
     validateShared('Identifier', principalId);
     const value = this.meta(`codexVoice:${principalId}:${fingerprint}`);

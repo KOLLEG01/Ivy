@@ -799,6 +799,11 @@
           "type": "integer",
           "minimum": 20,
           "maximum": 200
+        },
+        "playbackPrebufferMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200
         }
       }
     },

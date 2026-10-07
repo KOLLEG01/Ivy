@@ -10,6 +10,8 @@ namespace Ivy.PhoneBridge;
 // Both directions remain bounded and are discarded whenever call authority closes.
 public sealed class WebRtcAudioRoute : ICallAudioRoute {
     internal const int PlayoutPrebufferMs = 60;
+    public int QueueMs { get; }
+    public int PlaybackPrebufferMs { get; }
     private readonly object sync = new();
     private readonly Func<bool> permitted;
     private readonly RTCPeerConnection peer = new AudioPeer();
@@ -51,6 +53,7 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
     public MediaStatus Status { get { lock (sync) return new(closed ? "closed" : failed ? "failed" : IsOpen ? "open" : "suspended", "webrtc",
         AudioSettings.SampleRate, 1, received.Dropped, outgoing.Dropped, received.Count, outgoing.Count, null); } }
     public object Observation { get { lock (sync) return new { state = peer.connectionState.ToString(), sentPackets, receivedPackets,
+        queueMs = QueueMs, playbackPrebufferMs = PlaybackPrebufferMs,
         receive = packets.Status, concealedSamples = decoder?.ConcealedSamples ?? 0,
         captureUnderruns = received.Underruns, renderUnderruns = outgoing.Underruns, audio = Status }; } }
 
@@ -60,14 +63,18 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
         public int ReadCaptured(Span<float> output) => owner.outgoing.Read(output);
         public void WriteReceived(ReadOnlySpan<float> input) => owner.received.Write(input);
     }
-    public WebRtcAudioRoute(Func<bool> permitted, int queueMs = 80) {
+    public WebRtcAudioRoute(Func<bool> permitted, int queueMs = 80, int? playbackPrebufferMs = null) {
         ArgumentNullException.ThrowIfNull(permitted);
         if (queueMs is < 20 or > 200) throw new ArgumentException("Bounded realtime audio queues required.");
+        QueueMs = queueMs;
+        PlaybackPrebufferMs = playbackPrebufferMs ?? Math.Min(PlayoutPrebufferMs, queueMs);
+        if (PlaybackPrebufferMs < 0 || PlaybackPrebufferMs > queueMs)
+            throw new ArgumentException("Realtime prebuffer must fit its audio queue.");
         this.permitted = permitted;
         int capacity = AudioSettings.SampleRate * queueMs / 1000;
         // Keep a short playout reserve for packet/sender jitter. Re-arm after a
         // speech pause or starvation so each new utterance has the same reserve.
-        int prebuffer = AudioSettings.SampleRate * Math.Min(PlayoutPrebufferMs, queueMs) / 1000;
+        int prebuffer = AudioSettings.SampleRate * PlaybackPrebufferMs / 1000;
         received = new(capacity, prebuffer, rebufferAfterUnderrun: true, smoothDiscontinuities: true);
         outgoing = new(capacity, prebuffer, rebufferAfterUnderrun: true, smoothDiscontinuities: true);
         using var audio = new AudioEncoder(includeOpus: true);

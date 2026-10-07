@@ -46,8 +46,8 @@ static partial class Program {
             foreach (float value in input) { queue.Enqueue(value); Samples.Add(value); }
         }
     }
-    sealed class PlayoutPort : IPcmAudioPort {
-        public readonly AudioQueue Queue = new(3840, 48 * WebRtcAudioRoute.PlayoutPrebufferMs,
+    sealed class PlayoutPort(int prebufferMs = WebRtcAudioRoute.PlayoutPrebufferMs, int queueMs = 80) : IPcmAudioPort {
+        public readonly AudioQueue Queue = new(48 * queueMs, 48 * prebufferMs,
             rebufferAfterUnderrun: true, smoothDiscontinuities: true);
         public bool IsOpen => true;
         public long Generation => 1;
@@ -55,17 +55,22 @@ static partial class Program {
         public void WriteReceived(ReadOnlySpan<float> input) => Queue.Write(input);
     }
     static void OpusJitterPlayout() {
+        OpusJitterPlayout(60, 80, false);
+        OpusJitterPlayout(100, 160, true);
+    }
+    static void OpusJitterPlayout(int prebufferMs, int queueMs, bool burstJitter) {
         var format = new CodecSettings(["OPUS"]).Formats().Single();
         const int frames = 140;
         var source = new ContinuityPort(true);
         using var tx = new MediaCodec(format, source);
         var arrivals = Enumerable.Range(0, frames).Select(frame => new {
-            Frame = frame, Due = frame * 20 + (frame % 17 == 7 || frame % 9 == 3 ? 12 : 0),
+            Frame = frame, Due = frame * 20 + (burstJitter && frame % 20 is >= 8 and <= 11
+                ? (11 - frame % 20) * 20 + 12 : frame % 17 == 7 || frame % 9 == 3 ? 12 : 0),
             Packet = new RtpAudioPacket((ushort)frame, (uint)(frame * 960), 1, format.FormatID, tx.Encode(), 1)
         }).Where(value => value.Frame % 17 != 6).OrderBy(value => value.Due).ToArray();
         foreach (int phase in new[] { 0, 7, 19 }) {
             var clock = new Clock(); var packets = new RtpReceiveQueue(20, clock);
-            var sink = new PlayoutPort(); using var rx = new MediaCodec(format, sink);
+            var sink = new PlayoutPort(prebufferMs, queueMs); using var rx = new MediaCodec(format, sink);
             void Drain(int playoutSamples = 0) {
                 while (packets.TryTake(out var packet, out _, playoutDeadline: sink.Queue.Count < playoutSamples)) {
                     try { rx.DecodeRtp(packet); } finally { Array.Clear(packet.Payload); }
@@ -83,7 +88,7 @@ static partial class Program {
                 Drain(output.Length);
                 int count = sink.ReadCaptured(output);
                 if (played == 0 && count == 0) continue;
-                Check(count == 960, $"loss plus 12 ms jitter cannot insert a playout gap: phase={phase}, time={time}, frame={played}, samples={count}");
+                Check(count == 960, $"loss plus jitter cannot insert a playout gap: prebuffer={prebufferMs}, phase={phase}, time={time}, frame={played}, samples={count}");
                 double energy = 0;
                 foreach (float value in output) {
                     Check(Math.Abs(value - previous) < .15f, "jitter recovery cannot introduce a PCM boundary click");
@@ -97,7 +102,7 @@ static partial class Program {
             Check(rx.ConcealedSamples == packets.Status.MissingPackets * 960 && packets.Status.MissingPackets == frames - arrivals.Length,
                 "deadline recovery reconstructs each lost frame once without extending the audio timeline");
         }
-        Console.WriteLine("phone_opus_jitter_playout_passed: isolated loss plus12ms jitter across independent audio clock phases");
+        Console.WriteLine($"phone_opus_jitter_playout_passed: prebuffer={prebufferMs}ms queue={queueMs}ms isolated loss jitter={(burstJitter ? 72 : 12)}ms across independent audio clock phases");
     }
     static void CodecContinuity() {
         var opus = new CodecSettings(["OPUS"]).Formats().Single();

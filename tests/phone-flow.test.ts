@@ -870,6 +870,35 @@ test("Voice selection retains the task and restart binds a new native generation
   );
 });
 
+test("Confirmed reasoning is remembered across calls and restart, while disabled memory keeps the default", async (t) => {
+  const f = fixture(t), configured = { ...settings, codexVoice: { ...settings.codexVoice!, rememberReasoning: true, queueMs: 160, playbackPrebufferMs: 100 } };
+  const flow = f.flow(configured), call = await flow.request("main", randomUUID(), "personal", "voice");
+  await until(() => !!f.journal.callCommand(call.callId, "call.realtime.answer")?.receipt);
+  await tick();
+  await flow.controlVoice("main", call.callId, randomUUID(), { action: "select",
+    selection: { model: "gpt-6-astra", reasoningEffort: "xhigh" } });
+  assert.equal(f.journal.rememberedVoiceReasoning(), "xhigh");
+  const prepare = f.requests.find(x => x.method === "call.realtime.prepare")!;
+  assert.equal(prepare.params["queueMs"], 160);
+  assert.equal(prepare.params["playbackPrebufferMs"], 100);
+  await flow.hangup("main", call.callId);
+  const restarted = f.flow(configured);
+  assert.deepEqual(restarted.voiceSelection(randomUUID()), { model: "gpt-6-sol", reasoningEffort: "xhigh" });
+  assert.deepEqual(f.flow(settings).voiceSelection(randomUUID()), { model: "gpt-6-sol", reasoningEffort: "high" });
+});
+
+test("An unconfirmed reasoning change cannot replace the remembered effort", async (t) => {
+  const f = fixture(t), flow = f.flow({ ...settings, codexVoice: { ...settings.codexVoice!, rememberReasoning: true } });
+  f.journal.rememberVoiceReasoning("medium");
+  const call = await flow.request("main", randomUUID(), "personal", "voice");
+  await until(() => !!f.journal.callCommand(call.callId, "call.realtime.answer")?.receipt);
+  await tick();
+  f.failSelection(true);
+  await assert.rejects(flow.controlVoice("main", call.callId, randomUUID(), { action: "select",
+    selection: { model: "gpt-6-sol", reasoningEffort: "max" } }));
+  assert.equal(f.journal.rememberedVoiceReasoning(), "medium");
+});
+
 test("A rejected initial Voice prompt closes the original SIP call and cleans its prepared native peer", async (t) => {
   const f = fixture(t),
     flow = f.flow();

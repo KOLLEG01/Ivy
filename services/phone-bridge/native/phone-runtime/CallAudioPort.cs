@@ -75,20 +75,20 @@ public sealed class CallAudioPort : ICallAudioPort {
     public bool IsOpen { get { lock (sync) return !Failed && Permitted() && route != null && route.IsOpen; } }
     public long Generation { get { lock (sync) return route?.Generation ?? 0; } }
     internal WebRtcAudioRoute Realtime { get { lock (sync) return route as WebRtcAudioRoute; } }
-    public async Task<string> PrepareRealtimeAsync(int generation, int queueMs = 80) {
+    public async Task<string> PrepareRealtimeAsync(int generation, int queueMs = 80, int? playbackPrebufferMs = null) {
         Task work;
         lock (sync) {
             if (revoked != 0 || closed || Failed || preparation != null || route != null || generation != realtimeGeneration + 1 || generation > 128)
                 throw new NativeRpcException("runtime_not_ready");
             realtimeGeneration = generation;
-            work = preparation = PrepareRealtimeCoreAsync(queueMs);
+            work = preparation = PrepareRealtimeCoreAsync(queueMs, playbackPrebufferMs);
         }
         await work;
         lock (sync) return Realtime?.Offer ?? throw new NativeRpcException("runtime_not_ready");
     }
-    private async Task PrepareRealtimeCoreAsync(int queueMs) {
+    private async Task PrepareRealtimeCoreAsync(int queueMs, int? playbackPrebufferMs) {
         await Task.Yield();
-        var opened = new WebRtcAudioRoute(Permitted, queueMs);
+        var opened = new WebRtcAudioRoute(Permitted, queueMs, playbackPrebufferMs);
         try {
             await opened.PrepareAsync(stop.Token);
             lock (sync) {

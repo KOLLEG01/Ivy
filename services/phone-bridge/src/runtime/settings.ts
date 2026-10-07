@@ -37,6 +37,9 @@ export function phoneSettings(value: unknown): PhoneSettings {
     "Codex Voice routing requires its configured CLI runtime.",
   );
   if (settings.codexVoice) {
+    requireThat(settings.codexVoice.playbackPrebufferMs === undefined ||
+      settings.codexVoice.playbackPrebufferMs <= (settings.codexVoice.queueMs ?? 80),
+      "invalid_arguments", "Voice playout prebuffer cannot exceed its audio queue.");
     resolveCodexHome(settings.codexVoice);
     requireThat(
       isAbsolute(settings.codexVoice.nativeExecutable) &&

@@ -47,18 +47,24 @@ static partial class Program {
         var ports = new Dictionary<string, VoicePeerAudio>();
         var monitors = new List<Task>();
         await using var host = new SipTransportHost(new SipBinding("127.0.0.1", 0, "udp", RtpPortRangeStart: 32000, RtpPortRangeEnd: 32200),
-            new CodecSettings(["G722", "PCMA", "PCMU"]), id => ports[id] = new VoicePeerAudio(id), _ => true);
-        host.Incoming += call => {
+            new CodecSettings(["EVS", "G722", "PCMA", "PCMU"]), id => ports[id] = new VoicePeerAudio(id), _ => true);
+        void Monitor(SipCall call, bool incoming, string caller = "fixture") {
             monitors.Add(Task.Run(async () => {
                 try {
-                    await call.AnswerAsync(); EmitPeer(new { @event = "connected", callId = call.Observation.Id });
+                    if (incoming) await call.AnswerAsync();
+                    else {
+                        var observed = await call.DialAsync("sip:fixture@127.0.0.1:5070", caller, null, 30);
+                        Check(observed.State == "connected", "fixture connects only to the local PhoneBridge");
+                    }
+                    EmitPeer(new { @event = "connected", callId = call.Observation.Id });
                     var began = Stopwatch.StartNew();
                     while (call.Observation.State == "connected" && began.Elapsed < TimeSpan.FromSeconds(600)) await Task.Delay(20);
                     call.Hangup(); await host.ReleaseAsync(call);
                     EmitPeer(new { @event = "ended", audio = ports[call.Observation.Id].Status });
                 } catch (Exception error) { EmitPeer(new { @event = "failure", message = error.Message }); }
             }));
-        };
+        }
+        host.Incoming += call => Monitor(call, true);
         EmitPeer(new { @event = "ready", port = host.LocalEndpoint.Port });
         string? line;
         while ((line = await Console.In.ReadLineAsync()) != null) {
@@ -66,6 +72,12 @@ static partial class Program {
             using var document = JsonDocument.Parse(line);
             var command = document.RootElement;
             if (command.GetProperty("action").GetString() == "stop") break;
+            if (command.GetProperty("action").GetString() == "dial") {
+                Check(host.CurrentCall == null, "fixture redial waits for its own release");
+                string caller = command.TryGetProperty("caller", out var name) ? name.GetString()! : "fixture";
+                Check(System.Text.RegularExpressions.Regex.IsMatch(caller, @"^fixture[0-9]{0,2}$"), "only local fixture caller identities allowed");
+                Monitor(host.PrepareOutgoing(Guid.NewGuid().ToString()), false, caller); continue;
+            }
             var call = host.CurrentCall ?? throw new Exception("fixture has no active call");
             if (command.GetProperty("action").GetString() == "speak") ports[call.Observation.Id].Speak(command.GetProperty("wavPath").GetString()!);
             else if (command.GetProperty("action").GetString() == "hangup") call.Hangup();

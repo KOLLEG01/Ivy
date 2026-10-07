@@ -101,7 +101,7 @@ export class PhoneFlow {
   async prewarmVoice(principalId: string): Promise<void> {
     await this.voice?.prewarm(
       principalId,
-      this.settings.voiceDefault ?? defaultPhoneVoiceSelection,
+      this.defaultVoiceSelection(),
     );
   }
   voiceInputs(principalId: string, callId: string): unknown[] {
@@ -147,6 +147,12 @@ export class PhoneFlow {
       directDialConfigured:
         this.calls.admission.definition.allowDirectDial === true,
       voiceDefault: this.settings.voiceDefault ?? defaultPhoneVoiceSelection,
+      voiceEffectiveDefault: this.defaultVoiceSelection(),
+      voicePlaybackPrebufferMs: this.settings.codexVoice
+        ? (this.settings.codexVoice.playbackPrebufferMs ?? Math.min(60, this.settings.codexVoice.queueMs ?? 80)) : null,
+      voiceQueueMs: this.settings.codexVoice?.queueMs ?? null,
+      rememberVoiceReasoning: this.settings.codexVoice?.rememberReasoning ?? false,
+      resumeIncomingConversation: this.settings.codexVoice?.resumeIncomingConversation ?? false,
     };
   }
 
@@ -377,11 +383,14 @@ export class PhoneFlow {
     return call;
   }
   voiceSelection(callId: string): PhoneVoiceSelection {
-    return (
-      this.voiceSelections.get(callId) ??
-      this.settings.voiceDefault ??
-      defaultPhoneVoiceSelection
-    );
+    return this.voiceSelections.get(callId) ?? this.defaultVoiceSelection();
+  }
+  private defaultVoiceSelection(): PhoneVoiceSelection {
+    const selection = this.settings.voiceDefault ?? defaultPhoneVoiceSelection;
+    const effort = this.settings.codexVoice?.rememberReasoning
+      ? this.calls.journal.rememberedVoiceReasoning() : null;
+    return effort && !(selection.model === 'gpt-6-luna' && effort === 'ultra')
+      ? { ...selection, reasoningEffort: effort } : selection;
   }
   callRoute(call: PhoneCall): "voice" | "windows" {
     return (
@@ -658,13 +667,16 @@ export class PhoneFlow {
       "phone_voice_unconfigured",
       "Voice requires its Codex runtime.",
     );
+    const selection = this.voiceSelection(call.callId);
+    this.voiceSelections.set(call.callId, selection);
     const [task, media] = await Promise.allSettled([
-      this.voice.prepare(call, generation, this.voiceSelection(call.callId)),
+      this.voice.prepare(call, generation, selection),
       this.calls.prepareRealtime(
         call.principalId,
         call.callId,
         generation,
         this.settings.codexVoice.queueMs ?? 80,
+        this.settings.codexVoice.playbackPrebufferMs,
       ),
     ]);
     if (task.status === "rejected") throw task.reason;
@@ -709,6 +721,7 @@ export class PhoneFlow {
       "Native Voice media did not connect to the original call.",
     );
     this.continuing(call);
+    await this.voice!.connected?.(call.callId, () => this.confirmConnectedForVoice(call));
   }
   private async connect(call: PhoneCall): Promise<void> {
     this.continuing(call);
@@ -917,6 +930,8 @@ export class PhoneFlow {
     await this.voice.select(call, threadId, command, selection, () =>
       this.confirmConnectedForVoice(call),
     );
+    if (this.settings.codexVoice?.rememberReasoning)
+      this.calls.journal.rememberVoiceReasoning(selection.reasoningEffort);
     this.continuing(call);
     this.voiceSelections.set(call.callId, selection);
   }
@@ -965,6 +980,7 @@ export class PhoneFlow {
           call.callId,
           next,
           this.settings.codexVoice?.queueMs ?? 80,
+          this.settings.codexVoice?.playbackPrebufferMs,
         ),
       );
       requireThat(

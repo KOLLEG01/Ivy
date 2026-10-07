@@ -114,9 +114,10 @@ export class PhoneAdmission {
 /** Match the E.164 identity independently of SIP host/URI parameters, as IvySIP does.
  * Non-number SIP identities retain exact matching. Peer and asserted-identity checks remain. */
 function sameCaller(expected: string, actual: string): boolean {
-  const number = (uri: string) => /^(?:sips?:|tel:)(\+[1-9]\d{6,14})(?=@|;|$)/i.exec(uri)?.[1];
-  const wanted = number(expected);
-  return wanted ? number(actual) === wanted : expected === actual;
+  return phoneCallerIdentity(expected) === phoneCallerIdentity(actual);
+}
+export function phoneCallerIdentity(uri: string): string {
+  return /^(?:sips?:|tel:)(\+[1-9]\d{6,14})(?=@|;|$)/i.exec(uri)?.[1] ?? uri;
 }
 function matchesPeer(rule: string, context: PhoneIncoming): boolean {
   return rule === 'registered' ? context.registrationPeer === true : rule === context.peerAddress;

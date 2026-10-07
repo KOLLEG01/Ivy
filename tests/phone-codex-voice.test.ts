@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import catalog from "../specs/native/codex-0.159.2/catalog.json" with { type: "json" };
 import { PhoneCodexVoice } from "../services/phone-bridge/src/runtime/codex-voice.js";
+import type { PhoneCodexVoiceSettings } from "../services/phone-bridge/src/runtime/codex-voice.js";
 import { PhoneJournal } from "../services/phone-bridge/src/runtime/journal.js";
 import { PhoneAdmission } from "../services/phone-bridge/src/runtime/admission.js";
 import type { startCodexProcess } from "../packages/host-runtime/src/codex-process.js";
@@ -26,10 +27,10 @@ function fixture(t: test.TestContext) {
   const epoch = randomUUID();
   journal.beginEpoch(epoch);
   const policy = new PhoneAdmission({
-    incoming: [],
+    incoming: ["recipient", "other"].map(id => ({ peerAddress: "127.0.0.1", transport: "udp" as const, fromUri: `sip:${id}@127.0.0.1` })),
     recipients: [{ id: "recipient", destination: "sip:recipient@127.0.0.1" }],
   });
-  const settings = {
+  const settings: PhoneCodexVoiceSettings = {
     nativeExecutable: join(root, "codex.exe"),
     nativeExecutableHash: "sha256:" + "0".repeat(64),
     nativeVersion: "0.159.2",
@@ -171,10 +172,15 @@ function fixture(t: test.TestContext) {
     journal,
     requests,
     admit,
+    incoming: (caller = "recipient") => journal.admitCall(policy.incoming(epoch, randomUUID(), "incoming-user", {
+      id: randomUUID(), direction: "incoming", state: "ringing", error: null, sipCallId: "fixture-wire",
+      incoming: { sipCallId: "fixture-wire", peerAddress: "127.0.0.1", peerPort: 5060, transport: "udp", fromUri: `sip:${caller}@127.0.0.1` },
+    })),
     settings,
     opens: () => opens,
     forgetTasks: () => threads.clear(),
     killLoops: () => { for (const id of threads.keys()) deadLoops.add(id); },
+    reviveLoops: () => deadLoops.clear(),
     pauseUnload: (pause: Promise<void>) => {
       unloadPause = pause;
     },
@@ -186,6 +192,77 @@ function fixture(t: test.TestContext) {
     notification: (value: NativeNotification) => notification(value),
   };
 }
+
+test("Incoming continuation keeps its exact task and speech context, still greets, and *0 restarts fresh", async (t) => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const voice = f.voice(), first = f.admit("mcp-agent"), threadId = await voice.prepare(first, 0, selection);
+  await voice.start(first, 0, threadId, "Discuss the lake walk.", "offer", () => {});
+  const segment = { type: "transcriptSegment", id: "speech-1", realtimeSessionId: "fixture", role: "user", text: "My codeword is Seerose." };
+  f.notification({ method: "thread/realtime/item/completed", params: { threadId, item: segment } });
+  f.notification({ method: "thread/realtime/item/completed", params: { threadId, item: segment } });
+  await voice.stop(first.callId);
+  const before = f.requests.length, incoming = f.incoming();
+  assert.equal(await voice.prepare(incoming, 0, selection), threadId);
+  assert.deepEqual(f.requests.slice(before), []);
+  await voice.start(incoming, 0, threadId, 'Begruesse den User mit "Servus"', "offer", () => {});
+  await voice.connected(incoming.callId, async () => {});
+  await voice.connected(incoming.callId, async () => {});
+  const initial = f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"];
+  assert.deepEqual(initial, [{ role: "user", text: "Discuss the lake walk." }, { role: "user", text: "My codeword is Seerose." }]);
+  assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/appendText").map(x => x.params),
+    [{ threadId, role: "user", text: 'Begruesse den User mit "Servus"' }]);
+  assert.equal(f.requests.filter(x => x.method === "turn/start").length, 1);
+  const fresh = await voice.prepare(incoming, 1, selection);
+  assert.notEqual(fresh, threadId);
+  await voice.stop(incoming.callId, fresh);
+  await voice.start(incoming, 1, fresh, 'Begruesse den User mit "Servus"', "offer", () => {});
+  assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"],
+    [{ role: "user", text: 'Begruesse den User mit "Servus"' }]);
+});
+
+test("An outgoing Ivy call never resumes the previous incoming conversation", async (t) => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const voice = f.voice(), first = f.incoming(), old = await voice.prepare(first, 0, selection);
+  await voice.start(first, 0, old, "Previous context", "offer", () => {});
+  await voice.stop(first.callId);
+  const outgoing = f.admit(), fresh = await voice.prepare(outgoing, 0, selection);
+  assert.notEqual(fresh, old);
+  await voice.start(outgoing, 0, fresh, "New assignment", "offer", () => {});
+  assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"],
+    [{ role: "user", text: "New assignment" }]);
+});
+
+test("A different admitted incoming caller cannot inherit the previous conversation", async (t) => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const voice = f.voice(), first = f.incoming(), old = await voice.prepare(first, 0, selection);
+  await voice.start(first, 0, old, "Private first context", "offer", () => {});
+  await voice.stop(first.callId);
+  assert.notEqual(await voice.prepare(f.incoming("other"), 0, selection), old);
+});
+
+test("An uncertain stop cannot expose the still-owned task as an incoming continuation", async (t) => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const voice = f.voice(), first = f.incoming(), old = await voice.prepare(first, 0, selection);
+  await voice.start(first, 0, old, "Original context", "offer", () => {});
+  f.killLoops();
+  await assert.rejects(voice.stop(first.callId));
+  const next = f.incoming();
+  assert.notEqual(await voice.prepare(next, 0, selection), old);
+  f.reviveLoops();
+  await voice.stop(first.callId);
+});
+
+test("A continued native task is reconciled after reconnect without another READY preparation turn", async (t) => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const firstVoice = f.voice(), first = f.admit(), old = await firstVoice.prepare(first, 0, selection);
+  await firstVoice.start(first, 0, old, "Retained context", "offer", () => {});
+  await firstVoice.stop(first.callId);
+  await firstVoice.close();
+  const voice = f.voice(), incoming = f.incoming();
+  assert.equal(await voice.prepare(incoming, 0, selection), old);
+  assert.equal(f.requests.filter(x => x.method === "turn/start").length, 1);
+  assert.ok(f.requests.some(x => x.method === "thread/resume" && x.params["threadId"] === old));
+});
 
 test("A verified warm task starts without repeating native reads or settings, and errors invalidate that shortcut", async (t) => {
   const f = fixture(t), voice = f.voice();

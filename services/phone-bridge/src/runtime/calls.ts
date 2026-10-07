@@ -96,8 +96,9 @@ export class PhoneCallCommands {
   stopVoice(principalId: string, callId: string, desktop: Record<string, unknown>, voiceInput: Record<string, unknown>): Promise<PhoneOperation> {
     return this.invoke(principalId, callId, 'call.desktop.stopVoice', { callId, desktop, voiceInput }, 25000);
   }
-  prepareRealtime(principalId: string, callId: string, generation: number, queueMs = 80): Promise<PhoneOperation> {
-    return this.invoke(principalId, callId, 'call.realtime.prepare', { callId, generation, queueMs }, 15000);
+  prepareRealtime(principalId: string, callId: string, generation: number, queueMs = 80, playbackPrebufferMs?: number): Promise<PhoneOperation> {
+    return this.invoke(principalId, callId, 'call.realtime.prepare', { callId, generation, queueMs,
+      ...(playbackPrebufferMs === undefined ? {} : { playbackPrebufferMs }) }, 15000);
   }
   answerRealtime(principalId: string, callId: string, generation: number, sdp: string): Promise<PhoneOperation> {
     return this.invoke(principalId, callId, 'call.realtime.answer', { callId, generation, sdp }, 20000);
