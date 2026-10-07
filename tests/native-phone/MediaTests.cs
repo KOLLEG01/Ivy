@@ -31,6 +31,85 @@ static partial class Program {
             }
         }
     }
+    sealed class ContinuityPort(bool tone = false) : IPcmAudioPort {
+        private long position;
+        private readonly Queue<float> queue = new();
+        public readonly List<float> Samples = new();
+        public bool IsOpen { get; set; } = true;
+        public long Generation { get; set; } = 1;
+        public int ReadCaptured(Span<float> output) {
+            for (int i = 0; i < output.Length; i++)
+                output[i] = tone ? .2f * (float)Math.Sin(2 * Math.PI * 997 * position++ / 48000) : queue.TryDequeue(out var value) ? value : 0;
+            return output.Length;
+        }
+        public void WriteReceived(ReadOnlySpan<float> input) {
+            foreach (float value in input) { queue.Enqueue(value); Samples.Add(value); }
+        }
+    }
+    static void CodecContinuity() {
+        var opus = new CodecSettings(["OPUS"]).Formats().Single();
+        foreach (string name in new[] { "G722", "PCMA", "PCMU", "EVS" }) {
+            var phone = new CodecSettings([name]).Formats().Single();
+            var source = new ContinuityPort(true); var relay = new ContinuityPort(); var sink = new ContinuityPort();
+            using var voiceTx = new MediaCodec(opus, source); using var voiceRx = new MediaCodec(opus, relay);
+            using var phoneTx = new MediaCodec(phone, relay); using var phoneRx = new MediaCodec(phone, sink);
+            for (int frame = 0; frame < 200; frame++) {
+                voiceRx.Decode(voiceTx.Encode()); phoneRx.Decode(phoneTx.Encode());
+            }
+            var samples = sink.Samples.Skip(9600).ToArray();
+            double jump = samples.Zip(samples.Skip(1), (a, b) => Math.Abs(a - b)).Max();
+            double rms = Math.Sqrt(samples.Select(value => (double)value * value).Average());
+            Check(samples.Length > 170000 && rms is > .08 and < .3 && jump < .15,
+                $"continuous Opus-to-{name} resampling has no frame-boundary clicks: jump={jump:0.000000}, rms={rms:0.000000}");
+            Console.WriteLine($"phone_codec_continuity: Opus->{name} jump={jump:0.000000} rms={rms:0.000000}");
+        }
+    }
+    static void OpusPacketRecovery() {
+        var format = new CodecSettings(["OPUS"]).Formats().Single();
+        var source = new ContinuityPort(true); var sink = new ContinuityPort();
+        using var tx = new MediaCodec(format, source);
+        var rx = new MediaCodec(format, sink);
+        var clock = new Clock(); var queue = new RtpReceiveQueue(20, clock);
+        const int frames = 200;
+        try {
+            for (int frame = 0; frame < frames; frame++) {
+                var payload = tx.Encode();
+                clock.Ticks += 20;
+                if (frame > 10 && frame % 17 == 0) continue;
+                queue.Add(new((ushort)frame, (uint)(frame * 960), 1, format.FormatID, payload, sink.Generation));
+                while (queue.TryTake(out var packet, out _)) {
+                    try {
+                        rx.DecodeRtp(packet);
+                    } finally { Array.Clear(packet.Payload); }
+                }
+            }
+            Check(queue.Status.MissingPackets > 5, "fixture loses isolated Opus packets throughout the utterance");
+            Check(sink.Samples.Count >= frames * 960 - 64,
+                $"packet loss preserves the playout timeline instead of inserting silence: {sink.Samples.Count} samples");
+            var samples = sink.Samples.Skip(9600).ToArray();
+            double jump = samples.Zip(samples.Skip(1), (a, b) => Math.Abs(a - b)).Max();
+            Check(jump < .15, $"Opus loss recovery preserves overlapping decoder blocks: jump={jump:0.000000}");
+            Console.WriteLine($"phone_opus_recovery: missing={queue.Status.MissingPackets} samples={sink.Samples.Count} jump={jump:0.000000}");
+            Check(rx.ConcealedSamples == queue.Status.MissingPackets * 960, "concealment duration follows RTP timestamps");
+            long before = sink.Samples.Count;
+            var stale = new RtpAudioPacket(200, 200 * 960, 1, format.FormatID, tx.Encode(), sink.Generation);
+            sink.Generation++; rx.DecodeRtp(stale);
+            Check(sink.Samples.Count == before, "old generation cannot play decoded audio or loss concealment");
+            rx.DecodeRtp(stale with { Sequence = 203, Timestamp = 203 * 960, Generation = sink.Generation });
+            Check(sink.Samples.Count - before is > 0 and <= 960,
+                "new authority starts with the new packet and never conceals the previous generation");
+            before = sink.Samples.Count; long concealed = rx.ConcealedSamples;
+            rx.DecodeRtp(stale with { Sequence = 204, Timestamp = 204 * 960 + 48000, Generation = sink.Generation });
+            Check(sink.Samples.Count - before is > 0 and <= 960 && rx.ConcealedSamples == concealed,
+                "a long silence cannot synthesize an unbounded stale audio backlog");
+            sink.Generation++;
+            rx.DecodeRtp(stale with { Timestamp = uint.MaxValue - 959, Generation = sink.Generation });
+            before = sink.Samples.Count; concealed = rx.ConcealedSamples;
+            rx.DecodeRtp(stale with { Sequence = 0, Timestamp = 960, Generation = sink.Generation });
+            Check(sink.Samples.Count - before == 1920 && rx.ConcealedSamples - concealed == 960,
+                "RTP timestamp wrap preserves exactly one lost frame without resetting the decoder");
+        } finally { rx.Dispose(); }
+    }
     static void Codecs() {
         Reject(() => new CodecSettings(new[] { "PCMA", "PCMA" }).Validate(), "duplicate codec rejected");
         Reject(() => new CodecSettings(new[] { "unknown" }).Validate(), "unknown codec rejected");

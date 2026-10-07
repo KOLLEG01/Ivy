@@ -77,6 +77,7 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
             return new { sendCodec = SendCodec, sendPayload = SendPayload, receiveFormats = formats, rtcp,
                 localRtp = AudioStream.GetRTPChannel()?.RTPLocalEndPoint?.ToString(), remoteRtp = AudioStream.DestinationEndPoint?.ToString(),
                 sentPackets = SentPackets, receivedPackets = ReceivedPackets, receive = ReceiveStatus, audio = AudioStatus,
+                realtime = (audio as CallAudioPort)?.Realtime?.Observation,
                 dtmf = new { offeredEventPayloads = offeredEventPayloadIds.Length, offeredEventPayloadIds,
                     remoteEventFormats = remoteEvents, localEventFormats = localEvents,
                     negotiatedEventPayloadId = AudioStream.NegotiatedRtpEventPayloadID,

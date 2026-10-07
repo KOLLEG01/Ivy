@@ -47,6 +47,54 @@ static partial class Program {
         buffered.Write(new float[] { 9 });
         Check(buffered.Read(block) == 0 && buffered.Count == 1, "session reset discards old audio and rearms prebuffer");
         Reject(() => new AudioQueue(8, 9), "unreachable threshold refused");
+        // Simulate 20 ms packets, with every third packet arriving 12 ms late.
+        // A bounded two-frame reserve must play every sample continuously.
+        const int frameSamples = 960, frames = 64;
+        var realtime = new AudioQueue(frameSamples * 4, frameSamples * 2, rebufferAfterUnderrun: true);
+        var speech = Enumerable.Repeat(.25f, frameSamples).ToArray();
+        var playback = new float[frameSamples];
+        int arriving = 0, played = 0;
+        for (int time = 0; time <= (frames - 1) * 20 + 40; time += 20) {
+            while (arriving < frames && arriving * 20 + (arriving % 3 == 1 ? 12 : 0) <= time) {
+                realtime.Write(speech); arriving++;
+            }
+            int actual = realtime.Read(playback);
+            if (time < 40) Check(actual == 0 && playback.All(value => value == 0), "jitter reserve waits without consuming speech");
+            else {
+                Check(actual == frameSamples && playback.All(value => value == .25f), "packet jitter cannot insert a silence frame into speech");
+                played++;
+            }
+        }
+        Check(played == frames && realtime.Count == 0 && realtime.Dropped == 0, "jitter playback preserves all speech within bounded latency");
+        Check(realtime.Read(playback) == 0, "speech pause is silent");
+        realtime.Write(speech);
+        Check(realtime.Read(playback) == 0 && realtime.Count == frameSamples, "next utterance rearms its jitter reserve after a pause");
+        realtime.Write(speech);
+        Check(realtime.Read(playback) == frameSamples && playback.All(value => value == .25f), "next utterance resumes with intact buffered speech");
+        realtime.Clear();
+        Check(realtime.Read(playback) == 0 && playback.All(value => value == 0), "realtime reset discards buffered speech");
+        var smooth = new AudioQueue(frameSamples * 4, frameSamples * 2, rebufferAfterUnderrun: true, smoothDiscontinuities: true);
+        float previous = 0;
+        void Continuous(float[] samples, string reason) {
+            foreach (float value in samples) { Check(Math.Abs(value - previous) < .01f, reason); previous = value; }
+        }
+        smooth.Write(Enumerable.Repeat(.25f, frameSamples * 2).ToArray());
+        Check(smooth.Read(playback) == frameSamples, "smoothed startup keeps the full packet duration");
+        Continuous(playback, "utterance startup has no hard zero-to-signal step");
+        smooth.Write(Enumerable.Repeat(-.25f, frameSamples * 4).ToArray());
+        Check(smooth.Dropped == frameSamples && smooth.Read(playback) == frameSamples, "overflow retains bounded playout and its full duration");
+        Continuous(playback, "discarding an opposite-phase block cannot make a hard PCM splice");
+        for (int frame = 0; frame < 3; frame++) { smooth.Read(playback); Continuous(playback, "uninterrupted PCM stays continuous"); }
+        Check(smooth.Read(playback) == 0, "starvation retains the empty-input count");
+        Continuous(playback, "starvation fades to silence instead of cutting a nonzero sample");
+        Check(playback[^1] == 0 && previous == 0, "starvation reaches exact silence inside its existing frame");
+        var partial = new AudioQueue(frameSamples, smoothDiscontinuities: true);
+        partial.Write(Enumerable.Repeat(.25f, 37).ToArray());
+        Check(partial.Read(playback) == 37 && playback[36] == 0, "short final speech block fades before its padded silence");
+        Continuous(playback, "partial starvation has no hard signal-to-zero step");
+        smooth.Write(Enumerable.Repeat(-.25f, frameSamples * 2).ToArray()); smooth.Read(playback);
+        smooth.Clear(); smooth.Write(speech);
+        Check(smooth.Read(playback) == 0 && playback.All(value => value == 0), "authority reset discards fade history as well as queued PCM");
     }
     static void Permits() {
         var clock = new Clock { Ticks = 100 }; var permit = new AudioPermit(clock);
@@ -122,6 +170,8 @@ static partial class Program {
                 return 0;
             }
             if (args.SequenceEqual(new[] { "--audio-buffer-only" })) { Queues(); Settings(); Console.WriteLine("phone_audio_buffer_passed: FIFO, overflow, prebuffer threshold, underrun and session reset; no devices"); return 0; }
+            if (args.SequenceEqual(new[] { "--media-continuity-only" })) { CodecContinuity(); return 0; }
+            if (args.SequenceEqual(new[] { "--opus-recovery-only" })) { OpusPacketRecovery(); return 0; }
             if (args.SequenceEqual(new[] { "--screening-peer-fixture" })) { await ScreeningPeerFixture(); return 0; }
             if (args.SequenceEqual(new[] { "--loopback-probe-only" })) { await InstalledLoopbackProbe(); return 0; }
             if (args.SequenceEqual(new[] { "--phone-parity-only" })) { await PhoneParity(); return 0; }
@@ -234,7 +284,7 @@ static partial class Program {
                 Console.WriteLine("phone_outgoing_identity_passed: registered caller identity and digest credentials remain distinct; no carrier or devices"); return 0;
             }
             if (args.SequenceEqual(new[] { "--media-only" })) {
-                Codecs(); RtpQueues(); await RtpLoopback(); await SipLoopback(includeRegistration: false);
+                Codecs(); OpusPacketRecovery(); RtpQueues(); await RtpLoopback(); await SipLoopback(includeRegistration: false);
                 Console.WriteLine("phone_media_focused_passed: codec/generation, bounded RTP units and actual reordered/lost UDP audio, SIP/RTP lifecycle; no hardware/carrier"); return 0;
             }
             if (args.SequenceEqual(new[] { "--call-audio-only" })) {
@@ -259,7 +309,7 @@ static partial class Program {
             Console.WriteLine("phone_voice_authority_passed: original call/UI/capture authority, freshness and revocation; fake audio only");
             await VoiceLifetimeUnits(); await MicroVoiceLifetimeUnits(); await VoiceLifetimeNativeUnits();
             Console.WriteLine("phone_voice_lifetime_passed: original Voice lifetime, unknown cleanup fencing and pending cancellation; fake Desktop/audio only");
-            Codecs();
+            Codecs(); OpusPacketRecovery();
             Console.WriteLine("phone_codec_unit_passed: four codec durations/clocks, signal, silence on revocation, generation reset, bounds; no devices or SIP");
             EvsParameters(); EvsManagedCodecs(); await EvsNegotiation();
             Console.WriteLine("phone_evs_managed_passed: ABI, generations, SDP and actual initial/delayed SIP/RTP; synthetic audio only");

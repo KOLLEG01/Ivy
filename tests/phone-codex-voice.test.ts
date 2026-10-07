@@ -45,7 +45,10 @@ function fixture(t: test.TestContext) {
     opens = 0;
   const threads = new Map<string, Record<string, unknown>>();
   const unloaded = new Set<string>();
+  const deadLoops = new Set<string>();
   let unloadPause: Promise<void> | undefined;
+  let preparationPause: Promise<void> | undefined;
+  let losePreparationReply = false;
   const connect: typeof startCodexProcess = async (options) => {
     notification = options.onNotification;
     online = true;
@@ -74,6 +77,7 @@ function fixture(t: test.TestContext) {
             projectId: settings.projectId,
             ephemeral: false,
             status: { type: "idle" },
+            turns: [],
           };
           threads.set(thread.id, thread);
           result = { thread };
@@ -101,6 +105,21 @@ function fixture(t: test.TestContext) {
           await unloadPause;
           unloaded.add(String(params["threadId"]));
         }
+        if (method === "turn/start") {
+          const id = String(params["threadId"]);
+          const turn = { id: randomUUID(), status: "completed", items: [
+            { type: "userMessage", id: randomUUID(), clientId: String(params["clientUserMessageId"]) },
+          ] };
+          threads.get(id)!["turns"] = [turn];
+          await preparationPause;
+          // Completion can reach the client before the turn/start acknowledgement.
+          notification({ method: "turn/completed", params: { threadId: id, turn } });
+          if (losePreparationReply) { losePreparationReply = false; throw new Error("Preparation acknowledgement lost"); }
+          result = { turn };
+        }
+        if (method === "thread/realtime/stop" && deadLoops.has(String(params["threadId"])))
+          return { error: { code: -32603,
+            message: "failed to stop realtime conversation: internal error; agent loop died unexpectedly" } };
         if (method === "thread/realtime/start")
           notification({
             method: "thread/realtime/sdp",
@@ -138,9 +157,9 @@ function fixture(t: test.TestContext) {
     voices.push(value);
     return value;
   };
-  const admit = () =>
+  const admit = (principalId = "principal") =>
     journal.admitCall(
-      policy.outgoing(epoch, randomUUID(), "principal", "recipient", "voice"),
+      policy.outgoing(epoch, randomUUID(), principalId, "recipient", "voice"),
     );
   t.after(async () => {
     for (const value of voices) await value.close();
@@ -155,15 +174,102 @@ function fixture(t: test.TestContext) {
     settings,
     opens: () => opens,
     forgetTasks: () => threads.clear(),
+    killLoops: () => { for (const id of threads.keys()) deadLoops.add(id); },
     pauseUnload: (pause: Promise<void>) => {
       unloadPause = pause;
     },
+    pausePreparation: (pause: Promise<void>) => { preparationPause = pause; },
+    losePreparationReply: () => { losePreparationReply = true; },
     disconnect: () => {
       online = false;
     },
     notification: (value: NativeNotification) => notification(value),
   };
 }
+
+test("A verified warm task starts without repeating native reads or settings, and errors invalidate that shortcut", async (t) => {
+  const f = fixture(t), voice = f.voice();
+  await voice.prewarm("principal", selection);
+  const before = f.requests.length;
+  const call = f.admit(), threadId = await voice.prepare(call, 0, selection);
+  assert.deepEqual(f.requests.slice(before), []);
+  await voice.stop(call.callId);
+  f.notification({ method: "thread/realtime/closed", params: { threadId } });
+  const next = f.admit(), afterClose = f.requests.length;
+  assert.equal(await voice.prepare(next, 0, selection), threadId);
+  assert.deepEqual(f.requests.slice(afterClose), []);
+  await voice.stop(next.callId);
+  f.notification({ method: "thread/realtime/error", params: { threadId, message: "fixture" } });
+  const afterError = f.requests.length;
+  assert.equal(await voice.prepare(f.admit(), 0, selection), threadId);
+  assert.ok(f.requests.slice(afterError).some(value => value.method === "thread/read"));
+  assert.ok(f.requests.slice(afterError).some(value => value.method === "thread/settings/update"));
+});
+
+test("Incoming and MCP callers share one unused fully prepared task", async (t) => {
+  const f = fixture(t), voice = f.voice();
+  await voice.prewarm("incoming-user", selection);
+  const before = f.requests.length;
+  const call = f.admit("mcp-agent");
+  await voice.prepare(call, 0, selection);
+  assert.deepEqual(f.requests.slice(before), []);
+  assert.equal(f.requests.filter(value => value.method === "turn/start").length, 1);
+});
+
+test("A call arriving during background model preparation awaits that same task", async (t) => {
+  const f = fixture(t), voice = f.voice();
+  let release!: () => void;
+  f.pausePreparation(new Promise<void>(resolve => { release = resolve; }));
+  const warm = voice.prewarm("incoming-user", selection);
+  for (let i = 0; i < 100 && !f.requests.some(x => x.method === "turn/start"); i++)
+    await new Promise(resolve => setTimeout(resolve, 1));
+  assert.ok(f.requests.some(x => x.method === "turn/start"));
+  const prepared = voice.prepare(f.admit("mcp-agent"), 0, selection);
+  release();
+  await warm; await prepared;
+  assert.equal(f.requests.filter(value => value.method === "thread/start").length, 1);
+  assert.equal(f.requests.filter(value => value.method === "turn/start").length, 1);
+});
+
+test("A lost preparation acknowledgement reconciles its original message without repeating the turn", async (t) => {
+  const f = fixture(t), first = f.voice();
+  f.losePreparationReply();
+  await assert.rejects(first.prewarm("incoming-user", selection), /Preparation acknowledgement lost/);
+  await first.close();
+  const second = f.voice();
+  await second.prewarm("mcp-agent", selection);
+  assert.equal(f.requests.filter(value => value.method === "thread/start").length, 1);
+  assert.equal(f.requests.filter(value => value.method === "turn/start").length, 1);
+  assert.ok(f.requests.some(value => value.method === "thread/read" && value.params["includeTurns"] === true));
+});
+
+test("A completed conversation keeps its history and the next call uses a fresh prepared task", async (t) => {
+  const f = fixture(t), voice = f.voice(), first = f.admit();
+  const oldThread = await voice.prepare(first, 0, selection);
+  await voice.start(first, 0, oldThread, "First call context", "offer", () => {});
+  await voice.stop(first.callId);
+  f.notification({ method: "thread/realtime/closed", params: { threadId: oldThread } });
+  const second = f.admit(), nextThread = await voice.prepare(second, 0, selection);
+  assert.notEqual(nextThread, oldThread);
+  assert.equal(f.journal.voiceTask(first.callId, 0), oldThread);
+  assert.equal(f.requests.filter(value => value.method === "thread/start").length, 2);
+  assert.equal(await voice.start(second, 0, nextThread, "Independent second context", "offer", () => {}), "remote answer");
+});
+
+test("A confirmed dead cached agent loop is replaced without erasing its retained call identity", async (t) => {
+  const f = fixture(t), first = f.voice();
+  await first.prewarm("principal", selection);
+  const oldCall = f.admit(), oldThread = await first.prepare(oldCall, 0, selection);
+  await first.stop(oldCall.callId);
+  await first.close(); f.killLoops();
+  const next = f.voice(), call = f.admit();
+  const threadId = await next.prepare(call, 0, selection);
+  assert.notEqual(threadId, oldThread);
+  assert.equal(f.requests.filter(value => value.method === "thread/start").length, 2);
+  assert.equal(f.journal.voiceTask(oldCall.callId, 0), oldThread);
+  assert.equal(f.journal.voiceTask(call.callId, 0), threadId);
+  assert.equal(await next.start(call, 0, threadId, "New call context", "local offer", () => {}), "remote answer");
+});
 
 test("Cached native tasks survive a client reopen, retain their project and receive each full initial prompt", async (t) => {
   const f = fixture(t),
@@ -243,20 +349,21 @@ test("Lost control transport reconnects to stop the original task, and close als
   );
 });
 
-test("One cached task cannot be reserved by two concurrent calls before realtime starts", async (t) => {
+test("Overlapping calls claim separate tasks without stopping the first context", async (t) => {
   const f = fixture(t),
     voice = f.voice(),
     first = f.admit();
   const threadId = await voice.prepare(first, 0, selection);
   const other = f.admit();
-  await assert.rejects(voice.prepare(other, 0, selection), {
-    code: "phone_voice_task_busy",
-  });
+  const nextThread = await voice.prepare(other, 0, selection);
+  assert.notEqual(nextThread, threadId);
   assert.equal(
     f.requests.filter((value) => value.method === "thread/start").length,
-    1,
+    2,
   );
   assert.equal(f.journal.voiceTask(first.callId, 0), threadId);
+  assert.equal(f.journal.voiceTask(other.callId, 0), nextThread);
+  assert.equal(f.requests.filter(value => value.method === "thread/realtime/stop").length, 0);
 });
 
 test("Stopping a call releases a prepared replacement after a cancelled restart", async (t) => {

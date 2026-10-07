@@ -46,6 +46,13 @@ type Session = {
   failed: boolean;
   realtimeRequested: boolean;
 };
+type PreparationTurn = { id: string; status: string };
+// This slot has no caller context. The original call journal still owns admission.
+const preparedTaskKey = "prepared-phone-voice";
+const preparationPrompt =
+  "Prepare for a new phone conversation. There is no caller or call request yet. " +
+  "Reply only READY. Do not use tools or perform any actions. " +
+  "The current call context will arrive when voice starts.";
 
 export interface PhoneVoicePort {
   prewarm(principalId: string, selection: PhoneVoiceSelection): Promise<void>;
@@ -93,8 +100,16 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   private closed = false;
   private fingerprint: string | null = null;
   private readonly reconciled = new Set<string>();
+  private readonly preparedSelections = new Map<string, string>();
   private readonly reservations = new Map<string, string>();
   private readonly preparing = new Map<string, Promise<string>>();
+  private readonly preparationTurns = new Map<string, {
+    turnId: string | null;
+    completed: PreparationTurn | null;
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }>();
   private readonly sessions = new Map<string, Session>();
   private readonly sdps = new Map<
     string,
@@ -132,6 +147,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     if (this.connection?.rpc.connected) return;
     if (!this.opening)
       this.opening = (async () => {
+        this.reconciled.clear();
+        this.preparedSelections.clear();
         this.connection = await this.connect({
           settings: this.settings,
           artifactRoot: this.runtime.artifactRoot,
@@ -152,7 +169,13 @@ export class PhoneCodexVoice implements PhoneVoicePort {
               );
             }
             this.sdps.clear();
+            for (const pending of this.preparationTurns.values()) {
+              clearTimeout(pending.timer);
+              pending.reject(new IvyError(code, "Voice task preparation lost its control connection."));
+            }
+            this.preparationTurns.clear();
             this.reconciled.clear();
+            this.preparedSelections.clear();
             this.pendingInputs.clear();
             if (!this.closed) this.onError(code);
           },
@@ -299,6 +322,19 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     const params = notification.params as Record<string, Wire.Json> | null;
     if (!params || typeof params["threadId"] !== "string") return;
     const threadId = params["threadId"];
+    if (notification.method === "turn/completed") {
+      const pending = this.preparationTurns.get(threadId);
+      const turn = params["turn"] as PreparationTurn | undefined;
+      if (pending && turn && typeof turn.id === "string") {
+        pending.completed = turn;
+        this.completePreparation(threadId);
+      }
+    }
+    if (notification.method === "thread/status/changed" &&
+      (params["status"] as Record<string, Wire.Json> | undefined)?.["type"] === "notLoaded") {
+      this.reconciled.delete(threadId);
+      this.preparedSelections.delete(threadId);
+    }
     if (
       notification.method === "thread/realtime/sdp" &&
       typeof params["sdp"] === "string"
@@ -320,6 +356,10 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       if (session && !session.cancelled) {
         session.failed = true;
         this.onError("phone_voice_session_ended");
+      }
+      if (notification.method === "thread/realtime/error" || (session && !session.cancelled)) {
+        this.reconciled.delete(threadId);
+        this.preparedSelections.delete(threadId);
       }
       const pending = this.sdps.get(threadId);
       if (pending) {
@@ -348,28 +388,97 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     );
     return thread;
   }
+  private completePreparation(threadId: string): void {
+    const pending = this.preparationTurns.get(threadId);
+    const turn = pending?.completed;
+    if (!pending || !turn || turn.id !== pending.turnId || turn.status === "inProgress") return;
+    clearTimeout(pending.timer);
+    if (turn.status === "completed") pending.resolve();
+    else pending.reject(new IvyError("phone_voice_prepare_failed", "The original Voice preparation turn did not complete."));
+  }
+  private async prepareModel(threadId: string): Promise<void> {
+    let cache = this.journal.codexTaskCache(preparedTaskKey, this.fingerprint!);
+    requireThat(cache?.threadId === threadId, "phone_voice_task_changed", "Voice preparation no longer owns its cached task.");
+    const readTurn = async (): Promise<PreparationTurn | undefined> => {
+      const value = await this.call("thread/read", { threadId, includeTurns: true });
+      this.thread(value);
+      const turns = (value["thread"] as Record<string, Wire.Json>)["turns"] as unknown as
+        (PreparationTurn & { items: { type: string; clientId?: string | null }[] })[];
+      return turns?.find((turn) => cache!.preparationTurnId
+        ? turn.id === cache!.preparationTurnId
+        : turn.items.some((item) => item.type === "userMessage" && item.clientId === cache!.preparationOperationId));
+    };
+    const recovered = cache.preparationOperationId ? await readTurn() : undefined;
+    if (cache.preparationOperationId) {
+      requireThat(recovered, "phone_voice_prepare_unknown", "The original Voice preparation requires reconciliation; it cannot be repeated.");
+      if (recovered.status === "completed") return;
+      requireThat(recovered.status === "inProgress", "phone_voice_prepare_failed", "The original Voice preparation turn did not complete.");
+    }
+    let resolve!: () => void, reject!: (error: Error) => void;
+    const finished = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    void finished.catch(() => undefined);
+    const timer = setTimeout(() => reject(new IvyError("phone_voice_prepare_unknown", "Voice task preparation remains unconfirmed.", "unknown")), 120000);
+    const pending = { turnId: recovered?.id ?? null, completed: null as PreparationTurn | null, resolve, reject, timer };
+    this.preparationTurns.set(threadId, pending);
+    try {
+      if (recovered) {
+        // Subscribe before the second read so a completion between reads is retained.
+        const current = await readTurn();
+        if (current && current.status !== "inProgress") pending.completed = current;
+      } else {
+        const operationId = randomUUID();
+        cache = { ...cache, preparationOperationId: operationId };
+        this.journal.retainCodexTask(preparedTaskKey, cache);
+        const value = await this.call("turn/start", {
+          threadId,
+          clientUserMessageId: operationId,
+          input: [{ type: "text", text: preparationPrompt, text_elements: [] }],
+        }, {
+          requestId: operationId,
+          beforeResolve: (_id, reply) => {
+            if ("result" in reply) {
+              const turn = (reply.result as Record<string, Wire.Json>)["turn"] as unknown as PreparationTurn;
+              requireThat(typeof turn?.id === "string", "phone_voice_prepare_unknown", "Native Voice preparation did not acknowledge its original turn.");
+              cache = { ...cache!, preparationTurnId: turn.id };
+              this.journal.retainCodexTask(preparedTaskKey, cache);
+            }
+          },
+        });
+        const turn = value["turn"] as unknown as PreparationTurn;
+        pending.turnId = turn.id;
+        if (turn.status !== "inProgress") pending.completed = turn;
+      }
+      this.completePreparation(threadId);
+      await finished;
+    } finally {
+      clearTimeout(timer);
+      this.preparationTurns.delete(threadId);
+    }
+  }
   private async cachedTask(
-    principalId: string,
     selection: PhoneVoiceSelection,
     replace = false,
     ownerId?: string,
   ): Promise<string> {
     await this.open();
-    const key = `${principalId}:${replace ? randomUUID() : this.fingerprint}`;
+    const key = replace ? randomUUID() : this.fingerprint!;
     if (this.preparing.has(key)) {
       await this.preparing.get(key);
-      return this.cachedTask(principalId, selection, replace, ownerId);
+      return this.cachedTask(selection, replace, ownerId);
     }
     const pending = (async () => {
       const cache = replace
         ? null
-        : this.journal.codexTaskCache(principalId, this.fingerprint!);
+        : this.journal.codexTaskCache(preparedTaskKey, this.fingerprint!);
       let threadId = cache?.threadId ?? null;
       requireThat(
         !cache?.creationOperationId,
         "phone_voice_create_unknown",
         "The original prepared Voice task creation requires reconciliation.",
       );
+      // An overlapping call needs a separate context; never stop or claim the live one.
+      if (threadId && this.reservations.has(threadId) && this.reservations.get(threadId) !== ownerId)
+        threadId = null;
       if (threadId) {
         requireThat(
           !this.reservations.has(threadId) ||
@@ -377,7 +486,21 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           "phone_voice_task_busy",
           "Cached Voice task belongs to another original call.",
         );
-        try {
+        const used = this.journal.usedCodexVoiceTask(threadId);
+        const verified = this.reconciled.has(threadId) && this.preparedSelections.has(threadId);
+        // The live owner already verified and configured this warm task. Avoid
+        // repeating native reads/settings before every call; reconnect, unload,
+        // errors and selection changes still require reconciliation below.
+        if (!used && (ownerId || this.settings.keepTaskLoaded !== false) &&
+          this.reconciled.has(threadId) && this.preparedSelections.get(threadId) === canonical(selection))
+          return threadId;
+        // A positively stopped, locally verified task can be left as call history.
+        // An unverified task must first reconcile its exact previous Voice session.
+        if (used && verified) {
+          this.preparedSelections.delete(threadId);
+          this.reconciled.delete(threadId);
+          threadId = null;
+        } else try {
           let read: Thread | null = null;
           try {
             read = this.thread(
@@ -423,18 +546,27 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         } catch (error) {
           const native = IvyError.from(error).details as
             { code?: number; message?: string } | undefined;
-          if (
-            native?.code !== -32600 ||
-            native.message !== `no rollout found for thread id ${threadId}`
-          )
+          const missing = native?.code === -32600 &&
+            native.message === `no rollout found for thread id ${threadId}`;
+          const dead = native?.code === -32603 && native.message ===
+            "failed to stop realtime conversation: internal error; agent loop died unexpectedly";
+          if (!missing && !dead)
             throw error;
+          // Native Codex can retain a task whose agent loop has died. Resume and
+          // unsubscribe do not revive it; keep its history and replace this idle cache.
+          this.reconciled.delete(threadId);
+          this.preparedSelections.delete(threadId);
+          threadId = null;
+        }
+        if (used && threadId) {
+          this.preparedSelections.delete(threadId);
           this.reconciled.delete(threadId);
           threadId = null;
         }
       }
       if (!threadId) {
         const creationOperationId = randomUUID();
-        this.journal.retainCodexTask(principalId, {
+        this.journal.retainCodexTask(preparedTaskKey, {
           fingerprint: this.fingerprint!,
           threadId: null,
           creationOperationId,
@@ -458,7 +590,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
                 const created = this.thread(
                   reply.result as Record<string, Wire.Json>,
                 );
-                this.journal.retainCodexTask(principalId, {
+                this.journal.retainCodexTask(preparedTaskKey, {
                   fingerprint: this.fingerprint!,
                   threadId: created.id,
                   creationOperationId: null,
@@ -476,6 +608,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         model: selection.model,
         effort: selection.reasoningEffort,
       });
+      await this.prepareModel(threadId);
+      this.preparedSelections.set(threadId, canonical(selection));
       if (
         !ownerId &&
         this.settings.keepTaskLoaded === false &&
@@ -488,11 +622,11 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     return pending;
   }
   async prewarm(
-    principalId: string,
+    _principalId: string,
     selection: PhoneVoiceSelection,
   ): Promise<void> {
     if (this.sessions.size || this.journal.currentCalls().length) return;
-    await this.cachedTask(principalId, selection);
+    await this.cachedTask(selection);
   }
   async prepare(
     call: PhoneCall,
@@ -506,7 +640,6 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       return existing;
     }
     const threadId = await this.cachedTask(
-      call.principalId,
       selection,
       generation > 0,
       call.callId,
@@ -712,7 +845,9 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         effort: selection.reasoningEffort,
       });
       this.journal.finishVoiceSelection(intent, "sent");
+      this.preparedSelections.set(threadId, canonical(selection));
     } catch (error) {
+      this.preparedSelections.delete(threadId);
       this.journal.finishVoiceSelection(intent, "outcome_unknown");
       throw error;
     }
@@ -721,6 +856,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     return this.sessions.get(callId)?.failed ?? false;
   }
   private async unload(threadId: string): Promise<void> {
+    this.reconciled.delete(threadId);
+    this.preparedSelections.delete(threadId);
     await this.call("thread/unsubscribe", { threadId });
   }
   private releaseReservations(callId: string, keepThreadId?: string): void {
@@ -804,6 +941,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       )
         await this.unload(session.threadId);
     })().catch((error) => {
+      this.reconciled.delete(session.threadId);
+      this.preparedSelections.delete(session.threadId);
       session.stopping = null;
       throw error;
     }));

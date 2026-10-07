@@ -65,16 +65,68 @@ static partial class Program {
         route.Resume();
         var tone = Enumerable.Range(0, 960).Select(index => (float)(.25 * Math.Sin(index * Math.PI / 24))).ToArray();
         var shortTone = tone.Select(value => (short)(value * short.MaxValue)).ToArray();
+        ushort sequence = 40000; uint timestamp = 123000;
+        void SendTone(bool lost = false) {
+            lock (audio) {
+                var payload = audio.EncodeAudio(shortTone, format);
+                if (!lost) remote.SendRtpRaw(SDPMediaTypesEnum.audio, payload, timestamp, 0, format.FormatID, sequence);
+                sequence++; timestamp += 960;
+            }
+        }
+        // The first authenticated audio packet must wait for a short playout reserve.
+        // Otherwise a following packet delayed by only one sender tick creates silence.
+        SendTone(); SendTone();
+        var firstDeadline = DateTime.UtcNow.AddSeconds(2);
+        while (route.Status.CaptureQueuedSamples == 0 && DateTime.UtcNow < firstDeadline) await Task.Delay(5);
+        Check(route.Status.CaptureQueuedSamples > 0, "authenticated remote audio reaches the playout queue");
+        var firstFrame = Enumerable.Repeat(1f, 960).ToArray();
+        Check(route.ReadCaptured(firstFrame) == 0 && firstFrame.All(value => value == 0),
+            "WebRTC holds its first packet until a short jitter reserve is available");
         var deadline = DateTime.UtcNow.AddSeconds(5);
         bool incoming = false;
         while (DateTime.UtcNow < deadline && (!incoming || !received.Task.IsCompletedSuccessfully)) {
             route.WriteReceived(tone);
-            lock (audio) remote.SendAudio(960, audio.EncodeAudio(shortTone, format));
+            SendTone();
             await Task.Delay(20);
             var output = new float[960]; route.ReadCaptured(output);
             incoming |= output.Any(value => Math.Abs(value) > .02);
         }
         Check(incoming && received.Task.IsCompletedSuccessfully, "actual DTLS/SRTP/Opus carries both PCM directions");
+        route.Suspend(); route.Resume();
+        SendTone(); SendTone(); SendTone();
+        await Until(() => route.Status.CaptureQueuedSamples >= 1920, "loss fixture has a short initial playout reserve");
+        var recovered = new float[960];
+        Check(route.ReadCaptured(recovered) == 960, "loss fixture begins with a full frame");
+        for (int frame = 0; frame < 60; frame++) {
+            SendTone(lost: frame % 13 == 4);
+            await Task.Delay(20);
+            int count = route.ReadCaptured(recovered);
+            Check(count == 960, $"actual encrypted packet loss keeps playout full: frame={frame}, samples={count}");
+        }
+        var observed = System.Text.Json.JsonSerializer.SerializeToElement(route.Observation, NativeRpc.Json);
+        Check(observed.GetProperty("receive").GetProperty("missingPackets").GetInt64() == 5 &&
+            observed.GetProperty("concealedSamples").GetInt64() == 4800,
+            "actual DTLS/SRTP gaps reconstruct the missing Opus frames without resetting codec history");
+        // Hold the two worker threads so a timer continuation cannot run. The
+        // production sender must still advance its actual RTP clock at 50 Hz.
+        ThreadPool.GetMinThreads(out int minWorkers, out int minIo);
+        ThreadPool.GetMaxThreads(out int maxWorkers, out int maxIo);
+        using var blockedWorker = new ManualResetEventSlim();
+        using var releaseWorker = new ManualResetEventSlim();
+        using var releasedWorker = new ManualResetEventSlim();
+        try {
+            Check(ThreadPool.SetMinThreads(1, minIo) && ThreadPool.SetMaxThreads(2, maxIo), "clock fixture bounds worker capacity");
+            ThreadPool.QueueUserWorkItem(_ => { blockedWorker.Set(); releaseWorker.Wait(); releasedWorker.Set(); });
+            Check(blockedWorker.Wait(TimeSpan.FromSeconds(2)), "clock fixture occupies the other worker");
+            long Before() => System.Text.Json.JsonSerializer.SerializeToElement(route.Observation, NativeRpc.Json).GetProperty("sentPackets").GetInt64();
+            long before = Before();
+            Thread.Sleep(200);
+            long sent = Before() - before;
+            Check(sent is >= 7 and <= 13, $"WebRTC maintains its actual audio clock during worker starvation: packets={sent}");
+        } finally {
+            ThreadPool.SetMaxThreads(maxWorkers, maxIo); ThreadPool.SetMinThreads(minWorkers, minIo);
+            releaseWorker.Set(); releasedWorker.Wait(TimeSpan.FromSeconds(2));
+        }
         permitted = false;
         route.WriteReceived(tone);
         var blocked = Enumerable.Repeat(1f, 960).ToArray();

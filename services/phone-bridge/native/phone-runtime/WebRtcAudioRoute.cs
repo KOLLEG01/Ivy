@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using SIPSorcery.Media;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
@@ -49,7 +50,8 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
     public MediaStatus Status { get { lock (sync) return new(closed ? "closed" : failed ? "failed" : IsOpen ? "open" : "suspended", "webrtc",
         AudioSettings.SampleRate, 1, received.Dropped, outgoing.Dropped, received.Count, outgoing.Count, null); } }
     public object Observation { get { lock (sync) return new { state = peer.connectionState.ToString(), sentPackets, receivedPackets,
-        receive = packets.Status, audio = Status }; } }
+        receive = packets.Status, concealedSamples = decoder?.ConcealedSamples ?? 0,
+        captureUnderruns = received.Underruns, renderUnderruns = outgoing.Underruns, audio = Status }; } }
 
     private sealed class CodecPort(WebRtcAudioRoute owner) : IPcmAudioPort {
         public bool IsOpen => owner.IsOpen;
@@ -61,8 +63,12 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
         ArgumentNullException.ThrowIfNull(permitted);
         if (queueMs is < 20 or > 200) throw new ArgumentException("Bounded realtime audio queues required.");
         this.permitted = permitted;
-        received = new(AudioSettings.SampleRate * queueMs / 1000);
-        outgoing = new(AudioSettings.SampleRate * queueMs / 1000);
+        int capacity = AudioSettings.SampleRate * queueMs / 1000;
+        // Keep a short playout reserve for packet/sender jitter. Re-arm after a
+        // speech pause or starvation so each new utterance has the same reserve.
+        int prebuffer = AudioSettings.SampleRate * Math.Min(40, queueMs) / 1000;
+        received = new(capacity, prebuffer, rebufferAfterUnderrun: true, smoothDiscontinuities: true);
+        outgoing = new(capacity, prebuffer, rebufferAfterUnderrun: true, smoothDiscontinuities: true);
         using var audio = new AudioEncoder(includeOpus: true);
         peer.addTrack(new MediaStreamTrack(audio.SupportedFormats.Where(value =>
             value.FormatName.Equals("opus", StringComparison.OrdinalIgnoreCase)).ToList(), MediaStreamStatusEnum.SendRecv));
@@ -116,7 +122,7 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
             await gathered.Task.WaitAsync(TimeSpan.FromSeconds(5), linked.Token);
         linked.Token.ThrowIfCancellationRequested();
         Offer = peer.localDescription.sdp.ToString();
-        sending = SendAsync();
+        sending = StartSender();
     }
     public async Task AcceptAsync(string sdp, CancellationToken cancellationToken = default) {
         if (string.IsNullOrWhiteSpace(sdp) || sdp.Length > 48000) throw new ArgumentException("Bounded WebRTC answer required.");
@@ -147,27 +153,52 @@ public sealed class WebRtcAudioRoute : ICallAudioRoute {
         }
     }
     private void Drain() {
-        while (packets.TryTake(out var packet, out bool discontinuity)) {
+        while (packets.TryTake(out var packet, out _)) {
             try {
-                if (discontinuity) { decoder?.Dispose(); decoder = new(format, new CodecPort(this)); }
-                decoder.Decode(packet.Payload, packet.Generation); receivedPackets++;
+                decoder.DecodeRtp(packet); receivedPackets++;
             } finally { Array.Clear(packet.Payload); }
         }
     }
-    private async Task SendAsync() {
+    private Task StartSender() {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() => {
+            try { Send(); }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+            catch { lock (sync) { failed = true; Clear(); } }
+            finally { completion.TrySetResult(); }
+        // Match the existing SIP pump so other process work cannot routinely
+        // preempt one half of the same 20 ms audio path.
+        }) { IsBackground = true, Name = "Ivy WebRTC audio", Priority = ThreadPriority.Highest };
+        try { thread.Start(); }
+        catch { lock (sync) { failed = true; Clear(); } completion.TrySetResult(); }
+        return completion.Task;
+    }
+    private void Send() {
         using var timerResolution = WindowsTimerResolutionLease.Acquire();
-        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(20));
-        try {
-            while (await timer.WaitForNextTickAsync(stop.Token)) {
-                lock (sync) {
-                    if (closed || failed) return;
-                    if (!IsOpen || encoder == null) { Clear(); continue; }
+        long frameTicks = Math.Max(1, Stopwatch.Frequency / 50);
+        long next = Stopwatch.GetTimestamp() + frameTicks;
+        while (!stop.IsCancellationRequested) {
+            long remaining;
+            while ((remaining = next - Stopwatch.GetTimestamp()) > 0) {
+                int milliseconds = (int)Math.Min(10, remaining * 1000 / Stopwatch.Frequency);
+                if (milliseconds > 0 && stop.Token.WaitHandle.WaitOne(milliseconds)) return;
+                if (milliseconds == 0) Thread.SpinWait(32);
+            }
+            if (stop.IsCancellationRequested) return;
+            lock (sync) {
+                if (closed || failed) return;
+                if (!IsOpen || encoder == null) Clear();
+                else {
                     Drain();
                     peer.SendAudio(encoder.RtpDuration, encoder.Encode()); sentPackets++;
                 }
             }
-        } catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
-        catch { lock (sync) { failed = true; Clear(); } }
+            // Thread-pool stalls cannot coalesce audio ticks. Short delays catch up,
+            // while a long process suspension never produces an unbounded RTP burst.
+            next += frameTicks;
+            long now = Stopwatch.GetTimestamp();
+            if (now - next > frameTicks * 2) next = now + frameTicks;
+        }
     }
     public ValueTask DisposeAsync() {
         lock (sync) { disposal ??= DisposeCoreAsync(); return new(disposal); }

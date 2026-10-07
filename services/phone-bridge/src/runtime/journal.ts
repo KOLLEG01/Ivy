@@ -43,7 +43,10 @@ export interface PhoneCallTarget {
   callId: string; desktop: Record<string, unknown>; audio: Record<string, unknown>; voiceInput: Record<string, unknown>;
   voiceArchive: PhoneVoiceArchiveSettings | null;
 }
-export interface PhoneCodexTaskCache { fingerprint: string; threadId: string | null; creationOperationId: string | null }
+export interface PhoneCodexTaskCache {
+  fingerprint: string; threadId: string | null; creationOperationId: string | null;
+  preparationOperationId?: string; preparationTurnId?: string;
+}
 const validateContract = phoneValidator({ ...appToolsContract.$defs, ...archiveContract.$defs, ...contract.$defs });
 function validate(name: string, value: unknown): void {
   validateContract(name, value, phoneOutcomeReservation);
@@ -146,15 +149,27 @@ export class PhoneJournal {
     'phone_storage_invalid', 'Cached Codex Voice task has invalid ownership.');
     if (cache.threadId) validate('Uuid', cache.threadId);
     if (cache.creationOperationId) validate('Uuid', cache.creationOperationId);
+    if (cache.preparationOperationId) validate('Uuid', cache.preparationOperationId);
+    if (cache.preparationTurnId) validate('Uuid', cache.preparationTurnId);
     return cache;
   }
   retainCodexTask(principalId: string, cache: PhoneCodexTaskCache): void {
     validateShared('Identifier', principalId);
     if (cache.threadId) validate('Uuid', cache.threadId);
     if (cache.creationOperationId) validate('Uuid', cache.creationOperationId);
+    if (cache.preparationOperationId) validate('Uuid', cache.preparationOperationId);
+    if (cache.preparationTurnId) validate('Uuid', cache.preparationTurnId);
     requireThat(/^sha256:[0-9a-f]{64}$/.test(cache.fingerprint) && !!cache.threadId !== !!cache.creationOperationId,
       'invalid_arguments', 'Cached Voice task must identify either a created task or its original pending creation.');
     this.setMeta(`codexVoice:${principalId}:${cache.fingerprint}`, canonical(cache));
+  }
+  usedCodexVoiceTask(threadId: string): boolean {
+    validate('Uuid', threadId);
+    return !!this.statement(`SELECT 1 FROM commands WHERE method='call.promptVoice'
+      AND json_extract(value,'$.intent.threadId')=?
+      UNION ALL SELECT 1 FROM receipt_archive WHERE kind='command'
+      AND json_extract(value,'$.intent.method')='call.promptVoice'
+      AND json_extract(value,'$.intent.threadId')=? LIMIT 1`).get(threadId, threadId);
   }
   get epoch(): string | null { return this.meta('epoch') || null; }
   get epochOperations(): number { return Number(this.meta('epochOperations') ?? 0); }

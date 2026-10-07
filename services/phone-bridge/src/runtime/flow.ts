@@ -684,11 +684,8 @@ export class PhoneFlow {
     call: PhoneCall,
     prepared: { threadId: string; sdp: string },
     generation = 0,
-    waiting = false,
   ): Promise<void> {
     await this.confirmConnectedForVoice(call);
-    if (waiting)
-      result(await this.calls.endWaiting(call.principalId, call.callId));
     const answer = await this.voice!.start(
       call,
       generation,
@@ -774,13 +771,13 @@ export class PhoneFlow {
       );
     }
     const route = this.callRoute(call),
-      waiting = !call.screening && !challenged && route === "voice";
+      prepareDuringDial = !call.screening && !challenged && route === "voice";
     let prepared: { threadId: string; sdp: string } | null = null;
     if (call.direction === "incoming") {
       this.continuing(call);
       this.callResult(
         call,
-        await this.calls.answer(call.principalId, call.callId, waiting),
+        await this.calls.answer(call.principalId, call.callId),
         ["connected"],
       );
     } else {
@@ -794,9 +791,8 @@ export class PhoneFlow {
           call.callId,
           credentials,
           this.settings.ringSeconds,
-          waiting,
         ),
-        waiting ? this.prepareVoice(call) : Promise.resolve(null),
+        prepareDuringDial ? this.prepareVoice(call) : Promise.resolve(null),
       ]);
       if (dialed.status === "rejected") throw dialed.reason;
       this.callResult(call, dialed.value, ["connected"]);
@@ -842,7 +838,7 @@ export class PhoneFlow {
       return;
     }
     prepared ??= await this.prepareVoice(call);
-    await this.startVoice(call, prepared, 0, waiting);
+    await this.startVoice(call, prepared);
   }
 
   async observe(observed?: PhoneStatus): Promise<void> {
@@ -1045,6 +1041,10 @@ export class PhoneFlow {
     this.endedCalls.delete(callId);
     this.abandonedCalls.delete(callId);
     this.voiceSelections.delete(callId);
+    if (!this.closed && this.callRoute(call) === "voice")
+      void this.prewarmVoice(principalId).catch((error) =>
+        this.onError(callId, IvyError.from(error).code),
+      );
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;

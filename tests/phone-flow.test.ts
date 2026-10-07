@@ -453,8 +453,9 @@ function fixture(
     failSelection = false,
     promptError = "app_tools_unavailable";
   const events: string[] = [];
+  const voicePrewarms: string[] = [];
   const defaultVoiceTasks: PhoneVoicePort = {
-    async prewarm() {},
+    async prewarm(principalId) { voicePrewarms.push(principalId); },
     async prepare(call, generation, selection) {
       voicePrepares++;
       const threadId =
@@ -592,6 +593,7 @@ function fixture(
     epoch,
     root,
     events,
+    voicePrewarms,
     port: defaultVoiceTasks,
     screening: (value: string, fail = false) => {
       screening = value;
@@ -718,7 +720,10 @@ test("Voice task and native offer preparation overlap SIP dialing, but initial s
     flow = f.flow(),
     dialing = deferred();
   f.intercept(async (r) => {
-    if (r.method === "call.dial") await dialing.promise;
+    if (r.method === "call.dial") {
+      assert.equal(r.params["waiting"], false);
+      await dialing.promise;
+    }
   });
   const call = await flow.request("main", randomUUID(), "personal", "voice");
   await until(
@@ -730,10 +735,7 @@ test("Voice task and native offer preparation overlap SIP dialing, but initial s
   await until(
     () => !!f.journal.callCommand(call.callId, "call.realtime.answer")?.receipt,
   );
-  assert.ok(
-    f.methods().indexOf("call.waiting.end") <
-      f.methods().indexOf("call.realtime.answer"),
-  );
+  assert.ok(!f.methods().includes("call.waiting.end"));
 });
 
 test("Incoming Voice uses the configured initial prompt after SIP answer and leaves no native peer after hangup", async (t) => {
@@ -742,6 +744,9 @@ test("Incoming Voice uses the configured initial prompt after SIP answer and lea
       ...settings,
       incomingInitialPrompt: "Discuss the supplied appointment.",
     });
+  f.intercept(async (r) => {
+    if (r.method === "call.answer") assert.equal(r.params["waiting"], false);
+  });
   const callId = f.incoming();
   await flow.accept("main", randomUUID(), callId);
   await until(
@@ -752,6 +757,7 @@ test("Incoming Voice uses the configured initial prompt after SIP answer and lea
     !f.methods().includes("call.prepare") && !f.methods().includes("call.dial"),
   );
   await flow.hangup("main", callId);
+  assert.deepEqual(f.voicePrewarms, ["main"]);
   assert.ok(
     f.methods().indexOf("call.hangup") <
       f.methods().indexOf("call.realtime.stop"),
