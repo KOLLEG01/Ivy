@@ -240,13 +240,12 @@ function fixture(
             },
           ],
           codecs: [
-            {
-              name: "G722",
-              payload: 9,
-              pcmRate: 16000,
-              rtpClockRate: 8000,
-              channels: 1,
-            },
+            { name: "G722", payload: 9, pcmRate: 16000, rtpClockRate: 8000, channels: 1 },
+            { name: "PCMA", payload: 8, pcmRate: 8000, rtpClockRate: 8000, channels: 1 },
+            { name: "PCMU", payload: 0, pcmRate: 8000, rtpClockRate: 8000, channels: 1 },
+            { name: "OPUS", payload: 111, pcmRate: 48000, rtpClockRate: 48000, channels: 2 },
+            { name: "EVS", payload: 126, pcmRate: 48000, rtpClockRate: 16000, channels: 1 },
+            { name: "EVS", payload: 125, pcmRate: 48000, rtpClockRate: 16000, channels: 2 },
           ],
           processLoopbackSupported: true,
         };
@@ -1260,8 +1259,10 @@ test("audio inventory is available to every trusted caller and remains read-only
     "inventory",
     {},
     context("arbitrary-host.service"),
-  )) as { codecs: { name: string }[] };
+  )) as { codecs: { name: string; channels: number }[] };
   assert.equal(inventory.codecs[0]?.name, "G722");
+  assert.equal(inventory.codecs.length, 6);
+  assert.deepEqual(inventory.codecs.filter(value => value.name === 'EVS').map(value => value.channels), [1, 2]);
   assert.deepEqual(f.methods(), ["inventory"]);
   assert.equal(f.journal.status().operations, 0);
   assert.equal(f.credentialReads(), 0);
