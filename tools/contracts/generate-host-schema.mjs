@@ -84,10 +84,11 @@ const defs = {
       credentials: list(ref("Credential")),
       packagePublisherPrincipalIds: list(id, 128),
       backup: obj({
+        enabled: bool,
         directory: path,
         intervalHours: uint(1, 168),
         retain: uint(1, 365),
-      }),
+      }, ["directory", "intervalHours", "retain"]),
       trustedProxyAddresses: list(str(64), 32),
       // Expensive domain-message validation is an explicit diagnostic mode. Framing,
       // storage and registry admission remain mandatory regardless of this switch.

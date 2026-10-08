@@ -278,10 +278,10 @@ async function handle(
       );
       return kernel.packageCatalog.seed(message.catalog, principalId);
     }
-    case "package.pruneApps": {
+    case "package.prune": {
       const principalId = kernel.options.credentials[0]?.principalId;
       requireThat(principalId, "service_unavailable", "Hive package catalog requires one configured principal.");
-      return kernel.packageCatalog.pruneApps(principalId);
+      return kernel.packageCatalog.prune(principalId);
     }
     case "package.publish":
       return kernel.packageCatalog.publish(

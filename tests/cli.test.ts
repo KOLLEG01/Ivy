@@ -46,6 +46,9 @@ test('CLI JSON observes the same durable ID after caller/source loss, and report
   journal.advance(entry.record.deploymentId, 'preparing', 'needs_attention', { readiness: { state: 'unknown', message: 'Fixture owner cannot establish the result.' } });
   const unknown = await cli(argv); assert.equal(unknown.exitCode, 3); assert.equal(unknown.output.code, 'deployment_needs_attention');
   const status = await cli(['status', '--config', path, '--json']); assert.equal(status.exitCode, 0); assert.equal(status.output.code, 'host_status');
+  const collection = await cli(['collect-storage', '--config', path, '--json']);
+  assert.equal(collection.output.code, 'storage_retention_succeeded');
+  assert.ok(journal.storageRetentionStatus()?.completedAt);
   assert.equal(Object.hasOwn(status.output.data as object, 'storageRetention'), false);
   const retention: Host.StorageRetentionStatus = { schemaVersion: 1, hostId: config.hostId, state: 'partial', trigger: 'scheduled',
     startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), lastSuccessAt: null,

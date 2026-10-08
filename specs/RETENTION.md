@@ -21,11 +21,12 @@ Checks: [retention](../tests/retention.test.ts).
   authenticated UI routes. Collection removes directories for older releases
   once those directories are a day old; the collector runs every 15 minutes.
   Immutable URLs are stable while retained, not a permanent availability promise.
-- Keep at most the latest two uploaded `.tar.gz` app packages per app in the package
-  catalog and artifact directory. Failed app uploads leave a local marker so orphaned
-  archives are removed on startup or the next collection pass. Stale incoming package
-  files and private UI staging directories are removed after a day. Service package
-  retention is independent.
+- Keep the latest two uploaded `.tar.gz` packages per component, plus builds referenced
+  by Hive, registered services, host installation observations or unfinished deployments.
+  Last observations protect disconnected hosts until they report a replacement. Collection
+  prunes the catalog and archive files on startup and every 15 minutes. Failed uploads
+  leave a local marker so orphaned archives are removed on the next pass. Stale incoming
+  package files and private UI staging directories are removed after a day.
 - The global event journal has finite age/count/byte bounds. Pruning publishes an explicit
   gap boundary even for lagging subscribers; consumers recover from authoritative snapshots.
 - Mutation receipts have a finite replay window. Runtime epoch and issue time fence expired

@@ -40,21 +40,26 @@ const log = (code: string, message: string) =>
   process.stderr.write(
     JSON.stringify({ at: new Date().toISOString(), code, message }) + "\n",
   );
-export async function collectBackupArtifacts(root: string, now = Date.now()): Promise<void> {
+export async function collectBackupArtifacts(root: string, now = Date.now(), enabled = true): Promise<void> {
   const directory = resolve(root);
-  const entries = await readdir(directory, { withFileTypes: true });
+  const entries = await readdir(directory, { withFileTypes: true }).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error;
+  });
   const present = new Set(entries.map(entry => entry.name));
   const cutoff = now - 24 * 60 * 60 * 1000;
   const prefix = /^hive-\d{4}-\d{2}-\d{2}T[\d.-]+Z-[0-9a-f-]{36}\./;
   for (const entry of entries) {
-    if (!prefix.test(entry.name) || !/\.(?:partial|ui\.partial|ui|sqlite|sqlite\.json)$/.test(entry.name)) continue;
+    if (!prefix.test(entry.name) || !/\.(?:partial|ui\.partial|ui|sqlite(?:\.json|-wal|-shm)?)$/.test(entry.name)) continue;
     const target = resolve(directory, entry.name);
     requireThat(inside(directory, target), 'invalid_arguments', 'Invalid backup cleanup path.');
-    if ((await lstat(target)).mtimeMs > cutoff) continue;
-    const base = entry.name.replace(/\.(?:ui\.partial|sqlite\.json|partial|ui|sqlite)$/, '');
-    if (entry.name.endsWith('.ui') && present.has(base + '.sqlite') && present.has(base + '.sqlite.json')) continue;
-    if (entry.name.endsWith('.sqlite') && present.has(base + '.sqlite.json')) continue;
-    if (entry.name.endsWith('.sqlite.json') && present.has(base + '.sqlite')) continue;
+    if (enabled && (await lstat(target)).mtimeMs > cutoff) continue;
+    const base = entry.name.replace(/\.(?:ui\.partial|sqlite(?:\.json|-wal|-shm)?|partial|ui)$/, '');
+    if (enabled) {
+      if (entry.name.endsWith('.ui') && present.has(base + '.sqlite') && present.has(base + '.sqlite.json')) continue;
+      if (entry.name.endsWith('.sqlite') && present.has(base + '.sqlite.json')) continue;
+      if (entry.name.endsWith('.sqlite.json') && present.has(base + '.sqlite')) continue;
+      if (/\.sqlite-(?:wal|shm)$/.test(entry.name) && present.has(base + '.sqlite')) continue;
+    }
     if (entry.isFile() || entry.isDirectory()) await rm(target, { recursive: entry.isDirectory(), force: true });
   }
 }
@@ -121,9 +126,11 @@ export async function startHive(path: string): Promise<{
   const resetBootstrapCredentialDigest = await resetBootstrapCredential(
     config.dataRoot,
   );
-  await mkdir(settings.backup.directory, { recursive: true });
-  await collectBackupArtifacts(settings.backup.directory);
-  const backupEntries = new Set(await readdir(settings.backup.directory));
+  if (settings.backup.enabled !== false) await mkdir(settings.backup.directory, { recursive: true });
+  await collectBackupArtifacts(settings.backup.directory, Date.now(), settings.backup.enabled !== false);
+  const backupEntries = new Set(await readdir(settings.backup.directory).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error;
+  }));
   const snapshots = [...backupEntries].filter(
     (file) => file.startsWith("hive-") && file.endsWith(".sqlite") &&
       backupEntries.has(file + '.json') && backupEntries.has(file.replace(/\.sqlite$/, '.ui')),
@@ -227,6 +234,7 @@ export async function startHive(path: string): Promise<{
     true,
   );
   const backup = (): Promise<string> => {
+    requireThat(settings.backup.enabled !== false, 'backup_disabled', 'Local Hive backups are disabled by installation configuration.');
     if (backupTask) return backupTask;
     backupTask = (async () => {
       const root = resolve(settings.backup.directory);
@@ -371,14 +379,14 @@ export async function startHive(path: string): Promise<{
           "Storage operating reserve is available.",
           true,
         );
-      if (observed.ready && !backupTask && Date.now() >= nextBackupAt)
+      if (observed.ready && settings.backup.enabled !== false && !backupTask && Date.now() >= nextBackupAt)
         void backup().catch(() => undefined);
       if (observed.ready && Date.now() >= nextRetentionAt) {
         nextRetentionAt = Date.now() + 15 * 60_000;
         try {
           await server.worker.request({ action: "retention.collect" }, 30_000);
           await server.collectPackageArtifacts();
-          if (!backupTask) await collectBackupArtifacts(settings.backup.directory);
+          if (!backupTask) await collectBackupArtifacts(settings.backup.directory, Date.now(), settings.backup.enabled !== false);
           await diagnostic(
             "retention_failed",
             "Automatic retention collection completed.",

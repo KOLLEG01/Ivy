@@ -19,6 +19,7 @@ import { requireStorageSpace } from './storage-space.js';
 import { runtimePackageLocations, workspacePackageLocations } from './runtime-dependencies.js';
 import { preparationTools } from './preparation-tools.js';
 import { mapConcurrent } from './concurrency.js';
+import { touchDependencyCache, useDependencyCache } from './dependency-cache.js';
 import { createPackageArchive } from './package-archive.js';
 
 async function copyDirectory(source:string,destination:string,options:Parameters<typeof cp>[2]={}):Promise<void>{
@@ -328,7 +329,7 @@ export async function prepareCandidate(snapshot: Host.SourceSnapshot, componentI
   const sourceIdentity = hashJson((await artifactFiles(snapshot.sourceRoot)).map(({ path, hash, bytes }) => ({ path, hash, bytes })));
   const buildId = candidateBuildId(componentId, plan.version, sourceIdentity);
   const progress = new PreparationProgress(config, componentId, snapshot.snapshotId);
-  let lock: ExecutorLock | null = null;
+  let lock: ExecutorLock | null = null, cacheLease: ExecutorLock | null = null;
   let journal: HostJournal | null = null;
   let record: Host.PreparationRecord | null = null, registered: Host.Candidate | null = null;
   try {
@@ -356,6 +357,8 @@ export async function prepareCandidate(snapshot: Host.SourceSnapshot, componentI
     await copySourceTree(snapshot.sourceRoot, sourceRoot);
     const packageLock = await jsonFile<unknown>(join(sourceRoot, 'package-lock.json'));
     const workspaceLinks = workspacePackageLocations(packageLock);
+    cacheLease = await useDependencyCache(config.stagingRoot, dependencyKey.slice(7));
+    await touchDependencyCache(dependencyCacheRoot);
     const dependencyCacheHit = await restoreDependencies(sourceRoot, dependencyCacheRoot, dependencyKey, workspaceLinks);
     executionEnvironment['IVY_DEPENDENCY_CACHE_HIT'] = dependencyCacheHit ? '1' : '0';
     const execution = { onOutput: progress.output, jobLauncher: join(bootstrapRoot, 'dist/native/ivy-job.exe'), environment: executionEnvironment };
@@ -435,5 +438,5 @@ export async function prepareCandidate(snapshot: Host.SourceSnapshot, componentI
     if (record) await savePreparation(config, { ...record, phase: registered ? 'verified' : failure.outcome === 'unknown' || record.phase === 'publishing' ? 'unknown' : 'failed', updatedAt: new Date().toISOString(), errorCode: failure.code }).catch(() => undefined);
     if (registered) return registered;
     throw new IvyError(failure.code, failure.message, failure.outcome, { snapshotId: snapshot.snapshotId });
-  } finally { await progress.close(); journal?.close(); lock?.close(); }
+  } finally { await progress.close(); cacheLease?.close(); journal?.close(); lock?.close(); }
 }

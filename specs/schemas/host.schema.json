@@ -1171,6 +1171,9 @@
         "backup": {
           "type": "object",
           "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
             "directory": {
               "type": "string",
               "minLength": 1,

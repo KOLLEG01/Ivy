@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "host-executor",
   "kind": "native",
-  "version": "0.2.31",
+  "version": "0.2.32",
   "description": "Independent host deployment executor with durable local recovery",
   "connectsToHive": false,
   "requirements": {

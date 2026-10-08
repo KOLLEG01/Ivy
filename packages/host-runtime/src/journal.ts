@@ -148,15 +148,19 @@ export function bootstrapLaunchId(
 /** One independent OS file lock. Kernel process death releases it; stale PID files never grant a lock. */
 export class ExecutorLock {
   private readonly db: DatabaseSync;
-  constructor(root: string) {
+  constructor(root: string, shared = false) {
     mkdirSync(root, { recursive: true });
     const db = new DatabaseSync(join(root, "executor-lock.sqlite"));
     try {
-      db.exec(
-        "PRAGMA busy_timeout=100; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; CREATE TABLE IF NOT EXISTS owner(pid INTEGER); DELETE FROM owner;",
-      );
-      db.prepare("INSERT INTO owner VALUES (?)").run(process.pid);
-      db.exec("COMMIT");
+      if (shared) {
+        db.exec("PRAGMA busy_timeout=100; CREATE TABLE IF NOT EXISTS owner(pid INTEGER); BEGIN; SELECT * FROM owner;");
+      } else {
+        db.exec(
+          "PRAGMA busy_timeout=100; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; CREATE TABLE IF NOT EXISTS owner(pid INTEGER); DELETE FROM owner;",
+        );
+        db.prepare("INSERT INTO owner VALUES (?)").run(process.pid);
+        db.exec("COMMIT");
+      }
     } catch {
       db.close();
       throw new IvyError(
@@ -929,7 +933,7 @@ export class HostJournal {
   /** Live selections, unresolved operations and one rollback per live selection. */
   retentionCandidateIds(): Set<string> {
     const live = new Set<string>(), protectedIds = new Set<string>();
-    const installed = new Map<string, string>();
+    const installed = new Map<string, string>(), rollbackFound = new Set<string>(), rollbackSelections = new Set<string>();
     for (const table of ['installed', 'runtime_targets', 'observations']) {
       for (const row of this.db.prepare(`SELECT instance_id,value FROM ${table}`).all()) {
         const id = (JSON.parse(String(row['value'])) as { candidateId?: string }).candidateId;
@@ -940,9 +944,10 @@ export class HostJournal {
       const row = this.db.prepare('SELECT value FROM meta WHERE key=?').get('bootstrap-rollback:' + instanceId);
       if (!row) continue;
       const previous = JSON.parse(String(row['value'])) as { candidateId: string; selectedCandidateId: string };
-      if (previous.selectedCandidateId === selectedCandidateId) protectedIds.add(previous.candidateId);
+      if (previous.selectedCandidateId === selectedCandidateId) {
+        protectedIds.add(previous.candidateId); rollbackFound.add(instanceId); rollbackSelections.add(selectedCandidateId);
+      }
     }
-    const rollbackFound = new Set<string>();
     for (const row of this.db.prepare('SELECT entry_json FROM operations ORDER BY created_at DESC,operation_id DESC').all()) {
       const entry = JSON.parse(String(row['entry_json'])) as Host.JournalEntry;
       if (!['succeeded', 'rolled_back'].includes(entry.record.phase)) {
@@ -953,15 +958,17 @@ export class HostJournal {
         entry.previousCandidateId && entry.previousCandidateId !== entry.candidateId && !rollbackFound.has(entry.record.instanceId)) {
         protectedIds.add(entry.previousCandidateId);
         rollbackFound.add(entry.record.instanceId);
+        rollbackSelections.add(entry.candidateId);
       }
     }
     // Bootstrap installs and restored journals may have no deployment operation.
-    // Keep the nearest older version as well as the actual prior successful build.
+    // Fall back to the nearest older version only when no exact prior build is known.
     const releases = this.db.prepare('SELECT candidate_id,component_id,manifest_json FROM candidates').all().map(row => ({
       id: String(row['candidate_id']), component: String(row['component_id']),
       version: (JSON.parse(String(row['manifest_json'])) as Host.ReleaseManifest).version,
     })).filter(value => /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value.version));
     for (const id of live) {
+      if (rollbackSelections.has(id)) continue;
       const current = releases.find(value => value.id === id);
       if (!current) continue;
       const previous = releases.filter(value => value.component === current.component && compareVersions(value.version, current.version) < 0)

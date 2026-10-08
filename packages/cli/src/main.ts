@@ -8,6 +8,7 @@ import { defaultHostConfigPath } from '../../host-runtime/src/layout.js';
 import { freshExecutorStatus, HostJournal, requiresBootstrapReplacement, terminalPhases } from '../../host-runtime/src/journal.js';
 import { captureSource } from '../../host-runtime/src/source.js';
 import { compactPreparations, preparationInventory } from '../../host-runtime/src/preparations.js';
+import { collectHostStorage } from '../../host-runtime/src/storage-retention.js';
 import { backupHost } from '../../host-runtime/src/private-backup.js';
 import { restoreHost } from '../../host-runtime/src/restore.js';
 import { inspectBootstrap, updateBootstrap, bootstrapStatus } from '../../host-runtime/src/bootstrap-maintenance.js';
@@ -33,7 +34,7 @@ export async function cli(args: string[], environment: NodeJS.ProcessEnv = proce
     requireThat(parsed.positionals.length === 1, 'invalid_arguments', 'Select exactly one Ivy command.');
     const command = parsed.positionals[0]!;
     const supported: Record<string, string[]> = { prepare: ['component', 'source'], deploy: ['instance', 'candidate', 'source', 'operation-id', 'wait-ms'], rollback: ['instance', 'to', 'operation-id', 'wait-ms'], status: ['deployment'], restart: ['instance', 'operation-id', 'wait-ms'], enable: ['instance', 'operation-id', 'wait-ms'], disable: ['instance', 'operation-id', 'wait-ms'] };
-    supported['preparations'] = []; supported['compact-preparations'] = [];
+    supported['preparations'] = []; supported['compact-preparations'] = []; supported['collect-storage'] = [];
     supported['backup'] = ['destination']; supported['restore'] = ['backup', 'backup-hash'];
     supported['runtime-reset'] = ['apply', 'confirm'];
     supported['runtime-reset-host'] = ['phase', 'reset-id', 'runtime-epoch', 'scope-roots', 'publisher-digest'];
@@ -82,6 +83,11 @@ export async function cli(args: string[], environment: NodeJS.ProcessEnv = proce
     } else if (command === 'preparations' || command === 'compact-preparations') {
       output = { schemaVersion: 1, ok: true, code: command === 'preparations' ? 'preparation_inventory' : 'preparation_compaction',
         data: command === 'preparations' ? await preparationInventory(config) : await compactPreparations(config) };
+    } else if (command === 'collect-storage') {
+      const removed = await collectHostStorage(config);
+      const status = journal.storageRetentionStatus()!;
+      output = { schemaVersion: 1, ok: status.state === 'succeeded', code: 'storage_retention_' + status.state,
+        data: { removed, status } as Host.CliOutput['data'] };
     } else if (command === 'prepare') {
       const componentId = required('component');
       const snapshot = await captureSource(resolve(required('source')), config);

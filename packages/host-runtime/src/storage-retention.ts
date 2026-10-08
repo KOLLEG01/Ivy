@@ -2,7 +2,7 @@ import { lstat, readdir, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { IvyError, requireThat } from '../../contracts/src/errors.js';
 import { validateHost } from '../../contracts/src/host-validation.js';
-import { compareVersions, hashJson } from '../../contracts/src/canonical.js';
+import { hashJson } from '../../contracts/src/canonical.js';
 import type { Host } from '../../contracts/src/generated.js';
 import { retainedBootstrapPlans } from './bootstrap.js';
 import { readReleaseManifest } from './artifact.js';
@@ -12,6 +12,7 @@ import { installationIdentity } from './linux-resources.js';
 import { collectPreparationStorage, compactPreparations } from './preparations.js';
 import { hostStorageSpace } from './storage-space.js';
 import type { RetentionProgress } from './storage-space.js';
+import { collectDependencyCaches } from './dependency-cache.js';
 
 const buildName = /^[0-9a-f]{64}$/;
 const versionName = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
@@ -177,6 +178,7 @@ export async function collectHostStorage(config: Host.HostConfig, now = Date.now
       ...await hostStorageSpace(config), skipped: [], errorCode: null };
     journal.saveStorageRetentionStatus(status);
     bootstrapLock = new ExecutorLock(join(config.runtimeRoot, 'bootstrap-maintenance-lock'));
+    await collectDependencyCaches(config.stagingRoot, progress);
     const compaction = await compactPreparations(config, undefined, false);
     for (const entry of compaction.entries) {
       if (['compacted', 'recovered'].includes(entry.action)) progress.removed('payloads');
@@ -203,24 +205,6 @@ export async function collectHostStorage(config: Host.HostConfig, now = Date.now
       return [String(row['candidate_id']), typeof version === 'string' && versionName.test(version) ? version : null] as const;
     }));
     for (const [id, version] of versions) if (!version) protectedIds.add(id);
-    const byComponent = new Map<string, Host.Candidate[]>();
-    for (const candidate of candidates) {
-      const group = byComponent.get(candidate.componentId) ?? [];
-      group.push(candidate);
-      byComponent.set(candidate.componentId, group);
-    }
-    for (const group of byComponent.values()) {
-      group.sort((a, b) => compareVersions(versions.get(b.candidateId) ?? '0.0.0', versions.get(a.candidateId) ?? '0.0.0') ||
-        b.createdAt.localeCompare(a.createdAt) || b.candidateId.localeCompare(a.candidateId));
-      const retainedVersions = new Set<string>();
-      for (const candidate of group) {
-        const version = versions.get(candidate.candidateId);
-        if (!version || retainedVersions.has(version)) continue;
-        if (retainedVersions.size === 2) break;
-        protectedIds.add(candidate.candidateId);
-        retainedVersions.add(version);
-      }
-    }
     let removed = 0;
     const failures: unknown[] = [];
     const finishRemoval = async (candidate: Host.Candidate) => {

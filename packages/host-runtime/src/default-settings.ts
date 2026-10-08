@@ -51,6 +51,7 @@ export function defaultServiceSettings(
         listenHost: "127.0.0.1",
         listenPort: 39081,
         backup: {
+          enabled: true,
           directory: join(ivyRoot, "backups", "hive"),
           intervalHours: 24,
           retain: 7,

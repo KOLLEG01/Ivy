@@ -126,7 +126,19 @@ export class HiveKernel {
     this.uis = new Uis(this.store, this.registry, this.uiFiles);
     this.retention = new Retention(this.store, this.registry);
     this.configurations = new Configurations(this.store, this.objects);
-    this.packageCatalog = new PackageCatalogObject(this.store, this.objects);
+    this.packageCatalog = new PackageCatalogObject(this.store, this.objects, () => {
+      const builds = new Set<string>([this.options.buildId]);
+      for (const node of this.registry.nodes()) builds.add(node.buildId);
+      // Last observations also protect disconnected hosts until they report a replacement.
+      for (const { snapshot } of this.registry.hostObservations()) {
+        if (snapshot.status.executor?.buildId) builds.add(snapshot.status.executor.buildId);
+        for (const instance of snapshot.status.instances)
+          for (const build of [instance.installedBuild, instance.observedBuild]) if (build) builds.add(build);
+        for (const operation of snapshot.status.unfinished)
+          for (const build of [operation.previousBuild, operation.targetBuild, operation.observedBuild]) if (build) builds.add(build);
+      }
+      return builds;
+    });
     this.registerHandlers();
     const serverOperations = new Set([
       "tools.call",

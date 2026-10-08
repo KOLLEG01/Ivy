@@ -18,6 +18,7 @@ import { automaticBootstrapRecord } from '../packages/host-runtime/src/bootstrap
 import type { BootstrapOs } from '../packages/host-runtime/src/bootstrap-os.js';
 import { hostStorageSpace, RetentionSchedule, storageIsLow, treeBytes } from '../packages/host-runtime/src/storage-space.js';
 import { hashJson } from '../packages/contracts/src/canonical.js';
+import { useDependencyCache } from '../packages/host-runtime/src/dependency-cache.js';
 import type { Host } from '../packages/contracts/src/generated.js';
 
 async function fixture(t: TestContext, componentId = 'fixture', kind: 'native' | 'app' = 'native') {
@@ -67,13 +68,13 @@ test('host collection keeps live references and recent candidates while retiring
     snapshot, phase: 'compacted', candidate: candidates[1]!, startedAt: old.toISOString(), updatedAt: old.toISOString(), errorCode: null });
 
   const collected = await collectHostStorage(config);
-  assert.deepEqual(collected, { candidates: 1, preparations: 1, snapshots: 1 });
+  assert.deepEqual(collected, { candidates: 3, preparations: 1, snapshots: 1 });
   const status = journal.status(null).storageRetention!;
   assert.equal(status.state, 'succeeded'); assert.ok(status.lastSuccessAt);
-  assert.equal(status.removed.candidates, 1); assert.ok(status.availableBytes.artifacts > 0);
+  assert.equal(status.removed.candidates, 3); assert.ok(status.availableBytes.artifacts > 0);
   assert.ok(status.skipped.some(entry => entry.reason === 'protected_release' && !entry.requiresAttention));
   assert.deepEqual((await readdir(join(config.artifactRoot, 'candidates'))).sort(),
-    [candidates[0]!, candidates[1]!, candidates[2]!, candidates[3]!, candidates[5]!].map(value => value.candidateId.slice(7)).sort());
+    [candidates[0]!, candidates[1]!, candidates[2]!].map(value => value.candidateId.slice(7)).sort());
   await assert.rejects(stat(source), { code: 'ENOENT' });
   await assert.rejects(stat(join(config.stagingRoot, 'build-' + preparationId)), { code: 'ENOENT' });
   assert.deepEqual(await collectHostStorage(config), { candidates: 0, preparations: 0, snapshots: 0 });
@@ -104,9 +105,38 @@ test('verified app copies compact through cache links and then expire with their
   assert.equal(await readFile(join(cache, 'keep'), 'utf8'), 'shared dependencies');
   await assert.rejects(stat(join(root, 'source')), { code: 'ENOENT' });
   assert.deepEqual(await collectHostStorage(config, Date.now() + 4 * 24 * 60 * 60 * 1000),
-    { candidates: 4, preparations: 1, snapshots: 1 });
+    { candidates: 6, preparations: 1, snapshots: 1 });
   assert.throws(() => journal.candidate(candidate.candidateId), { code: 'not_found' });
   await assert.rejects(stat(source), { code: 'ENOENT' });
+});
+
+test('dependency cache collection keeps running builds and the latest cache, then releases unused caches', async t => {
+  const { root, config, journal, old } = await fixture(t);
+  const caches = ['8', '9', 'a'].map(value => value.repeat(64));
+  for (const [index, key] of caches.entries()) {
+    const directory = join(config.stagingRoot, 'dependency-cache', key);
+    await atomicJson(join(directory, 'cache.json'), { key: 'sha256:' + key });
+    const at = new Date(old.getTime() + index * 1000); await utimes(directory, at, at);
+  }
+  const leased = join(config.stagingRoot, 'dependency-cache', caches[0]!);
+  const first = await useDependencyCache(config.stagingRoot, caches[0]!);
+  const second = await useDependencyCache(config.stagingRoot, caches[0]!);
+  const outside = join(root, 'outside'); await mkdir(outside); await writeFile(join(outside, 'keep'), 'payload');
+  await symlink(outside, join(config.stagingRoot, 'dependency-cache', 'b'.repeat(64)), process.platform === 'win32' ? 'junction' : 'dir');
+  try {
+    await collectHostStorage(config);
+    assert.ok(await stat(leased));
+    await assert.rejects(stat(join(config.stagingRoot, 'dependency-cache', caches[1]!)), { code: 'ENOENT' });
+    assert.ok(journal.storageRetentionStatus()!.skipped.some(value => value.area === 'dependency-cache' && value.reason === 'active_build'));
+    first.close(); await collectHostStorage(config); assert.ok(await stat(leased));
+  } finally { second.close(); }
+  await collectHostStorage(config);
+  await assert.rejects(stat(leased), { code: 'ENOENT' });
+  assert.ok(await stat(join(config.stagingRoot, 'dependency-cache', caches[2]!)));
+  assert.equal(await readFile(join(outside, 'keep'), 'utf8'), 'payload');
+  const retired = join(config.stagingRoot, 'dependency-cache', '.retiring-' + caches[1]!);
+  await mkdir(retired); await writeFile(join(retired, 'partial-deletion'), 'x');
+  await collectHostStorage(config); await assert.rejects(stat(retired), { code: 'ENOENT' });
 });
 
 for (const area of ['preparations', 'snapshots'] as const) test(`interrupted ${area} deletion resumes without its metadata`, async t => {
@@ -171,7 +201,7 @@ test('retired staging cleanup rejects linked directories and preserves fresh pre
 test('prepared future releases cannot displace the installed rollback version', async t => {
   const { config, journal, candidates } = await fixture(t);
   journal.db.prepare('INSERT INTO installed VALUES (?,?)').run('fixture', JSON.stringify({ candidateId: candidates[2]!.candidateId }));
-  assert.equal((await collectHostStorage(config)).candidates, 2);
+  assert.equal((await collectHostStorage(config)).candidates, 4);
   assert.deepEqual(journal.candidateForBuild('fixture', candidates[1]!.buildId), candidates[1]);
   assert.throws(() => journal.candidate(candidates[0]!.candidateId), { code: 'not_found' });
 });
@@ -186,7 +216,7 @@ test('rollback keeps the actual previous successful build when deployment skippe
   journal.db.prepare('UPDATE installed SET value=? WHERE instance_id=?').run(JSON.stringify({ candidateId: candidates[3]!.candidateId }), 'fixture');
   await collectHostStorage(config);
   assert.deepEqual(journal.candidate(candidates[0]!.candidateId), candidates[0]);
-  assert.deepEqual(journal.candidate(candidates[2]!.candidateId), candidates[2]);
+  assert.throws(() => journal.candidate(candidates[2]!.candidateId), { code: 'not_found' });
   assert.throws(() => journal.candidate(candidates[1]!.candidateId), { code: 'not_found' });
 });
 
@@ -201,7 +231,7 @@ test('missing and corrupt preparation records preserve their evidence without bl
   await atomicJson(join(source, 'snapshot.json'), { schemaVersion: 1, snapshot: { snapshotId, sourceRoot: join(source, 'source'),
     manifestPath: join(source, 'snapshot.json'), originalRoot: source, capturedAt: old.toISOString() } });
   await utimes(source, old, old);
-  assert.deepEqual(await collectHostStorage(config), { candidates: 2, preparations: 0, snapshots: 0 });
+  assert.deepEqual(await collectHostStorage(config), { candidates: 4, preparations: 0, snapshots: 0 });
   const status = journal.status(null).storageRetention!;
   assert.equal(status.state, 'partial'); assert.equal(status.lastSuccessAt, null);
   assert.ok(status.skipped.some(entry => entry.area === 'snapshots' && entry.reason === 'unknown_preparation_ownership' && entry.requiresAttention));
@@ -220,7 +250,7 @@ test('interrupted candidate deletion resumes after reopening and rejects republi
     assert.equal(reopened.pendingCandidateRetirements().length, 1);
     assert.throws(() => reopened.saveCandidate(candidate, manifest), { code: 'mutation_conflict' });
   } finally { reopened.close(); }
-  assert.equal((await collectHostStorage(config)).candidates, 4);
+  assert.equal((await collectHostStorage(config)).candidates, 6);
   assert.deepEqual(journal.pendingCandidateRetirements(), []);
   await assert.rejects(stat(join(config.artifactRoot, 'candidates', candidate.candidateId.slice(7))), { code: 'ENOENT' });
   assert.deepEqual(await collectHostStorage(config), { candidates: 0, preparations: 0, snapshots: 0 });
@@ -297,7 +327,7 @@ async function bootstrapFixture(t: TestContext) {
 test('historical bootstrap plans stop pinning obsolete candidates but retain current and rollback OS plans', async t => {
   const { config, plans, select, journal, candidates } = await bootstrapFixture(t);
   await select(2);
-  assert.equal((await collectHostStorage(config)).candidates, 2);
+  assert.equal((await collectHostStorage(config)).candidates, 4);
   assert.deepEqual(new Set((await retainedBootstrapPlans(config)).map(plan => hashJson(plan))), new Set([plans[1]!, plans[2]!].map(plan => hashJson(plan))));
   assert.deepEqual(journal.candidate(candidates[1]!.candidateId), candidates[1]);
   assert.throws(() => journal.candidate(candidates[0]!.candidateId), { code: 'not_found' });
@@ -418,6 +448,6 @@ test('automatic candidate cleanup is independent of optional inventory limits', 
   const { config, candidates } = await fixture(t), candidate = candidates[0]!;
   await mkdir(join(candidate.artifactRoot, ...Array<string>(66).fill('d')), { recursive: true });
   await assert.rejects(treeBytes(candidate.artifactRoot), { code: 'limit_exceeded' });
-  assert.equal((await collectHostStorage(config)).candidates, 4);
+  assert.equal((await collectHostStorage(config)).candidates, 6);
   await assert.rejects(stat(candidate.artifactRoot), { code: 'ENOENT' });
 });

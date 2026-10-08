@@ -69,7 +69,7 @@ export type WorkerAction =
   | { action: "ui.pointers"; uiId?: string }
   | { action: "package.catalog"; after: number; includeUis: boolean }
   | { action: "package.seed"; catalog: unknown }
-  | { action: "package.pruneApps" }
+  | { action: "package.prune" }
   | {
       action: "package.publish";
       input: PackageUploadAuthorization;

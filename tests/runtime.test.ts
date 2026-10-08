@@ -76,6 +76,16 @@ test('actual Hive executable listens and returns nonzero for unavailable port an
   await assert.rejects(runCommand(command, artifactRoot, executables, { environment: { IVY_INSTANCE_CONFIG: join(config.dataRoot, 'missing.json') } }), (error: unknown) => error instanceof IvyError && error.code === 'command_failed');
 });
 
+test('disabled local backups do not create storage or schedule snapshots', { timeout: 15_000 }, async t => {
+  const { root, config, path, cleanups } = await fixture(t);
+  (config.settings as unknown as Host.HiveSettings).backup.enabled = false;
+  await atomicJson(path, config);
+  const hive = await startHive(path); cleanups.push(() => hive.close());
+  await until(async () => { try { return (await checkHealth(config)).ready; } catch { return false; } });
+  await assert.rejects(async () => hive.backup(), { code: 'backup_disabled' });
+  assert.ok(!(await readdir(root)).includes('backups'));
+});
+
 test('process runner preserves literal arguments, bounds output and deadlines, and excludes ambient secrets', { timeout: 20_000 }, async () => {
   const arguments_ = ['space value', 'quotes"and\\', 'trailing\\', '', '`literal`', '$(literal)'];
   const result = await runCommand({ executable: 'node', args: ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', ...arguments_], timeoutMs: 3000 }, artifactRoot, executables);

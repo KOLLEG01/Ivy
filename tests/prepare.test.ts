@@ -137,7 +137,7 @@ await mkdir('dist/apps/unrelated',{recursive:true});await writeFile('dist/apps/u
   await assert.rejects(stat(join(prepared.path, 'artifact')), { code: 'ENOENT' });
   assert.equal(await readFile(join(dependencyCache, 'keep'), 'utf8'), 'shared dependencies');
   assert.deepEqual(await collectHostStorage(f.config, Date.now() + 4 * 24 * 60 * 60 * 1000),
-    { candidates: 0, preparations: 1, snapshots: 1 });
+    { candidates: 1, preparations: 1, snapshots: 1 });
 });
 
 test('independent captures of unchanged source reuse the exact prepared candidate', { timeout: 20_000 }, async t => {

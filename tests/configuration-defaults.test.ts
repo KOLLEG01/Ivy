@@ -85,6 +85,7 @@ test("portable service defaults preserve local choices and leave extensions and 
   );
   assert.deepEqual(result.packageUpdates, { intervalSeconds: 120 });
   assert.deepEqual(settings["hive"]!["backup"], {
+    enabled: true,
     directory: "/srv/ivy/backups/hive",
     intervalHours: 24,
     retain: 14,

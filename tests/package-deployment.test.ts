@@ -183,7 +183,7 @@ test(
   },
 );
 
-test("startup keeps two app archives and removes older catalog entries and files", async (t) => {
+for (const kind of ['app', 'service'] as const) test(`startup keeps two ${kind} archives and removes older catalog entries and files`, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ivy-app-retention-"));
   const packageRoot = join(root, "packages");
   const packages = [] as Array<Record<string, unknown>>;
@@ -191,10 +191,14 @@ test("startup keeps two app archives and removes older catalog entries and files
     const buildId = digest("app-build-" + version);
     const archiveHash = digest("app-archive-" + version);
     const manifest: Host.ReleaseManifest = {
-      schemaVersion: 1, componentId: "retained-ui", kind: "app", version, buildId,
+      schemaVersion: 1, componentId: "retained-ui", kind, version, buildId,
       connectsToHive: false,
       requirements: { node: ">=24.18.0 <25.0.0", hiveProtocol: 1, contracts: [] },
-      app: { appId: "retained-ui", dist: "dist/apps/retained-ui", entryPath: "index.html" },
+      ...(kind === 'app' ? { app: { appId: "retained-ui", dist: "dist/apps/retained-ui", entryPath: "index.html" } } : {
+        entrypoint: { executable: 'node', args: ['dist/main.js'], timeoutMs: 5000 },
+        readiness: { timeoutMs: 5000, command: { executable: 'node', args: ['dist/health.js'], timeoutMs: 5000 } },
+        shutdown: { timeoutMs: 1000 }, restart: { policy: 'always' as const, minimumDelayMs: 100, maximumDelayMs: 500 },
+      }),
     };
     packages.push({ componentId: "retained-ui", version, buildId, archiveHash,
       bytes: 1, manifest, revision: index + 1, publishedAt: new Date().toISOString(),
@@ -206,7 +210,7 @@ test("startup keeps two app archives and removes older catalog entries and files
   await writeFile(join(packageRoot, "catalog.json"), JSON.stringify({ schemaVersion: 1, revision: 3, packages }));
   const orphan = join(packageRoot, 'artifacts', 'failed-ui');
   await mkdir(join(orphan, '1.0.0'), { recursive: true });
-  await writeFile(join(orphan, '.app'), '');
+  await writeFile(join(orphan, kind === 'app' ? '.app' : '.package'), '');
   await writeFile(join(orphan, '1.0.0', 'abandoned.tar.gz'), 'x');
   const incoming = join(packageRoot, 'incoming');
   await mkdir(join(incoming, '00000000-0000-4000-8000-000000000001-extract'), { recursive: true });
@@ -237,6 +241,48 @@ test("startup keeps two app archives and removes older catalog entries and files
   await assert.rejects(stat(join(incoming, '00000000-0000-4000-8000-000000000001-extract')), { code: 'ENOENT' });
 });
 
+test('catalog collection preserves offline installations and unfinished deployment builds until replaced', t => {
+  const credential = { principalId: 'publisher', digest: digest('retention-publisher') };
+  const kernel = new HiveKernel({ filename: ':memory:', publicBaseUrl: 'http://127.0.0.1/ivy',
+    version: 'test', buildId: digest('hive-retention'), credentials: [credential] });
+  t.after(() => kernel.close());
+  const context = { principalId: credential.principalId, credentialDigest: credential.digest, generation: 1 };
+  const registration = kernel.registry.connect(context, { serviceNodeId: 'manager', hostId: 'fixture-host',
+    serviceName: 'service-manager', version: '1.0.0', buildId: digest('manager'), hiveProtocol: 1 });
+  const packages = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0'].map((version, index) => {
+    const buildId = digest('retained-service-' + version);
+    const manifest: Host.ReleaseManifest = { schemaVersion: 1, componentId: 'fixture-service', kind: 'service', version, buildId,
+      connectsToHive: true, requirements: { node: '>=24.18.0 <25.0.0', hiveProtocol: 1, contracts: [] },
+      entrypoint: { executable: 'node', args: ['dist/main.js'], timeoutMs: 5000 },
+      readiness: { timeoutMs: 5000, command: { executable: 'node', args: ['dist/health.js'], timeoutMs: 5000 } },
+      shutdown: { timeoutMs: 1000 }, restart: { policy: 'always', minimumDelayMs: 100, maximumDelayMs: 500 } };
+    return { componentId: manifest.componentId, version, buildId, archiveHash: digest('archive-' + version), bytes: 1,
+      manifest, revision: index + 1, publishedAt: new Date().toISOString(), publisherPrincipalId: credential.principalId };
+  });
+  kernel.packageCatalog.seed({ schemaVersion: 1, revision: 5, packages }, credential.principalId);
+  const snapshot: Host.ManagementSnapshot = { sequence: 1, status: { schemaVersion: 1, hostId: 'fixture-host',
+    observedAt: new Date().toISOString(), executor: null,
+    instances: [{ instanceId: 'fixture', serviceNodeId: 'fixture', componentId: 'fixture-service', engine: 'process', desiredEnabled: true,
+      installedBuild: packages[0]!.buildId, installedCandidateId: packages[0]!.buildId, observedBuild: packages[0]!.buildId,
+      observedState: 'ready', observedAt: new Date().toISOString(), code: null, message: '' }],
+    unfinished: [{ deploymentId: 'unfinished', hostId: 'fixture-host', instanceId: 'fixture', componentId: 'fixture-service',
+      requestHash: digest('request'), previousBuild: packages[0]!.buildId, targetBuild: packages[1]!.buildId, observedBuild: null,
+      phase: 'needs_attention', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      readiness: { state: 'unknown', message: '' } }] } };
+  kernel.registry.reportHost({ ...context, ...registration }, snapshot);
+  kernel.registry.disconnect('manager');
+  assert.deepEqual(kernel.packageCatalog.prune(credential.principalId).map(value => value.version), ['1.2.0']);
+  assert.deepEqual(kernel.packageCatalog.current()!.catalog.packages.map(value => value.version), ['1.0.0', '1.1.0', '1.3.0', '1.4.0']);
+  const reconnected = kernel.registry.connect({ ...context, generation: 2 }, { serviceNodeId: 'manager', hostId: 'fixture-host', serviceName: 'service-manager',
+    version: '1.0.0', buildId: digest('manager'), hiveProtocol: 1 });
+  snapshot.sequence++; snapshot.status.unfinished = [];
+  snapshot.status.instances[0]!.installedBuild = packages[4]!.buildId;
+  snapshot.status.instances[0]!.observedBuild = packages[4]!.buildId;
+  snapshot.status.instances[0]!.installedCandidateId = packages[4]!.buildId;
+  kernel.registry.reportHost({ ...context, ...reconnected }, snapshot);
+  assert.deepEqual(kernel.packageCatalog.prune(credential.principalId).map(value => value.version), ['1.0.0', '1.1.0']);
+});
+
 test('backup cleanup removes interrupted copies and orphaned pairs', async t => {
   const root = await mkdtemp(join(tmpdir(), 'ivy-backup-cleanup-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -261,6 +307,13 @@ test('backup cleanup removes interrupted copies and orphaned pairs', async t => 
   await assert.rejects(stat(orphan), { code: 'ENOENT' });
   await assert.rejects(stat(unfinished + '.ui'), { code: 'ENOENT' });
   await assert.rejects(stat(unfinished + '.sqlite'), { code: 'ENOENT' });
+  await writeFile(complete + '.sqlite-wal', 'sidecar');
+  await writeFile(join(root, 'manual.sqlite'), 'keep');
+  await collectBackupArtifacts(root, Date.now(), false);
+  for (const suffix of ['.ui', '.sqlite', '.sqlite.json', '.sqlite-wal'])
+    await assert.rejects(stat(complete + suffix), { code: 'ENOENT' });
+  assert.equal(await readFile(join(root, 'manual.sqlite'), 'utf8'), 'keep');
+  await collectBackupArtifacts(join(root, 'absent'), Date.now(), false);
 });
 
 test(

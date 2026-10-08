@@ -27,9 +27,11 @@ Local commands and operating procedure: [host operations](#local-host-operations
   handoff and stopped-owner maintenance, with readiness and rollback. Returning offline
   hosts converge from the catalog without a central push.
 - HostExecutor collects completed build preparations, unreferenced source snapshots and
-  obsolete candidate directories after three days. It retains the two newest versions
-  per component, live selections, their previous successful build and nearest older
-  version, and candidates referenced by unresolved operations or preparation evidence.
+  obsolete candidate directories after three days. It retains live selections, their
+  previous successful build (or the nearest older version when no predecessor is known),
+  and candidates referenced by unresolved operations or preparation evidence.
+  Dependency caches retain only the most recently used cache and caches leased by running
+  builds. Shared build leases prevent collection from invalidating dependency links.
   Bootstrap history keeps current, rollback and unresolved maintenance plans plus the
   grace period; older plans no longer pin all historical releases. Candidate deletion
   is journaled and retried after interruption. Eligible preparations and snapshots are
@@ -178,6 +180,13 @@ substitute a development build for an installed artifact.
   file-backed UI releases. Backup copies omit upload staging directories. Incomplete
   backup copies and unpaired UI directories are collected after a day; backup retention
   removes both halves of every expired pair.
+- Installations covered by an external backup service can set Hive `backup.enabled` to
+  `false`. Hive then stops creating local backups and collects its generated backup pairs
+  and sidecars; unrelated files remain untouched. Local backups default to enabled.
+- Standalone installers use [release collection](../tools/operations/collect-installation-releases.mjs)
+  under their update lock after verifying the live build. Protect that build, its last
+  successful predecessor and all unresolved update targets before removing other owned
+  hash directories. Managed installations use HostExecutor retention instead.
 - Shared native homes remain external data as specified in [agent environments](AGENT-INSTRUCTIONS.md).
   Destructive runtime reset is a separate explicit, coordinated maintenance operation:
   verify its exact deletion/preservation plan and stopped owners before execution.
@@ -195,6 +204,7 @@ the [host schema](schemas/host.schema.json).
 | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `status [--deployment ID]`                                                                                                       | Read host state or the original deployment record, including readiness and preparation progress. |
 | `prepare --component ID --source PATH`; `preparations`; `compact-preparations`                                                   | Capture an immutable candidate; inspect or compact retained preparations.                        |
+| `collect-storage`                                                                                                               | Run the automatic storage policy now and report removals and protected or blocked areas.         |
 | `deploy --instance ID (--candidate ID \| --source PATH) --operation-id ID`                                                       | Durably request activation; prefer deploying the exact inspected candidate.                      |
 | `restart`, `enable`, `disable` with `--instance ID --operation-id ID`; `rollback --instance ID --to BUILD --operation-id ID`     | Change an instance through the executor.                                                         |
 | `install-bootstrap --candidate ID`; `inspect-bootstrap`; `update-bootstrap --request PATH`; `bootstrap-status --operation-id ID` | Install or maintain bootstrap-owned processes separately from ordinary deployment.               |

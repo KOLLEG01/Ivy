@@ -8,9 +8,9 @@ import { Objects } from './objects.js';
 import { HiveStore } from './store.js';
 
 const contract: DataContract = {
-  key: 'ivy/package-catalog', version: '1.0.1', owner: { kind: 'hive' }, mediaType: 'application/json',
+  key: 'ivy/package-catalog', version: '1.0.2', owner: { kind: 'hive' }, mediaType: 'application/json',
   retention: { objects: { mode: 'retain' }, revisions: { mode: 'current' } },
-  specMarkdown: 'Validated Ivy package catalog. Only the latest two app archives per app remain listed.',
+  specMarkdown: 'Validated Ivy package catalog. Retain the latest two archives per component and builds referenced by installation observations or unfinished deployments.',
   jsonSchema: { type: 'object', properties: { schemaVersion: { const: 1 }, revision: { type: 'integer', minimum: 0 }, packages: { type: 'array' } },
     required: ['schemaVersion', 'revision', 'packages'], additionalProperties: false },
 };
@@ -18,7 +18,8 @@ const contract: DataContract = {
 export interface PackageCatalogSnapshot { objectId: string; objectRevision: number; catalog: PackageCatalog }
 
 export class PackageCatalogObject {
-  constructor(readonly store: HiveStore, readonly objects: Objects) { this.objects.register(contract, contract.owner); }
+  constructor(readonly store: HiveStore, readonly objects: Objects,
+    readonly protectedBuilds: () => ReadonlySet<string> = () => new Set()) { this.objects.register(contract, contract.owner); }
 
   private objectId(): string | null {
     const rows = this.store.all('SELECT id FROM objects WHERE contract_key=? ORDER BY id LIMIT 2', contract.key);
@@ -52,19 +53,20 @@ export class PackageCatalogObject {
   }
 
   private retainedPackages(packages: PackageCatalogEntry[]): PackageCatalogEntry[] {
-    const apps = new Map<string, PackageCatalogEntry[]>();
-    for (const entry of packages) if (entry.manifest.kind === 'app') {
-      const versions = apps.get(entry.componentId) ?? [];
+    const components = new Map<string, PackageCatalogEntry[]>();
+    for (const entry of packages) {
+      const versions = components.get(entry.componentId) ?? [];
       versions.push(entry);
-      apps.set(entry.componentId, versions);
+      components.set(entry.componentId, versions);
     }
     const keep = new Set<PackageCatalogEntry>();
-    for (const versions of apps.values())
+    for (const versions of components.values())
       for (const entry of versions.sort((a, b) => compareVersions(b.version, a.version)).slice(0, 2)) keep.add(entry);
-    return packages.filter(entry => entry.manifest.kind !== 'app' || keep.has(entry));
+    const protectedBuilds = this.protectedBuilds();
+    return packages.filter(entry => keep.has(entry) || protectedBuilds.has(entry.buildId));
   }
 
-  pruneApps(principalId: string): PackageCatalogEntry[] {
+  prune(principalId: string): PackageCatalogEntry[] {
     const current = this.current();
     requireThat(current, 'service_unavailable', 'Package catalog Object is not initialized.');
     const packages = this.retainedPackages(current.catalog.packages);

@@ -49,18 +49,18 @@ export class PackageRegistry {
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       await this.worker.request({ action: 'package.seed', catalog });
     }
-    await this.worker.request({ action: 'package.pruneApps' });
-    await this.collectAppArtifacts();
+    await this.worker.request({ action: 'package.prune' });
+    await this.collectPublishedArtifacts();
     await this.collectIncoming();
   }
 
-  private async collectAppArtifacts(): Promise<void> {
+  private async collectPublishedArtifacts(): Promise<void> {
     const catalog = await this.catalog(0);
-    const apps = new Map<string, Set<string>>();
-    for (const entry of catalog.packages) if (entry.manifest.kind === 'app') {
-      const versions = apps.get(entry.componentId) ?? new Set<string>();
+    const components = new Map<string, Set<string>>();
+    for (const entry of catalog.packages) {
+      const versions = components.get(entry.componentId) ?? new Set<string>();
       versions.add(entry.version);
-      apps.set(entry.componentId, versions);
+      components.set(entry.componentId, versions);
     }
     const root = resolve(this.root, 'artifacts');
     const directories = await readdir(root, { withFileTypes: true }).catch(error => {
@@ -69,31 +69,37 @@ export class PackageRegistry {
     });
     for (const entry of directories) {
       if (!entry.isDirectory() || !/^[a-z][a-z0-9-]{0,127}$/.test(entry.name)) continue;
-      const marker = resolve(root, entry.name, '.app');
-      const info = await lstat(marker).catch(error => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-        throw error;
-      });
-      if (info) {
-        requireThat(info.isFile() && !info.isSymbolicLink(), 'storage_invalid', 'App artifact marker is invalid.');
-        if (!apps.has(entry.name)) apps.set(entry.name, new Set());
+      for (const name of ['.app', '.package']) {
+        const marker = resolve(root, entry.name, name);
+        const info = await lstat(marker).catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+        if (info) {
+          requireThat(info.isFile() && !info.isSymbolicLink(), 'storage_invalid', 'Package artifact marker is invalid.');
+          if (!components.has(entry.name)) components.set(entry.name, new Set());
+        }
       }
     }
-    for (const [appId, versions] of apps) {
-      const directory = resolve(root, appId);
-      requireThat(directory.startsWith(root + sep), 'storage_invalid', 'App artifact directory is invalid.');
+    for (const [componentId, versions] of components) {
+      const directory = resolve(root, componentId);
+      requireThat(directory.startsWith(root + sep), 'storage_invalid', 'Package artifact directory is invalid.');
+      const info = await lstat(directory).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; });
+      if (!info) continue;
+      requireThat(info.isDirectory() && !info.isSymbolicLink(), 'storage_invalid', 'Package artifact directory is invalid.');
       const entries = await readdir(directory, { withFileTypes: true }).catch(error => {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
         throw error;
       });
       for (const entry of entries) {
-        if (!entry.isDirectory() || versions.has(entry.name)) continue;
+        if (!entry.isDirectory() || versions.has(entry.name) || !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(entry.name)) continue;
         const target = resolve(directory, entry.name);
-        requireThat(target.startsWith(directory + sep), 'storage_invalid', 'App artifact path is invalid.');
+        requireThat(target.startsWith(directory + sep), 'storage_invalid', 'Package artifact path is invalid.');
         await rm(target, { recursive: true, force: true });
       }
-      if (versions.size === 0 && (await readdir(directory)).every(name => name === '.app')) {
+      if (versions.size === 0 && (await readdir(directory)).every(name => ['.app', '.package'].includes(name))) {
         await rm(join(directory, '.app'), { force: true });
+        await rm(join(directory, '.package'), { force: true });
         await rmdir(directory);
       }
     }
@@ -119,7 +125,10 @@ export class PackageRegistry {
     const previous = this.commitChain; let release!: () => void;
     this.commitChain = new Promise<void>(resolve => { release = resolve; });
     await previous;
-    try { await this.collectAppArtifacts(); await this.collectIncoming(); }
+    try {
+      await this.worker!.request({ action: 'package.prune' });
+      await this.collectPublishedArtifacts(); await this.collectIncoming();
+    }
     finally { release(); }
   }
 
@@ -197,13 +206,13 @@ export class PackageRegistry {
         requireThat(grant.manifest.kind !== 'app' || this.installUi, 'service_unavailable', 'Hive has no app package installer.');
         const target = join(this.root, 'artifacts', grant.componentId, grant.version, grant.archiveHash.slice(7) + '.tar.gz');
         await mkdir(dirname(target), { recursive: true });
-        if (grant.manifest.kind === 'app') {
-          const marker = join(this.root, 'artifacts', grant.componentId, '.app');
+        {
+          const marker = join(this.root, 'artifacts', grant.componentId, '.package');
           await writeFile(marker, '', { flag: 'wx' }).catch(error => {
             if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
           });
           const info = await lstat(marker);
-          requireThat(info.isFile() && !info.isSymbolicLink(), 'storage_invalid', 'App artifact marker is invalid.');
+          requireThat(info.isFile() && !info.isSymbolicLink(), 'storage_invalid', 'Package artifact marker is invalid.');
         }
         const retained = await lstat(target).catch(error => {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -216,13 +225,13 @@ export class PackageRegistry {
         const { uploadId: _uploadId, tokenDigest: _tokenDigest, principalId: _principalId, expiresAt: _expiresAt, ...entry } = grant;
         requireThat(this.worker, 'service_unavailable', 'Hive package storage worker is unavailable.');
         result = await this.worker.request<PackageCatalogEntry>({ action: 'package.publish', input: entry, publisherPrincipalId: grant.principalId });
-        await this.collectAppArtifacts();
+        await this.collectPublishedArtifacts();
       };
       const previous = this.commitChain; let release!: () => void; this.commitChain = new Promise<void>(resolve => { release = resolve; });
       await previous;
       try { await commit(); }
       catch (error) {
-        if (grant.manifest.kind === 'app') await this.collectAppArtifacts().catch(() => undefined);
+        await this.collectPublishedArtifacts().catch(() => undefined);
         throw error;
       } finally { release(); }
       return result;
