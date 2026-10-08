@@ -3,7 +3,7 @@ import type { Agent, Operation, Wire } from '../../../packages/sdk/src/node.js';
 import type { SecretaryEngine } from './engine.js';
 import type { Assignment, EventProgress, Execution, ExecutionTarget, ExecutionTrigger, ScheduleProgress, SecretaryConfiguration } from './schema.js';
 import type { Document } from './store.js';
-import { defaultConfiguration, effectiveRules, executionName, unifiedMainRules, validateAssignment, validateConfiguration, validateExecutionTarget } from './assignment-schema.js';
+import { assignmentName, defaultConfiguration, effectiveRules, executionName, unifiedMainRules, validateAssignment, validateConfiguration, validateExecutionTarget } from './assignment-schema.js';
 import { need, same } from './schema.js';
 import { messageBatchKind, messageChannel, messageWindowKey, messageWindowMs } from './assignment-message.js';
 import type { MessageWindow, MessageWindowState } from './assignment-message.js';
@@ -25,6 +25,7 @@ export function selectDefaultAgentManager(nodes: Operation.ServiceNode[], hostId
 
 export class AssignmentScheduler {
   private cursor: string | undefined;
+  private readonly retiredAssignments = new Map<string, string>();
   constructor(readonly engine: SecretaryEngine, readonly fallbackExecution: ExecutionTarget | null = null) {}
 
   private async operation(...parts: unknown[]): Promise<string> {
@@ -78,14 +79,34 @@ export class AssignmentScheduler {
 
   private async assignments(): Promise<Document<'secretary/assignment'>[]> {
     const page = await this.engine.client.request('objects.query', { contractKey: 'secretary/assignment', limit: this.engine.settings.recordsPerTick,
+      includeArchived: true, select: ['object.effectivelyArchived', 'object.archivedAt', 'object.name', 'data:/assignmentId'],
       ...(this.cursor ? { cursor: this.cursor } : {}), orderBy: [{ field: 'object.id', direction: 'asc' }],
       where: { op: 'eq', field: 'object.parentId', value: this.engine.store.root } });
     this.cursor = page.nextCursor ?? undefined;
     const result: Document<'secretary/assignment'>[] = [];
     for (const row of page.items) {
       try {
-        const assignment = await this.engine.store.read('secretary/assignment', { objectId: row.objectId, revision: row.revision });
-        validateAssignment(assignment.value); result.push(assignment);
+        const archived = row.values['object.effectivelyArchived'] === true;
+        const retirement = row.revision + ':' + row.values['object.archivedAt'];
+        if (archived && this.retiredAssignments.get(row.objectId) === retirement) continue;
+        if (archived) {
+          const key = row.values['data:/assignmentId'];
+          need(typeof key === 'string' && row.values['object.name'] === assignmentName(key),
+            'secretary_assignment_identity_conflict', 'The archived assignment must retain its original identity.');
+          const name = 'secretary-assignment-' + hashJson(key).slice('sha256:'.length, 48);
+          const legacy = this.engine.store.technicalNamed<{ name: string }>('secretary/event-subscription', key);
+          for (const selected of new Set([name, ...(legacy ? [legacy.value.name] : [])]))
+            await this.engine.client.request('events.unsubscribe', { name: selected,
+              mutationId: await this.operation('retire-assignment-subscription', row.objectId, retirement, selected) });
+          if (legacy) this.engine.store.technicalDelete('secretary/event-subscription', legacy.pin.objectId);
+          this.retiredAssignments.set(row.objectId, retirement);
+          this.engine.recoveryIssues.delete('assignment:' + key);
+        } else {
+          this.retiredAssignments.delete(row.objectId);
+          const assignment = await this.engine.store.read('secretary/assignment', { objectId: row.objectId, revision: row.revision });
+          validateAssignment(assignment.value);
+          result.push(assignment);
+        }
         this.engine.recoveryIssues.delete('assignment-record:' + row.objectId);
       } catch (error) {
         if (this.engine.signal.aborted) throw error;
@@ -462,7 +483,14 @@ export class AssignmentScheduler {
       }
       need(progress.value.assignmentId === key && progress.value.assignment.objectId === assignment.pin.objectId,
         'secretary_event_progress_mismatch', 'The durable event cursor belongs to another assignment.');
-      need(progress.value.processedThrough <= batch.throughSequence, 'secretary_event_progress_conflict', 'The event subscription moved behind its durable progress.');
+      // Restoring an archived assignment recreates its subscription. Skip journal
+      // pages already covered by the retained progress without replaying effects.
+      if (progress.value.processedThrough > batch.throughSequence) {
+        need(batch.hasMore, 'secretary_event_progress_conflict', 'The event subscription moved behind its durable progress.');
+        await this.engine.client.request('events.ack', { name, throughSequence: batch.throughSequence,
+          ...(batch.gap ? { gapThroughSequence: batch.gap.prunedThroughSequence } : {}) });
+        continue;
+      }
       if (progress.value.processedThrough < batch.throughSequence) {
         let next = structuredClone(progress.value);
         let stateChanged = false;

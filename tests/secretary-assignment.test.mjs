@@ -11,6 +11,7 @@ import { uniqueVoiceTarget } from '../dist/services/secretary/src/voice-target.j
 import { discoverVoiceTarget } from '../dist/services/secretary/src/voice-target.js';
 import { AssignmentVoice, voicePrompt } from '../dist/services/secretary/src/assignment-voice.js';
 import { SecretaryStore } from '../dist/services/secretary/src/store.js';
+import { secretaryRegistry } from '../dist/services/secretary/src/schema.js';
 import { AssignmentScheduler, selectDefaultAgentManager } from '../dist/services/secretary/src/assignment-scheduler.js';
 import { messageBatch, messageBatchKind, messageChannel, messageUnreadSnapshot, messageWindowKey } from '../dist/services/secretary/src/assignment-message.js';
 import { fixture, principal, settingsFor } from './secretary-fixture.mjs';
@@ -94,6 +95,82 @@ test('same-host ready AgentManager is the default', () => {
   assert.equal(selectDefaultAgentManager([offline], 'fixture'), null);
 });
 
+test('archived assignments release subscriptions once and preserve progress across restore and restart', async t => {
+  const f = await fixture(t, { recordsPerTick: 10 }, () => {
+    const registry = secretaryRegistry();
+    return { ...registry, requiredContracts: registry.requiredContracts.map(required => ({ ...required,
+      readScope: { roots: null, history: 'all', includeArchived: true, references: [] } })) };
+  });
+  const scheduler = new AssignmentScheduler(f.engine, executionTarget);
+  await scheduler.initialize();
+  const saved = [];
+  for (const assignmentId of ['archived', 'active']) {
+    const value = assignmentFor(at, { assignmentId });
+    saved.push(await f.engine.store.create('secretary/assignment', assignmentName(assignmentId), value, f.operationId()));
+  }
+  await scheduler.tick();
+  const progressName = 'event-' + hashJson('archived').slice('sha256:'.length);
+  const progress = await f.engine.store.named('secretary/event-progress', progressName);
+  assert.ok(progress);
+  const name = 'secretary-assignment-' + hashJson('archived').slice('sha256:'.length, 48);
+  const oldName = 'legacy-' + randomUUID();
+  await f.connection.request('events.subscribe', { name: oldName, filter: {}, initialSequence: 0, durable: true });
+  f.engine.store.technicalCreate('secretary/event-subscription', 'archived', { name: oldName });
+  await f.client.request('objects.archive', { objectId: saved[0].pin.objectId, archived: true, mutationId: f.operationId() });
+  const originalRequest = f.engine.client.request.bind(f.engine.client);
+  let retirements = 0;
+  f.engine.client.request = (method, args) => {
+    if (method === 'events.unsubscribe') retirements++;
+    return originalRequest(method, args);
+  };
+  assert.deepEqual((await scheduler.assignments()).map(row => row.value.assignmentId), ['active']);
+  await scheduler.assignments();
+  assert.equal(retirements, 2, 'already retired subscriptions must not generate mutations on every poll');
+  for (const selected of [name, oldName]) assert.deepEqual(await f.connection.request('events.unsubscribe', {
+    name: selected, mutationId: f.operationId(),
+  }), { removed: false });
+  assert.equal(f.engine.store.technicalNamed('secretary/event-subscription', 'archived'), null);
+  assert.deepEqual(await f.engine.store.named('secretary/event-progress', progressName), progress);
+  await f.restart();
+  const restarted = new AssignmentScheduler(f.engine, executionTarget);
+  await restarted.assignments();
+  assert.deepEqual(await f.engine.store.named('secretary/event-progress', progressName), progress);
+  await f.client.request('objects.archive', { objectId: saved[0].pin.objectId, archived: false, mutationId: f.operationId() });
+  const restored = (await restarted.assignments()).find(row => row.value.assignmentId === 'archived');
+  assert.ok(restored);
+  await restarted.events(restored, (await restarted.configuration()).value, 32);
+  assert.deepEqual(await f.engine.store.named('secretary/event-progress', progressName), progress);
+  const activeName = 'secretary-assignment-' + hashJson('active').slice('sha256:'.length, 48);
+  assert.deepEqual(await f.connection.request('events.unsubscribe', { name: activeName, mutationId: f.operationId() }), { removed: true });
+});
+
+test('restored subscriptions skip retained progress without repeating executions', async () => {
+  const assignment = assignmentFor(at, { enabled: true });
+  const selected = { pin: { objectId: 'assignment', revision: 1 }, value: assignment };
+  const event = sequence => ({ sequence, topic: assignment.trigger.topic, topicVersion: assignment.trigger.topicVersion,
+    source: 'service:producer', mutationId: 'event-' + sequence, occurredAt: at, payload: { kind: assignment.trigger.eventKind } });
+  const batches = [
+    { items: [], throughSequence: 100, hasMore: true, gap: { prunedThroughSequence: 100, resumeAfterSequence: 100 } },
+    { items: [event(150)], throughSequence: 200, hasMore: true, gap: null },
+    { items: [event(245), event(275)], throughSequence: 300, hasMore: false, gap: null },
+  ];
+  const progress = { pin: { objectId: 'progress', revision: 1 }, value: { assignmentId: assignment.assignmentId,
+    assignment: selected.pin, assignmentSnapshot: assignment, processedThrough: 250, active: true, needsRebase: false } };
+  const acknowledgements = [], executions = [];
+  const engine = { now: () => new Date(at), store: { async named() { return progress; }, technicalNamed() { return null; } },
+    client: { async request(method, args) {
+      if (method === 'events.subscribe') return batches.shift();
+      assert.equal(method, 'events.ack'); acknowledgements.push(args); return { acknowledgedSequence: args.throughSequence };
+    } } };
+  const scheduler = new AssignmentScheduler(engine);
+  scheduler.enqueue = async (_selected, trigger) => executions.push(trigger.key);
+  assert.equal(await scheduler.events(selected, {}, 3), true);
+  assert.deepEqual(acknowledgements.map(row => row.throughSequence), [100, 200, 300]);
+  assert.equal(acknowledgements[0].gapThroughSequence, 100);
+  assert.equal(executions.length, 1);
+  assert.match(executions[0], /275/);
+});
+
 test('message assignment groups any advertised channel for five minutes and replays without duplication', async () => {
   const assignment = { ...assignmentFor(at), enabled: true,
     trigger: { kind: 'event', topic: 'messages', topicVersion: '1.0.0', eventKind: 'message.received', sourceServiceNodeId: null } };
@@ -167,7 +244,8 @@ for (const predatesAssignment of [false, true]) test(predatesAssignment
     batches[1].throughSequence = 1103;
   }
   const client = { async request(method, args) {
-    if (method === 'objects.query') return { items: [{ objectId: 'bad-assignment', revision: 1 }, { objectId: 'assignment-object', revision: 1 }], nextCursor: null };
+    if (method === 'objects.query') return { items: [{ objectId: 'bad-assignment', revision: 1, values: { 'object.effectivelyArchived': false, 'object.archivedAt': null } },
+      { objectId: 'assignment-object', revision: 1, values: { 'object.effectivelyArchived': false, 'object.archivedAt': null } }], nextCursor: null };
     if (method === 'events.subscribe') { assert.equal(args.initialSequence, 0); assert.equal(args.durable, true); return batches.shift(); }
     if (method === 'events.ack') { acknowledgements.push(args); return { acknowledgedSequence: args.throughSequence }; }
     if (method === 'system.status') return { runtimeEpoch: randomUUID() };

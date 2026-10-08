@@ -33,6 +33,9 @@ Contracts: [inbox](schemas/secretary.schema.json), [triage](schemas/secretary-tr
   batch is acknowledged only after matching executions and any revision transition are saved.
   Historical journal gaps are exposed as recovery issues. Secretary's own Hive Object changes
   never trigger an Object-change assignment, preventing an execution from retriggering itself. Internal execution and progress writes do not produce Object-change events.
+  Archived assignments release their event subscriptions so they cannot block journal capacity.
+  Their retained progress and execution history remain available; restoring an assignment must
+  skip already processed journal pages before resuming collection.
 - Every admitted execution creates or explicitly reuses a durable native AgentManager task according to its assignment. Reused tasks are leased to one execution at a time. The optional preflight process completes first and its
   bounded output becomes labelled, untrusted prompt context.
 - The global configuration prefers a ready AgentManager on the Secretary host and a stable
