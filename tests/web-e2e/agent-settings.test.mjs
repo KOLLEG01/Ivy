@@ -112,11 +112,11 @@ for (const width of [1280, 390])
       await expect(
         f.page.getByLabel("Default model for server type"),
       ).toHaveText(/Native fixture model/);
-      await choose(f.page.getByLabel("Server type", { exact: true }), "claude");
+      await f.page.getByRole("tab", { name: "Claude", exact: true }).click();
       await expect(
         f.page.getByLabel("Default model for server type"),
       ).toHaveText(/claude-profile-model/);
-      await choose(f.page.getByLabel("Server type", { exact: true }), "codex");
+      await f.page.getByRole("tab", { name: "Codex", exact: true }).click();
       await expect(
         f.page.getByLabel("Default effort for server type"),
       ).toHaveText(/low/i);

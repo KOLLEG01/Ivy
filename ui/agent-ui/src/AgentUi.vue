@@ -7,15 +7,19 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  HostMark,
   Kbd,
   SearchDialog,
   SearchResult,
   SidebarGroup,
+  SidebarGroupAction,
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarMenu,
@@ -29,14 +33,13 @@ import {
   useRemote,
 } from "@ivy/ui";
 import {
-  Check,
   ChevronsUpDown,
   Folder,
   FolderOpen,
+  ListFilter,
   MoreHorizontal,
   Plus,
   Search,
-  Server,
   SquarePen,
 } from "@lucide/vue";
 import type {
@@ -45,7 +48,6 @@ import type {
   Transport,
 } from "../../../packages/sdk/src/client.js";
 import {
-  nativeRead,
   serviceNodeLabel,
   record,
   text,
@@ -63,7 +65,7 @@ import AgentHostSettings from "./AgentHostSettings.vue";
 import AgentSettings from "./AgentSettings.vue";
 import AgentTask from "./AgentTask.vue";
 import ProjectActions from "../../../packages/ui-client/src/ProjectActions.vue";
-import { groupTasks, isVisibleTask, isInternalProject, partitionInternalTasks } from "./task-groups";
+import { hostSections, isVisibleTask, partitionInternalTasks } from "./task-groups";
 import type { ScopedProject } from "./task-groups";
 import {
   liveWorking,
@@ -80,26 +82,33 @@ const query = computed(
   () => new URLSearchParams(hash.value.split("?")[1] ?? ""),
 );
 const node = computed(() => query.value.get("node") ?? "");
-// The scope picker chooses all hosts or the routed host; opening a task keeps the chosen scope.
-const scopeKey = "ivy.agent.scope:" + base.href;
-const allHosts = ref(false);
+// The task tree always spans every host; a host filter only narrows it and never follows navigation.
+const filterKey = "ivy.agent.host-filter:" + base.href,
+  internalKey = "ivy.agent.show-internal:" + base.href;
+const hostFilter = ref(""),
+  showInternal = ref(false);
 try {
-  allHosts.value = sessionStorage.getItem(scopeKey) === "all";
+  hostFilter.value = sessionStorage.getItem(filterKey) ?? "";
+  showInternal.value = localStorage.getItem(internalKey) === "true";
 } catch {
   /* Optional view state. */
 }
-const chooseScope = (all: boolean) => {
-  allHosts.value = all;
+const filterHost = (value: unknown) => {
+  hostFilter.value = value === "all" ? "" : String(value);
   try {
-    sessionStorage.setItem(scopeKey, all ? "all" : "");
+    sessionStorage.setItem(filterKey, hostFilter.value);
   } catch {
     /* Optional view state. */
   }
 };
-watch(section, (value) => {
-  if (value === "hosts") chooseScope(true);
-}, { immediate: true });
-const scopeNode = computed(() => (allHosts.value ? "" : node.value));
+const toggleInternal = (value: boolean) => {
+  showInternal.value = value;
+  try {
+    localStorage.setItem(internalKey, String(value));
+  } catch {
+    /* Optional view state. */
+  }
+};
 const search = ref("");
 const searchOpen = ref(false);
 watch(searchOpen, (open) => {
@@ -120,8 +129,8 @@ const recent = usePage((signal, cursor) =>
     client.request(
       "inventory.list",
       {
-        ...(scopeNode.value
-          ? { serviceNodeId: scopeNode.value }
+        ...(hostFilter.value
+          ? { serviceNodeId: hostFilter.value }
           : { serviceName: "agent-manager" }),
         namespace: "codex",
         kind: "thread",
@@ -133,18 +142,6 @@ const recent = usePage((signal, cursor) =>
       },
       { signal },
     ).then((page) => ({ ...page, items: page.items.filter(isVisibleTask) })), 30000, undefined, ["inventory"]);
-const projects = useRemote(async (signal) =>
-  scopeNode.value
-    ? ((await nativeRead(
-        client,
-        scopeNode.value,
-        "agent.projects",
-        {},
-        signal,
-      )) as Agent.ProjectsResult)
-    : null,
-  30000, ["inventory"],
-);
 const allProjects = useRemote(async (signal) => {
   const result: ScopedProject[] = [];
   let cursor: string | undefined;
@@ -168,11 +165,9 @@ try {
 } catch {
   /* Optional view state. */
 }
-watch(scopeNode, () => {
+watch(hostFilter, () => {
   recent.value.value = null;
   recent.reset();
-  projects.value.value = null;
-  void projects.refresh();
 });
 watch(node, (value) => {
   if (value) {
@@ -185,9 +180,6 @@ watch(node, (value) => {
   }
 });
 
-const selectedHost = computed(() =>
-  nodes.value.value?.items.find((item) => item.serviceNodeId === scopeNode.value),
-);
 const fallbackNode = computed(() => {
   const available = nodes.value.value?.items ?? [];
   return (
@@ -221,19 +213,34 @@ const taskName = (summary: unknown, id: string) =>
   text(record(summary).name) ||
   text(record(summary).preview).slice(0, 100) ||
   id;
-const scopedProjects = computed(() => scopeNode.value
-  ? (projects.value.value?.projects ?? []).filter(project => project.source === "native").map(project => ({ serviceNodeId: scopeNode.value, project }))
-  : allProjects.value.value ?? []);
-const taskLists = computed(() => partitionInternalTasks(scopedProjects.value, recent.value.value?.items ?? []));
-const visibleRecent = computed(() => allProjects.value.value === null ? [] : taskLists.value.recent);
-const internalProjects = computed(() => scopedProjects.value.filter(value => isInternalProject(value.project)));
-const internalOpen = ref(false);
-const groups = computed(() =>
-  groupTasks(
-    scopedProjects.value.map(value => value.project).filter(project => !isInternalProject(project)),
-    taskLists.value.recent,
-  ).filter((group) => !search.value || group.tasks.length),
+const hostItem = (serviceNodeId: string) =>
+  nodes.value.value?.items.find((item) => item.serviceNodeId === serviceNodeId);
+const hostReady = (serviceNodeId: string) => {
+  const item = hostItem(serviceNodeId);
+  return !!item?.ready && !!item.connected;
+};
+const scopedProjects = computed(() =>
+  (allProjects.value.value ?? []).filter(value => !hostFilter.value || value.serviceNodeId === hostFilter.value));
+const projectOf = (serviceNodeId: string, id: string) =>
+  scopedProjects.value.find(value => value.serviceNodeId === serviceNodeId && value.project.nativeId === id)?.project;
+// Tasks wait for the project catalog so internal work never flashes into a user project.
+const tasks = computed(() => allProjects.value.value === null ? [] : recent.value.value?.items ?? []);
+const taskLists = computed(() => partitionInternalTasks(scopedProjects.value, tasks.value));
+const visibleRecent = computed(() => taskLists.value.recent);
+const sections = computed(() =>
+  hostSections(
+    hostFilter.value ? [hostFilter.value] : (nodes.value.value?.items ?? []).map(item => item.serviceNodeId),
+    scopedProjects.value,
+    tasks.value,
+  ).map(value => ({ ...value, groups: value.groups.filter(group => !search.value || group.tasks.length) }))
+    .filter(value => !search.value || value.groups.length || (showInternal.value && value.internal.length)),
 );
+const internalOpen = ref(new Set<string>());
+const toggleInternalGroup = (serviceNodeId: string) => {
+  const next = new Set(internalOpen.value);
+  if (!next.delete(serviceNodeId)) next.add(serviceNodeId);
+  internalOpen.value = next;
+};
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 watch(search, () => {
@@ -367,7 +374,7 @@ const toggleGroup = (id: string) => {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton v-if="fallbackNode" as-child
-              ><a :href="route('host', { node: node || fallbackNode })"
+              ><a :href="route('host', { node: hostFilter || node || fallbackNode })"
                 ><SquarePen aria-hidden="true" /><span>New task</span></a
               ></SidebarMenuButton
             >
@@ -393,123 +400,81 @@ const toggleGroup = (id: string) => {
             <SidebarMenuItem>
               <DropdownMenu>
                 <DropdownMenuTrigger as-child>
-                  <SidebarMenuButton
-                    variant="outline"
-                    aria-label="Choose host scope"
-                  >
-                    <Server aria-hidden="true" />
-                    <span class="truncate">{{
-                      selectedHost ? hostName(selectedHost.serviceNodeId) : "All hosts"
-                    }}</span>
+                  <SidebarMenuButton aria-label="Filter tasks">
+                    <ListFilter aria-hidden="true" :class="{ 'text-primary': hostFilter }" />
+                    <span class="truncate">{{ hostFilter ? hostName(hostFilter) : "All hosts" }}</span>
                     <ChevronsUpDown class="ml-auto" aria-hidden="true" />
                   </SidebarMenuButton>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" class="w-60">
-                  <DropdownMenuLabel class="text-xs text-muted-foreground"
-                    >Task scope</DropdownMenuLabel
-                  >
-                  <DropdownMenuItem as-child
-                    ><a :href="route('hosts')"
-                      ><span>All hosts</span
-                      ><Check
-                        v-if="!scopeNode"
-                        class="ml-auto"
-                        aria-hidden="true" /></a
-                  ></DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    v-for="item in nodes.value.value?.items"
-                    :key="item.serviceNodeId"
-                    as-child
-                  >
-                    <a :href="route('host', { node: item.serviceNodeId })" @click="chooseScope(false)"
-                      ><span
-                        class="size-2 rounded-full"
-                        :class="
-                          item.ready && item.connected
-                            ? 'bg-emerald-500'
-                            : 'bg-amber-500'
-                        "
-                        aria-hidden="true" /><span class="truncate">{{
-                        hostName(item.serviceNodeId)
-                      }}</span
-                      ><Check
-                        v-if="scopeNode === item.serviceNodeId"
-                        class="ml-auto"
-                        aria-hidden="true"
-                    /></a>
-                  </DropdownMenuItem>
+                  <DropdownMenuLabel class="text-xs text-muted-foreground">Show tasks from</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup :model-value="hostFilter || 'all'" @update:model-value="filterHost">
+                    <DropdownMenuRadioItem value="all">All hosts</DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem
+                      v-for="item in nodes.value.value?.items"
+                      :key="item.serviceNodeId"
+                      :value="item.serviceNodeId"
+                    >
+                      <HostMark :label="hostName(item.serviceNodeId)" :seed="item.serviceNodeId" />
+                      <span class="truncate">{{ hostName(item.serviceNodeId) }}</span>
+                      <span
+                        v-if="!hostReady(item.serviceNodeId)"
+                        class="ml-auto size-2 shrink-0 rounded-full bg-amber-500"
+                        role="img"
+                        aria-label="Not ready"
+                      />
+                    </DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
                   <p
                     v-if="nodes.value.value?.items.length === 0"
                     class="px-2 py-1.5 text-sm text-muted-foreground"
                   >
                     No AgentManager is available.
                   </p>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuCheckboxItem
+                    :model-value="showInternal"
+                    @update:model-value="toggleInternal($event === true)"
+                    >Show IvyInternal</DropdownMenuCheckboxItem
+                  >
                 </DropdownMenuContent>
               </DropdownMenu>
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarGroup>
-        <SidebarGroup v-if="!scopeNode">
-          <SidebarGroupLabel>Recent</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              <SidebarMenuItem
-                v-for="item in visibleRecent"
-                :key="
-                  item.resourceRef.serviceNodeId +
-                  ':' +
-                  item.resourceRef.nativeId
-                "
-              >
-                <SidebarMenuButton
-                  as-child
-                  :class="{ 'pr-7': activityOf(item) }"
-                  :is-active="openKey === taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)"
-                  ><a
-                    :href="
-                      route('task', {
-                        node: item.resourceRef.serviceNodeId,
-                        id: item.resourceRef.nativeId,
-                      })
-                    "
-                    :aria-current="
-                      openKey === taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)
-                        ? 'page'
-                        : undefined
-                    "
-                    :title="
-                      taskName(item.summary, item.resourceRef.nativeId) +
-                      ' · ' +
-                      hostName(item.resourceRef.serviceNodeId)
-                    "
-                    ><span>{{
-                      taskName(item.summary, item.resourceRef.nativeId)
-                    }}</span></a
-                  ></SidebarMenuButton
-                ><SidebarMenuBadge v-if="activityOf(item)"
-                  ><ActivityIndicator :state="activityOf(item)!"
-                /></SidebarMenuBadge>
-              </SidebarMenuItem>
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-        <SidebarGroup v-else>
-          <SidebarGroupLabel>Projects</SidebarGroupLabel>
+        <SidebarGroup v-for="host in sections" :key="host.serviceNodeId">
+          <SidebarGroupLabel class="gap-2 pr-8" :title="hostName(host.serviceNodeId)">
+            <HostMark :label="hostName(host.serviceNodeId)" :seed="host.serviceNodeId" />
+            <span class="truncate">{{ hostName(host.serviceNodeId) }}</span>
+            <span
+              v-if="!hostReady(host.serviceNodeId)"
+              class="size-1.5 shrink-0 rounded-full bg-amber-500"
+              role="img"
+              aria-label="Not ready"
+            />
+          </SidebarGroupLabel>
+          <SidebarGroupAction as-child>
+            <a
+              :href="route('host', { node: host.serviceNodeId })"
+              :aria-label="'New task on ' + hostName(host.serviceNodeId)"
+              :title="'New task on ' + hostName(host.serviceNodeId)"
+              ><Plus aria-hidden="true"
+            /></a>
+          </SidebarGroupAction>
           <SidebarGroupContent>
             <SidebarMenu>
               <Collapsible
-                v-for="group in groups"
+                v-for="group in host.groups"
                 :key="group.id"
                 as-child
-                :open="!collapsed.has(group.id)"
-                @update:open="toggleGroup(group.id)"
+                :open="!collapsed.has(host.serviceNodeId + ':' + group.id)"
+                @update:open="toggleGroup(host.serviceNodeId + ':' + group.id)"
               >
                 <SidebarMenuItem>
                   <CollapsibleTrigger as-child>
                     <SidebarMenuButton :title="group.name"
                       ><Folder
-                        v-if="collapsed.has(group.id)"
+                        v-if="collapsed.has(host.serviceNodeId + ':' + group.id)"
                         aria-hidden="true"
                       /><FolderOpen v-else aria-hidden="true" /><span
                         class="truncate"
@@ -521,7 +486,7 @@ const toggleGroup = (id: string) => {
                     ><a
                       :href="
                         route('host', {
-                          node: scopeNode,
+                          node: host.serviceNodeId,
                           project: group.path,
                           projectId: group.id,
                         })
@@ -529,9 +494,9 @@ const toggleGroup = (id: string) => {
                       :aria-label="'New task in ' + group.name"
                       ><Plus aria-hidden="true" /></a
                   ></SidebarMenuAction>
-                  <ProjectActions v-if="group.path" :client="client" :node="scopeNode"
-                    :project="projects.value.value!.projects.find(project => project.nativeId === group.id)!"
-                    @changed="projects.refresh(); allProjects.refresh(); recent.refresh()">
+                  <ProjectActions v-if="group.path && projectOf(host.serviceNodeId, group.id)" :client="client" :node="host.serviceNodeId"
+                    :project="projectOf(host.serviceNodeId, group.id)!"
+                    @changed="allProjects.refresh(); recent.refresh()">
                     <SidebarMenuAction :aria-label="'Manage project ' + group.name" show-on-hover><MoreHorizontal aria-hidden="true" /></SidebarMenuAction>
                   </ProjectActions>
                   <CollapsibleContent>
@@ -543,18 +508,16 @@ const toggleGroup = (id: string) => {
                         <SidebarMenuSubButton
                           as-child
                           :class="{ 'pr-7': activityOf(item) }"
-                          :is-active="
-                            query.get('id') === item.resourceRef.nativeId
-                          "
+                          :is-active="openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)"
                           ><a
                             :href="
                               route('task', {
-                                node: scopeNode,
+                                node: host.serviceNodeId,
                                 id: item.resourceRef.nativeId,
                               })
                             "
                             :aria-current="
-                              query.get('id') === item.resourceRef.nativeId
+                              openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)
                                 ? 'page'
                                 : undefined
                             "
@@ -581,37 +544,43 @@ const toggleGroup = (id: string) => {
                   </CollapsibleContent>
                 </SidebarMenuItem>
               </Collapsible>
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-        <SidebarGroup v-if="internalProjects.length">
-          <SidebarGroupContent>
-            <SidebarMenu>
-              <Collapsible v-model:open="internalOpen" as-child>
+              <Collapsible
+                v-if="showInternal && host.hasInternal"
+                as-child
+                :open="internalOpen.has(host.serviceNodeId)"
+                @update:open="toggleInternalGroup(host.serviceNodeId)"
+              >
                 <SidebarMenuItem>
                   <CollapsibleTrigger as-child>
                     <SidebarMenuButton title="IvyInternal">
-                      <FolderOpen v-if="internalOpen" aria-hidden="true" /><Folder v-else aria-hidden="true" />
+                      <FolderOpen v-if="internalOpen.has(host.serviceNodeId)" aria-hidden="true" /><Folder v-else aria-hidden="true" />
                       <span>IvyInternal</span>
                     </SidebarMenuButton>
                   </CollapsibleTrigger>
-                  <SidebarMenuBadge>{{ taskLists.internal.length }}</SidebarMenuBadge>
+                  <SidebarMenuBadge>{{ host.internal.length }}</SidebarMenuBadge>
                   <CollapsibleContent>
                     <SidebarMenuSub>
-                      <SidebarMenuSubItem v-for="item in taskLists.internal" :key="taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)">
-                        <SidebarMenuSubButton as-child
-                          :is-active="node === item.resourceRef.serviceNodeId && query.get('id') === item.resourceRef.nativeId">
-                          <a :href="route('task', { node: item.resourceRef.serviceNodeId, id: item.resourceRef.nativeId })"
-                            :title="taskName(item.summary, item.resourceRef.nativeId) + ' · ' + hostName(item.resourceRef.serviceNodeId)">
+                      <SidebarMenuSubItem v-for="item in host.internal" :key="item.resourceRef.nativeId">
+                        <SidebarMenuSubButton as-child :class="{ 'pr-7': activityOf(item) }"
+                          :is-active="openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)">
+                          <a :href="route('task', { node: host.serviceNodeId, id: item.resourceRef.nativeId })"
+                            :title="taskName(item.summary, item.resourceRef.nativeId)">
                             <span>{{ taskName(item.summary, item.resourceRef.nativeId) }}</span>
                           </a>
                         </SidebarMenuSubButton>
+                        <ActivityIndicator v-if="activityOf(item)" :state="activityOf(item)!" class="pointer-events-none absolute top-1.5 right-1" />
                       </SidebarMenuSubItem>
-                      <li v-if="!taskLists.internal.length" class="px-2 py-1 text-xs text-muted-foreground">No recent tasks</li>
+                      <li v-if="!host.internal.length" class="px-2 py-1 text-xs text-muted-foreground">No recent tasks</li>
                     </SidebarMenuSub>
                   </CollapsibleContent>
                 </SidebarMenuItem>
               </Collapsible>
+              <li
+                v-if="!host.groups.length && !(showInternal && host.hasInternal)"
+                class="px-2 py-1 text-xs text-muted-foreground"
+              >
+                No tasks
+              </li>
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -643,7 +612,7 @@ const toggleGroup = (id: string) => {
           >
         </div>
         <p
-          v-if="recent.error.value || projects.error.value || allProjects.error.value || nodes.error.value"
+          v-if="recent.error.value || allProjects.error.value || nodes.error.value"
           class="px-4 text-xs text-muted-foreground"
         >
           Task navigation unavailable.
@@ -653,7 +622,6 @@ const toggleGroup = (id: string) => {
             class="h-8 px-0 text-xs"
             @click="
               recent.refresh();
-              projects.refresh();
               allProjects.refresh();
               nodes.refresh();
             "

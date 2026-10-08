@@ -116,6 +116,35 @@ test(
 );
 
 test(
+  "AgentUI deletes a task only after confirmation and returns to its host",
+  { timeout: 90000 },
+  async (t) => {
+    const f = await agentFixture(t, undefined, true);
+    await f.open("#/task?node=browser-agent&id=saved-task");
+    const actions = f.page.getByRole("button", { name: "Task actions", exact: true });
+    const remove = f.page.getByRole("menuitem", { name: /^(Delete|Löschen)…$/ });
+    const dialog = f.page.getByRole("dialog");
+    await actions.click();
+    await remove.click();
+    await dialog.getByRole("button", { name: /^(Cancel|Abbrechen)$/ }).click();
+    await expect(dialog).toHaveCount(0);
+    assert.equal(f.threads.has("saved-task"), true);
+    await actions.click();
+    await remove.click();
+    await dialog.getByRole("button", { name: /^(Delete|Löschen)$/ }).click();
+    await expect.poll(() => f.threads.has("saved-task")).toBe(false);
+    await expect(f.page).toHaveURL(/#\/host\?node=browser-agent$/);
+    await expect(
+      f.page
+        .getByRole("navigation", { name: "Recent tasks" })
+        .getByRole("link", { name: "saved-task", exact: true }),
+    ).toHaveCount(0);
+    assert.deepEqual(f.pageErrors, []);
+    assert.deepEqual(f.externalRequests, []);
+  },
+);
+
+test(
   "AgentUI sets a native goal and safety profile, then attaches and sends in one action",
   { timeout: 90000 },
   async (t) => {
@@ -586,54 +615,40 @@ test(
 );
 
 test(
-  "AgentUI switches between mixed all-host tasks and one explicit host",
-  { timeout: 90000 },
+  "AgentUI keeps every host in one task tree and filters it without navigating",
+  { timeout: 120000 },
   async (t) => {
     const f = await agentFixture(t);
-    await f.open("#/hosts");
+    await f.addAgent(undefined, "second-host");
+    await f.open("#/host?node=browser-agent");
+    const navigation = f.page.getByRole("navigation", { name: "Recent tasks" });
+    const filter = navigation.getByRole("button", { name: "Filter tasks", exact: true });
+    const tasks = navigation.getByRole("link", { name: "saved-task", exact: true });
+    await expect(filter).toContainText("All hosts");
     await expect(
-      f.page.getByRole("heading", { name: "All hosts", exact: true }),
-    ).toBeVisible();
+      navigation.getByRole("link", { name: "New task on second-host", exact: true }),
+    ).toBeVisible({ timeout: 35000 });
+    await expect(tasks).toHaveCount(2);
+    await tasks.last().click();
+    await expect(f.page).toHaveURL(/#\/task\?node=browser-second-agent&id=saved-task/);
+    await expect(filter).toContainText("All hosts");
+    await expect(tasks).toHaveCount(2);
+    await expect(tasks.last()).toHaveAttribute("aria-current", "page");
+    await expect(tasks.first()).not.toHaveAttribute("aria-current", "page");
+
+    await filter.click();
+    await f.page.getByRole("menuitemradio", { name: "isolated-agent-host", exact: true }).click();
+    await expect(filter).toContainText("isolated-agent-host");
+    await expect(f.page).toHaveURL(/#\/task\?node=browser-second-agent&id=saved-task/);
+    await expect(tasks).toHaveCount(1);
     await expect(
-      f.page.getByRole("button", { name: "Choose host scope", exact: true }),
-    ).toContainText("All hosts");
-    await expect(
-      f.page.getByRole("link", { name: /saved-task/ }).first(),
-    ).toBeVisible();
-    await f.page
-      .getByRole("navigation", { name: "Recent tasks" })
-      .getByRole("link", { name: /saved-task/ })
-      .first()
-      .click();
-    await expect(f.page).toHaveURL(/#\/task\?node=browser-agent/);
-    await expect(
-      f.page.getByRole("button", { name: "Choose host scope", exact: true }),
-    ).toContainText("All hosts");
+      navigation.getByRole("link", { name: "New task on second-host", exact: true }),
+    ).toHaveCount(0);
     await f.page.reload();
-    await expect(
-      f.page.getByRole("button", { name: "Choose host scope", exact: true }),
-    ).toContainText("All hosts");
-
-    await f.page
-      .getByRole("button", { name: "Choose host scope", exact: true })
-      .click();
-    await f.page
-      .getByRole("menuitem")
-      .filter({ hasText: "isolated-agent-host" })
-      .click();
-    await expect(f.page).toHaveURL(/#\/host\?node=browser-agent/);
-    await expect(
-      f.page.getByRole("button", { name: "Choose host scope", exact: true }),
-    ).toContainText("isolated-agent-host");
-
-    await f.page
-      .getByRole("button", { name: "Choose host scope", exact: true })
-      .click();
-    await f.page.getByRole("menuitem").filter({ hasText: "All hosts" }).click();
-    await expect(f.page).toHaveURL(/#\/hosts$/);
-    await expect(
-      f.page.getByRole("heading", { name: "All hosts", exact: true }),
-    ).toBeVisible();
+    await expect(filter).toContainText("isolated-agent-host");
+    await filter.click();
+    await f.page.getByRole("menuitemradio", { name: "All hosts", exact: true }).click();
+    await expect(tasks).toHaveCount(2);
     assert.deepEqual(f.pageErrors, []);
     assert.deepEqual(f.externalRequests, []);
   },

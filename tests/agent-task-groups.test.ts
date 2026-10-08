@@ -21,6 +21,8 @@ test('task navigation excludes native guardian sessions by source while preservi
   const tasks = sources.map((source, index) => ({ ...task(String(index), '/fixture', null),
     summary: { source, name: 'Guardian review', preview: 'Approval review' } }));
   assert.deepEqual(tasks.filter(isVisibleTask).map(value => value.resourceRef.nativeId), ['1', '2', '3', '4']);
+  assert.equal(isVisibleTask({ ...task('service-context', '/fixture', null), summary: { ephemeral: true, name: null, preview: '' } }), false,
+    'ephemeral service contexts have no saved history to open, archive or delete');
 });
 
 test('native project identity keeps an external worktree in its Desktop project', () => {

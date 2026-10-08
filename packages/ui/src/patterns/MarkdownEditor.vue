@@ -284,6 +284,11 @@ onBeforeUnmount(() => {
 .markdown-editor :deep(.ProseMirror h1) { font-size: 2rem; font-weight: 650; }
 .markdown-editor :deep(.ProseMirror h2) { font-size: 1.55rem; font-weight: 650; }
 .markdown-editor :deep(.ProseMirror h3) { font-size: 1.25rem; font-weight: 650; }
+/* Crepe paints its caret, list markers and input carets in the outline tone, which is our faint border; they stay as legible as text. */
+.markdown-editor :deep(.milkdown .ProseMirror-focused) { --prosemirror-virtual-cursor-color: var(--foreground); }
+.markdown-editor :deep(.milkdown .milkdown-list-item-block li .label-wrapper) { color: var(--foreground); }
+.markdown-editor :deep(.milkdown .milkdown-list-item-block li .label-wrapper svg) { fill: var(--foreground); }
+.markdown-editor :deep(.milkdown input) { caret-color: var(--foreground) !important; }
 .markdown-editor :deep(.ivy-image-reference) { display: inline-flex; max-width: 100%; overflow-wrap: anywhere; border-radius: .25rem; background: var(--muted); padding: .15rem .4rem; color: var(--muted-foreground); font-size: .875rem; }
 .markdown-editor :deep(.ivy-embedded-image) { display: inline-block; max-width: 100%; height: auto; max-height: 42rem; border-radius: .375rem; vertical-align: middle; }
 .markdown-editor :deep(.ivy-image-node) { position: relative; display: inline-block; min-width: 4.5rem; min-height: 2.5rem; max-width: 100%; vertical-align: middle; border-radius: .375rem; }

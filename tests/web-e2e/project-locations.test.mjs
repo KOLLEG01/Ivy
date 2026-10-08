@@ -26,13 +26,16 @@ test("AgentUI renames and removes native projects without recreating them or del
 });
 
 for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
-  test(`IvyInternal stays collapsed outside Recent and is searchable at ${viewport.width}px`, { timeout: 120000 }, async t => {
+  test(`IvyInternal is hidden by default, opens collapsed when shown and stays searchable at ${viewport.width}px`, { timeout: 120000 }, async t => {
     const f = await agentFixture(t, viewport, false, '0.154.0', false, true);
     await f.open("#/hosts");
     if (viewport.width < 768) await f.page.getByRole("button", { name: "Toggle navigation", exact: true }).click();
     const nav = f.page.getByRole("navigation", { name: "Recent tasks", exact: true });
-    await expect(nav.getByRole("button", { name: "IvyInternal", exact: true })).toHaveAttribute("aria-expanded", "false");
     await expect(nav.getByRole("link", { name: "saved-task", exact: true })).toBeVisible();
+    await expect(nav.getByRole("button", { name: "IvyInternal", exact: true })).toHaveCount(0);
+    await nav.getByRole("button", { name: "Filter tasks", exact: true }).click();
+    await f.page.getByRole("menuitemcheckbox", { name: "Show IvyInternal", exact: true }).click();
+    await expect(nav.getByRole("button", { name: "IvyInternal", exact: true })).toHaveAttribute("aria-expanded", "false");
     await expect(nav.getByRole("link", { name: "Internal service work", exact: true })).toBeHidden();
     await nav.getByRole("button", { name: "IvyInternal", exact: true }).click();
     await expect(nav.getByRole("link", { name: "Internal service work", exact: true })).toBeVisible();

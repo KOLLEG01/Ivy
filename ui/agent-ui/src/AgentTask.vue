@@ -19,6 +19,7 @@ import {
   MoreHorizontal,
   Square,
   Target,
+  Trash2,
   X,
 } from "@lucide/vue";
 import {
@@ -32,6 +33,12 @@ import {
   ComposerQueue,
   ConversationComposer,
   ContentView,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -125,6 +132,7 @@ const capabilities = useRemote(async () => {
     rename,
     archive,
     unarchive,
+    remove,
     goalSet,
     goalClear,
     steer,
@@ -137,6 +145,7 @@ const capabilities = useRemote(async () => {
       "codex.thread/name/set",
       "codex.thread/archive",
       "codex.thread/unarchive",
+      "codex.thread/delete",
       "codex.thread/goal/set",
       "codex.thread/goal/clear",
       "codex.turn/steer",
@@ -150,6 +159,7 @@ const capabilities = useRemote(async () => {
     rename,
     archive,
     unarchive,
+    remove,
     goalSet,
     goalClear,
     steer,
@@ -1012,6 +1022,30 @@ const setArchived = async () => {
     archivedOverride.value = !wasArchived;
   refresh();
 };
+// Deleting removes the native conversation; a TaskBoard ticket keeps its task and is archived instead.
+const deleteOpen = ref(false),
+  deleteError = ref("");
+const deleteTask = async () => {
+  const binding = capabilities.value.value?.remove;
+  if (!binding || action.locked.value) return;
+  deleteError.value = "";
+  if (await owningTicket().catch(() => null)) {
+    deleteError.value = tr(
+      "Dieser Task gehört zu einem TaskBoard-Ticket. Archiviere ihn stattdessen.",
+      "This task belongs to a TaskBoard ticket. Archive it instead.",
+    );
+    return;
+  }
+  await action.start("Delete task", binding, { threadId: props.threadId });
+  if (action.saved.value?.phase === "succeeded") {
+    deleteOpen.value = false;
+    window.location.hash = route("host", { node: props.node });
+  } else
+    deleteError.value =
+      action.error.value ||
+      text(action.saved.value?.detail) ||
+      tr("Der Task konnte nicht gelöscht werden.", "The task could not be deleted.");
+};
 watch(
   () => props.turnId,
   () => {
@@ -1475,9 +1509,39 @@ onBeforeUnmount(() => {
           >
             <Download aria-hidden="true" />Download turn
           </DropdownMenuItem>
+          <template v-if="capabilities.value.value?.remove">
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              variant="destructive"
+              :disabled="action.locked.value || working"
+              @select="deleteError = ''; deleteOpen = true"
+            >
+              <Trash2 aria-hidden="true" />{{ tr("Löschen…", "Delete…") }}
+            </DropdownMenuItem>
+          </template>
         </DropdownMenuContent>
       </DropdownMenu>
     </ToolbarContent>
+    <Dialog v-model:open="deleteOpen">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{{ tr("Task löschen?", "Delete task?") }}</DialogTitle>
+          <DialogDescription>{{
+            tr(
+              "Die Unterhaltung wird dauerhaft aus Codex entfernt. Dateien in ihrem Arbeitsverzeichnis bleiben erhalten.",
+              "The conversation is permanently removed from Codex. Files in its working directory are kept.",
+            )
+          }}</DialogDescription>
+        </DialogHeader>
+        <p v-if="deleteError" role="alert" class="text-sm text-destructive">
+          {{ deleteError }}
+        </p>
+        <DialogFooter>
+          <Button variant="outline" :disabled="action.locked.value" @click="deleteOpen = false">{{ tr("Abbrechen", "Cancel") }}</Button>
+          <Button variant="destructive" :disabled="action.locked.value" :loading="action.busy.value" @click="deleteTask">{{ tr("Löschen", "Delete") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <TaskProjectDialog
       v-if="projectOpen && capabilities.value.value?.project"
       v-model:open="projectOpen"

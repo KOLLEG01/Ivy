@@ -87,6 +87,7 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
         case 'thread/metadata/update': { thread.projectId = p.projectId || null; result = wireThread({ ...thread, turns: [] }); owner.emit({ method: 'thread/project/updated', params: { threadId: thread.id, projectId: thread.projectId } }); break; }
         case 'thread/name/set': thread.name = p.name; result = {}; setImmediate(() => owner.emit({ method: 'thread/name/updated', params: { threadId: thread.id, name: thread.name } })); break;
         case 'thread/archive': thread.archived = true; result = {}; setImmediate(() => owner.emit({ method: 'thread/archived', params: { threadId: thread.id } })); break;
+        case 'thread/delete': threads.delete(thread.id); result = {}; setImmediate(() => owner.emit({ method: 'thread/deleted', params: { threadId: thread.id } })); break;
         case 'thread/unarchive': thread.archived = false; result = { thread: wireThread(thread) }; setImmediate(() => owner.emit({ method: 'thread/unarchived', params: { threadId: thread.id } })); break;
         case 'thread/resume': thread.canAcceptDirectInput = true; thread.status = { type: 'idle' }; result = startResult(thread); break;
         case 'thread/goal/get': result = { goal: goals.get(p.threadId) ?? null }; break;

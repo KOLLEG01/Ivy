@@ -3,8 +3,9 @@ import { record } from '../../../packages/ui-client/src/native.js';
 import { nativeProjectForThread, isInternalProject } from '../../../packages/sdk/src/native-project-membership.js';
 export { normalizedProjectPath as normalizedPath, isInternalProject } from '../../../packages/sdk/src/native-project-membership.js';
 
-/** Native approval reviews are internal sessions, not user tasks. */
+/** Native approval reviews and ephemeral service contexts (no saved history) are not user tasks. */
 export const isVisibleTask = (task: Operation.InventoryItem): boolean =>
+  record(task.summary).ephemeral !== true &&
   record(record(record(task.summary).source).subAgent).other !== 'guardian';
 
 const orderedProjects = (projects: Agent.ProjectSummary[]) => [...projects].sort((a, b) =>
@@ -39,4 +40,16 @@ export function groupTasks(projects: Agent.ProjectSummary[], tasks: Operation.In
   }
   if (remaining.length) groups.push({ id: 'other', name: 'No project', path: '', paths: [], tasks: remaining });
   return groups;
+}
+export type HostSection = { serviceNodeId: string; groups: TaskGroup[]; internal: Operation.InventoryItem[]; hasInternal: boolean };
+/** Every host keeps its own project tree: listed hosts first, then any other host that still has projects or tasks. */
+export function hostSections(hosts: string[], projects: ScopedProject[], tasks: Operation.InventoryItem[]): HostSection[] {
+  const { recent, internal } = partitionInternalTasks(projects, tasks);
+  const ids = [...new Set([...hosts, ...projects.map(value => value.serviceNodeId), ...tasks.map(task => task.resourceRef.serviceNodeId)])];
+  return ids.map(serviceNodeId => {
+    const own = projects.filter(value => value.serviceNodeId === serviceNodeId).map(value => value.project);
+    const mine = (task: Operation.InventoryItem) => task.resourceRef.serviceNodeId === serviceNodeId;
+    return { serviceNodeId, groups: groupTasks(own.filter(project => !isInternalProject(project)), recent.filter(mine)),
+      internal: internal.filter(mine), hasInternal: own.some(isInternalProject) };
+  });
 }
