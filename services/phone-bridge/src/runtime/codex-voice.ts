@@ -28,6 +28,7 @@ export interface PhoneCodexVoiceSettings extends CodexProcessSettings {
   playbackPrebufferMs?: number;
   rememberReasoning?: boolean;
   resumeIncomingConversation?: boolean;
+  resetAfterOutgoingCall?: boolean;
   voice?: string;
   realtimeModel?: string;
   config?: Record<string, Wire.Json>;
@@ -767,7 +768,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       return existing;
     }
     await this.open();
-    if (generation > 0) this.journal.forgetVoiceConversation(this.fingerprint!);
+    if (generation > 0 || call.direction === "outgoing" && this.settings.resetAfterOutgoingCall !== false)
+      this.journal.forgetVoiceConversation(this.fingerprint!);
     const context = generation === 0 && call.direction === "incoming" && this.settings.resumeIncomingConversation
       ? this.journal.voiceConversation(this.fingerprint!) : null;
     let threadId: string | null = null;
@@ -1109,7 +1111,9 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           );
         }
       }
-      if (this.settings.resumeIncomingConversation && session.started && !session.failed && !keepPreparedThreadId) {
+      if (!keepPreparedThreadId && session.call.direction === "outgoing" && this.settings.resetAfterOutgoingCall !== false) {
+        this.journal.forgetVoiceConversation(this.fingerprint!);
+      } else if (this.settings.resumeIncomingConversation && session.started && !session.failed && !keepPreparedThreadId) {
         const previous = this.journal.voiceConversation(this.fingerprint!);
         this.journal.retainVoiceConversation({ fingerprint: this.fingerprint!, partyKey: this.partyKey(session.call),
           callId, threadId: session.threadId, generation: session.generation, items: session.items });

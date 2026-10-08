@@ -947,6 +947,9 @@ test("Confirmed reasoning is remembered across calls and restart, while disabled
   assert.equal(prepare.params["playbackPrebufferMs"], 100);
   await flow.hangup("main", call.callId);
   const restarted = f.flow(configured);
+  assert.equal(restarted.configuration().resetAfterOutgoingCall, true);
+  assert.equal(f.flow({ ...configured, codexVoice: { ...configured.codexVoice!, resetAfterOutgoingCall: false } })
+    .configuration().resetAfterOutgoingCall, false);
   await restarted.voiceModelCatalog();
   assert.deepEqual(restarted.voiceSelection(randomUUID()), { model: "gpt-6.1-sol", reasoningEffort: "xhigh" });
   assert.deepEqual(f.flow(settings).voiceSelection(randomUUID()), { model: "gpt-6.1-sol", reasoningEffort: "high" });

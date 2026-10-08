@@ -414,6 +414,9 @@
             },
             "resumeIncomingConversation": {
               "type": "boolean"
+            },
+            "resetAfterOutgoingCall": {
+              "type": "boolean"
             }
           }
         },
@@ -1205,6 +1208,11 @@
         "resumeIncomingConversation": {
           "type": "boolean",
           "default": false
+        },
+        "resetAfterOutgoingCall": {
+          "type": "boolean",
+          "default": true,
+          "description": "Clear resumable Voice context after an outgoing Voice call so the next call uses a fresh prepared task. False allows a later incoming call to continue the outgoing conversation."
         },
         "voice": {
           "type": "string",

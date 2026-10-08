@@ -36,6 +36,12 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   Outgoing Ivy calls and `*0#` always use fresh tasks. A reset clears the continuation
   pointer; an uncertain stop cannot publish a resumable context. Caller admission
   and any access challenge remain required before voice startup.
+- `codexVoice.resetAfterOutgoingCall` defaults to true. An outgoing Voice call
+  invalidates the previous continuation and cannot publish its own context after
+  confirmed stop. Normal background preparation makes the next task ready without
+  a call assignment. False allows the outgoing conversation to be resumed by a
+  later incoming call when `resumeIncomingConversation` is enabled. Incoming-only
+  conversations still continue normally; completed task history is retained.
 - `codexVoice.rememberReasoning` retains a confirmed DTMF/MCP reasoning selection
   across calls and service restarts. It changes the next session's effort while
   retaining the configured default model. Disabling it restores `voiceDefault`.

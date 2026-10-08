@@ -163,6 +163,7 @@ export class PhoneFlow {
       voiceQueueMs: this.settings.codexVoice?.queueMs ?? null,
       rememberVoiceReasoning: this.settings.codexVoice?.rememberReasoning ?? false,
       resumeIncomingConversation: this.settings.codexVoice?.resumeIncomingConversation ?? false,
+      resetAfterOutgoingCall: this.settings.codexVoice?.resetAfterOutgoingCall ?? true,
     };
   }
 

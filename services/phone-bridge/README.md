@@ -28,6 +28,9 @@ assignment at startup, including when the task is reused. A short connected cue
 opens the conversation once audio connects. Phone-specific instructions distinguish
 the assignment from the recipient's speech; Codex progress stays contextual until
 a confirmed result is available. The backing model also receives the full context.
+`codexVoice.resetAfterOutgoingCall` defaults to true: an outgoing Voice call clears
+the resumable context and the next task is prepared empty. Set it to false to allow
+an incoming call to continue that outgoing conversation when continuation is enabled.
 
 `phone_bridge_status.voiceModels` reads the model catalog from the configured Codex
 home using `model/list`, including pagination and each model's advertised reasoning

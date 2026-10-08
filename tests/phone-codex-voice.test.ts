@@ -187,6 +187,14 @@ function fixture(t: test.TestContext) {
     model,
     modelPage: (read: typeof modelPage) => { modelPage = read; },
     admit,
+    release: (call: ReturnType<typeof admit>) => {
+      const intent = { epoch: call.epoch, callId: call.callId, operationId: randomUUID(),
+        method: "call.release" as const, requestHash: "sha256:" + "0".repeat(64) };
+      journal.submit(intent);
+      journal.finish(intent, { version: 1, epoch: call.epoch, requestId: 1, ok: true, error: null,
+        result: { callId: call.callId, released: true } });
+      journal.releaseCall(call.callId, intent.operationId);
+    },
     incoming: (caller = "recipient") => journal.admitCall(policy.incoming(epoch, randomUUID(), "incoming-user", {
       id: randomUUID(), direction: "incoming", state: "ringing", error: null, sipCallId: "fixture-wire",
       incoming: { sipCallId: "fixture-wire", peerAddress: "127.0.0.1", peerPort: 5060, transport: "udp", fromUri: `sip:${caller}@127.0.0.1` },
@@ -265,7 +273,7 @@ test('GPT-6.1 Sol selection reaches native settings and is retained for a fresh 
 
 test("Incoming continuation keeps its exact task and speech context, still greets, and *0 restarts fresh", async (t) => {
   const f = fixture(t); f.settings.resumeIncomingConversation = true;
-  const voice = f.voice(), first = f.admit("mcp-agent"), threadId = await voice.prepare(first, 0, selection);
+  const voice = f.voice(), first = f.incoming(), threadId = await voice.prepare(first, 0, selection);
   await voice.start(first, 0, threadId, "Discuss the lake walk.", "offer", () => {});
   await voice.connected(first.callId, async () => {});
   const segment = { type: "transcriptSegment", id: "speech-1", realtimeSessionId: "fixture", role: "user", text: "My codeword is Seerose." };
@@ -290,6 +298,35 @@ test("Incoming continuation keeps its exact task and speech context, still greet
   await voice.start(incoming, 1, fresh, 'Begruesse den User mit "Servus"', "offer", () => {});
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"],
     [{ role: "user", text: 'Begruesse den User mit "Servus"' }]);
+});
+
+for (const reset of [undefined, true, false]) test(`Outgoing context reset ${reset ?? "default"} controls the next prepared incoming call`, async t => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  if (reset !== undefined) f.settings.resetAfterOutgoingCall = reset;
+  const voice = f.voice(), previous = f.incoming(), previousThread = await voice.prepare(previous, 0, selection);
+  await voice.start(previous, 0, previousThread, "Previous incoming context", "offer", () => {});
+  await voice.connected(previous.callId, async () => {});
+  await voice.stop(previous.callId); f.release(previous);
+  const outgoing = f.admit(), outgoingThread = await voice.prepare(outgoing, 0, selection);
+  assert.notEqual(outgoingThread, previousThread);
+  const prompt = "Kannst du mir bitte Chips verkaufen? Ich bin so hungrig";
+  await voice.start(outgoing, 0, outgoingThread, prompt, "offer", () => {});
+  await voice.connected(outgoing.callId, async () => {});
+  await voice.stop(outgoing.callId); f.release(outgoing);
+  await voice.prewarm("incoming-user", selection);
+  const before = f.requests.length, incoming = f.incoming(), nextThread = await voice.prepare(incoming, 0, selection);
+  assert.deepEqual(f.requests.slice(before), [], "the next call uses its background preparation without native setup");
+  assert.notEqual(nextThread, previousThread);
+  if (reset === false) assert.equal(nextThread, outgoingThread);
+  else assert.notEqual(nextThread, outgoingThread);
+  const greeting = 'Begruesse den User mit "Servus"';
+  await voice.start(incoming, 0, nextThread, greeting, "offer", () => {});
+  const start = f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params;
+  assert.deepEqual(start["initialItems"], [
+    ...(reset === false ? [{ role: "user", text: prompt }] : []), { role: "user", text: greeting },
+  ]);
+  assert.equal(String(start["realtimeStartInstructions"]).includes("Chips"), reset === false);
+  assert.equal(f.journal.voiceTask(outgoing.callId, 0), outgoingThread, "reset retains completed call history");
 });
 
 test("An outgoing Ivy call never resumes the previous incoming conversation", async (t) => {
@@ -332,7 +369,7 @@ test("An uncertain stop cannot expose the still-owned task as an incoming contin
 
 test("A continued native task is reconciled after reconnect without another READY preparation turn", async (t) => {
   const f = fixture(t); f.settings.resumeIncomingConversation = true;
-  const firstVoice = f.voice(), first = f.admit(), old = await firstVoice.prepare(first, 0, selection);
+  const firstVoice = f.voice(), first = f.incoming(), old = await firstVoice.prepare(first, 0, selection);
   await firstVoice.start(first, 0, old, "Retained context", "offer", () => {});
   await firstVoice.connected(first.callId, async () => {});
   await firstVoice.stop(first.callId);
