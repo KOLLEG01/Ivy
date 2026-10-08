@@ -454,7 +454,14 @@ function fixture(
     promptError = "app_tools_unavailable";
   const events: string[] = [];
   const voicePrewarms: string[] = [];
+  let voiceModels = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra', 'gpt-6.1-sol', 'provider-custom'].map(model => ({
+    model, displayName: model, description: 'Runtime catalog fixture', defaultReasoningEffort: 'high', isDefault: false,
+    supportedReasoningEfforts: (model === 'provider-custom' ? ['none', 'minimal', 'high', 'future-effort'] :
+      model === 'gpt-6-luna' ? ['low', 'medium', 'high', 'xhigh', 'max'] : ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+      .map(reasoningEffort => ({ reasoningEffort, description: reasoningEffort })),
+  }));
   const defaultVoiceTasks: PhoneVoicePort = {
+    async models() { return structuredClone(voiceModels); },
     async prewarm(principalId) { voicePrewarms.push(principalId); },
     async prepare(call, generation, selection) {
       voicePrepares++;
@@ -595,6 +602,7 @@ function fixture(
     events,
     voicePrewarms,
     port: defaultVoiceTasks,
+    modelCatalog: (value: typeof voiceModels) => { voiceModels = value; },
     screening: (value: string, fail = false) => {
       screening = value;
       bridgeFailure = fail;
@@ -849,7 +857,7 @@ test("Voice selection retains the task and restart binds a new native generation
   const before = f.prompts[0]!.threadId;
   const selected = await flow.controlVoice("main", call.callId, randomUUID(), {
     action: "select",
-    selection: { model: "gpt-6-astra", reasoningEffort: "high" },
+    selection: { model: "gpt-6.1-sol", reasoningEffort: "ultra" },
   });
   assert.equal(selected.phase, "result");
   assert.equal(f.selectionUpdates[0]!.threadId, before);
@@ -858,6 +866,9 @@ test("Voice selection retains the task and restart binds a new native generation
     action: "restart",
   });
   assert.equal(restarted.receipt?.ok, true);
+  assert.ok(restarted.intent.method === 'call.restartVoice');
+  assert.equal(restarted.intent.model, 'gpt-6.1-sol');
+  assert.equal(restarted.intent.reasoningEffort, 'ultra');
   assert.notEqual(f.prompts[1]!.threadId, before);
   assert.equal(f.prompts[1]!.generation, 1);
   await flow.controlVoice("main", call.callId, operationId, {
@@ -868,6 +879,60 @@ test("Voice selection retains the task and restart binds a new native generation
     f.methods().filter((method) => method === "call.dial").length,
     1,
   );
+});
+
+test('MCP exposes the runtime catalog and validates model-specific efforts before any selection effect', async t => {
+  const f = fixture(t), flow = f.flow(), bridge = new PhoneBridge(flow, f.native);
+  const status = await bridge.invoke('status', {}, context('main')) as { voiceModels: unknown[]; voiceModelsError: string | null };
+  assert.equal(status.voiceModelsError, null);
+  assert.deepEqual(status.voiceModels, await f.port.models());
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice');
+  await until(() => !!f.journal.callCommand(call.callId, 'call.realtime.answer')?.receipt);
+  await tick();
+  for (const selection of [{ model: 'missing-model', reasoningEffort: 'high' },
+    { model: 'gpt-6-sol', reasoningEffort: 'minimal' }, { model: 'gpt-6-luna', reasoningEffort: 'ultra' }]) {
+    const operationId = randomUUID();
+    await assert.rejects(bridge.invoke('selectVoice', { callId: call.callId, operationId, ...selection }, context('main')),
+      { code: 'phone_voice_selection_invalid' });
+    assert.equal(f.journal.get(operationId), null);
+  }
+  assert.equal(f.selectionUpdates.length, 0);
+  const selection = { model: 'gpt-6.1-sol', reasoningEffort: 'ultra' }, operationId = randomUUID();
+  const selected = await bridge.invoke('selectVoice', { callId: call.callId, operationId, ...selection }, context('main'));
+  assert.deepEqual(flow.voiceSelection(call.callId), selection);
+  f.modelCatalog([]);
+  assert.deepEqual(await bridge.invoke('selectVoice', { callId: call.callId, operationId, ...selection }, context('main')), selected);
+  assert.equal(f.selectionUpdates.length, 1);
+});
+
+test('Catalog failures leave readiness inspectable and cannot change a live task', async t => {
+  const f = fixture(t), flow = f.flow(settings, { ...f.port,
+    async models() { throw new IvyError('native_method_unavailable', 'No discovery'); },
+  }), bridge = new PhoneBridge(flow, f.native);
+  const status = await bridge.invoke('status', {}, context('main')) as { voiceModels: unknown[]; voiceModelsError: string | null; busy: boolean };
+  assert.deepEqual(status.voiceModels, []);
+  assert.equal(status.voiceModelsError, 'native_method_unavailable');
+  assert.equal(status.busy, false);
+  assert.deepEqual(f.selectionUpdates, []);
+});
+
+test('Remembered reasoning accepts advertised future efforts and falls back when the default model drops support', async t => {
+  const f = fixture(t), configured = { ...settings, voiceDefault: { model: 'provider-custom', reasoningEffort: 'high' },
+    codexVoice: { ...settings.codexVoice!, rememberReasoning: true } }, flow = f.flow(configured);
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice');
+  await until(() => !!f.journal.callCommand(call.callId, 'call.realtime.answer')?.receipt);
+  await tick();
+  await flow.controlVoice('main', call.callId, randomUUID(), { action: 'select',
+    selection: { model: 'provider-custom', reasoningEffort: 'future-effort' } });
+  assert.equal(f.journal.rememberedVoiceReasoning(), 'future-effort');
+  await flow.hangup('main', call.callId);
+  const resumed = f.flow(configured);
+  await resumed.voiceModelCatalog();
+  assert.equal(resumed.voiceSelection(randomUUID()).reasoningEffort, 'future-effort');
+  f.modelCatalog((await f.port.models()).map(model => ({ ...model,
+    supportedReasoningEfforts: model.supportedReasoningEfforts.filter(effort => effort.reasoningEffort !== 'future-effort') })));
+  await resumed.voiceModelCatalog();
+  assert.equal(resumed.voiceSelection(randomUUID()).reasoningEffort, 'high');
 });
 
 test("Confirmed reasoning is remembered across calls and restart, while disabled memory keeps the default", async (t) => {
@@ -883,6 +948,7 @@ test("Confirmed reasoning is remembered across calls and restart, while disabled
   assert.equal(prepare.params["playbackPrebufferMs"], 100);
   await flow.hangup("main", call.callId);
   const restarted = f.flow(configured);
+  await restarted.voiceModelCatalog();
   assert.deepEqual(restarted.voiceSelection(randomUUID()), { model: "gpt-6-sol", reasoningEffort: "xhigh" });
   assert.deepEqual(f.flow(settings).voiceSelection(randomUUID()), { model: "gpt-6-sol", reasoningEffort: "high" });
 });

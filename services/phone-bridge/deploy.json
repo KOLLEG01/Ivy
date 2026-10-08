@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "phone-bridge",
   "kind": "service",
-  "version": "0.2.89",
+  "version": "0.2.90",
   "description": "Authorized SIP calls, native WebRTC Codex Voice, configurable CLI homes, Windows audio and announcement screening with durable outcomes",
   "connectsToHive": true,
   "requirements": {

@@ -10,32 +10,38 @@
       ],
       "properties": {
         "model": {
-          "enum": [
-            "gpt-6-luna",
-            "gpt-6-sol",
-            "gpt-6-astra"
-          ]
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         },
         "reasoningEffort": {
-          "enum": [
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "ultra"
-          ]
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
         }
-      },
-      "not": {
-        "properties": {
-          "model": {
-            "const": "gpt-6-luna"
-          },
-          "reasoningEffort": {
-            "const": "ultra"
+      }
+    },
+    "PhoneVoiceModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "displayName", "description", "defaultReasoningEffort", "supportedReasoningEfforts", "isDefault"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "displayName": { "type": "string", "maxLength": 256 },
+        "description": { "type": "string", "maxLength": 4096 },
+        "defaultReasoningEffort": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "supportedReasoningEfforts": {
+          "type": "array", "maxItems": 32,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["reasoningEffort", "description"],
+            "properties": {
+              "reasoningEffort": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "description": { "type": "string", "maxLength": 4096 }
+            }
           }
-        }
+        },
+        "isDefault": { "type": "boolean" }
       }
     },
     "PhoneServiceSettings": {
@@ -321,6 +327,16 @@
             }
           ]
         },
+        "voiceModels": {
+          "description": "Picker-visible models and each model's reasoning options from the configured Codex home via model/list. Cached for up to 60 seconds; refreshed on reconnect. No fixed model allowlist.",
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/PhoneVoiceModel" }
+        },
+        "voiceModelsError": {
+          "description": "Null after a successful model catalog read; otherwise its error code. An unavailable catalog is never replaced with a fixed model list.",
+          "type": ["string", "null"]
+        },
         "incoming": {
           "anyOf": [
             {
@@ -529,31 +545,16 @@
           "$ref": "#/$defs/Uuid"
         },
         "model": {
-          "enum": [
-            "gpt-6-luna",
-            "gpt-6-sol",
-            "gpt-6-astra"
-          ]
+          "description": "Exact model ID from phone_bridge_status.voiceModels. Validated against the configured Codex runtime.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         },
         "reasoningEffort": {
-          "enum": [
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "ultra"
-          ]
-        }
-      },
-      "not": {
-        "properties": {
-          "model": {
-            "const": "gpt-6-luna"
-          },
-          "reasoningEffort": {
-            "const": "ultra"
-          }
+          "description": "One of the selected model's supportedReasoningEfforts from phone_bridge_status.voiceModels.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
         }
       }
     },

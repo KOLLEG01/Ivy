@@ -17,7 +17,7 @@ import type { Agent, Wire } from "../../../../packages/sdk/src/node.js";
 import type { PhoneCall } from "./admission.js";
 import { phoneCallerIdentity } from "./admission.js";
 import type { PhoneJournal, PhoneJournalIntent, PhoneConversation, PhoneVoiceText } from "./journal.js";
-import type { PhoneVoiceSelection } from "./voice-selection.js";
+import type { PhoneVoiceModel, PhoneVoiceSelection } from "./voice-selection.js";
 
 export interface PhoneCodexVoiceSettings extends CodexProcessSettings {
   cwd: string;
@@ -63,6 +63,7 @@ const preparationPrompt =
   "The current call context will arrive when voice starts.";
 
 export interface PhoneVoicePort {
+  models(): Promise<PhoneVoiceModel[]>;
   prewarm(principalId: string, selection: PhoneVoiceSelection): Promise<void>;
   prepare(
     call: PhoneCall,
@@ -131,6 +132,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   >();
   private readonly pendingInputs = new Map<string, NativeRequest>();
   private readonly schemas = new SchemaValidators();
+  private modelCatalog: { models: PhoneVoiceModel[]; expiresAt: number } | null = null;
+  private loadingModels: Promise<PhoneVoiceModel[]> | null = null;
   constructor(
     readonly settings: PhoneCodexVoiceSettings,
     private readonly journal: PhoneJournal,
@@ -157,6 +160,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     if (this.connection?.rpc.connected) return;
     if (!this.opening)
       this.opening = (async () => {
+        this.modelCatalog = null;
         this.reconciled.clear();
         this.preparedSelections.clear();
         this.connection = await this.connect({
@@ -171,6 +175,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           onRequest: (request) => this.input(request),
           onNotification: (notification) => this.notification(notification),
           onClose: (code) => {
+            this.modelCatalog = null;
             for (const session of this.sessions.values()) session.failed = true;
             for (const pending of this.sdps.values()) {
               clearTimeout(pending.timer);
@@ -221,6 +226,47 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       });
     await this.opening;
   }
+  async models(): Promise<PhoneVoiceModel[]> {
+    await this.open();
+    if (this.modelCatalog && this.modelCatalog.expiresAt > Date.now())
+      return structuredClone(this.modelCatalog.models);
+    if (!this.loadingModels)
+      this.loadingModels = (async () => {
+        const connection = this.connection!,
+          models: PhoneVoiceModel[] = [],
+          cursors = new Set<string>();
+        const definition = connection.rpc.catalog.clientRequests.find(
+          item => item.method === "model/list",
+        );
+        requireThat(definition, "native_method_unavailable", "Configured Codex does not provide a model catalog.");
+        let cursor: string | null = null;
+        do {
+          const page = await this.call("model/list", {
+            limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}),
+          });
+          this.schemas.validate(definition.outputSchema, page, 256 * 1024);
+          for (const item of page["data"] as unknown as (PhoneVoiceModel & { hidden: boolean })[]) {
+            if (item.hidden) continue;
+            requireThat(!models.some(existing => existing.model === item.model) && models.length < 256,
+              "phone_voice_catalog_invalid", "Codex returned a duplicate or oversized model catalog.");
+            models.push({
+              model: item.model, displayName: item.displayName, description: item.description,
+              defaultReasoningEffort: item.defaultReasoningEffort,
+              supportedReasoningEfforts: item.supportedReasoningEfforts, isDefault: item.isDefault,
+            });
+          }
+          cursor = (page["nextCursor"] as string | null | undefined) ?? null;
+          requireThat(!cursor || !cursors.has(cursor) && cursors.size < 256,
+            "phone_voice_catalog_invalid", "Codex model catalog pagination did not complete.");
+          if (cursor) cursors.add(cursor);
+        } while (cursor);
+        requireThat(this.connection === connection && connection.rpc.connected,
+          "phone_voice_unavailable", "Codex model catalog lost its control connection.");
+        this.modelCatalog = { models, expiresAt: Date.now() + 60000 };
+        return models;
+      })().finally(() => { this.loadingModels = null; });
+    return structuredClone(await this.loadingModels);
+  }
   private owner(call: PhoneCall): void {
     requireThat(
       !this.closed &&
@@ -258,7 +304,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       method,
       params,
       hooks,
-      method.startsWith("thread/realtime/") ? 30000 : 120000,
+      method === 'model/list' ? 15000 : method.startsWith("thread/realtime/") ? 30000 : 120000,
     );
     if ("error" in reply)
       throw new IvyError(

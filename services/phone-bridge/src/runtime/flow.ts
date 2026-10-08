@@ -28,8 +28,9 @@ import type {
 import {
   defaultPhoneVoiceSelection,
   selectedPhoneVoiceModel,
+  validatePhoneVoiceSelection,
 } from "./voice-selection.js";
-import type { PhoneVoiceSelection } from "./voice-selection.js";
+import type { PhoneVoiceModel, PhoneVoiceSelection } from "./voice-selection.js";
 import type { Agent } from "../../../../packages/sdk/src/node.js";
 
 type PhoneVoiceControl =
@@ -71,6 +72,7 @@ export class PhoneFlow {
   private readonly endedCalls = new Set<string>();
   private readonly abandonedCalls = new Set<string>();
   private readonly voiceSelections = new Map<string, PhoneVoiceSelection>();
+  private voiceModels: PhoneVoiceModel[] = [];
   private closed = false;
   private closing: Promise<void> | null = null;
   private readonly settings: PhoneFlowSettings;
@@ -99,10 +101,18 @@ export class PhoneFlow {
     this.settings = structuredClone(settings);
   }
   async prewarmVoice(principalId: string): Promise<void> {
+    if (!this.voice) return;
+    await this.voiceModelCatalog();
+    validatePhoneVoiceSelection(this.defaultVoiceSelection(), this.voiceModels);
     await this.voice?.prewarm(
       principalId,
       this.defaultVoiceSelection(),
     );
+  }
+  async voiceModelCatalog(): Promise<PhoneVoiceModel[]> {
+    requireThat(this.voice, 'phone_voice_unconfigured', 'Voice requires its configured Codex runtime.');
+    this.voiceModels = await this.voice.models();
+    return structuredClone(this.voiceModels);
   }
   voiceInputs(principalId: string, callId: string): unknown[] {
     this.original(principalId, callId, "read");
@@ -389,7 +399,8 @@ export class PhoneFlow {
     const selection = this.settings.voiceDefault ?? defaultPhoneVoiceSelection;
     const effort = this.settings.codexVoice?.rememberReasoning
       ? this.calls.journal.rememberedVoiceReasoning() : null;
-    return effort && !(selection.model === 'gpt-6-luna' && effort === 'ultra')
+    return effort && this.voiceModels.find(item => item.model === selection.model)
+      ?.supportedReasoningEfforts.some(item => item.reasoningEffort === effort)
       ? { ...selection, reasoningEffort: effort } : selection;
   }
   callRoute(call: PhoneCall): "voice" | "windows" {
@@ -667,7 +678,9 @@ export class PhoneFlow {
       "phone_voice_unconfigured",
       "Voice requires its Codex runtime.",
     );
+    if (!this.voiceModels.length) await this.voiceModelCatalog();
     const selection = this.voiceSelection(call.callId);
+    validatePhoneVoiceSelection(selection, this.voiceModels);
     this.voiceSelections.set(call.callId, selection);
     const [task, media] = await Promise.allSettled([
       this.voice.prepare(call, generation, selection),
@@ -916,6 +929,7 @@ export class PhoneFlow {
     command: PhoneVoiceSelectionCommand,
     selection: PhoneVoiceSelection,
   ): Promise<void> {
+    validatePhoneVoiceSelection(selection, await this.voiceModelCatalog());
     await this.confirmConnectedForVoice(call);
     const generation = this.calls.journal.latestVoiceGeneration(call.callId),
       threadId =

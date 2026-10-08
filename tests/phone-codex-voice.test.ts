@@ -50,6 +50,12 @@ function fixture(t: test.TestContext) {
   let unloadPause: Promise<void> | undefined;
   let preparationPause: Promise<void> | undefined;
   let losePreparationReply = false;
+  const model = (name: string, efforts: string[]) => ({ id: name, model: name, displayName: name, description: 'Native catalog fixture',
+    hidden: false, isDefault: false, defaultReasoningEffort: efforts[0]!,
+    supportedReasoningEfforts: efforts.map(reasoningEffort => ({ reasoningEffort, description: reasoningEffort })) });
+  let modelPage = (_params: Record<string, unknown>): unknown => ({
+    data: [model('gpt-6.1-sol', ['low', 'high', 'ultra']), model('provider-custom', ['none', 'minimal', 'future-effort'])], nextCursor: null,
+  });
   const connect: typeof startCodexProcess = async (options) => {
     notification = options.onNotification;
     online = true;
@@ -69,6 +75,7 @@ function fixture(t: test.TestContext) {
       ) {
         requests.push({ method, params });
         let result: unknown = {};
+        if (method === 'model/list') result = modelPage(params);
         if (method === "project/read")
           result = { project: { id: settings.projectId } };
         if (method === "thread/start") {
@@ -171,6 +178,8 @@ function fixture(t: test.TestContext) {
     voice,
     journal,
     requests,
+    model,
+    modelPage: (read: typeof modelPage) => { modelPage = read; },
     admit,
     incoming: (caller = "recipient") => journal.admitCall(policy.incoming(epoch, randomUUID(), "incoming-user", {
       id: randomUUID(), direction: "incoming", state: "ringing", error: null, sipCallId: "fixture-wire",
@@ -192,6 +201,60 @@ function fixture(t: test.TestContext) {
     notification: (value: NativeNotification) => notification(value),
   };
 }
+
+test('Native model discovery follows pages and coalesces concurrent reads without preparing a task', async t => {
+  const f = fixture(t), voice = f.voice();
+  f.modelPage(params => params['cursor']
+    ? { data: [f.model('provider-custom', ['none', 'minimal', 'future-effort'])], nextCursor: null }
+    : { data: [f.model('gpt-6.1-sol', ['low', 'high', 'ultra'])], nextCursor: 'second' });
+  const [first, concurrent] = await Promise.all([voice.models(), voice.models()]);
+  assert.deepEqual(first, concurrent);
+  assert.deepEqual(first.map(item => item.model), ['gpt-6.1-sol', 'provider-custom']);
+  assert.deepEqual(first[1]!.supportedReasoningEfforts.map(item => item.reasoningEffort), ['none', 'minimal', 'future-effort']);
+  first[0]!.model = 'mutated-client-copy';
+  assert.equal((await voice.models())[0]!.model, 'gpt-6.1-sol');
+  assert.deepEqual(f.requests.filter(item => item.method === 'model/list').map(item => item.params),
+    [{ limit: 100, includeHidden: false }, { limit: 100, includeHidden: false, cursor: 'second' }]);
+  assert.equal(f.requests.filter(item => /^(thread|turn)\//.test(item.method)).length, 0);
+});
+
+test('Model discovery refreshes after cache expiry and reconnect, and never substitutes a fixed list on failure', async t => {
+  const f = fixture(t), voice = f.voice();
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  await voice.models();
+  f.modelPage(() => ({ data: [f.model('new-native-model', ['new-native-effort'])], nextCursor: null }));
+  assert.equal((await voice.models())[0]!.model, 'gpt-6.1-sol');
+  now += 60001;
+  assert.equal((await voice.models())[0]!.model, 'new-native-model');
+  f.modelPage(() => { throw new Error('native catalog unavailable'); });
+  f.disconnect();
+  await assert.rejects(voice.models(), /native catalog unavailable/);
+  f.modelPage(() => ({ data: [f.model('after-reconnect', ['minimal'])], nextCursor: null }));
+  assert.equal((await voice.models())[0]!.model, 'after-reconnect');
+});
+
+test('Model discovery rejects malformed native data and repeated pagination cursors', async t => {
+  const f = fixture(t), voice = f.voice();
+  f.modelPage(() => ({ data: [{ model: 'incomplete' }], nextCursor: null }));
+  await assert.rejects(voice.models());
+  f.modelPage(params => ({ data: [f.model(params['cursor'] ? 'second' : 'first', ['high'])], nextCursor: 'repeat' }));
+  await assert.rejects(voice.models(), { code: 'phone_voice_catalog_invalid' });
+});
+
+test('GPT-6.1 Sol selection reaches native settings and is retained for a fresh replacement task', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit();
+  const original = await voice.prepare(call, 0, selection), operationId = randomUUID();
+  const chosen = { model: 'gpt-6.1-sol', reasoningEffort: 'ultra' };
+  await voice.select(call, original, { operationId }, chosen, async () => {});
+  assert.deepEqual(f.requests.filter(item => item.method === 'thread/settings/update').at(-1)!.params,
+    { threadId: original, model: chosen.model, effort: chosen.reasoningEffort });
+  assert.equal(f.journal.get(operationId)?.receipt?.ok, true);
+  assert.notEqual(await voice.prepare(call, 1, chosen), original);
+  const prepared = f.requests.filter(item => item.method === 'thread/start').at(-1)!.params;
+  assert.equal(prepared['model'], chosen.model);
+  assert.equal((prepared['config'] as Record<string, unknown>)['model_reasoning_effort'], chosen.reasoningEffort);
+});
 
 test("Incoming continuation keeps its exact task and speech context, still greets, and *0 restarts fresh", async (t) => {
   const f = fixture(t); f.settings.resumeIncomingConversation = true;

@@ -178,7 +178,7 @@ export const phoneTools = [
     output: "PhoneServiceStatus",
     readOnly: true,
     description:
-      "Check phone readiness, configured recipient IDs and this caller’s active or incoming call.",
+      "Check phone readiness, configured recipient IDs and this caller’s active or incoming call. voiceModels lists models and their supportedReasoningEfforts from the configured Codex runtime, refreshed automatically with a 60-second cache. voiceModelsError reports catalog failures.",
   },
   {
     name: "request",
@@ -202,7 +202,7 @@ export const phoneTools = [
     output: "PhoneOperationResult",
     readOnly: false,
     description:
-      "Change model and reasoningEffort for subsequent turns in the active Voice task. Requires callId and a new operationId. Supports gpt-6-luna, gpt-6-sol and gpt-6-astra; Luna excludes ultra. Keeps the phone call and task running. Reusing operationId returns the original outcome.",
+      "Change model and reasoningEffort for subsequent turns in the active Voice task. Read available model IDs and each model's supportedReasoningEfforts from phone_bridge_status.voiceModels; combinations are validated against the configured Codex runtime. Requires callId and a new operationId. Keeps the phone call and task running. Reusing operationId returns the original outcome.",
   },
   {
     name: "restartVoice",
@@ -289,7 +289,7 @@ export function phoneRegistry(): Wire.RegistrySync {
           "Phone calls with a voice model, Windows audio or automated announcements",
         guideMarkdown:
           "Use phone_bridge_status for readiness, configured recipient IDs, original call state, current Voice model selection and original operation outcomes. phone_bridge_call requires recipientId, operationId and a nonempty initialPrompt. PhoneBridge creates a local task with Sol/high by default and sends the prompt after connection. During the call, *1<M><R># selects model 1 Luna, 2 Sol or 3 Astra and reasoning 1 low, 2 medium, 3 high, 4 xhigh, 5 max or 6 ultra (not Luna). Selection leaves the current task running; *0# creates a new task with the selected model and reasoning, then starts Voice there. Use phone_bridge_hangup to end the call. " +
-          "phone_bridge_select_voice changes model and reasoningEffort in the current task; phone_bridge_restart_voice creates and transfers to a new task with that selection. Both require callId and operationId, keep the phone connection, and return the retained operation. Use a new operationId only for a new action; read a lost reply via phone_bridge_status with callId and operationId. " +
+          "phone_bridge_status.voiceModels discovers all picker-visible models and their supportedReasoningEfforts from the configured Codex home via model/list, cached for up to 60 seconds. Check voiceModelsError if discovery is unavailable. phone_bridge_select_voice accepts these exact model IDs and efforts without a fixed allowlist. It changes the current task; phone_bridge_restart_voice creates and transfers to a fresh task with that selection and the original greeting. Both require callId and operationId, keep the phone connection, and return the retained operation. Use a new operationId only for a new action; read a lost reply via phone_bridge_status with callId and operationId. " +
           "If the recipient already has an incoming or outgoing Voice call, phone_bridge_call forwards initialPrompt unchanged to its current task and returns the existing callId. It waits for setup or a task switch and retains the send under the request operationId, so retries cannot duplicate it. " +
           "The internal phone.request method also supports the Windows audio route and authorized direct destinations. " +
           "phone.screen plays an announcement and collects 1/2; phone.bridgeScreening connects an accepted call to Windows audio. " +

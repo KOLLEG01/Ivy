@@ -186,6 +186,9 @@ export class PhoneBridge {
         const voiceCall = visible.find(
           (call) => this.flow.callRoute(call) === "voice",
         );
+        let voiceModels: unknown[] = [], voiceModelsError: string | null = null;
+        try { voiceModels = await this.flow.voiceModelCatalog(); }
+        catch (error) { voiceModelsError = IvyError.from(error).code; }
         result = {
           epoch: this.native.epoch,
           registration: observed.registration,
@@ -196,6 +199,8 @@ export class PhoneBridge {
           voiceSelection: voiceCall
             ? this.flow.voiceSelection(voiceCall.callId)
             : null,
+          voiceModels,
+          voiceModelsError,
           call: visible[0] ?? null,
           incoming: pending[0] ?? null,
           calls: visible,

@@ -147,12 +147,12 @@ export class PhoneJournal {
   private setMeta(key: string, value: string): void { this.statement('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value); }
   rememberedVoiceReasoning(): PhoneVoiceSelection['reasoningEffort'] | null {
     const value = this.meta('voiceReasoning');
-    requireThat(value === null || ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value),
+    requireThat(value === null || value.length > 0 && value.length <= 64,
       'phone_storage_invalid', 'Remembered Voice reasoning is invalid.');
     return value as PhoneVoiceSelection['reasoningEffort'] | null;
   }
   rememberVoiceReasoning(value: PhoneVoiceSelection['reasoningEffort']): void {
-    requireThat(['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value),
+    requireThat(value.length > 0 && value.length <= 64,
       'invalid_arguments', 'Unsupported Voice reasoning.');
     this.setMeta('voiceReasoning', value);
   }

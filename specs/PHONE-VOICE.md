@@ -78,6 +78,14 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   packets can supply recovery before the reorder window expires. Longer gaps reset
   the stream instead of replaying old speech. Native media diagnostics include WebRTC receive counters,
   concealed samples and PCM underruns separately from telephone RTP counters.
+- MCP model selection discovers the configured Codex home's picker-visible models
+  through paginated `model/list`, including the reasoning options for each model.
+  `phone_bridge_status.voiceModels` exposes the catalog; `voiceModelsError` reports
+  failures. Cache discovery for 60 seconds and clear it on reconnect. Idle
+  preparation loads it ahead of calls; prepared calls do not wait for a refresh.
+  Validate selections against the catalog before settings updates or journal
+  intents. Remember arbitrary advertised efforts and only reuse them if the
+  configured default model supports them. Keep the established keypad shortcuts.
 - A forwarded prompt uses the existing recipient's active call and task, with its
   original operation ID. A model selection affects following task turns. Restart
   prepares a new task and reconnects media in the original SIP call; retained

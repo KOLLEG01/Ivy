@@ -26,9 +26,18 @@ new prompt in its existing task. Replaying an operation never sends it twice.
 `incomingInitialPrompt` controls incoming greetings. Each session receives its full
 prompt at realtime startup, including when the task is reused.
 
-The default task model is Sol/high. `phone_bridge_select_voice` updates following
+`phone_bridge_status.voiceModels` reads the model catalog from the configured Codex
+home using `model/list`, including pagination and each model's advertised reasoning
+efforts. The catalog is loaded during idle preparation and cached for 60 seconds;
+reconnecting refreshes it. `voiceModelsError` reports discovery failures without
+substituting a fixed list. Normal prepared calls use the cached selection.
+
+The default task model is Sol/high. `phone_bridge_select_voice` accepts exact model
+IDs and supported efforts from that catalog, including newly advertised models,
+and validates the combination before changing the task. It updates following
 turns; `phone_bridge_restart_voice` prepares a new task and reconnects Voice within
-the same phone call. The keypad equivalents are `*1<M><R>#` for model/reasoning and
+the same phone call with the selected model and reasoning and the original greeting.
+The established keypad shortcuts remain `*1<M><R>#` for model/reasoning and
 `*0#` for a new task. Accepted commands receive audible feedback. The prior task
 remains available as conversation history.
 
