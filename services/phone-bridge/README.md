@@ -32,7 +32,7 @@ efforts. The catalog is loaded during idle preparation and cached for 60 seconds
 reconnecting refreshes it. `voiceModelsError` reports discovery failures without
 substituting a fixed list. Normal prepared calls use the cached selection.
 
-The default task model is Sol/high. `phone_bridge_select_voice` accepts exact model
+The default task model is GPT-6.1 Sol/high. `phone_bridge_select_voice` accepts exact model
 IDs and supported efforts from that catalog, including newly advertised models,
 and validates the combination before changing the task. It updates following
 turns; `phone_bridge_restart_voice` prepares a new task and reconnects Voice within

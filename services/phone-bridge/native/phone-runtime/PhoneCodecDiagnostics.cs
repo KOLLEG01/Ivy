@@ -13,7 +13,7 @@ public static class PhoneCodecDiagnostics {
             var source = new SyntheticPort(); var sink = new SyntheticPort();
             long bytes = 0; int frames = 0; string error = null;
             try {
-                var format = new CodecSettings([name]).Formats().Single();
+                var format = new CodecSettings([name]).Formats().First();
                 using var encoder = new MediaCodec(format, source);
                 using var decoder = new MediaCodec(format, sink);
                 for (int frame = 0; frame < 25; frame++) {

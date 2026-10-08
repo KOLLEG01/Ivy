@@ -21,7 +21,7 @@ export function validatePhoneVoiceSelection(selection: PhoneVoiceSelection, mode
 }
 
 export const defaultPhoneVoiceSelection: PhoneVoiceSelection = Object.freeze({
-  model: 'gpt-6-sol',
+  model: 'gpt-6.1-sol',
   reasoningEffort: 'high',
 });
 

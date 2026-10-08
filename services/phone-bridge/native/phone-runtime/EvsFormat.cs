@@ -3,14 +3,18 @@ using SIPSorceryMedia.Abstractions;
 
 namespace Ivy.PhoneBridge;
 
-// One fixed EVS Primary sender profile, with independently bounded receive capabilities.
+// EVS Primary CBR profiles with independently negotiated send/receive constraints.
 // SDP rules: ETSI TS126445 AnnexA.3. A refused EVS format can still use an agreed other codec.
 internal static class EvsFormat {
-    internal const string OfferParameters = "br=5.9-24.4;bw=nb-swb;max-red=0";
-    internal static AudioFormat Offered => new(126, "EVS", 32000, 16000, 1, OfferParameters);
+    internal const string OfferParameters = "br=7.2-128;bw=nb-fb;max-red=0";
+    internal static string Parameters(int channels) => OfferParameters + (channels == 2 ? ";channels=2;hf-only=1" : "");
+    internal static AudioFormat Offered => new(126, "EVS", EvsNativeCodec.SampleRate, 16000, 1, Parameters(1));
+    internal static AudioFormat OfferedStereo => new(125, "EVS", EvsNativeCodec.SampleRate, 16000, 2, Parameters(2));
     internal static bool IsEvs(AudioFormat format) => string.Equals(format.FormatName, "EVS", StringComparison.OrdinalIgnoreCase);
-    internal static bool Mono(string rtpmap) => string.Equals(rtpmap, "EVS/16000", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(rtpmap, "EVS/16000/1", StringComparison.OrdinalIgnoreCase);
+    internal static int Channels(string rtpmap) => rtpmap?.ToUpperInvariant() switch {
+        "EVS/16000" or "EVS/16000/1" => 1, "EVS/16000/2" => 2, _ => 0
+    };
+    internal static bool Mono(string rtpmap) => Channels(rtpmap) == 1;
     private static Dictionary<string, string> Parse(string text) {
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(text)) return values;
@@ -30,7 +34,7 @@ internal static class EvsFormat {
     }
     private readonly record struct Rate(decimal Low, decimal High) {
         internal bool Includes(decimal value) => Low <= value && value <= High;
-        internal Rate Receive() => new(Math.Max(5.9m, Low), Math.Min(24.4m, High));
+        internal Rate Receive() => new(Math.Max(7.2m, Low), Math.Min(128m, High));
         public override string ToString() => Low.ToString(CultureInfo.InvariantCulture) + (Low == High ? "" : "-" + High.ToString(CultureInfo.InvariantCulture));
     }
     private static Rate Rates(string value) {
@@ -48,9 +52,24 @@ internal static class EvsFormat {
         _ => throw new ArgumentException("Unsupported EVS bandwidth.")
     };
     private static string BandwidthText(int value) => value switch {
-        1 => "nb", 2 => "wb", 4 => "swb", 3 => "nb-wb", 7 => "nb-swb", _ => throw new ArgumentException("No supported EVS receive bandwidth.")
+        1 => "nb", 2 => "wb", 4 => "swb", 8 => "fb", 3 => "nb-wb", 7 => "nb-swb", 15 => "nb-fb", _ => throw new ArgumentException("No supported EVS receive bandwidth.")
     };
-    internal static bool TrySelect(string remote, bool answeringOffer, out string selected) {
+    private static (int Bitrate, int Bandwidth) Profile(Rate rates, int bandwidths) {
+        // 5.9k SC-VBR requires DTX. Offer the complete constant-rate ladder without
+        // promising discontinuous transmission or channel-aware redundancy.
+        foreach (int rate in new[] { 128000, 96000, 64000, 48000, 32000, 24400, 16400, 13200, 9600, 8000, 7200 })
+            for (int bandwidth = 3; bandwidth >= 0; bandwidth--)
+                if (rates.Includes(rate / 1000m) && (bandwidths & (1 << bandwidth)) != 0 &&
+                    !(bandwidth == 0 && rate > 24400 || bandwidth == 2 && rate < 9600 || bandwidth == 3 && rate < 16400))
+                    return (rate, bandwidth);
+        throw new ArgumentException("No supported EVS bitrate/bandwidth combination.");
+    }
+    internal static (int Bitrate, int Bandwidth) Sender(string parameters) {
+        var fields = Parse(parameters);
+        return Profile(Rates(fields.GetValueOrDefault("br-send") ?? fields.GetValueOrDefault("br")),
+            Bandwidth(fields.GetValueOrDefault("bw-send") ?? fields.GetValueOrDefault("bw")));
+    }
+    internal static bool TrySelect(string remote, bool answeringOffer, out string selected, int channels = 1) {
         selected = null;
         try {
             var fields = Parse(remote);
@@ -60,8 +79,12 @@ internal static class EvsFormat {
             if (Get("evs-mode-switch") is not (null or "0") || Get("dtx") is not (null or "0") ||
                 Get("dtx-recv") is not (null or "0") || Get("cmr") is not (null or "-1") ||
                 Get("ch-aw-recv") is not (null or "0" or "-1") || Get("max-red") is not (null or "0") ||
-                Get("channels") is not (null or "1") || Get("ch-send") is not (null or "1") || Get("ch-recv") is not (null or "1") ||
                 Get("hf-only") is not (null or "0" or "1")) return false;
+            if (channels is not (1 or 2)) return false;
+            string channelCount = channels.ToString(CultureInfo.InvariantCulture);
+            foreach (string key in new[] { "channels", "ch-send", "ch-recv" })
+                if (Get(key) is string count && count != channelCount) return false;
+            if (channels == 2 && (Get("hf-only") != "1" || Get("channels") != "2")) return false;
             foreach (var prefix in new[] { "br", "bw" }) {
                 string both = Get(prefix);
                 bool Same(string value) => prefix == "br" ? Rates(value) == Rates(both) : Bandwidth(value) == Bandwidth(both);
@@ -71,19 +94,20 @@ internal static class EvsFormat {
             var remoteSend = Rates(Get("br-send") ?? Get("br"));
             var receive = remoteSend.Receive();
             int remoteReceiveBandwidth = Bandwidth(Get("bw-recv") ?? Get("bw"));
-            int receiveBandwidth = Bandwidth(Get("bw-send") ?? Get("bw")) & 7;
-            if (!remoteReceive.Includes(24.4m) || receive.Low > receive.High || (remoteReceiveBandwidth & 4) == 0 || receiveBandwidth == 0) return false;
-            if (!answeringOffer && (remoteSend.Low < 5.9m || remoteSend.High > 24.4m || (Bandwidth(Get("bw")) & 8) != 0)) return false;
+            int receiveBandwidth = Bandwidth(Get("bw-send") ?? Get("bw"));
+            var sendProfile = Profile(remoteReceive.Receive(), remoteReceiveBandwidth);
+            _ = Profile(receive, receiveBandwidth);
+            if (!answeringOffer && (remoteSend.Low < 7.2m || remoteReceive.Low < 7.2m)) return false;
             var result = new List<string>();
             bool separateRates = Get("br") == null && (Get("br-send") != null || Get("br-recv") != null);
-            if (separateRates) { result.Add("br-send=24.4"); result.Add("br-recv=" + receive); }
+            if (separateRates) { result.Add("br-send=" + (sendProfile.Bitrate / 1000m).ToString(CultureInfo.InvariantCulture)); result.Add("br-recv=" + receive); }
             else {
                 result.Add("br=" + receive);
                 if (Get("br-send") != null) result.Add("br-recv=" + receive);
                 if (Get("br-recv") != null) result.Add("br-send=" + receive);
             }
             bool separateBandwidth = Get("bw") == null && (Get("bw-send") != null || Get("bw-recv") != null);
-            if (separateBandwidth) { result.Add("bw-send=swb"); result.Add("bw-recv=" + BandwidthText(receiveBandwidth)); }
+            if (separateBandwidth) { result.Add("bw-send=" + BandwidthText(1 << sendProfile.Bandwidth)); result.Add("bw-recv=" + BandwidthText(receiveBandwidth)); }
             else {
                 result.Add("bw=" + BandwidthText(receiveBandwidth));
                 if (Get("bw-send") != null) result.Add("bw-recv=" + BandwidthText(receiveBandwidth));
@@ -91,8 +115,8 @@ internal static class EvsFormat {
             }
             result.Add("max-red=0");
             foreach (string key in new[] { "hf-only", "evs-mode-switch", "channels" }) if (Get(key) is string value) result.Add(key + "=" + value);
-            if (Get("ch-send") != null) result.Add("ch-recv=1");
-            if (Get("ch-recv") != null) result.Add("ch-send=1");
+            if (Get("ch-send") != null) result.Add("ch-recv=" + channelCount);
+            if (Get("ch-recv") != null) result.Add("ch-send=" + channelCount);
             selected = string.Join(';', result); return true;
         } catch (ArgumentException) { return false; }
     }

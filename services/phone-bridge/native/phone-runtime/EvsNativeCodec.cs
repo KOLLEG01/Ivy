@@ -7,23 +7,24 @@ namespace Ivy.PhoneBridge;
 // The shared library has no Desktop, audio-device, configuration or network side effects.
 internal sealed class EvsNativeCodec : IDisposable {
     internal const string FileName = "ivy_phone_evs.dll";
-    internal const int SampleRate = 32000, Samples = 640;
+    internal const int SampleRate = 48000, Samples = 960;
     private readonly object sync = new();
     private readonly bool encoding;
+    private readonly int channels;
     private readonly CodecHandle handle;
     private readonly EncodeDelegate encode;
     private readonly DecodeDelegate decode;
 
-    public EvsNativeCodec(bool encoding) {
-        this.encoding = encoding;
+    public EvsNativeCodec(bool encoding, int bitrate = 128000, int bandwidth = 3, int channels = 1) {
+        this.encoding = encoding; this.channels = channels;
         nint library = NativeLibrary.Load(Path.Combine(AppContext.BaseDirectory, FileName));
         nint created = 0; DestroyDelegate destroy = null;
         try {
             T Export<T>(string name) where T : Delegate => Marshal.GetDelegateForFunctionPointer<T>(NativeLibrary.GetExport(library, name));
-            if (Export<AbiDelegate>("ivy_phone_evs_abi")() != 1) throw new InvalidOperationException("Unsupported packaged EVS ABI.");
+            if (Export<AbiDelegate>("ivy_phone_evs_abi")() != 2) throw new InvalidOperationException("Unsupported packaged EVS ABI.");
             destroy = Export<DestroyDelegate>("ivy_phone_evs_destroy");
             encode = Export<EncodeDelegate>("ivy_phone_evs_encode"); decode = Export<DecodeDelegate>("ivy_phone_evs_decode");
-            int result = Export<CreateDelegate>("ivy_phone_evs_create")(encoding ? 1 : 0, out created);
+            int result = Export<CreateDelegate>("ivy_phone_evs_create")(encoding ? 1 : 0, bitrate, bandwidth, channels, out created);
             if (result != 0 || created == 0) throw new InvalidOperationException("EVS direction initialization failed.");
             handle = new CodecHandle(created, library, destroy);
         } catch {
@@ -37,10 +38,10 @@ internal sealed class EvsNativeCodec : IDisposable {
         lock (sync) {
             ObjectDisposedException.ThrowIf(handle.IsClosed, this);
             if (!encoding || pcm == null || pcm.Length != Samples) throw new ArgumentException("Exact EVS encoding direction and20ms PCM required.");
-            byte[] packet = new byte[headerFull ? 62 : 61];
+            byte[] packet = new byte[channels * 321];
             int bytes = encode(handle, pcm, pcm.Length, packet, packet.Length, headerFull ? 1 : 0);
-            if (bytes != packet.Length) { Array.Clear(packet); throw new InvalidOperationException("EVS frame encoding failed."); }
-            return packet;
+            if (bytes is < 1 || bytes > packet.Length) { Array.Clear(packet); throw new InvalidOperationException("EVS frame encoding failed."); }
+            var result = packet.AsSpan(0, bytes).ToArray(); Array.Clear(packet); return result;
         }
     }
 
@@ -73,7 +74,7 @@ internal sealed class EvsNativeCodec : IDisposable {
         }
     }
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int AbiDelegate();
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int CreateDelegate(int encoding, out nint handle);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int CreateDelegate(int encoding, int bitrate, int bandwidth, int channels, out nint handle);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void DestroyDelegate(nint handle);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int EncodeDelegate(SafeHandle handle, [In] short[] pcm, int samples, [Out] byte[] payload, int capacity, int full);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int DecodeDelegate(SafeHandle handle, [In] byte[] payload, int bytes, [Out] short[] pcm, int capacity, int full);

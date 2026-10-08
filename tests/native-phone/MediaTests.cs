@@ -107,7 +107,7 @@ static partial class Program {
     static void CodecContinuity() {
         var opus = new CodecSettings(["OPUS"]).Formats().Single();
         foreach (string name in new[] { "G722", "PCMA", "PCMU", "EVS" }) {
-            var phone = new CodecSettings([name]).Formats().Single();
+            var phone = new CodecSettings([name]).Formats().First();
             var source = new ContinuityPort(true); var relay = new ContinuityPort(); var sink = new ContinuityPort();
             using var voiceTx = new MediaCodec(opus, source); using var voiceRx = new MediaCodec(opus, relay);
             using var phoneTx = new MediaCodec(phone, relay); using var phoneRx = new MediaCodec(phone, sink);

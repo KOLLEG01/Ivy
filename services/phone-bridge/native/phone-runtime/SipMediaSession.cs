@@ -13,7 +13,7 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
     private readonly List<SDPAudioVideoMediaFormat> configuredFormats;
     private readonly RtpReceiveQueue receiveQueue;
     private Dictionary<int, AudioFormat> receiveFormats = new();
-    private Dictionary<int, string> evsAnswers = new();
+    private Dictionary<int, AudioFormat> evsAnswers = new();
     private readonly CancellationTokenSource stop = new();
     private MediaCodec sender, receiver;
     private Task pump = Task.CompletedTask;
@@ -59,12 +59,16 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
     internal Action<char, DtmfInputSource> Digit;
     public string SendCodec { get { lock (transmit) return sender?.Format.FormatName; } }
     public int? SendPayload { get { lock (transmit) return sender?.Format.FormatID; } }
+    private static object Describe(AudioFormat format) => new {
+        codec = format.FormatName, payload = format.FormatID, clockRate = format.RtpClockRate,
+        pcmRate = EvsFormat.IsEvs(format) ? EvsNativeCodec.SampleRate : format.ClockRate,
+        channels = format.ChannelCount, parameters = format.Parameters
+    };
     public object Diagnostics {
         get {
             object[] formats, rawPayloads, remoteEvents, localEvents; object inBand; int[] offeredEventPayloadIds;
             lock (receive) {
-                formats = receiveFormats.Values.Select(format => (object)new {
-                    codec = format.FormatName, payload = format.FormatID, clockRate = format.RtpClockRate }).ToArray();
+                formats = receiveFormats.Values.Select(Describe).ToArray();
                 offeredEventPayloadIds = tonePayloads.Order().ToArray();
                 remoteEvents = remoteEventFormats;
                 localEvents = localEventFormats;
@@ -72,9 +76,10 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
                     .Where(value => value.packets > 0).Select(value => (object)value).ToArray();
                 inBand = dtmf?.Diagnostics;
             }
-            object rtcp;
+            object rtcp, sendFormat;
+            lock (transmit) sendFormat = sender == null ? null : Describe(sender.Format);
             lock (reportSync) rtcp = new { reportsReceived, reportsSent, lastReportAt, peerReceptionReports };
-            return new { sendCodec = SendCodec, sendPayload = SendPayload, receiveFormats = formats, rtcp,
+            return new { sendCodec = SendCodec, sendPayload = SendPayload, sendFormat, receiveFormats = formats, rtcp,
                 localRtp = AudioStream.GetRTPChannel()?.RTPLocalEndPoint?.ToString(), remoteRtp = AudioStream.DestinationEndPoint?.ToString(),
                 sentPackets = SentPackets, receivedPackets = ReceivedPackets, receive = ReceiveStatus, audio = AudioStatus,
                 realtime = (audio as CallAudioPort)?.Realtime?.Observation,
@@ -181,10 +186,10 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
         try {
             // Negotiation may enumerate static RTP formats before dynamic ones. Select from
             // the agreed set using our configured priority, not the parser's enumeration order.
-            formats = formats.Select(value => EvsFormat.IsEvs(value) && evsAnswers.TryGetValue(value.FormatID, out string parameters)
-                ? new AudioFormat(value.FormatID, "EVS", 32000, 16000, 1, parameters) : value).ToList();
+            formats = formats.Select(value => EvsFormat.IsEvs(value) && evsAnswers.TryGetValue(value.FormatID, out var selected)
+                ? selected : value).ToList();
             var format = formats.Where(value => preference.ContainsKey(value.FormatName))
-                .OrderBy(value => preference[value.FormatName]).First();
+                .OrderBy(value => preference[value.FormatName]).ThenBy(value => value.ChannelCount).First();
             lock (transmit) {
                 if (IsClosed || Failed) return;
                 sender?.Dispose(); sender = new MediaCodec(format, (IPcmAudioPort)screening ?? waitingAudio);
@@ -309,8 +314,8 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
         var answer = base.CreateAnswer(connectionAddress);
         if (answer != null) foreach (var track in answer.Media.Where(value => value.Media == SDPMediaTypesEnum.audio))
             foreach (var format in track.MediaFormats.Values.ToArray())
-                if (format.Name().Equals("EVS", StringComparison.OrdinalIgnoreCase) && evsAnswers.TryGetValue(format.ID, out string parameters))
-                    track.MediaFormats[format.ID] = new SDPAudioVideoMediaFormat(format.Kind, format.ID, format.Rtpmap, parameters);
+                if (format.Name().Equals("EVS", StringComparison.OrdinalIgnoreCase) && evsAnswers.TryGetValue(format.ID, out var selected))
+                    track.MediaFormats[format.ID] = new SDPAudioVideoMediaFormat(format.Kind, format.ID, format.Rtpmap, selected.Parameters);
         answer = PacketTime(answer);
         lock (receive) localEventFormats = EventFormats(answer);
         return answer;
@@ -326,13 +331,15 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
         var parts = format.Rtpmap?.Split('/');
         return parts is { Length: > 1 } && int.TryParse(parts[1], out int parsed) ? parsed : 0;
     }
-    private void NormalizeEvsTrack(bool offering = false, string rtpmap = "EVS/16000/1") {
+    private void NormalizeEvsTrack(bool offering = false, Dictionary<int, string> rtpmaps = null) {
         var formats = AudioLocalTrack?.Capabilities;
         if (formats == null) return;
         for (int index = 0; index < formats.Count; index++) {
             var format = formats[index];
-            if (EvsFormat.Mono(format.Rtpmap)) formats[index] = new SDPAudioVideoMediaFormat(format.Kind, format.ID, rtpmap,
-                offering ? EvsFormat.OfferParameters : format.Fmtp);
+            int channels = EvsFormat.Channels(format.Rtpmap);
+            if (channels > 0) formats[index] = new SDPAudioVideoMediaFormat(format.Kind, format.ID,
+                rtpmaps?.GetValueOrDefault(channels) ?? "EVS/16000/" + channels,
+                offering ? EvsFormat.Parameters(channels) : format.Fmtp);
         }
     }
     private static SDP PacketTime(SDP description) {
@@ -340,7 +347,7 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
             value.MediaFormats.Values.Any(format => format.Name().Equals("EVS", StringComparison.OrdinalIgnoreCase)))) {
             foreach (string attribute in track.ExtraMediaAttributes.Where(value => value.StartsWith("a=ptime:", StringComparison.OrdinalIgnoreCase) ||
                 value.StartsWith("a=maxptime:", StringComparison.OrdinalIgnoreCase)).ToArray()) track.ExtraMediaAttributes.Remove(attribute);
-            track.ExtraMediaAttributes.Add("a=ptime:20"); track.ExtraMediaAttributes.Add("a=maxptime:40");
+            track.ExtraMediaAttributes.Add("a=ptime:20"); track.ExtraMediaAttributes.Add("a=maxptime:120");
         }
         return description;
     }
@@ -366,16 +373,17 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
         var offeredEvents = normalized.Media.Where(track => track.Media == SDPMediaTypesEnum.audio && track.Port > 0)
             .SelectMany(track => track.MediaFormats.Values).Where(format => format.Name().Equals("telephone-event", StringComparison.OrdinalIgnoreCase))
             .Select(format => format.ID).ToHashSet();
-        var answers = new Dictionary<int, string>();
-        string remoteEvsRtpmap = null;
+        var answers = new Dictionary<int, AudioFormat>();
+        var remoteEvsRtpmaps = new Dictionary<int, string>();
         foreach (var track in normalized.Media.Where(value => value.Media == SDPMediaTypesEnum.audio)) {
             foreach (var format in track.MediaFormats.Values.ToArray()) {
                 if (!format.Name().Equals("EVS", StringComparison.OrdinalIgnoreCase)) continue;
-                if (!EvsFormat.Mono(format.Rtpmap) || !EvsFormat.TrySelect(format.Fmtp, type == SdpType.offer, out string selected)) {
+                int channels = EvsFormat.Channels(format.Rtpmap);
+                if (channels == 0 || !EvsFormat.TrySelect(format.Fmtp, type == SdpType.offer, out string selected, channels)) {
                     track.MediaFormats.Remove(format.ID); continue;
                 }
-                remoteEvsRtpmap ??= format.Rtpmap;
-                answers[format.ID] = selected;
+                remoteEvsRtpmaps.TryAdd(channels, format.Rtpmap);
+                answers[format.ID] = new AudioFormat(format.ID, "EVS", EvsNativeCodec.SampleRate, 16000, channels, selected);
                 track.MediaFormats[format.ID] = new SDPAudioVideoMediaFormat(format.Kind, format.ID, format.Rtpmap, format.Fmtp);
             }
         }
@@ -387,7 +395,7 @@ public sealed class SipMediaSession : RTPSession, IAsyncDisposable {
             AudioLocalTrack.Capabilities.Clear(); AudioLocalTrack.Capabilities.AddRange(formats);
         }
         if (type == SdpType.offer && !challengeRestricted) ReplaceFormats(configuredFormats);
-        if (remoteEvsRtpmap != null) NormalizeEvsTrack(rtpmap: remoteEvsRtpmap);
+        if (remoteEvsRtpmaps.Count > 0) NormalizeEvsTrack(rtpmaps: remoteEvsRtpmaps);
         PrioritizeRemoteAudio(normalized);
         evsAnswers = answers; // Negotiated is raised synchronously by SetRemoteDescription.
         try {

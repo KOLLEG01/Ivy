@@ -113,7 +113,7 @@ test('initial Voice binds the original Desktop chat without creating, navigating
   await tasks.prompt(f.call, f.databasePath, f.settings, 0, f.voice, 'Call prompt', async () => undefined);
   await tasks.prompt(f.call, f.databasePath, f.settings, 0, f.voice, 'Call prompt', async () => undefined);
   assert.equal(f.reads, reads, 'the confirmed binding sends its prompt without another App read');
-  assert.deepEqual(f.prompts, [{ id: f.voice, prompt: 'Call prompt', selection: { model: 'gpt-6-sol', reasoningEffort: 'high' } }]);
+  assert.deepEqual(f.prompts, [{ id: f.voice, prompt: 'Call prompt', selection: { model: 'gpt-6.1-sol', reasoningEffort: 'high' } }]);
   assert.equal(f.opened.length, 1); assert.equal(f.closes, 1);
   await assert.rejects(tasks.bind(f.call, f.databasePath, f.settings, 0, f.previous), { code: 'mutation_conflict' });
   f.cancel();
@@ -176,7 +176,7 @@ test('a fresh Voice chat accepts its complete prompt while its task is notLoaded
     + 'The caller is answering this question; preserve these options as conversation context.';
   await tasks.prompt(f.call, f.databasePath, f.settings, 0, f.voice, prompt, async () => undefined);
   assert.deepEqual(f.prompts.map(value => value.prompt), [prompt]);
-  assert.deepEqual(f.prompts[0]?.selection, { model: 'gpt-6-sol', reasoningEffort: 'high' });
+  assert.deepEqual(f.prompts[0]?.selection, { model: 'gpt-6.1-sol', reasoningEffort: 'high' });
 });
 
 test('archived App controller is replaced without moving the Voice conversation', async t => {

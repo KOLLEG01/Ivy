@@ -949,8 +949,8 @@ test("Confirmed reasoning is remembered across calls and restart, while disabled
   await flow.hangup("main", call.callId);
   const restarted = f.flow(configured);
   await restarted.voiceModelCatalog();
-  assert.deepEqual(restarted.voiceSelection(randomUUID()), { model: "gpt-6-sol", reasoningEffort: "xhigh" });
-  assert.deepEqual(f.flow(settings).voiceSelection(randomUUID()), { model: "gpt-6-sol", reasoningEffort: "high" });
+  assert.deepEqual(restarted.voiceSelection(randomUUID()), { model: "gpt-6.1-sol", reasoningEffort: "xhigh" });
+  assert.deepEqual(f.flow(settings).voiceSelection(randomUUID()), { model: "gpt-6.1-sol", reasoningEffort: "high" });
 });
 
 test("An unconfirmed reasoning change cannot replace the remembered effort", async (t) => {

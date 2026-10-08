@@ -15,8 +15,8 @@ public sealed record CodecSettings(string[] Preferences, int PacketMs = 20, int 
     }
     public List<AudioFormat> Formats() {
         Validate(); using var encoder = new AudioEncoder(includeOpus: Preferences.Contains("OPUS"));
-        return Preferences.Select(name => name == "EVS" ? EvsFormat.Offered :
-            encoder.SupportedFormats.Single(format => string.Equals(format.FormatName, name, StringComparison.OrdinalIgnoreCase))).ToList();
+        return Preferences.SelectMany(name => name == "EVS" ? new[] { EvsFormat.Offered, EvsFormat.OfferedStereo } :
+            new[] { encoder.SupportedFormats.Single(format => string.Equals(format.FormatName, name, StringComparison.OrdinalIgnoreCase)) }).ToList();
     }
 }
 
@@ -48,7 +48,8 @@ public sealed class MediaCodec : IDisposable {
             "G722" => format.ClockRate == 16000 && format.RtpClockRate == 8000 && format.ChannelCount == 1,
             "PCMA" or "PCMU" => format.ClockRate == 8000 && format.RtpClockRate == 8000 && format.ChannelCount == 1,
             "OPUS" => format.ClockRate == 48000 && format.RtpClockRate == 48000 && format.ChannelCount is 1 or 2,
-            "EVS" => format.ClockRate is 16000 or 32000 && format.RtpClockRate == 16000 && format.ChannelCount == 1,
+            "EVS" => format.ClockRate is 16000 or 48000 && format.RtpClockRate == 16000 && format.ChannelCount is 1 or 2 &&
+                (format.ChannelCount == 1 || EvsFormat.HeaderFull(format.Parameters)),
             _ => false
         };
         if (!valid || format.FormatID is < 0 or > 127) throw new ArgumentException("Unsupported negotiated audio format.");
@@ -102,8 +103,12 @@ public sealed class MediaCodec : IDisposable {
             return result;
         } finally { Array.Clear(pcm); captured.Clear(); mono.Clear(); }
     }
+    private EvsNativeCodec CreateEvsEncoder() {
+        var profile = EvsFormat.Sender(Format.Parameters);
+        return new EvsNativeCodec(true, profile.Bitrate, profile.Bandwidth, Format.ChannelCount);
+    }
     private byte[] EncodePcm(short[] pcm) => EvsFormat.IsEvs(Format)
-        ? (evsEncoder ??= new EvsNativeCodec(true)).Encode(pcm, EvsFormat.HeaderFull(Format.Parameters))
+        ? (evsEncoder ??= CreateEvsEncoder()).Encode(pcm, EvsFormat.HeaderFull(Format.Parameters))
         : (encoder ??= new AudioEncoder(includeOpus: IsOpus)).EncodeAudio(pcm, Format);
     public void DecodeRtp(RtpAudioPacket packet) {
         ArgumentNullException.ThrowIfNull(packet);
@@ -144,7 +149,7 @@ public sealed class MediaCodec : IDisposable {
         if (packet == null || packet.Length is < 1 or > 8192) throw new ArgumentException("Encoded packet size outside bounds.");
         long expectedGeneration = generation;
         if (IsOpus) { RenderOpus(packet, 5760, false, expectedGeneration); return; }
-        var pcm = EvsFormat.IsEvs(Format) ? (evsDecoder ??= new EvsNativeCodec(false)).Decode(packet, EvsFormat.HeaderFull(Format.Parameters))
+        var pcm = EvsFormat.IsEvs(Format) ? (evsDecoder ??= new EvsNativeCodec(false, channels: Format.ChannelCount)).Decode(packet, EvsFormat.HeaderFull(Format.Parameters))
             : (encoder ??= new AudioEncoder()).DecodeAudio(packet, Format);
         Render(pcm, expectedGeneration);
     }

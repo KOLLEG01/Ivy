@@ -43,6 +43,7 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   across calls and service restarts. It changes the next session's effort while
   retaining the configured default model. Disabling it restores `voiceDefault`.
   An effort unsupported by that default model falls back to its configured effort.
+  Without an explicit `voiceDefault`, use GPT-6.1 Sol with `high` reasoning.
 - A confirmed missing task or dead native agent loop replaces only its idle cache.
   Earlier call/task identities remain retained. Other errors cannot create another task.
 - Reuse requires the configured home, directory and project and exclusive ownership
@@ -78,6 +79,16 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   packets can supply recovery before the reorder window expires. Longer gaps reset
   the stream instead of replaying old speech. Native media diagnostics include WebRTC receive counters,
   concealed samples and PCM underruns separately from telephone RTP counters.
+- Telephone EVS negotiates the highest mutually supported Primary constant rate:
+  7.2, 8, 9.6, 13.2, 16.4, 24.4, 32, 48, 64, 96 or 128 kbit/s per channel,
+  with NB/WB/SWB/FB bandwidth and 48 kHz PCM. Respect directional rate/bandwidth
+  constraints and their valid combinations. Prefer mono Compact packets; offer
+  stereo separately with Header-Full-only and independent channel state. The
+  mono Voice source is duplicated for stereo transmission; received channels
+  are mixed to mono. Send one 20 ms frame-block per packet with the fixed 16 kHz
+  RTP clock; accept one to six blocks (20..120 ms). These bounds do not increase
+  the configured playback buffer. SC-VBR/DTX, AMR-WB IO and redundancy are not
+  offered. Incompatible EVS parameters allow an agreed other codec.
 - MCP model selection discovers the configured Codex home's picker-visible models
   through paginated `model/list`, including the reasoning options for each model.
   `phone_bridge_status.voiceModels` exposes the catalog; `voiceModelsError` reports
