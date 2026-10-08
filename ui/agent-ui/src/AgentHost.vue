@@ -69,8 +69,8 @@ const projects = useRemote(
 );
 const startTool = useRemote(() =>
   optionalTool(client, props.node, "codex.thread/start"),
-  0, ['services']);
-const sendTool = useRemote(() => optionalTool(client, props.node, 'codex.turn/start'), 0, ['services']);
+  0, ['services/agent-manager/' + props.node]);
+const sendTool = useRemote(() => optionalTool(client, props.node, 'codex.turn/start'), 0, ['services/agent-manager/' + props.node]);
 const model = ref(''),
   mode = ref(''),
   effort = ref(""),

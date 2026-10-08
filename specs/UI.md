@@ -29,6 +29,8 @@ Delivery and authentication follow [Hive](IVYHIVE-SPEC.md).
   Use polling during connection/setup failure or failed reads. Coalesce
   transient invalidations, recover current state after reconnect or browser suspension, and
   preserve drafts, selection and paging. Empty invalidations are liveness heartbeats, not reads.
+  Scope service hints by service and owner, inventory by namespace, kind and owner, and
+  object reads by contract. Changes on another owner must not reload a task's native panels.
 - Loading, empty, stale, offline, unsupported and failed are distinct states. Show real owner,
   observation time and limits; missing measurements are unknown, not zero.
 - All browser UIs share bounded request admission: 16 sent requests per client, at most eight
@@ -37,6 +39,10 @@ Delivery and authentication follow [Hive](IVYHIVE-SPEC.md).
   automatically replayed. Pages reuse recent read bindings and load JSON list documents in
   bounded query pages; residual collection reads use four workers. Hive holds each routed call
   until its provider answers, and tabs sharing a credential share Hive's aggregate budget.
+  Native panels share capability discovery and simultaneous identical reads, including
+  independent cancellation. They share a short readiness observation for their selected owner, suppress
+  provider reads during known unavailability, and back off failed journal polls while
+  retaining automatic recovery and the original owner.
 - Every UI belongs to one installable Ivy browser app, scoped to the configured Hive base
   path. The shared account menu offers installation and per-browser notification settings.
   A shared desktop/mobile installation banner remains until installation or dismissal,

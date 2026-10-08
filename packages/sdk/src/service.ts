@@ -57,6 +57,7 @@ export interface ServiceOptions {
     generation?: number;
     code?: string;
     message?: string;
+    phase?: string;
   }) => void;
   notificationFilters?: () =>
     Operation.NotificationFilter[] | Promise<Operation.NotificationFilter[]>;
@@ -587,6 +588,7 @@ export class ServiceClient {
     status: Parameters<NonNullable<ServiceOptions["onState"]>>[0]["status"],
     code?: string,
     message?: string,
+    phase?: string,
   ): void {
     try {
       this.options.onState?.({
@@ -596,6 +598,7 @@ export class ServiceClient {
           : {}),
         ...(code ? { code } : {}),
         ...(message ? { message: message.slice(0, 256) } : {}),
+        ...(phase ? { phase } : {}),
       });
     } catch {
       /* Observability is not control flow. */
@@ -606,6 +609,7 @@ export class ServiceClient {
     const signal = this.controller.signal;
     while (!signal.aborted) {
       let connection: ServiceConnection | null = null;
+      let phase = "credential";
       const stopped = () => connection?.close();
       try {
         this.state("connecting");
@@ -616,26 +620,33 @@ export class ServiceClient {
         connection = new ServiceConnection(url, credential, this);
         this.current = connection;
         signal.addEventListener("abort", stopped, { once: true });
+        phase = "socket.open";
         await connection.opened;
+        phase = "service.connect";
         const connected = await connection.request(
           "service.connect",
           this.options.identity,
         );
         connection.generation = connected.generation;
         this.state("syncing");
+        phase = "registry.prepare";
         const registry = await connection.prepareRegistry(
           await dependency(this.options.registry(), connection.signal),
         );
+        phase = "registry.sync";
         await connection.request("registry.sync", registry);
         if (this.options.onNotification) {
+          phase = "notifications.subscribe";
           const filters = await dependency(
             this.options.notificationFilters?.() ?? [],
             connection.signal,
           );
           await connection.request("notifications.subscribe", { filters });
         }
+        phase = "reconcile";
         await dependency(this.options.reconcile(connection), connection.signal);
         while (!connection.signal.aborted && !signal.aborted) {
+          phase = "readiness";
           const observation = await dependency(
             this.options.readiness?.(connection) ?? {
               ready: true,
@@ -644,6 +655,7 @@ export class ServiceClient {
             connection.signal,
           );
           connection.ready = observation.ready;
+          phase = "service.heartbeat";
           const accepted = await connection.request(
             "service.heartbeat",
             observation,
@@ -652,6 +664,7 @@ export class ServiceClient {
           this.acknowledged = accepted.ready ? connection : null;
           this.state(accepted.ready ? "ready" : "degraded");
           if (accepted.ready) failures = 0;
+          phase = "heartbeat.wait";
           await delay(this.options.heartbeatMs ?? 5000, undefined, {
             signal: connection.signal,
           });
@@ -667,6 +680,7 @@ export class ServiceClient {
           "offline",
           failure instanceof IvyError ? failure.code : "dependency_unavailable",
           failure instanceof IvyError ? failure.message : undefined,
+          phase,
         );
       } finally {
         signal.removeEventListener("abort", stopped);

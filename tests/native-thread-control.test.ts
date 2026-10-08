@@ -10,6 +10,7 @@ function fixture(version = '0.154.0') {
   let reads = 0;
   const behavior = { changeEpoch: false };
   const client = { async request(method: string, raw: Record<string, unknown>) {
+    if (method === 'serviceNodes.get') return { connected: true, synced: true, ready: true, desiredEnabled: true };
     if (method === 'system.status') return { runtimeEpoch: '11111111-1111-4111-8111-111111111111' };
     if (method === 'tools.list') return { provider: { node: { serviceNodeId: 'owner' } }, items: [{ qualifiedName: raw.namespace + '.' + raw.namePrefix, definitionHash: digest('definition'), definition: {} }], nextCursor: null };
     assert.equal(method, 'tools.call');

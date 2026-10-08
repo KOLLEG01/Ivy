@@ -60,7 +60,7 @@ export function validateChangeNotificationFrame(value: unknown): asserts value i
   const scopes = params['scopes'];
   requireThat(exactKeys(params, ['scopes']) && Array.isArray(scopes) && scopes.length <= 64 &&
     new Set(scopes).size === scopes.length && scopes.every(scope => typeof scope === 'string' && scope.length <= 512 &&
-      /^(objects(?:\/[a-zA-Z0-9._/-]+)?|services|inventory|uis|system)$/.test(scope)),
+      /^((?:objects|services|inventory|system)(?:\/[a-zA-Z0-9._/-]+)?|uis)$/.test(scope)),
     'invalid_frame', 'UI invalidation scopes are invalid.');
 }
 

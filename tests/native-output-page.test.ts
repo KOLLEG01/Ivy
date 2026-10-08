@@ -11,6 +11,7 @@ function fixture(version = '0.154.0') {
   const turns: { id: string; status: string; items: Wire.Json[]; completedAt?: number }[] = [{ id: 'turn-one', status: 'completed', items: [{ id: 'item-one', type: 'agentMessage', text: 'Exact saved output.' }] }];
   const state = { supported: false, nativeCode: -32601, outcome: 'completed' as 'completed' | 'unknown', tamper: (value: Record<string, unknown>) => value, itemPage: null as Wire.Json[] | null, statusReads: 0, changeEpoch: false };
   const client = { async request(method: string, raw: Record<string, unknown>) {
+    if (method === 'serviceNodes.get') return { connected: true, synced: true, ready: true, desiredEnabled: true };
     if (method === 'system.status') return { runtimeEpoch: '11111111-1111-4111-8111-111111111111' };
     if (method === 'tools.list') return { provider: { node: { serviceNodeId: node } }, items: [{ qualifiedName: raw.namespace + '.' + raw.namePrefix, definitionHash: digest('definition'), definition: {} }], nextCursor: null };
     assert.equal(method, 'tools.call'); const name = raw.qualifiedName as string, args = raw.arguments as Record<string, unknown>; calls.push(name);

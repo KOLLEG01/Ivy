@@ -190,7 +190,7 @@ export class Inventory {
           entry.observedAt,
         );
       this.registry.save({ ...node, lastObservationAt: observedAt }, false);
-      this.store.invalidate("inventory");
+      this.store.invalidate("inventory/" + params.namespace + "/" + params.kind + "/" + node.serviceNodeId);
       return { snapshotRevision: params.snapshotRevision, observedAt };
     });
   }

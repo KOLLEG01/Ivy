@@ -136,7 +136,7 @@
             "scopes": {
               "description": "An empty list is a liveness heartbeat; nonempty scopes invalidate matching UI reads.",
               "type": "array", "maxItems": 64, "uniqueItems": true,
-              "items": { "type": "string", "maxLength": 512, "pattern": "^(objects(?:/[a-zA-Z0-9._/-]+)?|services|inventory|uis|system)$" }
+              "items": { "type": "string", "maxLength": 512, "pattern": "^((?:objects|services|inventory|system)(?:/[a-zA-Z0-9._/-]+)?|uis)$" }
             }
           },
           "required": ["scopes"], "additionalProperties": false

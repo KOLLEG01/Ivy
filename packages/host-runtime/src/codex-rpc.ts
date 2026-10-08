@@ -18,6 +18,7 @@ export interface NativeRequestHooks {
   beforeResolve?: (id: Agent.RequestId, reply: Agent.Reply) => void;
 }
 interface Pending extends NativeRequestHooks {
+  method: string; timeoutMs: number;
   resolve: (reply: Agent.Reply) => void;
   reject: (error: IvyError) => void; timer: NodeJS.Timeout;
 }
@@ -75,9 +76,9 @@ export class NativeRpc {
       const timer = setTimeout(() => {
         if(!hooks.detachOnTimeout){this.close('native_deadline_exceeded');return;}
         this.pending.delete(id);this.expired.add(id);
-        reject(new IvyError('native_observation_deadline','Background observation expired; active turns remain connected.','unknown'));
+        reject(new IvyError('native_observation_deadline','Background observation expired; active turns remain connected.','unknown', { method, timeoutMs }));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer, ...hooks });
+      this.pending.set(id, { resolve, reject, timer, method, timeoutMs, ...hooks });
       try { hooks.beforeSend?.(id); }
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); return; }
       try { this.write(encoded); } catch { this.close('native_write_failed'); }
@@ -154,7 +155,7 @@ export class NativeRpc {
     if (this.ended) return;
     this.ended = true; this.fragments = []; this.bufferedBytes = 0;
     try { this.hooks.onClose(code); } catch { code = 'native_recovery_storage_failed'; }
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new IvyError(code, 'Native connection ended; reconcile the original operation.', 'unknown')); }
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new IvyError(code, 'Native connection ended; reconcile the original operation.', 'unknown', { method: pending.method, timeoutMs: pending.timeoutMs })); }
     this.pending.clear(); this.expired.clear(); this.finishClosed(code);
   }
 }

@@ -254,7 +254,7 @@ export class Registry {
       node.serviceNodeId,
     );
     this.changedNodes.add(node.serviceNodeId);
-    if (notify) this.store.invalidate("services");
+    if (notify) this.store.invalidate("services/" + node.serviceName + "/" + node.serviceNodeId);
   }
   connect(
     context: AuthenticatedContext & { generation?: number },
@@ -340,7 +340,7 @@ export class Registry {
           canonical(node),
         );
       this.changedNodes.add(node.serviceNodeId);
-      this.store.invalidate("services");
+      this.store.invalidate("services/" + node.serviceName + "/" + node.serviceNodeId);
       this.changedGenerations.set(node.serviceNodeId, generation!);
       this.store.run(
         "INSERT INTO service_connections VALUES (?,?,?) ON CONFLICT(node_id) DO UPDATE SET credential_digest=excluded.credential_digest,session_digest=excluded.session_digest",
@@ -447,7 +447,7 @@ export class Registry {
         reportedAt,
         encoded,
       );
-      this.store.invalidate("system");
+      this.store.invalidate("system/hosts");
       return { sequence: snapshot.sequence, reportedAt };
     });
   }
@@ -485,6 +485,13 @@ export class Registry {
       );
   }
   private commitDiagnostics(values: Diagnostic[], now = Date.now()): void {
+    const invalidate = (value: Diagnostic) => {
+      const resource = value.resource;
+      const id = (resource && typeof resource === "object" && !Array.isArray(resource)
+        ? (resource as Record<string, unknown>)["serviceNodeId"] : null) ?? (value.source.startsWith("service:") ? value.source.slice(8) : null);
+      const row = typeof id === "string" ? this.store.get("SELECT service_name FROM service_nodes WHERE id=?", id) : null;
+      this.store.invalidate(row ? "services/" + String(row["service_name"]) + "/" + id : "services");
+    };
     const updates = new Map<string, Diagnostic>();
     for (const value of values) {
       validateShared("Diagnostic", value);
@@ -551,16 +558,16 @@ export class Registry {
         ))
         removed.add(identity);
       for (const identity of removed) {
+        invalidate(retained.get(identity)!);
         retained.delete(identity);
         this.store.run("DELETE FROM diagnostics WHERE identity=?", identity);
-        this.store.invalidate("services");
       }
       for (const [identity] of updates) {
         const next = retained.get(identity);
         if (next) {
           const prior = originals.get(identity);
           if (!prior || prior.status !== next.status || prior.message !== next.message || prior.severity !== next.severity)
-            this.store.invalidate("services");
+            invalidate(next);
           const encoded = canonical(next);
           if (
             !originals.has(identity) ||

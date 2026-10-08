@@ -124,7 +124,7 @@ const nodes = usePage((signal, cursor) =>
         ...(cursor ? { cursor } : {}),
       },
       { signal },
-    ), 30000, undefined, ["services"]);
+    ), 30000, undefined, ["services/agent-manager"]);
 const recent = usePage((signal, cursor) =>
     client.request(
       "inventory.list",
@@ -141,7 +141,8 @@ const recent = usePage((signal, cursor) =>
         ...(cursor ? { cursor } : {}),
       },
       { signal },
-    ).then((page) => ({ ...page, items: page.items.filter(isVisibleTask) })), 30000, undefined, ["inventory"]);
+    ).then((page) => ({ ...page, items: page.items.filter(isVisibleTask) })), 30000, undefined,
+    () => ["inventory/codex/thread" + (hostFilter.value ? "/" + hostFilter.value : "")]);
 const allProjects = useRemote(async (signal) => {
   const result: ScopedProject[] = [];
   let cursor: string | undefined;
@@ -156,7 +157,7 @@ const allProjects = useRemote(async (signal) => {
     cursor = page.nextCursor ?? undefined;
   } while (cursor);
   return result;
-}, 30000, ["inventory"]);
+}, 30000, ["inventory/codex/project"]);
 
 const lastNode = ref("");
 try {

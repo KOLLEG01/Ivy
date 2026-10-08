@@ -24,7 +24,7 @@ const props = defineProps<{
 const status = useRemote(
   (signal) => props.client.request("system.status", {}, { signal }),
   30000,
-  ["services", "system"],
+  ["system/runtime"],
 );
 // The rail lists every installed UI; this page is the one whose URL is open.
 const catalog = useRemote(

@@ -1266,6 +1266,7 @@ test(
       status: string;
       code?: string;
       message?: string;
+      phase?: string;
     }> = [];
     f.service.options.onState = (state) => observations.push(state);
     f.service.start();
@@ -1278,6 +1279,7 @@ test(
     const offline = observations.find((state) => state.status === "offline")!;
     assert.equal(offline.code, "invalid_frame");
     assert.equal(offline.message, "Malformed provider transport.");
+    assert.equal(offline.phase, "heartbeat.wait");
     await until(() => f.service.ready && f.service.connection !== connection);
   },
 );

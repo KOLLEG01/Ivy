@@ -59,7 +59,7 @@ export function nativeInputUpdates(
           },
         ),
       );
-      const stopChanges = notifications.subscribeChanges(["services"], changed);
+      const stopChanges = notifications.subscribeChanges(["services/agent-manager/" + serviceNodeId], changed);
       const stopStatus = notifications.onStatus(status);
       return () => {
         stopStatus();

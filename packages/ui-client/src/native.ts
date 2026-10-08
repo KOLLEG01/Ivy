@@ -1,4 +1,4 @@
-import { callBound, discover, IvyError, newOperationId } from '../../sdk/src/client.js';
+import { callBound, canonical, discover, IvyError, newOperationId } from '../../sdk/src/client.js';
 import type { BoundTool, RpcClient, Wire } from '../../sdk/src/client.js';
 
 export type JsonRecord = { [key: string]: Wire.Json };
@@ -40,34 +40,96 @@ export function supportsFields(binding: BoundTool | null | undefined, supplied: 
   const root = schemaNode(binding.definition.inputSchema, binding.definition.inputSchema), fields = record(root.properties);
   return supplied.every(key => key in fields) && list(root.required).every(key => typeof key === 'string' && supplied.includes(key));
 }
-// Reads reuse a recent binding instead of repeating discovery before every call. Any failure drops
-// it, and a changed definition is rediscovered once, because an unexecuted read is safe to repeat.
+// Panels share discovery, including absent optional capabilities. Invocations still carry the
+// exact definition hash; an unexecuted read may rediscover a changed definition once.
 const bindingMs = 60_000;
-const readBindings = new WeakMap<RpcClient, Map<string, { at: number; binding: Promise<BoundTool> }>>();
-function readBinding(client: RpcClient, node: string, method: string): Promise<BoundTool> {
+// All panels share one short readiness observation for their selected owner. An
+// unavailable owner must not receive a separate failing call from every loader.
+const readinessMs = 5_000;
+type ReadReadiness = { until: number; check?: Promise<void>; error?: IvyError };
+const readReadiness = new WeakMap<RpcClient, Map<string, ReadReadiness>>();
+async function readyForRead(client: RpcClient, node: string): Promise<void> {
+  let cache = readReadiness.get(client);
+  if (!cache) readReadiness.set(client, cache = new Map());
+  let entry = cache.get(node);
+  if (!entry || Date.now() >= entry.until) {
+    const check = client.request('serviceNodes.get', { serviceNodeId: node }, { timeoutMs: 5000 }).then(owner => {
+      if (!owner.connected) throw new IvyError('service_unavailable', 'Provider connection is closed.');
+      if (!owner.synced || !owner.ready || !owner.desiredEnabled) throw new IvyError('service_not_ready', 'Provider is not ready.');
+    });
+    cache.set(node, entry = { until: Date.now() + readinessMs, check });
+  }
+  if (entry.error) throw entry.error;
+  await entry.check;
+}
+const readBindings = new WeakMap<RpcClient, Map<string, { at: number; binding: Promise<BoundTool | undefined> }>>();
+function readBinding(client: RpcClient, node: string, method: string): Promise<BoundTool | undefined> {
   let cache = readBindings.get(client);
   if (!cache) readBindings.set(client, cache = new Map());
   const key = node + '\u0000' + method, cached = cache.get(key);
   if (cached && Date.now() - cached.at < bindingMs) return cached.binding;
-  const binding = discover(client, method, { serviceNodeId: node });
+  const binding = discover(client, method, { serviceNodeId: node }).catch(error => {
+    if (error instanceof IvyError && ['not_found', 'namespace_not_found'].includes(error.code)) return undefined;
+    throw error;
+  });
   cache.set(key, { at: Date.now(), binding });
   binding.catch(() => { if (cache.get(key)?.binding === binding) cache.delete(key); });
   return binding;
 }
-export async function nativeRead(client: RpcClient, node: string, method: string, args: Wire.Json, signal?: AbortSignal): Promise<Wire.Json> {
+async function executeRead(client: RpcClient, node: string, method: string, args: Wire.Json, signal: AbortSignal): Promise<Wire.Json> {
   for (let attempt = 0; ; attempt++) {
+    signal?.throwIfAborted();
+    await readyForRead(client, node);
+    signal?.throwIfAborted();
     const binding = await readBinding(client, node, method);
+    if (!binding) throw new IvyError('not_found', 'The exact tool is not in the selected provider catalog.');
     try {
+      signal?.throwIfAborted();
       return await callBound(client, binding, args, method.startsWith('codex.') ? await newOperationId(client) : undefined, signal ? { signal } : {});
     } catch (error) {
       if (!signal?.aborted) readBindings.get(client)?.delete(node + '\u0000' + method);
+      if (!signal?.aborted && error instanceof IvyError && ['service_unavailable', 'service_not_ready', 'native_capacity'].includes(error.code))
+        readReadiness.get(client)?.set(node, { until: Date.now() + readinessMs, error });
       if (attempt || !(error instanceof IvyError) || error.code !== 'tool_definition_changed') throw error;
     }
   }
 }
+type SharedRead = { work: Promise<Wire.Json>; controller: AbortController; users: number };
+const pendingReads = new WeakMap<RpcClient, Map<string, SharedRead>>();
+/** Coalesce simultaneous identical observations. A cancelled panel cannot cancel other readers. */
+export async function nativeRead(client: RpcClient, node: string, method: string, args: Wire.Json, signal?: AbortSignal): Promise<Wire.Json> {
+  signal?.throwIfAborted();
+  let reads = pendingReads.get(client);
+  if (!reads) pendingReads.set(client, reads = new Map());
+  const key = canonical([node, method, args]);
+  let entry = reads.get(key);
+  if (!entry || entry.controller.signal.aborted) {
+    const controller = new AbortController();
+    const work = executeRead(client, node, method, args, controller.signal);
+    const current = entry = { work, controller, users: 0 };
+    reads.set(key, current);
+    const clear = () => { if (reads.get(key) === current) reads.delete(key); };
+    void work.then(clear, clear);
+  }
+  const current = entry;
+  current.users++;
+  return new Promise<Wire.Json>((resolve, reject) => {
+    let finished = false;
+    const finish = (error: unknown, value?: Wire.Json) => {
+      if (finished) return;
+      finished = true;
+      signal?.removeEventListener('abort', abort);
+      if (--current.users === 0) current.controller.abort();
+      if (error !== undefined) reject(error); else resolve(value!);
+    };
+    const abort = () => finish(signal!.reason);
+    signal?.addEventListener('abort', abort, { once: true });
+    void current.work.then(value => finish(undefined, value), error => finish(error));
+    if (signal?.aborted) abort();
+  });
+}
 export async function optionalTool(client: RpcClient, node: string, method: string) {
-  try { return await discover(client, method, { serviceNodeId: node }); }
-  catch (error) { if (error instanceof IvyError && ['not_found', 'namespace_not_found'].includes(error.code)) return undefined; throw error; }
+  return readBinding(client, node, method);
 }
 export async function nativeModels(client: RpcClient, node: string, signal?: AbortSignal): Promise<JsonRecord> {
   const data: Wire.Json[] = [], cursors = new Set<string>(); let cursor: string | null = null;

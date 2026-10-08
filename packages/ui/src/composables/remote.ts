@@ -1,4 +1,4 @@
-import { inject, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
+import { inject, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import type { InjectionKey } from "vue";
 
 /** Applications supply their transport; components only know invalidation and readiness. */
@@ -11,7 +11,7 @@ export interface RemoteUpdates {
 }
 export const remoteUpdatesKey: InjectionKey<RemoteUpdates> =
   Symbol("remote-updates");
-export type RemoteSource = readonly string[] | RemoteUpdates;
+export type RemoteSource = readonly string[] | (() => readonly string[]) | RemoteUpdates;
 
 export function useRemote<T>(
   loader: (signal: AbortSignal) => Promise<T>,
@@ -20,9 +20,9 @@ export function useRemote<T>(
 ) {
   // A connection only replaces polling when this loader has an explicit source.
   const updates =
-    live && "subscribe" in live
+    live && typeof live === "object" && "subscribe" in live
       ? live
-      : live?.length
+      : typeof live === "function" || live?.length
         ? inject(remoteUpdatesKey, null)
         : null;
   const value = shallowRef<T | null>(null),
@@ -83,7 +83,9 @@ export function useRemote<T>(
     if (!document.hidden) schedule();
   };
   onMounted(() => {
-    if (updates)
+    const subscribe = () => {
+      if (!updates) return;
+      unsubscribe?.();
       unsubscribe = updates.subscribe(
         schedule,
         (ready) => {
@@ -91,8 +93,16 @@ export function useRemote<T>(
           connected = ready;
           if (recovered) schedule();
         },
-        Array.isArray(live) ? live : undefined,
+        typeof live === "function" ? live() : Array.isArray(live) ? live : undefined,
       );
+    };
+    if (updates) {
+      subscribe();
+      if (typeof live === "function") watch(() => live().join("\u0000"), () => {
+        subscribe();
+        schedule();
+      });
+    }
     void refresh();
     if (updates || intervalMs) {
       window.addEventListener("online", online);

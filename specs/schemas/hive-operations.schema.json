@@ -4337,11 +4337,11 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 512,
-            "pattern": "^(objects(?:/[a-zA-Z0-9._/-]+)?|services|inventory|uis|system)$"
+            "pattern": "^((?:objects|services|inventory|system)(?:/[a-zA-Z0-9._/-]+)?|uis)$"
           },
           "maxItems": 64,
           "uniqueItems": true,
-          "description": "Transient UI invalidations: objects or objects/<contract prefix>, services, inventory, uis and system. Reconnect rereads current state."
+          "description": "Transient hierarchical UI invalidations: objects/<contract>, services/<service>/<node>, inventory/<namespace>/<kind>/<node>, system/<area> and uis. Reconnect rereads current state."
         }
       },
       "required": [

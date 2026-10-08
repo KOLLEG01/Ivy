@@ -49,6 +49,7 @@ export function useNativeSettings(
   node: () => string,
   cwd: () => string,
 ) {
+  const services = () => [node() ? "services/agent-manager/" + node() : "services/agent-manager"];
   const models = useRemote(
     async (signal) => {
       if (!node()) return { data: [] };
@@ -57,7 +58,7 @@ export function useNativeSettings(
       return result;
     },
     0,
-    ["services"],
+    services,
   );
   const modes = useRemote(
     async (signal) =>
@@ -66,7 +67,7 @@ export function useNativeSettings(
         ? nativeRead(client, node(), "codex.collaborationMode/list", {}, signal)
         : null,
     0,
-    ["services"],
+    services,
   );
   const permissions = useRemote(
     async (signal) =>
@@ -75,7 +76,7 @@ export function useNativeSettings(
         ? nativePermissionProfiles(client, node(), cwd() || undefined, signal)
         : null,
     0,
-    ["services"],
+    services,
   );
   const config = useRemote(
     async (signal) =>
@@ -89,10 +90,10 @@ export function useNativeSettings(
           )
         : null,
     0,
-    ["services"],
+    services,
   );
   const defaults = useRemote(() => readExecutionDefaults(client), 0, [
-    "objects",
+    "objects/agent/execution-defaults",
   ]);
   watch(cwd, () => {
     void config.refresh();

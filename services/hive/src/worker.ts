@@ -309,7 +309,7 @@ async function handle(
     case "health":
       return { ready: kernel.store.get("SELECT 1 AS ready")?.["ready"] === 1 };
     case "retention.collect": {
-      kernel.store.invalidate("system");
+      kernel.store.invalidate("system/retention");
       try {
         const result = kernel.retention.collect();
         kernel.uis.collectFiles();

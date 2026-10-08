@@ -24,6 +24,92 @@ const runtime = load("packages/ui-client/src/runtime.ts", {
   "../../contracts/src/ui-route.js": load("packages/contracts/src/ui-route.ts"),
 });
 const native = load("packages/ui-client/src/native.ts", { "../../sdk/src/client.js": {} });
+const { IvyError } = load("packages/contracts/src/errors.ts");
+
+test("native panels share owner readiness, suppress outage calls and recover without rerouting", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: 100000 });
+  const owners = new Map([
+    ["offline", { connected: true, synced: true, ready: false, desiredEnabled: true }],
+    ["other", { connected: true, synced: true, ready: true, desiredEnabled: true }],
+  ]);
+  const checks = [], calls = [], discoveries = [];
+  let failure = null;
+  const client = { request: async (method, params) => {
+    assert.equal(method, "serviceNodes.get"); checks.push(params.serviceNodeId);
+    return { ...owners.get(params.serviceNodeId) };
+  } };
+  const { nativeRead } = load("packages/ui-client/src/native.ts", { "../../sdk/src/client.js": {
+    IvyError,
+    canonical: JSON.stringify,
+    discover: async (_client, method, target) => { discoveries.push(target.serviceNodeId); return { method, ...target }; },
+    callBound: async (_client, binding) => { calls.push(binding.serviceNodeId); if (failure) throw failure; return {}; },
+    newOperationId: async () => "read-operation",
+  } });
+  const burst = () => Promise.allSettled(["agent.status", "codex.model/list", "agent.inputs", "agent.notifications"].map(method => nativeRead(client, "offline", method, {})));
+  const unavailable = await burst();
+  assert.ok(unavailable.every(result => result.status === "rejected" && result.reason.code === "service_not_ready"));
+  await burst();
+  assert.deepEqual(checks, ["offline"], "panels share one owner check during an outage");
+  assert.equal(discoveries.length, 0);
+  assert.equal(calls.length, 0, "known unavailable owners receive no failing provider calls");
+  await nativeRead(client, "other", "agent.status", {});
+  assert.deepEqual(calls, ["other"], "another owner remains independently usable");
+  owners.get("offline").ready = true;
+  t.mock.timers.tick(5000);
+  assert.ok((await burst()).every(result => result.status === "fulfilled"));
+  assert.equal(checks.filter(node => node === "offline").length, 2);
+  failure = new IvyError("service_unavailable", "Provider connection is closed.");
+  await assert.rejects(nativeRead(client, "offline", "agent.status", {}), { code: "service_unavailable" });
+  const sent = calls.length;
+  await burst();
+  assert.equal(calls.length, sent, "a disconnect after a ready observation suppresses follow-up calls");
+  failure = null;
+  t.mock.timers.tick(5000);
+  await nativeRead(client, "offline", "agent.status", {});
+  assert.equal(calls.at(-1), "offline", "recovery retains the original owner");
+  const cancelled = new AbortController(); cancelled.abort();
+  const before = checks.length;
+  await assert.rejects(nativeRead(client, "offline", "agent.status", {}, cancelled.signal));
+  assert.equal(checks.length, before);
+  assert.equal(calls.length, sent + 1, "cancelled observations create no native work");
+});
+test("native capability discovery and identical reads are shared with independent cancellation", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: 100000 });
+  const discoveries = [], calls = [], signals = [];
+  let release;
+  const client = { request: async () => ({ connected: true, synced: true, ready: true, desiredEnabled: true }) };
+  const { nativeRead, optionalTool } = load("packages/ui-client/src/native.ts", { "../../sdk/src/client.js": {
+    IvyError, canonical: JSON.stringify, newOperationId: async () => "read-operation",
+    discover: async (_client, method, target) => {
+      discoveries.push([target.serviceNodeId, method]);
+      if (method === "codex.absent") throw new IvyError("not_found", "Absent");
+      return { method, ...target };
+    },
+    callBound: async (_client, binding, args, _operation, options) => {
+      calls.push([binding.serviceNodeId, args]); signals.push(options.signal);
+      return new Promise(resolve => { release = resolve; });
+    },
+  } });
+  await Promise.all(Array.from({ length: 10 }, () => optionalTool(client, "one", "codex.read")));
+  await Promise.all(Array.from({ length: 10 }, () => optionalTool(client, "one", "codex.absent")));
+  assert.equal(discoveries.length, 2, "positive and negative discoveries coalesce and stay cached");
+  const controller = new AbortController();
+  const cancelled = nativeRead(client, "one", "codex.read", { threadId: "one" }, controller.signal);
+  const retained = nativeRead(client, "one", "codex.read", { threadId: "one" });
+  await settle();
+  controller.abort();
+  await assert.rejects(cancelled);
+  assert.equal(signals[0].aborted, false, "one panel cannot cancel another panel's observation");
+  release({ value: "observed" });
+  assert.deepEqual(await retained, { value: "observed" });
+  assert.equal(calls.length, 1);
+  assert.equal(discoveries.length, 2, "native reads reuse optional discovery");
+  await optionalTool(client, "two", "codex.read");
+  assert.equal(discoveries.length, 3, "binding caches retain the exact owner");
+  t.mock.timers.tick(60000);
+  await optionalTool(client, "one", "codex.absent");
+  assert.equal(discoveries.length, 4, "absent capabilities can recover after cache expiry");
+});
 const renderer = vue.createRenderer({
   createElement: () => ({}), createText: () => ({}), createComment: () => ({}),
   setText() {}, setElementText() {}, patchProp() {}, insert() {}, remove() {},
@@ -88,6 +174,30 @@ function setup(t) {
 }
 async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); await vue.nextTick(); }
 async function advance(t, ms) { t.mock.timers.tick(ms); await settle(); }
+
+test("reactive live scopes follow their owner without refreshing for unrelated hosts", async t => {
+  const mount = setup(t), notifications = new Notifications(), node = vue.ref("first");
+  let reads = 0;
+  mount({ setup() {
+    remote.useRemote(async () => ++reads, 0, () => ["services/agent-manager/" + node.value]);
+    return {};
+  } }, {}, notifications);
+  await settle();
+  await advance(t, 250);
+  const initial = reads;
+  notifications.change("services/agent-manager/second");
+  await advance(t, 250);
+  assert.equal(reads, initial);
+  node.value = "second";
+  await settle(); await advance(t, 250);
+  assert.equal(reads, initial + 1, "owner changes refresh and replace the subscription");
+  notifications.change("services/agent-manager/first");
+  await advance(t, 250);
+  assert.equal(reads, initial + 1);
+  notifications.change("services/agent-manager/second");
+  await advance(t, 250);
+  assert.equal(reads, initial + 2);
+});
 
 test("explicit live sources isolate reads and preserve polling for uncovered sources", async t => {
   const mount = setup(t), notifications = new Notifications();
@@ -313,7 +423,7 @@ function agentTask(t, connected = true, failures = new Set()) {
     },
     "../../../packages/ui-client/src/native-thread-control": {
       readNativeThreadControl: (_client, _node, _thread, signal) =>
-        read("state", { attached: true, thread: { name: "Task", status: { type: "idle" } } }, signal),
+        read("state", { attached: true, status: { epoch: "epoch" }, thread: { name: "Task", status: { type: "idle" } } }, signal),
     },
     "../../../packages/ui-client/src/native-output-page": {
       isUnmaterializedNativeHistory: () => false,
@@ -324,12 +434,33 @@ function agentTask(t, connected = true, failures = new Set()) {
       useNativeAction: () => ({ saved: vue.ref(null), locked: vue.ref(false), error: vue.ref(null) }),
     },
     "../../../packages/ui-client/src/native-modes": {},
+    "../../../packages/ui-client/src/native-settings": {
+      useNativeSettings: () => ({
+        models: remote.useRemote(async () => ({ data: [] })),
+        permissions: remote.useRemote(async () => null),
+        modes: remote.useRemote(async () => null),
+        config: remote.useRemote(async () => null),
+        defaults: remote.useRemote(async () => null),
+        choices: vue.computed(() => []),
+        refresh() {},
+      }),
+      effectiveNativeSettings: () => ({}),
+    },
     "../../../packages/ui-client/src/object-archive": load("packages/ui-client/src/object-archive.ts", { "../../sdk/src/client.js": {} }),
     "../../../packages/ui-client/src/message-attachments": load("packages/ui-client/src/message-attachments.ts", { "../../sdk/src/client.js": {} }),
     "../../../packages/ui-client/src/NativeActionState.vue": {},
     "../../../packages/ui-client/src/NativeInputs.vue": {},
-    "./conversation": load("ui/agent-ui/src/conversation.ts", { "../../../packages/ui-client/src/native": native }),
-    "./runtime": { base: location, client: { request: async () => ({ summary: {} }) }, notifications },
+    "../../../packages/ui-client/src/TaskProjectDialog.vue": {},
+    "../../../packages/ui-client/src/MessageImages.vue": {},
+    "../../../packages/ui-client/src/native-images": {},
+    "./conversation": load("ui/agent-ui/src/conversation.ts", {
+      "../../../packages/ui-client/src/native": native,
+      "../../../packages/ui-client/src/message-images": load("packages/ui-client/src/message-images.ts", { "./native": native }),
+    }),
+    "./runtime": { base: location, client: { request: async () => ({ summary: {} }) }, notifications,
+      tr: (_de, en) => en,
+      outputCache: new (load("packages/ui-client/src/native-output-cache.ts").NativeOutputCache)(),
+    },
   }).default;
   const state = mount(component, { node: "owner", threadId: "task", turnId: "" }, notifications);
   return { state, notifications, reads, failures, holds, signals,
@@ -360,6 +491,26 @@ test("Agent snapshots retry failed reads with a healthy socket and stop after re
   const recovered = { ...f.reads };
   await advance(t, 30000); await advance(t, 600);
   assert.deepEqual(f.reads, recovered, "healthy idle tasks have no periodic snapshot or journal reads");
+});
+
+test("Agent journal failures back off and stop retrying after push recovers", async t => {
+  const f = agentTask(t, true, new Set(["journal"]));
+  await settle();
+  assert.equal(f.reads.journal, 1, "startup hints do not bypass a failed journal read's delay");
+  await advance(t, 1999);
+  assert.equal(f.reads.journal, 1);
+  await advance(t, 1);
+  assert.equal(f.reads.journal, 2);
+  await advance(t, 3999);
+  assert.equal(f.reads.journal, 2);
+  await advance(t, 1);
+  assert.equal(f.reads.journal, 3);
+  f.failures.clear();
+  await advance(t, 8000);
+  const recovered = f.reads.journal;
+  assert.equal(recovered, 5, "recovery reads the journal head and current page");
+  await advance(t, 30000);
+  assert.equal(f.reads.journal, recovered, "healthy push resumes without continuous retry polling");
 });
 
 test("Agent fallback keeps journal polling fast and snapshots slow without aborting in-flight reads", async t => {

@@ -60,7 +60,7 @@ const hosts = useRemote(
     );
   },
   30000,
-  ["services"],
+  ["services/agent-manager"],
 );
 const selectedNode = ref("");
 const matchingHosts = computed(
@@ -89,7 +89,7 @@ const sendTool = useRemote(
       ? optionalTool(client, selectedNode.value, "codex.turn/start")
       : Promise.resolve(undefined),
   0,
-  ["services"],
+  ["services/agent-manager"],
 );
 watch(selectedNode, () => void sendTool.refresh());
 const modeChoices = computed(() =>

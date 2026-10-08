@@ -122,7 +122,7 @@ const taskInventory = useRemote(
       { signal },
     ),
   0,
-  ["inventory"],
+  ["inventory/codex/thread/" + props.node],
 );
 const capabilities = useRemote(async () => {
   const [
@@ -165,7 +165,7 @@ const capabilities = useRemote(async () => {
     steer,
     project,
   };
-}, 0, ["services"]);
+}, 0, ["services/agent-manager/" + props.node]);
 const projectOpen = ref(false);
 const settings = useNativeSettings(client, () => props.node, () => text(state.value.value?.thread.cwd));
 const { models, permissions, modes } = settings;
@@ -1067,6 +1067,7 @@ let afterSequence = 0,
   stopStatus: (() => void) | undefined,
   stopServiceChanges: (() => void) | undefined,
   resyncRequested = false;
+let pollFailures = 0;
 let buffered: Agent.Notification[] = [];
 const activityAbort = new AbortController();
 const retainNotification = (entry: Agent.Notification) => {
@@ -1137,6 +1138,7 @@ const poll = async () => {
       activityAbort.signal,
     )) as Agent.NotificationPage;
     if (stopped) return;
+    pollFailures = 0;
     if ((activityEpoch && page.epoch !== activityEpoch) || page.gap) {
       gap.value = true;
       scheduleRefresh(true);
@@ -1154,14 +1156,14 @@ const poll = async () => {
     refreshForEvents(relevant.map((item) => item.method));
   } catch {
     // Saved history remains authoritative; the next bounded poll retries live updates.
-    nextPollMs = 2000;
+    nextPollMs = Math.min(30000, 2000 * 2 ** Math.min(pollFailures++, 4));
   } finally {
     polling = false;
     if (nextPollMs !== 0) {
       if (!stopped) for (const entry of buffered) retainNotification(entry);
       buffered = [];
     }
-    if (resyncRequested) nextPollMs = 0;
+    if (resyncRequested && !pollFailures) nextPollMs = 0;
     if (!stopped && nextPollMs !== null)
       timer = setTimeout(() => void poll(), nextPollMs);
   }
@@ -1207,7 +1209,7 @@ onMounted(() => {
       void poll();
     } else timer = setTimeout(() => void poll(), 1000);
   });
-  stopServiceChanges = notifications.subscribeChanges(["services"], () => {
+  stopServiceChanges = notifications.subscribeChanges(["services/agent-manager/" + props.node], () => {
     scheduleRefresh(true);
     void poll();
   });

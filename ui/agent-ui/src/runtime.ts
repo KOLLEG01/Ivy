@@ -30,4 +30,6 @@ notifications.subscribe(
       );
   },
 );
-notifications.subscribeChanges(["services"], () => outputCache.invalidate());
+notifications.subscribeChanges(["services/agent-manager"], scopes => {
+  for (const scope of scopes) outputCache.invalidate(scope.split("/")[2]);
+});

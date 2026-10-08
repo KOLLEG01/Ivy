@@ -26,7 +26,7 @@ test('expired agent reads do not close active requests and accept their late res
   const f=fixture(t);
   const background=f.rpc.request('thread/read',{threadId:'one',includeTurns:false}, {detachOnTimeout:true},10);
   const active=f.rpc.request('account/logout',null);
-  await assert.rejects(background,{code:'native_observation_deadline'});
+  await assert.rejects(background,{code:'native_observation_deadline',details:{method:'thread/read',timeoutMs:10}});
   assert.equal(f.rpc.connected,true);
   f.emit({id:f.sent[0]!['id'],result:{data:[],nextCursor:null}});
   assert.equal(f.rpc.connected,true);

@@ -1212,6 +1212,11 @@ export async function startAgentManager(
         };
       },
       onState: (state) => {
+        if (!closing && state.status === "offline")
+          process.stderr.write(JSON.stringify({
+            at: new Date().toISOString(), event: "agent_hive_connection_failed",
+            generation: state.generation ?? null, code: state.code, phase: state.phase,
+          }) + "\n");
         if (
           !closing &&
           ["offline", "stopped", "connecting"].includes(state.status)
@@ -1270,10 +1275,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     const code = await manager.closed;
     process.exitCode = code === "agent_stopped" ? 0 : 1;
   } catch (error) {
+    const failure = IvyError.from(error), details = failure.details as { method?: unknown; timeoutMs?: unknown } | undefined;
     process.stderr.write(
       JSON.stringify({
-        code: IvyError.from(error).code,
+        at: new Date().toISOString(),
+        code: failure.code,
         message: "AgentManager failed to start.",
+        ...(typeof details?.method === "string" ? { method: details.method } : {}),
+        ...(typeof details?.timeoutMs === "number" ? { timeoutMs: details.timeoutMs } : {}),
       }) + "\n",
     );
     process.exitCode = 1;

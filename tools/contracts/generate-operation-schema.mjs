@@ -1019,8 +1019,8 @@ op(
   "notifications.subscribe",
   obj({
     filters: array(ref("NotificationFilter"), 64),
-    changes: described({ ...array({ ...str(512), pattern: "^(objects(?:/[a-zA-Z0-9._/-]+)?|services|inventory|uis|system)$" }, 64), uniqueItems: true },
-      "Transient UI invalidations: objects or objects/<contract prefix>, services, inventory, uis and system. Reconnect rereads current state."),
+    changes: described({ ...array({ ...str(512), pattern: "^((?:objects|services|inventory|system)(?:/[a-zA-Z0-9._/-]+)?|uis)$" }, 64), uniqueItems: true },
+      "Transient hierarchical UI invalidations: objects/<contract>, services/<service>/<node>, inventory/<namespace>/<kind>/<node>, system/<area> and uis. Reconnect rereads current state."),
   }, ["filters"]),
   obj({ subscribed: uint(0, 64), changes: uint(0, 64) }, ["subscribed"]),
   "client",

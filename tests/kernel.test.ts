@@ -208,6 +208,27 @@ test("Hive instructions include each registered service hint once and follow reg
   assert.doesNotMatch(updated, /AgentManager offers test capabilities\./);
 });
 
+test("service and inventory invalidations identify their owner and kind", (t) => {
+  const { kernel, call, connect, ready } = fixture(t);
+  const service = connect("first");
+  ready(service);
+  kernel.store.changes.clear();
+  const other = connect("second");
+  ready(other);
+  assert.deepEqual([...kernel.store.changes], ["services/agent-manager/second"]);
+  kernel.store.changes.clear();
+  call(service, "inventory.sync", {
+    namespace: "codex", kind: "thread", schemaVersion: "1.0.0", mode: "snapshot", snapshotRevision: 1,
+    entries: [{ nativeId: "thread", summary: { title: "Thread" }, observedAt: new Date().toISOString() }],
+  });
+  assert.deepEqual([...kernel.store.changes], ["inventory/codex/thread/first"]);
+  kernel.store.changes.clear();
+  const now = new Date().toISOString();
+  kernel.registry.diagnostic({ code: "fixture", resource: { serviceNodeId: "second" }, source: "service:second",
+    severity: "warning", status: "current", firstObservedAt: now, lastObservedAt: now, message: "Changed" });
+  assert.deepEqual([...kernel.store.changes], ["services/agent-manager/second"]);
+});
+
 test("permanent deletion is absent from MCP discovery and rejected over MCP transport", (t) => {
   const { call } = fixture(t);
   const found = call<Operation.DiscoveryListResult>(client, "discovery.list", {
