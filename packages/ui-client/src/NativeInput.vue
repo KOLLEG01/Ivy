@@ -19,7 +19,9 @@ const questions = computed(() => list(params.value.questions).map(record).slice(
 const secret = computed(() => questions.value.some(q => q.isSecret === true));
 const answers = ref<Record<string, string>>({}), decision = ref('');
 try { const draft = JSON.parse(sessionStorage.getItem(key + ':draft') ?? '{}'); if (!secret.value) { answers.value = record(draft.answers) as Record<string, string>; decision.value = text(draft.decision); } } catch { action.error.value = 'The response draft could not be read.'; }
-watch([answers, decision], () => { if (secret.value) return; try { sessionStorage.setItem(key + ':draft', JSON.stringify({ answers: answers.value, decision: decision.value })); } catch { action.error.value = 'The response draft cannot be retained.'; } }, { deep: true });
+watch([answers, decision], () => { if (secret.value || props.input.state === 'answered' || action.saved.value?.phase === 'succeeded') return; try { sessionStorage.setItem(key + ':draft', JSON.stringify({ answers: answers.value, decision: decision.value })); } catch { action.error.value = 'The response draft cannot be retained.'; } }, { deep: true });
+// A delivered answer needs no draft; the request then leaves the task view.
+watch(() => action.saved.value?.phase, phase => { if (phase === 'succeeded') { try { sessionStorage.removeItem(key + ':draft'); } catch { /* Optional view state. */ } emit('answered'); } }, { immediate: true });
 const decisions = computed(() => {
   if (!['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(props.input.method)) return [];
   const values = enumStrings(fields.value.decision, definition.value.value?.responseSchema);

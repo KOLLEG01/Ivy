@@ -1152,6 +1152,9 @@ test(
     await second
       .getByLabel("Which fixture result?", { exact: true })
       .fill("Competing answer must remain local");
+    const competingDraftKey = await second.evaluate(() => Object.keys(sessionStorage).find(key =>
+      key.startsWith('ivy:agent-input:') && key.endsWith(':draft')));
+    assert.ok(competingDraftKey);
     await f.page
       .getByRole("button", { name: "Send response", exact: true })
       .click();
@@ -1170,21 +1173,32 @@ test(
       method: "serverRequest/resolved",
       params: { requestId: "pending-one", threadId: "saved-task" },
     });
-    await second
-      .getByRole("button", { name: "Send response", exact: true })
-      .click();
-    await expect(
-      second.getByText(
-        "This native request has been answered or expired. The response draft is retained.",
-        { exact: true },
-      ),
-    ).toBeVisible();
+    await expect(answer).toHaveCount(0);
+    await expect(second.getByLabel("Which fixture result?", { exact: true })).toHaveCount(0);
+    for (const page of [f.page, second]) {
+      assert.equal(await page.evaluate(() => Object.keys(sessionStorage).some(key =>
+        key.startsWith('ivy:agent-input:') && key.endsWith(':draft'))), false);
+    }
     assert.equal(
       f.current().sent.filter((x) => x.id === "pending-one" && !x.method)
         .length,
       1,
     );
+    // Older tabs can contain a draft without a successful local answer receipt.
+    // The owner's answered state must still remove it on reload.
+    await second.evaluate(key => {
+      sessionStorage.setItem(key,
+        JSON.stringify({ answers: { choice: 'Old answered draft' }, decision: '' }));
+    }, competingDraftKey);
+    await second.reload();
+    await expect(second.getByLabel('Message', { exact: true })).toBeVisible();
+    await expect(second.getByLabel("Which fixture result?", { exact: true })).toHaveCount(0);
+    await expect.poll(() => second.evaluate(key => sessionStorage.getItem(key), competingDraftKey)).toBe(null);
     await second.close();
+    f.current().emit(question("native-resolved"));
+    await answer.fill("Draft for a request resolved in the native host");
+    f.current().emit({ method: "serverRequest/resolved", params: { requestId: "native-resolved", threadId: "saved-task" } });
+    await expect(answer).toHaveCount(0);
     f.current().emit(question("pending-two"));
     const requestCard = f.page
       .locator("article")
@@ -1467,6 +1481,9 @@ test(
       method: "serverRequest/resolved",
       params: { requestId: "approval-one", threadId: "saved-task" },
     });
+    await expect(f.page.getByLabel("Decision", { exact: true })).toHaveCount(0);
+    assert.equal(await f.page.evaluate(() => Object.keys(sessionStorage).some(key =>
+      key.startsWith('ivy:agent-input:') && key.endsWith(':draft'))), false);
     f.current().emit({
       id: "secret-one",
       method: "item/tool/requestUserInput",

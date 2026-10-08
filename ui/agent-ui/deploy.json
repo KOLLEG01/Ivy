@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "agent-ui",
   "kind": "app",
-  "version": "0.2.57",
+  "version": "0.2.58",
   "description": "Static agent workspace UI",
   "connectsToHive": false,
   "requirements": {
