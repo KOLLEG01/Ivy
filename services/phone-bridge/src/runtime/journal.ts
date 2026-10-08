@@ -48,6 +48,7 @@ export interface PhoneCodexTaskCache {
   fingerprint: string; threadId: string | null; creationOperationId: string | null;
   preparationOperationId?: string; preparationTurnId?: string;
 }
+export interface PhoneCodexArchiveTask { threadId: string; operationId: string | null }
 export interface PhoneVoiceText { role: 'user' | 'assistant'; text: string }
 export interface PhoneConversation {
   fingerprint: string; partyKey: string; threadId: string; callId: string; generation: number;
@@ -206,7 +207,57 @@ export class PhoneJournal {
     if (cache.preparationTurnId) validate('Uuid', cache.preparationTurnId);
     requireThat(/^sha256:[0-9a-f]{64}$/.test(cache.fingerprint) && !!cache.threadId !== !!cache.creationOperationId,
       'invalid_arguments', 'Cached Voice task must identify either a created task or its original pending creation.');
-    this.setMeta(`codexVoice:${principalId}:${cache.fingerprint}`, canonical(cache));
+    this.transaction(() => {
+      if (cache.threadId) this.rememberCodexTask(cache.fingerprint, cache.threadId);
+      this.setMeta(`codexVoice:${principalId}:${cache.fingerprint}`, canonical(cache));
+    });
+  }
+  rememberCodexTask(fingerprint: string, threadId: string): void {
+    validate('Uuid', threadId);
+    requireThat(/^sha256:[0-9a-f]{64}$/.test(fingerprint), 'invalid_arguments', 'Codex task requires its runtime fingerprint.');
+    const key = `${fingerprint}:${threadId}`;
+    if (!this.meta(`codexArchive:${key}`) && !this.archive.read('codex-voice-archive', key))
+      this.setMeta(`codexArchive:${key}`, canonical({ threadId, operationId: null } satisfies PhoneCodexArchiveTask));
+  }
+  codexBindingPage(after = '', limit = 64): PhoneOperation[] {
+    requireThat(Number.isInteger(limit) && limit >= 1 && limit <= 64, 'invalid_arguments', 'Codex binding scan requires a bounded page.');
+    return this.statement(`SELECT value FROM (
+      SELECT operation_id AS id,value FROM commands WHERE method='call.bindVoice'
+      UNION ALL SELECT key AS id,value FROM receipt_archive WHERE kind='command'
+        AND json_extract(value,'$.intent.method')='call.bindVoice'
+    ) WHERE id>? AND json_extract(value,'$.phase')='result' AND json_extract(value,'$.receipt.ok')=1
+      ORDER BY id LIMIT ?`).all(after, limit).map(row => JSON.parse(String(row['value'])) as PhoneOperation);
+  }
+  codexArchivePage(fingerprint: string, after = '', limit = 32): PhoneCodexArchiveTask[] {
+    requireThat(/^sha256:[0-9a-f]{64}$/.test(fingerprint) && Number.isInteger(limit) && limit >= 1 && limit <= 64,
+      'invalid_arguments', 'Codex archive scan requires a runtime fingerprint and bounded page.');
+    const prefix = `codexArchive:${fingerprint}:`;
+    return this.statement('SELECT value FROM meta WHERE key GLOB ? AND key>? ORDER BY key LIMIT ?')
+      .all(`${prefix}*`, prefix + after, limit).map(row => {
+        const task = JSON.parse(String(row['value'])) as PhoneCodexArchiveTask;
+        validate('Uuid', task.threadId);
+        if (task.operationId !== null) validate('Uuid', task.operationId);
+        return task;
+      });
+  }
+  beginCodexArchive(fingerprint: string, task: PhoneCodexArchiveTask, operationId: string): void {
+    validate('Uuid', operationId);
+    const key = `codexArchive:${fingerprint}:${task.threadId}`;
+    requireThat(this.meta(key) === canonical(task) && task.operationId === null,
+      'phone_voice_archive_changed', 'Codex archival requires its original owned task.');
+    this.setMeta(key, canonical({ ...task, operationId }));
+  }
+  finishCodexArchive(fingerprint: string, task: PhoneCodexArchiveTask): void {
+    requireThat(task.operationId !== null, 'phone_voice_archive_changed', 'Codex archival requires its original request.');
+    const key = `${fingerprint}:${task.threadId}`;
+    this.transaction(() => {
+      const completed = this.archive.read('codex-voice-archive', key);
+      if (completed) { requireThat(completed === canonical(task), 'phone_voice_archive_changed', 'Codex archive receipt changed.'); return; }
+      requireThat(this.meta(`codexArchive:${key}`) === canonical(task),
+        'phone_voice_archive_changed', 'Codex archive request changed.');
+      this.archive.retain('codex-voice-archive', key, canonical(task));
+      this.statement('DELETE FROM meta WHERE key=?').run(`codexArchive:${key}`);
+    });
   }
   usedCodexVoiceTask(threadId: string): boolean {
     validate('Uuid', threadId);

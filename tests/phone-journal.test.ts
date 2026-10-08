@@ -69,6 +69,27 @@ test('Phone archive queue excludes historical deletion evidence after reopen', t
     'historical deletion evidence remains unchanged');
 });
 
+test('Native Voice archive ownership and original request survive reopen without repeating completed work', t => {
+  const f = fixture(t), journal = f.open(), fingerprint = digest('native Voice runtime'), first = randomUUID(), next = randomUUID();
+  journal.retainCodexTask('prepared-phone-voice', { fingerprint, threadId: first, creationOperationId: null });
+  journal.retainCodexTask('prepared-phone-voice', { fingerprint, threadId: next, creationOperationId: null });
+  const original = { threadId: first, operationId: randomUUID() };
+  journal.beginCodexArchive(fingerprint, { threadId: first, operationId: null }, original.operationId);
+  assert.throws(() => journal.beginCodexArchive(fingerprint, { threadId: first, operationId: null }, randomUUID()),
+    { code: 'phone_voice_archive_changed' });
+  journal.close();
+  const reopened = f.open();
+  assert.deepEqual(reopened.codexArchivePage(fingerprint).find(x => x.threadId === first), original);
+  assert.throws(() => reopened.finishCodexArchive(fingerprint, { ...original, operationId: randomUUID() }),
+    { code: 'phone_voice_archive_changed' });
+  reopened.finishCodexArchive(fingerprint, original);
+  reopened.finishCodexArchive(fingerprint, original);
+  reopened.rememberCodexTask(fingerprint, first);
+  assert.deepEqual(reopened.codexArchivePage(fingerprint), [{ threadId: next, operationId: null }]);
+  assert.deepEqual(reopened.codexArchivePage(fingerprint, next), []);
+  assert.deepEqual(reopened.codexArchivePage(digest('other runtime')), []);
+});
+
 test('Phone audio preparation cannot be replaced after receipt or owner loss', t => {
   for (const completed of [false, true]) {
     const f = fixture(t), journal = f.open(), epoch = randomUUID(); journal.beginEpoch(epoch);

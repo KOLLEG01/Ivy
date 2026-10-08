@@ -42,6 +42,13 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   a call assignment. False allows the outgoing conversation to be resumed by a
   later incoming call when `resumeIncomingConversation` is enabled. Incoming-only
   conversations still continue normally; completed task history is retained.
+- After idle preparation, archive retired native tasks in the background without
+  awaiting maintenance on call startup or hangup. Record ownership with creation;
+  recover earlier tasks only from bindings matching the exact runtime fingerprint.
+  Protect the ready task, resumable conversation, current admissions and reservations.
+  Skip busy tasks or unfinished descendants; native archival includes descendants.
+  Retain each archive request before sending it. Reconcile a lost acknowledgement
+  against native archived-task inventory without resubmitting or deleting history.
 - `codexVoice.rememberReasoning` retains a confirmed DTMF/MCP reasoning selection
   across calls and service restarts. It changes the next session's effort while
   retaining the configured default model. Disabling it restores `voiceDefault`.

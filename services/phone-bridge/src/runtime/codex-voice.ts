@@ -136,6 +136,9 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   private readonly schemas = new SchemaValidators();
   private modelCatalog: { models: PhoneVoiceModel[]; expiresAt: number } | null = null;
   private loadingModels: Promise<PhoneVoiceModel[]> | null = null;
+  private archiving: Promise<void> | null = null;
+  private archiveCursor = '';
+  private bindingCursor = '';
   constructor(
     readonly settings: PhoneCodexVoiceSettings,
     private readonly journal: PhoneJournal,
@@ -286,6 +289,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     hooks: Parameters<
       NonNullable<PhoneCodexVoice["connection"]>["rpc"]["request"]
     >[2] = {},
+    timeoutMs?: number,
   ): Promise<Record<string, Wire.Json>> {
     const rpc = this.connection?.rpc;
     requireThat(
@@ -306,7 +310,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       method,
       params,
       hooks,
-      method === 'model/list' ? 15000 : method.startsWith("thread/realtime/") ? 30000 : 120000,
+      timeoutMs ?? (method === 'model/list' ? 15000 : method.startsWith("thread/realtime/") ? 30000 : 120000),
     );
     if ("error" in reply)
       throw new IvyError(
@@ -703,6 +707,95 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     if (this.settings.resumeIncomingConversation && !this.sessions.size && !this.journal.currentCalls().length) {
       const context = this.journal.voiceConversation(this.fingerprint!);
       if (context) await this.resumeTask(context, selection);
+    }
+    // Maintenance runs after the next task is ready and never delays its caller.
+    void this.archive().catch(error => this.archiveIssue(null, error));
+  }
+  private archiveIdle(): boolean {
+    return !this.closed && !!this.connection?.rpc.connected && !this.sessions.size &&
+      !this.reservations.size && !this.preparing.size && !this.journal.currentCalls().length;
+  }
+  private archiveProtected(threadId: string): boolean {
+    return this.journal.codexTaskCache(preparedTaskKey, this.fingerprint!)?.threadId === threadId ||
+      this.journal.voiceConversation(this.fingerprint!)?.threadId === threadId;
+  }
+  private archiveIssue(threadId: string | null, error: unknown): void {
+    process.stderr.write(JSON.stringify({ event: "phone_codex_archive_issue", threadId, code: IvyError.from(error).code }) + "\n");
+  }
+  private archiveCall(method: string, params: Record<string, Wire.Json>, hooks: Parameters<PhoneCodexVoice['call']>[2] = {}) {
+    // Expired maintenance must not disconnect a new call using the same transport.
+    return this.call(method, params, { ...hooks, detachOnTimeout: true }, 15000);
+  }
+  archive(): Promise<void> {
+    return this.archiving ??= this.archiveCore().finally(() => { this.archiving = null; });
+  }
+  private async archiveCore(): Promise<void> {
+    if (!this.archiveIdle()) return;
+    const fingerprint = this.fingerprint!;
+    // Older native calls already have durable bindings in this same owner journal.
+    // Their exact request hash proves the configured home, directory and project.
+    const bindings = this.journal.codexBindingPage(this.bindingCursor);
+    for (const operation of bindings) {
+      this.bindingCursor = operation.intent.operationId;
+      if (operation.intent.method !== "call.bindVoice") continue;
+      const { threadId, voiceGeneration: generation = 0, requestHash } = operation.intent;
+      if (requestHash === digest(canonical({ threadId, generation, fingerprint })))
+        this.journal.rememberCodexTask(fingerprint, threadId);
+    }
+    if (bindings.length < 64) this.bindingCursor = '';
+    let tasks = this.journal.codexArchivePage(fingerprint, this.archiveCursor);
+    if (!tasks.length && this.archiveCursor) {
+      this.archiveCursor = '';
+      tasks = this.journal.codexArchivePage(fingerprint);
+    }
+    for (const task of tasks) {
+      if (!this.archiveIdle()) return;
+      this.archiveCursor = task.threadId;
+      if (this.archiveProtected(task.threadId)) continue;
+      try {
+        if (task.operationId) {
+          // A lost acknowledgement is observed by exact ID, never sent again.
+          let cursor: string | null = null, confirmed = false;
+          const cursors = new Set<string>();
+          do {
+            if (!this.archiveIdle()) return;
+            const page = await this.archiveCall("thread/list", { archived: true, useStateDbOnly: true,
+              projectId: this.settings.projectId ?? null, cwd: this.settings.cwd, limit: 100,
+              ...(cursor ? { cursor } : {}) });
+            if ((page["data"] as unknown as Thread[]).some(value => value.id === task.threadId)) { confirmed = true; break; }
+            cursor = (page["nextCursor"] as string | null | undefined) ?? null;
+            requireThat(!cursor || !cursors.has(cursor) && cursors.size < 16,
+              "phone_voice_archive_unknown", "Original Codex archival remains unconfirmed.");
+            if (cursor) cursors.add(cursor);
+          } while (cursor);
+          if (confirmed) {
+            this.journal.finishCodexArchive(fingerprint, task);
+            this.reconciled.delete(task.threadId); this.preparedSelections.delete(task.threadId);
+          }
+          else this.archiveIssue(task.threadId, new IvyError("phone_voice_archive_unknown", "Original Codex archival remains unconfirmed."));
+          continue;
+        }
+        const observed = this.thread(await this.archiveCall("thread/read", { threadId: task.threadId, includeTurns: false }));
+        if (!['idle', 'notLoaded'].includes(observed.status.type)) continue;
+        // Native archival also archives descendants. Leave unfinished delegated work alone.
+        const children = await this.archiveCall("thread/list", { ancestorThreadId: task.threadId, archived: false,
+          sourceKinds: ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"],
+          useStateDbOnly: true, limit: 100 });
+        if (children["nextCursor"] || (children["data"] as unknown as Thread[])
+          .some(value => !['idle', 'notLoaded'].includes(value.status.type))) continue;
+        // An admission can arrive during either native read. Its warm/continued task
+        // never enters maintenance, and a new call does not wait for this worker.
+        if (!this.archiveIdle() || this.archiveProtected(task.threadId)) return;
+        const operationId = randomUUID();
+        this.journal.beginCodexArchive(fingerprint, task, operationId);
+        const retained = { ...task, operationId };
+        await this.archiveCall("thread/archive", { threadId: task.threadId }, {
+          requestId: operationId,
+          beforeResolve: (_id, reply) => { if ("result" in reply) this.journal.finishCodexArchive(fingerprint, retained); },
+        });
+        this.reconciled.delete(task.threadId); this.preparedSelections.delete(task.threadId);
+        process.stdout.write(JSON.stringify({ event: "phone_codex_task_archived", threadId: task.threadId }) + "\n");
+      } catch (error) { this.archiveIssue(task.threadId, error); }
     }
   }
   private partyKey(call: PhoneCall): string {
@@ -1150,6 +1243,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     return (this.closing = (async () => {
       await this.opening?.catch(() => undefined);
       await Promise.allSettled(this.preparing.values());
+      await this.archiving?.catch(() => undefined);
       try {
         await Promise.all([...this.sessions.keys()].map((id) => this.stop(id)));
       } finally {

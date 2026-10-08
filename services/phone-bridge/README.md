@@ -31,6 +31,10 @@ a confirmed result is available. The backing model also receives the full contex
 `codexVoice.resetAfterOutgoingCall` defaults to true: an outgoing Voice call clears
 the resumable context and the next task is prepared empty. Set it to false to allow
 an incoming call to continue that outgoing conversation when continuation is enabled.
+Idle maintenance archives completed tasks through native Codex after preparing the
+next task. The ready task, resumable conversation, active calls and unfinished
+delegated work stay open. Only tasks owned by PhoneBridge's journal are selected;
+archived conversations remain available in history.
 
 `phone_bridge_status.voiceModels` reads the model catalog from the configured Codex
 home using `model/list`, including pagination and each model's advertised reasoning

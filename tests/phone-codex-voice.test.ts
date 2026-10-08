@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { canonical, digest } from "../packages/contracts/src/canonical.js";
 import { phoneVoiceInstructions, phoneVoiceOpeningCue } from "../instructions/phone-voice.js";
 import catalog from "../specs/native/codex-0.159.2/catalog.json" with { type: "json" };
 import { PhoneCodexVoice } from "../services/phone-bridge/src/runtime/codex-voice.js";
@@ -47,11 +48,24 @@ function fixture(t: test.TestContext) {
     opens = 0;
   const threads = new Map<string, Record<string, unknown>>();
   const unloaded = new Set<string>();
+  const archived = new Set<string>();
+  const archiveRequests: { threadId: string; operationId: string | undefined; detached: boolean | undefined }[] = [];
   const deadLoops = new Set<string>();
   let unloadPause: Promise<void> | undefined;
   let preparationPause: Promise<void> | undefined;
   let losePreparationReply = false;
   let losePromptReply = false;
+  let archivePause: Promise<void> | undefined;
+  let readPause: Promise<void> | undefined;
+  let loseArchiveReply = false;
+  const descendants = (ancestor: string, thread: Record<string, unknown>): boolean => {
+    let parent = thread['parentThreadId'];
+    while (typeof parent === 'string') {
+      if (parent === ancestor) return true;
+      parent = threads.get(parent)?.['parentThreadId'];
+    }
+    return false;
+  };
   const model = (name: string, efforts: string[]) => ({ id: name, model: name, displayName: name, description: 'Native catalog fixture',
     hidden: false, isDefault: false, defaultReasoningEffort: efforts[0]!,
     supportedReasoningEfforts: efforts.map(reasoningEffort => ({ reasoningEffort, description: reasoningEffort })) });
@@ -72,6 +86,7 @@ function fixture(t: test.TestContext) {
         params: Record<string, unknown>,
         hooks: {
           requestId?: string;
+          detachOnTimeout?: boolean;
           beforeResolve?: (id: string, value: unknown) => void;
         } = {},
       ) {
@@ -94,13 +109,7 @@ function fixture(t: test.TestContext) {
         }
         if (method === "thread/read" || method === "thread/resume") {
           const id = String(params["threadId"]);
-          if (
-            method === "thread/read" &&
-            (!threads.has(id) || unloaded.has(id))
-          )
-            return {
-              error: { code: -32600, message: `thread not loaded: ${id}` },
-            };
+          if (method === 'thread/read') await readPause;
           if (!threads.has(id))
             return {
               error: {
@@ -109,7 +118,21 @@ function fixture(t: test.TestContext) {
               },
             };
           if (method === "thread/resume") unloaded.delete(id);
-          result = { thread: threads.get(id) };
+          result = { thread: { ...threads.get(id), ...(unloaded.has(id) ? { status: { type: 'notLoaded' } } : {}) } };
+        }
+        if (method === 'thread/list') {
+          result = { data: [...threads.values()].filter(thread =>
+            archived.has(String(thread['id'])) === (params['archived'] === true) &&
+            (!params['ancestorThreadId'] || descendants(String(params['ancestorThreadId']), thread)))
+            .map(thread => ({ ...thread, ...(unloaded.has(String(thread['id'])) ? { status: { type: 'notLoaded' } } : {}) })), nextCursor: null };
+        }
+        if (method === 'thread/archive') {
+          const id = String(params['threadId']);
+          archiveRequests.push({ threadId: id, operationId: hooks.requestId, detached: hooks.detachOnTimeout });
+          await archivePause;
+          archived.add(id);
+          for (const thread of threads.values()) if (descendants(id, thread)) archived.add(String(thread['id']));
+          if (loseArchiveReply) { loseArchiveReply = false; throw new Error('Archive acknowledgement lost'); }
         }
         if (method === "thread/unsubscribe") {
           await unloadPause;
@@ -184,6 +207,10 @@ function fixture(t: test.TestContext) {
     voice,
     journal,
     requests,
+    threads,
+    archived,
+    archiveRequests,
+    fingerprint: digest(canonical({ home: settings.codexHome, cwd: settings.cwd, projectId: settings.projectId, config: {} })),
     model,
     modelPage: (read: typeof modelPage) => { modelPage = read; },
     admit,
@@ -210,6 +237,9 @@ function fixture(t: test.TestContext) {
     pausePreparation: (pause: Promise<void>) => { preparationPause = pause; },
     losePreparationReply: () => { losePreparationReply = true; },
     losePromptReply: () => { losePromptReply = true; },
+    loseArchiveReply: () => { loseArchiveReply = true; },
+    pauseArchive: (pause?: Promise<void>) => { archivePause = pause; },
+    pauseRead: (pause?: Promise<void>) => { readPause = pause; },
     disconnect: () => {
       online = false;
     },
@@ -314,6 +344,7 @@ for (const reset of [undefined, true, false]) test(`Outgoing context reset ${res
   await voice.connected(outgoing.callId, async () => {});
   await voice.stop(outgoing.callId); f.release(outgoing);
   await voice.prewarm("incoming-user", selection);
+  await voice.archive();
   const before = f.requests.length, incoming = f.incoming(), nextThread = await voice.prepare(incoming, 0, selection);
   assert.deepEqual(f.requests.slice(before), [], "the next call uses its background preparation without native setup");
   assert.notEqual(nextThread, previousThread);
@@ -327,6 +358,115 @@ for (const reset of [undefined, true, false]) test(`Outgoing context reset ${res
   ]);
   assert.equal(String(start["realtimeStartInstructions"]).includes("Chips"), reset === false);
   assert.equal(f.journal.voiceTask(outgoing.callId, 0), outgoingThread, "reset retains completed call history");
+  assert.ok(f.archived.has(previousThread));
+  assert.equal(f.archived.has(outgoingThread), reset !== false);
+  assert.ok(!f.archived.has(nextThread));
+});
+
+test('Background archival keeps the ready and resumable tasks and skips unrelated or busy delegated work', async t => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const voice = f.voice(), call = f.incoming(), continued = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, continued, 'Retained conversation', 'offer', () => {});
+  await voice.connected(call.callId, async () => {});
+  await voice.stop(call.callId); f.release(call);
+  await voice.prewarm('principal', selection); await voice.archive();
+  const ready = f.journal.codexTaskCache('prepared-phone-voice', f.fingerprint)!.threadId!;
+  const root = { cwd: f.settings.cwd, projectId: f.settings.projectId, ephemeral: false, status: { type: 'idle' }, turns: [] };
+  const unrelated = randomUUID(), busy = randomUUID(), child = randomUUID();
+  f.threads.set(unrelated, { ...root, id: unrelated, name: 'Phone Voice' });
+  f.threads.set(busy, { ...root, id: busy });
+  f.threads.set(child, { ...root, id: child, parentThreadId: busy, status: { type: 'inProgress' } });
+  f.journal.rememberCodexTask(f.fingerprint, busy);
+  await voice.archive();
+  assert.deepEqual([...f.archived], []);
+  assert.ok(f.requests.some(x => x.method === 'thread/list' && x.params['ancestorThreadId'] === busy &&
+    (x.params['sourceKinds'] as string[]).includes('subAgent')));
+  f.threads.get(child)!['status'] = { type: 'idle' };
+  f.threads.get(busy)!['status'] = { type: 'inProgress' };
+  await voice.archive();
+  assert.deepEqual([...f.archived], []);
+  f.threads.get(busy)!['status'] = { type: 'idle' };
+  await voice.archive();
+  assert.deepEqual(new Set(f.archived), new Set([busy, child]));
+  assert.ok(!f.archived.has(continued) && !f.archived.has(ready) && !f.archived.has(unrelated));
+  assert.equal(f.journal.voiceTask(call.callId, 0), continued);
+});
+
+test('A delayed background archive never holds up prewarming or an immediate new call', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit(), old = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, old, 'Completed call', 'offer', () => {});
+  await voice.stop(call.callId); f.release(call);
+  let release!: () => void;
+  f.pauseArchive(new Promise<void>(resolve => { release = resolve; }));
+  try {
+    await voice.prewarm('principal', selection);
+    for (let i = 0; i < 20 && !f.archiveRequests.length; i++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(f.archiveRequests.length, 1);
+    const original = f.archiveRequests[0]!;
+    assert.equal(original.detached, true, 'maintenance deadlines must preserve the call transport');
+    assert.equal(f.journal.codexArchivePage(f.fingerprint).find(x => x.threadId === old)!.operationId, original.operationId);
+    const before = f.requests.length, next = f.admit(), ready = await voice.prepare(next, 0, selection);
+    assert.notEqual(ready, old);
+    assert.deepEqual(f.requests.slice(before), [], 'an immediate call uses the already ready task');
+    await voice.start(next, 0, ready, 'Hello', 'offer', () => {});
+    await voice.connected(next.callId, async () => {});
+    assert.ok(!f.archived.has(ready));
+  } finally { release(); await voice.archive(); }
+  assert.ok(f.archived.has(old));
+});
+
+test('An admission during maintenance reads defers archival without blocking the prepared task', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit(), old = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, old, 'Completed call', 'offer', () => {});
+  await voice.stop(call.callId); f.release(call);
+  let release!: () => void;
+  f.pauseRead(new Promise<void>(resolve => { release = resolve; }));
+  await voice.prewarm('principal', selection);
+  const next = f.admit();
+  assert.notEqual(await voice.prepare(next, 0, selection), old);
+  release(); await voice.archive();
+  assert.deepEqual(f.archiveRequests, []);
+});
+
+test('Lost archive acknowledgement reconciles its original request after restart without replay', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit(), old = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, old, 'Completed call', 'offer', () => {});
+  await voice.stop(call.callId); f.release(call);
+  f.loseArchiveReply();
+  await voice.prewarm('principal', selection); await voice.archive();
+  assert.equal(f.archiveRequests.length, 1);
+  const original = f.archiveRequests[0]!.operationId;
+  assert.equal(f.journal.codexArchivePage(f.fingerprint).find(x => x.threadId === old)!.operationId, original);
+  await voice.close();
+  const restarted = f.voice();
+  await restarted.prewarm('principal', selection); await restarted.archive();
+  assert.equal(f.archiveRequests.length, 1);
+  assert.ok(f.requests.some(x => x.method === 'thread/list' && x.params['archived'] === true));
+  assert.ok(!f.journal.codexArchivePage(f.fingerprint).some(x => x.threadId === old));
+  f.journal.rememberCodexTask(f.fingerprint, old);
+  assert.ok(!f.journal.codexArchivePage(f.fingerprint).some(x => x.threadId === old), 'the retained receipt prevents rediscovery from replaying archival');
+  assert.equal(f.journal.voiceTask(call.callId, 0), old);
+});
+
+test('Historical native bindings recover only tasks proven to belong to this exact configured runtime', async t => {
+  const f = fixture(t), voice = f.voice();
+  await voice.prewarm('principal', selection); await voice.archive();
+  const owned = randomUUID(), other = randomUUID();
+  for (const threadId of [owned, other]) {
+    f.threads.set(threadId, { id: threadId, cwd: f.settings.cwd, projectId: f.settings.projectId,
+      ephemeral: false, status: { type: 'idle' }, turns: [] });
+    const call = f.admit(), generation = 0;
+    const intent = { epoch: call.epoch, callId: call.callId, method: 'call.bindVoice' as const, operationId: randomUUID(),
+      threadId, voiceGeneration: generation, requestHash: digest(canonical({ threadId, generation,
+        fingerprint: threadId === owned ? f.fingerprint : digest('other configured home') })) };
+    f.journal.submit(intent); f.journal.finishVoiceBinding(intent); f.release(call);
+  }
+  await voice.archive();
+  assert.deepEqual([...f.archived], [owned]);
+  assert.deepEqual(f.journal.codexBindingPage().map(x => x.intent.method), ['call.bindVoice', 'call.bindVoice']);
+  assert.equal(f.journal.codexBindingPage('', 1).length, 1);
+  const cursor = f.journal.codexBindingPage('', 1)[0]!.intent.operationId;
+  assert.equal(f.journal.codexBindingPage(cursor).length, 1);
 });
 
 test("An outgoing Ivy call never resumes the previous incoming conversation", async (t) => {
