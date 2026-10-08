@@ -13,8 +13,8 @@ instructions, MCP tools and approval policy come from the selected home. A share
 daemon uses an invisible proxy; `owned-stdio` selects a service-owned background
 app-server. Closing PhoneBridge leaves a shared daemon running.
 
-The incoming principal's task is prepared while idle, and each principal reuses its
-recorded task. `keepTaskLoaded` defaults to true; false unsubscribes the prepared
+An unused task is prepared while idle and claimed by the next call. `keepTaskLoaded`
+defaults to true; false unsubscribes the prepared
 task while retaining its identity for later resume. First creation and tool loading
 can take longer than a warm call. SIP settings, credentials, access challenges and
 screening remain protected installation configuration.
@@ -24,8 +24,10 @@ original operations. `phone_bridge_call` requires `recipientId`, `operationId` a
 the complete `initialPrompt`. An active Voice call for that recipient receives the
 new prompt in its existing task. Replaying an operation never sends it twice.
 `incomingInitialPrompt` controls incoming greetings. Each session receives its full
-prompt explicitly once media connects, including when the task is reused. The backing
-model also receives it as context at realtime startup.
+assignment at startup, including when the task is reused. A short connected cue
+opens the conversation once audio connects. Phone-specific instructions distinguish
+the assignment from the recipient's speech; Codex progress stays contextual until
+a confirmed result is available. The backing model also receives the full context.
 
 `phone_bridge_status.voiceModels` reads the model catalog from the configured Codex
 home using `model/list`, including pagination and each model's advertised reasoning

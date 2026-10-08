@@ -52,12 +52,17 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   Prompt limits reject oversized input explicitly; they never truncate it.
 - Task/offer preparation may overlap outgoing SIP ringing. Incoming calls answer
   early without a waiting tone. Voice startup follows confirmed SIP connection
-  and any required access challenge. Startup items contain only restored history;
-  they do not reliably request a spoken reply. Explicitly send the full initial
-  prompt once media connects, under the original startup intent. Acknowledge the
-  prompt only after that send succeeds; an unknown send is never repeated. Supply
-  it to the backing Codex model as user-supplied context through realtime start
-  instructions. Native Codex handles
+  and any required access challenge. Startup items contain restored history and
+  the complete current call assignment. Bound older history against the native
+  item/token limit and JSON-encoded backing context without truncating the current
+  assignment. The [phone instructions](../instructions/phone-voice.ts) distinguish
+  the owner's assignment from the recipient's speech. Send one short connected cue
+  after media connects, under the original startup intent; startup history alone
+  does not reliably request speech. Acknowledge startup after that cue succeeds;
+  an unknown send is never repeated. Also supply the assignment to the backing
+  Codex model as user-supplied context through realtime start instructions.
+  Route Codex output through the native commentary channel so intermediate work
+  remains context and Voice waits for confirmed results. Native Codex handles
   background task delegation; call context cannot grant permissions or approvals.
   Startup skips workspace/history scanning; the current call's full context is
   already supplied explicitly.

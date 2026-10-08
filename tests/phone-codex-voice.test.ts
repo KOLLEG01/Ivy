@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { phoneVoiceInstructions, phoneVoiceOpeningCue } from "../instructions/phone-voice.js";
 import catalog from "../specs/native/codex-0.159.2/catalog.json" with { type: "json" };
 import { PhoneCodexVoice } from "../services/phone-bridge/src/runtime/codex-voice.js";
 import type { PhoneCodexVoiceSettings } from "../services/phone-bridge/src/runtime/codex-voice.js";
@@ -278,16 +279,17 @@ test("Incoming continuation keeps its exact task and speech context, still greet
   await voice.connected(incoming.callId, async () => {});
   await voice.connected(incoming.callId, async () => {});
   const initial = f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"];
-  assert.deepEqual(initial, [{ role: "user", text: "Discuss the lake walk." }, { role: "user", text: "My codeword is Seerose." }]);
+  assert.deepEqual(initial, [{ role: "user", text: "Discuss the lake walk." }, { role: "user", text: "My codeword is Seerose." },
+    { role: "user", text: 'Begruesse den User mit "Servus"' }]);
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/appendText").map(x => x.params),
-    [{ threadId, role: "user", text: "Discuss the lake walk." }, { threadId, role: "user", text: 'Begruesse den User mit "Servus"' }]);
+    [{ threadId, role: "user", text: phoneVoiceOpeningCue }, { threadId, role: "user", text: phoneVoiceOpeningCue }]);
   assert.equal(f.requests.filter(x => x.method === "turn/start").length, 1);
   const fresh = await voice.prepare(incoming, 1, selection);
   assert.notEqual(fresh, threadId);
   await voice.stop(incoming.callId, fresh);
   await voice.start(incoming, 1, fresh, 'Begruesse den User mit "Servus"', "offer", () => {});
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"],
-    []);
+    [{ role: "user", text: 'Begruesse den User mit "Servus"' }]);
 });
 
 test("An outgoing Ivy call never resumes the previous incoming conversation", async (t) => {
@@ -301,9 +303,9 @@ test("An outgoing Ivy call never resumes the previous incoming conversation", as
   await voice.start(outgoing, 0, fresh, "New assignment", "offer", () => {});
   await voice.connected(outgoing.callId, async () => {});
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"],
-    []);
+    [{ role: "user", text: "New assignment" }]);
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/appendText").at(-1)!.params,
-    { threadId: fresh, role: "user", text: "New assignment" });
+    { threadId: fresh, role: "user", text: phoneVoiceOpeningCue });
 });
 
 test("A different admitted incoming caller cannot inherit the previous conversation", async (t) => {
@@ -457,7 +459,9 @@ test("Cached native tasks survive a client reopen, retain their project and rece
   const started = f.requests.find(
     (value) => value.method === "thread/realtime/start",
   )!.params;
-  assert.deepEqual(started["initialItems"], []);
+  assert.deepEqual(started["initialItems"], [{ role: "user", text: prompt }]);
+  assert.equal(started["prompt"], phoneVoiceInstructions);
+  assert.equal(started["codexResponseHandoffMode"], "commentary");
   assert.ok(
     String(started["realtimeStartInstructions"]).endsWith(
       JSON.stringify(prompt),
@@ -470,7 +474,7 @@ test("Cached native tasks survive a client reopen, retain their project and rece
   await Promise.all([second.connected(call.callId, async () => {}), second.connected(call.callId, async () => {})]);
   await second.connected(call.callId, async () => {});
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/appendText").map(x => x.params),
-    [{ threadId, role: "user", text: prompt }]);
+    [{ threadId, role: "user", text: phoneVoiceOpeningCue }]);
   assert.deepEqual(f.journal.callCommand(call.callId, "call.promptVoice", 0)?.receipt?.result, { threadId, state: "sent" });
   await second.stop(call.callId);
   assert.equal(
@@ -479,7 +483,7 @@ test("Cached native tasks survive a client reopen, retain their project and rece
   );
 });
 
-test("An initial prompt with a lost acknowledgement is retained and never automatically sent twice", async t => {
+test("A lost opening acknowledgement retains the full assignment without repeating its opening", async t => {
   const f = fixture(t), voice = f.voice(), call = f.admit(), threadId = await voice.prepare(call, 0, selection);
   await voice.start(call, 0, threadId, "Ask the caller about lunch.", "offer", () => {});
   f.losePromptReply();
@@ -487,6 +491,28 @@ test("An initial prompt with a lost acknowledgement is retained and never automa
   await assert.rejects(voice.connected(call.callId, async () => {}), /Prompt acknowledgement lost/);
   assert.equal(f.requests.filter(x => x.method === "thread/realtime/appendText").length, 1);
   assert.deepEqual(f.journal.callCommand(call.callId, "call.promptVoice", 0)?.receipt?.result, { threadId, state: "outcome_unknown" });
+});
+
+test("A long new assignment keeps recent continuation context within both native startup bounds", async t => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const voice = f.voice(), first = f.incoming(), threadId = await voice.prepare(first, 0, selection);
+  await voice.start(first, 0, threadId, "Previous assignment", "offer", () => {});
+  await voice.connected(first.callId, async () => {});
+  for (const [id, text] of [["escaped", '"'.repeat(10500)], ["recent", "The agreed codeword is Seerose."]] as const)
+    f.notification({ method: "thread/realtime/item/completed", params: { threadId,
+      item: { type: "transcriptSegment", id, role: "user", text } } });
+  await voice.stop(first.callId);
+  const incoming = f.incoming(), prompt = "New assignment: " + "x".repeat(18000);
+  assert.equal(await voice.prepare(incoming, 0, selection), threadId);
+  await voice.start(incoming, 0, threadId, prompt, "offer", () => {});
+  const start = f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params;
+  const items = start["initialItems"] as { role: string; text: string }[];
+  assert.deepEqual(items.at(-1), { role: "user", text: prompt });
+  assert.ok(items.some(x => x.text === "The agreed codeword is Seerose."));
+  assert.ok(items.length <= 128);
+  assert.ok(items.reduce((tokens, item) => tokens + Math.ceil(Buffer.byteLength(item.text) / 4), 0) <= 8192);
+  assert.ok(Buffer.byteLength(String(start["realtimeStartInstructions"])) <= 32768);
+  assert.ok(String(start["realtimeStartInstructions"]).includes(JSON.stringify(prompt)));
 });
 
 test("A call ending after media setup cannot dispatch its queued initial prompt", async t => {
