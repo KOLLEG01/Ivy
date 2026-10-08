@@ -121,7 +121,9 @@ export function useNativeAction(client: RpcClient, key: string) {
         ["caller_changed", "caller_unbound"].includes(e.code)
           ? "unknown"
           : "failed";
-      value.detail = e.message;
+      const details = record(e.details), nativeMessage = record(details.nativeError).message;
+      value.detail = e.code === "native_error" && details.operationId === value.operationId && typeof nativeMessage === "string"
+        ? nativeMessage.slice(0, 4096) : e.message;
       try {
         persist();
       } catch (failure) {
@@ -286,6 +288,9 @@ export function useNativeAction(client: RpcClient, key: string) {
   };
   watch([busy, () => saved.value?.operationId, () => saved.value?.phase], scheduleRecovery);
   onMounted(() => {
+    // A retained failure may predate the UI's error display. Read its exact receipt once,
+    // without replaying the mutation or polling a terminal outcome.
+    if (saved.value?.phase === "failed") void reconcile();
     scheduleRecovery();
     window.addEventListener("online", recoverNow);
     document.addEventListener("visibilitychange", recoverNow);

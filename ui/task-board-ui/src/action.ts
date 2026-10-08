@@ -19,7 +19,7 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
     if (!value.call?.operationId || !value.callerPrincipalId || typeof value.principalId !== 'string') throw new Error('Invalid retained action'); saved.value = value; } }
   catch { storageError.value = true; error.value = 'The original action cannot be read from this tab. Restore browser storage before sending.'; }
   const identityMatches = () => !saved.value || saved.value.callerPrincipalId === workspace().callerPrincipalId && saved.value.principalId === workspace().principalId && saved.value.rootObjectId === workspace().rootObjectId && saved.value.call.serviceNodeId === workspace().serviceNodeId;
-  const persist = () => { try { sessionStorage.setItem(key, JSON.stringify(saved.value)); } catch { storageError.value = true; throw new Error('The original action could not be retained. Further sends are paused.'); } };
+  const persist = () => { try { if (saved.value) sessionStorage.setItem(key, JSON.stringify(saved.value)); else sessionStorage.removeItem(key); } catch { storageError.value = true; throw new Error('The original action could not be retained. Further sends are paused.'); } };
   const checkCurrentIdentity = async () => {
     const current = await nativeRead(client, workspace().serviceNodeId, 'task-board.workspace', {}) as TaskBoard.WorkspaceInfo;
     if (!saved.value || current.callerPrincipalId !== saved.value.callerPrincipalId || current.principalId !== saved.value.principalId || current.rootObjectId !== saved.value.rootObjectId || current.serviceNodeId !== saved.value.call.serviceNodeId)
@@ -79,7 +79,16 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
     finally { busy.value = false; }
   };
   const canRetryPreparation = computed(() => !!error.value && !storageError.value && !busy.value && (!saved.value || ['succeeded', 'failed'].includes(saved.value.phase)));
+  const canDismiss = computed(() => !busy.value && !storageError.value && identityMatches() && !!saved.value && ['succeeded', 'failed'].includes(saved.value.phase));
+  const dismiss = () => {
+    if (!canDismiss.value) return;
+    const previous = saved.value;
+    saved.value = null;
+    try { persist(); error.value = null; }
+    catch (cause) { saved.value = previous; error.value = cause instanceof Error ? cause.message : 'The action could not be dismissed.'; }
+  };
   return { saved, error, busy, start, reconcile, replay: execute, canRetryPreparation,
+    canDismiss, dismiss,
     retryPreparation: () => { if (canRetryPreparation.value) error.value = null; },
     locked: computed(() => busy.value || !!error.value || !identityMatches() || !!saved.value && !['succeeded', 'failed'].includes(saved.value.phase)),
     identityMatches: computed(identityMatches) };

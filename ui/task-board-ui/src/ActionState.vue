@@ -14,5 +14,6 @@ const emit = defineEmits<{ changed: [] }>();
     <Button type="button" size="sm" variant="outline" :disabled="action.busy.value" @click="async () => { await action.replay(); emit('changed'); }">Resume original action</Button>
   </div>
   <Button v-if="action.canRetryPreparation.value" type="button" size="sm" variant="outline" @click="action.retryPreparation">Retry preparation</Button>
+  <Button v-if="action.canDismiss.value" type="button" size="sm" variant="outline" @click="action.dismiss">Dismiss</Button>
   <Disclosure v-if="action.saved.value" title="Action identity"><p class="mt-1 font-mono text-xs break-all text-muted-foreground">{{ action.saved.value.call.operationId }} · {{ action.saved.value.call.serviceNodeId }}</p></Disclosure>
 </div></template>

@@ -33,7 +33,7 @@ const message = computed(() => {
     <AlertTitle>{{ failed || error && !unresolved ? tr('Anfrage fehlgeschlagen', 'Request failed') : tr('Die Anfrage dauert länger', 'The request is taking longer') }}</AlertTitle>
     <AlertDescription class="space-y-2">
       <p>{{ message }}</p>
-      <div v-if="unresolved || action?.phase === 'not_found'" class="flex flex-wrap gap-2">
+      <div v-if="unresolved || action?.phase === 'not_found' || action?.phase === 'failed'" class="flex flex-wrap gap-2">
         <Button variant="outline" size="sm" :disabled="busy" :loading="busy" @click="$emit('reconcile')">{{ tr('Status prüfen', 'Check status') }}</Button>
         <Button v-if="action?.phase === 'not_found'" size="sm" :disabled="busy || action.secret" @click="$emit('retry')">{{ tr('Erneut versuchen', 'Retry request') }}</Button>
       </div>

@@ -154,7 +154,12 @@ export class TaskBoardNativeLifecycle {
           if (!history.value.previousTask) continue;
           requireThat(history.value.previousTask.objectId === task.pin.objectId,
             'task_board_history_mismatch', 'Previous native contexts must belong to this ticket.');
-          add((await this.engine.store.read('task-board/task', history.value.previousTask, true, true)).value.primaryResourceRef);
+          try {
+            add((await this.engine.store.read('task-board/task', history.value.previousTask, true, true)).value.primaryResourceRef);
+          } catch (error) {
+            // Runs retain their execution contexts independently of pruned Task snapshots.
+            if (!(error instanceof IvyError && error.code === 'revision_pruned')) throw error;
+          }
         }
         cursor = page.nextCursor ?? undefined;
       } while (cursor);

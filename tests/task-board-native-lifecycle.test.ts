@@ -130,6 +130,25 @@ test('ticket archive covers distinct historical contexts and replays a lost nati
   assert.equal(f.calls.length, 2);
 });
 
+test('ticket archive survives pruned Task snapshots and archives retained Run contexts', async t => {
+  const f = await lifecycle(t), before = await f.current();
+  const run = await f.w.f.first.store.read('task-board/run', f.w.state().run);
+  f.threads.set('earlier-thread', { archived: false });
+  await f.w.f.first.store.write('task-board/run', { ...run.value, primaryResourceRef: { ...run.value.primaryResourceRef!, nativeId: 'earlier-thread' } },
+    randomUUID(), { create: { parentId: null, name: 'Earlier context with pruned Task fixture' } });
+  let prunedReads = 0;
+  f.w.f.interceptRead(request => {
+    if (request.objectId === before.pin.objectId && request.revision !== undefined && request.revision < before.pin.revision) {
+      prunedReads++;
+      throw new IvyError('revision_pruned', 'Object revision was pruned by its retention policy.');
+    }
+  });
+  assert.equal((await f.archive(true)).effectivelyArchived, true);
+  assert.ok(prunedReads > 0);
+  assert.ok([...f.threads.values()].every(thread => thread.archived));
+  assert.deepEqual(f.calls.map(call => call.method), ['thread/archive', 'thread/archive']);
+});
+
 test('restoring a ticket restores its original native context without scheduling Done work', async t => {
   const f = await lifecycle(t), before = await f.current();
   await f.archive(true); await f.archive(false);

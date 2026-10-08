@@ -86,4 +86,6 @@ AgentUI shows resolved native model, working mode, reasoning effort and permissi
 
 Native actions show waiting on their submit button and reconcile the original receipt automatically without replaying mutations. Keep routine pending and successful receipts out of the conversation. Confirmed failures appear immediately; after two minutes, distinguish work still in progress from an unconfirmed result with concise feedback. Retain the draft and operation identity across reload, and offer a retry only after the original owner confirms absence.
 
+Display the native failure message returned to the original caller. Refresh a retained terminal failure once when opening its view; checking its receipt never resends the action. TaskBoard action notices can be dismissed after a confirmed terminal outcome without changing the original workflow receipt.
+
 Checks: [UI content](../tests/ui-content.test.ts), [browser workflows](../tests/web-e2e).

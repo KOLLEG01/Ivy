@@ -111,6 +111,7 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
         }
         case 'model/list': result = modelCatalog ? { data: modelCatalog, nextCursor: null } : { data: [{ id: p.cursor ? 'second-model-id' : 'fixture-model-id', model: p.cursor ? 'second-native-model' : 'fixture-model', displayName: p.cursor ? 'Second native page model' : 'Native fixture model', description: 'Protocol simulation only', hidden: false, isDefault: !p.cursor, defaultReasoningEffort: 'high', supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'Native high effort' }, { reasoningEffort: 'low', description: 'Native low effort' }, { reasoningEffort: 'max', description: 'Native max effort' }] }], nextCursor: p.cursor ? null : 'models-page-2' }; break;
         case 'turn/start': {
+          if (thread.submitError) { owner.emit({ id: frame.id, error: thread.submitError }); return; }
           thread.model = p.collaborationMode?.settings.model ?? p.model ?? thread.model ?? 'fixture-model';
           thread.reasoningEffort = p.collaborationMode?.settings.reasoning_effort ?? p.effort ?? thread.reasoningEffort ?? 'high';
           if (p.collaborationMode) thread.collaborationMode = p.collaborationMode;

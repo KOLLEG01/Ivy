@@ -327,6 +327,7 @@ export function taskBoardFixture(
       return {
         serviceNodeId: "native-agent",
         hostId: "fixture-host",
+        serverType: "codex",
         nativeVersion,
         nativeExecutableHash: native.nativeExecutableHash,
         catalogHash: hashJson(native),
