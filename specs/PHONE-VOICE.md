@@ -33,9 +33,6 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   segments (at most 126 items / 24 KB) into the new realtime session. Context is
   captured during the call, without a summarizing turn or a startup workspace scan.
   The configured incoming initial prompt still runs, including its greeting.
-  Restored startup history alone does not request a spoken reply reliably; send
-  the current incoming prompt once after media connects, retaining the original
-  startup intent and acknowledgement. An unknown greeting is never repeated.
   Outgoing Ivy calls and `*0#` always use fresh tasks. A reset clears the continuation
   pointer; an uncertain stop cannot publish a resumable context. Caller admission
   and any access challenge remain required before voice startup.
@@ -55,9 +52,12 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   Prompt limits reject oversized input explicitly; they never truncate it.
 - Task/offer preparation may overlap outgoing SIP ringing. Incoming calls answer
   early without a waiting tone. Voice startup follows confirmed SIP connection
-  and any required access challenge. The full initial prompt is supplied to
-  realtime V3 as role-bearing startup items and to its backing Codex model as
-  user-supplied context through realtime start instructions. Native Codex handles
+  and any required access challenge. Startup items contain only restored history;
+  they do not reliably request a spoken reply. Explicitly send the full initial
+  prompt once media connects, under the original startup intent. Acknowledge the
+  prompt only after that send succeeds; an unknown send is never repeated. Supply
+  it to the backing Codex model as user-supplied context through realtime start
+  instructions. Native Codex handles
   background task delegation; call context cannot grant permissions or approvals.
   Startup skips workspace/history scanning; the current call's full context is
   already supplied explicitly.

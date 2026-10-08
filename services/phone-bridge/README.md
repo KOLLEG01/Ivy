@@ -24,7 +24,8 @@ original operations. `phone_bridge_call` requires `recipientId`, `operationId` a
 the complete `initialPrompt`. An active Voice call for that recipient receives the
 new prompt in its existing task. Replaying an operation never sends it twice.
 `incomingInitialPrompt` controls incoming greetings. Each session receives its full
-prompt at realtime startup, including when the task is reused.
+prompt explicitly once media connects, including when the task is reused. The backing
+model also receives it as context at realtime startup.
 
 `phone_bridge_status.voiceModels` reads the model catalog from the configured Codex
 home using `model/list`, including pagination and each model's advertised reasoning

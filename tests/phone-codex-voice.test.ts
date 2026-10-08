@@ -50,6 +50,7 @@ function fixture(t: test.TestContext) {
   let unloadPause: Promise<void> | undefined;
   let preparationPause: Promise<void> | undefined;
   let losePreparationReply = false;
+  let losePromptReply = false;
   const model = (name: string, efforts: string[]) => ({ id: name, model: name, displayName: name, description: 'Native catalog fixture',
     hidden: false, isDefault: false, defaultReasoningEffort: efforts[0]!,
     supportedReasoningEfforts: efforts.map(reasoningEffort => ({ reasoningEffort, description: reasoningEffort })) });
@@ -136,6 +137,10 @@ function fixture(t: test.TestContext) {
               sdp: "remote answer",
             },
           });
+        if (method === "thread/realtime/appendText" && losePromptReply) {
+          losePromptReply = false;
+          throw new Error("Prompt acknowledgement lost");
+        }
         const reply = { result };
         hooks.beforeResolve?.(hooks.requestId ?? randomUUID(), reply);
         return reply;
@@ -195,6 +200,7 @@ function fixture(t: test.TestContext) {
     },
     pausePreparation: (pause: Promise<void>) => { preparationPause = pause; },
     losePreparationReply: () => { losePreparationReply = true; },
+    losePromptReply: () => { losePromptReply = true; },
     disconnect: () => {
       online = false;
     },
@@ -260,6 +266,7 @@ test("Incoming continuation keeps its exact task and speech context, still greet
   const f = fixture(t); f.settings.resumeIncomingConversation = true;
   const voice = f.voice(), first = f.admit("mcp-agent"), threadId = await voice.prepare(first, 0, selection);
   await voice.start(first, 0, threadId, "Discuss the lake walk.", "offer", () => {});
+  await voice.connected(first.callId, async () => {});
   const segment = { type: "transcriptSegment", id: "speech-1", realtimeSessionId: "fixture", role: "user", text: "My codeword is Seerose." };
   f.notification({ method: "thread/realtime/item/completed", params: { threadId, item: segment } });
   f.notification({ method: "thread/realtime/item/completed", params: { threadId, item: segment } });
@@ -273,32 +280,37 @@ test("Incoming continuation keeps its exact task and speech context, still greet
   const initial = f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"];
   assert.deepEqual(initial, [{ role: "user", text: "Discuss the lake walk." }, { role: "user", text: "My codeword is Seerose." }]);
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/appendText").map(x => x.params),
-    [{ threadId, role: "user", text: 'Begruesse den User mit "Servus"' }]);
+    [{ threadId, role: "user", text: "Discuss the lake walk." }, { threadId, role: "user", text: 'Begruesse den User mit "Servus"' }]);
   assert.equal(f.requests.filter(x => x.method === "turn/start").length, 1);
   const fresh = await voice.prepare(incoming, 1, selection);
   assert.notEqual(fresh, threadId);
   await voice.stop(incoming.callId, fresh);
   await voice.start(incoming, 1, fresh, 'Begruesse den User mit "Servus"', "offer", () => {});
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"],
-    [{ role: "user", text: 'Begruesse den User mit "Servus"' }]);
+    []);
 });
 
 test("An outgoing Ivy call never resumes the previous incoming conversation", async (t) => {
   const f = fixture(t); f.settings.resumeIncomingConversation = true;
   const voice = f.voice(), first = f.incoming(), old = await voice.prepare(first, 0, selection);
   await voice.start(first, 0, old, "Previous context", "offer", () => {});
+  await voice.connected(first.callId, async () => {});
   await voice.stop(first.callId);
   const outgoing = f.admit(), fresh = await voice.prepare(outgoing, 0, selection);
   assert.notEqual(fresh, old);
   await voice.start(outgoing, 0, fresh, "New assignment", "offer", () => {});
+  await voice.connected(outgoing.callId, async () => {});
   assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/start").at(-1)!.params["initialItems"],
-    [{ role: "user", text: "New assignment" }]);
+    []);
+  assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/appendText").at(-1)!.params,
+    { threadId: fresh, role: "user", text: "New assignment" });
 });
 
 test("A different admitted incoming caller cannot inherit the previous conversation", async (t) => {
   const f = fixture(t); f.settings.resumeIncomingConversation = true;
   const voice = f.voice(), first = f.incoming(), old = await voice.prepare(first, 0, selection);
   await voice.start(first, 0, old, "Private first context", "offer", () => {});
+  await voice.connected(first.callId, async () => {});
   await voice.stop(first.callId);
   assert.notEqual(await voice.prepare(f.incoming("other"), 0, selection), old);
 });
@@ -307,6 +319,7 @@ test("An uncertain stop cannot expose the still-owned task as an incoming contin
   const f = fixture(t); f.settings.resumeIncomingConversation = true;
   const voice = f.voice(), first = f.incoming(), old = await voice.prepare(first, 0, selection);
   await voice.start(first, 0, old, "Original context", "offer", () => {});
+  await voice.connected(first.callId, async () => {});
   f.killLoops();
   await assert.rejects(voice.stop(first.callId));
   const next = f.incoming();
@@ -319,6 +332,7 @@ test("A continued native task is reconciled after reconnect without another READ
   const f = fixture(t); f.settings.resumeIncomingConversation = true;
   const firstVoice = f.voice(), first = f.admit(), old = await firstVoice.prepare(first, 0, selection);
   await firstVoice.start(first, 0, old, "Retained context", "offer", () => {});
+  await firstVoice.connected(first.callId, async () => {});
   await firstVoice.stop(first.callId);
   await firstVoice.close();
   const voice = f.voice(), incoming = f.incoming();
@@ -443,7 +457,7 @@ test("Cached native tasks survive a client reopen, retain their project and rece
   const started = f.requests.find(
     (value) => value.method === "thread/realtime/start",
   )!.params;
-  assert.deepEqual(started["initialItems"], [{ role: "user", text: prompt }]);
+  assert.deepEqual(started["initialItems"], []);
   assert.ok(
     String(started["realtimeStartInstructions"]).endsWith(
       JSON.stringify(prompt),
@@ -451,11 +465,37 @@ test("Cached native tasks survive a client reopen, retain their project and rece
   );
   assert.equal(started["clientManagedHandoffs"], false);
   assert.equal(started["includeStartupContext"], false);
+  assert.equal(f.journal.callCommand(call.callId, "call.promptVoice", 0)?.phase, "submitted");
+  assert.equal(f.requests.filter(x => x.method === "thread/realtime/appendText").length, 0);
+  await Promise.all([second.connected(call.callId, async () => {}), second.connected(call.callId, async () => {})]);
+  await second.connected(call.callId, async () => {});
+  assert.deepEqual(f.requests.filter(x => x.method === "thread/realtime/appendText").map(x => x.params),
+    [{ threadId, role: "user", text: prompt }]);
+  assert.deepEqual(f.journal.callCommand(call.callId, "call.promptVoice", 0)?.receipt?.result, { threadId, state: "sent" });
   await second.stop(call.callId);
   assert.equal(
     f.journal.callCommand(call.callId, "call.stopVoice")?.receipt?.ok,
     true,
   );
+});
+
+test("An initial prompt with a lost acknowledgement is retained and never automatically sent twice", async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit(), threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, "Ask the caller about lunch.", "offer", () => {});
+  f.losePromptReply();
+  await assert.rejects(voice.connected(call.callId, async () => {}), /Prompt acknowledgement lost/);
+  await assert.rejects(voice.connected(call.callId, async () => {}), /Prompt acknowledgement lost/);
+  assert.equal(f.requests.filter(x => x.method === "thread/realtime/appendText").length, 1);
+  assert.deepEqual(f.journal.callCommand(call.callId, "call.promptVoice", 0)?.receipt?.result, { threadId, state: "outcome_unknown" });
+});
+
+test("A call ending after media setup cannot dispatch its queued initial prompt", async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit(), threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, "Ask the caller about lunch.", "offer", () => {});
+  await voice.stop(call.callId);
+  await voice.connected(call.callId, async () => {});
+  assert.equal(f.requests.filter(x => x.method === "thread/realtime/appendText").length, 0);
+  assert.deepEqual(f.journal.callCommand(call.callId, "call.promptVoice", 0)?.receipt?.result, { threadId, state: "outcome_unknown" });
 });
 
 test("Lost control transport reconnects to stop the original task, and close also confirms its stop", async (t) => {

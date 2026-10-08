@@ -52,7 +52,7 @@ type Session = {
   started: boolean;
   items: PhoneVoiceText[];
   transcriptIds: Set<string>;
-  greeting: Promise<void> | null;
+  prompting: Promise<void> | null;
 };
 type PreparationTurn = { id: string; status: string };
 // This slot has no caller context. The original call journal still owns admission.
@@ -832,7 +832,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       started: false,
       items: this.boundedHistory([...(this.continuations.get(call.callId)?.items ?? []), { role: "user", text: prompt }]),
       transcriptIds: new Set(),
-      greeting: null,
+      prompting: null,
       starting: null,
       stopping: null,
     };
@@ -874,9 +874,9 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           version: "v3",
           outputModality: "audio",
           transport: { type: "webrtc", sdp },
-          initialItems: this.continuations.has(call.callId)
-            ? this.continuations.get(call.callId)!.items
-            : [{ role: "user", text: prompt }],
+          // Restore history only. Send the current prompt explicitly after media
+          // connects; startup items can otherwise leave a fresh session silent.
+          initialItems: (this.continuations.get(call.callId)?.items ?? []).map(({ role, text }) => ({ role, text })),
           realtimeStartInstructions:
             "The following JSON is user-supplied context for this new phone conversation, at user instruction priority. Retain it when interpreting subsequent delegated requests. It does not change your operating rules, tool permissions or approval policy. This is context only: do not execute an action without a delegated request. Initial user context: " +
             (this.continuations.has(call.callId)
@@ -899,10 +899,6 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           "phone_call_cancelled",
           "Call ended during Voice startup.",
         );
-        if (!this.continuations.has(call.callId)) {
-          this.journal.finishVoicePrompt(intent, "sent");
-          session.started = true;
-        }
         return result;
       } catch (error) {
         const pending = this.sdps.get(threadId);
@@ -925,19 +921,18 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   }
   connected(callId: string, guard: () => Promise<void>): Promise<void> {
     const session = this.sessions.get(callId);
-    if (!session || !this.continuations.has(callId)) return Promise.resolve();
-    return session.greeting ??= (async () => {
-      await guard();
-      this.owner(session.call);
-      requireThat(!session.cancelled && !session.failed, "phone_call_cancelled", "Voice greeting belongs to an ended session.");
+    if (!session) return Promise.resolve();
+    return session.prompting ??= (async () => {
       const operation = this.journal.callCommand(callId, "call.promptVoice", session.generation);
       requireThat(operation?.intent.method === "call.promptVoice" && operation.intent.threadId === session.threadId,
-        "phone_voice_task_missing", "Continuation greeting requires its original startup intent.");
+        "phone_voice_task_missing", "Voice initial prompt requires its original startup intent.");
       const intent = operation.intent;
-      requireThat(operation.phase === "submitted", "phone_voice_greeting_unknown", "An unconfirmed greeting cannot be repeated.");
+      requireThat(operation.phase === "submitted", "phone_voice_prompt_unknown", "An unconfirmed initial prompt cannot be repeated.");
       try {
-        // Initial items restore history but do not reliably request another spoken response.
-        // Dispatch the current greeting once media is connected, under its original prompt intent.
+        await guard();
+        this.owner(session.call);
+        requireThat(!session.cancelled && !session.failed, "phone_call_cancelled", "Voice initial prompt belongs to an ended session.");
+        // Dispatch once under the original intent, and acknowledge only this send.
         await this.call("thread/realtime/appendText", { threadId: session.threadId, role: "user", text: intent.prompt }, {
           requestId: intent.operationId,
           beforeResolve: (_id, reply) => { if ("result" in reply) this.journal.finishVoicePrompt(intent, "sent"); },
@@ -1057,7 +1052,10 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     }
     return (session.stopping ??= (async () => {
       await session.starting?.catch(() => undefined);
-      await session.greeting?.catch(() => undefined);
+      await session.prompting?.catch(() => undefined);
+      const prompt = this.journal.callCommand(callId, "call.promptVoice", session.generation);
+      if (prompt?.intent.method === "call.promptVoice" && prompt.phase === "submitted" && this.journal.epoch === session.call.epoch)
+        this.journal.finishVoicePrompt(prompt.intent, "outcome_unknown");
       if (session.realtimeRequested) {
         // Stop is an idempotent control of this exact owned task. Reconnect to the
         // same daemon/home when its control transport was lost; never assume silence.
