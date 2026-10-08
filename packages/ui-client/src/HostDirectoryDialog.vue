@@ -14,7 +14,7 @@ import {
   Skeleton,
 } from "@ivy/ui";
 import { ArrowUp, Folder } from "@lucide/vue";
-import { serviceTools } from "../../sdk/src/client.js";
+import { IvyError, serviceTools } from "../../sdk/src/client.js";
 import type { Agent, RpcClient } from "../../sdk/src/client.js";
 
 /** Browse directories on one AgentManager host and choose an absolute folder. */
@@ -36,7 +36,7 @@ const path = ref(""),
 const parentOf = (value: string) => {
   const trimmed = value.replace(/[\\/]+$/, "");
   const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  const parent = index <= 0 ? "" : trimmed.slice(0, index);
+  const parent = index === 0 && trimmed.startsWith('/') ? '/' : index < 0 ? "" : trimmed.slice(0, index);
   return /^[A-Za-z]:$/.test(parent) ? parent + "\\" : parent;
 };
 let current: AbortController | null = null;
@@ -62,9 +62,11 @@ async function load(target: string, nearest = false) {
     path.value = typed.value = value.path;
   } catch (cause) {
     if (controller.signal.aborted) return;
-    const parent = nearest ? parentOf(target) : "";
+    const parent = nearest && cause instanceof IvyError && cause.code === 'ENOENT' ? parentOf(target) : "";
     if (parent) return void load(parent, true);
-    error.value = cause instanceof Error ? cause.message : String(cause);
+    typed.value = path.value || target;
+    const message = cause instanceof Error ? cause.message : String(cause);
+    error.value = `Could not open ${target}. ${message}`;
   } finally {
     if (current === controller) loading.value = false;
   }
@@ -72,13 +74,18 @@ async function load(target: string, nearest = false) {
 watch(
   open,
   (value) => {
-    if (value) void load(props.start || "/", true);
+    if (value) {
+      path.value = typed.value = parent.value = "";
+      folders.value = [];
+      void load(props.start || "/", true);
+    }
     else current?.abort();
   },
   { immediate: true },
 );
 onBeforeUnmount(() => current?.abort());
 const choose = () => {
+  if (!path.value || loading.value) return;
   emit("select", path.value);
   open.value = false;
 };
@@ -149,7 +156,7 @@ const choose = () => {
         >
         <Button
           type="button"
-          :disabled="!path || loading || !!error"
+          :disabled="!path || loading"
           @click="choose"
           >Use this folder</Button
         >

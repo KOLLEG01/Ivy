@@ -1,6 +1,6 @@
 import { readdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
-import { requireThat } from "../../../packages/sdk/src/node.js";
+import { IvyError, requireThat } from "../../../packages/sdk/src/node.js";
 import type { Agent } from "../../../packages/sdk/src/node.js";
 
 /** Host folder browsing is independent of the selected native agent's filesystem tools. */
@@ -12,8 +12,20 @@ export async function listDirectories(
     "invalid_arguments",
     "Choose an absolute directory on this host.",
   );
-  const path = await realpath(input.path);
-  const entries = await readdir(path, { withFileTypes: true });
+  const { path, entries } = await (async () => {
+    try {
+      const path = await realpath(input.path);
+      return { path, entries: await readdir(path, { withFileTypes: true }) };
+    } catch (cause) {
+      const code = (cause as NodeJS.ErrnoException).code;
+      const message = code === 'EACCES' || code === 'EPERM'
+        ? 'Access to this folder is denied'
+        : code === 'ENOENT' ? 'This folder does not exist'
+          : code === 'ENOTDIR' ? 'This path is not a folder' : null;
+      if (message) throw new IvyError(code!, `${message}: ${input.path}.`, 'not_executed');
+      throw cause;
+    }
+  })();
   const parent = dirname(path);
   return {
     path,

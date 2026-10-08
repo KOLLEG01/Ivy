@@ -37,7 +37,12 @@ test("host folder browsing returns canonical folders independently of native fil
     ],
   });
   await assert.rejects(listDirectories({ path: "relative" }), { code: "invalid_arguments" });
-  await assert.rejects(listDirectories({ path: join(root, "missing") }), { code: "ENOENT" });
+  await assert.rejects(listDirectories({ path: join(root, "missing") }), {
+    code: "ENOENT", outcome: "not_executed", message: `This folder does not exist: ${join(root, 'missing')}.`,
+  });
+  await assert.rejects(listDirectories({ path: join(root, "file.txt") }), {
+    code: "ENOTDIR", outcome: "not_executed", message: `This path is not a folder: ${join(root, 'file.txt')}.`,
+  });
 });
 
 test("service tasks retain native membership across nested Linux and extended Windows paths", () => {

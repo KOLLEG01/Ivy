@@ -174,6 +174,12 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await browse.getByRole("listitem").getByText("Browse", { exact: true }).click();
       await browse.getByRole("listitem").getByText("Nested", { exact: true }).click();
       await expect(browse.getByLabel("Folder path")).toHaveValue(nested);
+      const missing = join(nested, 'Missing');
+      await browse.getByLabel('Folder path').fill(missing);
+      await browse.getByRole('button', { name: 'Open', exact: true }).click();
+      await expect(browse.getByText(`Could not open ${missing}. This folder does not exist: ${missing}.`, { exact: true })).toBeVisible();
+      await expect(browse.getByLabel('Folder path')).toHaveValue(nested);
+      await expect(browse.getByRole('button', { name: 'Use this folder', exact: true })).toBeEnabled();
       await browse.getByRole("button", { name: "Use this folder", exact: true }).click();
       await expect(f.page.getByLabel("Absolute directory on this host")).toHaveValue(nested);
       await f.page.getByRole("button", { name: "Use this location", exact: true }).click();
