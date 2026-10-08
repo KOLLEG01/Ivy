@@ -25,7 +25,8 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
     finally { row.durationMs = performance.now() - began; }
   };
   const full = JSON.parse(await readFile('specs/native/codex-' + nativeVersion + '/catalog.json', 'utf8'));
-  const methods = ['thread/list', 'thread/loaded/list', 'thread/read', 'thread/start', 'thread/resume', 'thread/turns/list', 'thread/items/list', 'thread/goal/get', 'thread/goal/set', 'thread/goal/clear', 'turn/start', 'turn/steer', 'turn/interrupt', 'model/list', 'collaborationMode/list', 'permissionProfile/list', 'account/rateLimits/read', 'project/list', 'project/create', 'project/update', 'project/delete'];
+  const methods = ['thread/list', 'thread/loaded/list', 'thread/read', 'thread/start', 'thread/resume', 'thread/metadata/update', 'thread/turns/list', 'thread/items/list', 'thread/goal/get', 'thread/goal/set', 'thread/goal/clear', 'turn/start', 'turn/steer', 'turn/interrupt', 'model/list', 'collaborationMode/list', 'permissionProfile/list', 'account/rateLimits/read', 'project/list', 'project/create', 'project/update', 'project/delete'];
+  methods.push('config/read');
   const catalog = completeCatalog ? full : { ...full, clientRequests: full.clientRequests.filter(m => methods.includes(m.method) || m.method === 'fs/readFile') };
   const settings = { nativeExecutable: process.execPath, nativeHome: join(f.root, 'native'), nativeVersion: full.version, nativeExecutableHash: full.nativeExecutableHash,
     skillsRoot: join(f.root, '.agents', 'skills'), projectRoot: join(f.root, 'normal-projects'), internalProjectRoot: join(f.root, 'internal-projects'),
@@ -38,6 +39,8 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
   if (manageInstructions) await mkdir(settings.nativeHome, { recursive: true });
   const nativeProjects = [{ id: 'fixture-project', name: 'Isolated project', path: resolve(f.root, 'project') }];
   const projectCreations = new Map();
+  let emptyModelPage = false;
+  let heldMethod = null, heldReply = null;
   if (serviceTasks) nativeProjects.push({ id: 'fixture-internal-project', name: 'IvyInternal', path: settings.internalProjectRoot });
   for (const project of nativeProjects) await mkdir(project.path, { recursive: true });
   const threads = new Map(), goals = new Map(), owners = [], managers = [], managerObservations = []; let unsupportedItems = false, unmaterializedHistory = false;
@@ -55,6 +58,7 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
       const frame = JSON.parse(bytes.toString('utf8')); sent.push(frame);
       if (!frame.method) return;
       const p = frame.params ?? {}, thread = threads.get(p.threadId); let result;
+      if (frame.method === 'model/list' && emptyModelPage) { emptyModelPage = false; owner.emit({ id: frame.id, result: { data: [], nextCursor: null } }); return; }
       switch (frame.method) {
         case 'project/list': result = { data: nativeProjects.map((project, position) => ({ id: project.id, name: project.name, roots: [{ path: project.path }], metadata: {}, position, recencyAt: 1788690000000, createdAt: 1788690000, updatedAt: 1788690000 })), nextCursor: null }; break;
         case 'project/create': {
@@ -74,11 +78,13 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
           result = {}; owner.emit({ method: 'project/changed', params: { projectId: p.projectId, changeType: 'deleted' } }); break;
         }
         case 'collaborationMode/list': result = { data: [{ mode: 'plan', name: 'Plan', model: null, reasoning_effort: 'high' }, { mode: 'default', name: 'Default', model: null, reasoning_effort: null }] }; break;
+        case 'config/read': result = { config: { model: modelCatalog?.find(model => model.isDefault)?.model ?? 'fixture-model', model_reasoning_effort: 'high', sandbox_mode: 'read-only' }, origins: {}, layers: null }; break;
         case 'permissionProfile/list': result = { data: [{ id: ':read-only', allowed: true, description: 'Inspect the workspace without changing files.' }, { id: ':workspace', allowed: true, description: 'Read and write inside the active workspace.' }, { id: ':danger-full-access', allowed: true, description: 'Run without local sandbox restrictions.' }], nextCursor: null }; break;
         case 'thread/list': result = { data: [...threads.values()].filter(v => v.archived === !!p.archived).sort((a, b) => b.recencyAt - a.recencyAt).map(v => wireThread({ ...v, turns: [] })), nextCursor: null }; break;
         case 'thread/loaded/list': result = { data: [...threads.values()].filter(t => t.canAcceptDirectInput).map(t => t.id), nextCursor: null }; break;
         case 'thread/read': result = { thread: wireThread({ ...thread, turns: p.includeTurns ? thread.turns : [] }) }; break;
-        case 'thread/start': { const next = newThread('created-' + randomUUID(), true); next.cwd = p.cwd; next.projectId = p.projectId ?? null; threads.set(next.id, next); result = startResult({ ...next, turns: [] }); setImmediate(() => owner.emit({ method: 'thread/started', params: { thread: wireThread({ ...next, turns: [] }) } })); break; }
+        case 'thread/start': { if (p.projectId === '') { owner.emit({ id: frame.id, error: { code: -32600, message: 'projectId must not be empty' } }); return; } const next = newThread('created-' + randomUUID(), true); next.cwd = p.cwd; next.projectId = p.projectId ?? null; threads.set(next.id, next); result = startResult({ ...next, turns: [] }); setImmediate(() => owner.emit({ method: 'thread/started', params: { thread: wireThread({ ...next, turns: [] }) } })); break; }
+        case 'thread/metadata/update': { thread.projectId = p.projectId || null; result = wireThread({ ...thread, turns: [] }); owner.emit({ method: 'thread/project/updated', params: { threadId: thread.id, projectId: thread.projectId } }); break; }
         case 'thread/name/set': thread.name = p.name; result = {}; setImmediate(() => owner.emit({ method: 'thread/name/updated', params: { threadId: thread.id, name: thread.name } })); break;
         case 'thread/archive': thread.archived = true; result = {}; setImmediate(() => owner.emit({ method: 'thread/archived', params: { threadId: thread.id } })); break;
         case 'thread/unarchive': thread.archived = false; result = { thread: wireThread(thread) }; setImmediate(() => owner.emit({ method: 'thread/unarchived', params: { threadId: thread.id } })); break;
@@ -104,6 +110,10 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
         }
         case 'model/list': result = modelCatalog ? { data: modelCatalog, nextCursor: null } : { data: [{ id: p.cursor ? 'second-model-id' : 'fixture-model-id', model: p.cursor ? 'second-native-model' : 'fixture-model', displayName: p.cursor ? 'Second native page model' : 'Native fixture model', description: 'Protocol simulation only', hidden: false, isDefault: !p.cursor, defaultReasoningEffort: 'high', supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'Native high effort' }, { reasoningEffort: 'low', description: 'Native low effort' }, { reasoningEffort: 'max', description: 'Native max effort' }] }], nextCursor: p.cursor ? null : 'models-page-2' }; break;
         case 'turn/start': {
+          thread.model = p.collaborationMode?.settings.model ?? p.model ?? thread.model ?? 'fixture-model';
+          thread.reasoningEffort = p.collaborationMode?.settings.reasoning_effort ?? p.effort ?? thread.reasoningEffort ?? 'high';
+          if (p.collaborationMode) thread.collaborationMode = p.collaborationMode;
+          if (p.permissions) thread.activePermissionProfile = p.permissions.id;
           if (!thread?.canAcceptDirectInput || !['idle', 'systemError'].includes(thread.status.type)) { owner.emit({ id: frame.id, error: { code: -32000, message: 'The actual native fixture refuses concurrent or unattached input.' } }); return; }
           const turn = { id: randomUUID(), status: 'inProgress', items: [{ id: randomUUID(), type: 'userMessage', content: p.input }] };
           thread.turns.push(turn); thread.status = { type: 'active', activeFlags: [] }; result = { turn }; break;
@@ -113,13 +123,16 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
           if (!turn || turn.status !== 'inProgress' || turn.id !== p.expectedTurnId) { owner.emit({ id: frame.id, error: { code: -32000, message: 'The fixture has no matching active turn.' } }); return; }
           turn.items.push({ id: randomUUID(), type: 'userMessage', content: p.input }); result = { turnId: turn.id }; break;
         }
-        case 'fs/readFile': result = { dataBase64: readFileSync(p.path).toString('base64') }; break;
+        case 'fs/readFile': try { result = { dataBase64: readFileSync(p.path).toString('base64') }; } catch (error) { owner.emit({ id: frame.id, error: { code: -32603, message: error.message } }); return; } break;
         case 'turn/interrupt': result = {}; break; // Receipt alone never claims cancellation.
         case 'fs/readDirectory': try { result = { entries: readdirSync(p.path, { withFileTypes: true }).map(entry => ({ fileName: entry.name, isDirectory: entry.isDirectory(), isFile: entry.isFile() })) }; } catch (error) { owner.emit({ id: frame.id, error: { code: -32603, message: error.message } }); return; } break;
         case 'account/rateLimits/read': result = { rateLimits: { limitId: 'codex', limitName: 'Codex', primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1788700000 }, secondary: null, credits: null, planType: null } }; break;
         default: throw new Error('Unexpected native fixture method ' + frame.method);
       }
-      owner.emit({ id: frame.id, result });
+      if (frame.method === heldMethod) {
+        heldMethod = null;
+        heldReply = () => owner.emit({ id: frame.id, result });
+      } else owner.emit({ id: frame.id, result });
     });
     return { rpc, epoch, catalog, initialized: { codexHome: settings.nativeHome }, launcherPid: null,
       ...(manageInstructions ? { nativeHome: settings.nativeHome, connectionMode: 'owned-stdio', ownsNativeHome: false } : {}),
@@ -159,5 +172,8 @@ export async function agentFixture(t, viewport, completeCatalog = false, nativeV
     managers.push(handle); await handle.service.waitReady();
     return handle;
   };
-  return { ...f, url, open, nativeProjects, threads, owners, managerObservations, current, complete, restart, registryChange, addAgent, config, catalog, unsupportedItems: () => { unsupportedItems = true; }, unmaterializedHistory: () => { unmaterializedHistory = true; } };
+  return { ...f, url, open, nativeProjects, threads, owners, managerObservations, current, complete, restart, registryChange, addAgent, config, catalog,
+    holdNativeOnce: method => { heldMethod = method; return () => { assertHeld(); heldReply(); heldReply = null; }; },
+    emptyModelsOnce: () => { emptyModelPage = true; }, unsupportedItems: () => { unsupportedItems = true; }, unmaterializedHistory: () => { unmaterializedHistory = true; } };
+  function assertHeld() { if (!heldReply) throw new Error('The selected native request has not been held.'); }
 }

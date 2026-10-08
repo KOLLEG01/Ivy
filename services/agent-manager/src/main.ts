@@ -6,7 +6,7 @@ import { LocalAgentState } from "./hive-state.js";
 import type { SavedState } from "./hive-state.js";
 import { NativeOperations } from "./operations.js";
 import { NativeInteractions } from "./interactions.js";
-import { NativeNotifications, nativeBrowserNotice, inputBrowserNotice } from "./notifications.js";
+import { NativeNotifications, NativeNoticePolicy, nativeBrowserNotice, inputBrowserNotice } from "./notifications.js";
 import { publishBrowserNotice } from "../../../packages/sdk/src/node.js";
 import { answerNativeClock, nativeClockPrincipal } from "./clock.js";
 import {
@@ -24,6 +24,7 @@ import { McpConfigurationManager, SkillsManager } from "./environment.js";
 import { ClaudeMcpConfigurationManager } from "./claude-mcp.js";
 import { loadEnvironmentDefaults } from "./environment-defaults.js";
 import { ProjectLocations } from "./projects.js";
+import { listDirectories } from "./directories.js";
 import {
   NativeInventory,
   publishNativeProjects,
@@ -42,6 +43,7 @@ import {
 } from "../../../packages/sdk/src/node.js";
 import type {
   Agent,
+  BrowserNotice,
   InvocationContext,
   JsonToolHandler,
   ServiceConnection,
@@ -125,6 +127,8 @@ export async function startAgentManager(
     journal.reserveNotificationSequence(),
     settings.limits.maxNotificationBytes,
   );
+  const noticePolicy = new NativeNoticePolicy();
+  let sendBrowserNotice: ((threadId: string, notice: BrowserNotice) => Promise<void>) | null = null;
   const health = new HealthFile(config),
     work = new Set<Promise<unknown>>();
   let native: NativeOwner | null = null,
@@ -324,7 +328,7 @@ export async function startAgentManager(
           else startupClocks.push(input);
         } else if (service?.ready && !closing) {
           const notice = inputBrowserNotice(input);
-          if (notice) void publishBrowserNotice(service.connection, "agent", notice).catch(() => undefined);
+          if (notice) void sendBrowserNotice?.(input.threadId!, notice).catch(() => undefined);
           try {
             service.connection.notification("agent", "inputs", "1.0.0", {
               identity: input.identity,
@@ -336,10 +340,11 @@ export async function startAgentManager(
         }
       },
       onNotification: (epoch, value) => {
+        noticePolicy.observe(value);
         const event = notifications.observe(epoch, value.method, value.params);
         if (service?.ready && !closing) {
           const notice = nativeBrowserNotice(config.serviceNodeId, event);
-          if (notice) void publishBrowserNotice(service.connection, "agent", notice).catch(() => undefined);
+          if (notice) void sendBrowserNotice?.((value.params as { threadId: string }).threadId, notice).catch(() => undefined);
           try {
             service.connection.notification(
               "agent",
@@ -369,7 +374,9 @@ export async function startAgentManager(
             "thread/status/changed",
             "turn/started",
             "turn/completed",
-          ].includes(value.method)
+          ].includes(value.method) &&
+          !( ["thread/status/changed", "turn/started", "turn/completed"].includes(value.method) &&
+            noticePolicy.isInternal((value.params as { threadId: string }).threadId) === true )
         )
           requestThreadRefresh?.();
         if (value.method === "project/changed") {
@@ -397,6 +404,7 @@ export async function startAgentManager(
         requireThat(project, "native_inventory_changed", "The created Codex project is not in the current inventory.");
         return structuredClone(project);
       },
+      state,
     );
     const owner = native,
       catalogHash = hashJson(owner.catalog),
@@ -449,7 +457,9 @@ export async function startAgentManager(
       const task = track(
         (async () => {
           connection.signal.throwIfAborted();
+          const noticeRevision = noticePolicy.revision;
           const next = await inventory.collectThreads(connection.signal);
+          noticePolicy.setThreads(next.threads, noticeRevision);
           await publishNativeThreads(
             connection,
             journal,
@@ -507,6 +517,7 @@ export async function startAgentManager(
           const next = nativeRead
             ? await inventory.collectProjects(connection.signal)
             : inventory.currentProjects();
+          noticePolicy.setProjects(next.projects.projects);
           locations!.setNativeProjects(next.projects.projects);
           await publishNativeProjects(
             connection,
@@ -557,6 +568,28 @@ export async function startAgentManager(
       if (projectRefreshWork) await projectRefreshWork;
       await refreshProjects(connection);
     };
+    const noticeReads = new Map<string, Promise<void>>();
+    sendBrowserNotice = async (threadId, notice) => {
+      if (!service?.ready || closing) return;
+      // Initial discovery and project changes share their existing read; never poll for badges.
+      if (projectRefreshWork) await projectRefreshWork;
+      else if (!projectObserved) await refreshProjects(service.connection);
+      if (noticePolicy.isInternal(threadId) === null) {
+        let read = noticeReads.get(threadId);
+        if (!read) {
+          const revision = noticePolicy.revision;
+          read = (async () => {
+            const reply = await owner.rpc.request("thread/read", { threadId, includeTurns: false });
+            if ("error" in reply) throw new IvyError("native_inventory_unavailable", "Cannot determine the task's notification policy.");
+            noticePolicy.setThread(threadId, (reply.result as { thread: Record<string, Wire.Json> }).thread, revision);
+          })().finally(() => noticeReads.delete(threadId));
+          noticeReads.set(threadId, read);
+        }
+        await read;
+      }
+      if (noticePolicy.isInternal(threadId) === false && service?.ready && !closing)
+        await publishBrowserNotice(service.connection, "agent", notice);
+    };
     requestThreadRefresh = () => {
       if (service?.ready && hiveConnection)
         void refreshThreads(hiveConnection).catch(() => undefined);
@@ -591,6 +624,7 @@ export async function startAgentManager(
     const status = (): Agent.Status => ({
       serviceNodeId: config.serviceNodeId,
       hostId: config.hostId,
+      serverType: settings.appServer?.mode === 'claude-adapter' ? 'claude' : 'codex',
       nativeVersion: settings.nativeVersion,
       nativeExecutableHash: settings.nativeExecutableHash,
       catalogHash,
@@ -774,12 +808,19 @@ export async function startAgentManager(
             );
           })(),
         ),
+      "agent.listDirectories": (args) =>
+        track((async () => {
+          validateAgent("DirectoryListInput", args);
+          available();
+          return listDirectories(args as Agent.DirectoryListInput);
+        })()),
       "agent.resolveProject": (args, context) =>
         track(
           (async () => {
             validateAgent("ProjectResolveInput", args);
             available();
-            await freshProjects(service!.connection);
+            if ((args as Agent.ProjectResolveInput).selection.kind !== "projectless")
+              await freshProjects(service!.connection);
             const result = await locations!.resolve(
               (args as Agent.ProjectResolveInput).selection,
               context.callerPrincipalId,

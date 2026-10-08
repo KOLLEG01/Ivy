@@ -39,10 +39,10 @@ export function nativeModesFrom(binding: BoundTool | undefined | null, result: u
     seen.add(mode); return [{ mode, name, effort }];
   });
 }
-/** A mode change needs the explicitly selected advertised model; never infer the existing task model. */
+/** A mode change needs the resolved advertised model and its supported effort. */
 export function nativeModePayload(binding: BoundTool | undefined | null, mode: NativeMode | undefined, model: NativeModel | undefined, effort: string): Wire.Json | null {
   const fields = shape(binding); if (!fields || !mode || !model?.model.trim() || !enumStrings(record(fields.mode.properties).mode, fields.root).includes(mode.mode)) return null;
-  const reasoning = effort || mode.effort, props = record(fields.settings.properties);
+  const reasoning = effort || (model.efforts.length ? mode.effort : null), props = record(fields.settings.properties);
   if (reasoning !== null && !model.efforts.includes(reasoning) || !primitive(model.model, props.model, fields.root) || !primitive(reasoning, props.reasoning_effort, fields.root)) return null;
   return { mode: mode.mode, settings: { model: model.model, reasoning_effort: reasoning, developer_instructions: null } };
 }

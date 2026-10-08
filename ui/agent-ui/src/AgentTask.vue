@@ -14,6 +14,7 @@ import {
   ArrowUp,
   ChevronRight,
   Download,
+  FolderOpen,
   LoaderCircle,
   MoreHorizontal,
   Square,
@@ -50,8 +51,6 @@ import { route, usePage } from "../../../packages/ui-client/src/runtime";
 import {
   list,
   modelsFrom,
-  nativeModels,
-  nativePermissionProfiles,
   nativeRead,
   optionalTool,
   permissionProfileLabel,
@@ -63,7 +62,9 @@ import {
 import { useNativeAction } from "../../../packages/ui-client/src/native-action";
 import NativeActionState from "../../../packages/ui-client/src/NativeActionState.vue";
 import NativeInputs from "../../../packages/ui-client/src/NativeInputs.vue";
+import TaskProjectDialog from "../../../packages/ui-client/src/TaskProjectDialog.vue";
 import MessageImages from "../../../packages/ui-client/src/MessageImages.vue";
+import { readNativeImage } from "../../../packages/ui-client/src/native-images";
 import {
   isUnmaterializedNativeHistory,
   readNativeOutputPage,
@@ -74,6 +75,7 @@ import {
   nativeModePayload,
 } from "../../../packages/ui-client/src/native-modes";
 import { readNativeThreadControl } from "../../../packages/ui-client/src/native-thread-control";
+import { useNativeSettings, effectiveNativeSettings } from "../../../packages/ui-client/src/native-settings";
 import { useObjectArchive } from "../../../packages/ui-client/src/object-archive";
 import {
   messageInput,
@@ -81,7 +83,7 @@ import {
   useMessageAttachments,
 } from "../../../packages/ui-client/src/message-attachments";
 import type { StagedAttachment } from "../../../packages/ui-client/src/message-attachments";
-import { base, client, notifications, outputCache } from "./runtime";
+import { base, client, notifications, outputCache, tr } from "./runtime";
 import {
   activitySummary,
   conversationItem,
@@ -93,6 +95,11 @@ const props = defineProps<{ node: string; threadId: string; turnId: string }>();
 const state = useRemote((signal) =>
   readNativeThreadControl(client, props.node, props.threadId, signal),
 );
+const imageCwd = computed(() => text(state.value.value?.thread.cwd));
+const imageLoader = computed(() => {
+  const node = props.node, cwd = imageCwd.value;
+  return cwd ? (source: string, signal: AbortSignal) => readNativeImage(client, node, source, cwd, signal) : null;
+});
 const taskInventory = useRemote(
   (signal) =>
     client.request(
@@ -121,6 +128,7 @@ const capabilities = useRemote(async () => {
     goalSet,
     goalClear,
     steer,
+    project,
   ] = await Promise.all(
     [
       "codex.turn/start",
@@ -132,6 +140,7 @@ const capabilities = useRemote(async () => {
       "codex.thread/goal/set",
       "codex.thread/goal/clear",
       "codex.turn/steer",
+      "codex.thread/metadata/update",
     ].map((name) => optionalTool(client, props.node, name)),
   );
   return {
@@ -144,15 +153,12 @@ const capabilities = useRemote(async () => {
     goalSet,
     goalClear,
     steer,
+    project,
   };
 }, 0, ["services"]);
-const models = useRemote((signal) => nativeModels(client, props.node, signal), 0, ["services"]);
-const permissions = useRemote(async (signal) =>
-  (await optionalTool(client, props.node, "codex.permissionProfile/list"))
-    ? nativePermissionProfiles(client, props.node, undefined, signal)
-    : { data: [], unavailable: true },
-  0, ["services"],
-);
+const projectOpen = ref(false);
+const settings = useNativeSettings(client, () => props.node, () => text(state.value.value?.thread.cwd));
+const { models, permissions, modes } = settings;
 const goal = useRemote(async (signal) =>
   (await optionalTool(client, props.node, "codex.thread/goal/get"))
     ? nativeRead(
@@ -163,12 +169,6 @@ const goal = useRemote(async (signal) =>
         signal,
       )
     : null,
-);
-const modes = useRemote(async (signal) =>
-  (await optionalTool(client, props.node, "codex.collaborationMode/list"))
-    ? nativeRead(client, props.node, "codex.collaborationMode/list", {}, signal)
-    : null,
-  0, ["services"],
 );
 const turns = usePage(async (signal, cursor) => {
   try {
@@ -441,10 +441,22 @@ const permissionChoices = computed(() =>
     (profile) => profile.allowed,
   ),
 );
-const nativeModel = computed(() => text(state.value.value?.thread.model));
-const nativeEffort = computed(() =>
-  text(state.value.value?.thread.reasoningEffort),
-);
+const latestSettings = ref<Record<string, unknown>>({});
+const nativeMode = computed(() => text(record(latestSettings.value.collaborationMode ?? state.value.value?.thread.collaborationMode).mode));
+const nativeSettings = computed(() => {
+  const resumed = action.saved.value?.phase === 'succeeded' && action.saved.value.call.qualifiedName === 'codex.thread/resume' ? record(action.saved.value.result) : {};
+  const current = { ...resumed, ...record(state.value.value?.source), ...state.value.value?.thread, ...latestSettings.value };
+  current.model ||= resumed.model;
+  current.reasoningEffort ||= resumed.reasoningEffort;
+  const profile = settings.defaults.value.value?.document[state.value.value?.status.serverType ?? 'codex'];
+  if (profile?.mode && (!nativeMode.value || nativeMode.value === 'default') && turns.value.value?.items.length === 0 && !turns.value.value.nextCursor) current.collaborationMode = null;
+  return effectiveNativeSettings(models.value.value, settings.config.value.value, current, turns.value.value?.items.length === 0 ? profile : null);
+});
+const nativeModel = computed(() => nativeSettings.value.model);
+const nativeEffort = computed(() => model.value && model.value !== nativeModel.value
+  ? choices.value.find(value => value.model === model.value)?.defaultEffort ?? '' : nativeSettings.value.effort);
+const modelLabel = computed(() => choices.value.find(value => value.model === nativeModel.value)?.name || nativeModel.value || (models.error.value ? 'Model unavailable' : 'Loading model…'));
+const modeLabel = computed(() => modes.loading.value && !modes.value.value ? 'Loading modes…' : modeChoices.value.find(value => value.mode === nativeSettings.value.mode)?.name || (modes.error.value ? 'Modes unavailable' : 'Default'));
 const effectiveModel = computed(() => model.value || nativeModel.value);
 const modelChoice = computed(() =>
   choices.value.find((value) => value.model === effectiveModel.value),
@@ -463,12 +475,12 @@ const payloadFor = (options: Options) =>
     choices.value.find(
       (value) => value.model === (options.model || nativeModel.value),
     ),
-    options.effort,
+    options.effort || (options.model && options.model !== nativeModel.value ? choices.value.find(value => value.model === options.model)?.defaultEffort ?? '' : nativeEffort.value),
   );
 const currentOptions = computed<Options>(() => ({
   model: model.value,
   effort: effort.value,
-  mode: mode.value,
+  mode: mode.value || (modeChoices.value.some(value => value.mode === nativeSettings.value.mode) && turns.value.value?.items.length === 0 && (!nativeMode.value || nativeMode.value === 'default') ? nativeSettings.value.mode : ''),
   permission: permission.value,
 }));
 const modePayload = computed(() => payloadFor(currentOptions.value));
@@ -531,6 +543,7 @@ const selectedError = computed(() => {
     : "";
 });
 const optionsValid = (options: Options) =>
+  !settings.config.loading.value && !settings.config.error.value &&
   (!options.model || choices.value.some((v) => v.model === options.model)) &&
   (!options.effort ||
     (
@@ -558,6 +571,8 @@ const imagesSupported = (binding: BoundTool | undefined) =>
 const working = computed(
   () => !!activeTurn.value || threadStatus.value === "active",
 );
+const submitting = ref(false);
+const sending = computed(() => submitting.value || action.pending.value && ['codex.turn/start', 'codex.turn/steer', 'codex.thread/resume'].includes(action.saved.value?.call.qualifiedName ?? ''));
 const canResume = computed(
   () =>
     !state.error.value &&
@@ -577,6 +592,7 @@ const canSubmit = computed(
       imagesSupported(capabilities.value.value?.send)) &&
     optionsValid(currentOptions.value) &&
     !action.locked.value &&
+    !submitting.value &&
     (knownIdle.value || canResume.value || working.value),
 );
 const canInterrupt = computed(
@@ -783,6 +799,9 @@ const draft = () => ({
   options: { ...currentOptions.value },
 });
 const sendDraft = async () => {
+  if (submitting.value) return;
+  submitting.value = true;
+  try {
   // The definition and draft checked at submission are sent as they were; a changed provider
   // definition is refused by Hive instead of being adopted silently.
   const binding = capabilities.value.value?.send,
@@ -793,6 +812,9 @@ const sendDraft = async () => {
   if (!knownIdle.value) return;
   await action.start("Send message", binding, args);
   refresh();
+  } finally {
+    submitting.value = false;
+  }
 };
 watch(
   () => action.saved.value?.phase,
@@ -815,6 +837,7 @@ watch(
 );
 const submit = () => {
   if (!canSubmit.value) return;
+  if (selectedTurn.value) window.location.hash = route('task', { node: props.node, id: props.threadId });
   if (!working.value && !queue.value.length) {
     void sendDraft();
     return;
@@ -1027,6 +1050,7 @@ const retainNotification = (entry: Agent.Notification) => {
   }
   afterSequence = entry.sequence;
   if (record(entry.params).threadId !== props.threadId) return;
+  if (entry.method === 'thread/settings/updated') latestSettings.value = record(record(entry.params).threadSettings);
   if (activity.value.length >= 100) partialLive.value = true;
   activity.value = [...activity.value, entry].slice(-100);
   refreshForEvents([entry.method]);
@@ -1426,6 +1450,13 @@ onBeforeUnmount(() => {
           </div>
           <DropdownMenuSeparator />
           <DropdownMenuItem
+            v-if="supportsFields(capabilities.value.value?.project, ['threadId', 'projectId'])"
+            :disabled="action.locked.value || working || !state.value.value"
+            @select="projectOpen = true"
+          >
+            <FolderOpen aria-hidden="true" />{{ tr('Projekt ändern…', 'Change project…') }}
+          </DropdownMenuItem>
+          <DropdownMenuItem
             :disabled="
               action.locked.value ||
               !(archived
@@ -1447,6 +1478,17 @@ onBeforeUnmount(() => {
         </DropdownMenuContent>
       </DropdownMenu>
     </ToolbarContent>
+    <TaskProjectDialog
+      v-if="projectOpen && capabilities.value.value?.project"
+      v-model:open="projectOpen"
+      :client="client"
+      :node="node"
+      :thread-id="threadId"
+      :project-id="text(state.value.value?.thread.projectId)"
+      :binding="capabilities.value.value.project"
+      :scope="base.href"
+      @changed="refresh"
+    />
     <div ref="scroller" class="agent-messages" @scroll="trackScroll">
       <div class="agent-message-column ivy-conversation">
         <RemoteState
@@ -1468,7 +1510,7 @@ onBeforeUnmount(() => {
         <section class="space-y-4" aria-labelledby="results-heading">
           <h2 id="results-heading" class="sr-only">Conversation</h2>
           <p
-            v-if="selectedTurn"
+            v-if="selectedTurn && (turns.value.value?.nextCursor || turns.value.value?.items.some(turn => record(turn).id !== selectedTurn))"
             class="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground"
           >
             Showing a linked turn.
@@ -1519,6 +1561,7 @@ onBeforeUnmount(() => {
                 <ContentView
                   v-if="block.presentation.text"
                   :text="block.presentation.text"
+                  :image-loader="imageLoader"
                   :media-type="
                     block.presentation.markdown ? 'text/markdown' : 'text/plain'
                   "
@@ -1593,7 +1636,7 @@ onBeforeUnmount(() => {
               >
                 Partial live answer
               </p>
-              <ContentView :text="entry.text" media-type="text/markdown" />
+              <ContentView :text="entry.text" media-type="text/markdown" :image-loader="imageLoader" />
             </article>
           </div>
           <p
@@ -1713,6 +1756,8 @@ onBeforeUnmount(() => {
         <p v-if="models.error.value" class="px-1 text-sm text-muted-foreground">
           Model capabilities unavailable: {{ models.error.value }}
         </p>
+        <p v-if="permissions.error.value || settings.config.error.value" class="px-1 text-sm text-muted-foreground">{{ permissions.error.value || settings.config.error.value }}</p>
+        <Button v-if="models.error.value || modes.error.value || permissions.error.value || settings.config.error.value" variant="ghost" size="sm" @click="settings.refresh">Reload settings</Button>
         <p
           v-if="
             capabilities.error.value ||
@@ -1771,9 +1816,9 @@ onBeforeUnmount(() => {
               ><Target aria-hidden="true" />Goal</Button
             >
             <Label for="task-model" class="sr-only">Model</Label
-            ><OptionSelect id="task-model" v-model="model">
+            ><OptionSelect id="task-model" v-model="model" :disabled="models.loading.value && !models.value.value">
               <option value="">
-                {{ nativeModel ? nativeModel : "Default model" }}
+                {{ modelLabel }}
               </option>
               <option
                 v-for="item in choices.filter((value) => !value.hidden)"
@@ -1796,8 +1841,8 @@ onBeforeUnmount(() => {
               </optgroup></OptionSelect
             >
             <Label for="task-mode" class="sr-only">Working mode</Label>
-            <OptionSelect id="task-mode" v-model="mode">
-              <option value="">Default mode</option>
+            <OptionSelect id="task-mode" v-model="mode" :disabled="modes.loading.value && !modes.value.value">
+              <option value="">{{ modeLabel }}</option>
               <option
                 v-if="
                   mode &&
@@ -1825,7 +1870,7 @@ onBeforeUnmount(() => {
                 {{
                   nativeEffort
                     ? nativeEffort.charAt(0).toUpperCase() + nativeEffort.slice(1)
-                    : "Default effort"
+                    : (efforts.length ? 'Loading effort…' : 'No reasoning effort')
                 }}
               </option>
               <option v-for="value in efforts" :key="value" :value="value">
@@ -1838,7 +1883,7 @@ onBeforeUnmount(() => {
               v-model="permission"
               :disabled="permissions.loading.value"
             >
-              <option value="">Default safety</option>
+              <option value="">{{ nativeSettings.permission ? permissionProfileLabel(nativeSettings.permission) : 'Loading safety…' }}</option>
               <option
                 v-for="profile in permissionChoices"
                 :key="profile.id"
@@ -1854,15 +1899,17 @@ onBeforeUnmount(() => {
             size="icon"
             class="size-9 shrink-0 rounded-full"
             :disabled="!canInterrupt"
+            :loading="action.pending.value && action.saved.value?.call.qualifiedName === 'codex.turn/interrupt'"
             aria-label="Request interruption"
             @click="interrupt"
             ><Square class="size-3.5 fill-current" aria-hidden="true" /></Button
           ><Button
-            v-if="!working || message.trim() || attachments.items.value.length"
+            v-if="!working || message.trim() || attachments.items.value.length || sending"
             size="icon"
             class="size-9 shrink-0 rounded-full"
             :disabled="!canSubmit"
-            :aria-label="working || queue.length ? 'Queue message' : 'Send message'"
+            :loading="sending"
+            :aria-label="sending ? 'Send message' : working || queue.length ? 'Queue message' : 'Send message'"
             @click="submit"
             ><ArrowUp aria-hidden="true"
           /></Button>

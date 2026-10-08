@@ -22,6 +22,19 @@ export function renderMarkdown(source: string, maximumCharacters = 262144, trust
   return { html: markdown.render(source.slice(0, maximumCharacters), { trustedImageUrls, trustedAttachments }), truncated: source.length > maximumCharacters };
 }
 
+/** Use the renderer's parser so code examples, reference images and escaped paths agree. */
+export function markdownImageSources(source: string, maximumCharacters = 262144): string[] {
+  const sources = new Set<string>();
+  const visit = (tokens: ReturnType<typeof markdown.parse>) => {
+    for (const token of tokens) {
+      if (token.type === 'image' && token.attrGet('src')) sources.add(String(token.attrGet('src')));
+      else if (token.children) visit(token.children);
+    }
+  };
+  visit(markdown.parse(source.slice(0, maximumCharacters), {}));
+  return [...sources];
+}
+
 // Top-level token boundaries keep lists, fenced code and tables together. Retain whitespace and
 // unsupported syntax verbatim: opening the editor must never rewrite the stored document.
 export function markdownBlocks(source: string): Array<{ content: string; separator: string }> {

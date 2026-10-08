@@ -216,10 +216,17 @@ export default async function collectInstagram({
   for (const name of ["collectComments", "collectMessages", "notifyInitial"])
     if (config[name] !== undefined && typeof config[name] !== "boolean")
       throw failure("configuration_invalid", `${name} must be a boolean.`);
-  if (config.collectMessages && login !== "instagram")
+  const pageMessages = config.collectMessages && login === "facebook";
+  if (
+    pageMessages &&
+    (typeof config.facebookPageId !== "string" ||
+      !/^\d+$/.test(config.facebookPageId) ||
+      typeof config.pageAccessTokenSecret !== "string" ||
+      !config.pageAccessTokenSecret.trim())
+  )
     throw failure(
       "configuration_invalid",
-      "Message collection requires Instagram Login; Facebook Login needs a separate Page grant.",
+      "Facebook message collection requires facebookPageId and a pageAccessTokenSecret with the Instagram messaging grant.",
     );
   const maxInboxRequests = config.maxInboxRequests ?? 100;
   const maxInboxItems = config.maxInboxItems ?? 500;
@@ -230,6 +237,12 @@ export default async function collectInstagram({
     if (!Number.isInteger(value) || value < 1 || value > 1000)
       throw failure("configuration_invalid", `${name} must be 1..1000.`);
   const token = await instagramToken(config, secrets, signal);
+  const pageToken = pageMessages ? secrets[config.pageAccessTokenSecret] : null;
+  if (pageMessages && (typeof pageToken !== "string" || !pageToken.trim()))
+    throw failure(
+      "authentication_required",
+      "The configured Facebook Page token is missing.",
+    );
   const collectedAt = new Date().toISOString();
   const end = Date.parse(collectedAt);
   const start = end - days * 86400000;
@@ -248,7 +261,7 @@ export default async function collectInstagram({
           "The API omitted this count or returned a count outside JavaScript's safe integer range.",
           source,
         );
-  async function get(path, params) {
+  async function get(path, params, requestToken = token) {
     signal?.throwIfAborted();
     const url = new URL(`https://${host}/${version}/${path}`);
     for (const [key, value] of Object.entries(params))
@@ -256,7 +269,7 @@ export default async function collectInstagram({
     let response;
     try {
       response = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${requestToken}` },
         signal,
         redirect: "error",
       });
@@ -289,6 +302,22 @@ export default async function collectInstagram({
       throw error;
     }
     return body;
+  }
+  const getMessages = pageMessages
+    ? (path, params) => get(path, params, pageToken)
+    : get;
+  if (pageMessages) {
+    const page = await getMessages("me", {
+      fields: "id,instagram_business_account",
+    });
+    if (
+      page.id !== config.facebookPageId ||
+      page.instagram_business_account?.id !== accountId
+    )
+      throw failure(
+        "authentication_required",
+        "The Page token does not belong to the configured Page and Instagram account.",
+      );
   }
   const account = await get(accountId, {
     fields: `${login === "instagram" ? "user_id" : "id"},username,followers_count`,
@@ -385,6 +414,7 @@ export default async function collectInstagram({
     config.collectComments || config.collectMessages
       ? await collectInbox({
           get,
+          getMessages,
           accountId,
           login,
           mediaIds,
@@ -435,6 +465,7 @@ export default async function collectInstagram({
 
 async function collectInbox({
   get,
+  getMessages,
   accountId,
   login,
   mediaIds,
@@ -517,7 +548,8 @@ async function collectInbox({
         limited(target, "Inbox collection reached its request or item limit.");
         return;
       }
-      const response = await get(path, {
+      const request = target === messages ? getMessages : get;
+      const response = await request(path, {
         ...params,
         ...(after ? { after } : {}),
       });
@@ -597,8 +629,12 @@ async function collectInbox({
   if (config.collectMessages) {
     const budget = { remaining: maxInboxRequests };
     await walk(
-      `${accountId}/conversations`,
-      { fields: "id,updated_time", limit: 100 },
+      `${login === "facebook" ? config.facebookPageId : accountId}/conversations`,
+      {
+        fields: "id,updated_time",
+        limit: 100,
+        ...(login === "facebook" ? { platform: "instagram" } : {}),
+      },
       messages,
       budget,
       async (conversation) => {
@@ -624,7 +660,7 @@ async function collectInbox({
             }
             let message;
             try {
-              message = await get(id, {
+              message = await getMessages(id, {
                 fields: "id,created_time,from,to,message",
               });
             } catch (error) {

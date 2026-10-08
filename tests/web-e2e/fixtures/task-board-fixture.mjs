@@ -23,6 +23,11 @@ export async function taskBoardFixture(t, { native = false, viewport, scheduler 
   const url = f.base + '/ui/task-board-ui/';
   const open = async (hash = '#/home?node=browser-task-board') => { await f.login(); await f.page.goto(url + hash); };
   const invoke = async request => { const value = { operationId: await operationId('invoke'), ...request }; return callBound(f.client, await discover(f.client, 'task-board.' + value.action, { serviceNodeId: 'browser-task-board' }), value, value.operationId); };
+  if (native) {
+    const current = await callBound(f.client, await discover(f.client, 'task-board.configuration', { serviceNodeId: 'browser-task-board' }), {});
+    await invoke({ action: 'configure', configuration: current.object, value: { ...current.configuration,
+      defaults: { ...current.configuration.defaults, nativeOptions: { model: null, reasoningEffort: null, serviceTier: 'standard' } } } });
+  }
   const task = async id => (await f.client.request('objects.read', { objectId: id })).content.value;
   const restartTaskBoard = async () => { await service.close(); service = await startTaskBoard(path); await service.service.waitReady(); };
   return { ...f, url, open, invoke, task, restartTaskBoard, taskBoard: () => service, taskBoardConfig: config };

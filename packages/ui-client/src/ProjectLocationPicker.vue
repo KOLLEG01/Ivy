@@ -1,27 +1,50 @@
 <script setup lang="ts">
 import { ref, useId } from "vue";
-import { Alert, AlertDescription, Button, Field, FieldDescription, FieldGroup, FieldLegend, FieldSet, Input, Label, OptionSelect } from "@ivy/ui";
-import { serviceTools } from "../../sdk/src/client.js";
+import {
+  Alert,
+  AlertDescription,
+  Button,
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLegend,
+  FieldSet,
+  Input,
+  Label,
+  OptionSelect,
+} from "@ivy/ui";
+import { IvyError, serviceTools } from "../../sdk/src/client.js";
 import type { Agent, RpcClient } from "../../sdk/src/client.js";
+import { FolderOpen } from "@lucide/vue";
+import HostDirectoryDialog from "./HostDirectoryDialog.vue";
+import { localeText } from "./runtime.js";
 const props = defineProps<{
   client: RpcClient;
   node: string;
   scope: string;
   defaults?: Agent.ProjectsResult["defaults"] | undefined;
   disabled?: boolean;
+  host?: string | undefined;
+  initialKind?: "normal" | "existing";
 }>();
 const emit = defineEmits<{ selected: [Agent.ProjectLocation] }>();
 const typeId = useId(),
   nameId = useId();
-const kind = ref<"normal" | "existing">("normal"),
+const kind = ref<"normal" | "existing">(props.initialKind ?? "normal"),
   name = ref(""),
+  browsing = ref(false),
   busy = ref(false),
   error = ref("");
 const storageKey = "ivy:project-selection:" + props.scope + ":" + props.node;
 const pending = ref<Agent.ProjectSelection | null>(null);
 try {
   pending.value = JSON.parse(sessionStorage.getItem(storageKey) ?? "null");
-  if (pending.value?.kind === "task" || pending.value?.kind === "internal") pending.value = null;
+  if (
+    pending.value?.kind === "task" ||
+    pending.value?.kind === "internal" ||
+    pending.value?.kind === "projectless"
+  )
+    pending.value = null;
   if (pending.value) {
     kind.value = pending.value.kind === "existing" ? "existing" : "normal";
     name.value =
@@ -51,6 +74,16 @@ async function select() {
     pending.value = null;
     emit("selected", location);
   } catch (cause) {
+    if (
+      cause instanceof IvyError &&
+      (cause.code === "invalid_arguments" ||
+        (cause.code === "target_conflict" &&
+          (cause.details as { reason?: string } | undefined)?.reason ===
+            "project_directory_exists"))
+    ) {
+      sessionStorage.removeItem(storageKey);
+      pending.value = null;
+    }
     error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
     busy.value = false;
@@ -58,50 +91,77 @@ async function select() {
 }
 </script>
 <template>
-  <FieldSet
-    class="rounded-lg border p-3"
-    :disabled="disabled || busy"
-  >
+  <FieldSet class="rounded-lg border p-3" :disabled="disabled || busy">
     <FieldLegend>Choose another working location</FieldLegend>
     <FieldGroup>
-    <Field>
-      <Label :for="typeId">Project type</Label
-      ><OptionSelect
-        :id="typeId"
-        v-model="kind"
-        :disabled="!!pending"
-        class="w-full"
+      <Field>
+        <Label :for="typeId">Project type</Label
+        ><OptionSelect
+          :id="typeId"
+          v-model="kind"
+          :disabled="!!pending"
+          class="w-full"
+        >
+          <option value="normal">New project</option>
+          <option value="existing">Existing directory</option>
+        </OptionSelect>
+      </Field>
+      <Field>
+        <Label :for="nameId">{{
+          kind === "existing"
+            ? "Absolute directory on this host"
+            : "Project name"
+        }}</Label>
+        <div class="flex gap-2">
+          <Input
+            :id="nameId"
+            v-model="name"
+            :disabled="!!pending"
+            class="min-w-0 flex-1"
+          />
+          <Button
+            v-if="kind === 'existing'"
+            type="button"
+            variant="outline"
+            :disabled="!!pending"
+            @click="browsing = true"
+            ><FolderOpen aria-hidden="true" />Browse…</Button
+          >
+        </div>
+      </Field>
+      <FieldDescription
+        v-if="defaults && kind !== 'existing'"
+        class="break-all text-xs text-muted-foreground"
       >
-        <option value="normal">New project</option>
-        <option value="existing">Existing directory</option>
-      </OptionSelect>
-    </Field>
-    <Field>
-      <Label :for="nameId">{{
-        kind === "existing" ? "Absolute directory on this host" : "Project name"
-      }}</Label
-      ><Input
-        :id="nameId"
-        v-model="name"
-        :disabled="!!pending"
-      />
-    </Field>
-    <FieldDescription
-      v-if="defaults && kind !== 'existing'"
-      class="break-all text-xs text-muted-foreground"
-    >
-      Base:
-      {{
-        defaults.projectRoot
-      }}. This project receives its own permanent subdirectory.
-    </FieldDescription>
-    <Button
-      type="button"
-      :disabled="!node || (!pending && !name.trim())"
-      @click="select"
-      >{{ pending ? "Retry original selection" : "Use this location" }}</Button
-    >
-    <Alert v-if="error" variant="destructive"><AlertDescription>{{ error }}</AlertDescription></Alert>
+        Base:
+        {{ defaults.projectRoot }}.
+        {{
+          localeText(
+            "Der Projektname wird unverändert als Ordnername verwendet. Ein vorhandener Ordner führt zu einem Fehler.",
+            "The project name is used unchanged as its folder name. An existing folder causes an error.",
+          )
+        }}
+      </FieldDescription>
+      <Button
+        type="button"
+        :disabled="!node || (!pending && !name.trim())"
+        @click="select"
+        >{{
+          pending ? "Retry original selection" : "Use this location"
+        }}</Button
+      >
+      <Alert v-if="error" variant="destructive"
+        ><AlertDescription>{{ error }}</AlertDescription></Alert
+      >
     </FieldGroup>
   </FieldSet>
+  <HostDirectoryDialog
+    v-model:open="browsing"
+    :client="client"
+    :node="node"
+    :host="host ?? node"
+    :start="name.trim() || defaults?.projectRoot || ''"
+    title="Choose existing directory"
+    @select="name = $event"
+  />
 </template>

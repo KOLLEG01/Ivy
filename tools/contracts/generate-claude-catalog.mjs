@@ -14,9 +14,14 @@ if (hash(patch) !== lock.patchHash)
   throw new Error("Claude adapter patch differs from its lock");
 
 // This is the tested Ivy surface of the pinned 0.142.3 adapter plus one
-// adapter-side 0.158 item paging extension. Do not expose upstream stubs.
+// adapter-side 0.158 project ownership and item paging extensions. Do not expose upstream stubs.
 const methods = [
   "initialize",
+  "project/list",
+  "project/read",
+  "project/create",
+  "project/update",
+  "project/delete",
   "thread/start",
   "thread/resume",
   "thread/list",
@@ -28,6 +33,10 @@ const methods = [
   "turn/steer",
   "turn/interrupt",
   "model/list",
+  "collaborationMode/list",
+  "permissionProfile/list",
+  "config/read",
+  "fs/readFile",
   "account/rateLimits/read",
 ];
 const requests = [

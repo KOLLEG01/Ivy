@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { expect } from "@playwright/test";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { agentFixture } from "./fixtures/agent-fixture.mjs";
 import { taskBoardFixture } from "./fixtures/task-board-fixture.mjs";
@@ -49,7 +49,8 @@ test(
   async (t) => {
     const f = await agentFixture(t);
     await f.open("#/host?node=browser-agent");
-    await f.page.getByRole("button", { name: "Add project", exact: true }).click();
+    await f.page.getByLabel("Project", { exact: true }).click();
+    await f.page.getByRole("option", { name: "New project…", exact: true }).click();
     await f.page
       .getByLabel("Project name", { exact: true })
       .fill("Permanent normal work");
@@ -92,7 +93,7 @@ test(
       (await f.page
         .getByLabel("Project", { exact: true })
         .getAttribute("data-value")) ?? "";
-    assert.ok(cwd.startsWith(f.config.settings.projectRoot));
+    assert.equal(cwd, join(f.config.settings.projectRoot, "Permanent normal work"));
     assert.equal((await readdir(f.config.settings.projectRoot)).length, 1);
     assert.equal(f.nativeProjects.filter(project => project.path === cwd).length, 1);
     await f.page
@@ -114,6 +115,72 @@ test(
     assert.deepEqual(f.externalRequests, []);
   },
 );
+
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  test(`AgentUI preserves new project folder names and allows correcting collisions at ${viewport.width}px`,
+    { timeout: 120000 }, async t => {
+      const f = await agentFixture(t, viewport);
+      await f.open("#/host?node=browser-agent");
+      const selectNew = async () => {
+        await f.page.getByLabel("Project", { exact: true }).click();
+        await f.page.getByRole("option", { name: "New project…", exact: true }).click();
+      };
+      const use = () => f.page.getByRole("button", { name: "Use this location", exact: true }).click();
+      const name = f.page.getByRole("dialog").getByLabel("Project name", { exact: true });
+      await selectNew();
+      await name.fill("Local Take ä");
+      await use();
+      const cwd = join(f.config.settings.projectRoot, "Local Take ä");
+      await expect(f.page.getByLabel("Project", { exact: true })).toHaveAttribute("data-value", cwd);
+      assert.equal(f.nativeProjects.filter(project => project.path === cwd).length, 1);
+      await selectNew();
+      await name.fill("Local Take ä");
+      await use();
+      await expect(f.page.getByRole("dialog").getByText(/Project directory already exists:/)).toBeVisible();
+      await expect(name).toBeEnabled();
+      await expect(f.page.getByRole("button", { name: "Retry original selection", exact: true })).toHaveCount(0);
+      assert.equal(f.current().sent.filter(frame => frame.method === "project/create").length, 1);
+      assert.deepEqual(await readdir(f.config.settings.projectRoot), ["Local Take ä"]);
+      await name.fill("nested/folder");
+      await use();
+      await expect(f.page.getByRole("dialog").getByText(/Project name must be one valid directory name/)).toBeVisible();
+      await expect(name).toBeEnabled();
+      await name.fill("Other work");
+      await use();
+      await expect(f.page.getByLabel("Project", { exact: true })).toHaveAttribute("data-value", join(f.config.settings.projectRoot, "Other work"));
+      assert.equal(f.current().sent.filter(frame => frame.method === "project/create").length, 2);
+      assert.deepEqual(f.pageErrors, []);
+    });
+}
+
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  test(`AgentUI browses and selects an existing host directory from its project menu at ${viewport.width}px`,
+    { timeout: 120000 }, async t => {
+      const f = await agentFixture(t, viewport);
+      const nested = join(f.root, "Browse", "Nested");
+      await mkdir(nested, { recursive: true });
+      await f.open("#/host?node=browser-agent");
+      await expect(f.page.getByRole("button", { name: "Add project", exact: true })).toHaveCount(0);
+      await f.page.getByLabel("Project", { exact: true }).click();
+      await f.page.getByRole("option", { name: "Choose existing directory…", exact: true }).click();
+      await expect(f.page.getByLabel("Project type", { exact: true })).toHaveAttribute("data-value", "existing");
+      await f.page.getByRole("button", { name: "Browse…", exact: true }).click();
+      const browse = f.page.getByRole("dialog", { name: "Choose existing directory", exact: true });
+      await browse.getByLabel("Folder path").fill(f.root);
+      await browse.getByRole("button", { name: "Open", exact: true }).click();
+      await browse.getByRole("listitem").getByText("Browse", { exact: true }).click();
+      await browse.getByRole("listitem").getByText("Nested", { exact: true }).click();
+      await expect(browse.getByLabel("Folder path")).toHaveValue(nested);
+      await browse.getByRole("button", { name: "Use this folder", exact: true }).click();
+      await expect(f.page.getByLabel("Absolute directory on this host")).toHaveValue(nested);
+      await f.page.getByRole("button", { name: "Use this location", exact: true }).click();
+      await expect(f.page.getByLabel("Project", { exact: true })).toHaveAttribute("data-value", nested);
+      assert.equal(f.nativeProjects.filter(project => project.path === nested).length, 1);
+      assert.equal(f.current().sent.some(frame => frame.method === "fs/readDirectory"), false);
+      assert.deepEqual(f.pageErrors, []);
+      assert.deepEqual(f.externalRequests, []);
+    });
+}
 
 test(
   "TaskBoardUI automatically executes in the deterministic internal Task workspace",

@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
 import { IvyError, newOperationId } from "../../sdk/src/client.js";
 import { confirmsAbsence, record } from "./native";
@@ -121,7 +121,7 @@ export function useNativeAction(client: RpcClient, key: string) {
         ["caller_changed", "caller_unbound"].includes(e.code)
           ? "unknown"
           : "failed";
-      value.detail = `${e.message} (${e.code}; ${e.outcome})`;
+      value.detail = e.message;
       try {
         persist();
       } catch (failure) {
@@ -229,7 +229,10 @@ export function useNativeAction(client: RpcClient, key: string) {
             : outcome.phase === "outcome_unknown"
               ? "unknown"
               : "pending";
-      value.detail = `Owner journal: ${outcome.phase}${outcome.code ? " · " + outcome.code : ""}.`;
+      const failure = record(record(outcome.reply).error).message;
+      value.detail = outcome.phase === "failed"
+        ? typeof failure === "string" ? failure : "The request failed."
+        : `Owner journal: ${outcome.phase}.`;
       if (outcome.reply && "result" in outcome.reply)
         value.result = outcome.reply.result;
       persist();
@@ -265,9 +268,38 @@ export function useNativeAction(client: RpcClient, key: string) {
     };
     await execute();
   };
+  const pending = computed(() =>
+    busy.value || !!saved.value && ["prepared", "unknown", "pending"].includes(saved.value.phase),
+  );
+  // Recover receipts through the original owner's journal; mutations are never replayed here.
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined, stopped = false;
+  const scheduleRecovery = () => {
+    clearTimeout(recoveryTimer);
+    if (stopped || busy.value || !pending.value) return;
+    recoveryTimer = setTimeout(async () => {
+      if (!document.hidden) await reconcile();
+      scheduleRecovery();
+    }, error.value ? 15000 : 3000);
+  };
+  const recoverNow = () => {
+    if (!document.hidden && pending.value && !busy.value) void reconcile();
+  };
+  watch([busy, () => saved.value?.operationId, () => saved.value?.phase], scheduleRecovery);
+  onMounted(() => {
+    scheduleRecovery();
+    window.addEventListener("online", recoverNow);
+    document.addEventListener("visibilitychange", recoverNow);
+  });
+  onBeforeUnmount(() => {
+    stopped = true;
+    clearTimeout(recoveryTimer);
+    window.removeEventListener("online", recoverNow);
+    document.removeEventListener("visibilitychange", recoverNow);
+  });
   return {
     saved,
     busy,
+    pending,
     error,
     start,
     reconcile,

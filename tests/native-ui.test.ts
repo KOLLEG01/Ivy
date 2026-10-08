@@ -6,6 +6,31 @@ import { IvyError } from '../packages/contracts/src/errors.js';
 import { agentRegistry } from '../services/agent-manager/src/registry.js';
 import { hashJson } from '../packages/contracts/src/canonical.js';
 import type { Agent, Wire } from '../packages/contracts/src/generated.js';
+import { nativeImageBlob, nativeImagePath } from '../packages/ui-client/src/native-images.js';
+
+test('agent image paths resolve against the owning Windows or Linux task, never the browser host', () => {
+  for (const [source, cwd, expected] of [
+    ['C:%5CUsers%5CAgent%5Cshot.png', '/srv/other', 'C:/Users/Agent/shot.png'],
+    ['shots/light%20room%20(2).png', 'C:\\prj\\demo', 'C:/prj/demo/shots/light room (2).png'],
+    ['../shots/light.png', '/srv/project', '/srv/shots/light.png'],
+    ['file:///C:/prj/demo/light%20room.png', '/srv/other', 'C:/prj/demo/light room.png'],
+    ['file:///tmp/light%20room.png', 'C:\\prj\\demo', '/tmp/light room.png'],
+    ['https://tracker.example/image.png', '/srv/project', null],
+    ['javascript:alert(1)', '/srv/project', null],
+  ] as const) assert.equal(nativeImagePath(source, cwd), expected);
+  assert.throws(() => nativeImagePath('shots/light.png', ''), /task folder/);
+  assert.throws(() => nativeImagePath('/tmp/%00.png', '/srv/project'), /invalid/);
+});
+
+test('agent images validate decoded raster bytes instead of trusting an extension or declared media type', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+  const blob = nativeImageBlob(png.toString('base64'));
+  assert.equal(blob.type, 'image/png');
+  assert.deepEqual(Buffer.from(await blob.arrayBuffer()), png);
+  assert.throws(() => nativeImageBlob(Buffer.from('<svg onload="alert(1)"></svg>').toString('base64')), /not a supported image/);
+  assert.throws(() => nativeImageBlob('invalid'), /invalid/);
+  assert.throws(() => nativeImageBlob('a'.repeat(12000000)), /larger than 8 MiB/);
+});
 
 test('AgentUI never treats missing discovery/routing or another identity as proof a native operation was absent', () => {
   const call: Wire.ToolCall = { serviceNodeId: 'selected-owner', qualifiedName: 'codex.turn/start', operationId: 'original-intent', expectedDefinitionHash: 'sha256:' + 'a'.repeat(64), arguments: {} };

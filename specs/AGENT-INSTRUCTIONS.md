@@ -19,6 +19,15 @@ Defaults: [runtime instructions](../instructions/README.md).
   See [project selection](../packages/sdk/src/native-project.ts). Native project IDs
   are authoritative; Desktop display requires its supported membership synchronization.
 
+- Users may explicitly start a task without a project. Allocate its own permanent
+  directory under the internal root without requiring or registering a native project.
+  Retain the allocation key across retries and clear native membership explicitly.
+  Native membership, including an unassigned task, takes precedence over path grouping.
+
+- New projects use the requested valid folder name unchanged under the project root.
+  Reject an occupied destination; only the original allocation may reuse its directory
+  after an uncertain reply. Retain that allocation receipt in the service journal.
+
 - Use the exact supported native version and explicitly selected connection/home. Shared-daemon
   shutdown must leave the external daemon alive; owned stdio is an explicit alternative.
   No silent mode change, native update or Desktop restart is permitted.

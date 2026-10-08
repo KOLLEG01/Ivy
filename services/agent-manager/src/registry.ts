@@ -54,7 +54,7 @@ function codexSummary(name: string, group: string): string {
   return summaries[name] ?? name.replaceAll('/', ' / ').replace(/([a-z])([A-Z])/g, '$1 $2') + ': ' + (codexGroups[group] ?? 'Native Codex tools.');
 }
 function managementMcp(name: string): { name: string; surface: 'ivy' | 'ivy_dev' } | null {
-  if (['catalog', 'frameLimits', 'environmentDefaults', 'resolveWorkspace', 'prevent', 'stageFile'].includes(name)) return null;
+  if (['catalog', 'frameLimits', 'environmentDefaults', 'resolveWorkspace', 'listDirectories', 'prevent', 'stageFile'].includes(name)) return null;
   if (['status', 'capabilities'].includes(name)) return { name: 'agent_manager_status', surface: 'ivy' };
   if (['read', 'operation'].includes(name)) return { name: 'agent_manager_read', surface: 'ivy' };
   if (['inputs', 'inputDefinition'].includes(name)) return { name: 'agent_manager_inputs', surface: 'ivy' };
@@ -88,7 +88,8 @@ export function agentRegistry(catalog: Agent.Catalog): Wire.RegistrySync {
     ['answer', 'AnswerInput', 'Operation', 'Answer a pending Codex request using its reply schema and a stable operationId.'],
     ['notifications', 'NotificationQuery', 'NotificationPage', 'Read Codex event history, including any gaps in the retained sequence.'],
     ['projects', 'ProjectsInput', 'ProjectsResult', 'Read the current projects of the connected Codex instance. Codex is the sole project authority.'],
-    ['resolveProject', 'ProjectResolveInput', 'ProjectLocation', 'Validate a native project directory or explicitly register a normal/existing directory with Codex. Internal and task directories use their already registered native project.'],
+    ['listDirectories', 'DirectoryListInput', 'DirectoryListResult', 'Browse directories on this host under the AgentManager account.'],
+    ['resolveProject', 'ProjectResolveInput', 'ProjectLocation', 'Resolve a native project or allocate a persistent projectless task directory without registering a project. Normal/existing selections may register with Codex; internal and task selections require their registered native project.'],
     ['capabilities', 'CapabilityProfileInput', 'CapabilityProfile', 'Read which kinds of agent work this host is configured to accept.'],
     ['configureCapabilities', 'ConfigureCapabilitiesInput', 'CapabilityProfile', 'Configure which kinds of agent work this host accepts, using the current profile revision.'],
     ['environmentDefaults', 'EnvironmentDefaultsInput', 'EnvironmentDefaults', 'Read the project-owned MCP and skill defaults used when no Hive-wide override exists.'],
@@ -113,7 +114,10 @@ export function agentRegistry(catalog: Agent.Catalog): Wire.RegistrySync {
         { name: 'capabilities', version: '1.0.0', description: 'Transient hint that this node capability profile changed.', payloadSchema: agentSchema('CapabilityProfile') }],
       topics: [browserNoticeTopic('agent'), { topic: 'agent.notification', version: '1.0.0', title: 'Agent notification', description: 'A durable native AgentManager notification was retained.', payloadSchema: agentSchema('Notification'), eventKinds: [] },
         { topic: 'agent.capabilities', version: '1.0.0', title: 'Agent capabilities changed', description: 'The AgentManager capability profile changed.', payloadSchema: agentSchema('CapabilityProfile'), eventKinds: [] }], inventoryKinds: [] },
-  ], contracts: [{ key: 'agent/instructions', version: '1.0.0', owner: { kind: 'service', serviceName: 'agent-manager' },
+  ], contracts: [{ key: 'agent/execution-defaults', version: '1.0.0', owner: { kind: 'service', serviceName: 'agent-manager' },
+    mediaType: 'application/json', retention: { objects: { mode: 'retain' }, revisions: { mode: 'bounded', maximumCount: 100 } }, jsonSchema: agentSchema('ExecutionDefaultsDocument'),
+    specMarkdown: 'Composer defaults for new tasks, stored at /ivy-agent-execution-defaults. Codex and Claude profiles are independent. Null fields inherit the connected native server configuration. Existing tasks retain their native settings. AgentUI writes with user permissions and object CAS.' },
+  { key: 'agent/instructions', version: '1.0.0', owner: { kind: 'service', serviceName: 'agent-manager' },
     mediaType: 'application/json', retention: { objects: { mode: 'retain' }, revisions: { mode: 'bounded', maximumCount: 100 } }, jsonSchema: agentSchema('InstructionsDocument'),
     specMarkdown: 'Versioned user-authored instruction documents, not runtime configuration or credentials. Hive-wide hostId=null; host documents bind an exact hostId. AgentUI writes with the user permissions and object CAS. Enabled host instructions follow enabled Hive instructions and take precedence. A disabled host document suppresses central instructions on that host; removing it inherits Hive again. See specs/AGENT-INSTRUCTIONS.md.' },
   { key: 'agent/mcp-configuration', version: '1.0.0', owner: { kind: 'service', serviceName: 'agent-manager' },

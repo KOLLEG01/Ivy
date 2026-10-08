@@ -4,6 +4,6 @@
   "license": "MIT",
   "protocolVersion": "0.142.3",
   "agentSdkVersion": "0.3.283",
-  "patchHash": "sha256:75f729c135e3c931b00adffb4bdc3d6f559e2d20b1808ff9fa130cf9396d516d",
-  "bundleHash": "sha256:7111ee75ce47d26080345fc26531eefe0004f6bc621480e3d3ed7ca56f34489c"
+  "patchHash": "sha256:f989902f08f10f41feb2ea0045a86e1cd728c4e1638716069abeef24482a302b",
+  "bundleHash": "sha256:484e70f7e93a80ae3aca22f03defbedafd96b2ccc8748e1dd4987eaf00e90d3e"
 }

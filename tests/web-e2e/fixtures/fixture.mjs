@@ -62,7 +62,7 @@ export async function fixture(t, populated = false, viewport = { width: 1440, he
       message: 'A retained, resolved browser fixture diagnostic.', resource: { serviceNodeId: 'browser-fixture-service' }, firstObservedAt: now, lastObservedAt: now } });
   }
   browser = await chromium.launch({ ...(process.platform === 'win32' ? { channel: 'msedge' } : {}), headless: true, timeout: 20000 });
-  const context = await browser.newContext({ viewport, acceptDownloads: true, colorScheme: 'light' });
+  const context = await browser.newContext({ viewport, acceptDownloads: true, colorScheme: 'light', locale: 'en-US' });
   const page = await context.newPage(), pageErrors = [], externalRequests = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   await context.route('**/*', request => {

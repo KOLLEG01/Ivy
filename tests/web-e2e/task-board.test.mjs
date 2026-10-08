@@ -139,6 +139,7 @@ test("automatic native recovery stays in progress while user input stays blocked
   const runtime = f.taskBoard().runtime;
   await expect.poll(async () => (await f.task(created.task.objectId)).claim?.run?.objectId, { timeout: 30000 }).toBeTruthy();
   const admitted = await f.task(created.task.objectId);
+  const runId = admitted.claim?.run?.objectId;
   assert.ok(runId, JSON.stringify({ state: admitted.workflowState, waiting: admitted.waiting }));
   await runtime.native.drain(runId);
   await expect.poll(async () => (await f.task(created.task.objectId)).claim?.phase).toBe("running");
@@ -220,7 +221,7 @@ test(
     await expect(host).toHaveAttribute("aria-invalid", "true");
     await f.page.keyboard.press("Escape");
     await f.page.getByLabel("Project", { exact: true }).click();
-    await f.page.getByRole("option", { name: "Add project…" }).click();
+    await f.page.getByRole("option", { name: /^(Choose existing directory…|Bestehenden Ordner auswählen…)$/ }).click();
     const browse = f.page.getByRole("dialog", { name: "Add project" });
     await browse.getByRole("listitem").getByText("project", { exact: true }).click();
     await expect(browse.getByLabel("Folder path")).toHaveValue(/[\\/]project$/);

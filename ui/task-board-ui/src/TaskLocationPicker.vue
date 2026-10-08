@@ -13,16 +13,8 @@ import {
   FieldError,
   Input,
   Label,
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
+  ProjectSelect,
 } from "@ivy/ui";
-import { FolderGit2, FolderOpen, FolderPlus, House } from "@lucide/vue";
 import HostDirectoryDialog from "../../../packages/ui-client/src/HostDirectoryDialog.vue";
 import { client, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
@@ -54,6 +46,13 @@ const projects = computed(() =>
 const projectRoot = computed(
   () => props.agent?.projects.defaults?.projectRoot ?? "",
 );
+const projectOptions = computed(() =>
+  projects.value.map((project) => ({
+    value: project.key,
+    name: project.name,
+    path: project.path,
+  })),
+);
 const selected = computed(() => {
   const value = model.value;
   if (value.kind === "existing_project")
@@ -77,7 +76,8 @@ const selectedLabel = computed(() => {
       tr("Projekt nicht verfügbar", "Project unavailable")
     );
   if (value.kind === "directory_path") return value.path;
-  if (value.kind === "new_project_path") return "New project · " + value.folderName;
+  if (value.kind === "new_project_path")
+    return "New project · " + value.folderName;
   if (value.kind === "repository_path")
     return "New project · " + value.folderName + " from Git";
   return "No project";
@@ -88,14 +88,7 @@ const browsing = ref(false),
   repository = ref("");
 const choose = (value: unknown) => {
   const key = String(value);
-  if (key === "@add") browsing.value = true;
-  else if (key === "@new") {
-    folder.value =
-      "folderName" in model.value ? model.value.folderName : "";
-    repository.value =
-      model.value.kind === "repository_path" ? model.value.repositoryUrl : "";
-    creating.value = true;
-  } else if (key === "none") model.value = { kind: "task_workspace" };
+  if (key === "none") model.value = { kind: "task_workspace" };
   else if (key.startsWith("project:")) {
     const [projectId, path] = JSON.parse(key.slice(8)) as [string, string];
     model.value = {
@@ -103,9 +96,17 @@ const choose = (value: unknown) => {
       projectId,
       path: path || null,
       useWorktree:
-        model.value.kind === "existing_project" ? model.value.useWorktree : (props.defaultWorktree ?? false),
+        model.value.kind === "existing_project"
+          ? model.value.useWorktree
+          : (props.defaultWorktree ?? false),
     };
   }
+};
+const newProject = () => {
+  folder.value = "folderName" in model.value ? model.value.folderName : "";
+  repository.value =
+    model.value.kind === "repository_path" ? model.value.repositoryUrl : "";
+  creating.value = true;
 };
 const folderInvalid = computed(
   () =>
@@ -122,7 +123,11 @@ const createProject = () => {
   const folderName = folder.value.trim();
   if (!folderName || folderInvalid.value || repositoryInvalid.value) return;
   model.value = repository.value.trim()
-    ? { kind: "repository_path", repositoryUrl: repository.value.trim(), folderName }
+    ? {
+        kind: "repository_path",
+        repositoryUrl: repository.value.trim(),
+        folderName,
+      }
     : { kind: "new_project_path", folderName };
   creating.value = false;
 };
@@ -133,63 +138,25 @@ const nameFromRepository = () => {
 };
 </script>
 <template>
-  <Select
+  <ProjectSelect
+    :id="id"
     :model-value="selected"
+    :selected-label="selectedLabel"
+    :projects="projectOptions"
+    :host="host"
+    empty-value="none"
+    empty-label="No project"
+    :add-label="
+      tr('Bestehenden Ordner auswählen…', 'Choose existing directory…')
+    "
+    :create-label="tr('Neues Projekt…', 'New project…')"
     :disabled="disabled"
+    :actions-disabled="!agent"
+    class="w-full"
     @update:model-value="choose"
-  >
-    <SelectTrigger :id="id" class="w-full" :data-value="selected"
-      ><SelectValue
-        ><span class="truncate">{{ selectedLabel }}</span></SelectValue
-      ></SelectTrigger
-    >
-    <SelectContent>
-      <SelectItem value="none"
-        ><House aria-hidden="true" /><span>No project</span></SelectItem
-      >
-      <SelectItem v-if="selected === 'directory'" value="directory"
-        ><FolderOpen aria-hidden="true" /><span class="truncate">{{
-          selectedLabel
-        }}</span></SelectItem
-      >
-      <SelectItem v-if="selected === 'new'" value="new"
-        ><FolderPlus aria-hidden="true" /><span class="truncate">{{
-          selectedLabel
-        }}</span></SelectItem
-      >
-      <SelectItem
-        v-if="
-          model.kind === 'existing_project' &&
-          !projects.some((project) => project.key === selected)
-        "
-        :value="selected"
-        ><FolderGit2 aria-hidden="true" /><span class="truncate">{{
-          selectedLabel
-        }}</span></SelectItem
-      >
-      <SelectGroup v-if="projects.length">
-        <SelectLabel>Projects on {{ host }}</SelectLabel>
-        <SelectItem
-          v-for="project in projects"
-          :key="project.key"
-          :value="project.key"
-          ><FolderGit2 aria-hidden="true" /><span class="min-w-0"
-            ><span class="block truncate">{{ project.name }}</span
-            ><span class="block truncate text-xs text-muted-foreground">{{
-              project.path
-            }}</span></span
-          ></SelectItem
-        >
-      </SelectGroup>
-      <SelectSeparator />
-      <SelectItem value="@add" :disabled="!agent"
-        ><FolderOpen aria-hidden="true" /><span>Add project…</span></SelectItem
-      >
-      <SelectItem value="@new" :disabled="!agent"
-        ><FolderPlus aria-hidden="true" /><span>New project…</span></SelectItem
-      >
-    </SelectContent>
-  </Select>
+    @add="browsing = true"
+    @create="newProject"
+  />
   <HostDirectoryDialog
     v-if="agent"
     v-model:open="browsing"

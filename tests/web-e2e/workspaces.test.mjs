@@ -250,9 +250,10 @@ test(
   async (t) => {
     const f = await agentFixture(t);
     await f.open("#/host?node=browser-agent");
-    let lost = false;
+    let lost = false, recoverAllowed = false;
     await f.page.route("**/api/v1/rpc", async (route) => {
       const body = route.request().postDataJSON();
+      if (!recoverAllowed && body.method === "tools.call" && body.params.qualifiedName === "agent.operation") return route.abort();
       if (
         !lost &&
         body.method === "tools.call" &&
@@ -266,28 +267,17 @@ test(
     await f.page
       .getByLabel("First message", { exact: true })
       .fill("Implement the mobile navigation.");
-    await choose(f.page
-      .getByLabel("Project", { exact: true }), f.nativeProjects[0].path);
+    await f.page.getByLabel("Project", { exact: true }).click();
+    await f.page.getByRole("option", { name: /Isolated project/ }).click();
     await f.page
       .getByRole("button", { name: "Create task", exact: true })
       .click();
     await expect.poll(() => lost, { timeout: 35000 }).toBe(true);
-    const firstMessage = f.page
-      .locator('[aria-live="polite"]')
-      .filter({ has: f.page.getByText("Send first message", { exact: true }) });
-    await expect(
-      firstMessage.getByText("unknown", { exact: true }),
-    ).toBeVisible();
-    await expect(
-      firstMessage.getByRole("button", {
-        name: "Check original outcome",
-        exact: true,
-      }),
-    ).toBeEnabled();
+    await expect.poll(() => f.page.evaluate(() => JSON.parse(Object.values(sessionStorage).find(raw => raw.includes('"label":"Send first message"')) ?? 'null')?.phase)).toBe('unknown');
+    await expect(f.page.getByRole("button", { name: "Create task", exact: true })).toHaveAttribute("aria-busy", "true");
     await f.page.reload();
-    await f.page
-      .getByRole("button", { name: "Check original outcome", exact: true })
-      .click();
+    recoverAllowed = true;
+    await f.page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect(f.page).toHaveURL(/#\/task\?node=browser-agent&id=/, {
       timeout: 35000,
     });

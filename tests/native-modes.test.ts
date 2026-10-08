@@ -8,7 +8,7 @@ import { SchemaValidators } from '../packages/contracts/src/schema.js';
 import { schemaNode, record } from '../packages/ui-client/src/native.js';
 import type { Agent } from '../packages/contracts/src/generated.js';
 
-for (const version of ['0.154.0']) test('native working modes use the advertised capability, explicit model and exact ' + version + ' payload', () => {
+for (const version of ['0.154.0', '0.158.0', '0.142.3']) test('native working modes use the advertised capability, resolved model and exact ' + version + ' payload', () => {
   const catalog = JSON.parse(readFileSync('specs/native/codex-' + version + '/catalog.json', 'utf8')) as Agent.Catalog;
   const definition = agentRegistry(catalog).namespaces[0]!.tools.find(tool => tool.name === 'turn/start')!;
   const binding = { serviceNodeId: 'owner', qualifiedName: 'codex.turn/start', definition, definitionHash: hashJson(definition) };

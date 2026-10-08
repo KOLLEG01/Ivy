@@ -53,7 +53,7 @@ const decisionName = (value: string) => ({ accept: 'Approve once', acceptForSess
   <div v-else-if="decisions.length" class="space-y-2"><Label :for="identity + ':decision'">Decision</Label><OptionSelect :id="identity + ':decision'" v-model="decision" :disabled="!pendingNow" class="w-full"><option value="">Choose a decision</option><option v-for="value in decisions" :key="value" :value="value">{{ decisionName(value) }}</option></OptionSelect></div>
   <div v-else-if="permissionsMode" class="space-y-3"><p class="text-sm">Requested permissions, limited to this turn:</p><ContentView :text="JSON.stringify(params.permissions, null, 2)" /><div class="flex flex-wrap gap-2"><Button :disabled="!pendingNow" @click="permission(true)">Allow requested permissions for this turn</Button><Button variant="outline" :disabled="!pendingNow" @click="permission(false)">Decline permissions</Button></div></div>
   <p v-else-if="definition.value.value" class="text-sm text-muted-foreground">This native response shape has no supported form in this UI release. Use a compatible native client; no guessed response will be sent.</p>
-  <Button v-if="questionMode || decisions.length" :disabled="!canAnswer" @click="submit">Send response</Button>
+  <Button v-if="questionMode || decisions.length" :disabled="!canAnswer" :loading="action.pending.value" @click="submit">Send response</Button>
   <Disclosure title="Full native request"><ContentView :text="JSON.stringify(input.params, null, 2)" /></Disclosure>
   <NativeActionState :action="action.saved.value" :busy="action.busy.value" :error="action.error.value" @reconcile="action.reconcile" @retry="action.retry" />
 </article></template>

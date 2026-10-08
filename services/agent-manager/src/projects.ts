@@ -4,11 +4,23 @@ import { promisify } from "node:util";
 import { constants } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { inside } from "../../../packages/host-runtime/src/config.js";
-import { accountHome, resolvedFuturePath } from "../../../packages/host-runtime/src/layout.js";
-import { hashJson, requireThat } from "../../../packages/sdk/src/node.js";
+import {
+  accountHome,
+  resolvedFuturePath,
+} from "../../../packages/host-runtime/src/layout.js";
+import {
+  hashJson,
+  IvyError,
+  requireThat,
+} from "../../../packages/sdk/src/node.js";
 import type { Agent } from "../../../packages/sdk/src/node.js";
+import type { LocalAgentState } from "./hive-state.js";
 
-export type RegisterProject = (input: { name: string; cwd: string; idempotencyKey: string }) => Promise<Agent.ProjectSummary>;
+export type RegisterProject = (input: {
+  name: string;
+  cwd: string;
+  idempotencyKey: string;
+}) => Promise<Agent.ProjectSummary>;
 
 /** Codex owns project identities. This resolver only prepares and validates working directories. */
 export class ProjectLocations {
@@ -20,68 +32,213 @@ export class ProjectLocations {
     settings: Pick<Agent.Settings, "projectRoot" | "internalProjectRoot">,
     protectedRoots: string[] = [],
     private readonly register?: RegisterProject,
+    private readonly state?: Pick<LocalAgentState, "read" | "write">,
   ) {
     this.protectedRoots = [dataRoot, ...protectedRoots];
     this.defaults = {
       projectRoot: settings.projectRoot ?? join(accountHome(), "projects"),
-      internalProjectRoot: settings.internalProjectRoot ?? join(accountHome(), ".ivy", "codex-projects"),
+      internalProjectRoot:
+        settings.internalProjectRoot ??
+        join(accountHome(), ".ivy", "codex-projects"),
     };
-    requireThat(Object.values(this.defaults).every(isAbsolute), "invalid_arguments", "Project defaults must be absolute directories on the target host.");
+    requireThat(
+      Object.values(this.defaults).every(isAbsolute),
+      "invalid_arguments",
+      "Project defaults must be absolute directories on the target host.",
+    );
   }
-  close(): void { this.nativeProjects = []; }
+  close(): void {
+    this.nativeProjects = [];
+  }
   setNativeProjects(projects: Agent.ProjectSummary[]): void {
     this.nativeProjects = structuredClone(projects);
   }
   private samePath(left: string, right: string): boolean {
-    return process.platform === "win32" ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right);
+    return process.platform === "win32"
+      ? resolve(left).toLowerCase() === resolve(right).toLowerCase()
+      : resolve(left) === resolve(right);
   }
-  private async prepareDirectory(path: string, root: string): Promise<string> {
-    const boundaries = await Promise.all(this.protectedRoots.map(resolvedFuturePath));
-    const intended = await resolvedFuturePath(path), parent = await resolvedFuturePath(root);
-    requireThat(inside(parent, intended) && boundaries.every(value => !inside(value, intended)),
-      "target_conflict", "Working directories cannot enter protected service, Codex or artifact storage.");
-    await mkdir(path, { recursive: true });
+  private async prepareDirectory(
+    path: string,
+    root: string,
+    exclusive = false,
+  ): Promise<string> {
+    const boundaries = await Promise.all(
+      this.protectedRoots.map(resolvedFuturePath),
+    );
+    const intended = await resolvedFuturePath(path),
+      parent = await resolvedFuturePath(root);
+    requireThat(
+      inside(parent, intended) &&
+        boundaries.every((value) => !inside(value, intended)),
+      "target_conflict",
+      "Working directories cannot enter protected service, Codex or artifact storage.",
+    );
+    if (exclusive) await mkdir(root, { recursive: true });
+    try {
+      await mkdir(path, { recursive: !exclusive });
+    } catch (error) {
+      if (exclusive && (error as NodeJS.ErrnoException).code === "EEXIST")
+        throw new IvyError(
+          "target_conflict",
+          `Project directory already exists: ${path}. Choose another name or select the existing directory.`,
+          "not_executed",
+          { reason: "project_directory_exists" },
+        );
+      throw error;
+    }
     const cwd = await realpath(path);
-    requireThat(this.samePath(cwd, intended) && inside(await realpath(root), cwd) && boundaries.every(value => !inside(value, cwd)),
-      "target_conflict", "The working directory was redirected outside its allocation.");
+    requireThat(
+      this.samePath(cwd, intended) &&
+        inside(await realpath(root), cwd) &&
+        boundaries.every((value) => !inside(value, cwd)),
+      "target_conflict",
+      "The working directory was redirected outside its allocation.",
+    );
     await access(cwd, constants.R_OK | constants.W_OK);
     return cwd;
   }
-  async resolve(selection: Agent.ProjectSelection, principal: string, expectedProjectId?: string): Promise<Agent.ProjectLocation> {
+  async resolve(
+    selection: Agent.ProjectSelection,
+    principal: string,
+    expectedProjectId?: string,
+  ): Promise<Agent.ProjectLocation> {
+    if (selection.kind === "projectless") {
+      requireThat(
+        !expectedProjectId,
+        "invalid_arguments",
+        "A projectless task cannot select a project identity.",
+      );
+      const root = this.defaults.internalProjectRoot;
+      const path = join(
+        root,
+        "unassigned",
+        hashJson({ principal, key: selection.key }).slice(7, 39),
+      );
+      return {
+        kind: selection.kind,
+        cwd: await this.prepareDirectory(path, root),
+        project: null,
+      };
+    }
     if (selection.kind === "internal" || selection.kind === "task") {
       const root = this.defaults.internalProjectRoot;
-      const project = this.nativeProjects.find(value => value.paths.some(path => this.samePath(path, root)));
-      requireThat(project && (!expectedProjectId || project.nativeId === expectedProjectId),
-        "native_internal_project_missing", "Register the internal working directory as a Codex project before starting service tasks.");
-      if (selection.kind === "task") requireThat(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(selection.key) && ![".", ".."].includes(selection.key),
-        "invalid_arguments", "Task directory key must be one safe relative directory name.");
+      const project = this.nativeProjects.find((value) =>
+        value.paths.some((path) => this.samePath(path, root)),
+      );
+      requireThat(
+        project &&
+          (!expectedProjectId || project.nativeId === expectedProjectId),
+        "native_internal_project_missing",
+        "Register the internal working directory as a Codex project before starting service tasks.",
+      );
+      if (selection.kind === "task")
+        requireThat(
+          /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(selection.key) &&
+            ![".", ".."].includes(selection.key),
+          "invalid_arguments",
+          "Task directory key must be one safe relative directory name.",
+        );
       const path = selection.kind === "task" ? join(root, selection.key) : root;
       const cwd = await this.prepareDirectory(path, root);
       return { kind: selection.kind, cwd, project: structuredClone(project) };
     }
     let cwd: string;
     if (selection.kind === "existing") {
-      requireThat(isAbsolute(selection.cwd), "invalid_arguments", "Selected project cwd must be absolute.");
+      requireThat(
+        isAbsolute(selection.cwd),
+        "invalid_arguments",
+        "Selected project cwd must be absolute.",
+      );
       cwd = await realpath(selection.cwd);
-      requireThat((await stat(cwd)).isDirectory(), "target_conflict", "Selected project cwd must be a directory.");
+      requireThat(
+        (await stat(cwd)).isDirectory(),
+        "target_conflict",
+        "Selected project cwd must be a directory.",
+      );
       await access(cwd, constants.R_OK | constants.W_OK);
     } else {
-      const slug = selection.name.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 60).replace(/^-+|-+$/g, "") || "project";
+      requireThat(
+        !!selection.name.trim() &&
+          !/[\\/\u0000-\u001f]/.test(selection.name) &&
+          ![".", ".."].includes(selection.name) &&
+          (process.platform !== "win32" ||
+            (!/[<>:"|?*]|[. ]$/.test(selection.name) &&
+              !/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(
+                selection.name,
+              ))),
+        "invalid_arguments",
+        "Project name must be one valid directory name on this host.",
+      );
       const root = this.defaults.projectRoot;
-      const path = join(root, slug + "-" + hashJson({ principal, key: selection.key }).slice(7, 23));
-      requireThat(!inside(await resolvedFuturePath(this.defaults.internalProjectRoot), await resolvedFuturePath(path)),
-        "target_conflict", "Normal projects cannot be allocated inside the internal working directory.");
-      cwd = await this.prepareDirectory(path, root);
+      const path = join(root, selection.name);
+      requireThat(
+        !inside(
+          await resolvedFuturePath(this.defaults.internalProjectRoot),
+          await resolvedFuturePath(path),
+        ),
+        "target_conflict",
+        "Normal projects cannot be allocated inside the internal working directory.",
+      );
+      requireThat(
+        this.state,
+        "service_not_ready",
+        "Project allocation state is unavailable.",
+      );
+      const allocationKey = hashJson({ principal, selection });
+      const prior = await this.state.read<{
+        cwd: string;
+        dev: string;
+        ino: string;
+      }>("project-allocation", allocationKey);
+      if (prior) {
+        const directory = await stat(path, { bigint: true });
+        requireThat(
+          this.samePath(prior.value.cwd, await realpath(path)) &&
+            directory.dev.toString() === prior.value.dev &&
+            directory.ino.toString() === prior.value.ino,
+          "target_conflict",
+          "The original project directory has been replaced or redirected.",
+        );
+      }
+      cwd = await this.prepareDirectory(path, root, !prior);
+      if (!prior) {
+        const directory = await stat(cwd, { bigint: true });
+        await this.state.write("project-allocation", allocationKey, {
+          cwd,
+          dev: directory.dev.toString(),
+          ino: directory.ino.toString(),
+        });
+      }
     }
-    const existing = this.nativeProjects.find(project => (!expectedProjectId || project.nativeId === expectedProjectId) &&
-      project.paths.some(path => this.samePath(path, cwd)));
-    requireThat(!expectedProjectId || existing, "target_conflict", "The selected Codex project no longer belongs to this working directory.");
-    if (existing) return { kind: selection.kind, cwd, project: structuredClone(existing) };
-    requireThat(this.register, "native_inventory_unavailable", "Native project registration is unavailable.");
-    const project = await this.register({ name: selection.kind === "existing" ? basename(cwd) || cwd : selection.name, cwd,
-      idempotencyKey: hashJson({ principal, selection }) });
-    requireThat(project.paths.some(path => this.samePath(path, cwd)), "target_conflict",
-      "The original Codex project registration belongs to a different working directory.");
+    const existing = this.nativeProjects.find(
+      (project) =>
+        (!expectedProjectId || project.nativeId === expectedProjectId) &&
+        project.paths.some((path) => this.samePath(path, cwd)),
+    );
+    requireThat(
+      !expectedProjectId || existing,
+      "target_conflict",
+      "The selected Codex project no longer belongs to this working directory.",
+    );
+    if (existing)
+      return { kind: selection.kind, cwd, project: structuredClone(existing) };
+    requireThat(
+      this.register,
+      "native_inventory_unavailable",
+      "Native project registration is unavailable.",
+    );
+    const project = await this.register({
+      name:
+        selection.kind === "existing" ? basename(cwd) || cwd : selection.name,
+      cwd,
+      idempotencyKey: hashJson({ principal, selection }),
+    });
+    requireThat(
+      project.paths.some((path) => this.samePath(path, cwd)),
+      "target_conflict",
+      "The original Codex project registration belongs to a different working directory.",
+    );
     return { kind: selection.kind, cwd, project };
   }
   async workspace(
@@ -97,8 +254,13 @@ export class ProjectLocations {
       "invalid_arguments",
       "Task workspace requires its immutable Task key.",
     );
-    const taskRoot = await resolvedFuturePath(this.defaults.internalProjectRoot),
-      bootstrapPath = requirement.kind === "task_workspace" ? taskRoot : resolve(taskRoot, `taskboard-${taskKey}`);
+    const taskRoot = await resolvedFuturePath(
+        this.defaults.internalProjectRoot,
+      ),
+      bootstrapPath =
+        requirement.kind === "task_workspace"
+          ? taskRoot
+          : resolve(taskRoot, `taskboard-${taskKey}`);
     requireThat(
       inside(taskRoot, bootstrapPath),
       "target_conflict",
@@ -159,9 +321,17 @@ export class ProjectLocations {
         "Requested project path left projectRoot.",
       );
     } else if (requirement.kind === "directory_path") {
-      requireThat(isAbsolute(requirement.path), "invalid_arguments", "Selected directory must be absolute.");
+      requireThat(
+        isAbsolute(requirement.path),
+        "invalid_arguments",
+        "Selected directory must be absolute.",
+      );
       intendedPath = await realpath(requirement.path);
-      requireThat((await stat(intendedPath)).isDirectory(), "target_conflict", "Selected workspace must be a directory.");
+      requireThat(
+        (await stat(intendedPath)).isDirectory(),
+        "target_conflict",
+        "Selected workspace must be a directory.",
+      );
       await access(intendedPath, constants.R_OK | constants.W_OK);
     }
     if (prepare) {
@@ -173,28 +343,63 @@ export class ProjectLocations {
       } else if (useWorktree && sourcePath) {
         await mkdir(taskRoot, { recursive: true });
         const actualRoot = await realpath(taskRoot);
-        requireThat(inside(actualRoot, await resolvedFuturePath(intendedPath)), "target_conflict", "Worktree path left internalProjectRoot.");
+        requireThat(
+          inside(actualRoot, await resolvedFuturePath(intendedPath)),
+          "target_conflict",
+          "Worktree path left internalProjectRoot.",
+        );
         const run = promisify(execFile);
         const git = async (path: string, args: string[]) =>
-          (await run("git", ["-C", path, ...args], { windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 })).stdout.trim();
-        const common = async (path: string) => realpath(resolve(path, await git(path, ["rev-parse", "--git-common-dir"])));
+          (
+            await run("git", ["-C", path, ...args], {
+              windowsHide: true,
+              timeout: 30000,
+              maxBuffer: 1024 * 1024,
+            })
+          ).stdout.trim();
+        const common = async (path: string) =>
+          realpath(
+            resolve(path, await git(path, ["rev-parse", "--git-common-dir"])),
+          );
         let present = false;
-        try { present = (await stat(intendedPath)).isDirectory(); }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        try {
+          present = (await stat(intendedPath)).isDirectory();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
         if (!present) {
           await common(sourcePath);
-          await git(sourcePath, ["worktree", "add", "--detach", intendedPath, "HEAD"]);
+          await git(sourcePath, [
+            "worktree",
+            "add",
+            "--detach",
+            intendedPath,
+            "HEAD",
+          ]);
         }
-        requireThat((await realpath(intendedPath)) === intendedPath &&
-          (await common(sourcePath)) === (await common(intendedPath)),
-          "target_conflict", "Dedicated worktree does not belong to the selected repository.");
-      } else if (requirement.kind === "repository_path" || requirement.kind === "new_project_path") {
+        requireThat(
+          (await realpath(intendedPath)) === intendedPath &&
+            (await common(sourcePath)) === (await common(intendedPath)),
+          "target_conflict",
+          "Dedicated worktree does not belong to the selected repository.",
+        );
+      } else if (
+        requirement.kind === "repository_path" ||
+        requirement.kind === "new_project_path"
+      ) {
         await mkdir(this.defaults.projectRoot, { recursive: true });
         const actualRoot = await realpath(this.defaults.projectRoot);
-        requireThat(inside(actualRoot, await resolvedFuturePath(intendedPath)), "target_conflict", "Project path left projectRoot.");
+        requireThat(
+          inside(actualRoot, await resolvedFuturePath(intendedPath)),
+          "target_conflict",
+          "Project path left projectRoot.",
+        );
         await mkdir(intendedPath, { recursive: true });
-        requireThat((await realpath(intendedPath)) === intendedPath,
-          "target_conflict", "Requested project path was redirected.");
+        requireThat(
+          (await realpath(intendedPath)) === intendedPath,
+          "target_conflict",
+          "Requested project path was redirected.",
+        );
       }
     }
     const canonicalCwd = intendedPath;
@@ -300,11 +505,24 @@ export class ProjectLocations {
           .filter(Boolean)
           .join(" ");
     }
-    const nativeProjectId = project?.nativeId ?? this.nativeProjects
-      .flatMap(value => value.paths.map(path => ({ id: value.nativeId, path: resolve(path) })))
-      .filter(value => inside(value.path, canonicalCwd))
-      .sort((a, b) => b.path.length - a.path.length)[0]?.id;
-    if (nativeProjectId) project = { namespace: "codex", kind: "project", serviceNodeId, nativeId: nativeProjectId };
+    const nativeProjectId =
+      project?.nativeId ??
+      this.nativeProjects
+        .flatMap((value) =>
+          value.paths.map((path) => ({
+            id: value.nativeId,
+            path: resolve(path),
+          })),
+        )
+        .filter((value) => inside(value.path, canonicalCwd))
+        .sort((a, b) => b.path.length - a.path.length)[0]?.id;
+    if (nativeProjectId)
+      project = {
+        namespace: "codex",
+        kind: "project",
+        serviceNodeId,
+        nativeId: nativeProjectId,
+      };
     return {
       hostId,
       serviceNodeId,

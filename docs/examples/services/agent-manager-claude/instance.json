@@ -24,7 +24,6 @@
       "claudeExecutableHash": "<sha256-of-official-claude-executable>",
       "defaultModel": "<verified-claude-model-id>"
     },
-    "projects": [],
     "limits": {
       "maxOperations": 100000,
       "maxJournalBytes": 536870912,

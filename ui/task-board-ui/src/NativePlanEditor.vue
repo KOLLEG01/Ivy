@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { Disclosure, Button, Label, OptionSelect, Textarea, RemoteState, useRemote } from '@ivy/ui';
+import { Disclosure, Button, Label, OptionSelect, ProjectSelect, Textarea, RemoteState, useRemote } from '@ivy/ui';
 import { discover } from '../../../packages/sdk/src/client.js';
 import type { Agent } from '../../../packages/sdk/src/client.js';
 import { enumStrings, list, modelsFrom, nativeModels, nativeRead, record, schemaNode, text } from '../../../packages/ui-client/src/native';
@@ -9,7 +9,7 @@ import type { TaskBoard, Wire } from './runtime';
 import { useAction } from './action';
 import ActionState from './ActionState.vue';
 import { hashJson } from '../../../packages/ui-client/src/hash';
-import ProjectLocationPicker from '../../../packages/ui-client/src/ProjectLocationPicker.vue';
+import ProjectLocationDialog from '../../../packages/ui-client/src/ProjectLocationDialog.vue';
 import { serviceTools } from '../../../packages/sdk/src/client.js';
 const props = defineProps<{ workspace: TaskBoard.WorkspaceInfo; available: boolean; scope: string; prompt?: string; fixedNode?: string | undefined }>();
 const emit = defineEmits<{ saved: [value: { pin: TaskBoard.ObjectPin; target: TaskBoard.Target; project: Wire.ResourceRef | null; plan: TaskBoard.NativePlanDraft }] }>();
@@ -49,7 +49,11 @@ const efforts = computed(() => choices.value.find(item => item.model === model.v
 watch(model, () => { if (!efforts.value.includes(effort.value)) effort.value = ''; });
 const projects = computed(() => capabilities.value.value?.projects.projects.flatMap(project => project.paths.map(path => ({ key: JSON.stringify([project.nativeId, path]), id: project.nativeId, path, name: project.name, kind: project.kind ?? 'existing' }))) ?? []);
 const selectingLocation = ref(false);
+const projectPickerOpen = ref(false), projectPickerKind = ref<'normal' | 'existing'>('normal');
+const openProjectPicker = (kind: 'normal' | 'existing') => { projectPickerKind.value = kind; projectPickerOpen.value = true; };
 const chooseLocation = async (location: Agent.ProjectLocation) => {
+  const project = location.project;
+  if (!project) return;
   const owner = node.value, previous = capabilities.value.value;
   selectingLocation.value = true;
   selectedProject.value = '';
@@ -59,10 +63,10 @@ const chooseLocation = async (location: Agent.ProjectLocation) => {
     const observed = await nativeRead(client, owner, 'agent.projects', {}) as Agent.ProjectsResult;
     if (node.value !== owner || capabilities.value.value !== previous)
       throw new Error('The native owner changed while selecting the project. Reload its capabilities.');
-    if (!observed.projects.some(project => project.nativeId === location.project.nativeId && project.paths.includes(location.cwd)))
+    if (!observed.projects.some(value => value.nativeId === project.nativeId && value.paths.includes(location.cwd)))
       throw new Error('The allocated project is not in the current owner inventory. Refresh before selecting it.');
     capabilities.value.value = { ...previous, projects: observed };
-    selectedProject.value = JSON.stringify([location.project.nativeId, location.cwd]);
+    selectedProject.value = JSON.stringify([project.nativeId, location.cwd]);
   } catch (cause) { action.error.value = cause instanceof Error ? cause.message : String(cause); }
   finally { selectingLocation.value = false; }
 };
@@ -83,7 +87,7 @@ const draft = () => {
 const save = async () => {
   try { const value = draft();
     const verified = await serviceTools(client, node.value, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).call('agent.resolveProject', { selection: { kind: 'existing', cwd: value.plan.location.cwd }, expectedProjectId: value.plan.location.projectId }) as Agent.ProjectLocation;
-    if (verified.project.nativeId !== value.plan.location.projectId) throw new Error('The selected project identity changed during verification.');
+    if (verified.kind === 'projectless' || verified.project.nativeId !== value.plan.location.projectId) throw new Error('The selected project identity changed during verification.');
     const canonicalValue: PlanContext = { ...value, plan: { ...value.plan,
       location: { ...value.plan.location, kind: verified.kind === 'task' ? 'internal' : verified.kind, cwd: verified.cwd, projectId: verified.project.nativeId },
       threadStart: { ...value.plan.threadStart, cwd: verified.cwd }, threadResume: { ...value.plan.threadResume, cwd: verified.cwd } } };
@@ -95,11 +99,11 @@ const inspectPlan = computed(() => { try { return JSON.stringify(draft().plan, n
 </script>
 <template><section class="space-y-4 rounded-lg border bg-muted/20 p-4"><h3 class="font-semibold">Native execution plan</h3><p class="text-sm text-muted-foreground">Choose the owner, project and exact input for this work. Native configuration supplies permissions.</p>
   <div class="grid gap-4 md:grid-cols-2"><div class="space-y-2"><Label for="plan-owner">Native owner</Label><OptionSelect id="plan-owner" v-model="node" :disabled="!!fixedNode || action.locked.value"><option value="">Choose a native owner</option><option v-if="fixedNode && !hosts.value.value?.items.some(value => value.serviceNodeId === fixedNode)" :value="fixedNode">{{ fixedNode }}</option><option v-for="host in hosts.value.value?.items" :key="host.serviceNodeId" :value="host.serviceNodeId">{{ host.hostId }} · {{ host.serviceNodeId }}{{ host.ready ? '' : ' · unavailable' }}</option></OptionSelect></div>
-    <div class="space-y-2"><Label for="plan-project">Native project</Label><OptionSelect id="plan-project" v-model="selectedProject" :disabled="action.locked.value"><option value="">Choose a project</option><option v-for="project in projects" :key="project.key" :value="project.key">{{ project.name }} · {{ project.path }}</option></OptionSelect></div>
+    <div class="space-y-2"><Label for="plan-project">Native project</Label><ProjectSelect id="plan-project" v-model="selectedProject" :projects="projects.map(project => ({ value: project.key, name: project.name, path: project.path }))" :host="capabilities.value.value?.status.hostId" :disabled="action.locked.value || selectingLocation" :actions-disabled="!capabilities.value.value || !!capabilities.error.value" @add="openProjectPicker('existing')" @create="openProjectPicker('normal')" /></div>
     <div class="space-y-2"><Label for="plan-model">Model</Label><OptionSelect id="plan-model" v-model="model" :disabled="action.locked.value"><option value="">Native configured default</option><option v-for="choice in choices" :key="choice.id" :value="choice.model">{{ choice.name }}</option></OptionSelect></div>
     <div class="space-y-2"><Label for="plan-effort">Reasoning effort</Label><OptionSelect id="plan-effort" v-model="effort" :disabled="!model || action.locked.value"><option value="">Native configured default</option><option v-for="value in efforts" :key="value">{{ value }}</option></OptionSelect></div></div>
   <div class="space-y-2"><Label for="plan-prompt">Native task input</Label><Textarea id="plan-prompt" v-model="prompt" :disabled="action.locked.value || props.prompt !== undefined && scope.startsWith('continue:')" :maxlength="1048576" class="min-h-36" /></div>
-  <ProjectLocationPicker v-if="node" :key="node" :client="client" :node="node" :scope="'task-board:' + base.href + ':' + scope" :defaults="capabilities.value.value?.projects.defaults" :disabled="action.locked.value || selectingLocation || capabilities.loading.value || !!capabilities.error.value || !capabilities.value.value" @selected="chooseLocation" />
+  <ProjectLocationDialog v-if="node" :key="node" v-model:open="projectPickerOpen" :client="client" :node="node" :host="capabilities.value.value?.status.hostId" :scope="'task-board:' + base.href + ':' + scope" :kind="projectPickerKind" :defaults="capabilities.value.value?.projects.defaults" :disabled="action.locked.value || selectingLocation || capabilities.loading.value || !!capabilities.error.value || !capabilities.value.value" @selected="chooseLocation" />
   <RemoteState :loading="capabilities.loading.value" :error="capabilities.error.value" :has-data="!!capabilities.value.value" @retry="capabilities.refresh" />
   <p v-if="capabilities.value.value" class="text-xs text-muted-foreground">Codex {{ capabilities.value.value.status.nativeVersion }} · {{ capabilities.value.value.status.observedAt }} · Projects: {{ capabilities.value.value.projects.source }}</p>
   <Disclosure v-if="inspectPlan" title="Exact native plan"><pre class="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border p-3 text-xs">{{ inspectPlan }}</pre></Disclosure>

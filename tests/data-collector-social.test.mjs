@@ -1039,7 +1039,7 @@ test("Instagram inbox rejects repeated cursors and API permission failures rathe
   );
 });
 
-test("Instagram inbox rejects foreign-account messages and unsupported login configuration", async (t) => {
+test("Instagram inbox rejects foreign-account messages and a missing Facebook Page grant", async (t) => {
   fixture(t, [
     { path: "/v25.0/123", body: { user_id: "123" } },
     { path: "/v25.0/123/media", body: { data: [] } },
@@ -1072,6 +1072,144 @@ test("Instagram inbox rejects foreign-account messages and unsupported login con
     }),
     { code: "configuration_invalid" },
   );
+});
+
+test("Instagram Facebook Login binds a separate Page grant and uses it only for Instagram conversations", async (t) => {
+  const pageToken = "fixture-page-token";
+  const pageGrant = (url, options) => {
+    assert.equal(url.host, "graph.facebook.com");
+    assert.equal(options.headers.Authorization, `Bearer ${pageToken}`);
+  };
+  const metricsGrant = (url, options) => {
+    assert.equal(url.host, "graph.facebook.com");
+    assert.equal(options.headers.Authorization, `Bearer ${tokenSecrets.token}`);
+  };
+  fixture(t, [
+    {
+      path: "/v25.0/me",
+      check: pageGrant,
+      body: { id: "456", instagram_business_account: { id: "123" } },
+    },
+    { path: "/v25.0/123", check: metricsGrant, body: { id: "123" } },
+    {
+      path: "/v25.0/123/media",
+      check: metricsGrant,
+      body: { data: [igMedia("1", 31)] },
+    },
+    {
+      path: "/v25.0/1/comments",
+      check: metricsGrant,
+      body: { data: [] },
+    },
+    {
+      path: "/v25.0/456/conversations",
+      check: (url, options) => {
+        pageGrant(url, options);
+        assert.equal(url.searchParams.get("platform"), "instagram");
+      },
+      body: {
+        data: [{ id: "thread" }],
+        paging: {
+          next: "https://untrusted.invalid/?access_token=do-not-use",
+          cursors: { after: "next-thread" },
+        },
+      },
+    },
+    {
+      path: "/v25.0/thread",
+      check: pageGrant,
+      body: {
+        messages: {
+          data: [],
+          paging: {
+            next: "https://untrusted.invalid/?access_token=do-not-use",
+            cursors: { after: "next-message" },
+          },
+        },
+      },
+    },
+    {
+      path: "/v25.0/thread/messages",
+      check: (url, options) => {
+        pageGrant(url, options);
+        assert.equal(url.searchParams.get("after"), "next-message");
+      },
+      body: { data: [{ id: "incoming", created_time: stamp(1) }] },
+    },
+    {
+      path: "/v25.0/incoming",
+      check: pageGrant,
+      body: {
+        id: "incoming",
+        created_time: stamp(1),
+        from: { id: "9" },
+        to: { data: [{ id: "123" }] },
+        message: "Private Instagram message",
+      },
+    },
+    {
+      path: "/v25.0/456/conversations",
+      check: (url, options) => {
+        pageGrant(url, options);
+        assert.equal(url.searchParams.get("platform"), "instagram");
+        assert.equal(url.searchParams.get("after"), "next-thread");
+      },
+      body: { data: [] },
+    },
+  ]);
+  const result = await instagram({
+    config: {
+      ...igConfig,
+      login: "facebook",
+      facebookPageId: "456",
+      pageAccessTokenSecret: "page",
+      collectMessages: true,
+      collectComments: true,
+      notifyInitial: true,
+    },
+    secrets: { ...tokenSecrets, page: pageToken },
+  });
+  assert.equal(result.data.inbox.messages.complete, true);
+  assert.equal(
+    result.data.inbox.messages.items[0].text,
+    "Private Instagram message",
+  );
+  assert.equal(result.events[0].payload.directMessages, 1);
+  assert.equal(result.data.unreadMessages.status, "unavailable");
+  assert.equal(JSON.stringify(result).includes(pageToken), false);
+  assert.equal(
+    JSON.stringify(result.events).includes("Private Instagram message"),
+    false,
+  );
+});
+
+test("Instagram Facebook messages reject foreign Page tokens, linked accounts and missing credentials before collection", async (t) => {
+  fixture(t, [
+    {
+      path: "/v25.0/me",
+      body: { id: "999", instagram_business_account: { id: "123" } },
+    },
+    {
+      path: "/v25.0/me",
+      body: { id: "456", instagram_business_account: { id: "999" } },
+    },
+  ]);
+  const config = {
+    ...igConfig,
+    login: "facebook",
+    facebookPageId: "456",
+    pageAccessTokenSecret: "page",
+    collectMessages: true,
+  };
+  const context = {
+    config,
+    secrets: { ...tokenSecrets, page: "fixture-page-token" },
+  };
+  await assert.rejects(instagram(context), { code: "authentication_required" });
+  await assert.rejects(instagram(context), { code: "authentication_required" });
+  await assert.rejects(instagram({ config, secrets: tokenSecrets }), {
+    code: "authentication_required",
+  });
 });
 
 test("Instagram inbox notifications stay within the Hive envelope budget and suppress outgoing messages", async (t) => {

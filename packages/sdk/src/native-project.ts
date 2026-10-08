@@ -15,9 +15,10 @@ function pathKey(value: string): string {
 }
 const contains = (root: string, cwd: string) => cwd === root || cwd.startsWith(root.endsWith('/') ? root : root + '/');
 
-/** Apply a default before journaling. Explicit IDs (including clearing with "") stay authoritative. */
+/** Apply a default before journaling. An explicit empty ID opts out; native start represents it as null. */
 export function defaultNativeThreadProject(params: Record<string, Wire.Json>, inventory: Agent.ProjectsResult): Record<string, Wire.Json> {
   const result = structuredClone(params);
+  if (result['projectId'] === '') return { ...result, projectId: null };
   if (result['projectId'] != null || result['ephemeral'] === true) return result;
   const cwd = result['cwd'] ?? inventory.defaults?.internalProjectRoot;
   requireThat(typeof cwd === 'string', 'native_internal_project_missing', 'A service task requires an internal project directory or an explicit working directory.');
@@ -33,6 +34,7 @@ export function defaultNativeThreadProject(params: Record<string, Wire.Json>, in
 }
 
 export async function nativeThreadProject(client: RpcClient, serviceNodeId: string, params: Record<string, Wire.Json>, options?: RequestOptions): Promise<Record<string, Wire.Json>> {
+  if (params['projectId'] === '') return { ...structuredClone(params), projectId: null };
   if (params['projectId'] != null || params['ephemeral'] === true) return structuredClone(params);
   const inventory = await serviceTools(client, serviceNodeId, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).read('agent.projects', {}, options);
   validateAgent('ProjectsResult', inventory);

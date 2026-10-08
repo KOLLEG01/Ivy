@@ -177,6 +177,11 @@ const saveCapabilities = async () => {
         </div>
       </SettingsSection>
 
+      <SettingsSection title="Defaults by server type" description="Model, working mode, reasoning effort and safety for new tasks.">
+        <p class="mb-3 text-sm">Server type: {{ status.value.value.serverType === 'claude' ? 'Claude' : 'Codex' }}</p>
+        <Button variant="outline" as-child><a :href="route('settings')">Configure server defaults</a></Button>
+      </SettingsSection>
+
       <SettingsSection
         title="Agent instructions"
         description="This host inherits the Hive or packaged instructions unless a host-specific document is enabled."

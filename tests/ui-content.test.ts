@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { markdownBlocks, renderMarkdown } from '../packages/ui/src/lib/markdown.js';
+import { markdownBlocks, markdownImageSources, renderMarkdown } from '../packages/ui/src/lib/markdown.js';
 import { definedProps } from '../packages/ui/src/lib/utils.js';
 import { attachmentMarkdown } from '../packages/ui/src/lib/attachments.js';
 
@@ -32,6 +32,13 @@ test('untrusted Markdown emits no active HTML, unsafe URL or automatically fetch
   assert.equal(result.truncated, false);
   assert.equal(renderMarkdown('x'.repeat(300000)).truncated, true);
   assert.ok(renderMarkdown('x'.repeat(300000)).html.length < 263000);
+});
+
+test('image discovery follows rendered Markdown, including host paths and reference images, without reading code examples', () => {
+  const source = [String.raw`![Windows](C:\Users\Agent\shot.png)`,
+    '![Relative](<shots/light room (2).png>)', '![Reference][saved]', '![Duplicate][saved]', '', '[saved]: /tmp/saved.png', '',
+    '`![Inline code](/tmp/inline.png)`', '```md\n![Fenced](/tmp/fenced.png)\n```', '[Plain link](/tmp/link.png)'].join('\n');
+  assert.deepEqual(markdownImageSources(source), ['C:%5CUsers%5CAgent%5Cshot.png', 'shots/light%20room%20(2).png', '/tmp/saved.png']);
 });
 
 test('primitive forwarding keeps falsy values and required values while removing undefined without mutating the source', () => {

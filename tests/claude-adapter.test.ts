@@ -26,6 +26,11 @@ test("Claude adapter catalog exposes only the Ivy lifecycle surface", () => {
   const methods = new Set(catalog.clientRequests.map((value) => value.method));
   for (const method of [
     "initialize",
+    "project/list",
+    "project/read",
+    "project/create",
+    "project/update",
+    "project/delete",
     "thread/start",
     "thread/resume",
     "thread/list",
@@ -35,6 +40,10 @@ test("Claude adapter catalog exposes only the Ivy lifecycle surface", () => {
     "thread/loaded/list",
     "turn/start",
     "turn/interrupt",
+    "config/read",
+    "fs/readFile",
+    "permissionProfile/list",
+    "collaborationMode/list",
   ])
     assert.ok(methods.has(method), method);
   assert.equal(methods.has("account/login/start"), false);
@@ -252,8 +261,33 @@ test(
     assert.equal(init.codexHome, join(root, "codex"));
     assert.match(init.userAgent, /claude-codex/);
     rpc.notify("initialized");
-    const started = await call("thread/start", { cwd: root, config: { model_reasoning_effort: "max" } });
+    const screenshot = join(root, 'screenshot.png');
+    const screenshotBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+    await writeFile(screenshot, screenshotBytes);
+    const image = await call('fs/readFile', { path: screenshot });
+    assert.deepEqual(Buffer.from(image.dataBase64, 'base64'), screenshotBytes);
+    const missingImage = await rpc.request('fs/readFile', { path: join(root, 'missing.png') }, {}, 15000);
+    assert.ok('error' in missingImage);
+    const config = await call('config/read', { includeLayers: false });
+    assert.equal(typeof config.config.model, 'string');
+    assert.equal((await call('permissionProfile/list', {})).data.length, 3);
+    assert.deepEqual((await call('collaborationMode/list', {})).data.map((mode: { mode: string }) => mode.mode), ['default', 'plan']);
+    const projectRequest = { idempotencyKey: "project-request", name: "Working directory", roots: [{ path: root }], metadata: { purpose: "test" } };
+    const project = (await call("project/create", projectRequest)).project;
+    assert.equal((await call("project/create", projectRequest)).project.id, project.id);
+    assert.equal((await call("project/list", {})).data.length, 1);
+    const conflict = await rpc.request("project/create", { ...projectRequest, name: "Conflicting request" }, {}, 15_000);
+    assert.ok("error" in conflict, "idempotency key must reject a different request");
+    await call("project/update", { projectId: project.id, name: "Renamed directory" });
+    assert.equal((await call("project/read", { projectId: project.id })).project.name, "Renamed directory");
+    const empty = (await call("project/create", { idempotencyKey: "empty-project", name: "Empty", roots: [] })).project;
+    const page = await call("project/list", { limit: 1, sortKey: "position", sortDirection: "asc" });
+    assert.equal(page.data[0].id, project.id);
+    assert.equal((await call("project/list", { cursor: page.nextCursor, limit: 1 })).data[0].id, empty.id);
+    const started = await call("thread/start", { projectId: project.id, config: { model_reasoning_effort: "max" } });
     assert.equal(started.reasoningEffort, "max");
+    assert.equal(started.thread.projectId, project.id);
+    assert.equal(started.thread.cwd, root);
     const threadId = started.thread.id as string;
     const turn = await call("turn/start", {
       threadId,
@@ -279,10 +313,29 @@ test(
     });
     assert.equal(items.data.length, 1);
     assert.equal(items.data[0].turnId, turnId);
-    await call("thread/read", { threadId, includeTurns: true });
+    const observed = await call("thread/read", { threadId, includeTurns: true });
+    assert.equal(observed.thread.model, started.model);
+    assert.equal(observed.thread.reasoningEffort, 'max');
+    const plan = await call('turn/start', { threadId, input: [{ type: 'text', text: 'Create a plan without executing tools.' }],
+      collaborationMode: { mode: 'plan', settings: { model: 'claude-example-opus', reasoning_effort: 'high', developer_instructions: null } } });
+    await waitFor(notifications, value => value.method === 'turn/completed' && (value.params as Record<string, any>)?.turn?.id === plan.turn.id);
+    const planned = await call('thread/read', { threadId, includeTurns: true });
+    assert.equal(planned.thread.collaborationMode.mode, 'plan');
+    assert.equal(planned.thread.model, 'claude-example-opus');
+    assert.equal(planned.thread.reasoningEffort, 'high');
+    assert.ok(planned.thread.turns.find((turn: { id: string }) => turn.id === plan.turn.id).items.some((item: { type: string }) => item.type === 'plan'));
     await call("thread/list", { limit: 20 });
+    assert.equal((await call("thread/list", { projectId: project.id })).data[0].id, threadId);
+    assert.equal((await call("thread/list", { projectId: null })).data.length, 0);
+    const recent = await call("project/list", { sortKey: "recencyAt", sortDirection: "desc" });
+    assert.equal(recent.data[0].id, project.id);
+    assert.equal(recent.data[1].recencyAt, null);
     await call("thread/loaded/list", {});
-    await call("thread/resume", { threadId });
+    assert.equal((await call("thread/resume", { threadId })).thread.projectId, project.id);
+    assert.equal((await call("project/create", projectRequest)).project.id, project.id);
+    assert.equal((await call("project/list", {})).data.length, 2);
+    await call("project/delete", { projectId: empty.id });
+    assert.equal((await call("project/list", {})).data.length, 1);
     await call("turn/interrupt", { threadId, turnId });
     await call("account/rateLimits/read", null);
     await call("model/list", {});
@@ -300,8 +353,14 @@ test(
     });
     assert.equal(restarted.codexHome, join(root, "codex"));
     rpc.notify("initialized");
-    await call("thread/resume", { threadId });
+    assert.equal((await call("thread/resume", { threadId })).thread.projectId, project.id);
+    assert.equal((await call("project/create", projectRequest)).project.id, project.id);
+    assert.equal((await call("project/list", {})).data.length, 1);
     const persisted = await call("thread/items/list", { threadId, turnId });
+    const persistedSettings = (await call('thread/read', { threadId })).thread;
+    assert.equal(persistedSettings.collaborationMode.mode, 'plan');
+    assert.equal(persistedSettings.model, 'claude-example-opus');
+    assert.equal(persistedSettings.reasoningEffort, 'high');
     assert.ok(
       persisted.data.some((value: { turnId: string }) => value.turnId === turnId),
       "completed turn remains available after adapter restart",

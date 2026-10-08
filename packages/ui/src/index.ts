@@ -39,6 +39,7 @@ export { default as SearchResult } from "./patterns/SearchResult.vue";
 export { default as SettingsSection } from "./patterns/SettingsSection.vue";
 export { default as SegmentedControl } from "./patterns/SegmentedControl.vue";
 export { default as OptionSelect } from "./patterns/OptionSelect.vue";
+export { default as ProjectSelect } from "./patterns/ProjectSelect.vue";
 export { default as ChoiceChips } from "./patterns/ChoiceChips.vue";
 export { default as CreatableCombobox } from "./patterns/CreatableCombobox.vue";
 export { default as TagPicker } from "./patterns/TagPicker.vue";

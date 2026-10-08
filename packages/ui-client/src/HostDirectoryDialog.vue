@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import {
   Alert,
   AlertDescription,
@@ -14,8 +14,8 @@ import {
   Skeleton,
 } from "@ivy/ui";
 import { ArrowUp, Folder } from "@lucide/vue";
-import type { RpcClient } from "../../sdk/src/client.js";
-import { list, nativeRead, record, text } from "./native";
+import { serviceTools } from "../../sdk/src/client.js";
+import type { Agent, RpcClient } from "../../sdk/src/client.js";
 
 /** Browse directories on one AgentManager host and choose an absolute folder. */
 const open = defineModel<boolean>("open", { default: false });
@@ -29,25 +29,15 @@ const props = defineProps<{
 const emit = defineEmits<{ select: [path: string] }>();
 const path = ref(""),
   typed = ref(""),
-  folders = ref<string[]>([]),
+  folders = ref<Agent.DirectoryListResult["directories"]>([]),
+  parent = ref(""),
   loading = ref(false),
   error = ref("");
-const separator = computed(() =>
-  /^[A-Za-z]:\\/.test(path.value) ? "\\" : "/",
-);
-const parent = computed(() => {
-  const trimmed = path.value.replace(/[\\/]+$/, "");
-  const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  if (index < 0) return "";
-  const value = trimmed.slice(0, index);
-  return /^[A-Za-z]:$/.test(value) ? value + "\\" : value || "/";
-});
-const child = (name: string) =>
-  path.value.replace(/[\\/]+$/, "") + separator.value + name;
 const parentOf = (value: string) => {
   const trimmed = value.replace(/[\\/]+$/, "");
   const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  return index <= 0 ? "" : trimmed.slice(0, index);
+  const parent = index <= 0 ? "" : trimmed.slice(0, index);
+  return /^[A-Za-z]:$/.test(parent) ? parent + "\\" : parent;
 };
 let current: AbortController | null = null;
 // The first folder may not exist yet (a project root is created on first use); show its nearest parent.
@@ -57,22 +47,19 @@ async function load(target: string, nearest = false) {
   loading.value = true;
   error.value = "";
   try {
-    const value = record(
-      await nativeRead(
-        props.client,
-        props.node,
-        "codex.fs/readDirectory",
-        { path: target },
-        controller.signal,
-      ),
-    );
-    folders.value = list(value.entries)
-      .map(record)
-      .filter((entry) => entry.isDirectory === true)
-      .map((entry) => text(entry.fileName))
-      .filter((name) => name && !name.startsWith("."))
-      .sort((a, b) => a.localeCompare(b));
-    path.value = typed.value = target;
+    const value = (await serviceTools(props.client, props.node, [
+      { namespace: "agent", interfaceVersion: "1.0.0" },
+    ]).read(
+      "agent.listDirectories",
+      { path: target },
+      {
+        signal: controller.signal,
+      },
+    )) as Agent.DirectoryListResult;
+    if (controller.signal.aborted) return;
+    folders.value = value.directories;
+    parent.value = value.parent ?? "";
+    path.value = typed.value = value.path;
   } catch (cause) {
     if (controller.signal.aborted) return;
     const parent = nearest ? parentOf(target) : "";
@@ -90,6 +77,7 @@ watch(
   },
   { immediate: true },
 );
+onBeforeUnmount(() => current?.abort());
 const choose = () => {
   emit("select", path.value);
   open.value = false;
@@ -138,23 +126,31 @@ const choose = () => {
         >
           No subfolders.
         </p>
-        <button
-          v-for="name in folders"
-          :key="name"
+        <Button
+          v-for="folder in folders"
+          :key="folder.path"
           type="button"
+          variant="ghost"
           role="listitem"
-          class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:outline-none"
-          @click="load(child(name))"
+          class="w-full justify-start font-normal"
+          :disabled="loading"
+          @click="load(folder.path)"
         >
-          <Folder class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-          <span class="truncate">{{ name }}</span>
-        </button>
+          <Folder
+            class="size-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <span class="truncate">{{ folder.name }}</span>
+        </Button>
       </div>
       <DialogFooter>
         <Button type="button" variant="ghost" @click="open = false"
           >Cancel</Button
         >
-        <Button type="button" :disabled="!path || loading" @click="choose"
+        <Button
+          type="button"
+          :disabled="!path || loading || !!error"
+          @click="choose"
           >Use this folder</Button
         >
       </DialogFooter>

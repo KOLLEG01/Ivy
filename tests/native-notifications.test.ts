@@ -6,6 +6,7 @@ test('browser notices include completed turns and actionable inputs with exact d
   const event = { method: 'turn/completed', params: { threadId: 'task & one', turn: { id: 'turn-one', status: 'completed' } } };
   const notice = nativeBrowserNotice(owner.serviceNodeId, event)!;
   assert.equal(new URLSearchParams(notice.target.fragment.split('?')[1]).get('id'), 'task & one');
+  assert.equal(new URLSearchParams(notice.target.fragment.split('?')[1]).has('turn'), false);
   assert.equal(nativeBrowserNotice(owner.serviceNodeId, { ...event, method: 'item/agentMessage/delta' }), null);
   assert.equal(nativeBrowserNotice(owner.serviceNodeId, { ...event, params: { ...event.params, turn: { id: 'turn-one', status: 'interrupted' } } }), null);
   assert.match(nativeBrowserNotice(owner.serviceNodeId, { ...event, params: { ...event.params, turn: { id: 'turn-one', status: 'failed' } } })!.title, /needs attention/);

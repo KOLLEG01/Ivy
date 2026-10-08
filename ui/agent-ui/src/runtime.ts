@@ -5,6 +5,7 @@ import { record, text } from "../../../packages/ui-client/src/native";
 export const { base, client, uiUrl, notifications, live } = uiRuntime(
   definition.metadata,
 );
+export { localeText as tr } from "../../../packages/ui-client/src/runtime";
 export const outputCache = nativeOutputCache(client);
 // Invalidate inactive conversations too; cached previews never survive a known history change.
 notifications.subscribe(

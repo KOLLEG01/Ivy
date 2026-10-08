@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Social account authorization</title>
+    <script>
+      (() => {
+        const response = new URLSearchParams(location.hash.slice(1));
+        history.replaceState(null, "", location.pathname);
+        const german = navigator.language.toLowerCase().startsWith("de");
+        document.documentElement.lang = german ? "de" : "en";
+        document.addEventListener("DOMContentLoaded", async () => {
+          const text = german
+            ? {
+                title: "Social-Konto freigeben",
+                ready:
+                  "Die Anmeldeantwort ist eingegangen. Die Kontoverknüpfung wird anschließend geprüft.",
+                empty:
+                  "Keine Anmeldeantwort vorhanden. Starte die Freigabe bei der Plattform.",
+                denied: "Die Plattform hat die Freigabe nicht abgeschlossen.",
+                label: "Verschlüsselte Anmeldeantwort",
+                note: "Diese Seite sendet und speichert keine Zugangsdaten. Schließe sie nach Abschluss der Einrichtung.",
+              }
+            : {
+                title: "Authorize social account",
+                ready:
+                  "Authorization response received. The account connection still needs verification.",
+                empty:
+                  "No authorization response received. Start authorization with the provider.",
+                denied: "The provider did not complete authorization.",
+                label: "Encrypted authorization response",
+                note: "This page does not send or store credentials. Close it after setup is complete.",
+              };
+          document.title = text.title;
+          document.querySelector("h1").textContent = text.title;
+          document.querySelector("label").textContent = text.label;
+          document.querySelector("#note").textContent = text.note;
+          const hasResponse =
+            response.has("access_token") || response.has("error");
+          document.querySelector("#status").textContent = response.has("error")
+            ? text.denied
+            : response.has("access_token")
+              ? text.ready
+              : text.empty;
+          if (hasResponse) {
+            try {
+              const state = JSON.parse(
+                atob(
+                  response.get("state").replace(/-/g, "+").replace(/_/g, "/"),
+                ),
+              );
+              if (
+                state.version !== 1 ||
+                !/^[a-f0-9]{64}$/.test(state.nonce) ||
+                state.key?.kty !== "RSA"
+              ) {
+                throw new Error("Invalid capture session");
+              }
+              const recipient = await crypto.subtle.importKey(
+                "jwk",
+                state.key,
+                { name: "RSA-OAEP", hash: "SHA-256" },
+                false,
+                ["encrypt"],
+              );
+              const key = await crypto.subtle.generateKey(
+                { name: "AES-GCM", length: 256 },
+                true,
+                ["encrypt"],
+              );
+              const iv = crypto.getRandomValues(new Uint8Array(12));
+              const data = new TextEncoder().encode(
+                JSON.stringify(Object.fromEntries(response)),
+              );
+              const cipher = await crypto.subtle.encrypt(
+                { name: "AES-GCM", iv },
+                key,
+                data,
+              );
+              const wrappedKey = await crypto.subtle.encrypt(
+                "RSA-OAEP",
+                recipient,
+                await crypto.subtle.exportKey("raw", key),
+              );
+              const encode = (buffer) =>
+                btoa(String.fromCharCode(...new Uint8Array(buffer)));
+              document.querySelector("#oauth-response").value = JSON.stringify({
+                version: 1,
+                nonce: state.nonce,
+                iv: encode(iv),
+                key: encode(wrappedKey),
+                cipher: encode(cipher),
+              });
+              data.fill(0);
+            } catch {
+              document.querySelector("#status").textContent = text.denied;
+            }
+          }
+          response.forEach((_value, key) => response.set(key, ""));
+        });
+      })();
+    </script>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 2rem 1rem;
+      }
+      main {
+        max-width: 36rem;
+        margin: 8vh auto;
+      }
+      h1 {
+        font-size: 1.75rem;
+      }
+      p {
+        line-height: 1.6;
+      }
+      label {
+        display: block;
+        margin-top: 2rem;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 0.75rem;
+        margin-top: 0.5rem;
+      }
+      #note {
+        font-size: 0.875rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Authorize social account</h1>
+      <p id="status" role="status">Waiting for authorization response.</p>
+      <label for="oauth-response">Encrypted authorization response</label>
+      <input
+        id="oauth-response"
+        type="text"
+        readonly
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <p id="note">This page does not send or store credentials.</p>
+      <noscript
+        >JavaScript is required to receive the authorization response.</noscript
+      >
+    </main>
+  </body>
+</html>

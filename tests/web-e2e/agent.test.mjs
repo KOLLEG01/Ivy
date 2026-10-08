@@ -600,6 +600,19 @@ test(
     await expect(
       f.page.getByRole("link", { name: /saved-task/ }).first(),
     ).toBeVisible();
+    await f.page
+      .getByRole("navigation", { name: "Recent tasks" })
+      .getByRole("link", { name: /saved-task/ })
+      .first()
+      .click();
+    await expect(f.page).toHaveURL(/#\/task\?node=browser-agent/);
+    await expect(
+      f.page.getByRole("button", { name: "Choose host scope", exact: true }),
+    ).toContainText("All hosts");
+    await f.page.reload();
+    await expect(
+      f.page.getByRole("button", { name: "Choose host scope", exact: true }),
+    ).toContainText("All hosts");
 
     await f.page
       .getByRole("button", { name: "Choose host scope", exact: true })
@@ -763,9 +776,10 @@ test(
   async (t) => {
     const f = await agentFixture(t, undefined, false, "0.154.0");
     await f.open("#/task?node=browser-agent&id=saved-task");
-    let lost = false;
+    let lost = false, recoverAllowed = false;
     const loseResume = async (route) => {
       const request = route.request().postDataJSON();
+      if (!recoverAllowed && request.method === "tools.call" && request.params.qualifiedName === "agent.operation") return route.abort();
       if (
         !lost &&
         request.method === "tools.call" &&
@@ -784,14 +798,8 @@ test(
     await f.page
       .getByRole("button", { name: "Attach historical task", exact: true })
       .click();
-    await expect(f.page.getByText("unknown", { exact: true })).toBeVisible();
-    // Reload after the injected response loss, not while Playwright still forwards the request.
-    await expect(
-      f.page.getByRole("button", {
-        name: "Check original outcome",
-        exact: true,
-      }),
-    ).toBeEnabled();
+    await expect.poll(() => f.page.evaluate(() => JSON.parse(Object.values(sessionStorage).find(raw => raw.includes('"label":"Attach historical task"')) ?? 'null')?.phase)).toBe('unknown');
+    await expect(f.page.getByRole("button", { name: "Send message", exact: true })).toHaveAttribute("aria-busy", "true");
     await f.page.reload();
     await expect(f.page.getByLabel("Message", { exact: true })).toHaveValue(
       "Keep this message draft.",
@@ -799,9 +807,8 @@ test(
     await expect(
       f.page.getByRole("button", { name: "Send message", exact: true }),
     ).toBeDisabled();
-    await f.page
-      .getByRole("button", { name: "Check original outcome", exact: true })
-      .click();
+    recoverAllowed = true;
+    await f.page.evaluate(() => window.dispatchEvent(new Event("online")));
     await expect(
       f.page.getByRole("button", { name: "Send message", exact: true }),
     ).toBeEnabled();
@@ -931,19 +938,15 @@ test(
       .getByLabel("Working mode", { exact: true }), "plan");
     await expect(
       f.page.getByRole("button", { name: "Send message", exact: true }),
-    ).toBeDisabled();
-    await expect(
-      f.page.getByText("Choose a model to change the working mode.", {
-        exact: true,
-      }),
-    ).toBeVisible();
+    ).toBeEnabled();
     await choose(f.page
       .getByLabel("Model", { exact: true }), "fixture-model");
     await choose(f.page
       .getByLabel("Reasoning effort", { exact: true }), "low");
-    let dropped = false;
+    let dropped = false, recoverAllowed = false;
     await f.page.route("**/api/v1/rpc", async (route) => {
       const request = route.request().postDataJSON();
+      if (!recoverAllowed && request.method === "tools.call" && request.params.qualifiedName === "agent.operation") return route.abort();
       if (
         !dropped &&
         request.method === "tools.call" &&
@@ -957,7 +960,8 @@ test(
     await f.page
       .getByRole("button", { name: "Send message", exact: true })
       .click();
-    await expect(f.page.getByText("unknown", { exact: true })).toBeVisible();
+    await expect.poll(() => f.page.evaluate(() => JSON.parse(Object.values(sessionStorage).find(raw => raw.includes('"label":"Send message"')) ?? 'null')?.phase)).toBe('unknown');
+    await expect(f.page.getByRole("button", { name: "Send message", exact: true })).toHaveAttribute("aria-busy", "true");
     await f.page.reload();
     await expect(f.page.getByLabel("Message", { exact: true })).toHaveValue(
       "Keep this draft through a lost response.",
@@ -990,10 +994,9 @@ test(
         },
       },
     );
-    await f.page
-      .getByRole("button", { name: "Check original outcome", exact: true })
-      .click();
-    await expect(f.page.getByLabel("Message", { exact: true })).toHaveValue("");
+    recoverAllowed = true;
+    await f.page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect(f.page.getByLabel("Message", { exact: true })).toHaveValue("", { timeout: 35000 });
     assert.equal(
       f.current().sent.filter((x) => x.method === "turn/start").length,
       1,
@@ -1294,9 +1297,12 @@ test(
     await f.page
       .getByLabel("Message", { exact: true })
       .fill("An original operation which never reached the owner.");
+    await f.page.clock.install();
     const requests = [];
+    let recoverAllowed = false;
     await f.page.route("**/api/v1/rpc", async (route) => {
       const frame = route.request().postDataJSON();
+      if (!recoverAllowed && frame.method === "tools.call" && frame.params.qualifiedName === "agent.operation") return route.abort();
       if (
         frame.method === "tools.call" &&
         frame.params.qualifiedName === "codex.turn/start"
@@ -1309,38 +1315,33 @@ test(
     await f.page
       .getByRole("button", { name: "Send message", exact: true })
       .click();
-    await expect(f.page.getByText("unknown", { exact: true })).toBeVisible();
+    await expect.poll(() => f.page.evaluate(() => JSON.parse(Object.values(sessionStorage).find(raw => raw.includes('"label":"Send message"')) ?? 'null')?.phase)).toBe('unknown');
     await f.registryChange((registry) => {
       registry.namespaces[1].tools = registry.namespaces[1].tools.filter(
         (t) => t.name !== "operation",
       );
     });
-    await f.page
-      .getByRole("button", { name: "Check original outcome", exact: true })
-      .click();
-    await expect(
-      f.page.getByText(
-        "The exact tool is not in the selected provider catalog.",
-        { exact: true },
-      ),
-    ).toBeVisible();
+    recoverAllowed = true;
+    await f.page.evaluate(() => window.dispatchEvent(new Event("online")));
+    await expect.poll(() => f.page.evaluate(() => JSON.parse(Object.values(sessionStorage).find(raw => raw.includes('"label":"Send message"')) ?? 'null')?.phase)).toBe('unknown');
+    await f.page.clock.fastForward(125000);
+    await expect(f.page.getByRole("alert").filter({ hasText: "The request has not been confirmed yet." })).toBeVisible();
     assert.equal(
       await f.page
-        .getByRole("button", { name: "Retry original request", exact: true })
+        .getByRole("button", { name: "Retry request", exact: true })
         .count(),
       0,
     );
+    await f.page.clock.setSystemTime(new Date());
     await f.registryChange(() => {});
+    await f.page.evaluate(() => window.dispatchEvent(new Event("online")));
     await f.page
-      .getByRole("button", { name: "Check original outcome", exact: true })
-      .click();
-    await f.page
-      .getByRole("button", { name: "Retry original request", exact: true })
+      .getByRole("button", { name: "Retry request", exact: true })
       .click();
     await expect(f.page.getByText("Working…", { exact: true })).toBeVisible();
     await expect(
       f.page.getByRole("button", {
-        name: "Retry original request",
+        name: "Retry request",
         exact: true,
       }),
     ).toHaveCount(0);
@@ -1493,9 +1494,7 @@ test(
     await secretCard
       .getByRole("button", { name: "Send response", exact: true })
       .click();
-    await expect(
-      secretCard.getByText("unknown", { exact: true }),
-    ).toBeVisible();
+    await expect.poll(() => f.page.evaluate(() => JSON.parse(Object.values(sessionStorage).find(raw => raw.includes('"secret":true') && raw.includes('"label":"Answer native request"')) ?? 'null')?.phase)).toBe('unknown');
     assert.equal(
       (
         await f.page.evaluate(() =>
@@ -1511,9 +1510,7 @@ test(
     await expect(
       secretCard.getByLabel("Fixture secret answer", { exact: true }),
     ).toHaveValue("");
-    await secretCard
-      .getByRole("button", { name: "Check original outcome", exact: true })
-      .click();
+    await expect(secretCard.getByText("Re-enter the original secret response in the form.", { exact: true })).toBeVisible({ timeout: 35000 });
     await secretCard
       .getByLabel("Fixture secret answer", { exact: true })
       .fill("not-for-session-storage");

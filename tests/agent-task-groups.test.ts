@@ -5,9 +5,9 @@ import { groupTasks, isVisibleTask, normalizedPath, projectChoices, partitionInt
 
 const project = (nativeId: string, name: string, paths: string[], source: Agent.ProjectSummary['source'] = 'native'): Agent.ProjectSummary =>
   ({ nativeId, name, paths, source });
-const task = (nativeId: string, cwd: string, projectId: string | null): Operation.InventoryItem => ({
+const task = (nativeId: string, cwd: string, projectId: string | null | undefined): Operation.InventoryItem => ({
   resourceRef: { serviceNodeId: 'node', namespace: 'codex', kind: 'thread', nativeId }, schemaVersion: '1.0.0',
-  summary: { nativeId, cwd, projectId }, observedAt: '2026-09-14T00:00:00.000Z', stale: false, snapshotRevision: 1,
+  summary: { nativeId, cwd, ...(projectId === undefined ? {} : { projectId }) }, observedAt: '2026-09-14T00:00:00.000Z', stale: false, snapshotRevision: 1,
 });
 
 test('task navigation excludes native guardian sessions by source while preserving user tasks and other agents', () => {
@@ -29,7 +29,7 @@ test('native project identity keeps an external worktree in its Desktop project'
 });
 
 test('fallback grouping normalizes Windows spelling and selects the longest containing root', () => {
-  const groups = groupTasks([project('root', 'Root', ['C:\\PROJECTS']), project('ivy', 'Ivy', ['D:/unused', 'c:/projects/sample-project'])], [task('nested', 'C:/Projects/sample-project/ui/agent-ui', null)]);
+  const groups = groupTasks([project('root', 'Root', ['C:\\PROJECTS']), project('ivy', 'Ivy', ['D:/unused', 'c:/projects/sample-project'])], [task('nested', 'C:/Projects/sample-project/ui/agent-ui', undefined)]);
   assert.equal(groups.find(group => group.id === 'ivy')?.tasks[0]?.resourceRef.nativeId, 'nested');
   assert.equal(normalizedPath('C:\\PROJECTS\\sample-project\\'), 'c:/projects/sample-project');
   assert.equal(normalizedPath('\\\\SERVER\\Share\\Work\\'), '//server/share/work');
@@ -48,10 +48,20 @@ test('IvyInternal tasks are bundled per host and native membership while other p
     { serviceNodeId: 'node', project: project('nested', 'User project', ['C:/internal/user']) },
     { serviceNodeId: 'other-host', project: project('internal', 'User project', ['/elsewhere']) },
   ];
-  const tasks = [task('service', 'D:/external-worktree', 'internal'), task('old-service', 'c:\\internal\\run', null),
+  const tasks = [task('service', 'D:/external-worktree', 'internal'), task('old-service', 'c:\\internal\\run', undefined),
     task('user', 'C:/internal/user/task', 'nested'), task('removed-project', 'C:/internal', 'deleted'),
     { ...task('other-host-user', '/elsewhere', 'internal'), resourceRef: { ...task('x', '', null).resourceRef, serviceNodeId: 'other-host', nativeId: 'other-host-user' } }];
   const split = partitionInternalTasks(projects, tasks);
   assert.deepEqual(split.internal.map(value => value.resourceRef.nativeId), ['service', 'old-service']);
   assert.deepEqual(split.recent.map(value => value.resourceRef.nativeId), ['user', 'removed-project', 'other-host-user']);
+});
+
+test('explicitly unassigned tasks remain outside containing projects and internal groups', () => {
+  const internal = project('internal', 'IvyInternal', ['/internal']);
+  const tasks = [task('unassigned', '/internal/unassigned/one', null), task('cleared', '/internal/task', '')];
+  const groups = groupTasks([internal], tasks);
+  assert.equal(groups[0]?.tasks.length, 0);
+  assert.deepEqual(groups[1]?.tasks, tasks);
+  assert.equal(groups[1]?.name, 'No project');
+  assert.deepEqual(partitionInternalTasks([{ serviceNodeId: 'node', project: internal }], tasks), { recent: tasks, internal: [] });
 });

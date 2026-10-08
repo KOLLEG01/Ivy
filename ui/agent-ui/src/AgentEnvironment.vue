@@ -72,9 +72,9 @@ watch(() => [props.node, props.hostId], () => { for (const kind of ['mcp', 'skil
   <p class="text-sm text-muted-foreground">Secrets are never stored in these documents. AgentManager injects its own provisioned key only for the exact Hive MCP URL.</p>
   <section v-for="kind in (['mcp', 'skills'] as const)" :key="kind" class="space-y-3 border-t pt-4" :aria-label="kind === 'mcp' ? 'MCP configuration' : 'Skills configuration'">
     <h4 class="text-sm font-medium">{{ kind === 'mcp' ? 'MCP servers' : 'Skill files' }}</h4>
-    <fieldset :disabled="editors[kind].busy || !editors[kind].loaded || !!editors[kind].pending" class="space-y-3">
+    <fieldset :disabled="editors[kind].busy || !editors[kind].loaded || !!editors[kind].pending" class="min-w-0 space-y-3">
       <Label class="flex items-center gap-2"><Checkbox v-model="editors[kind].enabled" />Enable this configuration</Label>
-      <Label class="flex-col items-start gap-2">{{ kind === 'mcp' ? 'Server definitions (JSON)' : 'Files (JSON)' }}<Textarea v-model="editors[kind].text" :rows="kind === 'mcp' ? 12 : 18" maxlength="4194304" class="font-mono text-xs font-normal" /></Label>
+      <Label class="min-w-0 flex-col items-start gap-2">{{ kind === 'mcp' ? 'Server definitions (JSON)' : 'Files (JSON)' }}<Textarea v-model="editors[kind].text" :rows="kind === 'mcp' ? 12 : 18" maxlength="4194304" class="max-h-96 min-w-0 font-mono text-xs font-normal [field-sizing:fixed]" /></Label>
     </fieldset>
     <div class="flex flex-wrap gap-2"><Button :disabled="editors[kind].busy || !editors[kind].loaded" @click="save(kind)">{{ editors[kind].pending ? 'Retry original save' : 'Save' }}</Button>
       <Button variant="outline" :disabled="editors[kind].busy || !editors[kind].loaded || !!editors[kind].pending || !editors[kind].object" @click="save(kind, true)">Remove this override</Button>

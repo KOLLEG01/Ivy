@@ -250,7 +250,14 @@ const definitions = {
               claudeExecutableHash: hash,
               defaultModel: { ...text(256), minLength: 1 },
             },
-            ["mode", "adapterRoot", "nodeExecutableHash", "claudeExecutable", "claudeExecutableHash", "defaultModel"],
+            [
+              "mode",
+              "adapterRoot",
+              "nodeExecutableHash",
+              "claudeExecutable",
+              "claudeExecutableHash",
+              "defaultModel",
+            ],
           ),
         ],
       },
@@ -263,12 +270,7 @@ const definitions = {
         maxNotificationBytes: integer(1048576, 268435456),
       }),
     },
-    [
-      "nativeExecutable",
-      "nativeVersion",
-      "nativeExecutableHash",
-      "limits",
-    ],
+    ["nativeExecutable", "nativeVersion", "nativeExecutableHash", "limits"],
   ),
   RequestId: { anyOf: [{ type: "string" }, integer(-Number.MAX_SAFE_INTEGER)] },
   NativeError: object(
@@ -346,6 +348,7 @@ const definitions = {
       serviceNodeId: wire("Identifier"),
       hostId: wire("Identifier"),
       nativeVersion: id,
+      serverType: { enum: ['codex', 'claude'] },
       nativeExecutableHash: hash,
       catalogHash: hash,
       epoch: nullable(id),
@@ -559,8 +562,23 @@ const definitions = {
     items: array(ref("Notification"), 100),
   }),
   ProjectsInput: object({}),
+  ExecutionDefaults: object({
+    model: nullable(text(256)), mode: nullable(text(64)), effort: nullable(text(64)), permission: nullable(text(256)),
+  }),
+  ExecutionDefaultsDocument: object({
+    schemaVersion: { const: 1 },
+    codex: ref('ExecutionDefaults'),
+    claude: ref('ExecutionDefaults'),
+  }),
+  DirectoryListInput: object({ path: { ...text(2048), minLength: 1 } }),
+  DirectoryListResult: object({
+    path: text(2048),
+    parent: nullable(text(2048)),
+    directories: array(object({ name: text(256), path: text(2048) }), 10000),
+  }),
   ProjectSelection: {
     oneOf: [
+      object({ kind: { const: "projectless" }, key: id }),
       object({
         kind: { const: "existing" },
         cwd: { ...text(2048), minLength: 1 },
@@ -581,11 +599,20 @@ const definitions = {
     { selection: ref("ProjectSelection"), expectedProjectId: id },
     ["selection"],
   ),
-  ProjectLocation: object({
-    project: ref("ProjectSummary"),
-    cwd: { ...text(2048), minLength: 1 },
-    kind: { enum: ["existing", "normal", "internal", "task"] },
-  }),
+  ProjectLocation: {
+    oneOf: [
+      object({
+        project: ref("ProjectSummary"),
+        cwd: { ...text(2048), minLength: 1 },
+        kind: { enum: ["existing", "normal", "internal", "task"] },
+      }),
+      object({
+        project: { type: "null" },
+        cwd: { ...text(2048), minLength: 1 },
+        kind: { const: "projectless" },
+      }),
+    ],
+  },
   ProjectsResult: object(
     {
       source: { const: "native" },

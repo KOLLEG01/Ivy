@@ -9,14 +9,36 @@ import {
   rename,
   symlink,
   realpath,
+  readdir,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { ProjectLocations } from "../services/agent-manager/src/projects.js";
+import { LocalAgentState } from "../services/agent-manager/src/hive-state.js";
+import { listDirectories } from "../services/agent-manager/src/directories.js";
 import { defaultNativeThreadProject } from "../packages/sdk/src/native-project.js";
 import type { Agent } from "../packages/sdk/src/node.js";
+
+test("host folder browsing returns canonical folders independently of native filesystem tools", async t => {
+  const root = await mkdtemp(join(tmpdir(), "ivy-directory-list-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "Alpha"));
+  await mkdir(join(root, "Beta"));
+  await writeFile(join(root, "file.txt"), "not a folder");
+  const actual = await realpath(root);
+  assert.deepEqual(await listDirectories({ path: join(root, "Alpha", "..") }), {
+    path: actual,
+    parent: dirname(actual),
+    directories: [
+      { name: "Alpha", path: join(actual, "Alpha") },
+      { name: "Beta", path: join(actual, "Beta") },
+    ],
+  });
+  await assert.rejects(listDirectories({ path: "relative" }), { code: "invalid_arguments" });
+  await assert.rejects(listDirectories({ path: join(root, "missing") }), { code: "ENOENT" });
+});
 
 test("service tasks retain native membership across nested Linux and extended Windows paths", () => {
   for (const root of ["/home/account/.ivy/codex-projects", "C:\\Users\\Account\\.ivy\\codex-projects", "\\\\server\\share\\internal"]) {
@@ -28,7 +50,8 @@ test("service tasks retain native membership across nested Linux and extended Wi
     assert.deepEqual(defaultNativeThreadProject(params, inventory), { ...params, projectId: "internal" });
     assert.equal("projectId" in params, false);
     assert.deepEqual(defaultNativeThreadProject({}, inventory), { cwd: root, projectId: "internal" });
-    for (const projectId of ["chosen-project", ""]) assert.deepEqual(defaultNativeThreadProject({ ...params, projectId }, inventory), { ...params, projectId });
+    assert.deepEqual(defaultNativeThreadProject({ ...params, projectId: "chosen-project" }, inventory), { ...params, projectId: "chosen-project" });
+    assert.deepEqual(defaultNativeThreadProject({ ...params, projectId: "" }, inventory), { ...params, projectId: null });
     assert.deepEqual(defaultNativeThreadProject({ ...params, ephemeral: true }, inventory), { ...params, ephemeral: true });
     assert.throws(() => defaultNativeThreadProject(params, { ...inventory, projects: [] }), { code: "native_internal_project_missing" });
   }
@@ -46,30 +69,93 @@ test("default service membership respects the closest native project and directo
 
 test("project registration returns Codex identities without an Ivy project store", async t => {
   const root = await mkdtemp(join(tmpdir(), "ivy-projects-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const openState = () => new LocalAgentState(join(root, "data", "journal", "agent-runtime.sqlite"), "agent", { maxOperations: 10000, maxJournalBytes: 256 * 1024 * 1024 });
+  let state = openState();
+  t.after(async () => { state.close(); await rm(root, { recursive: true, force: true }); });
   const projects = new Map<string, Agent.ProjectSummary>();
   let registrations = 0;
+  let loseReply = false;
   const register = async ({ name, cwd, idempotencyKey }: { name: string; cwd: string; idempotencyKey: string }) => {
     registrations++;
     const project = projects.get(idempotencyKey) ?? { nativeId: "native-" + projects.size, source: "native" as const, name, paths: [cwd] };
     projects.set(idempotencyKey, project);
+    if (loseReply) { loseReply = false; throw new Error("Lost project registration reply"); }
     return project;
   };
   const settings = { projectRoot: join(root, "normal"), internalProjectRoot: join(root, "internal") };
   const selection = { kind: "normal", key: "create-project", name: "User work" } as const;
-  let locations = new ProjectLocations(join(root, "data"), settings, [], register);
+  let locations = new ProjectLocations(join(root, "data"), settings, [], register, state);
   const first = await locations.resolve(selection, "user");
-  locations = new ProjectLocations(join(root, "data"), settings, [], register);
+  assert.equal(first.cwd, join(await realpath(settings.projectRoot), selection.name));
+  assert.deepEqual(await readdir(settings.projectRoot), [selection.name]);
+  await writeFile(join(first.cwd, "keep.txt"), "user content");
+  state.close(); state = openState();
+  locations = new ProjectLocations(join(root, "data"), settings, [], register, state);
   assert.deepEqual(await locations.resolve(selection, "user"), first);
   assert.equal(projects.size, 1);
+  assert.ok(first.project);
   assert.equal(first.project.nativeId, "native-0");
   locations.setNativeProjects([...projects.values()]);
-  assert.equal((await locations.resolve({ kind: "existing", cwd: first.cwd }, "user", first.project.nativeId)).project.nativeId, first.project.nativeId);
+  const beforeCollision = registrations;
+  await assert.rejects(locations.resolve({ ...selection, key: "another-project" }, "user"), { code: "target_conflict" });
+  await assert.rejects(locations.resolve(selection, "another-user"), { code: "target_conflict" });
+  if (process.platform === "win32") await assert.rejects(locations.resolve({ ...selection, name: "USER WORK", key: "case-collision" }, "user"), { code: "target_conflict" });
+  assert.equal(registrations, beforeCollision);
+  assert.equal(await readFile(join(first.cwd, "keep.txt"), "utf8"), "user content");
+  const occupied = join(settings.projectRoot, "Existing folder");
+  await mkdir(occupied);
+  await writeFile(join(occupied, "keep.txt"), "existing content");
+  await assert.rejects(locations.resolve({ ...selection, name: "Existing folder", key: "occupied" }, "user"), { code: "target_conflict" });
+  await writeFile(join(settings.projectRoot, "Existing file"), "existing file");
+  await assert.rejects(locations.resolve({ ...selection, name: "Existing file", key: "occupied-file" }, "user"), { code: "target_conflict" });
+  for (const name of ["", "   ", ".", "..", "../escape", "nested/folder", "nested\\folder", ...(process.platform === "win32" ? ["CON", "nul.txt", "bad:name", "bad?name", "trailing.", "trailing "] : [])])
+    await assert.rejects(locations.resolve({ ...selection, name }, "user"), { code: "invalid_arguments" });
+  assert.equal((await locations.resolve({ kind: "existing", cwd: first.cwd }, "user", first.project.nativeId)).project?.nativeId, first.project.nativeId);
   const before = registrations;
   locations.setNativeProjects([]);
   await assert.rejects(locations.resolve({ kind: "existing", cwd: first.cwd }, "user", first.project.nativeId), { code: "target_conflict" });
   assert.equal(registrations, before, "Deleted project references must never re-register the project.");
+  const recovery = { ...selection, key: "recover-original", name: "Überblick work" };
+  loseReply = true;
+  await assert.rejects(locations.resolve(recovery, "user"), /Lost project registration reply/);
+  state.close(); state = openState();
+  locations = new ProjectLocations(join(root, "data"), settings, [], register, state);
+  const recovered = await locations.resolve(recovery, "user");
+  assert.equal(recovered.cwd, join(await realpath(settings.projectRoot), recovery.name));
+  assert.equal(projects.size, 2);
+  await assert.rejects(locations.resolve({ ...recovery, key: "different-allocation" }, "user"), { code: "target_conflict" });
+  await rename(first.cwd, first.cwd + "-retained");
+  await mkdir(first.cwd);
+  await assert.rejects(locations.resolve(selection, "user"), { code: "target_conflict" });
   await assert.rejects(readFile(join(root, "data", "project-backup-paths.json")), { code: "ENOENT" });
+});
+
+test("projectless tasks retain isolated workspaces across retries without registering a project", async t => {
+  const root = await mkdtemp(join(tmpdir(), "ivy-projectless-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const settings = { projectRoot: join(root, "normal"), internalProjectRoot: join(root, "internal") };
+  let registrations = 0;
+  const register = async () => { registrations++; throw new Error("Projectless tasks must not register projects."); };
+  let locations = new ProjectLocations(join(root, "data"), settings, [], register);
+  const selection = { kind: "projectless", key: "task-one" } as const;
+  const first = await locations.resolve(selection, "user");
+  assert.equal(first.project, null);
+  assert.equal(first.kind, "projectless");
+  assert.equal(dirname(dirname(first.cwd)), settings.internalProjectRoot);
+  await writeFile(join(first.cwd, "result.txt"), "retained work");
+  locations = new ProjectLocations(join(root, "data"), settings, [], register);
+  locations.setNativeProjects([{ nativeId: "internal", source: "native", name: "Internal", paths: [settings.internalProjectRoot] }]);
+  assert.deepEqual(await locations.resolve(selection, "user"), first);
+  assert.equal(await readFile(join(first.cwd, "result.txt"), "utf8"), "retained work");
+  assert.notEqual((await locations.resolve({ kind: "projectless", key: "task-two" }, "user")).cwd, first.cwd);
+  assert.notEqual((await locations.resolve(selection, "another-user")).cwd, first.cwd);
+  assert.equal(registrations, 0);
+  await assert.rejects(locations.resolve(selection, "user", "internal"), { code: "invalid_arguments" });
+  const protectedRoot = join(root, "protected");
+  await mkdir(protectedRoot);
+  await rename(first.cwd, first.cwd + "-retained");
+  await symlink(protectedRoot, first.cwd, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(locations.resolve(selection, "user"), { code: "target_conflict" });
 });
 
 test("internal and task directories require the native project and reject redirected destinations", async t => {
@@ -86,6 +172,7 @@ test("internal and task directories require the native project and reject redire
   const shared = await locations.resolve(selection, "user");
   const task = await locations.resolve({ kind: "task", key: "TASK-0001", name: "Task" }, "user");
   assert.equal(shared.cwd, internal); assert.equal(task.cwd, join(internal, "TASK-0001"));
+  assert.ok(shared.project); assert.ok(task.project);
   assert.equal(shared.project.nativeId, task.project.nativeId); assert.equal(registrations, 0);
   for (const key of ["../escape", "/absolute", "child/name", "child\\name", ".", ".."]) {
     await assert.rejects(locations.resolve({ kind: "task", key, name: "Task" }, "user"), { code: "invalid_arguments" });
@@ -123,8 +210,8 @@ test("native projects resolve to their current identity across Windows path spel
   );
   const canonical = await realpath(configured);
   assert.equal(location.cwd, canonical);
-  assert.equal(location.project.nativeId, "configured-project");
-  assert.deepEqual(location.project.paths, [configuredPath]);
+  assert.equal(location.project?.nativeId, "configured-project");
+  assert.deepEqual(location.project?.paths, [configuredPath]);
   await assert.rejects(
     locations.resolve(
       { kind: "existing", cwd: configuredPath },
@@ -214,7 +301,7 @@ test("TaskBoard shares the internal root and retains explicitly selected directo
   assert.equal((await locations.workspace("TASK-0020", { kind: "task_workspace" }, true, "host", "agent")).canonicalCwd, internal);
   const service = await locations.resolve({ kind: "internal", key: "secretary", name: "Secretary" }, "secretary");
   assert.equal(service.cwd, internal);
-  assert.equal(service.project.nativeId, plain.nativeProjectId);
+  assert.equal(service.project?.nativeId, plain.nativeProjectId);
 
   const selected = await locations.workspace("TASK-0011", { kind: "directory_path", path: outside }, true, "host", "agent");
   assert.equal(selected.canonicalCwd, outside);

@@ -7,6 +7,7 @@ import { uiPath } from '../../contracts/src/ui-route.js';
 import type { Operation } from '../../sdk/src/client.js';
 export { IvyError } from '../../sdk/src/client.js';
 export type { Operation } from '../../sdk/src/client.js';
+export const localeText = (de: string, en: string) => navigator.language.toLowerCase().startsWith('de') ? de : en;
 
 export function uiRuntime(metadata: Pick<Operation.UiMetadata, 'uiId' | 'slug'>) {
   const suffixes = ['/ui/' + encodeURIComponent(metadata.uiId) + '/', ...(metadata.slug ? ['/' + metadata.slug + '/'] : [])];

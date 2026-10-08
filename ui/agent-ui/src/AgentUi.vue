@@ -80,6 +80,26 @@ const query = computed(
   () => new URLSearchParams(hash.value.split("?")[1] ?? ""),
 );
 const node = computed(() => query.value.get("node") ?? "");
+// The scope picker chooses all hosts or the routed host; opening a task keeps the chosen scope.
+const scopeKey = "ivy.agent.scope:" + base.href;
+const allHosts = ref(false);
+try {
+  allHosts.value = sessionStorage.getItem(scopeKey) === "all";
+} catch {
+  /* Optional view state. */
+}
+const chooseScope = (all: boolean) => {
+  allHosts.value = all;
+  try {
+    sessionStorage.setItem(scopeKey, all ? "all" : "");
+  } catch {
+    /* Optional view state. */
+  }
+};
+watch(section, (value) => {
+  if (value === "hosts") chooseScope(true);
+}, { immediate: true });
+const scopeNode = computed(() => (allHosts.value ? "" : node.value));
 const search = ref("");
 const searchOpen = ref(false);
 watch(searchOpen, (open) => {
@@ -100,8 +120,8 @@ const recent = usePage((signal, cursor) =>
     client.request(
       "inventory.list",
       {
-        ...(node.value
-          ? { serviceNodeId: node.value }
+        ...(scopeNode.value
+          ? { serviceNodeId: scopeNode.value }
           : { serviceName: "agent-manager" }),
         namespace: "codex",
         kind: "thread",
@@ -114,10 +134,10 @@ const recent = usePage((signal, cursor) =>
       { signal },
     ).then((page) => ({ ...page, items: page.items.filter(isVisibleTask) })), 30000, undefined, ["inventory"]);
 const projects = useRemote(async (signal) =>
-  node.value
+  scopeNode.value
     ? ((await nativeRead(
         client,
-        node.value,
+        scopeNode.value,
         "agent.projects",
         {},
         signal,
@@ -148,11 +168,13 @@ try {
 } catch {
   /* Optional view state. */
 }
-watch(node, (value) => {
+watch(scopeNode, () => {
   recent.value.value = null;
   recent.reset();
   projects.value.value = null;
   void projects.refresh();
+});
+watch(node, (value) => {
   if (value) {
     lastNode.value = value;
     try {
@@ -164,7 +186,7 @@ watch(node, (value) => {
 });
 
 const selectedHost = computed(() =>
-  nodes.value.value?.items.find((item) => item.serviceNodeId === node.value),
+  nodes.value.value?.items.find((item) => item.serviceNodeId === scopeNode.value),
 );
 const fallbackNode = computed(() => {
   const available = nodes.value.value?.items ?? [];
@@ -199,8 +221,8 @@ const taskName = (summary: unknown, id: string) =>
   text(record(summary).name) ||
   text(record(summary).preview).slice(0, 100) ||
   id;
-const scopedProjects = computed(() => node.value
-  ? (projects.value.value?.projects ?? []).filter(project => project.source === "native").map(project => ({ serviceNodeId: node.value, project }))
+const scopedProjects = computed(() => scopeNode.value
+  ? (projects.value.value?.projects ?? []).filter(project => project.source === "native").map(project => ({ serviceNodeId: scopeNode.value, project }))
   : allProjects.value.value ?? []);
 const taskLists = computed(() => partitionInternalTasks(scopedProjects.value, recent.value.value?.items ?? []));
 const visibleRecent = computed(() => allProjects.value.value === null ? [] : taskLists.value.recent);
@@ -233,6 +255,24 @@ try {
 const seen = ref<SeenTasks>(readSeen(storedSeen));
 const live = ref(new Map<string, LiveTaskState>());
 const clock = ref(Date.now());
+const trackedTasks = computed(() => new Map(visibleRecent.value.map(item => [
+  taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId), item,
+])));
+// Remove old internal badge state too, including tasks moved into IvyInternal.
+watch(() => taskLists.value.internal, (items) => {
+  const tasks = { ...seen.value.tasks }, working = new Map(live.value);
+  let changed = false;
+  for (const item of items) {
+    const key = taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId);
+    working.delete(key);
+    if (key in tasks) { delete tasks[key]; changed = true; }
+  }
+  live.value = working;
+  if (changed) {
+    seen.value = { ...seen.value, tasks };
+    try { localStorage.setItem(seenKey, JSON.stringify(seen.value)); } catch { /* Optional view state. */ }
+  }
+}, { immediate: true });
 const openKey = computed(() =>
   section.value === "task" && node.value && query.value.get("id")
     ? taskKey(node.value, query.value.get("id")!)
@@ -240,12 +280,9 @@ const openKey = computed(() =>
 );
 const seeTask = (key: string) => {
   if (!key) return;
-  const item = recent.value.value?.items.find(
-    (value) =>
-      taskKey(value.resourceRef.serviceNodeId, value.resourceRef.nativeId) ===
-      key,
-  );
-  seen.value = markSeen(seen.value, key, record(item?.summary).updatedAt);
+  const item = trackedTasks.value.get(key);
+  if (!item) return;
+  seen.value = markSeen(seen.value, key, record(item.summary).updatedAt);
   try {
     localStorage.setItem(seenKey, JSON.stringify(seen.value));
   } catch {
@@ -258,7 +295,7 @@ watch(openKey, (value, previous) => {
   seeTask(value);
 });
 watch(
-  () => recent.value.value,
+  trackedTasks,
   () => seeTask(openKey.value),
   {
     immediate: true,
@@ -273,6 +310,7 @@ const taskChanged = (value: Transport.ProviderNotification) => {
   const working = liveWorking(method, payload.params);
   if (threadId && working !== undefined) {
     const key = taskKey(value.params.serviceNodeId, threadId);
+    if (!trackedTasks.value.has(key)) return;
     live.value = new Map(live.value).set(key, { working, at: Date.now() });
     clock.value = Date.now();
     if (key === openKey.value) seeTask(key);
@@ -283,7 +321,7 @@ const unsubscribe = notifications.subscribe(
   taskChanged,
 );
 const ticker = setInterval(() => {
-  clock.value = Date.now();
+  if (live.value.size) clock.value = Date.now();
 }, 30000);
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
@@ -374,7 +412,7 @@ const toggleGroup = (id: string) => {
                     ><a :href="route('hosts')"
                       ><span>All hosts</span
                       ><Check
-                        v-if="!node"
+                        v-if="!scopeNode"
                         class="ml-auto"
                         aria-hidden="true" /></a
                   ></DropdownMenuItem>
@@ -384,7 +422,7 @@ const toggleGroup = (id: string) => {
                     :key="item.serviceNodeId"
                     as-child
                   >
-                    <a :href="route('host', { node: item.serviceNodeId })"
+                    <a :href="route('host', { node: item.serviceNodeId })" @click="chooseScope(false)"
                       ><span
                         class="size-2 rounded-full"
                         :class="
@@ -396,7 +434,7 @@ const toggleGroup = (id: string) => {
                         hostName(item.serviceNodeId)
                       }}</span
                       ><Check
-                        v-if="node === item.serviceNodeId"
+                        v-if="scopeNode === item.serviceNodeId"
                         class="ml-auto"
                         aria-hidden="true"
                     /></a>
@@ -412,7 +450,7 @@ const toggleGroup = (id: string) => {
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarGroup>
-        <SidebarGroup v-if="!node">
+        <SidebarGroup v-if="!scopeNode">
           <SidebarGroupLabel>Recent</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
@@ -427,7 +465,7 @@ const toggleGroup = (id: string) => {
                 <SidebarMenuButton
                   as-child
                   :class="{ 'pr-7': activityOf(item) }"
-                  :is-active="query.get('id') === item.resourceRef.nativeId"
+                  :is-active="openKey === taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)"
                   ><a
                     :href="
                       route('task', {
@@ -436,7 +474,7 @@ const toggleGroup = (id: string) => {
                       })
                     "
                     :aria-current="
-                      query.get('id') === item.resourceRef.nativeId
+                      openKey === taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)
                         ? 'page'
                         : undefined
                     "
@@ -483,7 +521,7 @@ const toggleGroup = (id: string) => {
                     ><a
                       :href="
                         route('host', {
-                          node,
+                          node: scopeNode,
                           project: group.path,
                           projectId: group.id,
                         })
@@ -491,7 +529,7 @@ const toggleGroup = (id: string) => {
                       :aria-label="'New task in ' + group.name"
                       ><Plus aria-hidden="true" /></a
                   ></SidebarMenuAction>
-                  <ProjectActions v-if="group.path" :client="client" :node="node"
+                  <ProjectActions v-if="group.path" :client="client" :node="scopeNode"
                     :project="projects.value.value!.projects.find(project => project.nativeId === group.id)!"
                     @changed="projects.refresh(); allProjects.refresh(); recent.refresh()">
                     <SidebarMenuAction :aria-label="'Manage project ' + group.name" show-on-hover><MoreHorizontal aria-hidden="true" /></SidebarMenuAction>
@@ -511,7 +549,7 @@ const toggleGroup = (id: string) => {
                           ><a
                             :href="
                               route('task', {
-                                node,
+                                node: scopeNode,
                                 id: item.resourceRef.nativeId,
                               })
                             "
@@ -561,14 +599,13 @@ const toggleGroup = (id: string) => {
                   <CollapsibleContent>
                     <SidebarMenuSub>
                       <SidebarMenuSubItem v-for="item in taskLists.internal" :key="taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)">
-                        <SidebarMenuSubButton as-child :class="{ 'pr-7': activityOf(item) }"
+                        <SidebarMenuSubButton as-child
                           :is-active="node === item.resourceRef.serviceNodeId && query.get('id') === item.resourceRef.nativeId">
                           <a :href="route('task', { node: item.resourceRef.serviceNodeId, id: item.resourceRef.nativeId })"
                             :title="taskName(item.summary, item.resourceRef.nativeId) + ' · ' + hostName(item.resourceRef.serviceNodeId)">
                             <span>{{ taskName(item.summary, item.resourceRef.nativeId) }}</span>
                           </a>
                         </SidebarMenuSubButton>
-                        <ActivityIndicator v-if="activityOf(item)" :state="activityOf(item)!" class="pointer-events-none absolute top-1.5 right-1" />
                       </SidebarMenuSubItem>
                       <li v-if="!taskLists.internal.length" class="px-2 py-1 text-xs text-muted-foreground">No recent tasks</li>
                     </SidebarMenuSub>

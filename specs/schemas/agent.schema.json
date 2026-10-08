@@ -1829,6 +1829,12 @@
           "maxLength": 256,
           "minLength": 1
         },
+        "serverType": {
+          "enum": [
+            "codex",
+            "claude"
+          ]
+        },
         "nativeExecutableHash": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
         },
@@ -2857,8 +2863,164 @@
       "required": [],
       "additionalProperties": false
     },
+    "ExecutionDefaults": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "model",
+        "mode",
+        "effort",
+        "permission"
+      ],
+      "additionalProperties": false
+    },
+    "ExecutionDefaultsDocument": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "codex": {
+          "$ref": "#/$defs/ExecutionDefaults"
+        },
+        "claude": {
+          "$ref": "#/$defs/ExecutionDefaults"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "codex",
+        "claude"
+      ],
+      "additionalProperties": false
+    },
+    "DirectoryListInput": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "DirectoryListResult": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "directories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "path": {
+                "type": "string",
+                "maxLength": 2048
+              }
+            },
+            "required": [
+              "name",
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 10000
+        }
+      },
+      "required": [
+        "path",
+        "parent",
+        "directories"
+      ],
+      "additionalProperties": false
+    },
     "ProjectSelection": {
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "projectless"
+            },
+            "key": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "key"
+          ],
+          "additionalProperties": false
+        },
         {
           "type": "object",
           "properties": {
@@ -2947,31 +3109,57 @@
       "additionalProperties": false
     },
     "ProjectLocation": {
-      "type": "object",
-      "properties": {
-        "project": {
-          "$ref": "#/$defs/ProjectSummary"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "project": {
+              "$ref": "#/$defs/ProjectSummary"
+            },
+            "cwd": {
+              "type": "string",
+              "maxLength": 2048,
+              "minLength": 1
+            },
+            "kind": {
+              "enum": [
+                "existing",
+                "normal",
+                "internal",
+                "task"
+              ]
+            }
+          },
+          "required": [
+            "project",
+            "cwd",
+            "kind"
+          ],
+          "additionalProperties": false
         },
-        "cwd": {
-          "type": "string",
-          "maxLength": 2048,
-          "minLength": 1
-        },
-        "kind": {
-          "enum": [
-            "existing",
-            "normal",
-            "internal",
-            "task"
-          ]
+        {
+          "type": "object",
+          "properties": {
+            "project": {
+              "type": "null"
+            },
+            "cwd": {
+              "type": "string",
+              "maxLength": 2048,
+              "minLength": 1
+            },
+            "kind": {
+              "const": "projectless"
+            }
+          },
+          "required": [
+            "project",
+            "cwd",
+            "kind"
+          ],
+          "additionalProperties": false
         }
-      },
-      "required": [
-        "project",
-        "cwd",
-        "kind"
-      ],
-      "additionalProperties": false
+      ]
     },
     "ProjectsResult": {
       "type": "object",
