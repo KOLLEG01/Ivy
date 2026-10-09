@@ -627,65 +627,70 @@ const refresh = () => {
 };
 // Native events arrive in bursts while a turn runs. Coalesce them into one bounded reread of the
 // conversation so Hive's per-session request slots are not exhausted by superseded reads.
+type SnapshotPart = 'state' | 'goal' | 'turns' | 'output';
 let snapshotTimer: ReturnType<typeof setInterval> | undefined,
-  eventRefreshTimer: ReturnType<typeof setTimeout> | undefined,
-  eventRefreshTask = false;
-const scheduleRefresh = (task: boolean) => {
-  eventRefreshTask ||= task;
+  eventRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+const eventRefreshParts = new Set<SnapshotPart>();
+const scheduleRefresh = (parts: readonly SnapshotPart[] = ['state', 'goal', 'turns', 'output']) => {
+  for (const part of parts) eventRefreshParts.add(part);
   if (eventRefreshTimer) return;
   eventRefreshTimer = setTimeout(() => {
     eventRefreshTimer = undefined;
-    if (state.loading.value || goal.loading.value || turns.loading.value) {
-      scheduleRefresh(eventRefreshTask);
+    if (eventRefreshParts.has('state') && state.loading.value ||
+      eventRefreshParts.has('goal') && goal.loading.value ||
+      eventRefreshParts.has('turns') && turns.loading.value) {
+      scheduleRefresh([]);
       return;
     }
-    if (eventRefreshTask) {
-      void state.refresh();
-      void goal.refresh();
-    }
-    eventRefreshTask = false;
-    void turns.refresh();
-    void reloadOutput();
+    const selected = new Set(eventRefreshParts);
+    eventRefreshParts.clear();
+    if (selected.has('state')) void state.refresh();
+    if (selected.has('goal')) void goal.refresh();
+    if (selected.has('turns')) void turns.refresh();
+    if (selected.has('output')) void reloadOutput();
   }, 600);
 };
-const refreshForEvents = (methods: string[]) => {
-  if (
-    methods.some((method) =>
-      ["thread/deleted", "thread/reverted", "thread/compacted"].includes(method),
-    )
-  ) {
-    resetOutputView(false);
-    activity.value = [];
+const refreshForEvents = (entries: Agent.Notification[], pushed = true) => {
+  for (const entry of entries) {
+    const { method } = entry, params = record(entry.params), current = state.value.value;
+    const currentOwner = pushed && !state.error.value && !!current && current.status.epoch === entry.epoch;
+    if (['thread/deleted', 'thread/reverted', 'thread/compacted'].includes(method)) {
+      resetOutputView(false);
+      activity.value = [];
+    }
+    if (method === 'thread/name/updated') {
+      if (currentOwner && ('threadName' in params) && (params.threadName === null || typeof params.threadName === 'string'))
+        state.value.value = { ...current!, thread: { ...current!.thread, name: params.threadName } };
+      else scheduleRefresh(['state']);
+    } else if (method === 'thread/status/changed') {
+      const status = record(params.status), type = text(status.type);
+      if (currentOwner && (['notLoaded', 'idle', 'systemError'].includes(type) || type === 'active' && Array.isArray(status.activeFlags)))
+        state.value.value = { ...current!, thread: { ...current!.thread, status: params.status! } };
+      else scheduleRefresh(['state']);
+    } else if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
+      const changed = record(params.goal);
+      if (currentOwner && !goal.error.value && (method === 'thread/goal/cleared' || changed.threadId === props.threadId && typeof changed.objective === 'string'))
+        goal.value.value = { ...record(goal.value.value), goal: method === 'thread/goal/cleared' ? null : params.goal! };
+      else scheduleRefresh(['goal']);
+    } else if (method === 'thread/project/updated') {
+      if (currentOwner && ('projectId' in params) && (params.projectId === null || typeof params.projectId === 'string'))
+        state.value.value = { ...current!, thread: { ...current!.thread, projectId: params.projectId } };
+      else scheduleRefresh(['state']);
+    } else if (method === 'thread/settings/updated') {
+      if (!currentOwner || !params.threadSettings) scheduleRefresh(['state']);
+    } else if (method === 'thread/archived' || method === 'thread/unarchived') {
+      scheduleRefresh(['state']);
+    } else if (['thread/started', 'thread/deleted', 'thread/closed', 'thread/reverted', 'thread/compacted', 'turn/started', 'turn/completed'].includes(method)) {
+      scheduleRefresh();
+    } else if (method === 'item/completed') {
+      const item = record(params.item), presentation = conversationItem(item);
+      const covered = currentOwner && !gap.value && !outputError.value && !outputLoading.value && !outputLoadingEarlier.value &&
+        !outputPreview.value && activeTurn.value?.id === params.turnId && (!selectedTurn.value || selectedTurn.value === params.turnId) &&
+        !outputPages.value.some(page => page.items.some(saved => itemId(saved) === item.id)) &&
+        !!text(item.id) && !!text(item.type) && (presentation.kind !== 'message' || ['agentMessage', 'plan'].includes(text(item.type)) && typeof item.text === 'string');
+      if (!covered) scheduleRefresh(['turns', 'output']);
+    }
   }
-  if (
-    methods.some(
-      (method) =>
-        [
-          "thread/started",
-          "thread/status/changed",
-          "thread/archived",
-          "thread/deleted",
-          "thread/unarchived",
-          "thread/closed",
-          "thread/reverted",
-          "thread/name/updated",
-          "thread/goal/updated",
-          "thread/goal/cleared",
-          "thread/project/updated",
-          "thread/settings/updated",
-          "thread/compacted",
-          "turn/started",
-          "turn/completed",
-        ].includes(method),
-    )
-  )
-    scheduleRefresh(true);
-  else if (
-    methods.some((method) =>
-      ["item/completed", "serverRequest/resolved"].includes(method),
-    )
-  )
-    scheduleRefresh(false);
 };
 const resume = async () => {
   if (!canResume.value || !capabilities.value.value?.resume) return;
@@ -1075,20 +1080,20 @@ const retainNotification = (entry: Agent.Notification) => {
     gap.value = true;
     activity.value = [];
     afterSequence = 0;
-    scheduleRefresh(true);
+    scheduleRefresh();
   }
   activityEpoch = entry.epoch;
   if (entry.sequence <= afterSequence) return;
   if (afterSequence && entry.sequence !== afterSequence + 1) {
     gap.value = true;
-    scheduleRefresh(true);
+    scheduleRefresh();
   }
   afterSequence = entry.sequence;
   if (record(entry.params).threadId !== props.threadId) return;
   if (entry.method === 'thread/settings/updated') latestSettings.value = record(record(entry.params).threadSettings);
   if (activity.value.length >= 100) partialLive.value = true;
   activity.value = [...activity.value, entry].slice(-100);
-  refreshForEvents([entry.method]);
+  refreshForEvents([entry]);
 };
 const receiveProviderNotification = (value: Transport.ProviderNotification) => {
   const payload = record(value.params.payload);
@@ -1141,7 +1146,7 @@ const poll = async () => {
     pollFailures = 0;
     if ((activityEpoch && page.epoch !== activityEpoch) || page.gap) {
       gap.value = true;
-      scheduleRefresh(true);
+      scheduleRefresh();
     }
     activityEpoch = page.epoch;
     const relevant = page.items.filter(
@@ -1153,7 +1158,7 @@ const poll = async () => {
     activity.value = [...activity.value, ...relevant].slice(-100);
     afterSequence = Math.max(afterSequence, page.throughSequence);
     if (page.hasMore) nextPollMs = 0;
-    refreshForEvents(relevant.map((item) => item.method));
+    refreshForEvents(relevant, false);
   } catch {
     // Saved history remains authoritative; the next bounded poll retries live updates.
     nextPollMs = Math.min(30000, 2000 * 2 ** Math.min(pollFailures++, 4));
@@ -1171,7 +1176,7 @@ const poll = async () => {
 const visibilityChanged = () => {
   if (document.hidden) return;
   clearTimeout(timer);
-  scheduleRefresh(true);
+  scheduleRefresh();
   void poll();
 };
 onMounted(() => {
@@ -1191,19 +1196,19 @@ onMounted(() => {
         turns.error.value ||
         outputError.value)
     )
-      scheduleRefresh(true);
+      scheduleRefresh();
   }, 15000);
   const filter = { namespace: "agent", name: "notification", version: "1.0.0", serviceNodeId: props.node };
   unsubscribe = notifications.subscribe(filter, receiveProviderNotification);
   stopStatus = notifications.onStatus((ready) => {
     clearTimeout(timer);
     if (ready) {
-      scheduleRefresh(true);
+      scheduleRefresh();
       void poll();
     } else timer = setTimeout(() => void poll(), 1000);
   }, [], [filter]);
   stopServiceChanges = notifications.subscribeChanges(["services/agent-manager/" + props.node], () => {
-    scheduleRefresh(true);
+    scheduleRefresh();
     void poll();
   });
   document.addEventListener("visibilitychange", visibilityChanged);

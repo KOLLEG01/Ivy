@@ -12,6 +12,40 @@ const navigate = (f, hash) =>
     location.hash = hash;
   }, hash);
 
+for (const width of [1440, 390]) test(`AgentUI renders completed live items without rereading history and reconciles at completion (${width}px)`, { timeout: 90000 }, async t => {
+  const f = await agentFixture(t, { width, height: 1000 }), thread = f.threads.get('saved-task');
+  const turn = { id: 'live-turn', status: 'inProgress', items: [answer('initial', 'Initial saved answer.')] };
+  thread.turns.push(turn);
+  const detailRequests = [];
+  f.page.on('request', request => {
+    if (!request.url().endsWith('/api/v1/rpc')) return;
+    const body = request.postDataJSON();
+    for (const frame of Array.isArray(body) ? body : [body]) if (frame.method === 'discovery.describe') detailRequests.push(frame.params);
+  });
+  await f.open(target);
+  await expect(output(f)).toContainText('Initial saved answer.');
+  await f.page.waitForTimeout(1500);
+  const historyCalls = () => f.current().sent.filter(frame => ['thread/items/list', 'thread/turns/list'].includes(frame.method)).length;
+  const before = historyCalls();
+  for (let index = 0; index < 10; index++) {
+    const item = answer('live-' + index, 'Complete live answer ' + index + '.');
+    turn.items.push(item);
+    f.current().emit({ method: 'item/completed', params: { threadId: thread.id, turnId: turn.id, item } });
+  }
+  await expect(f.page.getByRole('article', { name: 'Live answer', exact: true })).toHaveCount(10);
+  await expect(output(f)).toContainText('Complete live answer 9.');
+  await f.page.waitForTimeout(1000);
+  assert.equal(historyCalls(), before, 'complete new items already arrived through the owner stream');
+  turn.status = 'completed';
+  f.current().emit({ method: 'turn/completed', params: { threadId: thread.id, turn } });
+  await expect(f.page.getByRole('article', { name: 'Live answer', exact: true })).toHaveCount(0);
+  await expect(output(f)).toContainText('Complete live answer 9.');
+  assert.ok(historyCalls() > before, 'terminal state reconciles the saved window and cursors');
+  assert.ok(detailRequests.length > 0);
+  assert.ok(detailRequests.every(request => request.serviceNodeId === 'browser-agent' && request.tools.length <= 5));
+  assert.deepEqual(f.pageErrors, []);
+});
+
 for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 390, height: 844 },
@@ -44,7 +78,7 @@ for (const viewport of [
       t.after(() => release());
       await f.page.route("**/api/v1/rpc", async (route) => {
         const body = route.request().postDataJSON();
-        if (body.params?.qualifiedName === "codex.thread/items/list") {
+        if ((Array.isArray(body) ? body : [body]).some(frame => frame.params?.qualifiedName === "codex.thread/items/list")) {
           pending++;
           await gate;
         }
@@ -107,10 +141,8 @@ test(
     t.after(() => release());
     await f.page.route("**/api/v1/rpc", async (route) => {
       const body = route.request().postDataJSON();
-      if (
-        body.params?.qualifiedName === "codex.thread/items/list" &&
-        body.params.arguments.turnId === "a"
-      ) {
+      if ((Array.isArray(body) ? body : [body]).some(frame =>
+        frame.params?.qualifiedName === "codex.thread/items/list" && frame.params.arguments.turnId === "a")) {
         pending++;
         await gate;
       }
@@ -166,10 +198,8 @@ test(
     });
     t.after(() => release());
     await f.page.route("**/api/v1/rpc", async (route) => {
-      if (
-        route.request().postDataJSON().params?.qualifiedName ===
-        "codex.thread/items/list"
-      ) {
+      const body = route.request().postDataJSON();
+      if ((Array.isArray(body) ? body : [body]).some(frame => frame.params?.qualifiedName === "codex.thread/items/list")) {
         pending++;
         await gate;
       }

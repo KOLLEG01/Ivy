@@ -258,11 +258,16 @@ export class Discovery {
     }
     let owner = params.serviceNodeId;
     const guides = new Map<string, string>();
+    const namespaces = new Map<string, ReturnType<Registry['namespace']>>();
     const items = params.tools.map(qualifiedName => {
       const namespace = qualifiedName.split('.')[0]!;
-      const node = this.registry.select(namespace, { serviceName: params.serviceName, ...(owner ? { serviceNodeId: owner } : {}) });
-      owner = node.serviceNodeId;
-      const ns = this.registry.namespace(owner, namespace);
+      let ns = namespaces.get(namespace);
+      if (!ns) {
+        const node = this.registry.select(namespace, { serviceName: params.serviceName, ...(owner ? { serviceNodeId: owner } : {}) });
+        owner = node.serviceNodeId;
+        ns = this.registry.namespace(owner, namespace);
+        namespaces.set(namespace, ns);
+      }
       const definition = ns.tools.find(tool => namespace + '.' + tool.name === qualifiedName);
       requireThat(definition, 'not_found', 'Exact tool is absent from the selected provider catalog.');
       requireThat(!mcpOnly || definition.discovery?.mcp, 'not_found', 'Tool is not published through MCP.');

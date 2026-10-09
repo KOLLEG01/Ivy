@@ -54,6 +54,12 @@ Delivery and authentication follow [Hive](IVYHIVE-SPEC.md).
   retaining automatic recovery and the original owner.
   Native invocation failures retain known Tool bindings; rediscover a binding when its
   definition changes or its cache expires.
+  Native panels gather exact capability definitions through bounded detail requests;
+  missing optional methods and the schema byte budget cannot discard other definitions.
+  An observed native connection or catalog change expires that owner's read bindings.
+  Apply complete current-owner notification data to its affected panels. During an active
+  turn, complete new items supplement the live conversation without rereading its history
+  for each item; reconcile saved output at turn boundaries, after gaps, and for historical edits.
 - Every UI belongs to one installable Ivy browser app, scoped to the configured Hive base
   path. The shared account menu offers installation and per-browser notification settings.
   A shared desktop/mobile installation banner remains until installation or dismissal,

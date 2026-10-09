@@ -130,17 +130,13 @@ export function liveMessages(
 ): Array<{ id: string; text: string }> {
   const messages = new Map<string, { id: string; text: string }>();
   for (const event of activity) {
-    const params = record(event.params),
-      id = text(params.itemId);
-    if (
-      event.method !== "item/agentMessage/delta" ||
-      !id ||
-      savedIds.has(id) ||
-      (turnId && params.turnId !== turnId)
-    )
-      continue;
+    const params = record(event.params), item = record(params.item),
+      completed = event.method === 'item/completed' && ['agentMessage', 'plan'].includes(text(item.type)) && typeof item.text === 'string',
+      id = text(completed ? item.id : params.itemId);
+    if ((!completed && event.method !== 'item/agentMessage/delta') || !id || savedIds.has(id) || (turnId && params.turnId !== turnId)) continue;
     const value = messages.get(id) ?? { id, text: "" };
-    value.text += text(params.delta);
+    if (completed) value.text = text(item.text);
+    else value.text += text(params.delta);
     messages.set(id, value);
   }
   return [...messages.values()];

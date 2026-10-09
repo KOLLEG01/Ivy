@@ -63,15 +63,74 @@ async function readyForRead(client: RpcClient, node: string): Promise<void> {
   await entry.check;
 }
 const readBindings = new WeakMap<RpcClient, Map<string, { at: number; binding: Promise<BoundTool | undefined> }>>();
+const nativeCatalogs = new WeakMap<RpcClient, Map<string, string>>();
+function observeCatalog(client: RpcClient, node: string, value: Wire.Json): void {
+  const status = record(value), fields = ['epoch', 'nativeVersion', 'nativeExecutableHash', 'catalogHash'];
+  if (status.serviceNodeId !== node || fields.some(field => typeof status[field] !== 'string' || !status[field])) return;
+  let catalogs = nativeCatalogs.get(client);
+  if (!catalogs) nativeCatalogs.set(client, catalogs = new Map());
+  const identity = canonical(fields.map(field => status[field]!)), previous = catalogs.get(node);
+  if (previous && previous !== identity) {
+    const bindings = readBindings.get(client);
+    for (const key of bindings?.keys() ?? []) if (key.startsWith(node + '\u0000')) bindings!.delete(key);
+  }
+  catalogs.set(node, identity);
+}
+type BindingRequest = { method: string; resolve: (binding: BoundTool | undefined) => void; reject: (error: unknown) => void };
+const bindingRequests = new WeakMap<RpcClient, Map<string, BindingRequest[]>>();
+async function describeBindings(client: RpcClient, node: string, methods: string[]): Promise<Map<string, BoundTool>> {
+  if (methods.length === 1) {
+    try {
+      const binding = await discover(client, methods[0]!, { serviceNodeId: node });
+      return new Map([[methods[0]!, binding]]);
+    } catch (error) {
+      if (error instanceof IvyError && ['not_found', 'namespace_not_found'].includes(error.code)) return new Map();
+      throw error;
+    }
+  }
+  try {
+    const result = await client.request('discovery.describe', { serviceName: 'agent-manager', serviceNodeId: node, tools: methods });
+    if (result.provider?.serviceNodeId !== node || result.items.length !== methods.length ||
+      new Set(result.items.map(binding => binding.qualifiedName)).size !== methods.length ||
+      result.items.some(binding => !methods.includes(binding.qualifiedName)))
+      throw new IvyError('provider_contract_error', 'Capability discovery returned another owner or tool selection.');
+    return new Map(result.items.map(binding => [binding.qualifiedName, { ...binding, serviceNodeId: node }]));
+  } catch (error) {
+    // An absent optional method or the schema byte budget must not discard other definitions.
+    if (!(error instanceof IvyError) || !['not_found', 'namespace_not_found', 'result_too_large'].includes(error.code)) throw error;
+    const middle = Math.ceil(methods.length / 2);
+    const halves = await Promise.all([describeBindings(client, node, methods.slice(0, middle)), describeBindings(client, node, methods.slice(middle))]);
+    return new Map(halves.flatMap(half => [...half]));
+  }
+}
+function queueBinding(client: RpcClient, node: string, method: string): Promise<BoundTool | undefined> {
+  let providers = bindingRequests.get(client);
+  if (!providers) bindingRequests.set(client, providers = new Map());
+  let requests = providers.get(node);
+  if (!requests) {
+    providers.set(node, requests = []);
+    const selected = requests;
+    queueMicrotask(() => {
+      providers!.delete(node);
+      // The existing detail endpoint accepts at most five exact definitions per request.
+      for (let offset = 0; offset < selected.length; offset += 5) {
+        const group = selected.slice(offset, offset + 5);
+        void describeBindings(client, node, group.map(request => request.method)).then(
+          bindings => { for (const request of group) request.resolve(bindings.get(request.method)); },
+          error => { for (const request of group) request.reject(error); },
+        );
+      }
+    });
+  }
+  const selected = requests;
+  return new Promise((resolve, reject) => selected.push({ method, resolve, reject }));
+}
 function readBinding(client: RpcClient, node: string, method: string): Promise<BoundTool | undefined> {
   let cache = readBindings.get(client);
   if (!cache) readBindings.set(client, cache = new Map());
   const key = node + '\u0000' + method, cached = cache.get(key);
   if (cached && Date.now() - cached.at < bindingMs) return cached.binding;
-  const binding = discover(client, method, { serviceNodeId: node }).catch(error => {
-    if (error instanceof IvyError && ['not_found', 'namespace_not_found'].includes(error.code)) return undefined;
-    throw error;
-  });
+  const binding = queueBinding(client, node, method);
   cache.set(key, { at: Date.now(), binding });
   binding.catch(() => { if (cache.get(key)?.binding === binding) cache.delete(key); });
   return binding;
@@ -85,7 +144,9 @@ async function executeRead(client: RpcClient, node: string, method: string, args
     if (!binding) throw new IvyError('not_found', 'The exact tool is not in the selected provider catalog.');
     try {
       signal?.throwIfAborted();
-      return await callBound(client, binding, args, method.startsWith('codex.') ? await newOperationId(client) : undefined, signal ? { signal } : {});
+      const value = await callBound(client, binding, args, method.startsWith('codex.') ? await newOperationId(client) : undefined, signal ? { signal } : {});
+      if (method === 'agent.status') observeCatalog(client, node, value);
+      return value;
     } catch (error) {
       if (!signal?.aborted && error instanceof IvyError && error.code === 'tool_definition_changed')
         readBindings.get(client)?.delete(node + '\u0000' + method);

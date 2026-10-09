@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "secretary-ui",
   "kind": "app",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "description": "Static Secretary configuration and execution journal UI",
   "connectsToHive": false,
   "requirements": {

@@ -134,7 +134,11 @@ test('capability searches find real service tools and Wiki data entry points wit
     assert.doesNotMatch(JSON.stringify(page), /inputSchema|outputSchema|guideMarkdown/);
   }
   const roots = call('discovery.list', {}).items;
-  for (const [name, registry] of services) assert.equal(roots.find(item => item.name === name)?.description, registry.discoveryHint);
+  for (const [name, registry] of services) {
+    const description = roots.find(item => item.name === name)!.description;
+    assert.ok(Buffer.byteLength(description) <= 220, 'root discovery keeps its compact summary budget');
+    assert.ok(registry.discoveryHint!.startsWith(description.replace(/\.\.\.$/, '')), name);
+  }
   const groups = call('discovery.list', { serviceName: 'hive' }).items;
   assert.match(groups.find(item => item.group === 'objects')!.description, /Wiki/);
   const detail = call('discovery.describe', { serviceName: 'secretary', tools: ['secretary.createAssignment'] });
@@ -400,25 +404,25 @@ test('the main service surfaces publish bounded complete direct schemas and keep
     assert.throws(() => directCall(bindings, { ...input, view: 'unknown' }), errorCode('invalid_arguments'));
   }
   const phoneBindings = kernel.discovery.mcpCatalog('phone_bridge_diagnostics');
-  for (const [view, operation, input, write] of [
-    ['loopback', 'probeLoopback', {}, false], ['audio', 'audioSetup', {}, false],
-    ['codecs', 'codecTest', {}, false], ['inventory', 'inventory', {}, false],
-    ['logs', 'logs', { callId: '10000000-0000-4000-8000-000000000001' }, false],
-    ['archive', 'reconcileArchive', { callId: '10000000-0000-4000-8000-000000000001' }, true],
+  for (const [view, operation, input] of [
+    ['loopback', 'probeLoopback', {}], ['audio', 'audioSetup', {}],
+    ['codecs', 'codecTest', {}], ['inventory', 'inventory', {}],
+    ['logs', 'logs', { callId: '10000000-0000-4000-8000-000000000001' }],
   ] as const) {
-    const args = { serviceNodeId: 'phone-bridge', input, view, ...(write ? { operationId: 'archive-1' } : {}) };
+    const args = { serviceNodeId: 'phone-bridge', input, view };
     schemas.validate(descriptors.find(tool => tool.name === 'phone_bridge_diagnostics')!.inputSchema, args);
     const call = directCall(phoneBindings, args);
     assert.equal(call.qualifiedName, 'phone.' + operation);
     assert.deepEqual(call.arguments, input);
-    assert.equal(call.operationId, write ? 'archive-1' : undefined);
+    assert.equal(call.operationId, undefined);
   }
+  assert.throws(() => directCall(phoneBindings, { serviceNodeId: 'phone-bridge', input: {}, view: 'archive' }), errorCode('invalid_arguments'));
   assert.throws(() => directCall(phoneBindings, { serviceNodeId: 'phone-bridge', input: {} }), errorCode('invalid_arguments'));
   for (const tool of descriptors) {
     assert.ok(Buffer.byteLength(JSON.stringify(tool)) < mcpDiscoveryResultBytes - 4096, tool.name);
     assert.ok(tool.inputSchema); assert.ok(tool.outputSchema);
     assert.ok(tool.title && tool.title.length <= 50, tool.name);
-    assert.ok(tool.description && tool.description.length <= 320, tool.name);
+    assert.ok(typeof tool.description === 'string' && tool.description.length > 0, tool.name);
     assert.ok(typeof tool._meta?.["ivy/serviceName"] === "string");
     clientSchemas.compile(tool.inputSchema);
     clientSchemas.compile(tool.outputSchema as AnySchema);

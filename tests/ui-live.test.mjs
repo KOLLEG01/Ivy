@@ -35,6 +35,8 @@ test("native panels share owner readiness, suppress outage calls and recover wit
   const checks = [], calls = [], discoveries = [];
   let failure = null;
   const client = { request: async (method, params) => {
+    if (method === 'discovery.describe') return { provider: { serviceNodeId: params.serviceNodeId },
+      items: params.tools.map(qualifiedName => ({ qualifiedName, method: qualifiedName, definition: {}, definitionHash: 'fixture', serviceNodeId: params.serviceNodeId })) };
     assert.equal(method, "serviceNodes.get"); checks.push(params.serviceNodeId);
     return { ...owners.get(params.serviceNodeId) };
   } };
@@ -130,6 +132,69 @@ test("native capability discovery and identical reads are shared with independen
   t.mock.timers.tick(60000);
   await optionalTool(client, "one", "codex.absent");
   assert.equal(discoveries.length, 4, "absent capabilities can recover after cache expiry");
+});
+
+test('native capability bursts gather bounded exact definitions and isolate missing or large methods and other owners', async () => {
+  const requests = [], singles = [];
+  const definition = method => ({ qualifiedName: method, method, definition: {}, definitionHash: 'fixture' });
+  const client = { request: async (method, params) => {
+    assert.equal(method, 'discovery.describe');
+    requests.push(params);
+    assert.ok(params.tools.length <= 5);
+    if (params.tools.includes('codex.absent')) throw new IvyError('not_found', 'Optional method absent');
+    if (params.tools.includes('codex.large')) throw new IvyError('result_too_large', 'Detail budget exceeded');
+    return { provider: { serviceNodeId: params.serviceNodeId }, items: params.tools.map(definition) };
+  } };
+  const { optionalTool } = load('packages/ui-client/src/native.ts', { '../../sdk/src/client.js': {
+    IvyError, canonical: JSON.stringify,
+    discover: async (_client, method, target) => {
+      singles.push([target.serviceNodeId, method]);
+      if (method === 'codex.absent') throw new IvyError('not_found', 'Optional method absent');
+      return { ...definition(method), ...target };
+    },
+  } });
+  const methods = Array.from({ length: 12 }, (_, index) => 'codex.read' + index);
+  const found = await Promise.all([...methods, methods[0]].map(method => optionalTool(client, 'one', method)));
+  assert.equal(requests.length, 3, 'twelve distinct definitions use three bounded operations');
+  assert.equal(singles.length, 0);
+  assert.equal(found[0], found.at(-1), 'duplicate readers retain one exact binding');
+  assert.ok(found.every(binding => binding.serviceNodeId === 'one'));
+  const mixed = await Promise.all(['codex.read', 'codex.absent', 'codex.large'].map(method => optionalTool(client, 'two', method)));
+  assert.equal(mixed[1], undefined);
+  assert.equal(mixed[2].qualifiedName, 'codex.large', 'a large individual schema uses normal exact discovery');
+  assert.ok(singles.every(([node]) => node === 'two'));
+  const sent = requests.length + singles.length;
+  await optionalTool(client, 'two', 'codex.absent');
+  assert.equal(requests.length + singles.length, sent, 'known absence is shared');
+});
+
+test('native catalog observations expire only that owner and metadata failures never substitute a binding', async () => {
+  let version = 'one', fail = false, discoveries = 0;
+  const definition = method => ({ qualifiedName: method, method, definition: {}, definitionHash: version });
+  const client = { request: async (method, params) => {
+    if (method === 'serviceNodes.get') return { connected: true, ready: true, synced: true, desiredEnabled: true };
+    assert.equal(method, 'discovery.describe');
+    if (fail) throw new IvyError('service_unavailable', 'Closed');
+    return { provider: { serviceNodeId: params.serviceNodeId }, items: params.tools.map(definition) };
+  } };
+  const { nativeRead, optionalTool } = load('packages/ui-client/src/native.ts', { '../../sdk/src/client.js': {
+    IvyError, canonical: JSON.stringify,
+    discover: async (_client, method, target) => { discoveries++; return { ...definition(method), ...target }; },
+    callBound: async (_client, binding) => ({ serviceNodeId: binding.serviceNodeId, epoch: 'epoch', nativeVersion: 'native', nativeExecutableHash: 'executable', catalogHash: version }),
+  } });
+  await nativeRead(client, 'one', 'agent.status', {});
+  const first = await optionalTool(client, 'one', 'codex.read'), other = await optionalTool(client, 'other', 'codex.read');
+  version = 'two';
+  await nativeRead(client, 'one', 'agent.status', {});
+  assert.notEqual(await optionalTool(client, 'one', 'codex.read'), first);
+  assert.equal(await optionalTool(client, 'other', 'codex.read'), other);
+  fail = true;
+  const before = discoveries;
+  const failed = await Promise.allSettled(['codex.a', 'codex.b'].map(method => optionalTool(client, 'failed', method)));
+  assert.ok(failed.every(result => result.status === 'rejected' && result.reason.code === 'service_unavailable'));
+  assert.equal(discoveries, before, 'unavailability does not trigger extra single lookups');
+  fail = false;
+  assert.ok((await Promise.all(['codex.a', 'codex.b'].map(method => optionalTool(client, 'failed', method)))).every(Boolean));
 });
 const renderer = vue.createRenderer({
   createElement: () => ({}), createText: () => ({}), createComment: () => ({}),
@@ -501,8 +566,8 @@ function agentTask(t, connected = true, failures = new Set()) {
   }).default;
   const state = mount(component, { node: "owner", threadId: "task", turnId: "" }, notifications);
   return { state, notifications, reads, failures, holds, signals,
-    emit(method) {
-      const entry = { method, params: { threadId: "task" }, epoch: "epoch", sequence: journal.length + 1, observedAt: new Date().toISOString() };
+    emit(method, params = {}) {
+      const entry = { method, params: { threadId: "task", ...params }, epoch: "epoch", sequence: journal.length + 1, observedAt: new Date().toISOString() };
       journal.push(entry);
       if (notifications.connected) notifications.emit("owner", "notification", entry);
     },
@@ -578,7 +643,7 @@ test("Agent fallback keeps journal polling fast and snapshots slow without abort
   assert.equal(f.reads.state, 4, "reconnection refreshes immediately");
 });
 
-test("Agent streaming deltas do not refresh snapshots but lifecycle and goal changes do", async t => {
+test("Agent events refresh only their affected panels and streaming deltas do not refresh snapshots", async t => {
   const f = agentTask(t);
   await settle(); await advance(t, 600);
   const before = { ...f.reads };
@@ -587,12 +652,42 @@ test("Agent streaming deltas do not refresh snapshots but lifecycle and goal cha
     f.emit(method);
   await advance(t, 1000);
   assert.deepEqual(f.reads, before);
-  for (const method of ["thread/name/updated", "thread/goal/updated", "thread/goal/cleared", "turn/completed"]) {
-    const count = f.reads.state;
+  for (const [method, parts] of [['thread/name/updated', ['state']], ['thread/goal/updated', ['goal']],
+    ['thread/goal/cleared', []], ['turn/completed', ['state', 'goal', 'turns', 'output']]]) {
+    const count = { ...f.reads };
     f.emit(method); f.emit(method);
     await advance(t, 600);
-    assert.equal(f.reads.state, count + 1, method + " coalesces a burst into one refresh");
+    for (const kind of ['state', 'goal', 'turns', 'output']) assert.equal(f.reads[kind], count[kind] + Number(parts.includes(kind)), method + ' ' + kind);
   }
+});
+
+test('complete current-owner push data updates panels and running output without a history reread; completion reconciles and historical edits refresh', async t => {
+  const f = agentTask(t);
+  await settle(); await advance(t, 600);
+  f.state.turns.value.value = { items: [{ id: 'active-turn', status: 'inProgress' }], nextCursor: null };
+  const before = { ...f.reads };
+  f.emit('thread/name/updated', { threadName: 'Pushed name' });
+  f.emit('thread/status/changed', { status: { type: 'active', activeFlags: [] } });
+  f.emit('thread/goal/updated', { goal: { threadId: 'task', objective: 'Pushed goal', status: 'active' } });
+  f.emit('item/agentMessage/delta', { turnId: 'active-turn', itemId: 'answer', delta: 'Partial ' });
+  f.emit('item/completed', { turnId: 'active-turn', item: { id: 'answer', type: 'agentMessage', text: 'Complete owner answer.' } });
+  f.emit('item/completed', { turnId: 'active-turn', item: { id: 'command', type: 'commandExecution', command: 'checked' } });
+  await advance(t, 1000);
+  assert.deepEqual(f.reads, before);
+  assert.equal(f.state.state.value.value.thread.name, 'Pushed name');
+  assert.equal(f.state.threadStatus, 'active');
+  assert.equal(f.state.goalRecord.objective, 'Pushed goal');
+  assert.deepEqual(f.state.live, [{ id: 'answer', text: 'Complete owner answer.' }]);
+  assert.equal(f.state.pendingSteps[0].running, false);
+  f.emit('turn/completed', { turn: { id: 'active-turn', status: 'completed' } });
+  await advance(t, 600);
+  for (const kind of ['state', 'goal', 'turns', 'output']) assert.equal(f.reads[kind], before[kind] + 1);
+  const completed = { ...f.reads };
+  f.emit('item/completed', { turnId: 'active-turn', item: { id: 'answer', type: 'agentMessage', text: 'Historical edit.' } });
+  await advance(t, 600);
+  assert.equal(f.reads.output, completed.output + 1);
+  assert.equal(f.reads.turns, completed.turns + 1);
+  assert.equal(f.reads.state, completed.state);
 });
 
 test("Console app metadata and package releases follow their actual change sources", async t => {
