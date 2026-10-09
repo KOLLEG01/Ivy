@@ -91,7 +91,7 @@ const current = useRemote(
   15000,
   ["objects/task-board/configuration"],
 );
-const environments = useRemote(executionEnvironments, 30000, ["services"]);
+const environments = useRemote(executionEnvironments, 30000, ["services/agent-manager"]);
 const host = computed({
   get: () =>
     draft.value?.defaults.executionRequirement?.kind === "host"

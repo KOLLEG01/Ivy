@@ -10,6 +10,8 @@ import {
   connectionInFlightRequests,
   managementFrameBytes,
   managementSocketBufferBytes,
+  rpcBatchRequests,
+  rpcBatchRequestBytes,
 } from "../../../packages/contracts/src/limits.js";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
@@ -215,9 +217,20 @@ export class HiveServer {
       this.eventsAvailable(throughSequence);
     this.worker.onChanges = (scopes) => {
       for (const peer of this.peers) {
-        const selected = scopes.filter(scope => peer.changeScopes.some(watched =>
-          scope === watched || scope.startsWith(watched + "/") || watched.startsWith(scope + "/")));
-        if (selected.length) this.send(peer, { jsonrpc: "2.0", method: "notifications.changed", params: { scopes: selected } });
+        const selected = scopes.filter((scope) =>
+          peer.changeScopes.some(
+            (watched) =>
+              scope === watched ||
+              scope.startsWith(watched + "/") ||
+              watched.startsWith(scope + "/"),
+          ),
+        );
+        if (selected.length)
+          this.send(peer, {
+            jsonrpc: "2.0",
+            method: "notifications.changed",
+            params: { scopes: selected },
+          });
       }
     };
     this.worker.onFailure = () => {
@@ -1037,7 +1050,10 @@ export class HiveServer {
         ) {
           const target = this.returnPath(url.pathname + url.search);
           // The browser carries the original fragment to /login; its script adds it to returnTo.
-          this.redirect(response, `${this.basePath}/login?returnTo=${encodeURIComponent(target)}&resume=1`);
+          this.redirect(
+            response,
+            `${this.basePath}/login?returnTo=${encodeURIComponent(target)}&resume=1`,
+          );
           return;
         }
         throw error;
@@ -1081,6 +1097,12 @@ export class HiveServer {
         );
         const received = await this.body(request);
         const frame = this.parse(received);
+        if (!mcpSurface && Array.isArray(frame)) {
+          const body = await this.invokeBatch(context, frame, received.length);
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(body);
+          return;
+        }
         requireThat(
           !Array.isArray(frame) && frame !== null && typeof frame === "object",
           "invalid_frame",
@@ -1195,10 +1217,18 @@ export class HiveServer {
           this.redirect(response, `${this.basePath}/${slug}/${url.search}`);
           return;
         }
-        const parts = shortUiId ? [shortUiId, ...path.split('/').slice(2).map(part => decodeURIComponent(part))] : path
-          .split("/")
-          .slice(2)
-          .map((part) => decodeURIComponent(part));
+        const parts = shortUiId
+          ? [
+              shortUiId,
+              ...path
+                .split("/")
+                .slice(2)
+                .map((part) => decodeURIComponent(part)),
+            ]
+          : path
+              .split("/")
+              .slice(2)
+              .map((part) => decodeURIComponent(part));
         const uiId = parts[0]!;
         const historical = parts[1] === "releases" && parts.length >= 4;
         const currentEntry = parts.length === 2 && parts[1] === "";
@@ -1219,7 +1249,10 @@ export class HiveServer {
           "not_found",
           "UI asset path not found.",
         );
-        const selected = await this.worker.request<{ releaseId: string; asset: Operation.UiAsset }>(
+        const selected = await this.worker.request<{
+          releaseId: string;
+          asset: Operation.UiAsset;
+        }>(
           historical
             ? {
                 action: "asset",
@@ -1383,6 +1416,75 @@ export class HiveServer {
     } finally {
       lease.release();
     }
+  }
+  /** Each batch item retains normal authorization, admission, validation and response identity. */
+  private async invokeBatch(
+    context: ConnectionContext,
+    frames: unknown[],
+    receivedBytes: number,
+  ): Promise<string> {
+    requireThat(
+      frames.length > 0,
+      "invalid_frame",
+      "Expected a nonempty RPC batch.",
+    );
+    requireThat(
+      frames.length <= rpcBatchRequests &&
+        receivedBytes <= rpcBatchRequestBytes,
+      "limit_exceeded",
+      "RPC batch exceeds its request count or byte limit.",
+    );
+    const ids = frames.map((frame) =>
+      validRequestId((frame as { id?: unknown } | null)?.id),
+    );
+    requireThat(
+      new Set(ids.filter((id) => id !== null)).size ===
+        ids.filter((id) => id !== null).length,
+      "invalid_frame",
+      "RPC batch request identities must be distinct.",
+    );
+    let remaining = MAX_FRAME - 2 - (frames.length - 1) - frames.length * 4096;
+    const replies = await Promise.all(
+      frames.map(async (frame, index) => {
+        const id = ids[index] ?? null;
+        let reply: unknown;
+        try {
+          validateRequest(frame);
+          const result = await this.invoke(
+            context,
+            frame,
+            Buffer.byteLength(encodeJson(frame)),
+          );
+          reply = { jsonrpc: "2.0", id, result };
+        } catch (error) {
+          reply = rpcFailure(error, id).body;
+        }
+        try {
+          const encoded = encodeJson(reply),
+            bytes = Buffer.byteLength(encoded);
+          if (bytes > remaining)
+            throw new IvyError(
+              "result_too_large",
+              "RPC batch response exceeds its frame limit.",
+              "unknown",
+            );
+          remaining -= bytes;
+          return encoded;
+        } catch {
+          return encodeJson(
+            rpcFailure(
+              new IvyError(
+                "result_too_large",
+                "RPC batch item cannot fit its response frame.",
+                "unknown",
+              ),
+              id,
+            ).body,
+          );
+        }
+      }),
+    );
+    return "[" + replies.join(",") + "]";
   }
   private checkedDirect(
     method: string,

@@ -12,6 +12,9 @@ export const textObjectContentBytes = 1048576;
 export const binaryObjectContentBytes = 8388608;
 /** Concurrent requests admitted for one HTTP, WebSocket, or SDK connection. */
 export const connectionInFlightRequests = 64;
+/** Read micro-batches remain smaller than a browser's logical request budget. */
+export const rpcBatchRequests = 8;
+export const rpcBatchRequestBytes = 65536;
 /** Aggregate reservations for one authenticated credential or original HTTP client address. */
 export const consumerInFlightRequests = 256;
 

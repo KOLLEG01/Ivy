@@ -23,7 +23,7 @@ try { const saved = JSON.parse(sessionStorage.getItem(draftKey) ?? 'null'); if (
 const persistDraft = () => { try { sessionStorage.setItem(draftKey, JSON.stringify({ node: node.value, selectedProject: selectedProject.value, model: model.value, effort: effort.value, prompt: prompt.value, original: original.value, principalId: props.workspace.principalId, rootObjectId: props.workspace.rootObjectId })); } catch { throw new Error('The original native plan could not be retained before sending.'); } };
 watch([node, selectedProject, model, effort, prompt], () => { try { persistDraft(); } catch (cause) { action.error.value = String(cause); } });
 const recoveredPlan = () => { const pin = action.saved.value?.outcome?.plan; if (pin && original.value && action.identityMatches.value) emit('saved', { ...original.value, pin }); };
-const hosts = useRemote(signal => client.request('serviceNodes.list', { serviceName: 'agent-manager', limit: 200 }, { signal }), 0, ["services"]);
+const hosts = useRemote(signal => client.request('serviceNodes.list', { serviceName: 'agent-manager', limit: 200 }, { signal }), 0, ["services/agent-manager"]);
 const capabilities = useRemote(async signal => {
   if (!node.value) return null;
   const [status, projects, models, catalog, ...bindings] = await Promise.all([

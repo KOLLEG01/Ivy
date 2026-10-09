@@ -37,7 +37,7 @@ const workspace = useRemote(
       signal,
     )) as TaskBoard.WorkspaceInfo,
   15000,
-  ["services", "objects/task-board"],
+  () => ["services/task-board/" + props.node, "objects/task-board"],
 );
 const identity = computed(() =>
   workspace.value.value

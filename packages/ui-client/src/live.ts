@@ -8,7 +8,7 @@ export function liveUpdates(notifications: BrowserNotifications) {
   const updates: RemoteUpdates = {
     subscribe(changed, status, scopes = []) {
       const stopChanges = notifications.subscribeChanges(scopes, changed);
-      const stopStatus = notifications.onStatus(status);
+      const stopStatus = notifications.onStatus(status, scopes);
       return () => {
         stopStatus();
         stopChanges();
@@ -39,9 +39,11 @@ export function nativeInputUpdates(
 ): RemoteUpdates {
   return {
     subscribe(changed, status) {
-      const stops = ["inputs", "notification", "capabilities"].map((name) =>
+      const filters = ["inputs", "notification", "capabilities"].map((name) =>
+        ({ namespace: "agent", name, version: "1.0.0", serviceNodeId }));
+      const stops = filters.map((filter) =>
         notifications.subscribe(
-          { namespace: "agent", name, version: "1.0.0", serviceNodeId },
+          filter,
           (frame) => {
             const payload = frame.params.payload as {
               threadId?: string;
@@ -49,9 +51,9 @@ export function nativeInputUpdates(
               params?: { threadId?: string };
             };
             if (
-              name === "capabilities" ||
-              (name === "inputs" && payload.threadId === threadId) ||
-              (name === "notification" &&
+              filter.name === "capabilities" ||
+              (filter.name === "inputs" && payload.threadId === threadId) ||
+              (filter.name === "notification" &&
                 payload.method === "serverRequest/resolved" &&
                 payload.params?.threadId === threadId)
             )
@@ -59,8 +61,13 @@ export function nativeInputUpdates(
           },
         ),
       );
-      const stopChanges = notifications.subscribeChanges(["services/agent-manager/" + serviceNodeId], changed);
-      const stopStatus = notifications.onStatus(status);
+      const stopChanges = notifications.subscribeChanges(
+        ["services/agent-manager/" + serviceNodeId],
+        changed,
+      );
+      const stopStatus = notifications.onStatus(status, [
+        "services/agent-manager/" + serviceNodeId,
+      ], filters);
       return () => {
         stopStatus();
         stopChanges();

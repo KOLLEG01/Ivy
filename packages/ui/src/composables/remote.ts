@@ -34,9 +34,11 @@ export function useRemote<T>(
     stopped = false,
     connected = false,
     dirty = false;
+  let started = false;
   let timer: ReturnType<typeof setInterval> | undefined,
     queued: ReturnType<typeof setTimeout> | undefined,
     unsubscribe: (() => void) | undefined;
+  let initial: ReturnType<typeof setTimeout> | undefined;
   // Coalesce bursts; retain a hint arriving during a read for one follow-up.
   const schedule = () => {
     dirty = true;
@@ -50,6 +52,8 @@ export function useRemote<T>(
   const refresh = async () => {
     if (stopped) return;
     clearTimeout(queued);
+    clearTimeout(initial);
+    started = true;
     queued = undefined;
     dirty = false;
     controller?.abort();
@@ -91,19 +95,32 @@ export function useRemote<T>(
         (ready) => {
           const recovered = ready && !connected;
           connected = ready;
-          if (recovered) schedule();
+          if (recovered && !started) void refresh();
+          else if (recovered) schedule();
         },
         typeof live === "function" ? live() : Array.isArray(live) ? live : undefined,
       );
     };
     if (updates) {
       subscribe();
-      if (typeof live === "function") watch(() => live().join("\u0000"), () => {
-        subscribe();
-        schedule();
-      });
+      if (typeof live === "function")
+        watch(
+          () => live().join("\u0000"),
+          () => {
+            subscribe();
+            schedule();
+          },
+        );
     }
-    void refresh();
+    // Read after subscribing so the first snapshot already covers the live stream.
+    // An unavailable socket may delay the initial read by at most 250 ms.
+    if (!started) {
+      if (updates)
+        initial = setTimeout(() => {
+          if (!started) void refresh();
+        }, 250);
+      else void refresh();
+    }
     if (updates || intervalMs) {
       window.addEventListener("online", online);
       document.addEventListener("visibilitychange", visible);
@@ -126,6 +143,7 @@ export function useRemote<T>(
     controller?.abort();
     clearInterval(timer);
     clearTimeout(queued);
+    clearTimeout(initial);
     unsubscribe?.();
     window.removeEventListener("online", online);
     document.removeEventListener("visibilitychange", visible);

@@ -610,6 +610,46 @@ async function fixture(
   return { server, base, rpc, mutation };
 }
 
+test('HTTP read batches retain per-item validation, authorization and correlation with bounded admission', async t => {
+  const { base } = await fixture(t);
+  const request = (body: unknown, token = clientToken) => fetch(base + '/api/v1/rpc', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify(body),
+  });
+  const frame = (id: string, method = 'system.status', params: unknown = {}) => ({ jsonrpc: '2.0', id, method, params });
+  const mixed = await request([frame('status'), frame('invalid', 'system.status', { unknown: true }), frame('socket', 'notifications.subscribe', { filters: [] })]);
+  assert.equal(mixed.status, 200);
+  const replies = await mixed.json() as Envelope[];
+  assert.equal(replies.length, 3);
+  assert.ok(replies.find(reply => reply.id === 'status')?.result);
+  assert.equal(replies.find(reply => reply.id === 'invalid')?.error?.data.code, 'invalid_arguments');
+  assert.equal(replies.find(reply => reply.id === 'socket')?.error?.data.code, 'invalid_arguments');
+  for (const body of [[], Array.from({ length: 9 }, (_, i) => frame(String(i))), [frame('duplicate'), frame('duplicate')]]) {
+    const refused = await request(body);
+    assert.ok(refused.status >= 400);
+    assert.equal((await refused.json() as Envelope).error?.data.outcome, 'not_executed');
+  }
+  const refused = await request([frame('one'), frame('two')], 'invalid-token');
+  assert.equal(refused.status, 401);
+  assert.equal((await refused.json() as Envelope).id, null);
+  const partial = await request([frame('valid'), null, { ...frame('bad-envelope'), jsonrpc: '1.0' }]);
+  const parts = await partial.json() as Envelope[];
+  assert.ok(parts.find(reply => reply.id === 'valid')?.result);
+  assert.equal(parts.find(reply => reply.id === 'bad-envelope')?.error?.data.code, 'invalid_frame');
+  assert.equal(parts.find(reply => reply.id === null)?.error?.data.code, 'invalid_frame');
+});
+
+test('HTTP batches bound aggregate results while preserving other item outcomes', async t => {
+  const { server, base } = await fixture(t);
+  t.mock.method(server, 'invoke', async (_context: unknown, request: unknown) => (request as { method: string }).method === 'large'
+    ? 'x'.repeat(managementFrameBytes / 2 + 1024) : { ok: true });
+  const response = await fetch(base + '/api/v1/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + clientToken },
+    body: JSON.stringify(['first', 'second', 'small'].map(id => ({ jsonrpc: '2.0', id, method: id === 'small' ? 'small' : 'large', params: {} }))) });
+  const text = await response.text(), replies = JSON.parse(text) as Envelope[];
+  assert.ok(Buffer.byteLength(text) <= managementFrameBytes);
+  assert.equal(replies.filter(reply => reply.error?.data.code === 'result_too_large').length, 1);
+  assert.deepEqual(replies.find(reply => reply.id === 'small')?.result, { ok: true });
+});
+
 async function oauthTokens(server: HiveServer) {
   const oauth = (server as unknown as { oauth: HiveOAuth }).oauth;
   const redirectUri = "http://127.0.0.1/callback",
@@ -1048,7 +1088,10 @@ test(
       });
       const login = await fetch(base + "/", { redirect: "manual" });
       assert.equal(login.status, 303);
-      assert.equal(login.headers.get("location"), prefix + "/login");
+      const loginTarget = new URL(login.headers.get("location")!, base);
+      assert.equal(loginTarget.pathname, prefix + "/login");
+      assert.equal(loginTarget.searchParams.get('returnTo'), prefix + '/');
+      assert.equal(loginTarget.searchParams.get('resume'), '1');
       const status = await rpc("system.status", {});
       assert.equal(status.response.status, 200);
       for (const body of [
@@ -2107,7 +2150,7 @@ test("MCP paginates the complete typed catalog and routes exact providers withou
   assert.equal(validateInput({ serviceNodeId: "loopback", input: { value: "exact payload" } }), true);
   assert.equal(validateInput({ input: { value: "missing owner" } }), false);
   assert.equal(validateInput({ serviceNodeId: "other-host", input: { value: "second owner" } }), true);
-  assert.equal(echo._meta, undefined);
+  assert.deepEqual(echo._meta, { 'ivy/serviceName': 'fixture-provider' });
   const page = await devMcp.listTools({ cursor: "" }); assert.ok(page.nextCursor);
   await first.call("service.heartbeat", { ready: true, diagnostics: [] });
   await devMcp.listTools({ cursor: page.nextCursor });

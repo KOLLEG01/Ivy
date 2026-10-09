@@ -5,7 +5,7 @@ import catalog from '../../../../specs/schemas/task-board.operations.json' with 
 import evidenceChunk from '../../../../specs/schemas/task-board.evidence-chunk.json' with { type: 'json' };
 import readEvidenceChunk from '../../../../specs/schemas/task-board.read-evidence-chunk.json' with { type: 'json' };
 import attachment from '../../../../specs/schemas/task-board.attachment.json' with { type: 'json' };
-import { upgradeConfigurationRecord, upgradeTaskRecord } from '../../../../packages/contracts/src/task-board-records.js';
+import { upgradeConfigurationRecord, upgradeTaskRecord } from '../../../../packages/sdk/src/client.js';
 
 export const version = '1.0.0' as const;
 export const contractVersion = (key: ContractKey): '1.0.0' | '1.1.0' | '1.2.0' | '1.7.0' => key === 'task-board/task' ? '1.7.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/run' || key === 'task-board/delivery' ? '1.1.0' : version;

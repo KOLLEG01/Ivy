@@ -1,7 +1,7 @@
 import definition from '../ui.json';
 import type { Operation, TaskBoard, Wire } from '../../../packages/sdk/src/client.js';
 import { uiRuntime, route } from '../../../packages/ui-client/src/runtime';
-import { upgradeTaskRecord } from '../../../packages/contracts/src/task-board-records.js';
+import { upgradeTaskRecord } from '../../../packages/sdk/src/client.js';
 export const { base, client, uiUrl, notifications, live } = uiRuntime(definition.metadata);
 export type { TaskBoard, Operation, Wire };
 export const tr = (de: string, en: string) => navigator.language.toLowerCase().startsWith('de') ? de : en;

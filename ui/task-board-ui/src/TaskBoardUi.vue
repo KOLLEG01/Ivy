@@ -30,7 +30,7 @@ const services = useRemote(async (signal) => {
     if (cursor) seen.add(cursor);
   } while (cursor);
   return items;
-}, 30000, ["services"]);
+}, 30000, ["services/task-board"]);
 
 const lastNode = ref("");
 try {

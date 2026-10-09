@@ -73,6 +73,27 @@ test("native panels share owner readiness, suppress outage calls and recover wit
   assert.equal(checks.length, before);
   assert.equal(calls.length, sent + 1, "cancelled observations create no native work");
 });
+test("native failures retain known contracts and do not block other tasks, while changed definitions refresh once", async () => {
+  let version = 1, discoveries = 0;
+  const client = { request: async () => ({ connected: true, synced: true, ready: true, desiredEnabled: true }) };
+  const { nativeRead } = load("packages/ui-client/src/native.ts", { "../../sdk/src/client.js": {
+    IvyError, canonical: JSON.stringify, newOperationId: async () => "read-operation",
+    discover: async (_client, method, target) => { discoveries++; return { method, version, ...target }; },
+    callBound: async (_client, binding, args) => {
+      if (binding.version !== version) throw new IvyError("tool_definition_changed", "Changed definition");
+      if (args.threadId === "broken") throw new IvyError("native_error", "Native task failed");
+      return { version };
+    },
+  } });
+  for (let attempt = 0; attempt < 3; attempt++)
+    await assert.rejects(nativeRead(client, "one", "codex.thread/read", { threadId: "broken" }), { code: "native_error" });
+  assert.equal(discoveries, 1, "a native failure does not invalidate its unchanged contract");
+  assert.deepEqual(await nativeRead(client, "one", "codex.thread/read", { threadId: "other" }), { version: 1 });
+  version = 2;
+  assert.deepEqual(await nativeRead(client, "one", "codex.thread/read", { threadId: "other" }), { version: 2 });
+  assert.equal(discoveries, 2, "a rejected definition is rediscovered once");
+});
+
 test("native capability discovery and identical reads are shared with independent cancellation", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: 100000 });
   const discoveries = [], calls = [], signals = [];
@@ -174,6 +195,22 @@ function setup(t) {
 }
 async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); await vue.nextTick(); }
 async function advance(t, ms) { t.mock.timers.tick(ms); await settle(); }
+
+test('live loaders take their initial snapshot after acknowledgement and retain bounded HTTP fallback', async t => {
+  const mount = setup(t), notifications = new Notifications();
+  notifications.connected = false;
+  let reads = 0;
+  mount({ setup() { remote.useRemote(async () => ++reads, 15000, ['objects/wiki/page']); return {}; } }, {}, notifications);
+  await settle(); assert.equal(reads, 0);
+  notifications.ready(true); await settle(); assert.equal(reads, 1);
+  await advance(t, 250); assert.equal(reads, 1, 'connection setup does not trigger a second initial snapshot');
+  const unavailable = new Notifications(); unavailable.connected = false;
+  let fallback = 0;
+  mount({ setup() { remote.useRemote(async () => ++fallback, 15000, ['objects/wiki/page']); return {}; } }, {}, unavailable);
+  await settle(); assert.equal(fallback, 0);
+  await advance(t, 250); assert.equal(fallback, 1);
+  unavailable.ready(true); await advance(t, 250); assert.equal(fallback, 2, 'late connection setup reconciles the uncovered interval');
+});
 
 test("reactive live scopes follow their owner without refreshing for unrelated hosts", async t => {
   const mount = setup(t), notifications = new Notifications(), node = vue.ref("first");

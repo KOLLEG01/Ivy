@@ -142,7 +142,7 @@ const taskView = useRemote((signal) =>
       "task-board.read",
       { task: props.taskId },
       signal,
-    ) as Promise<TaskBoard.TaskView>, 15000, ["objects/task-board", "services"]);
+    ) as Promise<TaskBoard.TaskView>, 15000, () => ["objects/task-board", "services/task-board/" + props.workspace.serviceNodeId, "services/agent-manager"]);
 const action = useAction(() => props.workspace, "task:" + props.taskId);
 const panel = ref(""),
   deleteOpen = ref(false),

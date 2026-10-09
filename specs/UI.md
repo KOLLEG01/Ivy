@@ -26,6 +26,9 @@ Delivery and authentication follow [Hive](IVYHIVE-SPEC.md).
 - Live views share one SDK WebSocket per app/tab. Each loader opts into its actual change
   source; keep polling for sources without full push coverage. Confirm that source's
   subscription before suspending periodic reads and use one refresh owner per dataset.
+  Readiness belongs to acknowledged scopes and provider filters: adding another view must not refresh existing
+  views. Load the initial snapshot after acknowledgement, with a bounded HTTP fallback when
+  the socket is unavailable; reconnects refresh current state.
   Use polling during connection/setup failure or failed reads. Coalesce
   transient invalidations, recover current state after reconnect or browser suspension, and
   preserve drafts, selection and paging. Empty invalidations are liveness heartbeats, not reads.
@@ -33,16 +36,24 @@ Delivery and authentication follow [Hive](IVYHIVE-SPEC.md).
   object reads by contract. Changes on another owner must not reload a task's native panels.
 - Loading, empty, stale, offline, unsupported and failed are distinct states. Show real owner,
   observation time and limits; missing measurements are unknown, not zero.
-- All browser UIs share bounded request admission: 16 sent requests per client, at most eight
+- All browser UIs share one SDK client with bounded admission: 16 logical requests per client, at most eight
   routed to providers, and 128 waiting. Ordinary reads may pass waiting provider calls.
   Cancellation removes waiting work and the deadline includes its wait; sent work is never
   automatically replayed. Pages reuse recent read bindings and load JSON list documents in
   bounded query pages; residual collection reads use four workers. Hive holds each routed call
   until its provider answers, and tabs sharing a credential share Hive's aggregate budget.
+  The SDK gathers read micro-batches and shares concurrent identical observations with
+  independent cancellation. Completed responses are not cached. Writes fence earlier
+  observations and are sent individually. Keep provider reads separate by provider and
+  from ordinary Hive reads so a slow owner cannot block other owners.
+  Bound Tools use their pinned `readOnlyHint` to classify reads, including native reads
+  that require an operation ID; each call retains that ID and its definition hash.
   Native panels share capability discovery and simultaneous identical reads, including
   independent cancellation. They share a short readiness observation for their selected owner, suppress
   provider reads during known unavailability, and back off failed journal polls while
   retaining automatic recovery and the original owner.
+  Native invocation failures retain known Tool bindings; rediscover a binding when its
+  definition changes or its cache expires.
 - Every UI belongs to one installable Ivy browser app, scoped to the configured Hive base
   path. The shared account menu offers installation and per-browser notification settings.
   A shared desktop/mobile installation banner remains until installation or dismissal,

@@ -22,7 +22,7 @@ const query = computed(() => new URLSearchParams(hash.value.split('?')[1] ?? '')
 const systemPage = computed(() => section.value.startsWith('system/') ? section.value.slice('system/'.length) : '');
 const systemPages = { nodes: NodesView, problems: ProblemsView, releases: ReleasesView, deployments: DeploymentsView, retention: RetentionView, definitions: DefinitionsView, objects: ObjectsView, settings: ConfigurationsView, mcp: McpDiscoveryView };
 const view = computed(() => section.value === 'uis' ? UIsView : Object.hasOwn(systemPages, systemPage.value) ? systemPages[systemPage.value as keyof typeof systemPages] : null);
-const status = useRemote(signal => consoleClient.request('system.status', {}, { signal }), 30000, ['services', 'system']);
+const status = useRemote(signal => consoleClient.request('system.status', {}, { signal }), 30000, ['system/runtime']);
 const uis = useRemote(signal => consoleClient.request('uis.catalog', { limit: 50 }, { signal }), 60000, ['uis']);
 const uiLinks = computed(() => (uis.value.value?.items ?? []).filter(ui => ui.currentReleaseId && ui.metadata.uiId !== 'chat-ui').map(ui => ({ id: ui.metadata.uiId, name: ui.metadata.displayName, href: uiUrl(ui), icon: uiIcon(ui.metadata.iconKey) })));
 const systemNavigation = [

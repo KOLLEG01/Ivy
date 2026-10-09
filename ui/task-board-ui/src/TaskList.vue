@@ -75,7 +75,7 @@ const hosts = useRemote((signal) =>
     "serviceNodes.list",
     { serviceName: "agent-manager", limit: 200 },
     { signal },
-  ), 0, ["services"]);
+  ), 0, ["services/agent-manager"]);
 const filterKey = computed(() =>
   JSON.stringify(
     ["q", "status", "control", "host", "category"].map((key) =>

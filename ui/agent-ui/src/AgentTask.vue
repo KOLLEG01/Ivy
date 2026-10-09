@@ -1193,22 +1193,15 @@ onMounted(() => {
     )
       scheduleRefresh(true);
   }, 15000);
-  unsubscribe = notifications.subscribe(
-    {
-      namespace: "agent",
-      name: "notification",
-      version: "1.0.0",
-      serviceNodeId: props.node,
-    },
-    receiveProviderNotification,
-  );
+  const filter = { namespace: "agent", name: "notification", version: "1.0.0", serviceNodeId: props.node };
+  unsubscribe = notifications.subscribe(filter, receiveProviderNotification);
   stopStatus = notifications.onStatus((ready) => {
     clearTimeout(timer);
     if (ready) {
       scheduleRefresh(true);
       void poll();
     } else timer = setTimeout(() => void poll(), 1000);
-  });
+  }, [], [filter]);
   stopServiceChanges = notifications.subscribeChanges(["services/agent-manager/" + props.node], () => {
     scheduleRefresh(true);
     void poll();

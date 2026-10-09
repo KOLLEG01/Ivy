@@ -21,7 +21,7 @@ const props = defineProps<{
   section: string;
 }>();
 const emit = defineEmits<{ selectNode: [value: string] }>();
-const workspace = useRemote((signal) => loadWorkspace(props.node, signal), 30000, ["services", "objects/secretary/configuration"]);
+const workspace = useRemote((signal) => loadWorkspace(props.node, signal), 30000, () => ["services/secretary/" + props.node, "objects/secretary/configuration"]);
 const navigation = computed(() => [
   {
     label: tr("Journal", "Journal"),

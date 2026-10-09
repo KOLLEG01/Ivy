@@ -45,7 +45,7 @@ const managers = useRemote(
     return result.items;
   },
   30000,
-  ["services"],
+  ["services/agent-manager"],
 );
 const current = useRemote(
   async (signal) => {

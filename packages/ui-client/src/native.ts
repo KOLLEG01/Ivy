@@ -87,7 +87,8 @@ async function executeRead(client: RpcClient, node: string, method: string, args
       signal?.throwIfAborted();
       return await callBound(client, binding, args, method.startsWith('codex.') ? await newOperationId(client) : undefined, signal ? { signal } : {});
     } catch (error) {
-      if (!signal?.aborted) readBindings.get(client)?.delete(node + '\u0000' + method);
+      if (!signal?.aborted && error instanceof IvyError && error.code === 'tool_definition_changed')
+        readBindings.get(client)?.delete(node + '\u0000' + method);
       if (!signal?.aborted && error instanceof IvyError && ['service_unavailable', 'service_not_ready', 'native_capacity'].includes(error.code))
         readReadiness.get(client)?.set(node, { until: Date.now() + readinessMs, error });
       if (attempt || !(error instanceof IvyError) || error.code !== 'tool_definition_changed') throw error;

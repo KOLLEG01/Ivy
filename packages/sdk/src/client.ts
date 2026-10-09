@@ -5,6 +5,8 @@ import {
 import { encodeJson } from "../../contracts/src/canonical-json.js";
 import { IvyError, requireThat } from "../../contracts/src/errors.js";
 import { RequestQueue } from "./request-queue.js";
+import { ReadBatcher } from "./read-batcher.js";
+import { isReadRequest } from "../../contracts/src/read-request.js";
 import type {
   Operation,
   OperationName,
@@ -38,6 +40,7 @@ export type {
   Wire,
 } from "../../contracts/src/generated.js";
 export { IvyError, requireThat } from "../../contracts/src/errors.js";
+export { upgradeTaskRecord, upgradeConfigurationRecord } from "../../contracts/src/task-board-records.js";
 export {
   canonical,
   deriveOperationId,
@@ -52,11 +55,16 @@ export {
   jsonObjectContentBytes,
   managementFrameBytes,
   mcpDiscoveryResultBytes,
+  rpcBatchRequests,
+  rpcBatchRequestBytes,
   textObjectContentBytes,
 } from "../../contracts/src/limits.js";
+// Only a pinned Tool binding may classify a routed read that retains an operation identity.
+const boundRead = Symbol("bound-read");
 export interface RequestOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  [boundRead]?: boolean;
 }
 export interface ToolCallOptions extends RequestOptions {
   expectedCallerPrincipalId?: string;
@@ -223,7 +231,7 @@ export function callBound(
       ...(binding.resourceRef ? { resourceRef: binding.resourceRef } : {}),
       ...(operationId === undefined ? {} : { operationId }),
     },
-    options,
+    { ...options, [boundRead]: binding.definition.annotations?.readOnlyHint === true },
   );
 }
 
@@ -337,7 +345,7 @@ export class BoundToolClient {
     const pending = this.bindings.get(binding.qualifiedName);
     if (
       pending &&
-      await pending === binding &&
+      (await pending) === binding &&
       this.bindings.get(binding.qualifiedName) === pending
     )
       this.bindings.delete(binding.qualifiedName);
@@ -537,6 +545,7 @@ export class HiveClient implements RpcClient {
   readonly base: URL;
   private active = 0;
   private readonly queue: RequestQueue | null;
+  private readonly reads: ReadBatcher | null;
   constructor(
     value: string,
     private readonly options: {
@@ -548,6 +557,8 @@ export class HiveClient implements RpcClient {
       requestCalls?: number;
       /** Maximum requests waiting to be sent. */
       queuedRequests?: number;
+      /** Share concurrent reads and gather small read batches; writes are always sent individually. */
+      batchReads?: boolean;
     } = {},
   ) {
     this.base = baseUrl(value);
@@ -560,13 +571,21 @@ export class HiveClient implements RpcClient {
       "Invalid client concurrency limit.",
     );
     this.queue =
-      options.requestCalls || options.providerCalls
+      options.batchReads || options.requestCalls || options.providerCalls
         ? new RequestQueue(
             maximum,
             options.providerCalls ?? maximum,
             options.queuedRequests ?? 128,
           )
         : null;
+    this.reads = options.batchReads
+      ? new ReadBatcher(
+          (provider, signal) =>
+            this.queue?.acquire(provider, signal) ?? Promise.resolve(() => {}),
+          (body, signal) => this.exchange(body, signal),
+          responseValue,
+        )
+      : null;
   }
   async request<M extends OperationName>(
     method: M,
@@ -583,8 +602,16 @@ export class HiveClient implements RpcClient {
       : controller.signal;
     let release: (() => void) | undefined;
     let sent = false;
+    const read = method === "tools.call" && options[boundRead] !== undefined
+      ? options[boundRead]!
+      : isReadRequest(method, params);
     try {
       signal.throwIfAborted();
+      if (this.reads && read)
+        return (await this.reads.request(method, params, signal, () => {
+          sent = true;
+        })) as Result<M>;
+      if (!read) this.reads?.invalidate();
       if (this.queue)
         release = await this.queue.acquire(
           method === "tools.call" || method === "discovery.call",
@@ -602,6 +629,7 @@ export class HiveClient implements RpcClient {
         );
       throw error;
     } finally {
+      if (!read) this.reads?.invalidate();
       release?.();
       clearTimeout(timer);
     }
@@ -611,15 +639,22 @@ export class HiveClient implements RpcClient {
     params: Params<M>,
     options: RequestOptions & { signal: AbortSignal },
   ): Promise<Result<M>> {
+    const id = crypto.randomUUID();
+    return responseValue(
+      await this.exchange(
+        encodeJson({ jsonrpc: "2.0", id, method, params }),
+        options.signal,
+      ),
+      id,
+    ) as Result<M>;
+  }
+  private async exchange(body: string, signal: AbortSignal): Promise<unknown> {
     requireThat(
       this.active < connectionInFlightRequests,
       "limit_exceeded",
       "Hive client request limit reached.",
     );
-    options.signal?.throwIfAborted();
-    const id = crypto.randomUUID(),
-      body = encodeJson({ jsonrpc: "2.0", id, method, params });
-    const signal = options.signal;
+    signal.throwIfAborted();
     this.active++;
     try {
       const response = await (this.options.fetch ?? fetch)(
@@ -683,7 +718,7 @@ export class HiveClient implements RpcClient {
           "unknown",
         );
       }
-      return responseValue(frame, id) as Result<M>;
+      return frame;
     } catch (error) {
       if (error instanceof IvyError) throw error;
       throw new IvyError(
@@ -698,6 +733,7 @@ export class HiveClient implements RpcClient {
 }
 
 /** Browser code receives no API credential and stores no authentication material. */
+const browserClients = new Map<string, HiveClient>();
 export function browserClient(value: string): HiveClient {
   const base = baseUrl(value);
   requireThat(
@@ -705,12 +741,17 @@ export function browserClient(value: string): HiveClient {
     "invalid_arguments",
     "Browser Hive access must stay on the current origin.",
   );
+  const existing = browserClients.get(base.href);
+  if (existing) return existing;
   // Pages share one per-client Hive request budget; a slow provider must not consume all of it.
-  return new HiveClient(base.href, {
+  const client = new HiveClient(base.href, {
     requestCalls: 16,
     providerCalls: 8,
     queuedRequests: 128,
+    batchReads: true,
   });
+  browserClients.set(base.href, client);
+  return client;
 }
 
 /** Browser-only provider notifications. Commands keep using the reconciled HTTP client. */
@@ -725,7 +766,12 @@ export class BrowserNotifications {
     (scopes: string[]) => void,
     readonly string[]
   >();
-  private readonly statusListeners = new Set<(ready: boolean) => void>();
+  private readonly statusListeners = new Map<
+    (ready: boolean) => void,
+    { scopes: readonly string[]; filters: readonly ProviderNotificationFilter[]; last: boolean }
+  >();
+  private syncedChanges = new Set<string>();
+  private syncedFilters: readonly ProviderNotificationFilter[] = [];
   private ready = false;
   private deadline: ReturnType<typeof setTimeout> | undefined;
   private heartbeat: ReturnType<typeof setTimeout> | undefined;
@@ -736,6 +782,8 @@ export class BrowserNotifications {
     signature: string;
     count: number;
     changes: number;
+    scopes: string[];
+    filters: ProviderNotificationFilter[];
   } | null = null;
   private syncedSignature: string | null = null;
   constructor(value: string) {
@@ -760,9 +808,14 @@ export class BrowserNotifications {
   get connected(): boolean {
     return this.ready;
   }
-  onStatus(listener: (ready: boolean) => void): () => void {
-    this.statusListeners.add(listener);
-    listener(this.ready);
+  onStatus(
+    listener: (ready: boolean) => void,
+    scopes: readonly string[] = [],
+    filters: readonly ProviderNotificationFilter[] = [],
+  ): () => void {
+    const ready = this.ready && this.acknowledged(scopes, filters);
+    this.statusListeners.set(listener, { scopes: [...scopes], filters: structuredClone(filters), last: ready });
+    listener(ready);
     return () => {
       this.statusListeners.delete(listener);
     };
@@ -785,15 +838,23 @@ export class BrowserNotifications {
     this.connect();
   }
   private setReady(value: boolean): void {
-    if (this.ready === value) return;
     this.ready = value;
-    for (const listener of this.statusListeners) {
+    for (const [listener, state] of this.statusListeners) {
+      const ready = value && this.acknowledged(state.scopes, state.filters);
+      if (state.last === ready) continue;
+      state.last = ready;
       try {
-        listener(value);
+        listener(ready);
       } catch {
         /* Subscribers are isolated. */
       }
     }
+  }
+  private acknowledged(scopes: readonly string[], filters: readonly ProviderNotificationFilter[]): boolean {
+    return scopes.every((scope) => this.syncedChanges.has(scope)) &&
+      filters.every(filter => this.syncedFilters.some(synced =>
+        synced.namespace === filter.namespace && synced.name === filter.name && synced.version === filter.version &&
+        (synced.serviceNodeId === undefined || synced.serviceNodeId === filter.serviceNodeId)));
   }
   private wanted(): boolean {
     return this.listeners.size + this.changeListeners.size > 0;
@@ -814,6 +875,8 @@ export class BrowserNotifications {
     this.socket = null;
     this.pending = null;
     this.syncedSignature = null;
+    this.syncedChanges.clear();
+    this.syncedFilters = [];
     clearTimeout(this.deadline);
     clearTimeout(this.heartbeat);
     this.setReady(false);
@@ -850,12 +913,13 @@ export class BrowserNotifications {
       signature = canonical({ filters, changes });
     if (signature === this.syncedSignature) return;
     const id = crypto.randomUUID();
-    this.setReady(false);
     this.pending = {
       id,
       signature,
       count: filters.length,
       changes: changes.length,
+      scopes: changes,
+      filters,
     };
     clearTimeout(this.deadline);
     this.deadline = setTimeout(() => this.disconnected(socket), 5_000);
@@ -941,11 +1005,13 @@ export class BrowserNotifications {
             "Hive returned an invalid notification subscription result.",
           );
           this.syncedSignature = pending.signature;
+          this.syncedChanges = new Set(pending.scopes);
+          this.syncedFilters = pending.filters;
           this.pending = null;
           clearTimeout(this.deadline);
           this.reconnectMs = 500;
           this.sync();
-          if (this.socket === socket && !this.pending) this.setReady(true);
+          if (this.socket === socket) this.setReady(true);
         } catch {
           this.disconnected(socket);
         }

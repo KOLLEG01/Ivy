@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "dashboards-ui",
   "kind": "app",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "description": "Dashboard list, HTML editor and frameless viewer",
   "connectsToHive": false,
   "requirements": {

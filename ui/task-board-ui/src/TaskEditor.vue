@@ -161,7 +161,7 @@ const blockerOptions = computed(() =>
 );
 
 // Execution: every agent Task names one host; the configured default host is preselected.
-const environments = useRemote(executionEnvironments, 30000, ["services"]);
+const environments = useRemote(executionEnvironments, 30000, ["services/agent-manager"]);
 const executionDefaults = useExecutionDefaults(
   () => props.workspace,
   () => props.task?.value,

@@ -4,6 +4,12 @@ Contracts: [operations](schemas/operations.json), [wire schema](schemas/hive-wir
 [operation schema](schemas/hive-operations.schema.json).
 [Interface boundaries](INTERFACE-BOUNDARIES.md) apply to every transport.
 
+HTTP RPC accepts bounded JSON-RPC request arrays. Each item uses normal authorization,
+admission and validation and retains its own result or error identity; batches are not
+transactions and have no execution ordering guarantee. Request count, request bytes
+and aggregate response bytes obey the [shared limits](../packages/contracts/src/limits.ts).
+MCP continues to use its standard single-message envelope.
+
 ## Access and storage
 
 - Use the configured canonical base URL for links, cookies and redirects, including subpath

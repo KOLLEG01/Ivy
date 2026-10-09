@@ -22,7 +22,7 @@ const services = useRemote(async (signal) => {
     cursor = page.nextCursor;
   } while (cursor);
   return items;
-}, 30000, ["services"]);
+}, 30000, ["services/secretary"]);
 const selected = ref(new URLSearchParams(location.hash.split("?")[1] ?? "").get("node") ?? "");
 const node = computed(() => {
   const values = services.value.value ?? [];

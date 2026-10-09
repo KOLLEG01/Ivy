@@ -1,6 +1,7 @@
 import test from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
+import ts from "typescript";
 import {
   mkdtempSync,
   readdirSync,
@@ -126,18 +127,22 @@ test("service and browser implementations depend on the public SDK boundary", ()
       directTransports.add(normalized + ":websocket");
     if (/\+\s*['"]\/mcp['"]/.test(source))
       directTransports.add(normalized + ":mcp-endpoint");
-    for (const occurrence of source.matchAll(/serviceTools\(([^)]*)\)/g))
-      assert.match(
-        occurrence[1]!,
-        /interfaceVersion/,
-        `${file} calls a stable service namespace without its SDK interface version`,
-      );
+    const script = file.endsWith('.vue') ? [...source.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(match => match[1]).join('\n') : source;
+    const parsed = ts.createSourceFile(file, script, ts.ScriptTarget.Latest, true);
+    const check = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'serviceTools')
+        assert.match(node.arguments[2]?.getText(parsed) ?? '', /interfaceVersion/,
+          `${file} calls a stable service namespace without its SDK interface version`);
+      ts.forEachChild(node, check);
+    };
+    check(parsed);
   }
   assert.deepEqual(
     [...directTransports].sort(),
     [
-      "services/agent-manager/src/proxy-transport.ts:websocket",
+      "packages/ui-client/src/browser-app.ts:fetch",
       "services/chat-bridge/src/whatsapp/media.ts:fetch",
+      "services/data-collector/src/runner.ts:fetch",
     ],
     "direct product transports must stay limited to the documented service-owned exceptions",
   );
@@ -444,6 +449,48 @@ test("browser notifications correlate versioned subscription setup and can resta
   assert.deepEqual(setup.params.changes, ["objects/wiki", "services"]);
   third.message({ jsonrpc: "2.0", id: setup.id, result: { subscribed: 0, changes: 2 } });
   assert.equal(notifications.connected, true);
+  const wikiStatus: boolean[] = [], newStatus: boolean[] = [];
+  cleanup.push(notifications.onStatus(value => wikiStatus.push(value), ["objects/wiki"]));
+  const newChanges = notifications.subscribeChanges(["inventory/codex/thread"], () => undefined);
+  cleanup.push(newChanges);
+  cleanup.push(notifications.onStatus(value => newStatus.push(value), ["inventory/codex/thread"]));
+  assert.deepEqual(wikiStatus, [true], "an existing subscription stays ready during an unrelated addition");
+  assert.deepEqual(newStatus, [false], "new scopes wait for their own acknowledgement");
+  const expanded = JSON.parse(third.sent.at(-1)!);
+  third.message({ jsonrpc: "2.0", id: expanded.id, result: { subscribed: 0, changes: 3 } });
+  assert.deepEqual(wikiStatus, [true]);
+  assert.deepEqual(newStatus, [false, true]);
+  newChanges();
+  const narrowed = JSON.parse(third.sent.at(-1)!);
+  third.message({ jsonrpc: "2.0", id: narrowed.id, result: { subscribed: 0, changes: 2 } });
+  assert.deepEqual(wikiStatus, [true]);
+  assert.deepEqual(newStatus, [false, true, false]);
+  const providerStatus: boolean[] = [];
+  const stopProvider = notifications.subscribe(filter, () => undefined);
+  cleanup.push(stopProvider);
+  cleanup.push(notifications.onStatus(value => providerStatus.push(value), ["objects/wiki"], [filter]));
+  assert.deepEqual(providerStatus, [false], "an acknowledged change scope cannot replace a missing provider subscription");
+  assert.deepEqual(wikiStatus, [true], "provider additions do not invalidate an existing view");
+  const providerSetup = JSON.parse(third.sent.at(-1)!);
+  third.message({ jsonrpc: "2.0", id: providerSetup.id, result: { subscribed: 1, changes: 2 } });
+  assert.deepEqual(providerStatus, [false, true]);
+  const otherOwnerStatus: boolean[] = [];
+  cleanup.push(notifications.onStatus(value => otherOwnerStatus.push(value), [], [{ ...filter, serviceNodeId: "agent-two" }]));
+  assert.deepEqual(otherOwnerStatus, [false], "another owner's acknowledged filter cannot cover this owner");
+  const stopAllOwners = notifications.subscribe({ namespace: "agent", name: "notification", version: "1.0.0" }, () => undefined);
+  cleanup.push(stopAllOwners);
+  const allOwnersSetup = JSON.parse(third.sent.at(-1)!);
+  third.message({ jsonrpc: "2.0", id: allOwnersSetup.id, result: { subscribed: 2, changes: 2 } });
+  assert.deepEqual(otherOwnerStatus, [false, true], "an acknowledged unscoped filter already covers an added owner");
+  assert.deepEqual(wikiStatus, [true]);
+  stopAllOwners();
+  const allOwnersRemoval = JSON.parse(third.sent.at(-1)!);
+  third.message({ jsonrpc: "2.0", id: allOwnersRemoval.id, result: { subscribed: 1, changes: 2 } });
+  assert.deepEqual(otherOwnerStatus, [false, true, false]);
+  stopProvider();
+  const providerRemoval = JSON.parse(third.sent.at(-1)!);
+  third.message({ jsonrpc: "2.0", id: providerRemoval.id, result: { subscribed: 0, changes: 2 } });
+  assert.deepEqual(providerStatus, [false, true, false]);
   third.message({ jsonrpc: "2.0", method: "notifications.changed", params: { scopes: ["objects/task-board/task"] } });
   third.message({ jsonrpc: "2.0", method: "notifications.changed", params: { scopes: ["objects/wiki/page"] } });
   third.message({ jsonrpc: "2.0", method: "notifications.changed", params: { scopes: ["objects"] } });

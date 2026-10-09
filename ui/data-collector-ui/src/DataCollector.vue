@@ -351,8 +351,8 @@ onUnmounted(() => {
             class="h-full gap-3 transition-colors group-hover:border-foreground/20 group-hover:bg-accent/50"
           >
             <CardHeader>
-              <div class="flex items-center justify-between gap-3">
-                <CardTitle class="truncate">{{ row.task.name }}</CardTitle>
+              <div class="flex min-w-0 items-center justify-between gap-3">
+                <CardTitle class="min-w-0 flex-1 truncate">{{ row.task.name }}</CardTitle>
                 <StatusBadge
                   :label="statusLabel(row.status)"
                   :tone="statusTone(row.status)"
