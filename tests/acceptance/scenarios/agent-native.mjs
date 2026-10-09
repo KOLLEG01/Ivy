@@ -109,7 +109,7 @@ try {
     await page.goto(entry + '#/host?node=' + encodeURIComponent(values.owner));
     await choose(page.getByLabel('Project', { exact: true }), values.project);
     await page.getByRole('button', { name: 'Create task', exact: true }).click();
-    await page.getByRole('link', { name: 'Open created task', exact: true }).click();
+    await page.waitForURL(url => url.hash.startsWith('#/task?'));
     report.threadId = new URLSearchParams(page.url().split('?').at(-1)).get('id'); assert.ok(report.threadId);
   }
   if (report.needsAttach) {

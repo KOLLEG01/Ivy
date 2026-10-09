@@ -655,6 +655,43 @@ test(
 );
 
 test(
+  "AgentUI shows host usage, collapses hosts and lists tasks by latest update with row actions",
+  { timeout: 120000 },
+  async (t) => {
+    const f = await agentFixture(t, undefined, true);
+    await f.open("#/host?node=browser-agent");
+    const navigation = f.page.getByRole("navigation", { name: "Recent tasks" });
+    const task = navigation.getByRole("link", { name: "saved-task", exact: true });
+    const host = navigation.getByRole("button", { name: "isolated-agent-host", exact: true });
+    await expect(task).toBeVisible({ timeout: 35000 });
+
+    await navigation.getByRole("button", { name: "Usage on isolated-agent-host", exact: true }).click();
+    const usage = f.page.getByRole("dialog");
+    await expect(usage.getByText("5-hour limit", { exact: true })).toBeVisible();
+    await expect(usage.getByText("12% used", { exact: true })).toBeVisible();
+    await f.page.keyboard.press("Escape");
+
+    await host.click();
+    await expect(task).toHaveCount(0);
+    await f.page.reload();
+    await expect(host).toHaveAttribute("aria-expanded", "false");
+    await host.click();
+    await expect(task).toBeVisible();
+
+    await navigation.getByRole("button", { name: "Filter tasks", exact: true }).click();
+    await f.page.getByRole("menuitemradio", { name: "By latest update", exact: true }).click();
+    await expect(host).toHaveCount(0);
+    await expect(task).toBeVisible();
+    await navigation.getByRole("button", { name: "Actions for saved-task", exact: true }).click();
+    await f.page.getByLabel("Task name", { exact: true }).fill("Renamed from sidebar");
+    await f.page.getByRole("button", { name: "Rename", exact: true }).click();
+    await expect.poll(() => f.threads.get("saved-task").name).toBe("Renamed from sidebar");
+    assert.deepEqual(f.pageErrors, []);
+    assert.deepEqual(f.externalRequests, []);
+  },
+);
+
+test(
   "AgentUI keeps host configuration on a dedicated settings page",
   { timeout: 90000 },
   async (t) => {

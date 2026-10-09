@@ -449,7 +449,7 @@ watch(() => action.saved.value?.phase, (phase) => {
       @retry="status.refresh"
     />
     <div class="new-task-center flex flex-1 flex-col justify-center">
-      <h2 class="mb-6 text-center text-2xl font-medium tracking-tight">
+      <h2 class="mb-6 text-center text-xl font-medium tracking-tight">
         What should we work on?
       </h2>
       <p
@@ -475,7 +475,7 @@ watch(() => action.saved.value?.phase, (phase) => {
         <Textarea
           id="first-message"
           v-model="message"
-          class="max-h-48 min-h-14 resize-none border-0 bg-transparent px-2 py-2 text-base shadow-none focus-visible:ring-0 dark:bg-transparent"
+          class="max-h-48 min-h-14 resize-none border-0 bg-transparent px-2 py-2 shadow-none focus-visible:ring-0 dark:bg-transparent"
           :disabled="creating || action.locked.value || !!launch"
           :maxlength="131072"
           placeholder="Ask anything, describe a task, or share an idea…"
@@ -636,28 +636,25 @@ watch(() => action.saved.value?.phase, (phase) => {
             }
           "
         />
-        <div v-if="createdId" class="mt-3 flex gap-2">
-          <Button
-            v-if="
-              launch &&
-              !sending &&
-              !firstMessage.busy.value &&
-              (!firstMessage.saved.value ||
-                record(firstMessage.saved.value.call.arguments).threadId !==
-                  createdId ||
-                ['failed', 'succeeded'].includes(
-                  firstMessage.saved.value.phase,
-                ))
-            "
-            variant="outline"
-            @click="continueLaunch"
-            >Continue setup</Button
-          ><Button v-if="!launch" variant="ghost" as-child
-            ><a :href="route('task', { node, id: createdId })"
-              >Open created task</a
-            ></Button
-          >
-        </div>
+        <!-- A finished launch opens its task itself; only an interrupted one needs a control here. -->
+        <Button
+          v-if="
+            createdId &&
+            launch &&
+            !sending &&
+            !firstMessage.busy.value &&
+            (!firstMessage.saved.value ||
+              record(firstMessage.saved.value.call.arguments).threadId !==
+                createdId ||
+              ['failed', 'succeeded'].includes(
+                firstMessage.saved.value.phase,
+              ))
+          "
+          variant="outline"
+          class="mt-3"
+          @click="continueLaunch"
+          >Continue setup</Button
+        >
       </ConversationComposer>
     </div>
   </div>

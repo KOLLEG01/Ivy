@@ -88,7 +88,7 @@ const choose = (value: unknown) => {
         >
           <FolderGit2 aria-hidden="true" />
           <span class="min-w-0"
-            ><span class="block truncate">{{ project.name }}</span>
+            ><span class="block truncate" :data-value="project.value">{{ project.name }}</span>
             <span class="block truncate text-xs text-muted-foreground">{{
               project.path
             }}</span>

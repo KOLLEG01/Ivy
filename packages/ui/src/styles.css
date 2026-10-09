@@ -194,28 +194,43 @@
 .ivy-markdown > :first-child {
   margin-top: 0;
 }
+/* Conversation text follows the compact desktop assistants: 14px prose, 13px controls. */
 .ivy-conversation {
-  font-size: 0.9375rem;
+  font-size: 0.875rem;
   line-height: 1.6;
 }
 .ivy-conversation .ivy-markdown {
-  line-height: 1.65;
+  line-height: 1.6;
 }
 .ivy-conversation .ivy-markdown > * + * {
-  margin-top: 0.75rem;
+  margin-top: 0.625rem;
 }
 .ivy-conversation .ivy-markdown h1 {
-  font-size: 1.25rem;
-}
-.ivy-conversation .ivy-markdown h2 {
   font-size: 1.125rem;
 }
-.ivy-conversation .ivy-markdown h3 {
+.ivy-conversation .ivy-markdown h2 {
   font-size: 1rem;
+}
+.ivy-conversation .ivy-markdown h3 {
+  font-size: 0.9375rem;
+}
+.ivy-message-bubble {
+  width: fit-content;
+  max-width: 85%;
+  margin-left: auto;
+  border-radius: 1.125rem;
+  background: var(--muted);
+  padding: 0.5rem 0.875rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .ivy-composer {
   min-width: 0;
   box-shadow: 0 3px 16px color-mix(in srgb, var(--foreground) 5%, transparent);
+}
+.ivy-composer [data-slot="textarea"] {
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 .ivy-composer:focus-within {
   border-color: color-mix(in srgb, var(--foreground) 22%, var(--border));
@@ -226,7 +241,7 @@
   border-color: transparent;
   background: transparent;
   box-shadow: none;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   padding-block: 0;
   padding-left: 0.75rem;
 }
@@ -317,6 +332,7 @@
 @media (max-width: 767px) and (hover: none) and (pointer: coarse) {
   [data-slot="input"],
   [data-slot="textarea"],
+  .ivy-composer [data-slot="textarea"],
   select {
     font-size: 16px;
   }

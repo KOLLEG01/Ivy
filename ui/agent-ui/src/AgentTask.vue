@@ -9,17 +9,14 @@ import {
   watch,
 } from "vue";
 import {
-  Archive,
   ArrowDown,
   ArrowUp,
   ChevronRight,
   Download,
-  FolderOpen,
   LoaderCircle,
   MoreHorizontal,
   Square,
   Target,
-  Trash2,
   X,
 } from "@lucide/vue";
 import {
@@ -33,19 +30,11 @@ import {
   ComposerQueue,
   ConversationComposer,
   ContentView,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DropdownMenu,
-  DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
   Input,
   Label,
+  LoadingIndicator,
+  MessageBubble,
   OptionSelect,
   RemoteState,
   Textarea,
@@ -69,7 +58,6 @@ import {
 import { useNativeAction } from "../../../packages/ui-client/src/native-action";
 import NativeActionState from "../../../packages/ui-client/src/NativeActionState.vue";
 import NativeInputs from "../../../packages/ui-client/src/NativeInputs.vue";
-import TaskProjectDialog from "../../../packages/ui-client/src/TaskProjectDialog.vue";
 import MessageImages from "../../../packages/ui-client/src/MessageImages.vue";
 import { readNativeImage } from "../../../packages/ui-client/src/native-images";
 import {
@@ -83,14 +71,14 @@ import {
 } from "../../../packages/ui-client/src/native-modes";
 import { readNativeThreadControl } from "../../../packages/ui-client/src/native-thread-control";
 import { useNativeSettings, effectiveNativeSettings } from "../../../packages/ui-client/src/native-settings";
-import { useObjectArchive } from "../../../packages/ui-client/src/object-archive";
 import {
   messageInput,
   supportsInputType,
   useMessageAttachments,
 } from "../../../packages/ui-client/src/message-attachments";
 import type { StagedAttachment } from "../../../packages/ui-client/src/message-attachments";
-import { base, client, notifications, outputCache, tr } from "./runtime";
+import { base, client, notifications, outputCache } from "./runtime";
+import TaskActions from "./TaskActions.vue";
 import {
   activitySummary,
   conversationItem,
@@ -125,48 +113,18 @@ const taskInventory = useRemote(
   ["inventory/codex/thread/" + props.node],
 );
 const capabilities = useRemote(async () => {
-  const [
-    send,
-    resume,
-    interrupt,
-    rename,
-    archive,
-    unarchive,
-    remove,
-    goalSet,
-    goalClear,
-    steer,
-    project,
-  ] = await Promise.all(
+  const [send, resume, interrupt, goalSet, goalClear, steer] = await Promise.all(
     [
       "codex.turn/start",
       "codex.thread/resume",
       "codex.turn/interrupt",
-      "codex.thread/name/set",
-      "codex.thread/archive",
-      "codex.thread/unarchive",
-      "codex.thread/delete",
       "codex.thread/goal/set",
       "codex.thread/goal/clear",
       "codex.turn/steer",
-      "codex.thread/metadata/update",
     ].map((name) => optionalTool(client, props.node, name)),
   );
-  return {
-    send,
-    resume,
-    interrupt,
-    rename,
-    archive,
-    unarchive,
-    remove,
-    goalSet,
-    goalClear,
-    steer,
-    project,
-  };
+  return { send, resume, interrupt, goalSet, goalClear, steer };
 }, 0, ["services/agent-manager/" + props.node]);
-const projectOpen = ref(false);
 const settings = useNativeSettings(client, () => props.node, () => text(state.value.value?.thread.cwd));
 const { models, permissions, modes } = settings;
 const goal = useRemote(async (signal) =>
@@ -517,26 +475,14 @@ const threadStatus = computed(() =>
     "unknown",
   ),
 );
-const archivedOverride = ref<boolean | null>(null);
 const archived = computed(
+  () => record(taskInventory.value.value?.summary).archived === true,
+);
+const title = computed(
   () =>
-    archivedOverride.value ??
-    record(taskInventory.value.value?.summary).archived === true,
-);
-watch(
-  () => record(taskInventory.value.value?.summary).archived,
-  (value) => {
-    if (typeof value === "boolean") archivedOverride.value = value;
-  },
-);
-const taskName = ref(""),
-  taskNameDirty = ref(false);
-watch(
-  () => state.value.value?.thread.name,
-  (value) => {
-    if (!taskNameDirty.value) taskName.value = text(value);
-  },
-  { immediate: true },
+    text(state.value.value?.thread.name) ||
+    text(state.value.value?.thread.preview).slice(0, 100) ||
+    "Native task",
 );
 // A background refresh keeps the last owner-confirmed state. The send path performs
 // its own immediate preflight read before dispatching, so refresh animation need not
@@ -973,84 +919,6 @@ const interrupt = async () => {
   );
   refresh();
 };
-const rename = async () => {
-  const binding = capabilities.value.value?.rename,
-    name = taskName.value.trim();
-  if (!binding || !name || action.locked.value) return;
-  await action.start("Rename task", binding, {
-    threadId: props.threadId,
-    name,
-  });
-  if (action.saved.value?.phase === "succeeded") taskNameDirty.value = false;
-  refresh();
-};
-// A Codex task that works on a TaskBoard ticket is archived through its ticket, which also archives
-// every Codex task of that ticket; the board then never shows finished work that was archived here.
-const ticketArchive = useObjectArchive(
-  client,
-  "ivy:agent-ticket-archive:" + base.href + props.node + ":" + props.threadId,
-);
-const owningTicket = async () =>
-  (
-    await client.request("objects.query", {
-      contractKey: "task-board/task",
-      where: {
-        op: "and",
-        args: [
-          { op: "eq", field: "data:/primaryResourceRef/serviceNodeId", value: props.node },
-          { op: "eq", field: "data:/primaryResourceRef/nativeId", value: props.threadId },
-        ],
-      },
-      includeArchived: true,
-      limit: 1,
-    })
-  ).items[0]?.objectId ?? null;
-const setArchived = async () => {
-  const wasArchived = archived.value,
-    binding = wasArchived
-      ? capabilities.value.value?.unarchive
-      : capabilities.value.value?.archive;
-  if (action.locked.value || ticketArchive.busy.value) return;
-  ticketArchive.clearError();
-  const ticket = await owningTicket().catch(() => null);
-  if (ticket) {
-    if (await ticketArchive.run(ticket, !wasArchived))
-      archivedOverride.value = !wasArchived;
-    refresh();
-    return;
-  }
-  if (!binding) return;
-  await action.start(wasArchived ? "Restore task" : "Archive task", binding, {
-    threadId: props.threadId,
-  });
-  if (action.saved.value?.phase === "succeeded")
-    archivedOverride.value = !wasArchived;
-  refresh();
-};
-// Deleting removes the native conversation; a TaskBoard ticket keeps its task and is archived instead.
-const deleteOpen = ref(false),
-  deleteError = ref("");
-const deleteTask = async () => {
-  const binding = capabilities.value.value?.remove;
-  if (!binding || action.locked.value) return;
-  deleteError.value = "";
-  if (await owningTicket().catch(() => null)) {
-    deleteError.value = tr(
-      "Dieser Task gehört zu einem TaskBoard-Ticket. Archiviere ihn stattdessen.",
-      "This task belongs to a TaskBoard ticket. Archive it instead.",
-    );
-    return;
-  }
-  await action.start("Delete task", binding, { threadId: props.threadId });
-  if (action.saved.value?.phase === "succeeded") {
-    deleteOpen.value = false;
-    window.location.hash = route("host", { node: props.node });
-  } else
-    deleteError.value =
-      action.error.value ||
-      text(action.saved.value?.detail) ||
-      tr("Der Task konnte nicht gelöscht werden.", "The task could not be deleted.");
-};
 watch(
   () => props.turnId,
   () => {
@@ -1376,20 +1244,29 @@ const retainScroll = () => {
     /* View state is optional. */
   }
 };
+const nearTop = ref(false);
 const trackScroll = () => {
   const element = scroller.value;
   if (!element || restoreTop !== null) return;
-  if (
-    element.scrollTop < 180 &&
-    outputNextCursor.value &&
-    !outputLoadingEarlier.value
-  )
+  nearTop.value = element.scrollTop < 180;
+  if (nearTop.value && outputNextCursor.value && !outputLoadingEarlier.value)
     void loadEarlierOutput();
   atBottom.value =
     element.scrollHeight - element.scrollTop - element.clientHeight < 100;
   clearTimeout(scrollTimer);
   scrollTimer = setTimeout(retainScroll, 150);
 };
+// Reaching the top while another read runs triggers no further scroll event, so earlier
+// messages follow as soon as that read ends.
+watch([outputLoading, outputLoadingEarlier, outputPreview], async () => {
+  if (outputLoading.value || outputLoadingEarlier.value || outputPreview.value) return;
+  await nextTick();
+  const element = scroller.value;
+  // A conversation shorter than the view cannot be scrolled to its top at all.
+  if (element && outputNextCursor.value && restoreTop === null &&
+    (nearTop.value && element.scrollTop < 180 || element.scrollHeight <= element.clientHeight))
+    void loadEarlierOutput();
+});
 const scrollBottom = async () => {
   await nextTick();
   scroller.value?.scrollTo({ top: scroller.value.scrollHeight });
@@ -1439,68 +1316,24 @@ onBeforeUnmount(() => {
   <div ref="taskRoot" class="agent-task">
     <ToolbarContent>
       <span class="text-muted-foreground" aria-hidden="true">/</span>
-      <h1 class="min-w-0 truncate text-sm font-medium">
-        {{
-          text(state.value.value?.thread.name) ||
-          text(state.value.value?.thread.preview).slice(0, 100) ||
-          "Native task"
-        }}
-      </h1>
+      <h1 class="min-w-0 truncate text-sm font-medium">{{ title }}</h1>
       <ActivityIndicator v-if="working" state="working" />
     </ToolbarContent>
     <ToolbarContent side="end">
-      <DropdownMenu>
-        <DropdownMenuTrigger as-child>
-          <Button variant="ghost" size="icon-sm" aria-label="Task actions"
-            ><MoreHorizontal aria-hidden="true"
-          /></Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" class="w-72">
-          <div class="space-y-2 p-2">
-            <Label for="task-name">Task name</Label>
-            <div class="flex gap-2">
-              <Input
-                id="task-name"
-                v-model="taskName"
-                :disabled="
-                  action.locked.value || !capabilities.value.value?.rename
-                "
-                maxlength="512"
-                @input="taskNameDirty = true"
-                @keydown.stop
-              />
-              <Button
-                variant="outline"
-                :disabled="
-                  action.locked.value ||
-                  !taskName.trim() ||
-                  !taskNameDirty ||
-                  !capabilities.value.value?.rename
-                "
-                @click="rename"
-                >Rename</Button
-              >
-            </div>
-          </div>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            v-if="supportsFields(capabilities.value.value?.project, ['threadId', 'projectId'])"
-            :disabled="action.locked.value || working || !state.value.value"
-            @select="projectOpen = true"
-          >
-            <FolderOpen aria-hidden="true" />{{ tr('Projekt ändern…', 'Change project…') }}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            :disabled="
-              action.locked.value ||
-              !(archived
-                ? capabilities.value.value?.unarchive
-                : capabilities.value.value?.archive)
-            "
-            @select="setArchived"
-          >
-            <Archive aria-hidden="true" />{{ archived ? "Restore" : "Archive" }}
-          </DropdownMenuItem>
+      <TaskActions
+        :node="node"
+        :thread-id="threadId"
+        :name="title"
+        :project-id="text(state.value.value?.thread.projectId)"
+        :archived="archived"
+        :working="working || !state.value.value"
+        scope="task"
+        @changed="refresh"
+      >
+        <Button variant="ghost" size="icon-sm" aria-label="Task actions"
+          ><MoreHorizontal aria-hidden="true"
+        /></Button>
+        <template #items>
           <DropdownMenuItem
             v-if="outputDownload"
             aria-label="Download complete turn"
@@ -1509,51 +1342,15 @@ onBeforeUnmount(() => {
           >
             <Download aria-hidden="true" />Download turn
           </DropdownMenuItem>
-          <template v-if="capabilities.value.value?.remove">
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              variant="destructive"
-              :disabled="action.locked.value || working"
-              @select="deleteError = ''; deleteOpen = true"
-            >
-              <Trash2 aria-hidden="true" />{{ tr("Löschen…", "Delete…") }}
-            </DropdownMenuItem>
-          </template>
-        </DropdownMenuContent>
-      </DropdownMenu>
+        </template>
+      </TaskActions>
     </ToolbarContent>
-    <Dialog v-model:open="deleteOpen">
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{{ tr("Task löschen?", "Delete task?") }}</DialogTitle>
-          <DialogDescription>{{
-            tr(
-              "Die Unterhaltung wird dauerhaft aus Codex entfernt. Dateien in ihrem Arbeitsverzeichnis bleiben erhalten.",
-              "The conversation is permanently removed from Codex. Files in its working directory are kept.",
-            )
-          }}</DialogDescription>
-        </DialogHeader>
-        <p v-if="deleteError" role="alert" class="text-sm text-destructive">
-          {{ deleteError }}
-        </p>
-        <DialogFooter>
-          <Button variant="outline" :disabled="action.locked.value" @click="deleteOpen = false">{{ tr("Abbrechen", "Cancel") }}</Button>
-          <Button variant="destructive" :disabled="action.locked.value" :loading="action.busy.value" @click="deleteTask">{{ tr("Löschen", "Delete") }}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-    <TaskProjectDialog
-      v-if="projectOpen && capabilities.value.value?.project"
-      v-model:open="projectOpen"
-      :client="client"
-      :node="node"
-      :thread-id="threadId"
-      :project-id="text(state.value.value?.thread.projectId)"
-      :binding="capabilities.value.value.project"
-      :scope="base.href"
-      @changed="refresh"
-    />
     <div ref="scroller" class="agent-messages" @scroll="trackScroll">
+      <LoadingIndicator
+        v-if="outputLoadingEarlier || (nearTop && outputNextCursor && (outputLoading || outputPreview))"
+        floating
+        label="Loading earlier messages…"
+      />
       <div class="agent-message-column ivy-conversation">
         <RemoteState
           :loading="state.loading.value"
@@ -1597,25 +1394,26 @@ onBeforeUnmount(() => {
             empty-title="No saved output yet"
             @retry="refreshOutput"
           />
-          <p
-            v-if="outputLoadingEarlier"
-            class="py-2 text-center text-xs text-muted-foreground"
-            role="status"
-          >
-            Loading earlier messages…
-          </p>
           <div
-            class="space-y-6"
+            class="conversation-blocks"
             tabindex="0"
             role="region"
             aria-label="Saved native output"
           >
             <template v-for="block in blocks" :key="block.key">
               <article
-                v-if="block.type === 'message'"
-                class="conversation-entry"
-                :class="{ 'user-message': block.presentation.label === 'You' }"
+                v-if="block.type === 'message' && block.presentation.label === 'You'"
+                class="user-message"
               >
+                <MessageImages
+                  v-if="block.presentation.images?.length"
+                  :client="client"
+                  :node="node"
+                  :images="block.presentation.images"
+                />
+                <MessageBubble v-if="block.presentation.text" :text="block.presentation.text" />
+              </article>
+              <article v-else-if="block.type === 'message'" class="conversation-entry">
                 <MessageImages
                   v-if="block.presentation.images?.length"
                   :client="client"
@@ -1631,7 +1429,7 @@ onBeforeUnmount(() => {
                   "
                 />
               </article>
-              <Collapsible v-else class="activity-group text-sm">
+              <Collapsible v-else class="activity-group text-[0.8125rem]">
                 <CollapsibleTrigger
                   class="group flex max-w-full min-w-0 items-center gap-1.5 rounded-md py-0.5 text-left text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
                 >
@@ -1706,7 +1504,7 @@ onBeforeUnmount(() => {
           <p
             v-if="working"
             role="status"
-            class="flex items-center gap-2 py-2 text-sm text-muted-foreground"
+            class="flex items-center gap-2 py-1 text-[0.8125rem] text-muted-foreground"
           >
             <LoaderCircle class="size-4 animate-spin" aria-hidden="true" />
             Working…
@@ -1769,7 +1567,7 @@ onBeforeUnmount(() => {
           id="message"
           v-model="message"
           :maxlength="131072"
-          class="max-h-40 min-h-12 resize-none border-0 bg-transparent px-2 py-2 text-base shadow-none focus-visible:ring-0 dark:bg-transparent"
+          class="max-h-40 min-h-12 resize-none border-0 bg-transparent px-2 py-2 shadow-none focus-visible:ring-0 dark:bg-transparent"
           :placeholder="working ? 'Queue a message for this task…' : 'Message this task…'"
           @keydown="onMessageKeydown"
         />
@@ -2036,7 +1834,7 @@ onBeforeUnmount(() => {
 .agent-message-column {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1rem;
 }
 .agent-input-area {
   flex: 0 1 auto;
@@ -2069,13 +1867,20 @@ onBeforeUnmount(() => {
   background: var(--muted);
   padding: 0.25rem 0.375rem 0.25rem 0.75rem;
 }
+/* Desktop-assistant rhythm: tool summaries sit close to the text they belong to, while each of
+   the user's turns starts a visibly new exchange. */
+.conversation-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.conversation-blocks > .user-message:not(:first-child) {
+  margin-top: 0.75rem;
+}
 .user-message {
-  width: fit-content;
-  max-width: 85%;
-  margin-left: auto;
-  border-radius: 1.5rem;
-  background: var(--muted);
-  padding: 0.625rem 1.125rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
 }
 .activity-steps {
   border-left: 2px solid var(--border);

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import {
-  ActivityIndicator,
   Button,
   Collapsible,
   CollapsibleContent,
@@ -16,6 +15,7 @@ import {
   DropdownMenuTrigger,
   HostMark,
   Kbd,
+  LoadingIndicator,
   SearchDialog,
   SearchResult,
   SidebarGroup,
@@ -28,11 +28,10 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
   useRemote,
 } from "@ivy/ui";
 import {
+  ChevronRight,
   ChevronsUpDown,
   Folder,
   FolderOpen,
@@ -59,6 +58,8 @@ import {
   usePage,
 } from "../../../packages/ui-client/src/runtime";
 import { base, client, notifications } from "./runtime";
+import HostUsage from "./HostUsage.vue";
+import TaskRow from "./TaskRow.vue";
 import AgentHosts from "./AgentHosts.vue";
 import AgentHost from "./AgentHost.vue";
 import AgentHostSettings from "./AgentHostSettings.vue";
@@ -109,6 +110,22 @@ const toggleInternal = (value: boolean) => {
     /* Optional view state. */
   }
 };
+// The project tree is the default; the activity view lists every task by its latest update.
+const viewKey = "ivy.agent.view:" + base.href;
+const view = ref<"projects" | "activity">("projects");
+try {
+  if (localStorage.getItem(viewKey) === "activity") view.value = "activity";
+} catch {
+  /* Optional view state. */
+}
+const chooseView = (value: unknown) => {
+  view.value = value === "activity" ? "activity" : "projects";
+  try {
+    localStorage.setItem(viewKey, view.value);
+  } catch {
+    /* Optional view state. */
+  }
+};
 const search = ref("");
 const searchOpen = ref(false);
 watch(searchOpen, (open) => {
@@ -125,8 +142,12 @@ const nodes = usePage((signal, cursor) =>
       },
       { signal },
     ), 30000, undefined, ["services/agent-manager"]);
-const recent = usePage((signal, cursor) =>
-    client.request(
+// Every unarchived task stays listed; archiving or deleting is how a user tidies the list.
+const recent = useRemote(async (signal) => {
+  const items: Operation.InventoryItem[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await client.request(
       "inventory.list",
       {
         ...(hostFilter.value
@@ -137,12 +158,16 @@ const recent = usePage((signal, cursor) =>
         archived: false,
         sort: "recency-desc",
         ...(search.value ? { searchTerm: search.value } : {}),
-        limit: 50,
+        limit: 200,
         ...(cursor ? { cursor } : {}),
       },
       { signal },
-    ).then((page) => ({ ...page, items: page.items.filter(isVisibleTask) })), 30000, undefined,
-    () => ["inventory/codex/thread" + (hostFilter.value ? "/" + hostFilter.value : "")]);
+    );
+    items.push(...page.items.filter(isVisibleTask));
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return { items };
+}, 30000, () => ["inventory/codex/thread" + (hostFilter.value ? "/" + hostFilter.value : "")]);
 const allProjects = useRemote(async (signal) => {
   const result: ScopedProject[] = [];
   let cursor: string | undefined;
@@ -168,7 +193,7 @@ try {
 }
 watch(hostFilter, () => {
   recent.value.value = null;
-  recent.reset();
+  void recent.refresh();
 });
 watch(node, (value) => {
   if (value) {
@@ -248,7 +273,7 @@ watch(search, () => {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     recent.value.value = null;
-    recent.reset();
+    void recent.refresh();
   }, 250);
 });
 // Lifecycle events mark tasks working or finished immediately; the inventory reread that follows
@@ -311,6 +336,23 @@ watch(
 );
 const activityOf = (item: Operation.InventoryItem) =>
   taskActivity(item, live.value, seen.value, openKey.value, clock.value);
+// A live lifecycle event counts as an update before the inventory reports it.
+const updatedAt = (item: Operation.InventoryItem) => Math.max(
+  (Number(record(item.summary).updatedAt) || 0) * 1000,
+  live.value.get(taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId))?.at ?? 0,
+);
+const activityTasks = computed(() =>
+  [...(showInternal.value ? tasks.value : visibleRecent.value)].sort((a, b) => updatedAt(b) - updatedAt(a)));
+const ageUnits = [["minute", 60], ["hour", 3600], ["day", 86400]] as const;
+const ageFormats = new Map(ageUnits.map(([unit]) => [unit, new Intl.NumberFormat(undefined, { style: "unit", unit, unitDisplay: "narrow" })]));
+const age = (item: Operation.InventoryItem) => {
+  const at = updatedAt(item), seconds = (clock.value - at) / 1000;
+  if (!at) return "";
+  if (seconds < 60) return ageFormats.get("minute")!.format(0);
+  if (seconds >= 7 * 86400) return new Date(at).toLocaleDateString([], { day: "numeric", month: "short" });
+  const [unit, size] = [...ageUnits].reverse().find(([, size]) => seconds >= size)!;
+  return ageFormats.get(unit)!.format(Math.floor(seconds / size));
+};
 const taskChanged = (value: Transport.ProviderNotification) => {
   const payload = record(value.params.payload),
     method = text(payload.method),
@@ -329,8 +371,9 @@ const unsubscribe = notifications.subscribe(
   taskChanged,
 );
 const ticker = setInterval(() => {
-  if (live.value.size) clock.value = Date.now();
+  if (live.value.size || view.value === "activity") clock.value = Date.now();
 }, 30000);
+watch(view, () => { clock.value = Date.now(); });
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   clearInterval(ticker);
@@ -438,180 +481,192 @@ const toggleGroup = (id: string) => {
                     @update:model-value="toggleInternal($event === true)"
                     >Show IvyInternal</DropdownMenuCheckboxItem
                   >
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel class="text-xs text-muted-foreground">Organize</DropdownMenuLabel>
+                  <DropdownMenuRadioGroup :model-value="view" @update:model-value="chooseView">
+                    <DropdownMenuRadioItem value="projects">By project</DropdownMenuRadioItem>
+                    <DropdownMenuRadioItem value="activity">By latest update</DropdownMenuRadioItem>
+                  </DropdownMenuRadioGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarGroup>
-        <SidebarGroup v-for="host in sections" :key="host.serviceNodeId">
-          <SidebarGroupLabel class="gap-2 pr-8" :title="hostName(host.serviceNodeId)">
-            <HostMark :label="hostName(host.serviceNodeId)" :seed="host.serviceNodeId" />
-            <span class="truncate">{{ hostName(host.serviceNodeId) }}</span>
-            <span
-              v-if="!hostReady(host.serviceNodeId)"
-              class="size-1.5 shrink-0 rounded-full bg-amber-500"
-              role="img"
-              aria-label="Not ready"
-            />
-          </SidebarGroupLabel>
-          <SidebarGroupAction as-child>
-            <a
-              :href="route('host', { node: host.serviceNodeId })"
-              :aria-label="'New task on ' + hostName(host.serviceNodeId)"
-              :title="'New task on ' + hostName(host.serviceNodeId)"
-              ><Plus aria-hidden="true"
-            /></a>
-          </SidebarGroupAction>
+        <LoadingIndicator
+          v-if="!tasks.length && (recent.loading.value || allProjects.loading.value) && !(recent.error.value || allProjects.error.value)"
+          label="Loading tasks…"
+        />
+        <SidebarGroup v-if="view === 'activity'">
           <SidebarGroupContent>
             <SidebarMenu>
-              <Collapsible
-                v-for="group in host.groups"
-                :key="group.id"
-                as-child
-                :open="!collapsed.has(host.serviceNodeId + ':' + group.id)"
-                @update:open="toggleGroup(host.serviceNodeId + ':' + group.id)"
-              >
-                <SidebarMenuItem>
-                  <CollapsibleTrigger as-child>
-                    <SidebarMenuButton :title="group.name"
-                      ><Folder
-                        v-if="collapsed.has(host.serviceNodeId + ':' + group.id)"
-                        aria-hidden="true"
-                      /><FolderOpen v-else aria-hidden="true" /><span
-                        class="truncate"
-                        >{{ group.name }}</span
-                      ></SidebarMenuButton
-                    >
-                  </CollapsibleTrigger>
-                  <SidebarMenuAction v-if="group.path" as-child show-on-hover class="right-7"
-                    ><a
-                      :href="
-                        route('host', {
-                          node: host.serviceNodeId,
-                          project: group.path,
-                          projectId: group.id,
-                        })
-                      "
-                      :aria-label="'New task in ' + group.name"
-                      ><Plus aria-hidden="true" /></a
-                  ></SidebarMenuAction>
-                  <ProjectActions v-if="group.path && projectOf(host.serviceNodeId, group.id)" :client="client" :node="host.serviceNodeId"
-                    :project="projectOf(host.serviceNodeId, group.id)!"
-                    @changed="allProjects.refresh(); recent.refresh()">
-                    <SidebarMenuAction :aria-label="'Manage project ' + group.name" show-on-hover><MoreHorizontal aria-hidden="true" /></SidebarMenuAction>
-                  </ProjectActions>
-                  <CollapsibleContent>
-                    <SidebarMenuSub>
-                      <SidebarMenuSubItem
-                        v-for="item in group.tasks"
-                        :key="item.resourceRef.nativeId"
-                      >
-                        <SidebarMenuSubButton
-                          as-child
-                          :class="{ 'pr-7': activityOf(item) }"
-                          :is-active="openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)"
-                          ><a
-                            :href="
-                              route('task', {
-                                node: host.serviceNodeId,
-                                id: item.resourceRef.nativeId,
-                              })
-                            "
-                            :aria-current="
-                              openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)
-                                ? 'page'
-                                : undefined
-                            "
-                            :title="
-                              taskName(item.summary, item.resourceRef.nativeId)
-                            "
-                            ><span>{{
-                              taskName(item.summary, item.resourceRef.nativeId)
-                            }}</span></a
-                          ></SidebarMenuSubButton
-                        ><ActivityIndicator
-                          v-if="activityOf(item)"
-                          :state="activityOf(item)!"
-                          class="pointer-events-none absolute top-1.5 right-1"
-                        />
-                      </SidebarMenuSubItem>
-                      <li
-                        v-if="!group.tasks.length"
-                        class="px-2 py-1 text-xs text-muted-foreground"
-                      >
-                        No recent tasks
-                      </li>
-                    </SidebarMenuSub>
-                  </CollapsibleContent>
-                </SidebarMenuItem>
-              </Collapsible>
-              <Collapsible
-                v-if="showInternal && host.hasInternal"
-                as-child
-                :open="internalOpen.has(host.serviceNodeId)"
-                @update:open="toggleInternalGroup(host.serviceNodeId)"
-              >
-                <SidebarMenuItem>
-                  <CollapsibleTrigger as-child>
-                    <SidebarMenuButton title="IvyInternal">
-                      <FolderOpen v-if="internalOpen.has(host.serviceNodeId)" aria-hidden="true" /><Folder v-else aria-hidden="true" />
-                      <span>IvyInternal</span>
-                    </SidebarMenuButton>
-                  </CollapsibleTrigger>
-                  <SidebarMenuBadge>{{ host.internal.length }}</SidebarMenuBadge>
-                  <CollapsibleContent>
-                    <SidebarMenuSub>
-                      <SidebarMenuSubItem v-for="item in host.internal" :key="item.resourceRef.nativeId">
-                        <SidebarMenuSubButton as-child :class="{ 'pr-7': activityOf(item) }"
-                          :is-active="openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)">
-                          <a :href="route('task', { node: host.serviceNodeId, id: item.resourceRef.nativeId })"
-                            :title="taskName(item.summary, item.resourceRef.nativeId)">
-                            <span>{{ taskName(item.summary, item.resourceRef.nativeId) }}</span>
-                          </a>
-                        </SidebarMenuSubButton>
-                        <ActivityIndicator v-if="activityOf(item)" :state="activityOf(item)!" class="pointer-events-none absolute top-1.5 right-1" />
-                      </SidebarMenuSubItem>
-                      <li v-if="!host.internal.length" class="px-2 py-1 text-xs text-muted-foreground">No recent tasks</li>
-                    </SidebarMenuSub>
-                  </CollapsibleContent>
-                </SidebarMenuItem>
-              </Collapsible>
-              <li
-                v-if="!host.groups.length && !(showInternal && host.hasInternal)"
-                class="px-2 py-1 text-xs text-muted-foreground"
-              >
-                No tasks
-              </li>
+              <TaskRow
+                v-for="item in activityTasks"
+                :key="taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)"
+                :item="item"
+                :name="taskName(item.summary, item.resourceRef.nativeId)"
+                :active="openKey === taskKey(item.resourceRef.serviceNodeId, item.resourceRef.nativeId)"
+                :activity="activityOf(item)"
+                :host="hostName(item.resourceRef.serviceNodeId)"
+                :age="age(item)"
+                @changed="recent.refresh()"
+              />
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+        <template v-else>
+          <Collapsible
+            v-for="host in sections"
+            :key="host.serviceNodeId"
+            as-child
+            :open="!collapsed.has('host:' + host.serviceNodeId)"
+            @update:open="toggleGroup('host:' + host.serviceNodeId)"
+          >
+            <SidebarGroup>
+              <SidebarGroupLabel class="gap-1.5 pr-8">
+                <HostUsage
+                  :node="host.serviceNodeId"
+                  :label="hostName(host.serviceNodeId)"
+                  :ready="hostReady(host.serviceNodeId)"
+                >
+                  <button
+                    type="button"
+                    class="-m-0.5 flex shrink-0 rounded-[5px] p-0.5 outline-hidden ring-sidebar-ring hover:bg-sidebar-accent focus-visible:ring-2"
+                    :aria-label="'Usage on ' + hostName(host.serviceNodeId)"
+                    :title="'Usage on ' + hostName(host.serviceNodeId)"
+                  >
+                    <HostMark :label="hostName(host.serviceNodeId)" :seed="host.serviceNodeId" />
+                  </button>
+                </HostUsage>
+                <CollapsibleTrigger
+                  class="group/host flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md text-left outline-hidden ring-sidebar-ring hover:text-sidebar-foreground focus-visible:ring-2"
+                  :title="hostName(host.serviceNodeId)"
+                >
+                  <span class="truncate">{{ hostName(host.serviceNodeId) }}</span>
+                  <span
+                    v-if="!hostReady(host.serviceNodeId)"
+                    class="size-1.5 shrink-0 rounded-full bg-amber-500"
+                    role="img"
+                    aria-label="Not ready"
+                  />
+                  <ChevronRight
+                    class="size-3.5 shrink-0 opacity-60 transition-transform group-data-[state=open]/host:rotate-90"
+                    aria-hidden="true"
+                  />
+                </CollapsibleTrigger>
+              </SidebarGroupLabel>
+              <SidebarGroupAction as-child>
+                <a
+                  :href="route('host', { node: host.serviceNodeId })"
+                  :aria-label="'New task on ' + hostName(host.serviceNodeId)"
+                  :title="'New task on ' + hostName(host.serviceNodeId)"
+                  ><Plus aria-hidden="true"
+                /></a>
+              </SidebarGroupAction>
+              <CollapsibleContent>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    <Collapsible
+                      v-for="group in host.groups"
+                      :key="group.id"
+                      as-child
+                      :open="!collapsed.has(host.serviceNodeId + ':' + group.id)"
+                      @update:open="toggleGroup(host.serviceNodeId + ':' + group.id)"
+                    >
+                      <SidebarMenuItem>
+                        <CollapsibleTrigger as-child>
+                          <SidebarMenuButton :title="group.name"
+                            ><Folder
+                              v-if="collapsed.has(host.serviceNodeId + ':' + group.id)"
+                              aria-hidden="true"
+                            /><FolderOpen v-else aria-hidden="true" /><span
+                              class="truncate"
+                              >{{ group.name }}</span
+                            ></SidebarMenuButton
+                          >
+                        </CollapsibleTrigger>
+                        <SidebarMenuAction v-if="group.path" as-child show-on-hover class="right-7"
+                          ><a
+                            :href="
+                              route('host', {
+                                node: host.serviceNodeId,
+                                project: group.path,
+                                projectId: group.id,
+                              })
+                            "
+                            :aria-label="'New task in ' + group.name"
+                            ><Plus aria-hidden="true" /></a
+                        ></SidebarMenuAction>
+                        <ProjectActions v-if="group.path && projectOf(host.serviceNodeId, group.id)" :client="client" :node="host.serviceNodeId"
+                          :project="projectOf(host.serviceNodeId, group.id)!"
+                          @changed="allProjects.refresh(); recent.refresh()">
+                          <SidebarMenuAction :aria-label="'Manage project ' + group.name" show-on-hover><MoreHorizontal aria-hidden="true" /></SidebarMenuAction>
+                        </ProjectActions>
+                        <CollapsibleContent>
+                          <SidebarMenuSub>
+                            <TaskRow
+                              v-for="item in group.tasks"
+                              :key="item.resourceRef.nativeId"
+                              nested
+                              :item="item"
+                              :name="taskName(item.summary, item.resourceRef.nativeId)"
+                              :active="openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)"
+                              :activity="activityOf(item)"
+                              @changed="recent.refresh()"
+                            />
+                            <li v-if="!group.tasks.length" class="px-2 py-1 text-xs text-muted-foreground">No tasks</li>
+                          </SidebarMenuSub>
+                        </CollapsibleContent>
+                      </SidebarMenuItem>
+                    </Collapsible>
+                    <Collapsible
+                      v-if="showInternal && host.hasInternal"
+                      as-child
+                      :open="internalOpen.has(host.serviceNodeId)"
+                      @update:open="toggleInternalGroup(host.serviceNodeId)"
+                    >
+                      <SidebarMenuItem>
+                        <CollapsibleTrigger as-child>
+                          <SidebarMenuButton title="IvyInternal">
+                            <FolderOpen v-if="internalOpen.has(host.serviceNodeId)" aria-hidden="true" /><Folder v-else aria-hidden="true" />
+                            <span>IvyInternal</span>
+                          </SidebarMenuButton>
+                        </CollapsibleTrigger>
+                        <SidebarMenuBadge>{{ host.internal.length }}</SidebarMenuBadge>
+                        <CollapsibleContent>
+                          <SidebarMenuSub>
+                            <TaskRow
+                              v-for="item in host.internal"
+                              :key="item.resourceRef.nativeId"
+                              nested
+                              :item="item"
+                              :name="taskName(item.summary, item.resourceRef.nativeId)"
+                              :active="openKey === taskKey(host.serviceNodeId, item.resourceRef.nativeId)"
+                              :activity="activityOf(item)"
+                              @changed="recent.refresh()"
+                            />
+                            <li v-if="!host.internal.length" class="px-2 py-1 text-xs text-muted-foreground">No tasks</li>
+                          </SidebarMenuSub>
+                        </CollapsibleContent>
+                      </SidebarMenuItem>
+                    </Collapsible>
+                    <li
+                      v-if="!host.groups.length && !(showInternal && host.hasInternal)"
+                      class="px-2 py-1 text-xs text-muted-foreground"
+                    >
+                      No tasks
+                    </li>
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </CollapsibleContent>
+            </SidebarGroup>
+          </Collapsible>
+        </template>
         <p
           v-if="recent.value.value?.items.length === 0"
           class="px-4 py-2 text-xs text-muted-foreground"
         >
           No matching tasks
         </p>
-        <div
-          v-if="recent.page.value > 1 || recent.value.value?.nextCursor"
-          class="flex gap-1 px-2"
-        >
-          <Button
-            v-if="recent.page.value > 1"
-            variant="ghost"
-            size="sm"
-            :disabled="recent.loading.value"
-            @click="recent.previous"
-            >Newer</Button
-          >
-          <Button
-            v-if="recent.value.value?.nextCursor"
-            variant="ghost"
-            size="sm"
-            :disabled="recent.loading.value"
-            @click="recent.next"
-            >Older</Button
-          >
-        </div>
         <p
           v-if="recent.error.value || allProjects.error.value || nodes.error.value"
           class="px-4 text-xs text-muted-foreground"
