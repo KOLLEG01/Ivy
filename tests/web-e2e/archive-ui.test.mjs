@@ -34,6 +34,7 @@ test('TaskBoard archives an idle task from its UI', { timeout: 90000 }, async t 
   const f = await taskBoardFixture(t); await f.open('#/new?node=browser-task-board');
   await f.page.getByLabel('Title', { exact: true }).fill('Recoverable UI task');
   await f.page.getByLabel('Description', { exact: true }).fill('Archive this idle task through the product UI.');
+  await f.page.getByRole('radio', { name: 'Me', exact: true }).check();
   await f.page.getByRole('button', { name: 'Create task', exact: true }).click();
   await expect(f.page.getByRole('heading', { name: /Recoverable UI task/ })).toBeVisible();
   const id = new URLSearchParams(new URL(f.page.url()).hash.split('?')[1]).get('id'); assert.ok(id);

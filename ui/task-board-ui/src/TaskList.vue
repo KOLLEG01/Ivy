@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import {
   Alert,
   AlertDescription,
@@ -30,10 +30,12 @@ import {
   rootWhere,
   taskContractVersions,
   taskStatuses,
+  tr,
 } from "./runtime";
 import type { Operation, TaskBoard } from "./runtime";
 import { useAction } from "./action";
 import ActionState from "./ActionState.vue";
+import { useObjectArchive } from "../../../packages/ui-client/src/object-archive";
 import { taskFilter } from "./task-filter";
 import {
   boardColumns,
@@ -167,8 +169,34 @@ const columnRefs = ref<InstanceType<typeof BoardColumn>[]>([]),
   backlogRef = ref<InstanceType<typeof BoardColumn> | null>(null),
   archiveRef = ref<InstanceType<typeof BoardColumn> | null>(null),
   action = useAction(() => props.workspace, "board"),
+  archive = useObjectArchive(client, "ivy:task-board:archive:" + base.href + ":" + props.workspace.serviceNodeId + ":board"),
+  archiveError = ref(""),
   error = ref(""),
   preparing = ref(false);
+const retainedArchive = computed(() => action.saved.value?.call.qualifiedName === "task-board.archive");
+// Resolve an already retained archive without showing workflow internals on the board.
+onMounted(async () => {
+  if (!retainedArchive.value || !action.identityMatches.value) return;
+  if (!action.canDismiss.value) await action.reconcile();
+  if (action.canDismiss.value) action.dismiss();
+  refresh();
+});
+const archiveFeedback = computed(() => archiveError.value || archive.error.value ||
+  (retainedArchive.value && !action.busy.value ? action.error.value || action.saved.value?.detail : "") ||
+  (archive.pending.value ? tr("Archivierung noch nicht bestätigt.", "Archive action awaiting confirmation.") : ""));
+const archivePending = computed(() => !!archive.pending.value || retainedArchive.value && !action.canDismiss.value);
+const retryArchive = async () => {
+  if (!props.available || preparing.value || props.workspace.role !== "user") return;
+  if (retainedArchive.value) {
+    await action.replay();
+    if (action.canDismiss.value) action.dismiss();
+  } else if (archive.pending.value) {
+    const pending = archive.pending.value;
+    archive.clearError();
+    await archive.run(pending.objectId, pending.archived);
+  }
+  refresh();
+};
 const refresh = () => {
   void counts.refresh();
   for (const column of columnRefs.value) void column.refresh();
@@ -199,7 +227,7 @@ const selected = computed({
   },
 });
 const disabled = computed(
-  () => !props.available || preparing.value || action.locked.value,
+  () => !props.available || preparing.value || action.locked.value || archive.busy.value || !!archive.pending.value,
 );
 const transition = async (id: string, operation: BoardTransition) => {
   if (disabled.value || props.workspace.role !== "user") return;
@@ -240,8 +268,9 @@ const transition = async (id: string, operation: BoardTransition) => {
 const archiveTasks = async (id?: string) => {
   if (disabled.value || props.workspace.role !== "user") return;
   preparing.value = true;
-  error.value = "";
-  let archived = 0;
+  archiveError.value = "";
+  archive.clearError();
+  if (retainedArchive.value && action.canDismiss.value) action.dismiss();
   try {
     const ids: string[] = [];
     if (id) ids.push(id);
@@ -268,17 +297,11 @@ const archiveTasks = async (id?: string) => {
       if (current.read.object.effectivelyArchived) continue;
       if (!['done', 'cancelled'].includes(current.value.workflowState) || current.value.claim || current.value.publication)
         throw new Error("A task changed. Refresh the board before archiving the remaining tasks.");
-      const result = await action.start("Archive task", {
-        action: "archive", taskId, expectedRevision: current.pin.revision, archived: true,
-      });
-      if (!result) {
-        error.value = `Archived ${archived} of ${ids.length} tasks. Resolve the archive action before archiving the remaining tasks.`;
-        break;
-      }
-      archived++;
+      if (!await archive.run(taskId, true)) break;
+      refresh();
     }
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : "The tasks could not be archived.";
+    archiveError.value = cause instanceof Error ? cause.message : "The tasks could not be archived.";
   } finally {
     preparing.value = false;
     refresh();
@@ -496,7 +519,7 @@ const drop = (column: string) => {
     >
   </form>
   <ActionState
-    v-if="action.saved.value?.phase !== 'succeeded' || action.error.value"
+    v-if="!retainedArchive && (action.saved.value?.phase !== 'succeeded' || action.error.value)"
     :action="action"
     @changed="recovered"
   /><Alert v-if="error" variant="destructive" class="mb-4"
@@ -546,7 +569,18 @@ const drop = (column: string) => {
         @drag="dragged = $event"
         @archive="archiveTasks"
         @archive-all="archiveTasks()"
-      />
+      >
+        <template v-if="column.id === 'done'" #feedback>
+          <Alert v-if="archiveFeedback && !archive.busy.value && !action.busy.value" variant="destructive">
+            <AlertDescription>
+              {{ archiveFeedback }}
+              <Button v-if="archivePending" variant="outline" size="sm"
+                :disabled="!available || preparing || archive.busy.value || action.busy.value || !action.identityMatches.value"
+                @click="retryArchive">{{ tr("Archivierung erneut versuchen", "Retry archive") }}</Button>
+            </AlertDescription>
+          </Alert>
+        </template>
+      </BoardColumn>
     </div>
   </div>
   <div

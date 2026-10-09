@@ -39,7 +39,7 @@ for (const width of [1440, 390]) {
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   });
 
-  test(`TaskBoard dismisses an old terminal failure without retrying its action at ${width}px`, { timeout: 90000 }, async t => {
+  test(`TaskBoard clears a terminal archive failure and keeps unresolved archives inline at ${width}px`, { timeout: 90000 }, async t => {
     const f = await taskBoardFixture(t, { viewport: { width, height: 1000 } });
     await f.open('#/tasks?node=browser-task-board');
     await expect(f.page.getByRole('heading', { name: 'Task board', exact: true })).toBeVisible();
@@ -55,10 +55,10 @@ for (const width of [1440, 390]) {
       if (body?.method === 'tools.call' && body.params.qualifiedName === 'task-board.archive') mutations++;
     });
     await f.page.reload();
-    await expect(f.page.getByText(/Object revision was pruned/)).toBeVisible();
-    await f.page.getByRole('button', { name: 'Dismiss', exact: true }).click();
+    await expect(f.page.getByRole('region', { name: 'Done', exact: true })).toBeVisible();
     await expect(f.page.getByText(/Object revision was pruned/)).toHaveCount(0);
     await f.page.reload();
+    await expect(f.page.getByRole('region', { name: 'Done', exact: true })).toBeVisible();
     await expect(f.page.getByText(/Object revision was pruned/)).toHaveCount(0);
     await expect(f.page.getByRole('alert')).toHaveCount(0);
     assert.equal(await f.page.evaluate(key => sessionStorage.getItem(key), key), null);
@@ -69,7 +69,9 @@ for (const width of [1440, 390]) {
       phase: 'unknown', detail: 'The original result is unresolved.', outcome: null,
     })), { key });
     await f.page.reload();
-    await expect(f.page.getByText('The original result is unresolved.', { exact: true })).toBeVisible();
+    const done = f.page.getByRole('region', { name: 'Done', exact: true });
+    await expect(done.getByRole('button', { name: 'Retry archive', exact: true })).toBeVisible();
+    await expect(f.page.getByText('Action identity', { exact: true })).toHaveCount(0);
     await expect(f.page.getByRole('button', { name: 'Dismiss', exact: true })).toHaveCount(0);
     assert.deepEqual(f.pageErrors, []);
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);

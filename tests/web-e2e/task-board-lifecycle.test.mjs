@@ -27,6 +27,8 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     const done = f.page.getByRole('region', { name: 'Done', exact: true });
     await done.getByRole('button', { name: 'Actions for Archive linked task', exact: true }).click();
     await f.page.getByRole('menuitem', { name: 'Archive task', exact: true }).click();
+    await expect(f.page.getByText('Action identity', { exact: true })).toHaveCount(0);
+    await expect(f.page.getByRole('button', { name: 'Check original action', exact: true })).toHaveCount(0);
     await expect.poll(async () => (await f.client.request('objects.stat', { objectId: linked.objectId })).effectivelyArchived).toBe(true);
     assert.equal(f.threads.get('saved-task').archived, true);
     await expect(done.getByRole('button', { name: 'Done actions', exact: true })).toBeEnabled();
@@ -48,15 +50,13 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
       });
       await done.getByRole('button', { name: 'Done actions', exact: true }).click();
       await f.page.getByRole('menuitem', { name: 'Archive all tasks', exact: true }).click();
-      await expect(f.page.getByRole('button', { name: 'Check original action', exact: true })).toBeEnabled();
-      assert.equal(calls.length, 1);
-      assert.equal((await Promise.all(remaining.map(task => f.client.request('objects.stat', { objectId: task.objectId })))).filter(task => task.effectivelyArchived).length, 1);
-      await f.page.unroute('**/api/v1/rpc');
-      await f.page.getByRole('button', { name: 'Check original action', exact: true }).click();
-      await expect(done.getByRole('button', { name: 'Done actions', exact: true })).toBeEnabled();
-      await done.getByRole('button', { name: 'Done actions', exact: true }).click();
-      await f.page.getByRole('menuitem', { name: 'Archive all tasks', exact: true }).click();
       await expect.poll(async () => (await Promise.all(remaining.map(task => f.client.request('objects.stat', { objectId: task.objectId })))).every(task => task.effectivelyArchived)).toBe(true);
+      await expect(done.getByRole('button', { name: 'Done actions', exact: true })).toBeEnabled();
+      assert.equal(calls.length, 2);
+      assert.equal(new Set(calls.map(call => call.operationId)).size, 2);
+      await expect(f.page.getByText('Action identity', { exact: true })).toHaveCount(0);
+      await expect(f.page.getByRole('alert')).toHaveCount(0);
+      await f.page.unroute('**/api/v1/rpc');
     }
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(f.pageErrors, []);
@@ -88,11 +88,12 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     await expect.poll(async () => (await f.client.request('objects.stat', { objectId: id })).effectivelyArchived).toBe(false);
     assert.equal(f.threads.get('saved-task').archived, false); assert.equal((await f.task(id)).workflowState, 'done');
     await expect(fresh).toBeEnabled(); assert.equal(starts(), 0);
+    const initialThreads = f.threads.size;
     await fresh.click();
     await expect.poll(async () => (await f.task(id)).primaryResourceRef.nativeId, { timeout: 30000 }).not.toBe('saved-task');
     const task = await f.task(id); assert.equal(task.fields.control, 'agent');
     assert.ok(['todo', 'in_progress'].includes(task.workflowState)); assert.equal(starts(), 1);
-    assert.equal(f.threads.get('saved-task').archived, false); assert.equal(f.threads.size, 2);
+    assert.equal(f.threads.get('saved-task').archived, false); assert.equal(f.threads.size, initialThreads + 1);
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     assert.deepEqual(f.pageErrors, []);
   });

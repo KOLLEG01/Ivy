@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue';
-import { callBound, discover, IvyError, newOperationId } from '../../sdk/src/client.js';
+import { callBound, canonical, discover, IvyError, newOperationId } from '../../sdk/src/client.js';
 import type { Result, RpcClient } from '../../sdk/src/client.js';
 import type { TaskBoard, Wire } from '../../sdk/src/client.js';
 
@@ -52,6 +52,26 @@ export function useObjectArchive(client: RpcClient, key: string) {
       pending.value = null; persist(); return result;
     } catch (cause) {
       const failure = IvyError.from(cause);
+      // A lost response can follow a completed archive. Read the original receipt
+      // before leaving the control blocked or asking the user to retry.
+      if (failure.outcome !== 'not_executed' && pending.value?.call) {
+        const call = pending.value.call;
+        try {
+          if (!call.serviceNodeId || !call.operationId) throw new Error('The original archive identity is incomplete.');
+          const operation = await callBound(client, await discover(client, 'task-board.operation', { serviceNodeId: call.serviceNodeId }),
+            { operationId: call.operationId }) as TaskBoard.Operation;
+          const expected = (call.arguments as TaskBoard.ArchiveRequest).expectedWorkspace;
+          if (operation.operationId === call.operationId && operation.callerPrincipalId === expected?.callerPrincipalId &&
+              canonical(operation.request) === canonical(call.arguments)) {
+            if (operation.phase === 'succeeded' && operation.outcome?.archive) {
+              pending.value = null; persist(); return operation.outcome.archive;
+            }
+            if (operation.phase === 'failed') {
+              pending.value = null; persist(); error.value = operation.error?.message ?? failure.message; return null;
+            }
+          }
+        } catch { /* Keep the original request when its outcome is still unavailable. */ }
+      }
       if (failure.outcome === 'not_executed') { pending.value = null; try { persist(); } catch { /* The actionable error below remains visible. */ } }
       error.value = cause instanceof Error ? cause.message : 'The archive action could not be confirmed.';
       return null;

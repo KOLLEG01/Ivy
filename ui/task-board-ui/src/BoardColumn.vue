@@ -343,6 +343,7 @@ defineExpose({ refresh: pages.refresh });
         </DropdownMenuContent>
       </DropdownMenu>
     </h2>
+    <slot name="feedback" />
     <RemoteState
       :loading="pages.loading.value"
       :error="pages.error.value"
