@@ -24,6 +24,7 @@ import {
 } from "../../../../../packages/sdk/src/client";
 import { consoleClient, dateLabel, shortHash, usePage } from "../runtime";
 import type { Operation } from "../runtime";
+import OpenaiPluginSettings from "../OpenaiPluginSettings.vue";
 
 const page = usePage((signal, cursor) =>
   consoleClient.request(
@@ -354,6 +355,7 @@ watch([hostId, draft, conflictDraft, loadedRevision, selected], persistDraft, {
     :loading="page.loading.value"
     :updated-at="page.updatedAt.value"
   />
+  <OpenaiPluginSettings />
   <RemoteState
     :loading="page.loading.value"
     :error="page.error.value"

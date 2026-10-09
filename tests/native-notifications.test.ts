@@ -1,7 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NativeNotifications, nativeBrowserNotice, inputBrowserNotice } from '../services/agent-manager/src/notifications.js';
+import { NativeNotifications, NativeNoticePolicy, nativeBrowserNotice, inputBrowserNotice } from '../services/agent-manager/src/notifications.js';
 const owner={serviceNodeId:'agent',nativeVersion:'0.154.0'};
+
+test('notice policy follows native project membership, new threads and reassignment without extra reads', () => {
+  const policy = new NativeNoticePolicy();
+  policy.setProjects([
+    { nativeId: 'internal', source: 'native', name: 'IvyInternal', paths: ['C:/internal'] },
+    { nativeId: 'user', source: 'native', name: 'User', paths: ['C:/internal/user'] },
+  ]);
+  assert.equal(policy.isInternal('unknown'), null);
+  policy.observe({ method: 'thread/started', params: { thread: { id: 'internal-task', cwd: 'D:/worktree', projectId: 'internal' } } });
+  assert.equal(policy.isInternal('internal-task'), true, 'native identity also covers worktrees outside the internal root');
+  policy.setThread('old-task', { cwd: 'c:\\INTERNAL\\task' });
+  assert.equal(policy.isInternal('old-task'), true);
+  policy.setThread('nested-user', { cwd: 'C:/internal/user/task' });
+  assert.equal(policy.isInternal('nested-user'), false);
+  policy.setThread('projectless', { cwd: 'C:/internal/task', projectId: null });
+  assert.equal(policy.isInternal('projectless'), false);
+  const snapshotRevision = policy.revision;
+  policy.observe({ method: 'thread/project/updated', params: { threadId: 'internal-task', projectId: 'user' } });
+  assert.equal(policy.isInternal('internal-task'), false);
+  policy.setThread('internal-task', { cwd: 'D:/worktree', projectId: 'internal' }, snapshotRevision);
+  assert.equal(policy.isInternal('internal-task'), false, 'a late inventory or thread read cannot undo a live reassignment');
+  policy.observe({ method: 'thread/project/updated', params: { threadId: 'internal-task', projectId: 'internal' } });
+  assert.equal(policy.isInternal('internal-task'), true);
+});
 test('browser notices include completed turns and actionable inputs with exact deep links', () => {
   const event = { method: 'turn/completed', params: { threadId: 'task & one', turn: { id: 'turn-one', status: 'completed' } } };
   const notice = nativeBrowserNotice(owner.serviceNodeId, event)!;

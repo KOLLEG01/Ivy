@@ -83,7 +83,10 @@ export async function buildWeb({ uis = null } = {}) {
   if (!requested || requested.has("console"))
     await cached(
       "console",
-      [resolve(project, "services/hive/console")],
+      [
+        resolve(project, "services/hive/console"),
+        resolve(project, "services/hive/chatgpt-plugin/assets"),
+      ],
       destination,
       async () => {
         await build({

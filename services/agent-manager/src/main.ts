@@ -375,8 +375,8 @@ export async function startAgentManager(
             "turn/started",
             "turn/completed",
           ].includes(value.method) &&
-          !( ["thread/status/changed", "turn/started", "turn/completed"].includes(value.method) &&
-            noticePolicy.isInternal((value.params as { threadId: string }).threadId) === true )
+          !(["thread/status/changed", "turn/started", "turn/completed"].includes(value.method) &&
+            noticePolicy.isInternal((value.params as { threadId: string }).threadId) === true)
         )
           requestThreadRefresh?.();
         if (value.method === "project/changed") {
@@ -579,7 +579,7 @@ export async function startAgentManager(
         if (!read) {
           const revision = noticePolicy.revision;
           read = (async () => {
-            const reply = await owner.rpc.request("thread/read", { threadId, includeTurns: false });
+            const reply = await owner.rpc.request("thread/read", { threadId, includeTurns: false }, { detachOnTimeout: true });
             if ("error" in reply) throw new IvyError("native_inventory_unavailable", "Cannot determine the task's notification policy.");
             noticePolicy.setThread(threadId, (reply.result as { thread: Record<string, Wire.Json> }).thread, revision);
           })().finally(() => noticeReads.delete(threadId));

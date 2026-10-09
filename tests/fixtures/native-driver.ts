@@ -59,7 +59,7 @@ export async function nativeDriverFixture(t: TestContext, nativeVersion: '0.154.
         const operation = ownerAbsence ? null : journal.get(identity); if (operation) return operation;
         throw new IvyError('not_found', 'Exact fixture owner absence.', 'not_executed', { kind: 'agent_operation_absent', operationId: identity.operationId, serviceNodeId: 'native-agent', epoch });
       }
-      if (call.definition.name === 'status') return { serviceNodeId: 'native-agent', hostId: 'fixture-host', nativeVersion: catalog.version,
+      if (call.definition.name === 'status') return { serviceNodeId: 'native-agent', hostId: 'fixture-host', serverType: 'codex', nativeVersion: catalog.version,
         nativeExecutableHash: catalog.nativeExecutableHash, catalogHash: hashJson(catalog), epoch, pid: null, state: 'ready', observedAt: new Date().toISOString(), code: null,
         initialized: {}, pendingInputs: 0, operations: journal.status(), observedMethods: journal.observedMethods(), processStops,
         connection: { mode: 'owned-stdio', ownsServer: true, ownsHome: true, actualHome: root, actualVersion: catalog.version,
