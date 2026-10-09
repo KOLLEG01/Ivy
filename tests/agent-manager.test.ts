@@ -89,6 +89,10 @@ for (const version of ["0.154.0"] as const)
             "thread/read",
             "thread/turns/list",
             "thread/items/list",
+            "thread/goal/get",
+            "config/read",
+            "permissionProfile/list",
+            "fs/readFile",
             "project/list",
             "account/logout",
             "account/rateLimits/read",
@@ -202,6 +206,8 @@ for (const version of ["0.154.0"] as const)
             Wire.Json
           >;
           sent.push(frame);
+          if (["thread/goal/get", "config/read", "permissionProfile/list", "fs/readFile"].includes(String(frame["method"])))
+            owner.emit({ id: frame["id"], error: { code: -1, message: "Fixture read error" } });
           if (
             typeof frame["method"] === "string" &&
             ["thread/list", "thread/loaded/list", "project/list"].includes(
@@ -337,6 +343,18 @@ for (const version of ["0.154.0"] as const)
         throw Error("Interactive path wrote local workflow state");
       };
       try {
+        const reads = {
+          "thread/goal/get": { threadId: "read-thread" },
+          "config/read": { includeLayers: false },
+          "permissionProfile/list": {},
+          "fs/readFile": { path: "/fixture/file.txt" },
+        };
+        for (const [method, params] of Object.entries(reads)) {
+          if (!catalog.clientRequests.some(value => value.method === method)) continue;
+          const binding = await discover(client, "codex." + method, { serviceNodeId: "agent-node" });
+          await assert.rejects(callBound(client, binding, params), { code: "native_error" },
+            method + " must reach native observation without reading or writing the operation journal");
+        }
         const request = {
           operationId: "fast-interaction",
           nativeVersion: version,

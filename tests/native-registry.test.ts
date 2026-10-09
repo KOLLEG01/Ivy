@@ -55,8 +55,8 @@ test('the complete supported catalog register in the actual Hive kernel with exa
       const binding = actual.get('codex.' + definition.name)!; assert.ok(binding);
       assert.deepEqual(binding.definition, definition); assert.equal(binding.definitionHash, toolDefinitionHash(definition));
     }
-    const management = call<Operation.ToolsListResult>(client, 'tools.list', { namespace: 'agent', serviceNodeId: node, limit: 25 }); assert.equal(management.items.length, 21);
-    assert.deepEqual(management.items.map(value => value.qualifiedName).sort(), ['answer', 'capabilities', 'catalog', 'configureCapabilities', 'discover', 'environmentDefaults', 'frameLimits', 'inputDefinition', 'inputs', 'interact', 'interaction', 'invoke', 'notifications', 'operation', 'prevent', 'projects', 'read', 'resolveProject', 'resolveWorkspace', 'stageFile', 'status'].map(name => 'agent.' + name).sort());
+    const management = call<Operation.ToolsListResult>(client, 'tools.list', { namespace: 'agent', serviceNodeId: node, limit: 25 }); assert.equal(management.items.length, 22);
+    assert.deepEqual(management.items.map(value => value.qualifiedName).sort(), ['answer', 'capabilities', 'catalog', 'configureCapabilities', 'discover', 'environmentDefaults', 'frameLimits', 'inputDefinition', 'inputs', 'interact', 'interaction', 'invoke', 'listDirectories', 'notifications', 'operation', 'prevent', 'projects', 'read', 'resolveProject', 'resolveWorkspace', 'stageFile', 'status'].map(name => 'agent.' + name).sort());
     assert.equal(management.items.find(value => value.qualifiedName === 'agent.frameLimits')!.definition.annotations?.readOnlyHint, true);
     assert.equal(management.items.find(value => value.qualifiedName === 'agent.catalog')!.definition.annotations?.readOnlyHint, true);
     const read = management.items.find(value => value.qualifiedName === 'agent.read')!;
@@ -66,6 +66,10 @@ test('the complete supported catalog register in the actual Hive kernel with exa
     assert.equal(management.items.find(value => value.qualifiedName === 'agent.prevent')!.definition.annotations?.readOnlyHint, false);
     assert.equal(management.items.find(value => value.qualifiedName === 'agent.stageFile')!.definition.annotations?.readOnlyHint, false);
     assert.equal(actual.get('codex.thread/list')!.definition.annotations?.readOnlyHint, true);
+    for (const method of ['thread/goal/get', 'config/read', 'permissionProfile/list', 'fs/readFile']) {
+      const binding = actual.get('codex.' + method);
+      if (binding) assert.equal(binding.definition.annotations?.readOnlyHint, true, method + ' must not fill the action journal');
+    }
     assert.equal(actual.get('codex.thread/start')!.definition.annotations?.readOnlyHint, undefined);
     const nil = actual.get('codex.account/rateLimits/read')!;
     const dispatch = routing.prepare({ ...client, principalId: 'caller' }, { qualifiedName: nil.qualifiedName, serviceNodeId: node,
@@ -89,7 +93,7 @@ test('searchable native inventory advances its immutable schema version', t => {
   for (const kind of legacy.namespaces[0]!.inventoryKinds) {
     kind.version = '1.0.0'; delete kind.searchPointers; delete kind.archivedPointer; delete kind.recencyPointer;
   }
-  assert.deepEqual(current.namespaces[0]!.inventoryKinds.map(kind => kind.version), ['1.1.0', '1.1.0']);
+  assert.deepEqual(current.namespaces[0]!.inventoryKinds.map(kind => kind.version), ['1.1.0', '2.0.0']);
   const connected = call<{ generation: number }>(socket, 'service.connect', { serviceNodeId: 'agent', serviceName: 'agent-manager', hostId: 'host', nativeVersion: '0.154.0', version: '0.2.12', buildId: digest('agent'), hiveProtocol: 1 });
   const context = { ...socket, serviceNodeId: 'agent', generation: connected.generation };
   call(context, 'registry.sync', legacy);

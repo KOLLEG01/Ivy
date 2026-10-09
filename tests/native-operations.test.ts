@@ -2,9 +2,33 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { NativeOperations } from '../services/agent-manager/src/operations.js';
 import { NativeJournal } from '../services/agent-manager/src/journal.js';
-import type { LocalAgentState, SavedState } from '../services/agent-manager/src/hive-state.js';
+import { LocalAgentState } from '../services/agent-manager/src/hive-state.js';
+import type { SavedState } from '../services/agent-manager/src/hive-state.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { operationId } from '../packages/contracts/src/operation-id.js';
 import { digest } from '../packages/contracts/src/canonical.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
+
+test('local receipts use the configured capacity beyond 10,000 rows and preserve originals when it is reached', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'ivy-native-capacity-')), path = join(root, 'journal.sqlite');
+  const state = new LocalAgentState(path, 'agent', { maxOperations: 10_002, maxJournalBytes: 64 * 1024 * 1024 });
+  t.after(() => { state.close(); rmSync(root, { recursive: true, force: true }); });
+  state.setRuntimeEpoch('runtime');
+  const db = new DatabaseSync(path);
+  db.prepare(`WITH RECURSIVE rows(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM rows WHERE i<10000)
+    INSERT INTO state SELECT 'operation','retained-'||i,1,'{}',2,?,? FROM rows`).run(Date.now(), Date.now());
+  db.close();
+  const original = { operationId: operationId('runtime'), phase: 'succeeded', reply: { result: {} } };
+  const saved = await state.write('operation', 'original', original);
+  await state.write('operation', 'last', { ...original, operationId: operationId('runtime') });
+  await assert.rejects(state.write('operation', 'over-limit', { ...original, operationId: operationId('runtime') }), { code: 'native_journal_capacity' });
+  assert.deepEqual(await state.read('operation', 'original'), saved);
+  assert.equal(await state.read('operation', 'over-limit'), null);
+  await state.write('operation', 'original', { ...original, code: 'retained' }, saved.pin);
+});
 
 test('local durable claims precede native effects, survive empty service memory and prevent competing dispatch', async () => {
   const rows=new Map<string,SavedState<unknown>>();let unavailable=false;

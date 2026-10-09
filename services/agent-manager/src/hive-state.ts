@@ -13,8 +13,6 @@ export type SavedState<T> = { value: T; pin: Pin };
 export class LocalAgentState {
   private readonly db: DatabaseSync;
   private runtimeEpoch: string | null = null;
-  private static readonly maximumRows = 10_000;
-  private static readonly maximumBytes = 256 * 1024 * 1024;
   private static readonly resultReservation = 25 * 1024 * 1024;
   constructor(filename: string, readonly serviceNodeId: string, private readonly limits: Pick<Agent.Settings['limits'], 'maxOperations' | 'maxJournalBytes'>) {
     mkdirSync(dirname(filename), { recursive: true });
@@ -58,13 +56,13 @@ export class LocalAgentState {
         const expiredBefore = Number((this.db.prepare("SELECT value FROM state_metadata WHERE key='expired_before'").get() as { value: string }).value);
         requireThat(identity.runtimeEpoch === this.runtimeEpoch && identity.issuedAtUnixMs <= now + 60_000 && identity.issuedAtUnixMs >= expiredBefore && now < identity.issuedAtUnixMs + 24 * 60 * 60 * 1000,
           'operation_expired', 'Native operation identity belongs to another runtime or is outside its replay window.');
-        requireThat(usage.count < Math.min(this.limits.maxOperations, LocalAgentState.maximumRows) &&
-          usage.bytes + bytes + LocalAgentState.resultReservation <= Math.min(this.limits.maxJournalBytes, LocalAgentState.maximumBytes),
+        requireThat(usage.count < this.limits.maxOperations &&
+          usage.bytes + bytes + LocalAgentState.resultReservation <= this.limits.maxJournalBytes,
           'native_journal_capacity', 'Agent operation journal is full; no native request sent.');
       }
       if (row) {
         const old = this.db.prepare('SELECT byte_length FROM state WHERE kind=? AND key=?').get(kind, key) as { byte_length: number };
-        requireThat(usage.bytes - old.byte_length + bytes <= Math.min(this.limits.maxJournalBytes, LocalAgentState.maximumBytes),
+        requireThat(usage.bytes - old.byte_length + bytes <= this.limits.maxJournalBytes,
           'native_journal_capacity', 'Agent operation journal is full; no native result was discarded.');
       }
       const phase = kind === 'operation' && value && typeof value === 'object' ? (value as { phase?: string }).phase : undefined;
