@@ -14,10 +14,12 @@ import { syncNativeComments } from '../services/task-board/src/runtime/native-co
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
 import { unstartedArchivedContext, unstartedMissingContext } from '../services/task-board/src/runtime/native-recovery.js';
 import { TaskBoardReconciler } from '../services/task-board/src/runtime/reconciler.js';
+import { nativeRateLimitRetryAt } from '../services/task-board/src/runtime/native-rate-limit.js';
 
 async function fixture(t: TestContext) {
   const f = await nativeDriverFixture(t); let status = 'inProgress', started = false, readFailed = false, archived = false, largeResume = false, outputError: number | null = null;
   let outputItems: Wire.Json[] = [{ id: 'two', type: 'agentMessage', phase: 'final_answer', text: 'Second' }];
+  let turnError: Wire.Json = null, completedAt: number | null = null;
   f.reply(frame => {
     if (readFailed && frame['method'] === 'thread/turns/list') return { error: { code: -32000, message: 'Temporary native read failure.' } };
     if (frame['method'] === 'turn/start') { started = true; status = 'inProgress'; }
@@ -33,7 +35,8 @@ async function fixture(t: TestContext) {
         approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly' }, reasoningEffort: 'high' } };
     }
     if (frame['method'] === 'thread/unarchive') { archived = false; return { result: { thread: f.w.nativeThread() } }; }
-    if (frame['method'] === 'thread/turns/list') return { result: { data: [{ ...nativeRecord(f.w.turn(status)), items: [], itemsView: 'notLoaded' }], nextCursor: null } };
+    if (frame['method'] === 'thread/turns/list') return { result: { data: [{ ...nativeRecord(f.w.turn(status)), ...(turnError ? { error: turnError } : {}),
+      ...(completedAt === null ? {} : { completedAt }), items: [], itemsView: 'notLoaded' }], nextCursor: null } };
     if (frame['method'] === 'thread/items/list') {
       const params = nativeRecord(frame['params']);
       assert.equal(params['limit'], 1); assert.equal(params['sortDirection'], 'desc');
@@ -48,8 +51,82 @@ async function fixture(t: TestContext) {
     archive: () => { archived = true; },
     largeResume: () => { largeResume = true; },
     outputs: (items: Wire.Json[]) => { outputItems = items; }, outputError: (code: number) => { outputError = code; },
+    error: (value: Wire.Json, at: number | null = null) => { turnError = value; completedAt = at; },
     current: () => f.w.f.first.store.read('task-board/run', runId) };
 }
+
+test('native quota retries use the reported reset and timezone, with delayed retries when reset data is absent', () => {
+  const turn = (message: string, codexErrorInfo: Wire.Json = null) => ({ status: 'failed', error: { message, codexErrorInfo } });
+  assert.equal(nativeRateLimitRetryAt(turn("You've hit your session limit · resets 8:10pm (Europe/Berlin)"), '2026-10-09T13:57:31.803Z'), '2026-10-09T18:11:00.000Z');
+  assert.equal(nativeRateLimitRetryAt(turn("You've hit your session limit · resets 1:10am (Europe/Berlin)"), '2026-10-09T21:57:31.803Z'), '2026-10-09T23:11:00.000Z');
+  assert.equal(nativeRateLimitRetryAt(turn("You've hit your weekly limit · resets 8:10am (Europe/Berlin)"), '2026-10-24T21:57:31.803Z'), '2026-10-25T07:11:00.000Z');
+  assert.equal(nativeRateLimitRetryAt(turn("You've hit your session limit · resets 8:10pm (Europe/Berlin)"), '2026-10-09T18:11:31.803Z'), '2026-10-09T18:26:31.803Z');
+  assert.equal(nativeRateLimitRetryAt(turn('Claude five hour limit reached. Resets at 2026-10-09T18:10:00.000Z.'), '2026-10-09T13:57:31.803Z'), '2026-10-09T18:11:00.000Z');
+  for (const message of ['Usage quota exceeded.', "You've hit your session limit", "You've hit your session limit · resets 8:10pm (invalid)", 'Claude five hour limit reached. Resets at 2026-10-09T12:00:00.000Z.'])
+    assert.equal(nativeRateLimitRetryAt(turn(message, 'usageLimitExceeded'), '2026-10-09T13:57:31.803Z'), '2026-10-09T14:12:31.803Z');
+  assert.equal(nativeRateLimitRetryAt({ ...turn("You've hit your session limit · resets 8:10pm (Europe/Berlin)"), completedAt: 1791554225 }, '2026-10-10T08:00:00.000Z'), '2026-10-09T18:11:00.000Z');
+  for (const message of ['Command failed.', 'Claude usage is nearing the five hour limit.', 'Please handle rate limit exceeded errors.'])
+    assert.equal(nativeRateLimitRetryAt(turn(message), '2026-10-09T13:57:31.803Z'), null);
+  assert.equal(nativeRateLimitRetryAt({ status: 'completed', items: [{ type: 'agentMessage', text: "You've hit your session limit" }] }, '2026-10-09T13:57:31.803Z'), null);
+});
+
+test('a quota failure waits until reset and automatically continues the same native context exactly once', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first, reset = new Date(Date.now() + 120000).toISOString();
+  await f.first.drain(f.runId);
+  f.error({ message: `Claude five hour limit reached. Resets at ${reset}.` }); f.status('failed'); f.outputs([]);
+  await f.first.drain(f.runId);
+  const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
+  assert.equal(run.value.phase, 'failed'); assert.equal(task.value.claim, null);
+  assert.equal(task.value.workflowState, 'waiting'); assert.equal(task.value.waiting?.reason, 'time');
+  assert.equal(task.value.fields.nextReviewAt, new Date(Date.parse(reset) + 60000).toISOString());
+  assert.match(task.value.comments.at(-1)!.body, /Claude five hour limit reached/);
+  const scheduler = new TaskBoardScheduler(engine);
+  for (let pass = 0; pass < 2; pass++) assert.equal(await scheduler.task(task.pin.objectId), null);
+  assert.deepEqual((await engine.store.read('task-board/task', task.pin.objectId)).pin, task.pin);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(task.value.fields.nextReviewAt!) + 1 });
+  const continued = await new TaskBoardScheduler(engine).task(task.pin.objectId);
+  assert.ok(continued?.run);
+  assert.equal(await new TaskBoardScheduler(f.f.w.f.second).task(task.pin.objectId), null);
+  await f.second.drain(continued.run.objectId);
+  const current = await engine.store.read('task-board/task', task.pin.objectId);
+  assert.deepEqual(current.value.primaryResourceRef, task.value.primaryResourceRef);
+  assert.equal(current.value.waiting, null); assert.equal(current.value.attemptCount, 2);
+  for (const [method, count] of [['thread/start', 1], ['thread/resume', 1], ['turn/start', 2]] as const)
+    assert.equal(f.f.frames.filter(frame => frame['method'] === method).length, count);
+});
+
+test('a previously blocked quota failure is reclassified from its original native turn and respects explicit user waits', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first, reset = new Date(Date.now() + 120000).toISOString();
+  await f.first.drain(f.runId); f.error({ message: `Claude five hour limit reached. Resets at ${reset}.` }); f.status('failed'); f.outputs([]);
+  await f.first.drain(f.runId);
+  const task = await engine.store.read('task-board/task', (await f.current()).value.taskId);
+  const waiting = { reason: 'user' as const, detail: 'Execution failed; see the ticket comment.', since: task.value.updatedAt };
+  // Reproduce the stored projection produced before quota-aware completion publication.
+  await engine.store.write('task-board/task', { ...task.value, waiting, fields: { ...task.value.fields, nextReviewAt: null } }, randomUUID(),
+    { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
+  const deferred = await new TaskBoardScheduler(engine).task(task.pin.objectId);
+  assert.ok(deferred?.task);
+  const recovered = await engine.store.read('task-board/task', task.pin.objectId);
+  assert.equal(recovered.value.waiting?.reason, 'time'); assert.equal(recovered.value.attemptCount, 1);
+  assert.equal(recovered.value.fields.nextReviewAt, new Date(Date.parse(reset) + 60000).toISOString());
+  assert.deepEqual(recovered.value.primaryResourceRef, task.value.primaryResourceRef);
+  await engine.store.write('task-board/task', { ...recovered.value, waiting: { ...waiting, detail: 'Waiting for a deliberate user decision.' }, fields: { ...recovered.value.fields, nextReviewAt: null } }, randomUUID(),
+    { objectId: recovered.pin.objectId, expectedRevision: recovered.pin.revision });
+  assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
+});
+
+test('quota recovery preserves an unanswered ticket question', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  await f.first.drain(f.runId);
+  let task = await engine.store.read('task-board/task', (await f.current()).value.taskId);
+  await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision,
+    commentId: 'quota-question', authorKind: 'agent', purpose: 'question', body: 'Which input should be used?', requests: [], responses: [], attachments: [], replyTo: null });
+  f.error({ message: "You've hit your session limit" }); f.status('failed'); f.outputs([]); await f.first.drain(f.runId);
+  task = await engine.store.read('task-board/task', task.pin.objectId);
+  assert.equal(task.value.waiting?.reason, 'user'); assert.equal(task.value.fields.nextReviewAt, null);
+  assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
+});
 
 test('continuation restores an externally archived context before claiming and delivers its queued input once', async t => {
   const f = await fixture(t), engine = f.f.w.f.first;

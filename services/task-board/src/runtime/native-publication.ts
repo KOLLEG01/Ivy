@@ -13,9 +13,10 @@ import { boundedOutputSummary, TaskBoardTurnEvidence } from './turn-evidence.js'
 import type { verifyNativeTranscript } from './full-turn-evidence.js';
 import { initialDelivery } from './deliveries.js';
 import { BoundToolClient } from '../../../../packages/sdk/src/client.js';
+import { nativeRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
 
 export const finishedRun = (run: TaskBoard.Run): boolean => ['completed', 'failed', 'cancelled'].includes(run.phase);
-type Completion = { state: 'succeeded' | 'failed' | 'cancelled'; summary: string; evidence: TaskBoard.Artifact | null; code: string | null };
+type Completion = { state: 'succeeded' | 'failed' | 'cancelled'; summary: string; evidence: TaskBoard.Artifact | null; code: string | null; retryAt?: string | null };
 const artifactFor = (document: Document<'task-board/run'>): TaskBoard.Artifact => ({ object: document.pin, label: 'Saved native attempt before closure', mediaType: 'application/json', contentHash: document.revision.contentHash });
 const preventedRequest = (operation: Agent.Operation) => operation.phase === 'failed' && operation.code === 'request_prevented' && operation.requestId === null && operation.epoch === null && operation.reply === null;
 function readOutcome(run: TaskBoard.Run, status: string): Pick<TaskBoard.Run['externalOutcome'], 'state' | 'code'> {
@@ -44,6 +45,8 @@ export function projectNativeState(run: TaskBoard.Run, status: string, epoch: st
 }
 // The ticket keeps a bounded summary; Codex retains the conversation history.
 function outputSummary(turn: Record<string, Wire.Json>, status: string): string {
+  const error = nativeString(nativeRecord(turn['error'])['message']);
+  if (status === 'failed' && error) return boundedOutputSummary(error);
   const messages = nativeArray(turn['items']).map(nativeRecord).filter(item => item['type'] === 'agentMessage');
   const finals = messages.filter(item => item['phase'] === 'final_answer');
   const parts = (finals.length ? finals : messages.slice(-1)).map(item => nativeString(item['text']));
@@ -83,7 +86,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     requireThat(nativeString(turn['id']) === next.turnId, 'task_board_turn_mismatch', 'A native snapshot cannot substitute another turn for the saved execution identity.');
     const status = nativeString(turn['status']);
     if (!['completed', 'failed', 'interrupted'].includes(status)) { requireThat(status === 'inProgress', 'task_board_native_state_unsupported', 'The native turn has an unsupported state.'); return null; }
-    return { state: status === 'completed' ? 'succeeded' : status === 'interrupted' && !!next.cancellation ? 'cancelled' : 'failed', summary: outputSummary(turn, status), evidence: proof, code: status === 'completed' ? null : 'native_' + status };
+    return { state: status === 'completed' ? 'succeeded' : status === 'interrupted' && !!next.cancellation ? 'cancelled' : 'failed', summary: outputSummary(turn, status), evidence: proof, code: status === 'completed' ? null : 'native_' + status, retryAt: nativeRateLimitRetryAt(turn, at) };
   };
   switch (request.change.kind) {
     case 'readSnapshot': {
@@ -101,7 +104,9 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       const observedOutcome = readOutcome(run, verified.status);
       requireThat(['succeeded', 'failed', 'cancelled'].includes(observedOutcome.state), 'task_board_native_state_changed', 'Completion must identify a terminal native outcome.');
       const handoff = runHandoff(task.value, request.run.objectId);
-      completion = { state: observedOutcome.state as Completion['state'], summary: handoff?.body ?? verified.summary, evidence: change.snapshot, code: observedOutcome.code };
+      const turn = verified.snapshot.turn;
+      completion = { state: observedOutcome.state as Completion['state'], summary: verified.status === 'failed' && nativeString(nativeRecord(turn['error'])['message'])
+        ? outputSummary(turn, verified.status) : handoff?.body ?? verified.summary, evidence: change.snapshot, code: observedOutcome.code, retryAt: nativeRateLimitRetryAt(turn, at) };
       break;
     }
     case 'transcript': {
@@ -112,7 +117,9 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       next.notificationCursor = change.notificationCursor;
       const observedOutcome = readOutcome(run, transcript.status);
       requireThat(['succeeded', 'failed', 'cancelled'].includes(observedOutcome.state), 'task_board_native_state_changed', 'A transcript must identify a terminal native outcome.');
-      completion = { state: observedOutcome.state as Completion['state'], summary: transcript.summary, evidence: change.evidence, code: observedOutcome.code };
+      const turn = transcript.snapshot.turn;
+      completion = { state: observedOutcome.state as Completion['state'], summary: transcript.status === 'failed' && nativeString(nativeRecord(turn['error'])['message'])
+        ? outputSummary(turn, transcript.status) : transcript.summary, evidence: change.evidence, code: observedOutcome.code, retryAt: nativeRateLimitRetryAt(turn, at) };
       break;
     }
     case 'reattachCall': {
@@ -341,6 +348,11 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         waiting: !followUp && completion.state !== 'cancelled' && !ready
           ? { reason: 'user', detail: needsAnswer ? 'Waiting for a response in the ticket.' : 'Execution failed; see the ticket comment.', since: at } : null };
       if (finalTask.blocker && completion.state !== 'cancelled') finalTask.waiting = { reason: 'dependency', detail: 'Waiting for the linked task condition.', since: at };
+      if (completion.state === 'failed' && completion.retryAt && !next.cancellation && !needsAnswer && !finalTask.blocker && !coordinationOnly) {
+        const nextReviewAt = finalTask.fields.nextReviewAt && finalTask.fields.nextReviewAt > completion.retryAt ? finalTask.fields.nextReviewAt : completion.retryAt;
+        finalTask = { ...finalTask, workflowState: 'waiting', fields: { ...finalTask.fields, nextReviewAt },
+          waiting: { reason: 'time', detail: rateLimitWaitingDetail(nextReviewAt), since: at } };
+      }
       if (coordinationOnly && completion.state !== 'cancelled') {
         const initial = (await store.read('task-board/task', { objectId: run.taskId, revision: run.originalRequest.expectedRevision })).value;
         const userFollowUp = finalTask.commentDeliveries.some(delivery => delivery.state === 'queued' && finalTask.comments.some(comment => comment.commentId === delivery.commentId && comment.authorKind === 'user'));

@@ -21,6 +21,7 @@ import { mutation } from "./store.js";
 import type { Document } from "./store.js";
 import { effectiveExecution, supportsExecutionOptions } from './configuration.js';
 import { freshContextRecovery, unstartedArchivedContext, unstartedMissingContext } from './native-recovery.js';
+import { failedRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
 
 /** Retains an automatic action before invocation and never replaces an uncertain Operation. */
 export class TaskBoardScheduler {
@@ -329,6 +330,7 @@ export class TaskBoardScheduler {
     task: Document<"task-board/task">,
     sequence: number,
     recoverThread = false,
+    rateLimitRetryAt: string | null = null,
   ): Promise<TaskBoard.SchedulerRequest | null> {
     const value = task.value,
       base = {
@@ -347,6 +349,11 @@ export class TaskBoardScheduler {
       sequence,
     ]);
     if (recoverThread) return { action: 'recoverThread', ...base, operationId, run: value.lastRun! };
+    if (rateLimitRetryAt && rateLimitRetryAt > this.now().toISOString()) {
+      const nextReviewAt = value.fields.nextReviewAt && value.fields.nextReviewAt > rateLimitRetryAt ? value.fields.nextReviewAt : rateLimitRetryAt;
+      return { action: 'defer', ...base, operationId, reason: 'time', nextReviewAt,
+        detail: rateLimitWaitingDetail(nextReviewAt) };
+    }
     const coordinationOnly = coordinationPending(value);
     const comments = value.commentDeliveries
       .filter((item) => item.state === "queued")
@@ -404,7 +411,7 @@ export class TaskBoardScheduler {
       const detail =
         ["task_board_model_unavailable", "task_board_capability_unavailable"].includes(error.code) ? error.message.slice(0, 2048)
           : reason === "time" && value.fields.nextReviewAt
-          ? `Deferred until ${value.fields.nextReviewAt}.`
+          ? value.waiting?.detail === rateLimitWaitingDetail(value.fields.nextReviewAt) ? value.waiting.detail : `Deferred until ${value.fields.nextReviewAt}.`
           : error.message.slice(0, 2048);
       const blockerTaskId = error.details && typeof error.details === 'object' && 'blockerTaskId' in error.details
         ? error.details.blockerTaskId : null;
@@ -526,10 +533,12 @@ export class TaskBoardScheduler {
       (!value.waiting || value.waiting.reason === 'user');
     const recoverThread = recoveryAllowed && await unstartedMissingContext(this.engine, task);
     const restoreArchived = recoveryAllowed && !recoverThread && value.waiting?.reason === 'user' && await unstartedArchivedContext(this.engine, task);
+    const rateLimitRetryAt = recoveryAllowed && !recoverThread && !restoreArchived && value.waiting?.reason === 'user'
+      ? await failedRateLimitRetryAt(this.engine, task) : null;
     if (recoverThread || restoreArchived) {
       const run = await store.read('task-board/run', value.lastRun!);
       if (this.now().getTime() < Date.parse(run.value.finishedAt!) + Math.max(30000, this.engine.settings.scheduler.intervalMs)) return null;
-    } else if (value.waiting?.reason === 'user' && !coordinationPending(value)) return null;
+    } else if (value.waiting?.reason === 'user' && !coordinationPending(value) && !rateLimitRetryAt) return null;
     const freeBytes = store.localUsage().freeBytes;
     requireThat(freeBytes === null || freeBytes >= 512 * 1024 * 1024,
       "task_board_storage_low", "New agent work is paused until the TaskBoard journal has at least 512 MiB free.");
@@ -562,7 +571,7 @@ export class TaskBoardScheduler {
       previousOperation = operation;
     }
     const sequence = (attempt?.value.sequence ?? 0) + 1;
-    const proposed = await this.proposed(task, sequence, recoverThread);
+    const proposed = await this.proposed(task, sequence, recoverThread, rateLimitRetryAt);
     if (!proposed) return null;
     const request = proposed;
     const next: TaskBoard.SchedulerAttempt = {

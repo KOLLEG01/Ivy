@@ -60,6 +60,9 @@ UI requirements: [UI](UI.md).
   commits and deployments through directed ticket comments; unrelated changes must be preserved.
   A task may defer with `blocker: {taskId, until: "idle" | "done"}`. Cycles are rejected.
   Blocked is the board label for `waiting`, including tasks blocked before their first attempt.
+  Confirmed native usage-limit failures defer agent work until the reported reset, with a one-minute
+  grace period. Without a usable reset time, retry after fifteen minutes. Continue in the same context;
+  repeated limits defer again. General failures, cancellation and unanswered questions require intervention.
   When the condition clears, the scheduler rechecks time, dependencies, host and workspace before
   continuing. User-controlled work and Backlog remain unscheduled. A task waiting for a host
   names why each AgentManager was skipped. Backlog rank is the ticket's Hive sibling order.

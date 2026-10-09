@@ -14,6 +14,7 @@ import { NativeRpc } from '../../services/agent-manager/src/rpc.js';
 import { catalogFor } from '../../services/task-board/src/runtime/evidence.js';
 import { TaskBoardNativeDriver } from '../../services/task-board/src/runtime/native-driver.js';
 import { nativeWorkflow } from './task-board-native.js';
+import { fixtureModels } from './task-board.js';
 
 export async function nativeDriverFixture(t: TestContext, nativeVersion: '0.154.0' = '0.154.0', maxJournalBytes = 64 * 1024 * 1024) {
   const w = await nativeWorkflow(t, nativeVersion), catalog = catalogFor(nativeVersion).catalog;
@@ -34,7 +35,7 @@ export async function nativeDriverFixture(t: TestContext, nativeVersion: '0.154.
       if (frame['method'] === heldMethod) return;
       const overridden = nativeReply?.(frame);
       if (overridden) { output.write(JSON.stringify({ id: frame['id'], ...overridden }) + '\n'); return; }
-      const result = frame['method'] === 'thread/read' ? { thread: w.nativeThread() } : frame['method'] === 'turn/start' ? { turn: w.turn() }
+      const result = frame['method'] === 'model/list' ? fixtureModels() : frame['method'] === 'thread/read' ? { thread: w.nativeThread() } : frame['method'] === 'turn/start' ? { turn: w.turn() }
         : frame['method'] === 'turn/interrupt' ? {} : { thread: w.nativeThread(), cwd: '/fixture', model: 'fixture-model', modelProvider: 'openai',
           approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly' }, reasoningEffort: 'high' };
       output.write(JSON.stringify({ id: frame['id'], result }) + '\n');

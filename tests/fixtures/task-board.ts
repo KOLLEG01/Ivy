@@ -63,6 +63,9 @@ export const context = (operationId: string, callerPrincipalId = "user") => ({
   generation: 1,
   signal: new AbortController().signal,
 });
+export const fixtureModels = () => ({ data: ['fixture-model', 'gpt-fixture', 'gpt-6.1-sol'].map((model, index) => ({ id: model, model, displayName: 'Fixture model',
+  description: 'Isolated model catalog', hidden: false, isDefault: index === 0, defaultReasoningEffort: 'high',
+  supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'High' }, { reasoningEffort: 'low', description: 'Low' }, { reasoningEffort: 'xhigh', description: 'Extra high' }] })), nextCursor: null });
 
 export function taskBoardFixture(
   t: { after: (fn: () => void) => void },
@@ -295,9 +298,7 @@ export function taskBoardFixture(
           id: threadId, modelProvider: 'openai', preview: 'Fixture', projectId: null, sessionId: threadId, source: 'appServer',
           status: { type: 'idle' }, turns: [], updatedAt: 1788690000, path: '/fixture/sessions/' + threadId + '.jsonl' } } } } satisfies Agent.ReadObservation;
     }
-    if (call.definition.name === 'model/list') return { data: ['fixture-model', 'gpt-fixture', 'gpt-6.1-sol'].map((model, index) => ({ id: model, model, displayName: 'Fixture model',
-      description: 'Isolated model catalog', hidden: false, isDefault: index === 0, defaultReasoningEffort: 'high',
-      supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'High' }, { reasoningEffort: 'low', description: 'Low' }, { reasoningEffort: 'xhigh', description: 'Extra high' }] })), nextCursor: null };
+    if (call.definition.name === 'model/list') return fixtureModels();
     if (call.definition.name === "resolveProject")
       return {
         kind: "task",

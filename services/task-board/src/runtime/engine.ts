@@ -29,6 +29,7 @@ import { TaskBoardNativeInspector } from "./native-inspector.js";
 import { checkConfiguration, configurationName, configurationView } from './configuration.js';
 import { TaskBoardNativeLifecycle } from './native-lifecycle.js';
 import { unstartedArchivedContext } from './native-recovery.js';
+import { failedRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
 
 /** A Task has run once it has any attempt, claim, Run or native context. */
 export const started = (task: TaskBoard.Task) =>
@@ -1380,6 +1381,13 @@ export class TaskBoardEngine {
       "task_board_invalid_transition",
       "This task is terminal for the requested action.",
     );
+    let rateLimitRecovery = false;
+    if (actor.source === 'scheduler' && task.waiting?.reason === 'user' &&
+      (request.action === 'continue' || request.action === 'defer' && request.reason === 'time')) {
+      const retryAt = await failedRateLimitRetryAt(this, await this.store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision }));
+      rateLimitRecovery = !!retryAt && (request.action === 'continue' ? retryAt <= at
+        : request.nextReviewAt === retryAt && request.detail === rateLimitWaitingDetail(retryAt));
+    }
     if (actor.source === "scheduler")
       requireThat(
         task.fields.control === "agent" &&
@@ -1387,7 +1395,7 @@ export class TaskBoardEngine {
             request.action,
           ) &&
           (["todo", "waiting"].includes(task.workflowState) || request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task)) &&
-          (!task.waiting || request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task) ||
+          (!task.waiting || rateLimitRecovery || request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task) ||
             request.action === 'continue' && task.waiting.reason === 'user' && await unstartedArchivedContext(this,
               await this.store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision })) ||
             ["time", "dependency", "host", "capability", "workspace"].includes(
