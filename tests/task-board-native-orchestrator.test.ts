@@ -19,10 +19,13 @@ import { nativeRateLimitRetryAt } from '../services/task-board/src/runtime/nativ
 async function fixture(t: TestContext) {
   const f = await nativeDriverFixture(t); let status = 'inProgress', started = false, readFailed = false, archived = false, largeResume = false, outputError: number | null = null;
   let outputItems: Wire.Json[] = [{ id: 'two', type: 'agentMessage', phase: 'final_answer', text: 'Second' }];
-  let turnError: Wire.Json = null, completedAt: number | null = null;
+  let turnError: Wire.Json = null, completedAt: number | null = null, startReplyStatus: string | null = null;
   f.reply(frame => {
     if (readFailed && frame['method'] === 'thread/turns/list') return { error: { code: -32000, message: 'Temporary native read failure.' } };
-    if (frame['method'] === 'turn/start') { started = true; status = 'inProgress'; }
+    if (frame['method'] === 'turn/start') {
+      started = true; status = 'inProgress';
+      if (startReplyStatus) return { result: { turn: f.w.turn(startReplyStatus) } };
+    }
     if (frame['method'] === 'turn/steer') return { result: { turnId: 'native-turn' } };
     if (frame['method'] === 'turn/interrupt') { status = 'interrupted'; return { result: {} }; }
     if (frame['method'] === 'thread/read') return { result: { thread: { ...f.w.nativeThread([], archived ? { type: 'notLoaded' } : started && status === 'inProgress' ? { type: 'active', activeFlags: [] } : { type: 'idle' }),
@@ -48,6 +51,7 @@ async function fixture(t: TestContext) {
   });
   const first = new TaskBoardNativeOrchestrator(f.w.f.first), second = new TaskBoardNativeOrchestrator(f.w.f.second), runId = f.w.state().run.objectId;
   return { f, first, second, runId, status: (value: string) => { status = value; }, failRead: (value: boolean) => { readFailed = value; },
+    startReply: (value: string) => { startReplyStatus = value; },
     archive: () => { archived = true; },
     largeResume: () => { largeResume = true; },
     outputs: (items: Wire.Json[]) => { outputItems = items; }, outputError: (code: number) => { outputError = code; },
@@ -70,16 +74,41 @@ test('native quota retries use the reported reset and timezone, with delayed ret
   assert.equal(nativeRateLimitRetryAt({ status: 'completed', items: [{ type: 'agentMessage', text: "You've hit your session limit" }] }, '2026-10-09T13:57:31.803Z'), null);
 });
 
-test('a quota failure waits until reset and automatically continues the same native context exactly once', async t => {
+for (const status of ['interrupted', 'failed', 'completed']) test(`a ${status} start acknowledgement does not close a native turn that is still running`, async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  f.startReply(status); await f.first.drain(f.runId);
+  const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
+  assert.equal(run.value.phase, 'running'); assert.equal(run.value.externalOutcome.state, 'active');
+  assert.equal(task.value.workflowState, 'in_progress'); assert.equal(task.value.claim?.run?.objectId, f.runId);
+  f.status('completed'); await f.first.drain(f.runId);
+  assert.equal((await f.current()).value.phase, 'completed');
+  assert.equal((await engine.store.read('task-board/task', run.value.taskId)).value.workflowState, 'review');
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
+});
+
+test('native capacity failures retry after one minute without treating assistant text as an error', () => {
+  const message = 'Selected model is at capacity. Please try a different model.';
+  const turn = { status: 'failed', error: { message } };
+  assert.equal(nativeRateLimitRetryAt(turn, '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:58.000Z');
+  assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: 'Backend busy.', codexErrorInfo: 'serverOverloaded' } },
+    '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:58.000Z');
+  assert.equal(nativeRateLimitRetryAt({ ...turn, completedAt: 1791810178 }, '2026-10-12T14:00:00.000Z'), '2026-10-12T13:03:58.000Z');
+  assert.equal(nativeRateLimitRetryAt({ status: 'completed', error: { message } }, '2026-10-12T13:02:58.000Z'), null);
+  assert.equal(nativeRateLimitRetryAt({ status: 'failed', items: [{ type: 'agentMessage', text: message }] }, '2026-10-12T13:02:58.000Z'), null);
+  assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: `Please handle ${message}` } }, '2026-10-12T13:02:58.000Z'), null);
+});
+
+for (const capacity of [false, true]) test(`${capacity ? 'capacity' : 'quota'} failures wait and automatically continue the same native context exactly once`, async t => {
   const f = await fixture(t), engine = f.f.w.f.first, reset = new Date(Date.now() + 120000).toISOString();
   await f.first.drain(f.runId);
-  f.error({ message: `Claude five hour limit reached. Resets at ${reset}.` }); f.status('failed'); f.outputs([]);
+  const message = capacity ? 'Selected model is at capacity. Please try a different model.' : `Claude five hour limit reached. Resets at ${reset}.`;
+  f.error({ message }); f.status('failed'); f.outputs([]);
   await f.first.drain(f.runId);
   const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
   assert.equal(run.value.phase, 'failed'); assert.equal(task.value.claim, null);
   assert.equal(task.value.workflowState, 'waiting'); assert.equal(task.value.waiting?.reason, 'time');
-  assert.equal(task.value.fields.nextReviewAt, new Date(Date.parse(reset) + 60000).toISOString());
-  assert.match(task.value.comments.at(-1)!.body, /Claude five hour limit reached/);
+  assert.equal(task.value.fields.nextReviewAt, new Date(Date.parse(capacity ? run.value.finishedAt! : reset) + 60000).toISOString());
+  assert.equal(task.value.comments.at(-1)!.body, message);
   const scheduler = new TaskBoardScheduler(engine);
   for (let pass = 0; pass < 2; pass++) assert.equal(await scheduler.task(task.pin.objectId), null);
   assert.deepEqual((await engine.store.read('task-board/task', task.pin.objectId)).pin, task.pin);
@@ -95,9 +124,9 @@ test('a quota failure waits until reset and automatically continues the same nat
     assert.equal(f.f.frames.filter(frame => frame['method'] === method).length, count);
 });
 
-test('a previously blocked quota failure is reclassified from its original native turn and respects explicit user waits', async t => {
+for (const capacity of [false, true]) test(`previously blocked ${capacity ? 'capacity' : 'quota'} failures are reclassified from the original native turn and respect explicit user waits`, async t => {
   const f = await fixture(t), engine = f.f.w.f.first, reset = new Date(Date.now() + 120000).toISOString();
-  await f.first.drain(f.runId); f.error({ message: `Claude five hour limit reached. Resets at ${reset}.` }); f.status('failed'); f.outputs([]);
+  await f.first.drain(f.runId); f.error({ message: capacity ? 'Selected model is at capacity. Please try a different model.' : `Claude five hour limit reached. Resets at ${reset}.` }); f.status('failed'); f.outputs([]);
   await f.first.drain(f.runId);
   const task = await engine.store.read('task-board/task', (await f.current()).value.taskId);
   const waiting = { reason: 'user' as const, detail: 'Execution failed; see the ticket comment.', since: task.value.updatedAt };
@@ -108,7 +137,7 @@ test('a previously blocked quota failure is reclassified from its original nativ
   assert.ok(deferred?.task);
   const recovered = await engine.store.read('task-board/task', task.pin.objectId);
   assert.equal(recovered.value.waiting?.reason, 'time'); assert.equal(recovered.value.attemptCount, 1);
-  assert.equal(recovered.value.fields.nextReviewAt, new Date(Date.parse(reset) + 60000).toISOString());
+  assert.equal(recovered.value.fields.nextReviewAt, new Date(Date.parse(capacity ? (await f.current()).value.finishedAt! : reset) + 60000).toISOString());
   assert.deepEqual(recovered.value.primaryResourceRef, task.value.primaryResourceRef);
   await engine.store.write('task-board/task', { ...recovered.value, waiting: { ...waiting, detail: 'Waiting for a deliberate user decision.' }, fields: { ...recovered.value.fields, nextReviewAt: null } }, randomUUID(),
     { objectId: recovered.pin.objectId, expectedRevision: recovered.pin.revision });

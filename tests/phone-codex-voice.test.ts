@@ -564,6 +564,45 @@ test("A call arriving during background model preparation awaits that same task"
   assert.equal(f.requests.filter(value => value.method === "turn/start").length, 1);
 });
 
+test("An unknown unused creation still warms incoming continuation without repeating that creation", async t => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const first = f.voice(), call = f.incoming(), threadId = await first.prepare(call, 0, selection);
+  await first.start(call, 0, threadId, "Retained conversation", "offer", () => {});
+  await first.connected(call.callId, async () => {});
+  await first.stop(call.callId); f.release(call); await first.close();
+  const creationOperationId = randomUUID();
+  f.journal.retainCodexTask("prepared-phone-voice", { fingerprint: f.fingerprint, threadId: null, creationOperationId });
+  const second = f.voice(), before = f.requests.length;
+  await assert.rejects(second.prewarm("incoming-user", selection), { code: "phone_voice_create_unknown" });
+  assert.ok(f.requests.slice(before).some(x => x.method === "thread/resume" && x.params["threadId"] === threadId));
+  assert.equal(f.requests.filter(x => x.method === "thread/start").length, 1);
+  assert.equal(f.journal.codexTaskCache("prepared-phone-voice", f.fingerprint)?.creationOperationId, creationOperationId);
+  const warm = f.requests.length;
+  assert.equal(await second.prepare(f.incoming(), 0, selection), threadId);
+  assert.deepEqual(f.requests.slice(warm), [], "the incoming call needs no native reconciliation");
+});
+
+test("Slow unused model preparation does not delay an already warmed incoming continuation", async t => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const first = f.voice(), call = f.incoming(), threadId = await first.prepare(call, 0, selection);
+  await first.start(call, 0, threadId, "Retained conversation", "offer", () => {});
+  await first.connected(call.callId, async () => {});
+  await first.stop(call.callId); f.release(call); await first.close();
+  let release!: () => void;
+  f.pausePreparation(new Promise<void>(resolve => { release = resolve; }));
+  const second = f.voice(), warm = second.prewarm("incoming-user", selection);
+  let finished = false; void warm.then(() => { finished = true; });
+  try {
+    for (let i = 0; i < 100 && f.requests.filter(x => x.method === "turn/start").length < 2; i++)
+      await new Promise(resolve => setTimeout(resolve, 1));
+    assert.equal(f.requests.filter(x => x.method === "turn/start").length, 2);
+    assert.equal(finished, false);
+    const before = f.requests.length;
+    assert.equal(await second.prepare(f.incoming(), 0, selection), threadId);
+    assert.deepEqual(f.requests.slice(before), [], "continuation does not await the other task's preparation");
+  } finally { release(); await warm; }
+});
+
 test("A lost preparation acknowledgement reconciles its original message without repeating the turn", async (t) => {
   const f = fixture(t), first = f.voice();
   f.losePreparationReply();

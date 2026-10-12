@@ -7,8 +7,9 @@ import { TaskBoardNativeInspector } from './native-inspector.js';
 import type { Document } from './store.js';
 
 const retryDelayMs = 15 * 60 * 1000;
+const capacityRetryDelayMs = 60 * 1000;
 const resetGraceMs = 60 * 1000;
-export const rateLimitWaitingDetail = (at: string): string => `Agent usage limit reached; automatic continuation after ${at}.`;
+export const rateLimitWaitingDetail = (at: string): string => `Agent temporarily unavailable; automatic continuation after ${at}.`;
 
 function localReset(message: string, failedAt: number): number | null {
   const iso = /\bresets?(?: at)?\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))/i.exec(message);
@@ -48,11 +49,13 @@ function localReset(message: string, failedAt: number): number | null {
 export function nativeRateLimitRetryAt(turn: Record<string, Wire.Json>, observedAt: string): string | null {
   if (turn['status'] !== 'failed') return null;
   const error = nativeRecord(turn['error']), message = nativeString(error['message']);
-  if (error['codexErrorInfo'] !== 'usageLimitExceeded' &&
-    !/^(?:you['’]ve hit your (?:session|weekly|usage) limit\b|Claude [\w ]{1,64} limit reached\b|rate limit (?:reached|exceeded)\b)/i.test(message)) return null;
   const observed = Date.parse(observedAt), completed = turn['completedAt'];
   const failedAt = typeof completed === 'number' && Number.isFinite(completed) && completed * 1000 <= observed
     ? completed * 1000 : observed;
+  if (error['codexErrorInfo'] === 'serverOverloaded' || /^Selected model is at capacity(?:[.!]|$)/i.test(message))
+    return new Date(failedAt + capacityRetryDelayMs).toISOString();
+  if (error['codexErrorInfo'] !== 'usageLimitExceeded' &&
+    !/^(?:you['’]ve hit your (?:session|weekly|usage) limit\b|Claude [\w ]{1,64} limit reached\b|rate limit (?:reached|exceeded)\b)/i.test(message)) return null;
   const reset = localReset(message, failedAt);
   return new Date(Math.max(failedAt + resetGraceMs, reset === null || reset < failedAt
     ? failedAt + retryDelayMs : reset + resetGraceMs)).toISOString();

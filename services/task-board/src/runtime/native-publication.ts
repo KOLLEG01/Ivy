@@ -214,7 +214,8 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         } else if (change.slot === 'turn') {
           const turn = nativeRecord(result['turn']), id = nativeString(turn['id']); requireThat(id, 'task_board_turn_mismatch', 'Turn start must return its exact native identity.');
           next.turnId = id; next.nativeEpoch = observation.epoch; next.phase = run.cancellation ? 'cancel_requested' : 'running';
-          next.externalOutcome = { state: 'active', observedAt: at, evidence: artifact, code: null }; completion = finishTurn(turn, artifact);
+          // Start acknowledges identity; a separate observation confirms the execution outcome.
+          next.externalOutcome = { state: 'active', observedAt: at, evidence: artifact, code: null };
         } else next.phase = 'cancel_requested'; // An interrupt receipt never proves terminal state.
       } break;
     }

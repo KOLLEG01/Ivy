@@ -703,11 +703,15 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     selection: PhoneVoiceSelection,
   ): Promise<void> {
     if (this.sessions.size || this.journal.currentCalls().length) return;
-    await this.cachedTask(selection);
+    await this.open();
+    // Incoming continuation is independent of the unused task. Reconcile it first
+    // so a slow or unknown fresh creation cannot leave the next redial cold.
     if (this.settings.resumeIncomingConversation && !this.sessions.size && !this.journal.currentCalls().length) {
       const context = this.journal.voiceConversation(this.fingerprint!);
       if (context) await this.resumeTask(context, selection);
     }
+    if (this.sessions.size || this.journal.currentCalls().length) return;
+    await this.cachedTask(selection);
     // Maintenance runs after the next task is ready and never delays its caller.
     void this.archive().catch(error => this.archiveIssue(null, error));
   }

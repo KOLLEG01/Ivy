@@ -36,6 +36,8 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   Outgoing Ivy calls and `*0#` always use fresh tasks. A reset clears the continuation
   pointer; an uncertain stop cannot publish a resumable context. Caller admission
   and any access challenge remain required before voice startup.
+  Warm the retained conversation before preparing the unused task; a slow or unknown
+  fresh creation must not prevent an incoming continuation from being ready.
 - `codexVoice.resetAfterOutgoingCall` defaults to true. An outgoing Voice call
   invalidates the previous continuation and cannot publish its own context after
   confirmed stop. Normal background preparation makes the next task ready without
