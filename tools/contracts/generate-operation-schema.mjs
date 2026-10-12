@@ -84,6 +84,14 @@ const byLocation = (extra) =>
 const paged = (item) =>
   obj({ items: array(item), nextCursor: nullable(str(8192)) });
 const defs = {
+  OpenaiConfiguration: obj({
+    schemaVersion: { const: 1 },
+    appId: nullable({ type: "string", pattern: "^asdk_app_[a-f0-9]{32}$" }),
+  }),
+  OpenaiConfigurationSnapshot: obj({
+    revision: uint(),
+    configuration: ref("OpenaiConfiguration"),
+  }),
   ObjectMetadata: obj({
     id,
     parentId: nullable(id),
@@ -522,6 +530,12 @@ function op(
   };
 }
 op("system.status", obj({}), ref("Status"));
+op("openai.getConfiguration", obj({}), ref("OpenaiConfigurationSnapshot"));
+op("openai.saveConfiguration", obj({
+  mutationId,
+  expectedRevision: uint(),
+  configuration: ref("OpenaiConfiguration"),
+}), ref("OpenaiConfigurationSnapshot"), "client", true);
 op(
   "system.instructions",
   obj({

@@ -66,8 +66,9 @@ Defaults: [runtime instructions](../instructions/README.md).
 - Codex configuration projection owns one marked TOML block after unmanaged root keys and before
   unmanaged tables. Existing two-block installations are migrated with their edit checks. It selects the
   V1 permission behavior (`approval_policy = "never"` and
-  `default_permissions = ":danger-full-access"`), disables the synchronized hosted Ivy app while
-  direct Ivy MCP is managed, and injects the provisioned credential only for explicitly selected
+  `default_permissions = ":danger-full-access"`), disables the hosted Ivy app identified by
+  the Hive-wide OpenAI configuration saved in the Console while direct Ivy MCP is managed,
+  and injects the provisioned credential only for explicitly selected
   AgentManager authentication at this installation's Ivy MCP URLs. Legacy sandbox settings
   and unmanaged entries for the owned keys are conflicts. Keep secrets out of stored environment
   documents, UI responses and logs; preserve all other unmanaged configuration.

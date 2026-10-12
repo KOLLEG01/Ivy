@@ -280,7 +280,7 @@ export async function retainBootstrapPlan(
 export async function bootstrapPlan(
   path: string,
   candidateId: string,
-  resources?: Host.LinuxResourceBudget,
+  resources?: Host.LinuxResourceBudget | null,
   preferred: readonly BootstrapComponent[] = [],
 ): Promise<Host.BootstrapPlan> {
   const config = await hostConfig(resolve(path)),
@@ -297,7 +297,7 @@ export async function bootstrapPlan(
     // Linux a retained plan may carry the administrator's existing slice budget.
     // Do not let a pre-simplification plan become part of the new contract.
     if (
-      !resources &&
+      resources === undefined &&
       process.platform === "linux" &&
       (await exists(selected))
     ) {
@@ -308,7 +308,7 @@ export async function bootstrapPlan(
       config,
       path,
       candidate,
-      resources,
+      resources ?? undefined,
       bootstrapComponents(config, journal, candidate, [
         { candidate, manifest },
         ...preferred,

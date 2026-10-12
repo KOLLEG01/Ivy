@@ -113,6 +113,47 @@ test("pinned Claude runtime selects filesystem skill sources and receives manage
   assert.doesNotMatch(prompt.append, /@AGENTS\.md/);
 });
 
+test("Claude plan usage becomes valid Codex rate limits and survives a restart", { skip: !process.env.IVY_CLAUDE_ADAPTER_ROOT }, async (t) => {
+  const root = process.env.IVY_CLAUDE_ADAPTER_ROOT!;
+  const native = await import(pathToFileURL(join(root, "dist/src/native-runtime.mjs")).href);
+  const runtime = new native.NativeClaudeRuntime();
+  let request: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> } | undefined;
+  let closed = false;
+  const limits = { five_hour: { utilization: 27.4, resets_at: "2026-10-10T15:50:00.180610+00:00" }, seven_day: { utilization: 12, resets_at: null },
+    seven_day_opus: null, internal_bucket: { utilization: 100, resets_at: null } };
+  runtime.sdk = { query: (input: typeof request) => {
+    request = input;
+    return { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({ rate_limits_available: true, rate_limits: limits }), close: () => { closed = true; } };
+  } };
+  assert.deepEqual(await runtime.planUsage(), limits);
+  assert.equal(closed, true);
+  assert.deepEqual(request!.options.tools, []);
+  assert.equal((await request!.prompt[Symbol.asyncIterator]().next()).done, true);
+
+  const home = await mkdtemp(join(tmpdir(), "ivy-claude-limits-"));
+  const previousHome = process.env.CLAUDE_CODEX_HOME;
+  process.env.CLAUDE_CODEX_HOME = home;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.CLAUDE_CODEX_HOME;
+    else process.env.CLAUDE_CODEX_HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  });
+  const { RateLimitStore } = await import(pathToFileURL(join(root, "dist/src/rate-limits.mjs")).href);
+  const store = new RateLimitStore();
+  contract.validateResult("account/rateLimits/read", store.read());
+  store.recordUsage(limits);
+  store.recordEvent({ status: "rejected", rateLimitType: "seven_day", utilization: 1, resetsAt: 1791700000 });
+  const restored = new RateLimitStore().read(1791600000);
+  contract.validateResult("account/rateLimits/read", restored);
+  assert.deepEqual(restored.rateLimits.primary, { usedPercent: 27, windowDurationMins: 300, resetsAt: 1791647400 });
+  assert.deepEqual(restored.rateLimits.secondary, { usedPercent: 100, windowDurationMins: 10080, resetsAt: 1791700000 });
+  assert.equal(restored.rateLimits.rateLimitReachedType, "rate_limit_reached");
+  assert.deepEqual(Object.keys(restored.rateLimitsByLimitId), ["claude-code"]);
+  const reset = new RateLimitStore().read(1791700001);
+  assert.deepEqual(reset.rateLimits.secondary, { usedPercent: 0, windowDurationMins: 10080, resetsAt: null });
+  assert.equal(reset.rateLimits.rateLimitReachedType, null);
+});
+
 test("Claude model discovery preserves runtime capabilities without submitting an inference turn", { skip: !process.env.IVY_CLAUDE_ADAPTER_ROOT }, async (t) => {
   const root = process.env.IVY_CLAUDE_ADAPTER_ROOT!;
   const native = await import(pathToFileURL(join(root, "dist/src/native-runtime.mjs")).href);

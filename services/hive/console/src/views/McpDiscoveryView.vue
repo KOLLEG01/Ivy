@@ -7,7 +7,6 @@ import { Disclosure,
   CardTitle,
   JsonTree,
   Input,
-  PageHeader,
   RemoteState,
   StatusBadge,
   useRemote,
@@ -67,11 +66,6 @@ const refresh = () => void surface.refresh();
 </script>
 
 <template>
-  <PageHeader
-    title="MCP Tools"
-    description="All published tools with complete schemas and service guides, grouped by their owner."
-    :loading="surface.loading.value"
-  />
   <RemoteState
     :loading="surface.loading.value"
     :error="surface.error.value"

@@ -5,8 +5,9 @@ import { atomicJson } from '../../../packages/host-runtime/src/config.js';
 import { ExecutorLock } from '../../../packages/host-runtime/src/journal.js';
 import { digest, hashJson } from '../../../packages/sdk/src/node.js';
 import { IvyError, requireThat } from '../../../packages/sdk/src/node.js';
-import { validateAgent } from '../../../packages/sdk/src/node.js';
+import { validateAgent, validateOutput } from '../../../packages/sdk/src/node.js';
 import type { Agent } from '../../../packages/sdk/src/node.js';
+import type { Operation } from '../../../packages/sdk/src/node.js';
 import type { ServiceConnection } from '../../../packages/sdk/src/service.js';
 
 export const mcpContract = 'agent/mcp-configuration', skillsContract = 'agent/skills';
@@ -67,7 +68,6 @@ const beginMcp = '# >>> Ivy AgentManager MCP configuration (managed; edit in Age
 const endMcp = '# <<< Ivy AgentManager MCP configuration';
 const beginPermissions = '# >>> Ivy AgentManager Codex permissions (managed; edit in AgentUI)';
 const endPermissions = '# <<< Ivy AgentManager Codex permissions';
-const hostedIvyAppId = 'asdk_app_6aaab03ab3f48191a8e0e4dbdc434e5d';
 const approvalPolicy = 'never', defaultPermissions = ':danger-full-access';
 function managedBlock(source: string, beginMarker: string, endMarker: string): { block: string | null; outside: string } {
   const begin = source.indexOf(beginMarker), end = source.indexOf(endMarker);
@@ -91,8 +91,7 @@ function codexBlock(source: string, acceptedHashes: ReadonlySet<string>): { bloc
   // only when the remaining Ivy entries reconstruct the exact previously applied block.
   const region = source.slice(begin + beginCodex.length, end < 0 ? source.length : end);
   const positions = [...region.matchAll(/^[ \t]*\[\[?/gm)].map(match => match.index!);
-  requireThat(positions.length > 0, 'target_conflict', 'The Ivy-managed Codex block has local changes.');
-  const root = region.slice(0, positions[0]);
+  const root = region.slice(0, positions[0] ?? region.length);
   const permissionLine = (key: string) => new RegExp(`^[ \\t]*${key}[ \\t]*=[^\\r\\n]*(?:\\r?\\n|$)`, 'gm');
   const approvalLines = [...root.matchAll(permissionLine('approval_policy'))];
   const defaultLines = [...root.matchAll(permissionLine('default_permissions'))];
@@ -101,21 +100,19 @@ function codexBlock(source: string, acceptedHashes: ReadonlySet<string>): { bloc
     'target_conflict', 'The Ivy-managed Codex permissions have local changes.');
   const extraRoot = root.replace(permissionLine('approval_policy'), '').replace(permissionLine('default_permissions'), '');
   const rawTables = positions.map((position, index) => region.slice(position, positions[index + 1] ?? region.length));
-  requireThat(rawTables[0]!.trimStart().startsWith(`[apps.${tomlString(hostedIvyAppId)}]`),
-    'target_conflict', 'The Ivy-managed Codex app has local changes.');
   const tables = rawTables.map(table => table.trim());
-  for (let serverCount = 0; serverCount < rawTables.length; serverCount++) {
+  for (let tableCount = 0; tableCount <= rawTables.length; tableCount++) {
+    const sections = tables.slice(0, tableCount).flatMap(table => table.startsWith('[apps.') ? [table, ''] : [table]);
     const candidate = [beginCodex, `approval_policy = ${tomlString(approvalPolicy)}`,
-      `default_permissions = ${tomlString(defaultPermissions)}`, '', tables[0]!, '',
-      ...tables.slice(1, serverCount + 1), endCodex].join('\n');
+      `default_permissions = ${tomlString(defaultPermissions)}`, '', ...sections, endCodex].join('\n');
     if (!acceptedHashes.has(digest(candidate))) continue;
     return { block: candidate, outside: source.slice(0, begin) + extraRoot +
-      rawTables.slice(serverCount + 1).join('') + source.slice(through) };
+      rawTables.slice(tableCount).join('') + source.slice(through) };
   }
   throw new IvyError('target_conflict', 'The Ivy-managed Codex block has local changes.');
 }
 const tomlString = (value: string) => JSON.stringify(value);
-function renderMcpSections(document: Agent.McpDocument, hiveMcpUrls: ReadonlySet<string>, credential: string): string[] | null {
+function renderMcpSections(document: Agent.McpDocument, hiveMcpUrls: ReadonlySet<string>, credential: string, appId: string | null): string[] | null {
   if (!document.enabled) return null;
   const names = new Set<string>();
   const blocks = document.servers.map(server => {
@@ -128,7 +125,7 @@ function renderMcpSections(document: Agent.McpDocument, hiveMcpUrls: ReadonlySet
       ...(server.authentication === 'agent-manager' ? [`http_headers = { Authorization = ${tomlString('Bearer ' + credential)} }`] : []),
       `enabled = ${server.enabled}`, `startup_timeout_sec = ${server.startupTimeoutSeconds}`, `tool_timeout_sec = ${server.toolTimeoutSeconds}`].join('\n');
   });
-  return [`[apps.${tomlString(hostedIvyAppId)}]`, 'enabled = false', '', ...blocks];
+  return [...(appId ? [`[apps.${tomlString(appId)}]`, 'enabled = false', ''] : []), ...blocks];
 }
 function renderCodex(sections: string[] | null): string | null {
   if (!sections) return null;
@@ -197,8 +194,12 @@ export class McpConfigurationManager {
     }).finally(() => { this.running = null; });
     return this.running;
   }
-  bootstrap(): Promise<void> {
-    return this.synchronize({ request: async () => { throw new IvyError('not_found', 'No stored environment override.'); } } as unknown as Pick<ServiceConnection, 'request'>);
+  async bootstrap(): Promise<void> {
+    if (await regularBytes(join(this.home, '.ivy-agent-mcp', 'state.json'))) return;
+    return this.synchronize({ request: async (method: string) => {
+      if (method === 'openai.getConfiguration') return { revision: 0, configuration: { schemaVersion: 1, appId: null } };
+      throw new IvyError('not_found', 'No stored environment override.');
+    } } as unknown as Pick<ServiceConnection, 'request'>);
   }
   async close(): Promise<void> { await this.running; }
   private async apply(connection: Pick<ServiceConnection, 'request'>): Promise<void> {
@@ -206,12 +207,15 @@ export class McpConfigurationManager {
     const global = await readEnvironmentDocument<Agent.McpDocument>(connection, 'mcp', null, 'McpDocument');
     const host = await readEnvironmentDocument<Agent.McpDocument>(connection, 'mcp', this.hostId, 'McpDocument');
     const desired = selectEnvironmentDocument(this.defaults, global, host), hiveMcpUrls = new Set(['/mcp', '/mcp-dev'].map(path => new URL(this.hiveUrl.replace(/\/$/, '') + path).href));
-    const sections = renderMcpSections(desired.document, hiveMcpUrls, this.credential);
+    const openai = await connection.request('openai.getConfiguration', {}) as Operation.OpenaiConfigurationSnapshot;
+    validateOutput('openai.getConfiguration', openai);
+    const hostedIvyAppId = openai.configuration.appId;
+    const sections = renderMcpSections(desired.document, hiveMcpUrls, this.credential, hostedIvyAppId);
     const block = renderCodex(sections), blockHash = block === null ? null : digest(block);
     const legacyMcpBlock = sections === null ? null : [beginMcp, ...sections, endMcp].join('\n');
     const legacyPermissionsBlock = sections === null ? null : [beginPermissions,
       `approval_policy = ${tomlString(approvalPolicy)}`, `default_permissions = ${tomlString(defaultPermissions)}`, endPermissions].join('\n');
-    const desiredVersion = hashJson({ document: desired.version, approvalPolicy, defaultPermissions, hostedIvyAppId });
+    const desiredVersion = hashJson({ document: desired.version, approvalPolicy, defaultPermissions, openai });
     await mkdir(stateRoot, { recursive: true, mode: 0o700 });
     const rootInfo = await lstat(stateRoot);
     requireThat(rootInfo.isDirectory() && !rootInfo.isSymbolicLink(), 'target_conflict', 'Managed MCP state must be a real directory.');
@@ -249,7 +253,7 @@ export class McpConfigurationManager {
     if (block) {
       const conflicts = serverSections(unmanaged);
       for (const server of desired.document.servers) requireThat(!conflicts.has(server.name), 'target_conflict', `MCP server ${server.name} already has an unmanaged configuration.`);
-      requireThat(!hasAppSection(unmanaged, hostedIvyAppId), 'target_conflict', 'The hosted Ivy app already has an unmanaged configuration.');
+      if (hostedIvyAppId) requireThat(!hasAppSection(unmanaged, hostedIvyAppId), 'target_conflict', 'The hosted Ivy app already has an unmanaged configuration.');
     }
     if (block) {
       const keys = rootConfigurationKeys(unmanaged);

@@ -38,6 +38,8 @@ export namespace Wire {
   export type ContractReadScope = { "roots": (null) | (Array<string>); "history": "current" | "all"; "includeArchived": boolean; "references": Array<{ "objectId": string; "revision": number; }>; };
 }
 export namespace Operation {
+  export type OpenaiConfiguration = { "schemaVersion": 1; "appId": (string) | (null); };
+  export type OpenaiConfigurationSnapshot = { "revision": number; "configuration": Operation.OpenaiConfiguration; };
   export type ObjectMetadata = { "id": Wire.Identifier; "parentId": (Wire.Identifier) | (null); "ownerObjectId": (Wire.Identifier) | (null); "name": string; "path": string; "position": number; "icon": (string) | (null); "contractKey": string; "currentRevision": number; "contractVersion": Wire.ContractVersion; "archivedAt": (string) | (null); "effectivelyArchived": boolean; "createdAt": string; "updatedAt": string; };
   export type RevisionMetadata = { "objectId": Wire.Identifier; "revision": number; "contractVersion": Wire.ContractVersion; "contentHash": Wire.Hash; "mediaType": string; "byteLength": number; "createdAt": string; "references": Wire.RevisionReferences; };
   export type ObjectRead = { "object": Operation.ObjectMetadata; "revision": Operation.RevisionMetadata; "content": Wire.Content; };
@@ -85,6 +87,10 @@ export namespace Operation {
   export type Status = { "callerPrincipalId": Wire.Identifier; "version": string; "buildId": Wire.Hash; "hiveProtocol": 1; "runtimeEpoch": Wire.Identifier; "ready": boolean; "serverTime": string; "storageFormat": number; "publicBaseUrl": string; };
   export type SystemStatusParams = {  };
   export type SystemStatusResult = Operation.Status;
+  export type OpenaiGetConfigurationParams = {  };
+  export type OpenaiGetConfigurationResult = Operation.OpenaiConfigurationSnapshot;
+  export type OpenaiSaveConfigurationParams = { "mutationId": Wire.Identifier; "expectedRevision": number; "configuration": Operation.OpenaiConfiguration; };
+  export type OpenaiSaveConfigurationResult = Operation.OpenaiConfigurationSnapshot;
   export type SystemInstructionsParams = { "view"?: "instructions" | "examples"; "cursor"?: string; };
   export type SystemInstructionsResult = { "view": "instructions" | "examples"; "text": string; "sha256": Wire.Hash; "totalBytes": number; "startByte": number; "endByte": number; "complete": boolean; "nextCursor": (string) | (null); };
   export type SystemToolSchemaParams = { "name": string; };
@@ -646,6 +652,8 @@ export namespace Secretary {
 }
 export interface OperationMap {
   "system.status": { params: Operation.SystemStatusParams; result: Operation.SystemStatusResult };
+  "openai.getConfiguration": { params: Operation.OpenaiGetConfigurationParams; result: Operation.OpenaiGetConfigurationResult };
+  "openai.saveConfiguration": { params: Operation.OpenaiSaveConfigurationParams; result: Operation.OpenaiSaveConfigurationResult };
   "system.instructions": { params: Operation.SystemInstructionsParams; result: Operation.SystemInstructionsResult };
   "system.toolSchema": { params: Operation.SystemToolSchemaParams; result: Operation.SystemToolSchemaResult };
   "system.inspectStorage": { params: Operation.SystemInspectStorageParams; result: Operation.SystemInspectStorageResult };

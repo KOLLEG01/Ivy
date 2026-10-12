@@ -72,6 +72,9 @@ const buckets = computed<Bucket[]>(() => {
     return { id: id || text(limit.limitId), name: text(limit.limitName) || text(limit.limitId) || id || "Usage", plan: text(limit.planType), windows, notes };
   }).filter(bucket => bucket.windows.length || bucket.notes.length);
 });
+// A limit entry without values means the host tracks limits but has no reading yet.
+const reported = computed(() => !!result.value && (Object.keys(record(result.value.rateLimitsByLimitId)).length > 0 ||
+  !!text(record(result.value.rateLimits).limitId)));
 const resetCredits = computed(() => Number(record(result.value?.rateLimitResetCredits).availableCount) || 0);
 const blocked = computed(() => result.value?.ordinaryUsageAllowed === false);
 </script>
@@ -107,7 +110,7 @@ const blocked = computed(() => result.value?.ordinaryUsageAllowed === false);
           <p v-for="note in bucket.notes" :key="note" class="text-xs text-muted-foreground">{{ note }}</p>
         </section>
         <p v-if="resetCredits" class="text-xs text-muted-foreground">{{ resetCredits }} limit reset {{ resetCredits === 1 ? "credit" : "credits" }} available</p>
-        <p v-if="!buckets.length && !blocked" class="text-sm text-muted-foreground">This host reports no usage limits.</p>
+        <p v-if="!buckets.length && !blocked" class="text-sm text-muted-foreground">{{ reported ? "This host has not reported usage yet." : "This host reports no usage limits." }}</p>
       </template>
     </PopoverContent>
   </Popover>

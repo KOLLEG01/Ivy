@@ -136,8 +136,6 @@ export async function updateBootstrap(configPath: string, request: Host.Bootstra
     journal.db.exec('BEGIN IMMEDIATE');
     const plans = await candidatePlans(config, path, journal, next);
     const owners = await inspectOwned(os, plans, journal); offline(config, journal, owners);
-    requireThat(next.linuxResources || !owners.some(owner => plans.some(plan => plan.linuxResources && digest(linuxUnit(plan, owner)) === owner.definitionHash)),
-      'resource_scope_required', 'Bootstrap maintenance cannot remove an established Linux resource boundary.');
     requireThat(hashJson(await currentHostConfiguration(path)) === next.configHash, 'configuration_changed', 'Host configuration changed before bootstrap publication.');
     await retainBootstrapPlan(next);
     await os.prepare?.(next);

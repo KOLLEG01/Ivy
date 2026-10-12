@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { Copy, Download } from "@lucide/vue";
 import {
   Button,
@@ -15,7 +15,9 @@ import {
 import { localeText as tr } from "../../../../packages/ui-client/src/runtime";
 import iconUrl from "../../chatgpt-plugin/assets/icon.png?url&no-inline";
 import logoUrl from "../../chatgpt-plugin/assets/logo.png?url&no-inline";
-import { consoleBase } from "./runtime";
+import { newOperationId } from "../../../../packages/sdk/src/client.js";
+import type { Operation } from "../../../../packages/sdk/src/client.js";
+import { consoleBase, consoleClient } from "./runtime";
 import {
   openaiAppId,
   openaiPluginPackage,
@@ -26,9 +28,56 @@ const mcpUrl = new URL("mcp", consoleBase).href;
 const appId = ref("");
 const normalizedId = computed(() => openaiAppId(appId.value));
 const invalid = computed(() => !!appId.value.trim() && !normalizedId.value);
+const loaded = ref(false), savedId = ref<string | null>(null), revision = ref(0);
+const pending = ref<Operation.OpenaiSaveConfigurationParams | null>(null);
+const message = ref("");
+const dirty = computed(() => normalizedId.value !== savedId.value);
 const busy = ref(false),
   copied = ref(false),
   error = ref<string | null>(null);
+
+async function load() {
+  if (busy.value || pending.value) return;
+  busy.value = true;
+  loaded.value = false;
+  error.value = null;
+  message.value = "";
+  try {
+    const saved = await consoleClient.request("openai.getConfiguration", {});
+    revision.value = saved.revision;
+    savedId.value = saved.configuration.appId;
+    appId.value = savedId.value ?? "";
+    loaded.value = true;
+  } catch (failure) {
+    error.value = failure instanceof Error ? failure.message : String(failure);
+  } finally { busy.value = false; }
+}
+
+async function save() {
+  if (busy.value || !loaded.value || invalid.value) return;
+  busy.value = true;
+  error.value = null;
+  message.value = "";
+  try {
+    pending.value ??= {
+      mutationId: await newOperationId(consoleClient), expectedRevision: revision.value,
+      configuration: { schemaVersion: 1, appId: normalizedId.value },
+    };
+    const saved = await consoleClient.request("openai.saveConfiguration", pending.value);
+    revision.value = saved.revision;
+    savedId.value = saved.configuration.appId;
+    appId.value = savedId.value ?? "";
+    pending.value = null;
+    message.value = tr("App-ID im Hive gespeichert.", "App ID saved in Hive.");
+  } catch (failure) {
+    const code = (failure as { code?: string }).code;
+    if (["revision_conflict", "invalid_arguments", "target_conflict", "forbidden"].includes(code ?? "")) pending.value = null;
+    error.value = code === "revision_conflict"
+      ? tr("Die Einstellung wurde inzwischen geändert. Lade sie neu und speichere erneut.", "The setting has changed. Reload it before saving again.")
+      : failure instanceof Error ? failure.message : String(failure);
+  } finally { busy.value = false; }
+}
+onMounted(load);
 
 async function copyUrl() {
   error.value = null;
@@ -87,7 +136,7 @@ async function download() {
       )
     "
   >
-    <form class="space-y-5" @submit.prevent="download">
+    <form class="space-y-5" @submit.prevent="save">
       <FieldGroup>
         <Field>
           <FieldLabel for="openai-mcp-url">MCP-URL</FieldLabel>
@@ -113,11 +162,10 @@ async function download() {
           <Input
             id="openai-app-id"
             v-model="appId"
-            required
             autocomplete="off"
             autocapitalize="none"
             :spellcheck="false"
-            :disabled="busy"
+            :disabled="busy || !loaded || !!pending"
             :aria-invalid="invalid"
             :aria-describedby="
               invalid
@@ -135,6 +183,12 @@ async function download() {
               )
             }}
           </FieldDescription>
+          <FieldDescription>
+            {{ tr(
+              "Speichere die ID für diesen Hive. Sie verhindert doppelte Ivy-Verbindungen in verwalteten Codex-Chats. Ein leeres Feld entfernt die Zuordnung.",
+              "Save the ID for this Hive. It prevents duplicate Ivy connections in managed Codex chats. Leave the field empty to remove the connection identity.",
+            ) }}
+          </FieldDescription>
           <FieldError v-if="invalid" id="openai-app-id-error">
             {{
               tr(
@@ -146,7 +200,13 @@ async function download() {
         </Field>
       </FieldGroup>
       <div class="flex flex-wrap items-center gap-3">
-        <Button type="submit" :disabled="!normalizedId || busy">
+        <Button type="submit" :disabled="busy || !loaded || invalid || (!pending && !dirty)">
+          {{ pending ? tr("Speichern erneut versuchen", "Retry original save") : tr("Speichern", "Save") }}
+        </Button>
+        <Button type="button" variant="outline" :disabled="busy || !!pending" @click="load">
+          {{ tr("Neu laden", "Reload") }}
+        </Button>
+        <Button type="button" variant="outline" :disabled="!normalizedId || busy || !!pending" @click="download">
           <Download aria-hidden="true" />
           {{
             busy
@@ -159,6 +219,7 @@ async function download() {
           {{ openaiPluginVersion }} · ZIP</span
         >
       </div>
+      <p v-if="message" role="status" class="text-sm">{{ message }}</p>
       <FieldError v-if="error">{{ error }}</FieldError>
       <Disclosure default-open :title="tr('Kurzanleitung', 'Setup guide')">
         <ol class="list-decimal space-y-3 pl-5 text-sm">
@@ -189,8 +250,8 @@ async function download() {
           <li>
             {{
               tr(
-                "Öffne die Detailseite des Ivy-Plugins. Kopiere die Adresse oder die darin enthaltene ID plugin_asdk_app_… und füge sie oben ein.",
-                "Open the Ivy plugin detail page. Copy its URL or the plugin_asdk_app_… ID within it and paste it above.",
+                "Öffne die Detailseite des Ivy-Plugins. Kopiere die Adresse oder die darin enthaltene ID plugin_asdk_app_… und füge sie oben ein. Speichere die ID.",
+                "Open the Ivy plugin detail page. Copy its URL or the plugin_asdk_app_… ID within it and paste it above. Save the ID.",
               )
             }}
           </li>

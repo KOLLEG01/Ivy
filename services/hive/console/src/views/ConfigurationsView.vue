@@ -24,7 +24,10 @@ import {
 } from "../../../../../packages/sdk/src/client";
 import { consoleClient, dateLabel, shortHash, usePage } from "../runtime";
 import type { Operation } from "../runtime";
-import OpenaiPluginSettings from "../OpenaiPluginSettings.vue";
+import { localeText as tr } from "../../../../../packages/ui-client/src/runtime";
+import McpDiscoveryView from "./McpDiscoveryView.vue";
+
+const mcpBrowserOpen = ref(false);
 
 const page = usePage((signal, cursor) =>
   consoleClient.request(
@@ -355,7 +358,14 @@ watch([hostId, draft, conflictDraft, loadedRevision, selected], persistDraft, {
     :loading="page.loading.value"
     :updated-at="page.updatedAt.value"
   />
-  <OpenaiPluginSettings />
+  <Disclosure
+    v-model:open="mcpBrowserOpen"
+    class="mb-6"
+    variant="card"
+    :title="tr('MCP-Testbrowser', 'MCP test browser')"
+  >
+    <McpDiscoveryView v-if="mcpBrowserOpen" />
+  </Disclosure>
   <RemoteState
     :loading="page.loading.value"
     :error="page.error.value"

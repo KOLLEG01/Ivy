@@ -330,7 +330,7 @@ export default async function collectInstagram({
       "Instagram returned an unexpected account ID.",
     );
   const posts = new Map();
-  const mediaIds = new Set();
+  const mediaComments = new Map();
   const seenCursors = new Set();
   let after;
   let complete = false;
@@ -356,7 +356,7 @@ export default async function collectInstagram({
           "Instagram returned a media item without a valid ID or timestamp.",
         );
       }
-      mediaIds.add(media.id);
+      mediaComments.set(media.id, media.comments_count);
       if (published < start || published > end || posts.has(media.id)) continue;
       let views = unavailable(
         "Insights collection is disabled in config.collectInsights.",
@@ -417,7 +417,7 @@ export default async function collectInstagram({
           getMessages,
           accountId,
           login,
-          mediaIds,
+          mediaComments,
           mediaComplete: complete,
           config,
           state,
@@ -468,7 +468,7 @@ async function collectInbox({
   getMessages,
   accountId,
   login,
-  mediaIds,
+  mediaComments,
   mediaComplete,
   config,
   state,
@@ -598,7 +598,7 @@ async function collectInbox({
     };
     // Comments on old posts can be new. Scan all discovered media, including media
     // outside the metrics window, and inspect replies to old parent comments.
-    for (const mediaId of mediaIds) {
+    for (const [mediaId, reportedCommentCount] of mediaComments) {
       if (budget.remaining <= 0 || comments.items.length >= maxInboxItems) {
         limited(
           comments,
@@ -606,12 +606,14 @@ async function collectInbox({
         );
         break;
       }
+      let returnedComments = 0;
       await walk(
         `${mediaId}/comments`,
         { fields: commentFields, limit: 100 },
         comments,
         budget,
         async (comment) => {
+          returnedComments++;
           addComment(comment, mediaId, null);
           await walk(
             `${encoded(comment.id)}/replies`,
@@ -622,9 +624,20 @@ async function collectInbox({
           );
         },
       );
+      if (
+        comments.complete &&
+        returnedComments === 0 &&
+        Number.isSafeInteger(reportedCommentCount) &&
+        reportedCommentCount > 0
+      )
+        limited(
+          comments,
+          "Meta reported comments on a post but returned an empty comments edge.",
+        );
     }
     if (!mediaComplete)
       limited(comments, "The media traversal did not cover every post.");
+    comments.coverage = "Only comments exposed by Meta's API are included.";
   }
   if (config.collectMessages) {
     const budget = { remaining: maxInboxRequests };
@@ -633,7 +646,7 @@ async function collectInbox({
       {
         fields: "id,updated_time",
         limit: 100,
-        ...(login === "facebook" ? { platform: "instagram" } : {}),
+        platform: "instagram",
       },
       messages,
       budget,

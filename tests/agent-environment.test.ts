@@ -16,6 +16,7 @@ import type { Agent } from "../packages/contracts/src/generated.js";
 import type { ServiceConnection } from "../packages/sdk/src/service.js";
 
 type Document = Agent.McpDocument | Agent.SkillsDocument;
+const appId = 'asdk_app_0123456789abcdef0123456789abcdef';
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "ivy-agent-environment-")),
     home = join(root, "codex"),
@@ -29,8 +30,12 @@ async function fixture(t: TestContext) {
     string,
     { document: Document; revision: number; contractKey: string }
   >();
+  let hostedAppId: string | null = null, openaiRevision = 0;
   const connection = {
     request: (async (method: string, params: Record<string, unknown>) => {
+      if (method === 'openai.getConfiguration') return {
+        revision: openaiRevision, configuration: { schemaVersion: 1, appId: hostedAppId },
+      };
       const key = String(params["path"] ?? params["objectId"]).replace(
           /^\//,
           "",
@@ -61,7 +66,8 @@ async function fixture(t: TestContext) {
       revision: 1,
       contractKey: kind === "mcp" ? "agent/mcp-configuration" : "agent/skills",
     });
-  return { root, home, skillsRoot, connection, put };
+  const setAppId = (id: string | null) => { hostedAppId = id; openaiRevision++; };
+  return { root, home, skillsRoot, connection, put, setAppId };
 }
 
 test("AgentManager patches an isolated MCP block with its local key and preserves unrelated Codex configuration", async (t) => {
@@ -95,6 +101,9 @@ test("AgentManager patches an isolated MCP block with its local key and preserve
     defaults,
   );
   await manager.bootstrap();
+  assert.doesNotMatch(await readFile(config, 'utf8'), /asdk_app_/);
+  f.setAppId(appId);
+  await manager.synchronize(f.connection);
   assert.equal(manager.status.state, "applied");
   const first = await readFile(config, "utf8");
   assert.match(first, /# >>> Ivy AgentManager Codex configuration/);
@@ -107,7 +116,7 @@ test("AgentManager patches an isolated MCP block with its local key and preserve
   assert.match(first, /\[apps\.existing\]\nenabled = true/);
   assert.match(
     first,
-    /\[apps\."asdk_app_6aaab03ab3f48191a8e0e4dbdc434e5d"\]\nenabled = false/,
+    /\[apps\."asdk_app_0123456789abcdef0123456789abcdef"\]\nenabled = false/,
   );
   assert.match(first, /mcp_servers\."ivy"/);
   assert.match(first, /mcp_servers\.existing/);
@@ -225,11 +234,12 @@ test("AgentManager rejects unmanaged permission and hosted Ivy app conflicts", a
     'sandbox_mode = "workspace-write"\n',
     "sandbox_workspace_write = { network_access = true }\n",
     "[sandbox_workspace_write]\nnetwork_access = true\n",
-    '[apps."asdk_app_6aaab03ab3f48191a8e0e4dbdc434e5d"]\nenabled = true\n',
+    '[apps."asdk_app_0123456789abcdef0123456789abcdef"]\nenabled = true\n',
   ]) {
     const f = await fixture(t),
       config = join(f.home, "config.toml");
     await writeFile(config, source);
+    f.setAppId(appId);
     const manager = new McpConfigurationManager(
       f.home,
       "host-a",
@@ -237,7 +247,7 @@ test("AgentManager rejects unmanaged permission and hosted Ivy app conflicts", a
       "secret",
       defaults,
     );
-    await manager.bootstrap();
+    await manager.synchronize(f.connection);
     assert.equal(manager.status.state, "conflict");
     assert.equal(await readFile(config, "utf8"), source);
   }
@@ -246,12 +256,13 @@ test("AgentManager rejects unmanaged permission and hosted Ivy app conflicts", a
 test("AgentManager adopts matching unmanaged permissions and still disables the hosted Ivy app", async (t) => {
   const f = await fixture(t), config = join(f.home, "config.toml");
   await writeFile(config, 'approval_policy = "never"\ndefault_permissions = ":danger-full-access"\nmodel = "existing"\n');
+  f.setAppId(appId);
   const manager = new McpConfigurationManager(f.home, "host-a", "https://hive.example", "secret", {
     schemaVersion: 1, hostId: null, enabled: true,
     servers: [{ name: "ivy", url: "https://hive.example/mcp", enabled: true,
       authentication: "agent-manager", startupTimeoutSeconds: 15, toolTimeoutSeconds: 45 }],
   });
-  await manager.bootstrap();
+  await manager.synchronize(f.connection);
   assert.equal(manager.status.state, "applied");
   const output = await readFile(config, "utf8");
   assert.equal((output.match(/^approval_policy\s*=/gm) ?? []).length, 1);
@@ -260,7 +271,7 @@ test("AgentManager adopts matching unmanaged permissions and still disables the 
   assert.equal((output.match(/# >>> Ivy AgentManager/g) ?? []).length, 1);
   assert.ok(output.indexOf('model = "existing"') < output.indexOf('# >>> Ivy AgentManager'));
   assert.match(output, /model = "existing"/);
-  assert.match(output, /\[apps\."asdk_app_6aaab03ab3f48191a8e0e4dbdc434e5d"\]\nenabled = false/);
+  assert.match(output, /\[apps\."asdk_app_0123456789abcdef0123456789abcdef"\]\nenabled = false/);
   await manager.bootstrap();
   assert.equal(manager.status.state, "applied");
   assert.equal(await readFile(config, "utf8"), output);
@@ -285,10 +296,11 @@ test("AgentManager migrates both legacy TOML blocks and their state", async (t) 
   for (const hasPermissions of [true, false]) {
     const f = await fixture(t), config = join(f.home, "config.toml"),
       statePath = join(f.home, ".ivy-agent-mcp", "state.json");
+    f.setAppId(appId);
     const manager = new McpConfigurationManager(
       f.home, "host-a", "https://hive.example", "secret", defaults,
     );
-    await manager.bootstrap();
+    await manager.synchronize(f.connection);
     const current = await readFile(config, "utf8");
     const appAndMcp = current.slice(current.indexOf('[apps."asdk_app_'), current.indexOf('# <<< Ivy AgentManager Codex configuration')).trimEnd();
     const oldMcp = ['# >>> Ivy AgentManager MCP configuration (managed; edit in AgentUI)',
@@ -322,6 +334,50 @@ test("AgentManager migrates both legacy TOML blocks and their state", async (t) 
     await manager.bootstrap();
     assert.equal(await readFile(config, "utf8"), output);
   }
+});
+
+test("AgentManager follows the saved Hive app identity through replacements, restart and removal", async (t) => {
+  const f = await fixture(t), config = join(f.home, 'config.toml');
+  const defaults = await loadEnvironmentDefaults('', 'https://hive.example');
+  const manager = new McpConfigurationManager(f.home, 'host-a', 'https://hive.example', 'secret', defaults.mcp);
+  await manager.bootstrap();
+  f.setAppId(appId);
+  f.put('mcp', { ...defaults.mcp, hostId: 'host-a' });
+  await manager.synchronize(f.connection);
+  assert.equal(manager.status.state, 'applied');
+  assert.ok((await readFile(config, 'utf8')).includes(`[apps."${appId}"]\nenabled = false`));
+  const changed = (await readFile(config, 'utf8'))
+    .replace('approval_policy =', 'model = "preserved"\napproval_policy =')
+    .replace('# <<< Ivy AgentManager Codex configuration',
+      '[mcp_servers.local]\ncommand = "preserved"\n# <<< Ivy AgentManager Codex configuration');
+  await writeFile(config, changed);
+  const replacement = 'asdk_app_fedcba9876543210fedcba9876543210';
+  f.setAppId(replacement);
+  await manager.synchronize(f.connection);
+  assert.equal(manager.status.state, 'applied');
+  const replaced = await readFile(config, 'utf8');
+  assert.ok(replaced.includes(`[apps."${replacement}"]\nenabled = false`));
+  assert.ok(!replaced.includes(appId));
+  assert.match(replaced, /model = "preserved"/);
+  assert.match(replaced, /mcp_servers\.local/);
+  const restarted = new McpConfigurationManager(f.home, 'host-a', 'https://hive.example', 'secret', defaults.mcp);
+  await restarted.bootstrap();
+  assert.equal(await readFile(config, 'utf8'), replaced);
+  await restarted.synchronize(f.connection);
+  assert.equal(restarted.status.state, 'applied');
+  await restarted.synchronize({ request: async () => { throw new IvyError('service_unavailable', 'Offline fixture.'); } } as unknown as Pick<ServiceConnection, 'request'>);
+  assert.equal(restarted.status.state, 'pending');
+  assert.equal(await readFile(config, 'utf8'), replaced);
+  f.setAppId(null);
+  await restarted.synchronize(f.connection);
+  assert.equal(restarted.status.state, 'applied');
+  assert.doesNotMatch(await readFile(config, 'utf8'), /asdk_app_/);
+  f.setAppId(replacement);
+  f.put('mcp', { ...defaults.mcp, hostId: 'host-a', enabled: false });
+  await restarted.synchronize(f.connection);
+  assert.equal(restarted.status.state, 'disabled');
+  assert.doesNotMatch(await readFile(config, 'utf8'), /asdk_app_/);
+  assert.match(await readFile(config, 'utf8'), /mcp_servers\.local/);
 });
 
 test("AgentManager applies skill patches beside existing skills and releases omitted patches", async (t) => {

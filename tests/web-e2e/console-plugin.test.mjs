@@ -7,7 +7,7 @@ import { expect } from "@playwright/test";
 import { fixture } from "./fixtures/fixture.mjs";
 
 test(
-  "Settings exports the entered OpenAI app with complete plugin assets on desktop and mobile",
+  "MCP connection exports the entered OpenAI app with complete plugin assets on desktop and mobile",
   { timeout: 60000 },
   async (t) => {
     const f = await fixture(t);
@@ -20,6 +20,7 @@ test(
         width: 1440,
         title: "Connect OpenAI",
         download: "Download plugin package",
+        save: "Save", reload: "Reload", saved: "App ID saved in Hive.",
         guide: "Setup guide",
         copy: "Copy URL",
         copied: "Copied",
@@ -29,6 +30,7 @@ test(
         width: 390,
         title: "OpenAI anbinden",
         download: "Plugin-Paket herunterladen",
+        save: "Speichern", reload: "Neu laden", saved: "App-ID im Hive gespeichert.",
         guide: "Kurzanleitung",
         copy: "URL kopieren",
         copied: "Kopiert",
@@ -45,7 +47,7 @@ test(
         const page = await context.newPage(),
           errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
-        await page.goto(f.base + "/#/system/settings");
+        await page.goto(f.base + "/#/system/mcp");
         const section = page.getByRole("region", {
           name: scenario.title,
           exact: true,
@@ -55,11 +57,14 @@ test(
           section.getByLabel("MCP-URL", { exact: true }),
         ).toHaveValue(f.base + "/mcp");
         const input = section.getByLabel("OpenAI App-ID", { exact: true });
+        await expect(input).toBeEnabled();
+        const save = section.getByRole("button", { name: scenario.save, exact: true });
         const button = section.getByRole("button", {
           name: scenario.download,
           exact: true,
         });
-        await expect(button).toBeDisabled();
+        if (scenario.locale === "en-US") await expect(button).toBeDisabled();
+        else await expect(input).toHaveValue(appId);
         for (const invalid of [
           "not-an-app",
           "asdk_app_123",
@@ -77,6 +82,14 @@ test(
           await input.fill(valid);
           await expect(button).toBeEnabled();
         }
+        if (scenario.locale === "en-US") {
+          await save.click();
+          await expect(section.getByRole("status")).toHaveText(scenario.saved);
+        }
+        assert.equal((await f.client.request("openai.getConfiguration", {})).configuration.appId, appId);
+        await page.reload();
+        await expect(input).toHaveValue(appId);
+        await expect(input).toBeEnabled();
         await expect(
           section.getByRole("button", { name: scenario.guide, exact: true }),
         ).toHaveAttribute("aria-expanded", "true");
@@ -136,6 +149,15 @@ test(
         }
         await expect(section.getByRole("alert")).toHaveCount(0);
         assert.deepEqual(errors, []);
+        if (scenario.locale === "de-DE") {
+          await input.fill("");
+          await save.click();
+          await expect(section.getByRole("status")).toHaveText(scenario.saved);
+          await page.reload();
+          await expect(input).toBeEnabled();
+          await expect(input).toHaveValue("");
+          assert.equal((await f.client.request("openai.getConfiguration", {})).configuration.appId, null);
+        }
       } finally {
         await context.close();
       }

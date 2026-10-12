@@ -13,14 +13,14 @@ import ObjectsView from './views/ObjectsView.vue';
 import RetentionView from './views/RetentionView.vue';
 import ConfigurationsView from './views/ConfigurationsView.vue';
 import ReleasesView from './views/ReleasesView.vue';
-import McpDiscoveryView from './views/McpDiscoveryView.vue';
+import McpView from './views/McpView.vue';
 
 const hash = ref(location.hash || '#/uis'), changed = () => { hash.value = location.hash || '#/uis'; };
 window.addEventListener('hashchange', changed); onBeforeUnmount(() => window.removeEventListener('hashchange', changed));
 const section = computed(() => hash.value.slice(2).split('?')[0] || 'uis');
 const query = computed(() => new URLSearchParams(hash.value.split('?')[1] ?? ''));
 const systemPage = computed(() => section.value.startsWith('system/') ? section.value.slice('system/'.length) : '');
-const systemPages = { nodes: NodesView, problems: ProblemsView, releases: ReleasesView, deployments: DeploymentsView, retention: RetentionView, definitions: DefinitionsView, objects: ObjectsView, settings: ConfigurationsView, mcp: McpDiscoveryView };
+const systemPages = { nodes: NodesView, problems: ProblemsView, releases: ReleasesView, deployments: DeploymentsView, retention: RetentionView, definitions: DefinitionsView, objects: ObjectsView, settings: ConfigurationsView, mcp: McpView };
 const view = computed(() => section.value === 'uis' ? UIsView : Object.hasOwn(systemPages, systemPage.value) ? systemPages[systemPage.value as keyof typeof systemPages] : null);
 const status = useRemote(signal => consoleClient.request('system.status', {}, { signal }), 30000, ['system/runtime']);
 const uis = useRemote(signal => consoleClient.request('uis.catalog', { limit: 50 }, { signal }), 60000, ['uis']);
@@ -29,7 +29,7 @@ const systemNavigation = [
   { id: 'nodes', label: 'Hosts & services', group: 'Overview' }, { id: 'problems', label: 'Problems', group: 'Overview' },
   { id: 'releases', label: 'Releases', group: 'Runtime' }, { id: 'deployments', label: 'Deployments', group: 'Runtime' }, { id: 'retention', label: 'Retention', group: 'Runtime' },
   { id: 'definitions', label: 'Definitions', group: 'Data' }, { id: 'objects', label: 'Object Browser', group: 'Data' },
-  { id: 'mcp', label: 'MCP Tools', group: 'Configuration' },
+  { id: 'mcp', label: 'MCP', group: 'Configuration' },
 ] as const;
 // Home lists UIs and one entry into System; System has its own navigation.
 const navigation = computed(() => systemPage.value

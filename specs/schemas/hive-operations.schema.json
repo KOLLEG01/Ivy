@@ -3,6 +3,48 @@
   "$id": "https://ivy.invalid/schemas/hive-operations.schema.json",
   "title": "Ivy canonical operation parameters and results",
   "$defs": {
+    "OpenaiConfiguration": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "appId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^asdk_app_[a-f0-9]{32}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "appId"
+      ],
+      "additionalProperties": false
+    },
+    "OpenaiConfigurationSnapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "configuration": {
+          "$ref": "#/$defs/OpenaiConfiguration"
+        }
+      },
+      "required": [
+        "revision",
+        "configuration"
+      ],
+      "additionalProperties": false
+    },
     "ObjectMetadata": {
       "type": "object",
       "properties": {
@@ -2018,6 +2060,41 @@
     },
     "SystemStatusResult": {
       "$ref": "#/$defs/Status"
+    },
+    "OpenaiGetConfigurationParams": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "OpenaiGetConfigurationResult": {
+      "$ref": "#/$defs/OpenaiConfigurationSnapshot"
+    },
+    "OpenaiSaveConfigurationParams": {
+      "type": "object",
+      "properties": {
+        "mutationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "configuration": {
+          "$ref": "#/$defs/OpenaiConfiguration"
+        }
+      },
+      "required": [
+        "mutationId",
+        "expectedRevision",
+        "configuration"
+      ],
+      "additionalProperties": false
+    },
+    "OpenaiSaveConfigurationResult": {
+      "$ref": "#/$defs/OpenaiConfigurationSnapshot"
     },
     "SystemInstructionsParams": {
       "type": "object",

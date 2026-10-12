@@ -13,6 +13,7 @@ import { verifyCandidate } from '../packages/host-runtime/src/artifact.js';
 import type { BootstrapDefinition, BootstrapOs, BootstrapOwner } from '../packages/host-runtime/src/bootstrap-os.js';
 import { ExecutorLock } from '../packages/host-runtime/src/journal.js';
 import { atomicJson, jsonFile } from '../packages/host-runtime/src/config.js';
+import { hostConfig } from '../packages/host-runtime/src/host-config.js';
 import { backupHost } from '../packages/host-runtime/src/private-backup.js';
 import { restoreHost, verifyBackup } from '../packages/host-runtime/src/restore.js';
 import { exists } from '../packages/host-runtime/src/backup-files.js';
@@ -101,6 +102,7 @@ async function fixture(t: TestContext, domainEnabled=false) {
   const f = await hostFixture(t, 'host-executor');
   f.config.packageUpdates = { intervalSeconds: 60 }; await atomicJson(f.configPath, f.config); f.journal.useConfiguration(f.config);
   if(domainEnabled){f.config.instances.push({instanceId:'domain',serviceNodeId:'domain',componentId:'fixture-domain',enabled:true,engine:'process',settings:{}});await atomicJson(f.configPath,f.config);f.journal.useConfiguration(f.config);}
+  Object.assign(f.config, await hostConfig(f.configPath)); f.journal.useConfiguration(f.config);
   const old = await f.prepare('old-bootstrap-fixture'), next = await f.prepare('next-bootstrap-fixture');
   const oldPlan = await bootstrapPlan(f.configPath, old.candidateId), nextPlan = await bootstrapPlan(f.configPath, next.candidateId), os = new SimulatedOs(oldPlan);
   const request: Host.BootstrapMaintenanceRequest = { schemaVersion: 1, operationId: 'maintenance-1', previous: await inspectBootstrap(f.configPath, distribution, os), next: nextPlan };
@@ -281,19 +283,21 @@ test('Linux resource maintenance retains both exact plans across partial OS publ
     return { ...instance, candidateId: f.old.candidateId, definitionHash: digest(content), enabled: false, running: false, definition: { content, hash: digest(content) } };
   });
   let failAfterWrite = true, writes = 0;
+  const definitionFor = (plan: Host.BootstrapPlan, owner: BootstrapOwner) => linuxUnit(plan, plan.processes.find(instance => instance.instanceId === owner.instanceId)!);
   const os: BootstrapOs = {
     async inspect(plans) {
-      for (const owner of owners) assert.equal(plans.filter(plan => linuxUnit(plan, owner) === owner.definition.content).length, 1, 'actual old/new unit must match exactly one retained plan');
+      for (const owner of owners) assert.equal(plans.filter(plan => definitionFor(plan, owner) === owner.definition.content).length, 1, 'actual old/new unit must match exactly one retained plan');
       return structuredClone(owners);
     },
-    async render(owner, plan) { const content = linuxUnit(plan, owner); return { content, hash: digest(content) }; },
+    async render(owner, plan) { const content = definitionFor(plan, owner); return { content, hash: digest(content) }; },
     async check(definition) { assert.equal(digest(definition.content), definition.hash); },
     async apply(owner, desired, plans) {
       const current = owners.find(value => value.instanceId === owner.instanceId)!;
       assert.ok([owner.definitionHash, desired.hash].includes(current.definitionHash));
       if (current.definitionHash === desired.hash) return;
-      const plan = plans.find(value => linuxUnit(value, owner) === desired.content)!;
-      assert.ok(plan); current.candidateId = plan.candidateId; current.definition = desired; current.definitionHash = desired.hash; writes++;
+      const plan = plans.find(value => definitionFor(value, owner) === desired.content)!;
+      assert.ok(plan); Object.assign(current, plan.processes.find(instance => instance.instanceId === owner.instanceId)!);
+      current.candidateId = plan.candidateId; current.definition = desired; current.definitionHash = desired.hash; writes++;
       if (failAfterWrite) { failAfterWrite = false; throw new IvyError('outcome_unknown', 'Simulated loss after one exact Linux unit publication.'); }
     },
     async reload() {},
@@ -307,13 +311,18 @@ test('Linux resource maintenance retains both exact plans across partial OS publ
   assert.equal((await inspectBootstrap(f.configPath, distribution, os)).owners.filter(owner => owner.candidateId === f.next.candidateId).length, 1);
   assert.equal((await updateBootstrap(f.configPath, request, distribution, os)).phase, 'succeeded'); assert.equal(writes, 2);
   assert.deepEqual((await bootstrapPlan(f.configPath, f.old.candidateId)).linuxResources, next.linuxResources);
-  const remove: Host.BootstrapMaintenanceRequest = { schemaVersion: 1, operationId: 'remove-boundary', previous: await inspectBootstrap(f.configPath, distribution, os), next: f.oldPlan };
-  assert.equal((await updateBootstrap(f.configPath, remove, distribution, os)).errorCode, 'resource_scope_required'); assert.equal(writes, 2);
+  const unbounded = await bootstrapPlan(f.configPath, f.old.candidateId, null);
+  assert.equal(unbounded.linuxResources, undefined);
+  const remove: Host.BootstrapMaintenanceRequest = { schemaVersion: 1, operationId: 'remove-boundary', previous: await inspectBootstrap(f.configPath, distribution, os), next: unbounded };
+  assert.equal((await updateBootstrap(f.configPath, remove, distribution, os)).phase, 'succeeded'); assert.equal(writes, 4);
+  assert.equal((await bootstrapPlan(f.configPath, f.next.candidateId)).linuxResources, undefined);
   const changedBudget = { ...budget, tasksMax: 65 }, changed = await bootstrapPlan(f.configPath, f.old.candidateId, changedBudget);
-  const change: Host.BootstrapMaintenanceRequest = { ...remove, operationId: 'change-boundary', next: changed };
-  assert.equal((await updateBootstrap(f.configPath, change, distribution, os)).phase, 'succeeded'); assert.equal(writes, 4);
+  const change: Host.BootstrapMaintenanceRequest = { ...remove, operationId: 'change-boundary', previous: await inspectBootstrap(f.configPath, distribution, os), next: changed };
+  assert.equal((await updateBootstrap(f.configPath, change, distribution, os)).phase, 'succeeded'); assert.equal(writes, 6);
   assert.deepEqual((await bootstrapPlan(f.configPath, f.next.candidateId)).linuxResources?.budget, changedBudget);
   const retainedPath = join(f.config.runtimeRoot, 'bootstrap-plans', hashJson(next).slice(7) + '.json');
   await atomicJson(retainedPath, { ...next, linuxResources: changed.linuxResources });
-  await assert.rejects(inspectBootstrap(f.configPath, distribution, os), code('storage_invalid')); assert.equal(writes, 4);
+  assert.equal((await retainedBootstrapPlans(f.config)).some(plan => hashJson(plan) === hashJson(next)), false);
+  assert.ok((await inspectBootstrap(f.configPath, distribution, os)).owners.every(owner => owner.candidateId === f.old.candidateId));
+  assert.deepEqual((await bootstrapPlan(f.configPath, f.next.candidateId)).linuxResources?.budget, changedBudget); assert.equal(writes, 6);
 });

@@ -965,6 +965,38 @@ test("Instagram inbox captures new replies on old posts and deduplicates incomin
   assert.deepEqual(replay.events, []);
 });
 
+test("Instagram inbox reports incomplete comments when media counts contradict an empty comments edge", async (t) => {
+  fixture(t, [
+    { path: "/v25.0/123", body: { user_id: "123" } },
+    {
+      path: "/v25.0/123/media",
+      body: { data: [igMedia("1", 31, { comments_count: 1 })] },
+    },
+    {
+      path: "/v25.0/1/comments",
+      body: {
+        data: [],
+        paging: { next: "unused", cursors: { after: "next-comments" } },
+      },
+    },
+    {
+      path: "/v25.0/1/comments",
+      check: (url) =>
+        assert.equal(url.searchParams.get("after"), "next-comments"),
+      body: { data: [] },
+    },
+  ]);
+  const result = await instagram({
+    config: { ...igConfig, collectComments: true },
+    secrets: tokenSecrets,
+  });
+  assert.equal(result.data.posts.complete, true);
+  assert.equal(result.data.inbox.comments.complete, false);
+  assert.match(result.data.inbox.comments.reason, /reported comments.*empty/);
+  assert.deepEqual(result.data.inbox.comments.items, []);
+  assert.deepEqual(result.events, []);
+});
+
 test("Instagram inbox reconstructs pagination on the Graph host and exposes bounded coverage", async (t) => {
   fixture(t, [
     { path: "/v25.0/123", body: { user_id: "123" } },

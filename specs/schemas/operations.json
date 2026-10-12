@@ -7,6 +7,18 @@
       "access": "client",
       "mutation": false
     },
+    "openai.getConfiguration": {
+      "input": "#/$defs/OpenaiGetConfigurationParams",
+      "output": "#/$defs/OpenaiGetConfigurationResult",
+      "access": "client",
+      "mutation": false
+    },
+    "openai.saveConfiguration": {
+      "input": "#/$defs/OpenaiSaveConfigurationParams",
+      "output": "#/$defs/OpenaiSaveConfigurationResult",
+      "access": "client",
+      "mutation": true
+    },
     "system.instructions": {
       "input": "#/$defs/SystemInstructionsParams",
       "output": "#/$defs/SystemInstructionsResult",

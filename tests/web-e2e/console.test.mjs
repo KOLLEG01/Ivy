@@ -46,12 +46,20 @@ test('UI launcher and rail share priority order and settings stay at the top rig
   assert.deepEqual(f.pageErrors, []);
 });
 
-test('MCP direct tools show complete schemas at desktop and mobile widths', { timeout: 90000 }, async t => {
+test('MCP test browser opens from Settings and shows complete schemas at desktop and mobile widths', { timeout: 90000 }, async t => {
   const f = await fixture(t);
   await f.login();
-  await f.page.goto(f.base + '/#/system/mcp');
+  const mcpRequests = [];
+  f.page.on('request', request => { if (request.url() === f.base + '/mcp') mcpRequests.push(request); });
+  await f.page.goto(f.base + '/#/system/settings');
+  const browserToggle = f.page.getByRole('button', { name: 'MCP test browser', exact: true });
+  await expect(browserToggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(f.page.getByLabel('OpenAI App-ID', { exact: true })).toHaveCount(0);
+  assert.equal(mcpRequests.length, 0);
   for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
     await f.page.setViewportSize(viewport);
+    await browserToggle.click();
+    await expect(browserToggle).toHaveAttribute('aria-expanded', 'true');
     const tools = f.page.locator('section[aria-labelledby="direct-heading"]');
     await expect(tools.getByRole('heading', { name: 'Direct tools' })).toBeVisible({ timeout: 20000 });
     const pageRead = tools.locator('[data-tool="wiki_read"]');
@@ -60,6 +68,11 @@ test('MCP direct tools show complete schemas at desktop and mobile widths', { ti
     await expect(pageRead.getByText('inputSchema', { exact: true })).toBeVisible();
     assert.ok(await f.page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1));
     await expect(f.page.getByRole('alert')).toHaveCount(0);
+    if (viewport.width === 1440) {
+      await browserToggle.click();
+      await expect(browserToggle).toHaveAttribute('aria-expanded', 'false');
+      await expect(tools).toHaveCount(0);
+    }
   }
   await f.page.getByRole('textbox', { name: 'Filter tools' }).fill('wiki_read');
   await expect(f.page.locator('[data-tool]')).toHaveCount(1);
@@ -90,7 +103,7 @@ test(
       ["Deployments", "Deployments"],
       ["Problems", "Problems"],
       ["Object Browser", "Object Browser"],
-      ["MCP Tools", "MCP Tools"],
+      ["MCP", "MCP"],
     ]) {
       await navigation(f.page)
         .getByRole("link", { name: label, exact: true })
@@ -100,6 +113,10 @@ test(
       ).toBeVisible();
       await expect(f.page.getByRole("alert")).toHaveCount(0);
     }
+    await expect(f.page.getByLabel("OpenAI App-ID", { exact: true })).toBeVisible();
+    await expect(f.page.getByText("Protocol surface", { exact: true })).toHaveCount(0);
+    await f.page.locator('.ivy-toolbar').getByRole('link', { name: 'Settings', exact: true }).click();
+    await f.page.getByRole('button', { name: 'MCP test browser', exact: true }).click();
     await expect(f.page.getByText("Protocol surface", { exact: true })).toBeVisible({ timeout: 20000 });
     const objectRead = f.page.locator('[data-service="hive"] [data-tool="hive_object_read"]');
     await expect(objectRead).toBeVisible();
