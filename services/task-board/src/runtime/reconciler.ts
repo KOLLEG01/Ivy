@@ -169,6 +169,16 @@ export class TaskBoardReconciler {
       .finally(() => { this.activeTasks.delete(key); });
     this.activeTasks.set(key, current);
   }
+  private async publicationFailure(id: string, error: unknown): Promise<void> {
+    const key = 'publication:' + id, failure = IvyError.from(error);
+    if (failure.code === 'revision_conflict' && failure.outcome === 'not_executed') {
+      const original = await this.engine.store.read('task-board/operation', id).catch(() => null);
+      if (original?.value.phase === 'failed' && original.value.error?.execution === 'not_executed') {
+        this.record(key); return;
+      }
+    }
+    this.record(key, error);
+  }
   private async recoverGates(): Promise<void> {
     let gates = this.engine.store.pendingCoordinationPage(this.gateCursor, 10);
     if (!gates.length && this.gateCursor) {
@@ -185,12 +195,12 @@ export class TaskBoardReconciler {
           if (this.activeTasks.size >= 10) return;
           this.startTask(key, async () => {
             try { await this.engine.recoverOperation(id); this.record("publication:" + id); }
-            catch (error) { this.record("publication:" + id, error); }
+            catch (error) { await this.publicationFailure(id, error); }
           });
         }
         this.gateCursor = gate.gateId;
       } catch (error) {
-        this.record("publication:" + id, error);
+        await this.publicationFailure(id, error);
       }
     }
   }

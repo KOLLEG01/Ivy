@@ -20,12 +20,14 @@ test('an unavailable input owner does not prevent Run recovery', async t => {
 
 test('periodic scans give recovery a turn even when the same waiting Task is always schedulable', async t => {
   const w = await nativeWorkflow(t); await w.running();
-  await w.update({ kind: 'unavailable', reason: 'host', code: 'service_unavailable', detail: 'Provider connection is closed.' });
+  const waiting = await w.f.planned('agent');
+  await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: waiting.task.objectId,
+    expectedRevision: waiting.task.revision, reason: 'host', detail: 'Provider connection is closed.', nextReviewAt: null });
   const runtime = new TaskBoardReconciler(w.f.first);
   let recovered = 0, scheduled = 0;
   runtime.native.drain = async () => { recovered++; return true; };
   runtime.signals.step = async () => null;
-  runtime.scheduler.task = async () => { scheduled++; return null; };
+  runtime.scheduler.task = async id => { assert.equal(id, waiting.task.objectId); scheduled++; return null; };
   while (!runtime.recovered) await step(runtime);
   recovered = 0;
   for (let pass = 0; pass < 12; pass++) await step(runtime);
@@ -34,6 +36,25 @@ test('periodic scans give recovery a turn even when the same waiting Task is alw
 });
 
 const step = async (runtime: TaskBoardReconciler) => { await runtime.tick(); await runtime.settled(); };
+
+test('a conclusively rejected stale publication clears its recovery warning while uncertain conflicts remain visible', async t => {
+  const f = taskBoardFixture(t), created = await f.create({ control: 'user' });
+  await todo(f, created.task!);
+  const operation = await f.first.operations.begin({ action: 'transition', operationId: randomUUID(),
+    taskId: created.task!.objectId, expectedRevision: created.task!.revision, workflowState: 'todo', detail: null },
+  { principalId: 'user', serviceNodeId: f.first.owner.serviceNodeId, generation: f.first.owner.generation, source: 'user' });
+  await f.first.coordination.acquire(operation);
+  const runtime = new TaskBoardReconciler(f.first), recover = f.first.recoverOperation.bind(f.first);
+  f.first.recoverOperation = async () => { throw new IvyError('revision_conflict', 'Fixture result is uncertain.', 'unknown'); };
+  await step(runtime);
+  assert.ok(runtime.diagnostics.some(value => value.code === 'revision_conflict'));
+  f.first.recoverOperation = recover;
+  await step(runtime);
+  const terminal = await f.first.store.read('task-board/operation', operation.pin.objectId);
+  assert.equal(terminal.value.phase, 'failed'); assert.equal(terminal.value.error?.execution, 'not_executed');
+  assert.equal(terminal.value.writes.length, 0);
+  assert.deepEqual(runtime.diagnostics, []);
+});
 
 test('recovery errors stay visible through backoff and clear only after a successful pass', async t => {
   const w = await nativeWorkflow(t), runtime = new TaskBoardReconciler(w.f.first);
