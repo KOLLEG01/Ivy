@@ -82,6 +82,7 @@ export type WorkerAction =
       message: string;
     }
   | { action: "diagnostic"; value: Wire.Diagnostic }
+  | { action: "binding.diagnostics" }
   | { action: "health" }
   | { action: "retention.collect" }
   | { action: "backup"; destination: string }

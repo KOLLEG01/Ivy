@@ -57,6 +57,9 @@ Sources: [assignment contracts](../services/secretary/src/assignment-schema.ts),
 
 ## Rules
 
+- The global configuration can disable Secretary browser notifications independently of Main
+  and Voice delivery. They default to enabled and still require the contact policy and each
+  browser's Ivy notification subscription. Delivery reads the current setting.
 - Global rules independently describe acceptable Main and Voice contact, including enablement,
   minimum urgency and optional local-time windows. Voice defaults to critical, immediate-only use.
   Read-only research remains bounded to at most five minutes.

@@ -9,6 +9,7 @@ import { scopedOperationId } from '../../../packages/sdk/src/client.js';
 import type { RpcClient } from '../../../packages/sdk/src/client.js';
 import { localContractKeys, version, readableVersions } from './schema.js';
 import type { ContractKey, ContractValues } from './schema.js';
+import type { DiagnosticNoticeState } from './diagnostic-notifications.js';
 
 export interface Document<K extends ContractKey> {
   key: K; pin: Chat.ObjectPin; value: ContractValues[K]; metadata: Operation.ObjectMetadata; revision: Operation.RevisionMetadata;
@@ -35,6 +36,14 @@ export class ChatStore {
       CREATE UNIQUE INDEX IF NOT EXISTS blobs_identity ON blobs(key,name,COALESCE(parent_id,''));`);
   }
   setRuntimeEpoch(value: string): void { requireThat(value.length > 0 && !value.includes(':'), 'invalid_arguments', 'Invalid runtime epoch.'); this.runtimeEpoch = value; this.expireOperations(); }
+  diagnosticNoticeState(scope: string): Record<string, DiagnosticNoticeState> {
+    const row = this.local.prepare('SELECT value_json FROM markers WHERE key=?').get('diagnostic-notices:' + scope);
+    return row ? JSON.parse(String(row['value_json'])) as Record<string, DiagnosticNoticeState> : {};
+  }
+  saveDiagnosticNoticeState(scope: string, value: Record<string, DiagnosticNoticeState>): void {
+    this.local.prepare('INSERT INTO markers VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json')
+      .run('diagnostic-notices:' + scope, canonical(value));
+  }
   rememberNoticeInput(inputId: string): void {
     if (this.isNoticeInput(mutation(inputId, 'native-user-message'))) return;
     this.local.prepare('INSERT INTO markers VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json')

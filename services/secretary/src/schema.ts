@@ -22,7 +22,7 @@ export interface VoiceRuleOverride { enabled?: boolean; minimumUrgency?: 'critic
 export interface RuleOverrides { main?: ContactRuleOverride; whatsapp?: WhatsAppRuleOverride; voice?: VoiceRuleOverride; researchMaxMinutes?: number }
 export interface ExecutionTarget { serviceNodeId: string; threadCwd: string; model: string | null; effort: 'low' | 'medium' | 'high' | 'xhigh'; permissions: string }
 export interface NativeTarget { serviceNodeId: string; hostId: string; nativeVersion: string; nativeExecutableHash: string; catalogHash: string }
-export interface SecretaryConfiguration { schemaVersion: 1; rules: GlobalRules; execution: ExecutionTarget | null; updatedAt: string }
+export interface SecretaryConfiguration { schemaVersion: 1; rules: GlobalRules; execution: ExecutionTarget | null; browserNotifications?: boolean; updatedAt: string }
 export interface ScheduleTrigger { kind: 'schedule'; timeZone: string; cadence: 'interval' | 'daily' | 'weekly'; intervalMinutes: number | null; localTime: string | null; weekdays: number[] }
 export interface EventTrigger { kind: 'event'; topic: string; topicVersion: string; sourceServiceNodeId: string | null; eventKind: string | null }
 export interface ObjectTrigger {
@@ -85,6 +85,7 @@ export function need(value: unknown, code: string, message: string): asserts val
 export const same = (a: unknown, b: unknown) => hashJson(a) === hashJson(b);
 export const version = '1.0.0';
 const histories: Record<string, string[]> = {
+  'secretary/configuration': ['1.0.0', '1.1.0'],
   'secretary/item': ['1.0.0', '1.1.0', '1.2.0', '1.3.0'],
   'secretary/assignment': ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0'],
   'secretary/schedule-progress': ['1.0.0', '1.1.0', '1.2.0'],

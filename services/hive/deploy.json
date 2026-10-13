@@ -2,25 +2,34 @@
   "schemaVersion": 1,
   "componentId": "hive",
   "kind": "hive",
-  "version": "0.2.91",
+  "version": "0.2.94",
   "description": "Persistent Hive backend and bundled Console",
   "connectsToHive": false,
   "requirements": {
     "node": ">=24.18.0 <25.0.0",
-    "os": ["linux"],
-    "arch": ["x64"],
+    "os": [
+      "linux"
+    ],
+    "arch": [
+      "x64"
+    ],
     "hiveProtocol": 1,
     "contracts": []
   },
   "entrypoint": {
     "executable": "node",
-    "args": ["dist/services/hive/src/main.js"],
+    "args": [
+      "dist/services/hive/src/main.js"
+    ],
     "timeoutMs": 30000
   },
   "prepare": [
     {
       "executable": "node",
-      "args": ["tools/build/run-npm.mjs", "ci"],
+      "args": [
+        "tools/build/run-npm.mjs",
+        "ci"
+      ],
       "timeoutMs": 600000
     },
     {
@@ -39,7 +48,9 @@
     "timeoutMs": 180000,
     "command": {
       "executable": "node",
-      "args": ["dist/packages/host-runtime/src/health.js"],
+      "args": [
+        "dist/packages/host-runtime/src/health.js"
+      ],
       "timeoutMs": 5000
     }
   },

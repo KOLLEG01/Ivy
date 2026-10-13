@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "data-collector",
   "kind": "service",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Isolated script tasks and versioned collection results",
   "connectsToHive": true,
   "requirements": {
@@ -12,13 +12,18 @@
   },
   "entrypoint": {
     "executable": "node",
-    "args": ["dist/services/data-collector/src/main.js"],
+    "args": [
+      "dist/services/data-collector/src/main.js"
+    ],
     "timeoutMs": 30000
   },
   "prepare": [
     {
       "executable": "node",
-      "args": ["tools/build/run-npm.mjs", "ci"],
+      "args": [
+        "tools/build/run-npm.mjs",
+        "ci"
+      ],
       "timeoutMs": 600000
     },
     {
@@ -37,7 +42,9 @@
     "timeoutMs": 60000,
     "command": {
       "executable": "node",
-      "args": ["dist/packages/host-runtime/src/health.js"],
+      "args": [
+        "dist/packages/host-runtime/src/health.js"
+      ],
       "timeoutMs": 5000
     }
   },

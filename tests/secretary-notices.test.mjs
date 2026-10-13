@@ -41,16 +41,22 @@ async function fixture(t) {
 
 test('Secretary defers notices, recovers a lost admission and continues the original delivery after an uncertain transport acknowledgement', { timeout: 60000 }, async t => {
   const f = await fixture(t); f.settings.policy.silentTime = { timeZone: 'Europe/Berlin', start: '22:00', end: '07:00' }; f.setNow('2026-09-07T21:00:00.000Z');
+  const configuration = defaultConfiguration(f.settings, '2026-09-07T21:00:00.000Z');
+  assert.equal(configuration.browserNotifications, true);
+  const current = await f.engine.store.create('secretary/configuration', 'configuration', configuration, await newOperationId(f.client));
+  const disabled = await f.engine.saveConfiguration('chat-owner', { operationId: await newOperationId(f.client), configuration: current.pin, value: { ...configuration, browserNotifications: false } });
   const id = await f.save(); await f.notices.step(id); assert.equal(f.calls.length, 0); assert.equal((await f.engine.item(id)).value.notice.reason, 'silent_time');
   assert.equal((await f.browserNotices()).length, 0);
   await f.save(assessment({ disposition: 'record', notification: 'none' }));
   const checkpoint = await f.engine.action('chat-owner', { action: 'checkpoint', operationId: await newOperationId(f.client), expectedScope: f.settings.identity.scope, sourceId: 'personal-inbox', previousCursor: null, nextCursor: 'observed-empty-page', captures: [] });
   assert.equal(checkpoint.phase, 'succeeded', 'Silent time must not pause source progression or triage.');
   f.setNow('2026-09-08T06:00:00.000Z'); await f.notices.step(id);
-  assert.equal((await f.browserNotices()).length, 1);
+  assert.equal((await f.browserNotices()).length, 0, 'The current Secretary setting stops browser notices while Main delivery continues.');
   const prepared = (await f.engine.item(id)).value.notice; assert.ok(prepared.request); assert.equal(prepared.state, 'dispatching'); assert.equal(f.calls.length, 0);
+  await f.engine.saveConfiguration('chat-owner', { operationId: await newOperationId(f.client), configuration: disabled, value: { ...configuration, browserNotifications: true } });
   f.beforeNotify(async () => assert.deepEqual((await f.engine.item(id)).value.notice.request, prepared.request));
   f.lose(); await f.notices.step(id); assert.equal((await f.engine.item(id)).value.notice.state, 'dispatching');
+  assert.equal((await f.browserNotices()).length, 1, 'Re-enabling takes effect on an already pending notice.');
   const restarted = await f.reopen(); await restarted.step(id); assert.equal((await f.engine.item(id)).value.notice.state, 'dispatching');
   assert.equal(f.calls.filter(call => call.name === 'notify').length, 2, 'A lost admission is retried idempotently while Main is still answering.');
   await f.offer(); await restarted.step(id); assert.equal((await f.engine.item(id)).value.notice.state, 'outcome_unknown');
@@ -131,7 +137,8 @@ test('assignment waits five minutes and reconciles a late Main confirmation afte
   const f = await fixture(t);
   const at = '2026-09-07T08:00:00.000Z';
   const configuration = defaultConfiguration(f.settings, at);
-  await f.engine.store.create('secretary/configuration', 'configuration', configuration, await newOperationId(f.client));
+  const currentConfiguration = await f.engine.store.create('secretary/configuration', 'configuration', configuration, await newOperationId(f.client));
+  const disabledConfiguration = await f.engine.saveConfiguration('chat-owner', { operationId: await newOperationId(f.client), configuration: currentConfiguration.pin, value: { ...configuration, browserNotifications: false } });
   const builtIn = assignmentFor(at, { minimumNotificationAgeMinutes: 5 });
   const assignment = { ...builtIn, enabled: true };
   const selected = await f.engine.store.create('secretary/assignment', assignmentName(assignment.assignmentId), assignment, await newOperationId(f.client));
@@ -154,8 +161,7 @@ test('assignment waits five minutes and reconciles a late Main confirmation afte
   assert.equal((await f.browserNotices()).length, 0);
   f.setNow('2026-09-07T08:05:00.000Z');
   assert.equal(await delivery.step(record), false);
-  assert.equal((await f.browserNotices()).length, 1);
-  assert.equal((await f.browserNotices())[0].payload.body, decision.text);
+  assert.equal((await f.browserNotices()).length, 0, 'A completed assignment uses the current disabled browser setting.');
   const prepared = ({ value: (await f.engine.store.read('secretary/execution', record.pin.objectId)).value.delivery });
   assert.ok(prepared.value.request);
   assert.deepEqual(prepared.value.request.source, record.pin);
@@ -163,7 +169,10 @@ test('assignment waits five minutes and reconciles a late Main confirmation afte
   const { target: originalTarget, ...withoutTarget } = prepared.value;
   const current = await f.engine.store.read('secretary/execution', record.pin.objectId);
   const existing = await f.engine.store.amend(current, 'secretary/execution', { ...current.value, delivery: withoutTarget });
+  await f.engine.saveConfiguration('chat-owner', { operationId: await newOperationId(f.client), configuration: disabledConfiguration, value: { ...configuration, browserNotifications: true } });
   assert.equal(await delivery.step(record), false, 'An existing prepared handoff can still use its unchanged configured owner.');
+  assert.equal((await f.browserNotices()).length, 1);
+  assert.equal((await f.browserNotices())[0].payload.body, decision.text);
   await f.engine.store.amend(existing, 'secretary/execution', { ...existing.value, delivery: { ...withoutTarget, target: originalTarget } });
   const restarted = new AssignmentDelivery(f.engine);
   const disabled = await f.engine.store.amend(selected, 'secretary/assignment', { ...assignment, enabled: false });

@@ -5,6 +5,7 @@ import type { ConnectionContext } from './kernel.js';
 import type { LiveCatalog, ServiceNode, ToolBinding, Target } from './registry.js';
 import type { Transport, Wire } from '../../../packages/contracts/src/generated.js';
 import type { Schema } from '../../../packages/contracts/src/types.js';
+import type { ToolBindingTarget } from './tool-binding-diagnostics.js';
 
 export interface RoutingUpdate { node: ServiceNode; generation?: number; catalog?: LiveCatalog }
 type Route = { node: ServiceNode; generation: number; namespaces: Set<string>; tools: Map<string, ToolBinding>; notifications: Map<string, Schema> };
@@ -17,7 +18,7 @@ export class LiveRouting {
   private readonly validators: SchemaValidators | null;
   private readonly notificationValidators = new SchemaValidators();
   private readonly routes = new Map<string, Route>();
-  constructor(private readonly validateMessages = false) { this.validators = validateMessages ? new SchemaValidators() : null; }
+  constructor(private readonly validateMessages = false, private readonly rejectedBinding?: (target: ToolBindingTarget) => void) { this.validators = validateMessages ? new SchemaValidators() : null; }
   clear(): void { this.routes.clear(); }
   retireUnconfiguredPrincipals(principalIds: readonly string[]): void {
     const configured = new Set(principalIds);
@@ -80,7 +81,10 @@ export class LiveRouting {
     }
     const binding = route.tools.get(params.qualifiedName); requireThat(binding, 'not_found', 'Tool is absent from the selected provider.');
     requireThat(context.transport !== 'mcp' || binding.definition.discovery?.mcp, 'not_found', 'Tool is not published through MCP.');
-    requireThat(binding.definitionHash === params.expectedDefinitionHash, 'tool_definition_changed', 'Tool definition changed.');
+    if (binding.definitionHash !== params.expectedDefinitionHash) {
+      this.rejectedBinding?.({ callerPrincipalId: context.principalId, serviceNodeId: route.node.serviceNodeId, qualifiedName: params.qualifiedName });
+      throw new IvyError('tool_definition_changed', 'Tool definition changed.');
+    }
     if (this.validators) this.validators.validate(binding.definition.inputSchema, params.arguments, managementFrameBytes);
     return {serviceNodeId:route.node.serviceNodeId,generation:route.generation,definition:binding.definition,definitionHash:binding.definitionHash,arguments:params.arguments,callerPrincipalId:context.principalId,...(params.operationId===undefined?{}:{operationId:params.operationId})};
   }

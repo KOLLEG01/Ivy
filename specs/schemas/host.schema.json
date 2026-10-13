@@ -78,6 +78,10 @@
                 }
               ]
             },
+            "nativeCatalogs": {
+              "const": true,
+              "description": "Before activation, verify that this candidate retains the exact catalogs of available AgentManagers."
+            },
             "contracts": {
               "type": "array",
               "maxItems": 128,
@@ -522,6 +526,31 @@
         {
           "if": {
             "properties": {
+              "requirements": {
+                "required": [
+                  "nativeCatalogs"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "connectsToHive": {
+                "const": true
+              },
+              "requirements": {
+                "properties": {
+                  "hiveProtocol": {
+                    "const": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
               "kind": {
                 "const": "app"
               }
@@ -670,6 +699,10 @@
                   "type": "null"
                 }
               ]
+            },
+            "nativeCatalogs": {
+              "const": true,
+              "description": "Before activation, verify that this candidate retains the exact catalogs of available AgentManagers."
             },
             "contracts": {
               "type": "array",
@@ -1039,6 +1072,31 @@
       ],
       "additionalProperties": false,
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "requirements": {
+                "required": [
+                  "nativeCatalogs"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "connectsToHive": {
+                "const": true
+              },
+              "requirements": {
+                "properties": {
+                  "hiveProtocol": {
+                    "const": 1
+                  }
+                }
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {

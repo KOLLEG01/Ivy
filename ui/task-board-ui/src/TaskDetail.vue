@@ -14,6 +14,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  ImagePreview,
   Label,
   LazyMarkdownEditor as MarkdownEditor,
   PageControls,
@@ -27,6 +28,7 @@ import {
   TabsList,
   TabsTrigger,
   ToolbarContent,
+  markdownImageSources,
   useRemote,
 } from "@ivy/ui";
 import type { UploadedAttachment } from "@ivy/ui";
@@ -346,6 +348,57 @@ const images = useAttachmentImages(
     return value ? [value.fields.description, ...value.fields.acceptanceCriteria, ...value.comments.map((comment) => comment.body), commentBody.value] : [commentBody.value];
   },
 );
+// Follow the ticket's reading order, then include remaining attachments once each.
+const ticketImages = computed(() => {
+  const value = task.value.value?.value;
+  if (!value) return [];
+  const sources = [
+    ...[value.fields.description, ...value.fields.acceptanceCriteria].flatMap(text => markdownImageSources(text)),
+    ...value.comments.flatMap(comment => [
+      ...markdownImageSources(comment.body),
+      ...comment.attachments.map(attachment => attachmentSource(attachment.attachmentId)),
+    ]),
+    ...value.attachments.map(attachment => attachmentSource(attachment.attachmentId)),
+  ];
+  const attachments = new Map(value.attachments
+    .filter(attachment => attachmentView(attachment.filename, attachment.mediaType) === "image")
+    .map(attachment => [attachment.attachmentId, attachment]));
+  return [...new Set(sources.map(sourceAttachmentId))]
+    .flatMap(id => id && attachments.has(id) ? [attachments.get(id)!] : []);
+});
+const imagePreviewOpen = ref(false),
+  previewAttachmentId = ref<string | null>(null),
+  imagePreviewLoading = ref(false),
+  imagePreviewError = ref<string | null>(null),
+  imagePreviewAttempt = ref(0);
+const previewIndex = computed(() => ticketImages.value.findIndex(attachment => attachment.attachmentId === previewAttachmentId.value));
+const previewAttachment = computed(() => ticketImages.value[previewIndex.value]);
+const previewSource = computed(() => previewAttachment.value ? attachmentSource(previewAttachment.value.attachmentId) : null);
+const previewImage = (source: string) => {
+  const id = sourceAttachmentId(source);
+  if (!id || !ticketImages.value.some(attachment => attachment.attachmentId === id)) return;
+  previewAttachmentId.value = id;
+  imagePreviewOpen.value = true;
+};
+const stepImage = (offset: number) => {
+  const attachment = ticketImages.value[previewIndex.value + offset];
+  if (attachment) previewImage(attachmentSource(attachment.attachmentId));
+};
+watch([imagePreviewOpen, previewSource, imagePreviewAttempt], async ([open, source], _previous, onCleanup) => {
+  let active = true;
+  onCleanup(() => { active = false; });
+  imagePreviewError.value = null;
+  imagePreviewLoading.value = false;
+  if (!open || !source) { imagePreviewOpen.value = false; return; }
+  imagePreviewLoading.value = true;
+  try {
+    if (!await images.load(source)) throw new Error("The saved attachment is unavailable.");
+  } catch (cause) {
+    if (active) imagePreviewError.value = cause instanceof Error ? cause.message : "The saved attachment is unavailable.";
+  } finally {
+    if (active) imagePreviewLoading.value = false;
+  }
+});
 // Files added to a comment are uploaded to the Task at once and listed with the comment when it is sent.
 const uploadFile = async (file: File): Promise<UploadedAttachment> => {
   if (!writable.value) throw new Error("This task cannot be changed right now.");
@@ -667,6 +720,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                 media-type="text/markdown"
                 :trusted-image-urls="images.urls.value"
                 :trusted-attachments="images.files.value"
+                :preview-image="previewImage"
               />
             </div>
             <p v-else class="text-sm text-muted-foreground">
@@ -699,7 +753,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                   .acceptanceCriteria"
                 :key="criterion"
               >
-                <ContentView :text="criterion" media-type="text/markdown" :trusted-image-urls="images.urls.value" :trusted-attachments="images.files.value" />
+                <ContentView :text="criterion" media-type="text/markdown" :trusted-image-urls="images.urls.value" :trusted-attachments="images.files.value" :preview-image="previewImage" />
               </li>
             </ul>
           </section>
@@ -765,6 +819,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                         media-type="text/markdown"
                         :trusted-image-urls="images.urls.value"
                         :trusted-attachments="images.files.value"
+                        :preview-image="previewImage"
                       />
                       <NativeInput v-if="comment.nativeInput && !comment.replyTo && !['answered', 'expired'].includes(nativeInput(comment)!.state)" compact
                         :input="nativeInput(comment)!" :epoch="comment.nativeInput.identity.epoch"
@@ -833,6 +888,8 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                           :key="attachment.attachmentId"
                           :attachment="attachment"
                           :task-id="taskId"
+                          :load-image="images.load"
+                          :preview-image="previewImage"
                         />
                       </div>
                     </CommentCard>
@@ -880,6 +937,8 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                       :key="attachment.attachmentId"
                       :attachment="attachment"
                       :task-id="taskId"
+                      :load-image="images.load"
+                      :preview-image="previewImage"
                     />
                   </div>
                 </Disclosure>
@@ -1087,6 +1146,20 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
         </aside>
       </div>
     </template>
+    <ImagePreview
+      v-model:open="imagePreviewOpen"
+      :source="previewSource ? images.urls.value[previewSource] ?? null : null"
+      :name="previewAttachment?.filename ?? ''"
+      :index="previewIndex"
+      :count="ticketImages.length"
+      :loading="imagePreviewLoading"
+      :error="imagePreviewError"
+      :previous-label="tr('Vorheriges Bild', 'Previous image')"
+      :next-label="tr('Nächstes Bild', 'Next image')"
+      @previous="stepImage(-1)"
+      @next="stepImage(1)"
+      @retry="imagePreviewAttempt++"
+    />
     <ObjectDeleteDialog v-model:open="deleteOpen" :client="client" :object-id="taskId" :expected-revision="task.value.value?.read.object.currentRevision ?? null" :label="'the ticket “' + (task.value.value?.value.taskKey ?? taskId) + '”'" consequence="This also deletes its attachments and related workflow records." :storage-key="'ivy.task-board.delete:' + base.href + ':' + taskId" @deleted="emit('deleted')" />
   </div>
 </template>

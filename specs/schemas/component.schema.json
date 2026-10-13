@@ -66,6 +66,10 @@
             }
           ]
         },
+        "nativeCatalogs": {
+          "const": true,
+          "description": "Before activation, verify that this candidate retains the exact catalogs of available AgentManagers."
+        },
         "contracts": {
           "type": "array",
           "maxItems": 128,
@@ -474,6 +478,19 @@
   ],
   "additionalProperties": false,
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "requirements": { "required": ["nativeCatalogs"] }
+        }
+      },
+      "then": {
+        "properties": {
+          "connectsToHive": { "const": true },
+          "requirements": { "properties": { "hiveProtocol": { "const": 1 } } }
+        }
+      }
+    },
     {
       "if": {
         "properties": {

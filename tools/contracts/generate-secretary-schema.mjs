@@ -39,7 +39,7 @@ const defs = {
   RuleOverrides: optionalObject({ main: ref('ContactRuleOverride'), whatsapp: ref('WhatsAppRuleOverride'), voice: ref('VoiceRuleOverride'), researchMaxMinutes: integer(0, 5) }),
   ExecutionTarget: object({ serviceNodeId: text(), threadCwd: text(4096), model: nullable(text(128)), effort: enumeration('low', 'medium', 'high', 'xhigh'), permissions: text(128) }),
   NativeTarget: object({ serviceNodeId: text(), hostId: text(), nativeVersion: text(), nativeExecutableHash: hash, catalogHash: hash }),
-  SecretaryConfiguration: object({ schemaVersion: { const: 1 }, rules: ref('GlobalRules'), execution: nullable(ref('ExecutionTarget')), updatedAt: stamp }),
+  SecretaryConfiguration: optionalObject({ schemaVersion: { const: 1 }, rules: ref('GlobalRules'), execution: nullable(ref('ExecutionTarget')), browserNotifications: { type: 'boolean' }, updatedAt: stamp }, ['schemaVersion', 'rules', 'execution', 'updatedAt']),
   ScheduleTrigger: object({ kind: { const: 'schedule' }, timeZone: text(128), cadence: enumeration('interval', 'daily', 'weekly'), intervalMinutes: nullable(integer(1, 10080)), localTime: nullable(time), weekdays: array(integer(0, 6), 7) }),
   EventTrigger: object({ kind: { const: 'event' }, topic: text(128), topicVersion: text(32), sourceServiceNodeId: nullable(text()), eventKind: nullable(text(256)) }),
   ObjectTrigger: object({ kind: { const: 'object-change' }, objectIds: array(text(), 100, 1), paths: array(text(2048, 0), 32), delaySeconds: integer(0, 3600),

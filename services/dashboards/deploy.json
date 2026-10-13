@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "dashboards",
   "kind": "service",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "HTML dashboards with live Hive data and PNG rendering",
   "connectsToHive": true,
   "requirements": {
@@ -12,13 +12,18 @@
   },
   "entrypoint": {
     "executable": "node",
-    "args": ["dist/services/dashboards/src/main.js"],
+    "args": [
+      "dist/services/dashboards/src/main.js"
+    ],
     "timeoutMs": 30000
   },
   "prepare": [
     {
       "executable": "node",
-      "args": ["tools/build/run-npm.mjs", "ci"],
+      "args": [
+        "tools/build/run-npm.mjs",
+        "ci"
+      ],
       "timeoutMs": 600000
     },
     {
@@ -37,7 +42,9 @@
     "timeoutMs": 30000,
     "command": {
       "executable": "node",
-      "args": ["dist/packages/host-runtime/src/health.js"],
+      "args": [
+        "dist/packages/host-runtime/src/health.js"
+      ],
       "timeoutMs": 5000
     }
   },

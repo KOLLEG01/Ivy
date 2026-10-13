@@ -65,6 +65,7 @@ import {
 } from "./admission.js";
 import type { RequestLease } from "./admission.js";
 import { LiveRouting } from "./live-routing.js";
+import { ToolBindingDiagnostics } from './tool-binding-diagnostics.js';
 import { HiveOAuth, oauthPage } from "./oauth.js";
 import { PackageRegistry } from "./packages.js";
 import { UiFiles } from "./ui-files.js";
@@ -116,6 +117,7 @@ export class HiveServer {
   });
   private readonly peers = new Set<Peer>();
   private readonly routing: LiveRouting;
+  private readonly bindingDiagnostics: ToolBindingDiagnostics;
   private readonly oauth: HiveOAuth;
   private readonly packages: PackageRegistry | null;
   private readonly uiFiles: UiFiles;
@@ -153,7 +155,12 @@ export class HiveServer {
   private stopped = false;
 
   constructor(readonly options: ServerOptions) {
-    this.routing = new LiveRouting(options.validateMessages === true);
+    this.bindingDiagnostics = new ToolBindingDiagnostics(value => {
+      void this.worker.request({ action: 'diagnostic', value }).catch(() => {
+        console.error('Hive could not retain a Tool binding diagnostic.');
+      });
+    });
+    this.routing = new LiveRouting(options.validateMessages === true, target => this.bindingDiagnostics.rejected(target));
     requireThat(
       (options.trustedProxyAddresses ?? []).every((value) => isIP(value) !== 0),
       "invalid_arguments",
@@ -341,6 +348,7 @@ export class HiveServer {
   async start(): Promise<{ port: number; host: string }> {
     try {
       await this.worker.start();
+      this.bindingDiagnostics.restore(await this.worker.request({ action: 'binding.diagnostics' }));
       this.oauth.initialize(
         await this.worker.request<{ signingKey: string; referenceKey: string }>(
           { action: "oauth.initialize" },
@@ -392,7 +400,9 @@ export class HiveServer {
     if (this.stopped || this.recoveryTimer) return;
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = null;
-      void this.worker.start().catch(() => this.scheduleRecovery());
+      void this.worker.start().then(async () => {
+        this.bindingDiagnostics.restore(await this.worker.request({ action: 'binding.diagnostics' }));
+      }).catch(() => this.scheduleRecovery());
     }, 1000);
   }
   private eventsAvailable(throughSequence: number): void {
@@ -1972,7 +1982,10 @@ export class HiveServer {
       this.forwarded.set(id, { peer, call, resolve, reject, timer });
       this.send(peer, request, encoded);
     });
-    return this.routing.complete(call, result);
+    const completed = this.routing.complete(call, result);
+    this.bindingDiagnostics.completed({ callerPrincipalId: call.callerPrincipalId, serviceNodeId: call.serviceNodeId,
+      qualifiedName: call.definition.namespace + '.' + call.definition.name });
+    return completed;
   }
   private async providerResult(
     peer: Peer,

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "data-collector-ui",
   "kind": "app",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "DataCollector task editor and result viewer",
   "connectsToHive": false,
   "requirements": {
@@ -18,7 +18,10 @@
   "prepare": [
     {
       "executable": "node",
-      "args": ["tools/build/run-npm.mjs", "ci"],
+      "args": [
+        "tools/build/run-npm.mjs",
+        "ci"
+      ],
       "timeoutMs": 600000
     },
     {

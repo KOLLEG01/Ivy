@@ -24,11 +24,13 @@ import { validateHost } from '../../contracts/src/host-validation.js';
 import { canonical } from '../../contracts/src/canonical.js';
 import { installationIdentity, validateLinuxResourceScope } from './linux-resources.js';
 import { requireRuntimeRequirements } from './package-requirements.js';
+import { verifyConfiguredNativeCatalog, verifyNativeCatalogCompatibility } from './native-catalog-compatibility.js';
+import { agentManagerAccountSettings } from './layout.js';
 import { PackageUpdater } from './package-updater.js';
 import { AutomaticBootstrapUpdater } from './bootstrap-automatic.js';
 import { ConfigurationUpdater, configurationFailure } from './configuration-updater.js';
 import { reconcileBootstrapConfigurationRestarts } from './bootstrap-config-restart.js';
-import type { Host, Wire } from '../../contracts/src/generated.js';
+import type { Agent, Host, Wire } from '../../contracts/src/generated.js';
 import { ensureLinuxProcessIdentity, linuxProcessUser } from './linux-service-identity.js';
 import { sourceBuildPlan } from './source.js';
 import { collectHostStorage } from './storage-retention.js';
@@ -437,6 +439,8 @@ export class HostExecutor {
     requireRuntimeRequirements(manifest.requirements);
     this.serviceStorage(instanceId, manifest);
     await verifyLaunchCandidate(candidate, this.config, manifest.entrypoint?.args[0]);
+    if (manifest.componentId === 'agent-manager') await verifyConfiguredNativeCatalog(candidate.artifactRoot, instanceId,
+      agentManagerAccountSettings(this.journal.instance(instanceId).settings) as Agent.Settings);
     if (this.journal.instance(instanceId).engine === 'docker') await this.dockerAdapter.verifyContainerImage(this.config, this.journal.instance(instanceId), candidate, manifest);
     await resolveCommand(manifest.entrypoint!, candidate.artifactRoot, this.config.executables);
     await resolveCommand(manifest.readiness!.command, candidate.artifactRoot, this.config.executables);
@@ -474,6 +478,7 @@ export class HostExecutor {
       const status = await client.request('system.status', {}, { timeoutMs: 5000 });
       requireThat(status.ready && status.hiveProtocol === manifest.requirements.hiveProtocol, 'incompatible_protocol', 'Current Hive protocol is unavailable or incompatible.');
       inspection = await client.request('system.inspectStorage', { contracts }, { timeoutMs: 5000 });
+      if (manifest.requirements.nativeCatalogs) await verifyNativeCatalogCompatibility(client, candidate.artifactRoot, manifest.componentId);
     }
     if (inspection) for (const usage of inspection.contracts) {
       const requirement = manifest.requirements.contracts.find(item => item.key === usage.key);

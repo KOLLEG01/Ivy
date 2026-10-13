@@ -2,12 +2,13 @@
   "schemaVersion": 1,
   "componentId": "task-board",
   "kind": "service",
-  "version": "0.2.62",
+  "version": "0.2.63",
   "description": "Durable task actions, retained native Run reconciliation and fair scheduling",
   "connectsToHive": true,
   "requirements": {
     "node": ">=24.18.0 <25.0.0",
     "hiveProtocol": 1,
+    "nativeCatalogs": true,
     "contracts": []
   },
   "entrypoint": {

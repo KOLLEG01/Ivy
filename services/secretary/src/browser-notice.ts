@@ -5,6 +5,8 @@ import type { SecretaryEngine } from './engine.js';
 export async function secretaryBrowserNotice(engine: SecretaryEngine, tag: string, text: string): Promise<void> {
   const key = 'secretary/browser-notice';
   if (engine.store.technicalNamed(key, tag)) return;
+  const configuration = await engine.store.named('secretary/configuration', 'configuration');
+  if (configuration?.value.browserNotifications === false) return;
   await publishBrowserNotice(engine.client, 'secretary', {
     title: 'Ivy · Secretary', body: text, tag,
     target: { uiId: 'secretary-ui', fragment: '#/journal?' + new URLSearchParams({ node: engine.owner.serviceNodeId }) },

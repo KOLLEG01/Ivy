@@ -4,7 +4,7 @@ import { markdownImageSources, renderMarkdown } from '../lib/markdown';
 import type { AttachmentInfo } from '../lib/attachments';
 import { Button } from '../components/button';
 import ImagePreview from './ImagePreview.vue';
-const props = defineProps<{ text: string; mediaType?: string; maximumCharacters?: number; trustedImageUrls?: Record<string, string>; trustedAttachments?: Record<string, AttachmentInfo>; imageLoader?: ((source: string, signal: AbortSignal) => Promise<Blob | null>) | null }>();
+const props = defineProps<{ text: string; mediaType?: string; maximumCharacters?: number; trustedImageUrls?: Record<string, string>; trustedAttachments?: Record<string, AttachmentInfo>; imageLoader?: ((source: string, signal: AbortSignal) => Promise<Blob | null>) | null; previewImage?: (source: string) => void }>();
 const limit = computed(() => props.maximumCharacters ?? 262144);
 const loaded = ref<Record<string, string>>({}), failures = ref<string[]>([]);
 const imageUrls = computed(() => ({ ...loaded.value, ...props.trustedImageUrls }));
@@ -47,7 +47,11 @@ const previewOpen = ref(false), preview = ref({ source: '', name: '' });
 const showImage = (event: MouseEvent) => {
   const button = event.target instanceof Element ? event.target.closest('button.ivy-image-button') : null;
   const image = button?.querySelector('img');
-  if (image && Object.values(imageUrls.value).includes(image.src)) { event.preventDefault(); preview.value = { source: image.src, name: image.alt }; previewOpen.value = true; }
+  const source = image ? Object.keys(imageUrls.value).find(source => imageUrls.value[source] === image.src) : undefined;
+  if (!image || source === undefined) return;
+  event.preventDefault();
+  if (props.previewImage) props.previewImage(source);
+  else { preview.value = { source: image.src, name: image.alt }; previewOpen.value = true; }
 };
 </script>
 <template>

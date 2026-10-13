@@ -672,6 +672,9 @@ test('cached read Tools recover definition updates but cannot retry mutations or
   read.description = 'Updated read contract.'; await sync();
   assert.equal(await tools.read('example.echo', { value: 'same request' }), 'same request');
   assert.equal(f.invocations(), 2, 'The rejected stale binding must never reach the provider.');
+    read.description = 'Updated read used through call.'; await sync();
+    assert.equal(await tools.call('example.echo', { value: 'ordinary read call' }), 'ordinary read call');
+    assert.equal(f.invocations(), 3);
   const request = f.client.request.bind(f.client); let calls = 0;
   f.client.request = async (method, params, options) => {
     if (method === 'tools.call') { calls++; throw new IvyError('tool_definition_changed', 'Uncertain response.', 'unknown'); }
@@ -682,8 +685,9 @@ test('cached read Tools recover definition updates but cannot retry mutations or
   f.client.request = request;
   read.annotations = { readOnlyHint: false }; await sync();
   await assert.rejects(tools.read('example.echo', { value: 'became a mutation' }), { code: 'tool_definition_changed' });
-  await assert.rejects(tools.read('example.echo', { value: 'still a mutation' }), { code: 'invalid_arguments' });
-  assert.equal(f.invocations(), 2);
+  await assert.rejects(tools.read('example.echo', { value: 'still a mutation' }), { code: 'tool_definition_changed' });
+  await assert.rejects(tools.call('example.echo', { value: 'cannot silently become a mutation' }), { code: 'tool_definition_changed' });
+    assert.equal(f.invocations(), 3);
 });
 
 async function fixture(t: TestContext, start = true, callTimeoutMs = 1000) {

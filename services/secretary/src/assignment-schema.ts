@@ -106,7 +106,7 @@ const allowedWindow = (settings: Settings): ContactWindow | null => settings.pol
 export function defaultConfiguration(settings: Settings, now: string, execution: ExecutionTarget | null = null): SecretaryConfiguration {
   const contactWindow = allowedWindow(settings);
   const main = { enabled: true, minimumUrgency: settings.policy.minimumMainUrgency, window: contactWindow } as const;
-  const value: SecretaryConfiguration = { schemaVersion: 1, execution, updatedAt: now, rules: {
+  const value: SecretaryConfiguration = { schemaVersion: 1, execution, browserNotifications: true, updatedAt: now, rules: {
     main,
     whatsapp: { ...main, questionsOnly: false },
     voice: { enabled: true, minimumUrgency: 'critical', window: contactWindow, immediateOnly: true },

@@ -25,6 +25,7 @@ import type { ChatTool } from "./registry.js";
 import { ChatStore } from "./store.js";
 import { resolveChatPlan } from "./native-plan.js";
 import { WhatsAppRuntime } from "./whatsapp/runtime.js";
+import { DiagnosticNotifications, diagnosticNotificationPollMs } from './diagnostic-notifications.js';
 
 export async function startChatBridge(path: string) {
   const config = await instanceConfig(path);
@@ -54,6 +55,8 @@ export async function startChatBridge(path: string) {
     activeWork: Promise<void> | null = null,
     healthWork: Promise<void> = Promise.resolve();
   let diagnostic: Wire.Diagnostic | null = null;
+  let diagnosticNoticeError: Wire.Diagnostic | null = null, diagnosticWork: Promise<void> | null = null;
+  let diagnosticTimer: NodeJS.Timeout | null = null;
   const invocations = new Set<Promise<unknown>>();
   const retired = new Set<Promise<void>>();
   let closing: Promise<void> | null = null;
@@ -114,6 +117,19 @@ export async function startChatBridge(path: string) {
           );
         wakePending = false;
       });
+  };
+  const monitorDiagnostics = () => {
+    if (closed || !runtime || !service.ready || diagnosticWork) return;
+    const selected = runtime, connection = service.connection;
+    diagnosticWork = new DiagnosticNotifications(selected.main, settings.language ?? 'en').tick(connection.signal).then(() => {
+      if (runtime === selected) { diagnosticNoticeError = null; kick(); }
+    }, error => {
+      if (runtime !== selected || connection.signal.aborted) return;
+      const at = new Date().toISOString();
+      diagnosticNoticeError = { code: 'chat_diagnostics_unavailable', source: 'chat-bridge', severity: 'error', status: 'current',
+        resource: { cause: IvyError.from(error).code }, firstObservedAt: diagnosticNoticeError?.firstObservedAt ?? at, lastObservedAt: at,
+        message: 'Operational notices could not be reconciled with their original Main receipts.' };
+    }).finally(() => { diagnosticWork = null; });
   };
   const handlers: Record<string, ToolHandler> = {};
   for (const tool of chatTools)
@@ -232,6 +248,7 @@ export async function startChatBridge(path: string) {
             const work = Promise.allSettled([
               ...invocations,
               activeWork,
+              diagnosticWork,
               whatsapp?.settled(),
             ]).then(() => store.close());
             retired.add(work);
@@ -257,17 +274,18 @@ export async function startChatBridge(path: string) {
       await writeHealth(
         true,
         connection.generation,
-        (diagnostic
+        (diagnosticNoticeError ? 'Operational diagnostic notifications need reconciliation.' : diagnostic
           ? "Saved chat is available; original work needs reconciliation."
           : "Authenticated chat storage and original work reconciliation are available.") +
           (whatsapp ? " WhatsApp: " + whatsapp.transport.state + "." : ""),
       );
-      return { ready: true, diagnostics: diagnostic ? [diagnostic] : [] };
+      return { ready: true, diagnostics: [diagnostic, diagnosticNoticeError].filter((value): value is Wire.Diagnostic => value !== null) };
     },
     onState: (state) => {
       if (state.status === "ready" && state.generation !== startedGeneration) {
         startedGeneration = state.generation ?? null;
         kick();
+        monitorDiagnostics();
       } else if (["offline", "stopped", "connecting"].includes(state.status)) {
         runtime = null;
         whatsapp?.attach(null);
@@ -288,11 +306,13 @@ export async function startChatBridge(path: string) {
       closed = true;
       if (timer) clearTimeout(timer);
       if (control) clearInterval(control);
+      if (diagnosticTimer) clearInterval(diagnosticTimer);
       try {
         await whatsapp?.close();
       } finally {
         await service.stop();
         await activeWork;
+        await diagnosticWork;
         await Promise.all(retired);
       }
       await healthWork.catch(() => undefined);
@@ -316,6 +336,7 @@ export async function startChatBridge(path: string) {
       });
   }, 500);
   service.start();
+  diagnosticTimer = setInterval(monitorDiagnostics, diagnosticNotificationPollMs);
   whatsapp?.start();
   return {
     service,

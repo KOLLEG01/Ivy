@@ -389,7 +389,7 @@ export class TaskBoardScheduler {
       else if (error.code === "task_board_dependency_waiting")
         reason = "dependency";
       else if (error.code === "task_board_capability_unavailable") reason = "capability";
-      else if (["task_board_target_unavailable", "task_board_model_unavailable"].includes(error.code))
+      else if (["task_board_target_unavailable", "task_board_model_unavailable", "native_catalog_mismatch"].includes(error.code))
         reason = "host";
       else if (
         ["service_not_ready", "service_unavailable"].includes(error.code)

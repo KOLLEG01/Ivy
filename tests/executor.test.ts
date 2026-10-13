@@ -14,11 +14,57 @@ import { startProcess } from '../packages/host-runtime/src/process.js';
 import { cli } from '../packages/cli/src/main.js';
 import { HostJournal, terminalPhases } from '../packages/host-runtime/src/journal.js';
 import { atomicJson } from '../packages/host-runtime/src/config.js';
+import { hostConfig } from '../packages/host-runtime/src/host-config.js';
+import { verifyConfiguredNativeCatalog, verifyNativeCatalogCompatibility } from '../packages/host-runtime/src/native-catalog-compatibility.js';
+import { hashJson, digest } from '../packages/contracts/src/canonical.js';
+import { agentRegistry } from '../services/agent-manager/src/registry.js';
+import type { RpcClient } from '../packages/sdk/src/client.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import { captureSource } from '../packages/host-runtime/src/source.js';
 import { prepareCandidate } from '../packages/host-runtime/src/prepare.js';
-import type { Host } from '../packages/contracts/src/generated.js';
+import type { Host, Agent, Operation } from '../packages/contracts/src/generated.js';
 import { collectHostStorage } from '../packages/host-runtime/src/storage-retention.js';
+
+test('native deployment compatibility rejects a different build of the same protocol and accepts a matching owner', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ivy-native-compatibility-'));
+  t.after(() => import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })));
+  const catalog = JSON.parse(await readFile('specs/native/codex-0.142.3/catalog.json', 'utf8')) as Agent.Catalog;
+  const directory = join(root, 'dist/specs/native/codex-' + catalog.version);
+  await mkdir(directory, { recursive: true }); await atomicJson(join(directory, 'catalog.json'), catalog);
+  await assert.rejects(verifyConfiguredNativeCatalog(root, 'fixture-provider', { nativeVersion: catalog.version,
+    nativeExecutableHash: digest('different adapter bytes') }), { code: 'incompatible_native_catalog' });
+  await verifyConfiguredNativeCatalog(root, 'fixture-provider', { nativeVersion: catalog.version, nativeExecutableHash: catalog.nativeExecutableHash });
+  const registry = agentRegistry(catalog), calls: string[] = [];
+  const node = { serviceNodeId: 'fixture.agent-manager', hostId: 'fixture', connected: true, synced: true, ready: true,
+    desiredEnabled: true, stale: false } as Operation.ServiceNode;
+  let otherBuild = true, offline = false;
+  const client = { async request(method: string, params: Record<string, unknown>) {
+    calls.push(method);
+    if (method === 'serviceNodes.list') return { items: [{ ...node, connected: !offline }, { ...node, serviceNodeId: 'offline', connected: false }], nextCursor: null };
+    if (method === 'tools.list') {
+      assert.equal(params['serviceNodeId'], node.serviceNodeId);
+      const definition = registry.namespaces[1]!.tools.find(value => value.name === 'status')!;
+      return { provider: { node }, items: [{ qualifiedName: 'agent.status', definition, definitionHash: hashJson(definition) }], nextCursor: null };
+    }
+    assert.equal(method, 'tools.call'); assert.equal(params['qualifiedName'], 'agent.status');
+    assert.equal(params['operationId'], undefined, 'compatibility has no native mutation or turn');
+    return { serviceNodeId: node.serviceNodeId, hostId: node.hostId, nativeVersion: catalog.version,
+      nativeExecutableHash: otherBuild ? digest('different adapter bytes') : catalog.nativeExecutableHash,
+      catalogHash: otherBuild ? digest('different adapter catalog') : hashJson(catalog), epoch: 'fixture-epoch',
+      pid: null, state: 'ready', observedAt: new Date().toISOString(), code: null, initialized: {}, pendingInputs: 0,
+      operations: { retained: 0, maximum: 100, bytes: 0, maximumBytes: 1048576 }, observedMethods: [] };
+  } } as unknown as RpcClient;
+  await assert.rejects(verifyNativeCatalogCompatibility(client, root, 'fixture-consumer'), error => {
+    assert.equal((error as IvyError).code, 'incompatible_native_catalog');
+    assert.match((error as Error).message, /fixture\.agent-manager.*native version 0\.142\.3/);
+    return true;
+  });
+  otherBuild = false;
+  await verifyNativeCatalogCompatibility(client, root, 'fixture-consumer');
+  calls.length = 0; offline = true;
+  await verifyNativeCatalogCompatibility(client, root, 'fixture-consumer');
+  assert.deepEqual(calls, ['serviceNodes.list'], 'an offline host adds no retry or readiness wait');
+});
 
 test('executor heartbeat reflects completed manual storage collection', async t => {
   const f = await hostFixture(t);
@@ -277,7 +323,7 @@ test('a running executor applies accepted configuration only on activation and i
   assert.equal(result.exitCode, 0);
   await until(() => terminalPhases.has(f.journal.get(result.output.deploymentId!).record.phase));
   const entry = f.journal.get(result.output.deploymentId!); assert.equal(entry.record.phase, 'succeeded', JSON.stringify(entry));
-  assert.deepEqual(f.journal.acceptedConfiguration(entry.configurationPath), next);
+  assert.deepEqual(f.journal.acceptedConfiguration(entry.configurationPath), await hostConfig(f.configPath));
   assert.deepEqual(JSON.parse(await readFile(join(f.config.runtimeRoot, 'instances/first/data/launch-settings.json'), 'utf8')), next.instances[0]!.settings);
   assert.equal(f.journal.observations()['unrelated']?.health?.bootId, other.bootId); assert.notEqual(f.journal.target('first')?.revision, previous.revision);
   const active = f.journal.target('first')!;

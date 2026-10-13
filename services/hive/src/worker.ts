@@ -306,6 +306,8 @@ async function handle(
     case "diagnostic":
       kernel.registry.diagnostic(message.value);
       return { recorded: true };
+      case "binding.diagnostics":
+        return kernel.registry.diagnostics('unresolved').filter(value => value.source === 'hive.tool-bindings');
     case "health":
       return { ready: kernel.store.get("SELECT 1 AS ready")?.["ready"] === 1 };
     case "retention.collect": {

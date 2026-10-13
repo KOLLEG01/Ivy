@@ -168,6 +168,9 @@ substitute a development build for an installed artifact.
 - Check compatibility against actual retained formats/contracts before switching. Drain,
   stop, launch and readiness checks are bounded and use the platform's process-tree ownership.
   Unrelated components remain supervised.
+- Components declaring `requirements.nativeCatalogs` compare their retained catalogs with
+  available AgentManagers before draining the current instance. A mismatch fails the original
+  deployment with the native owner and exact catalog identity; offline hosts are skipped.
 - Reconcile unfinished steps against observed state after restart. Ambiguity is
   `needs_attention`; rollback is a distinct outcome. Process survival is not readiness.
 - Roll back binaries only when they can read current data. Never restore an old database

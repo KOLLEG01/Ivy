@@ -11,12 +11,14 @@ import {
 } from "@ivy/ui";
 import { Paperclip } from "@lucide/vue";
 import { attachmentView } from "./attachment-view";
-import { attachmentBytes, saveBytes } from "./attachment-images";
+import { attachmentBytes, attachmentSource, saveBytes } from "./attachment-images";
 import type { TaskBoard } from "./runtime";
 
 const props = defineProps<{
   attachment: TaskBoard.TaskAttachment;
   taskId: string;
+  loadImage: (source: string) => Promise<string | null>;
+  previewImage: (source: string) => void;
 }>();
 const kind = computed(() =>
   attachmentView(props.attachment.filename, props.attachment.mediaType),
@@ -41,6 +43,11 @@ const loadPreview = async () => {
   busy.value = true;
   error.value = null;
   try {
+    if (kind.value === "image") {
+      previewUrl.value = await props.loadImage(attachmentSource(props.attachment.attachmentId));
+      if (!previewUrl.value) throw new Error("The saved attachment is unavailable.");
+      return;
+    }
     const value = await bytes();
     if (kind.value === "markdown" || kind.value === "text")
       previewText.value = new TextDecoder().decode(value);
@@ -79,7 +86,7 @@ onMounted(() => {
   if (kind.value === "image" || kind.value === "video") void loadPreview();
 });
 onBeforeUnmount(() => {
-  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+  if (previewUrl.value && kind.value !== "image") URL.revokeObjectURL(previewUrl.value);
 });
 </script>
 
@@ -131,12 +138,13 @@ onBeforeUnmount(() => {
     >
       Loading preview…
     </p>
-    <img
+    <button
       v-if="previewUrl && kind === 'image'"
-      :src="previewUrl"
-      :alt="attachment.filename"
-      class="max-h-80 max-w-full rounded-md object-contain"
-    />
+      type="button"
+      class="block max-w-full rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      :aria-label="'Enlarge ' + attachment.filename"
+      @click="previewImage(attachmentSource(attachment.attachmentId))"
+    ><img :src="previewUrl" :alt="attachment.filename" class="max-h-80 max-w-full rounded-md object-contain" /></button>
     <video
       v-if="previewUrl && kind === 'video'"
       :src="previewUrl"

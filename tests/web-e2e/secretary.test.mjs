@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { expect } from '@playwright/test';
-import { ServiceClient, digest, IvyError, newOperationId } from '../../dist/packages/sdk/src/node.js';
+import { ServiceClient, digest, deriveOperationId, IvyError, newOperationId } from '../../dist/packages/sdk/src/node.js';
 import { contractVersion, secretaryRegistry } from '../../dist/services/secretary/src/schema.js';
 import { defaultConfiguration } from '../../dist/services/secretary/src/assignment-schema.js';
 import { publishUi } from '../../dist/packages/cli/src/publish-ui.js';
@@ -34,7 +34,15 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       eventKinds: [{ kind: 'record.changed', title: 'Record changed', description: 'A record needs review.' }] }];
     const handlers = Object.fromEntries(registry.namespaces.flatMap(namespace => namespace.tools.map(tool => [namespace.namespace + '.' + tool.name, () => { throw Error('This fixture only supports reads.'); }])));
     const saves = [];
+    const configurationSaves = [];
+    let connection;
     handlers['secretary.saveAssignment'] = args => { saves.push(structuredClone(args)); throw new IvyError('fixture_capture_only', 'Save captured without changing the fixture.'); };
+    handlers['secretary.saveConfiguration'] = async args => {
+      configurationSaves.push(structuredClone(args));
+      const saved = await connection.request('objects.write', { mutationId: deriveOperationId(args.operationId, ['browser-fixture-save-configuration']), contractVersion: contractVersion('secretary/configuration'), references: {},
+        objectId: args.configuration.objectId, expectedRevision: args.configuration.revision, content: { encoding: 'json', value: args.value } });
+      return { objectId: saved.object.id, revision: saved.revision.revision };
+    };
     handlers['secretary.binding'] = (_args, context) => ({ serviceNodeId: 'browser-secretary', hostId: 'fixture', available: true, expectedScope: scope,
       generation: context.generation, bindingHash: digest('browser-secretary-binding'), observedAt: at });
     const secretaryStates = [];
@@ -42,7 +50,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       identity: { serviceNodeId: 'browser-secretary', serviceName: 'secretary', hostId: 'fixture', version: 'test', buildId: digest('browser-secretary'), hiveProtocol: 1 },
       registry: () => registry, handlers, reconcile: async () => {}, onState: state => secretaryStates.push(state) });
     t.after(() => secretary.stop()); secretary.start();
-    const connection = await secretary.waitReady({ timeoutMs: 10000 }).catch(cause => { throw new Error(JSON.stringify(secretaryStates.slice(-6)), { cause }); });
+    connection = await secretary.waitReady({ timeoutMs: 10000 }).catch(cause => { throw new Error(JSON.stringify(secretaryStates.slice(-6)), { cause }); });
     const savedIds = new Set();
     const save = async (contractKey, contractVersion, name, value) => {
       const saved = await connection.request('objects.write', { mutationId: await newOperationId(connection), contractVersion, references: {},
@@ -50,7 +58,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       savedIds.add(saved.object.id); return { objectId: saved.object.id, revision: saved.revision.revision };
     };
     const configuration = defaultConfiguration({ policy: { minimumMainUrgency: 'normal', silentTime: null, researchMaxMinutes: 5 } }, at);
-    await save('secretary/configuration', '1.0.0', 'configuration', configuration);
+    await save('secretary/configuration', contractVersion('secretary/configuration'), 'configuration', configuration);
     await publishUi(f.client, { directory: resolve('dist/apps/secretary-ui'), definition: JSON.parse(await readFile('ui/secretary-ui/ui.json', 'utf8')),
       expectedReleaseId: null, mutationId: await newOperationId(f.client) });
     await f.login();
@@ -110,8 +118,22 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await pagination.getByRole('button', { name: 'Next', exact: true }).click();
     await expect(assignments).toHaveCount(1); await expect(pagination).toContainText('Page 2'); await fits();
     const queries = requests.filter(request => request.method === 'objects.query' && request.params.contractKey.startsWith('secretary/'));
-    assert.ok(queries.length >= 5); assert.ok(queries.every(request => request.params.includeContent === true));
+    for (const key of ['secretary/execution', 'secretary/assignment'])
+      assert.ok(queries.some(request => request.params.contractKey === key), 'Pagination queries documents for ' + key);
+    assert.ok(queries.every(request => request.params.includeContent === true));
     assert.equal(requests.filter(request => request.method === 'objects.read' && savedIds.has(request.params.objectId)).length, 0);
+    await f.page.goto(f.base + '/ui/secretary-ui/#/rules');
+    const desktopNotifications = f.page.getByRole('switch', { name: /^(Allow desktop notifications|Desktop-Benachrichtigungen erlauben)$/ });
+    const saveSettings = f.page.getByRole('button', { name: /^(Save|Speichern)$/ });
+    await expect(desktopNotifications).toBeChecked(); await fits();
+    await desktopNotifications.click(); await saveSettings.click();
+    await expect(f.page.getByRole('status')).toContainText(/Saved revision|Revision .* gespeichert/);
+    assert.equal(configurationSaves.length, 1); assert.equal(configurationSaves[0].value.browserNotifications, false);
+    await f.page.reload(); await expect(desktopNotifications).not.toBeChecked(); await fits();
+    await desktopNotifications.click(); await saveSettings.click();
+    await expect(f.page.getByRole('status')).toContainText(/Saved revision|Revision .* gespeichert/);
+    assert.equal(configurationSaves.length, 2); assert.equal(configurationSaves[1].value.browserNotifications, true);
+    await f.page.reload(); await expect(desktopNotifications).toBeChecked(); await fits();
     assert.deepEqual(f.pageErrors, []); assert.deepEqual(f.externalRequests, []);
   });
 }

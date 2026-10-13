@@ -134,7 +134,11 @@ async function save() {
   error.value = "";
   message.value = "";
   try {
-    const next = await saveConfiguration(props.node, pin.value, JSON.parse(submitted));
+    const next = await saveConfiguration(
+      props.node,
+      pin.value,
+      JSON.parse(submitted),
+    );
     pin.value = next;
     const loaded = await readDocument(
       "secretary/configuration",
@@ -161,12 +165,38 @@ async function save() {
     :loading="current.loading.value"
   />
   <section class="mx-auto w-full max-w-4xl">
-    <Alert v-if="current.error.value || error" variant="destructive" class="mb-6"
+    <Alert
+      v-if="current.error.value || error"
+      variant="destructive"
+      class="mb-6"
       ><AlertDescription>{{
         current.error.value || error
       }}</AlertDescription></Alert
     >
     <template v-if="draft">
+      <SettingsSection
+        :title="tr('Desktop-Benachrichtigungen', 'Desktop notifications')"
+        :description="
+          tr(
+            'Hinweise dieses Secretary in Browsern mit aktivierten Ivy-Benachrichtigungen anzeigen.',
+            'Show notices from this Secretary in browsers with Ivy notifications enabled.',
+          )
+        "
+      >
+        <Field orientation="horizontal">
+          <Label for="browser-notifications" class="flex-1">{{
+            tr(
+              "Desktop-Benachrichtigungen erlauben",
+              "Allow desktop notifications",
+            )
+          }}</Label>
+          <Switch
+            id="browser-notifications"
+            :model-value="draft.browserNotifications !== false"
+            @update:model-value="draft.browserNotifications = $event === true"
+          />
+        </Field>
+      </SettingsSection>
       <SettingsSection
         v-for="entry in contactRules"
         :key="entry.key"
@@ -238,7 +268,9 @@ async function save() {
             ><Label for="immediate-only" class="flex-1 font-normal">{{
               tr("Nur sofortige Eskalationen", "Immediate escalations only")
             }}</Label
-            ><Switch id="immediate-only" v-model="draft.rules.voice.immediateOnly"
+            ><Switch
+              id="immediate-only"
+              v-model="draft.rules.voice.immediateOnly"
           /></Field>
         </div>
       </SettingsSection>
@@ -342,7 +374,11 @@ async function save() {
       <div
         class="sticky bottom-0 flex flex-wrap items-center justify-end gap-3 border-t bg-background py-3"
       >
-        <p v-if="message" role="status" class="mr-auto text-sm text-muted-foreground">
+        <p
+          v-if="message"
+          role="status"
+          class="mr-auto text-sm text-muted-foreground"
+        >
           {{ message }}
         </p>
         <Button :disabled="busy || !pin" @click="save">{{

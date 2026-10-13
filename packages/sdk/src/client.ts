@@ -360,22 +360,37 @@ export class BoundToolClient {
     options?.signal?.throwIfAborted();
     const binding = await this.binding(qualifiedName);
     options?.signal?.throwIfAborted();
+    if (binding.definition.annotations?.readOnlyHint === true)
+      return this.readBound(binding, args, operationId, options);
     return callBound(this.client, binding, args, operationId, options);
   }
   /** Refresh a definitively rejected read once, retaining provider, interface and arguments. */
   async read(qualifiedName: string, args: Wire.Json, options?: ToolCallOptions): Promise<Wire.Json> {
     options?.signal?.throwIfAborted();
-    const original = structuredClone(args), binding = await this.binding(qualifiedName);
+    const binding = await this.binding(qualifiedName);
     requireThat(binding.definition.annotations?.readOnlyHint === true, "invalid_arguments", "A read requires a read-only Tool.");
+    return this.readBound(binding, args, undefined, options);
+  }
+  private async readBound(binding: BoundTool, args: Wire.Json, operationId: string | undefined, options?: ToolCallOptions): Promise<Wire.Json> {
+    const original = structuredClone(args);
     try {
-      return await callBound(this.client, binding, original, undefined, options);
+      return await callBound(this.client, binding, original, operationId, options);
     } catch (error) {
       if (!(error instanceof IvyError) || error.code !== "tool_definition_changed" || error.outcome !== "not_executed") throw error;
-      const fresh = await this.refresh(binding);
+      const namespace = binding.qualifiedName.slice(0, binding.qualifiedName.indexOf('.'));
+      const interfaceVersion = this.interfaces.get(namespace);
+      // Do not admit the replacement to the shared cache before proving it is still a read.
+      const fresh = await discover(this.client, binding.qualifiedName, {
+        serviceNodeId: this.serviceNodeId, ...(interfaceVersion ? { interfaceVersion } : {}),
+      });
       if (fresh.definitionHash === binding.definitionHash || fresh.definition.annotations?.readOnlyHint !== true ||
           fresh.definition.interfaceVersion !== binding.definition.interfaceVersion) throw error;
+      freezeBinding(fresh);
+      const pending = this.bindings.get(binding.qualifiedName);
+      if (pending && await pending === binding && this.bindings.get(binding.qualifiedName) === pending)
+        this.bindings.set(binding.qualifiedName, Promise.resolve(fresh));
       options?.signal?.throwIfAborted();
-      return callBound(this.client, fresh, original, undefined, options);
+      return callBound(this.client, fresh, original, operationId, options);
     }
   }
 }

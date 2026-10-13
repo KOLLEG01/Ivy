@@ -13,8 +13,12 @@ Wire fields and operations: [schemas](schemas).
 - Long actions retain original arguments and operation identity before effects and expose
   status. Request correlation IDs do not replace durable operation IDs.
 - Cached read bindings refresh once after a confirmed pre-execution definition rejection,
-  retaining their provider, interface and arguments. Mutations still require their exact
+  including reads invoked through `call`, retaining their provider, interface, arguments
+  and operation identity. Mutations still require their exact
   retained definition and domain recovery; a replacement read must remain read-only.
+- Hive retains rejected obsolete bindings as operational diagnostics until the same caller
+  completes a call with the current contract. Evidence contains routing identities, never
+  request arguments or credentials.
 - External messages, calls and writes require the originating user's authorization.
   Tool annotations, source content and recovery do not grant new authority.
 
@@ -60,6 +64,14 @@ the original transport result or stays unknown. Transport retention and recovery
 [Chat tests](../tests/chat-outbox.test.ts). `Chat.Settings.language` optionally selects `en` or
 `de` for ChatBridge-authored WhatsApp copy; omission uses English. It is a presentation setting,
 not part of the workspace `Definition` or the separate transcription-language setting.
+
+ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting one minute
+enters Main once; confirmed resolution produces one recovery notice. Original notice requests
+and deduplication state survive restarts in the existing journal. Incomplete diagnostic reads
+cannot imply recovery. Short reconnects remain quiet, and failures of the notice mechanism
+itself remain visible as a diagnostic without recursively generating notices.
+Checks: [operational notices](../tests/chat-diagnostic-notifications.test.ts),
+[binding evidence](../tests/hive-tool-binding-diagnostics.test.ts).
 
 [PhoneBridge](PHONE-VOICE.md) owns SIP, audio and its native runtime. Call admission, screening,
 routing and shutdown must use the exact principal/peer/call identity. Voice task operations use

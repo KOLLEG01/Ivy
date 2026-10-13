@@ -1,4 +1,5 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { markdownImageSources } from '@ivy/ui';
 import type { AttachmentInfo } from '@ivy/ui';
 import { hashBytes } from '../../../packages/ui-client/src/content';
 import { attachmentView } from './attachment-view';
@@ -9,7 +10,6 @@ import type { TaskBoard } from './runtime';
 export const attachmentSource = (attachmentId: string) => 'attachment:' + attachmentId;
 const attachmentParameter = /^attachment:([A-Za-z0-9._-]+)$/;
 export const sourceAttachmentId = (source: string) => attachmentParameter.exec(source)?.[1] ?? null;
-const imageSources = (text: string) => [...text.matchAll(/!\[(?:\\.|[^\]\\])*\]\(([^)\s]+)\)/g)].map(match => match[1]!);
 const linkSources = (text: string) => [...text.matchAll(/(?<!!)\[(?:\\.|[^\]\\])*\]\(([^)\s]+)\)/g)].map(match => match[1]!);
 
 const bytesBase64 = (bytes: Uint8Array) => {
@@ -50,20 +50,48 @@ export async function attachmentBytes(attachment: TaskBoard.TaskAttachment, task
 /** Verified blob URLs for image attachments, and file details for attachment links, in the given Markdown texts. */
 export function useAttachmentImages(taskId: () => string | null, attachments: () => TaskBoard.TaskAttachment[], texts: () => string[]) {
   const urls = ref<Record<string, string>>({}), byAttachment = new Map<string, string>(), created: string[] = [];
+  const pending = new Map<string, Promise<string | null>>();
+  let generation = 0;
+  const release = () => {
+    generation++;
+    for (const url of created) URL.revokeObjectURL(url);
+    created.length = 0;
+    urls.value = {};
+    byAttachment.clear();
+    pending.clear();
+  };
+  /** Reuses a verified image for inline content, attachment cards and the ticket gallery. */
+  const load = async (source: string): Promise<string | null> => {
+    if (urls.value[source]) return urls.value[source]!;
+    const id = taskId(), attachmentId = sourceAttachmentId(source);
+    if (!id || !attachmentId) return null;
+    const attachment = attachments().find(value => value.attachmentId === attachmentId);
+    if (!attachment || attachmentView(attachment.filename, attachment.mediaType) !== 'image') return null;
+    const existing = byAttachment.get(attachmentId);
+    if (existing) { urls.value = { ...urls.value, [source]: existing }; return existing; }
+    let operation = pending.get(attachmentId);
+    if (!operation) {
+      const current = generation;
+      operation = (async () => {
+        const value = await attachmentBytes(attachment, id);
+        if (current !== generation) return null;
+        const url = byAttachment.get(attachmentId) ?? URL.createObjectURL(new Blob([new Uint8Array(value)], { type: attachment.mediaType }));
+        if (!byAttachment.has(attachmentId)) { byAttachment.set(attachmentId, url); created.push(url); }
+        urls.value = { ...urls.value, [source]: url };
+        return url;
+      })().finally(() => { if (current === generation) pending.delete(attachmentId); });
+      pending.set(attachmentId, operation);
+    }
+    return operation;
+  };
+  watch(taskId, release);
   watch(() => [taskId(), attachments(), texts().join('\n')] as const, async ([id]) => {
     if (!id) return;
-    for (const source of new Set(texts().flatMap(imageSources))) {
-      const attachmentId = sourceAttachmentId(source);
-      if (!attachmentId || urls.value[source]) continue;
-      let url = byAttachment.get(attachmentId);
-      if (!url) {
-        const attachment = attachments().find(value => value.attachmentId === attachmentId);
-        if (!attachment || attachmentView(attachment.filename, attachment.mediaType) !== 'image') continue;
-        try { url = URL.createObjectURL(new Blob([new Uint8Array(await attachmentBytes(attachment, id))], { type: attachment.mediaType })); }
-        catch { continue; }
-        byAttachment.set(attachmentId, url); created.push(url);
-      }
-      urls.value = { ...urls.value, [source]: url };
+    const current = generation;
+    for (const source of new Set(texts().flatMap(text => markdownImageSources(text)))) {
+      if (current !== generation) return;
+      try { await load(source); }
+      catch { /* Unavailable inline images remain references; the gallery offers an explicit retry. */ }
     }
   }, { immediate: true });
   const files = computed(() => {
@@ -81,6 +109,6 @@ export function useAttachmentImages(taskId: () => string | null, attachments: ()
     if (attachmentId) byAttachment.set(attachmentId, url);
     urls.value = { ...urls.value, [source]: url };
   };
-  onBeforeUnmount(() => { for (const url of created) URL.revokeObjectURL(url); });
-  return { urls, files, remember };
+  onBeforeUnmount(release);
+  return { urls, files, remember, load };
 }

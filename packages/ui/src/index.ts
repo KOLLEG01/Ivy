@@ -16,6 +16,7 @@ export type {
 } from "./patterns/hierarchy";
 export { default as ContentView } from "./patterns/ContentView.vue";
 export { default as ImagePreview } from "./patterns/ImagePreview.vue";
+export { markdownImageSources } from "./lib/markdown";
 export { fileSize, attachmentMarkdown } from "./lib/attachments";
 export type { AttachmentInfo, UploadedAttachment } from "./lib/attachments";
 export { default as ConversationComposer } from "./patterns/ConversationComposer.vue";

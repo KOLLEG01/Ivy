@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "service-manager",
   "kind": "service-manager",
-  "version": "0.2.24",
+  "version": "0.2.25",
   "description": "Host-local deployment facade and sequenced runtime observations",
   "connectsToHive": true,
   "requirements": {
@@ -12,13 +12,18 @@
   },
   "entrypoint": {
     "executable": "node",
-    "args": ["dist/services/service-manager/src/main.js"],
+    "args": [
+      "dist/services/service-manager/src/main.js"
+    ],
     "timeoutMs": 30000
   },
   "prepare": [
     {
       "executable": "node",
-      "args": ["tools/build/run-npm.mjs", "ci"],
+      "args": [
+        "tools/build/run-npm.mjs",
+        "ci"
+      ],
       "timeoutMs": 600000
     },
     {
@@ -37,11 +42,15 @@
     "timeoutMs": 30000,
     "command": {
       "executable": "node",
-      "args": ["dist/packages/host-runtime/src/health.js"],
+      "args": [
+        "dist/packages/host-runtime/src/health.js"
+      ],
       "timeoutMs": 5000
     }
   },
-  "shutdown": { "timeoutMs": 15000 },
+  "shutdown": {
+    "timeoutMs": 15000
+  },
   "restart": {
     "policy": "always",
     "minimumDelayMs": 1000,
@@ -54,10 +63,22 @@
   },
   "runtimeReset": {
     "delete": [
-      { "area": "data", "path": "health.json" },
-      { "area": "data", "path": "control.json" },
-      { "area": "work", "path": "." },
-      { "area": "logs", "path": "." }
+      {
+        "area": "data",
+        "path": "health.json"
+      },
+      {
+        "area": "data",
+        "path": "control.json"
+      },
+      {
+        "area": "work",
+        "path": "."
+      },
+      {
+        "area": "logs",
+        "path": "."
+      }
     ],
     "preserve": []
   }
