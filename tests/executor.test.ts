@@ -86,6 +86,32 @@ test('executor heartbeat reflects completed manual storage collection', async t 
   await until(async () => (await observed()).code === 'storage_retention_attention');
 });
 
+test('native provider rollback checks the retained launch configuration after a runtime identity change', { timeout: 45_000 }, async t => {
+  const f = await hostFixture(t, 'agent-manager');
+  const catalog = JSON.parse(await readFile('specs/native/codex-0.142.3/catalog.json', 'utf8')) as Agent.Catalog;
+  const oldHash = digest('original native runtime'), newHash = digest('replacement native runtime');
+  f.config.instances[0]!.settings = { nativeExecutable: process.execPath, nativeVersion: catalog.version, nativeExecutableHash: oldHash };
+  await atomicJson(f.configPath, f.config); f.journal.useConfiguration(f.config);
+  f.plan.prepare.push({ executable: 'node', args: ['-e', 'const fs=require("fs");fs.mkdirSync("dist/specs/native/codex-0.142.3",{recursive:true});fs.copyFileSync("packages/catalog.json","dist/specs/native/codex-0.142.3/catalog.json")'], timeoutMs: 5000 });
+  await atomicJson(join(f.source, 'packages/catalog.json'), { ...catalog, nativeExecutableHash: oldHash });
+  const original = await f.prepare('original-native');
+  const owner = new RuntimeOwner(f.config, 'first', resolve('.')); owner.start(); f.cleanups.push(() => owner.close());
+  const executor = new HostExecutor(f.config, f.configPath, resolve('.')); executor.start(); f.cleanups.push(() => executor.close());
+  const start = f.journal.accept({ action: 'deploy', instanceId: 'first', candidateId: original.candidateId, operationId: 'native-original' });
+  await until(() => terminalPhases.has(f.journal.get(start.record.deploymentId).record.phase));
+  assert.equal(f.journal.get(start.record.deploymentId).record.phase, 'succeeded');
+  await atomicJson(join(f.source, 'packages/catalog.json'), { ...catalog, nativeExecutableHash: newHash });
+  const replacement = await f.prepare('replacement-native', false), next = structuredClone(f.config);
+  next.instances[0]!.settings['nativeExecutableHash'] = newHash;
+  await atomicJson(f.configPath, next); f.journal.useConfiguration(next);
+  const update = f.journal.accept({ action: 'deploy', instanceId: 'first', candidateId: replacement.candidateId, operationId: 'native-replacement' });
+  await until(() => terminalPhases.has(f.journal.get(update.record.deploymentId).record.phase), 25_000);
+  assert.equal(f.journal.get(update.record.deploymentId).record.phase, 'rolled_back');
+  const restored = JSON.parse(await readFile(f.journal.target('first')!.configPath, 'utf8')) as Host.InstanceConfig;
+  assert.equal(restored.settings['nativeExecutableHash'], oldHash);
+  assert.equal(f.journal.installed('first')!.candidateId, original.candidateId);
+});
+
 test('Phone target binds its native hash to the selected candidate instead of stale host state', async t => {
   const root = await mkdtemp(join(tmpdir(), 'ivy-phone-target-')); t.after(() => import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })));
   const executable = 'dist/native/phone/Ivy.PhoneRuntime.exe', actual = join(root, executable);

@@ -434,13 +434,13 @@ export class HostExecutor {
       observed.health.buildId === this.journal.candidate(target.candidateId).buildId ? this.journal.manifest(target.candidateId).storage : undefined;
     verifyServiceStorage(this.config, instanceId, plan, running && running.minReadableFormat === running.writeFormat && running.maxReadableFormat === running.writeFormat ? running.writeFormat : undefined);
   }
-  private async compatibility(candidateId: string, instanceId: string): Promise<void> {
+  private async compatibility(candidateId: string, instanceId: string, nativeSettings?: Host.InstanceConfig['settings']): Promise<void> {
     const candidate = this.journal.candidate(candidateId), manifest = this.journal.manifest(candidateId);
     requireRuntimeRequirements(manifest.requirements);
     this.serviceStorage(instanceId, manifest);
     await verifyLaunchCandidate(candidate, this.config, manifest.entrypoint?.args[0]);
     if (manifest.componentId === 'agent-manager') await verifyConfiguredNativeCatalog(candidate.artifactRoot, instanceId,
-      agentManagerAccountSettings(this.journal.instance(instanceId).settings) as Agent.Settings);
+      (nativeSettings ?? agentManagerAccountSettings(this.journal.instance(instanceId).settings)) as Agent.Settings);
     if (this.journal.instance(instanceId).engine === 'docker') await this.dockerAdapter.verifyContainerImage(this.config, this.journal.instance(instanceId), candidate, manifest);
     await resolveCommand(manifest.entrypoint!, candidate.artifactRoot, this.config.executables);
     await resolveCommand(manifest.readiness!.command, candidate.artifactRoot, this.config.executables);
@@ -496,7 +496,6 @@ export class HostExecutor {
         entry = this.advance(entry, 'rolling_back', { target });
       }
       if (entry.record.instanceId !== this.ownInstanceId) await this.waitFor(entry.record.instanceId, target, value => ['idle', 'stopped'].includes(value.state), 30_000 + (this.journal.manifest(target?.candidateId ?? entry.candidateId!).shutdown?.timeoutMs ?? 15_000));
-      await this.compatibility(previousCandidateId, entry.record.instanceId);
       // Restore the configuration that actually launched the retained build. A new
       // immutable target file is materialized from it so rollback neither applies
       // the failed release's settings nor reuses an old mutable target file.
@@ -504,6 +503,7 @@ export class HostExecutor {
       requireThat(previous?.candidateId === previousCandidateId && entry.activation.previousConfigurationPath,
         'rollback_unavailable', 'The previous launch configuration is not retained for rollback.');
       const previousConfig = readAcceptedInstanceConfiguration(this.journal.config, entry.activation.previousConfigurationPath);
+      await this.compatibility(previousCandidateId, entry.record.instanceId, previousConfig.settings);
       target = (await materializeTarget(this.journal, entry.record.instanceId, previousCandidateId, entry.activation.previousEnabled, previousConfig)).target;
       entry = this.advance(entry, 'rolling_back', { target, rollbackTargetRevision: target.revision });
     }
