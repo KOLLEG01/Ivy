@@ -59,7 +59,8 @@ export class DiagnosticNotifications {
         await this.queue(entry.alert, signal);
         this.main.store.saveDiagnosticNoticeState(this.scope, state);
       }
-      if (!entry.active && entry.alert?.queued && !entry.recovery)
+      if (!entry.active && entry.alert?.queued && !entry.recovery && entry.resolvedAt !== null &&
+        now - entry.resolvedAt >= diagnosticNotificationDelayMs)
         entry.recovery = { request: await this.request(entry, true), queued: false, confirmed: false };
       if (entry.recovery?.queued && !entry.recovery.confirmed) {
         await this.review(entry.recovery, signal);

@@ -16,7 +16,7 @@ async function fixture(t: Parameters<typeof chatNativeFixture>[0]) {
   const signal = new AbortController().signal;
   const monitor = () => new DiagnosticNotifications(f.first, 'de', () => now);
   const queue = async () => { await new ChatNotices(f.first).recoverPending(); return (await f.first.queue.main()).value.queue; };
-  return { ...f, diagnostic, signal, monitor, queue, advance: (ms = 60_000) => { now += ms; } };
+  return { ...f, diagnostic, signal, monitor, queue, now: () => now, advance: (ms = 60_000) => { now += ms; } };
 }
 
 test('persistent diagnostics create one durable Main notice, recover once and resume a lost receipt across restart', async t => {
@@ -38,9 +38,30 @@ test('persistent diagnostics create one durable Main notice, recover once and re
   assert.equal(Object.values(f.second.store.diagnosticNoticeState(scope))[0]!.alert!.request.operationId, originalId);
   f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' });
   await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1);
+  f.advance(); await f.monitor().tick(f.signal);
   queue = await f.queue(); assert.equal(queue.length, 2);
   assert.match((await f.first.store.read('chat-bridge/input', queue[1]!.inputId)).value.payload.text, /Erholung festgestellt/u);
   await new DiagnosticNotifications(f.second, 'de').tick(f.signal);
+  assert.equal((await f.queue()).length, 2);
+});
+
+test('a brief healthy interval across restart keeps the original incident until recovery is stable', async t => {
+  const f = await fixture(t);
+  f.kernel.registry.diagnostic(f.diagnostic); await f.monitor().tick(f.signal);
+  f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1);
+  const scope = hashJson([f.admission.definition.principalId, f.admission.definition.workspaceId]);
+  const originalId = Object.values(f.first.store.diagnosticNoticeState(scope))[0]!.alert!.request.operationId;
+  f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' });
+  await f.monitor().tick(f.signal); f.advance(30_000);
+  await new DiagnosticNotifications(f.second, 'de', f.now).tick(f.signal);
+  f.kernel.registry.diagnostic(f.diagnostic); await f.monitor().tick(f.signal);
+  f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1);
+  assert.equal(Object.values(f.first.store.diagnosticNoticeState(scope))[0]!.alert!.request.operationId, originalId);
+  f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' });
+  await f.monitor().tick(f.signal); f.advance(); await f.monitor().tick(f.signal);
   assert.equal((await f.queue()).length, 2);
 });
 
