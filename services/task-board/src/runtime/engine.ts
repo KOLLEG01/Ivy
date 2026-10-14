@@ -8,10 +8,12 @@ import type { TaskBoard, Wire } from "../../../../packages/sdk/src/node.js";
 import type { InvocationContext } from "../../../../packages/sdk/src/service.js";
 import { TaskBoardChecks, date, planSemantics, reservesWorkspace, resultCommentFits, same, sharedProjectKey, sharedProjectOwner } from "./checks.js";
 import { TaskBoardCoordination } from "./coordination.js";
+import { validateParent } from './task-delegation.js';
 import { TaskBoardOperations } from "./operations.js";
 import { publishNative } from "./native-publication.js";
 import { verifyNativeTranscript } from "./full-turn-evidence.js";
 import type { ContractValues } from "./schema.js";
+import { contractVersion } from './schema.js';
 import { mutation, taskAttachmentPins, TaskBoardStore } from "./store.js";
 import type { Document } from "./store.js";
 import { initialDelivery } from "./deliveries.js";
@@ -166,7 +168,7 @@ export class TaskBoardEngine {
       ...this.owner,
       source: "user",
     };
-    if (request.action === 'comment' && request.authorKind === 'agent') actor.source = 'worker';
+    if (request.action === 'comment' && request.authorKind === 'agent' || request.action === 'create' && request.parentTaskId) actor.source = 'worker';
     if (request.action === "savePlan") {
       const contract = checkedNativeContract(request.plan.nativeVersion, {
         sourceHash: request.plan.catalogSourceHash,
@@ -380,8 +382,10 @@ export class TaskBoardEngine {
     const relatedWorkspace = query.relatedTo ? await workspaceIdentity(this.store, (await this.store.read('task-board/task', query.relatedTo)).value) : null;
     if (query.status) filters.push({ op: "eq", field: "data:/workflowState", value: query.status });
     if (query.category) filters.push({ op: "eq", field: "data:/fields/category", value: query.category });
+    if (query.parentTaskId) filters.push({ op: 'eq', field: 'data:/parentTaskId', value: query.parentTaskId });
     const page = await this.store.page("task-board/task", {
       limit: query.limit ?? 50,
+      ...(query.parentTaskId ? { contractVersions: [contractVersion('task-board/task')] } : {}),
       ...(query.cursor ? { cursor: query.cursor } : {}),
       ...(filters.length ? { where: filters.length === 1 ? filters[0] : { op: "and", args: filters } } : {}),
       select: ["data:/taskKey", "data:/fields/title", "data:/workflowState", "data:/fields/category"],
@@ -711,7 +715,7 @@ export class TaskBoardEngine {
         async (pin, task) => {
           this.categoryProjection.observe(pin.objectId, pin.revision, task);
           const comment = task.comments.findLast(value => value.operationId === request.operationId && value.authorKind === 'agent' && ['question', 'handoff'].includes(value.purpose ?? ''));
-          if (comment) await publishBrowserNotice(this.store.client, 'task-board', {
+          if (comment && task.fields.userContact !== 'ticket' && (comment.purpose !== 'handoff' || !task.parentTaskId)) await publishBrowserNotice(this.store.client, 'task-board', {
             title: 'Ivy · ' + task.fields.title, body: comment.body, tag: hashJson([pin.objectId, comment.commentId]),
             target: { uiId: 'task-board-ui', fragment: '#/tasks?' + new URLSearchParams({ node: this.owner.serviceNodeId, id: pin.objectId }) },
           });
@@ -757,7 +761,7 @@ export class TaskBoardEngine {
     if (request.action === "create") {
       const submitted: TaskBoard.TaskFields = {
         ...request.fields,
-        userContact: request.fields.userContact ?? (await configurationView(this.store)).configuration.defaults.userContact ?? "ticket",
+        userContact: request.fields.userContact ?? (request.parentTaskId ? 'ticket' : (await configurationView(this.store)).configuration.defaults.userContact ?? "ticket"),
         allowParallel: request.fields.allowParallel ?? (await configurationView(this.store)).configuration.defaults.allowParallel ?? false,
       };
       if (first && submitted.category !== null)
@@ -767,6 +771,7 @@ export class TaskBoardEngine {
           "A categorized Task needs a current canonical category before publication.",
         );
       if (first) {
+        if (request.parentTaskId) await validateParent(this.store, request.parentTaskId);
         await this.checks.fields(submitted, null);
         await this.checks.executionOptions(submitted);
       }
@@ -774,6 +779,7 @@ export class TaskBoardEngine {
         ? {
             schemaVersion: 1,
             taskKey: await this.store.allocateTaskKey(operation.pin.objectId),
+            ...(request.parentTaskId ? { parentTaskId: request.parentTaskId } : {}),
             fields: {
               ...submitted,
               category:
@@ -879,6 +885,8 @@ export class TaskBoardEngine {
       };
     }
     if (request.action === "edit" && first) {
+      if (request.parentTaskId === null) delete next.parentTaskId;
+      else if (request.parentTaskId !== undefined) next.parentTaskId = request.parentTaskId;
       const submitted: TaskBoard.TaskFields = {
         ...request.fields,
         userContact: request.fields.userContact ?? previous.fields.userContact,
@@ -894,7 +902,7 @@ export class TaskBoardEngine {
         ...submitted,
         category: submitted.category === null ? null : normalizedCategory!,
       };
-      if (!previous.claim) next.workRevision++;
+      if (!previous.claim && (request.parentTaskId === undefined || !same(previous.fields, next.fields))) next.workRevision++;
     }
     if (request.action === "reassign" && first) {
       next = {
@@ -911,7 +919,7 @@ export class TaskBoardEngine {
       };
     }
     if (request.action === "comment" && first) {
-      const authorKind = actor.source === "user" ? "user" : actor.source === "worker" || request.nativeInput && !request.replyTo ? "agent" : "system";
+      const authorKind = actor.source === "user" ? "user" : actor.source === "worker" || actor.source === 'native' && request.sourceTaskId || request.nativeInput && !request.replyTo ? "agent" : "system";
       const comment: TaskBoard.Comment = {
         commentId: request.commentId, sequence: previous.comments.length + 1, author: actor, authorKind,
         body: request.body, requests: request.requests, responses: request.responses,
@@ -953,9 +961,10 @@ export class TaskBoardEngine {
         };
         if (first)
           next.fields = { ...submitted, category: next.fields.category };
+        const parentOnly = request.parentTaskId !== undefined && same(previous.fields, next.fields);
         // An active claim permits only metadata edits, which must not queue another native turn.
         if (
-          next.fields.control === "agent" &&
+          !parentOnly && next.fields.control === "agent" &&
           previous.workflowState !== "cancelled" &&
           !previous.claim
         ) {
@@ -988,7 +997,7 @@ export class TaskBoardEngine {
           ];
         }
         if (
-          next.fields.control === "agent" &&
+          !parentOnly && next.fields.control === "agent" &&
           ["review", "done"].includes(previous.workflowState)
         ) {
           next.workflowState = "todo";
@@ -1215,7 +1224,7 @@ export class TaskBoardEngine {
           authorKind:
             actor.source === "user"
               ? "user"
-              : actor.source === "worker" || request.nativeInput && !request.replyTo
+              : actor.source === "worker" || actor.source === 'native' && request.sourceTaskId || request.nativeInput && !request.replyTo
                 ? "agent"
                 : "system",
           body: request.body,
@@ -1417,6 +1426,7 @@ export class TaskBoardEngine {
           userContact: request.fields.userContact ?? task.fields.userContact,
           allowParallel: request.fields.allowParallel ?? task.fields.allowParallel ?? false,
         };
+        if (request.parentTaskId) await validateParent(this.store, request.parentTaskId, request.taskId);
         // Before the first attempt the host and workspace are plain ticket fields; afterwards the
         // native context lives there, so moving it is the explicit reassign workflow.
         requireThat(
@@ -1666,9 +1676,12 @@ export class TaskBoardEngine {
         break;
       case "comment":
         if (request.sourceTaskId) {
-          requireThat(actor.source === 'worker' && request.sourceTaskId !== request.taskId && !request.moveToTodo, 'task_board_forbidden', 'Directed agent comments must identify another source task and cannot reopen Done.');
+          requireThat(['worker', 'native'].includes(actor.source) && request.sourceTaskId !== request.taskId && !request.moveToTodo, 'task_board_forbidden', 'Directed agent comments must identify another source task and cannot reopen Done.');
           const source = await this.store.read('task-board/task', request.sourceTaskId);
-          requireThat(source.value.fields.control === 'agent' && !!source.value.claim, 'task_board_forbidden', 'Directed messages require an active source task.');
+          if (actor.source === 'native') await this.checks.aggregate(source.value, request.sourceTaskId);
+          requireThat(source.value.fields.control === 'agent' && (actor.source === 'native'
+            ? source.value.parentTaskId === request.taskId && source.value.workflowState === 'review' && !!source.value.latestResult && !source.value.claim && !source.value.publication
+            : !!source.value.claim), 'task_board_forbidden', 'Directed messages require an active source task or its verified delegated result.');
         }
         requireThat(!request.nativeInput || actor.source === 'native', 'task_board_forbidden', 'Native input observations are recorded only by TaskBoard.');
         requireThat(!request.contactUser || request.purpose === 'question', 'invalid_arguments', 'Only important questions can request user contact.');

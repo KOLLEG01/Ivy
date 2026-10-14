@@ -9,6 +9,7 @@ import { nativeWorkflow } from './fixtures/task-board-native.js';
 import { catalogFor } from '../services/task-board/src/runtime/evidence.js';
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
 import { readPlan } from '../services/task-board/src/runtime/native-plan.js';
+import { checkBlocker, validateBlocker } from '../services/task-board/src/runtime/task-coordination.js';
 
 async function lifecycle(t: { after: (fn: () => void) => void }) {
   const w = await nativeWorkflow(t);
@@ -147,6 +148,39 @@ test('ticket archive survives pruned Task snapshots and archives retained Run co
   assert.ok(prunedReads > 0);
   assert.ok([...f.threads.values()].every(thread => thread.archived));
   assert.deepEqual(f.calls.map(call => call.method), ['thread/archive', 'thread/archive']);
+});
+
+test('archiving accepted delegated work preserves its parent and closes the child native context', async t => {
+  const f = await lifecycle(t), parent = await f.w.f.planned('agent'), child = await f.current();
+  await f.w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId: child.pin.objectId, expectedRevision: child.pin.revision,
+    fields: child.value.fields, parentTaskId: parent.task.objectId });
+  assert.equal((await f.current()).value.workflowState, 'done');
+  await f.archive(true);
+  assert.equal((await f.current()).metadata.effectivelyArchived, true);
+  assert.equal((await f.current()).value.parentTaskId, parent.task.objectId);
+  assert.equal(f.threads.get('native-primary')?.archived, true);
+  assert.equal((await f.w.f.first.store.read('task-board/task', parent.task.objectId)).metadata.effectivelyArchived, false);
+  assert.deepEqual((await f.w.f.first.list({ parentTaskId: parent.task.objectId })).items, []);
+  for (const until of ['idle', 'done'] as const) {
+    const blocker = { taskId: child.pin.objectId, until };
+    await checkBlocker(f.w.f.first.store, blocker);
+    await validateBlocker(f.w.f.first.store, blocker, parent.task.objectId);
+  }
+  await f.w.f.first.checks.dependencies({ ...child.value.fields, dependencies: [child.pin.objectId] }, parent.task.objectId, true);
+});
+
+test('an archived cancelled child is idle but never satisfies an accepted-result dependency', async t => {
+  const f = await lifecycle(t), child = await f.w.f.create({ control: 'user' });
+  const cancelled = await f.w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: child.task!.objectId,
+    expectedRevision: child.task!.revision, workflowState: 'cancelled', detail: 'Delegated work is no longer needed.' });
+  const task = await f.w.f.first.store.read('task-board/task', cancelled.task!);
+  const input = { action: 'archive' as const, operationId: randomUUID(), taskId: task.pin.objectId,
+    expectedRevision: task.pin.revision, archived: true };
+  await f.w.f.first.archive(input, context(input.operationId));
+  await checkBlocker(f.w.f.first.store, { taskId: task.pin.objectId, until: 'idle' });
+  const waiting = (error: unknown) => error instanceof IvyError && error.code === 'task_board_dependency_waiting';
+  await assert.rejects(checkBlocker(f.w.f.first.store, { taskId: task.pin.objectId, until: 'done' }), waiting);
+  await assert.rejects(f.w.f.first.checks.dependencies({ ...task.value.fields, dependencies: [task.pin.objectId] }, null, true), waiting);
 });
 
 test('restoring a ticket restores its original native context without scheduling Done work', async t => {

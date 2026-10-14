@@ -8,13 +8,17 @@ import { NativeJournal } from './journal.js';
 type Identity=Pick<Agent.Operation,'callerPrincipalId'|'operationId'>;
 /** Local SQLite owns bounded receipts. Memory only coordinates currently executing calls. */
 export class NativeOperations {
-  private active=new Map<string,{requestHash:string;work:Promise<Agent.Operation>;claimed:Promise<Agent.Operation>}>();
+  private active=new Map<string,{requestHash:string;method:string;threadId:string|null;work:Promise<Agent.Operation>;claimed:Promise<Agent.Operation>}>();
   constructor(readonly state:Pick<LocalAgentState,'serviceNodeId'|'read'|'write'>,readonly memory:NativeJournal) {}
   private key({callerPrincipalId,operationId}:Identity):string {return hashJson({callerPrincipalId,operationId});}
   requestId(identity:Identity):string {return this.key(identity).slice(7,39);}
   async settle(identity:Identity):Promise<void> {
     await this.active.get(this.key(identity))?.work.catch(()=>undefined);
     await this.read(identity);
+  }
+  async settleTurn(threadId:string):Promise<void> {
+    for(const call of this.active.values()) if(call.method==='turn/start'&&call.threadId===threadId)
+      await call.work.catch(()=>undefined);
   }
   async read(identity:Identity):Promise<Agent.Operation|null> {
     const saved=await this.state.read<Agent.Operation>('operation',this.key(identity));if(!saved)return null;
@@ -70,6 +74,7 @@ export class NativeOperations {
       if(['succeeded','failed','outcome_unknown'].includes(result.phase))this.memory.retainedInHive(identity);
       return result;
     })();
-    this.active.set(key,{requestHash,work,claimed});void work.then(claimedResolve,claimedReject).finally(()=>this.active.delete(key)).catch(()=>undefined);return work;
+    const threadId=params!==null&&typeof params==='object'&&!Array.isArray(params)&&typeof params['threadId']==='string'?params['threadId']:null;
+    this.active.set(key,{requestHash,method,threadId,work,claimed});void work.then(claimedResolve,claimedReject).finally(()=>this.active.delete(key)).catch(()=>undefined);return work;
   }
 }

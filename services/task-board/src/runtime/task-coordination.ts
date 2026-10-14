@@ -30,8 +30,8 @@ export async function peerState(store: TaskBoardStore, task: TaskBoard.Task, tas
 }
 export async function checkBlocker(store: TaskBoardStore, blocker: TaskBoard.Blocker | undefined): Promise<void> {
   if (!blocker) return;
-  const other = (await store.read('task-board/task', blocker.taskId)).value;
-  const running = other.lastRun && !['completed', 'failed', 'cancelled'].includes((await store.read('task-board/run', other.lastRun)).value.phase);
+  const other = (await store.read('task-board/task', blocker.taskId, true, true)).value;
+  const running = other.lastRun && !['completed', 'failed', 'cancelled'].includes((await store.read('task-board/run', other.lastRun, true, true)).value.phase);
   requireThat(blocker.until === 'done' ? other.workflowState === 'done' : !other.claim && !other.publication && !running,
     'task_board_dependency_waiting', `Waiting for Task ${other.taskKey} to be ${blocker.until}.`);
 }
@@ -42,7 +42,7 @@ export async function validateBlocker(store: TaskBoardStore, blocker: TaskBoard.
     requireThat(id !== self, 'task_board_dependency_cycle', 'A task cannot wait on itself, directly or indirectly.');
     if (seen.has(id)) continue;
     requireThat(seen.size < 512, 'limit_exceeded', 'The blocking graph is too large.'); seen.add(id);
-    const task = (await store.read('task-board/task', id)).value;
+    const task = (await store.read('task-board/task', id, true, true)).value;
     pending.push(...task.fields.dependencies, ...(task.blocker ? [task.blocker.taskId] : []));
   }
 }

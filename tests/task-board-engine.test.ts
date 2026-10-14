@@ -201,7 +201,8 @@ test("Tasks receive stable keys, start in Backlog and expose category projection
   assert.equal(b.value.taskKey, "TASK-0002");
   assert.equal(a.value.workflowState, "backlog");
   assert.equal(a.value.fields.control, "agent");
-  assert.equal(a.value.fields.userContact, "ticket");
+  assert.equal(a.value.fields.userContact, (await f.first.configuration()).configuration.defaults.userContact);
+  assert.equal(b.value.fields.userContact, "ticket");
   assert.deepEqual(
     (await f.first.task({ task: { taskKey: "TASK-0001" } }, "user")).object,
     a.pin,

@@ -872,6 +872,7 @@ export class TaskBoardStore {
       where?: Wire.QueryPredicate;
       orderBy?: Wire.ObjectQuery["orderBy"];
       select?: string[];
+      contractVersions?: string[];
     } = {},
   ) {
     if (localContractKeys.has(key)) {
@@ -968,7 +969,7 @@ export class TaskBoardStore {
         : { op: "eq", field: "object.parentId", value: this.rootObjectId };
     return this.client.request("objects.query", {
       contractKey: key,
-      contractVersions: readableVersions(key),
+      contractVersions: options.contractVersions ?? readableVersions(key),
       where: options.where ? { op: "and", args: [root, options.where] } : root,
       orderBy: options.orderBy ?? [{ field: "object.id", direction: "asc" }],
       limit: options.limit ?? 50,

@@ -686,3 +686,20 @@ test('ordinary worker updates stay in the ticket and handoff notification is pub
   assert.equal(browserNotices().length, 1);
   assert.equal(JSON.parse(String(browserNotices()[0]!['payload'])).body, 'Delivered.');
 });
+
+test('ticket-only questions and final results remain in the ticket without browser or contact notifications', async t => {
+  const w = await nativeWorkflow(t); await w.running();
+  for (const purpose of ['question', 'handoff'] as const) {
+    await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId,
+      expectedRevision: w.state().task.revision, commentId: purpose, authorKind: 'agent', purpose,
+      body: purpose === 'handoff' ? 'Delivered in the ticket.' : 'Please answer in the ticket.',
+      requests: [], responses: [], attachments: [], replyTo: null });
+    await w.refresh();
+  }
+  const outcome = await w.f.first.nativeUpdate(await w.snapshot('completed', 'Delivered in the ticket.'));
+  const task = (await w.f.first.store.read('task-board/task', outcome.task!)).value;
+  assert.equal(task.fields.userContact, 'ticket');
+  assert.equal(task.workflowState, 'review'); assert.equal(task.comments.length, 2);
+  assert.equal((await w.f.first.store.page('task-board/delivery')).items.length, 0);
+  assert.deepEqual(w.f.kernel.store.all("SELECT payload FROM events WHERE topic='task-board.browser-notification'"), []);
+});

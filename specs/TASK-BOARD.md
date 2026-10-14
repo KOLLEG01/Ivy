@@ -120,10 +120,16 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   may answer in a coordination-only turn without implementation, reopening review or replacing
   its result. Done and Cancelled never restart from agent messages. Related-task state changes
   notify running peers through the same reference-only steering path.
+- Delegated tasks identify their original task with `parentTaskId`; their separate hosts and worktrees
+  do not change that responsibility. The parent reviews saved final results and integration, moves
+  accepted children to Done, and archives them. Waiting on a child uses `until=idle` so its Review can
+  be assessed. Coordination-only turns may accept and archive children while preserving the parent's
+  result and blocker. Delegation cycles are rejected. Omitted child contact defaults to ticket;
+  completion is delivered once to the parent through normal directed-comment handling.
 - Agents publish one final comment with `purpose=handoff`, useful output links, actual verification
   and material limitations, then end the turn. TaskBoard alone moves successful execution to Review
-  and sends the configured completion notification. Unanswered questions and failed attempts remain
-  Blocked; queued follow-up work returns to Todo unless an explicit blocker remains. Users move Review to Done using the normal board
+  and sends the configured root completion notification or delivers the delegated result to its parent. Unanswered questions and failed attempts remain
+  Blocked; queued follow-up work returns to Todo unless an explicit blocker remains. Users move root Review to Done using the normal board
   transition, with no result-acceptance action or extra review state.
 - Serialize publication per Task until the first Task write has durably retained the owning
   Operation marker. Root coordination additionally covers shared category and dependency graph
@@ -167,6 +173,8 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   `contactUser=true`) request configured Chat/Phone contact. Routine updates do not. Successful
   Review handoff sends one durable completion notification over that route. Main/Voice records
   ordinary answers as ticket comments; native answers use the exact AgentManager request identity.
+- Ticket-only contact sends no browser push notices. Delegated handoffs notify their parent,
+  not the user; root tasks retain their configured completion contact.
 - Phone falls back to Chat only after a conclusively unstarted or unanswered call.
   Unknown outcomes cannot create another contact. Delivery recovery continues independently of
   Task workflow state.

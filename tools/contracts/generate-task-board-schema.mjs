@@ -98,7 +98,7 @@ Object.assign(defs.Comment.properties, {
 defs.TaskFields.required = defs.TaskFields.required.filter(key => key !== 'nativeOptions' && key !== 'requiredCapabilities' && key !== 'allowParallel');
 defs.TaskFieldsInput = { ...defs.TaskFields, properties: { ...defs.TaskFields.properties,
   userContact: { type: 'string', enum: ['ticket', 'chat', 'phone'],
-    description: 'Contact route: ticket records only in the ticket; chat also contacts Main; phone also contacts by voice. Omit on creation to inherit current task_configuration defaults.userContact; omit on edit to preserve the ticket setting.' },
+    description: 'Contact route: ticket records only in the ticket; chat also contacts Main; phone also contacts by voice. Omit on root creation to inherit task_configuration defaults.userContact; delegated creation defaults to ticket and delivers completion to the parent. Omit on edit to preserve the setting.' },
 }, required: defs.TaskFields.required.filter(key => key !== 'userContact') };
 defs.ExpectedWorkspace = obj({ principalId: id, rootObjectId: nullable(id), callerPrincipalId: id });
 const actionBase = { operationId: id }, existing = { ...actionBase, taskId: id, expectedRevision: integer(1) };
@@ -134,6 +134,7 @@ Object.assign(defs, {
   CategoriesQuery: obj({ categories: { const: true } }), CategoriesResult: obj({ categories: array(str(128, 1), 256) }),
   TaskQuery: obj({ task: { anyOf: [id, obj({ taskKey: id })] } }),
   TaskListQuery: obj({
+    parentTaskId: { ...id, description: 'List unarchived tasks delegated by this parent task, including separate worktrees and hosts.' },
     relatedTo: { ...id, description: 'Find other allocated tasks sharing this task canonical working directory and host. Separate worktrees do not match. Read peer tickets before coordinating.' },
     status: { enum: ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'] },
     category: str(128, 1), limit: integer(1, 100), cursor: str(4096, 1),
@@ -148,6 +149,8 @@ Object.assign(defs, {
   TaskView: obj({ object: ref('ObjectPin'), task: ref('Task'), executionCondition: ref('ExecutionCondition'), unreadAgentComments: integer() }),
 });
 defs.CommentActionRequest.required = defs.CommentActionRequest.required.filter(key => key !== 'agentDelivery');
+defs.CreateRequest.properties.parentTaskId = { ...id, description: 'When delegating part of your current task, identify that task as the parent. It owns result review, Done and archival. Omitted userContact defaults to ticket for delegated tasks.' };
+defs.EditRequest.properties.parentTaskId = { ...nullable(id), description: 'Assign or remove the delegating parent. Omit to preserve the current parent.' };
 Object.assign(defs.CommentActionRequest.properties, {
   sourceTaskId: { ...id, description: 'For a directed agent message, identify the different sending task and explicitly set authorKind=agent and agentDelivery=queue. Ordinary worker updates never wake themselves.' },
   authorKind: { enum: ['user', 'agent'], description: 'Use agent for worker-authored comments; these never enqueue their own execution.' },
@@ -205,11 +208,12 @@ Object.assign(defs, {
     ['operationId', 'task', 'plan', 'run', 'history', 'result', 'review', 'attachment']),
 });
 defs.Task.required = defs.Task.required.filter(key => key !== 'blocker');
+defs.Task.properties.parentTaskId = id;
 // Domain Objects are strict, distinct contracts. Large native schemas stay behind exact revision
 // pins. Publication bytes are a hash-checked JSON artifact, validated against contractKey both
 // before staging and before dispatch; the destination Hive write validates them again.
 const contracts = { configuration: 'Configuration', task: 'Task', run: 'Run', result: 'Result', review: 'Review', history: 'History', delivery: 'Delivery', 'native-plan': 'NativePlan', 'native-call': 'NativeCall' };
-const contractVersions = { task: '1.7.0', run: '1.1.0', configuration: '1.2.0', delivery: '1.1.0' };
+const contractVersions = { task: '1.8.0', run: '1.1.0', configuration: '1.2.0', delivery: '1.1.0' };
 // Internal owner observations are durable actions, but are never public service tools or accepted
 // as a user/worker ActionRequest. Their referenced bytes precede every resulting publication.
 defs.NativeUpdateRequest = obj({ action: { const: 'nativeUpdate' }, ...existing, run: ref('ObjectPin'), change: { oneOf: [
@@ -230,7 +234,7 @@ defs.NativeLifecycleCall = obj({ key: id,
   operationId: id, method: { enum: ['thread/archive', 'thread/unarchive', 'thread/start', 'thread/resume'] }, params: wire('Json'),
   definitionHash: hash, observation: nullable(agent('Operation')) });
 defs.PreparedWrite = obj({
-  mutationId: id, contractKey: { enum: Object.keys(contracts).map(key => 'task-board/' + key) }, contractVersion: { enum: ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0'] }, payload: ref('Artifact'),
+  mutationId: id, contractKey: { enum: Object.keys(contracts).map(key => 'task-board/' + key) }, contractVersion: { enum: ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0'] }, payload: ref('Artifact'),
   destination: { oneOf: [obj({ create: obj({ parentId: nullable(id), name: str(256, 1) }) }),
     obj({ objectId: id, expectedRevision: integer(1) })] }, outcome: nullable(ref('ObjectPin')) });
 defs.Operation = obj({ schemaVersion: { const: 1 }, operationId: id, callerPrincipalId: id, request: ref('DurableRequest'),

@@ -368,7 +368,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
           attachments: [], run: request.run, turnId: next.turnId, replyTo: null, createdAt: at, operationId: request.operationId };
         const append = !handoff && !needsAnswer;
         const fits = !!handoff || resultCommentFits(finalTask, comment, steps.pin);
-        if (fits && ready && finalTask.fields.userContact !== 'ticket' && !comment.delivery) {
+        if (fits && ready && !finalTask.parentTaskId && finalTask.fields.userContact !== 'ticket' && !comment.delivery) {
           const delivery = await steps.create('task-board/delivery', initialDelivery(engine.settings, steps.pin, request.taskId, comment.commentId, finalTask.fields.userContact, at), 'Handoff notification');
           comment = { ...comment, delivery };
         }

@@ -37,6 +37,9 @@ An isolated [Claude adapter option](CLAUDE-ADAPTER.md) uses the same AgentManage
 - Durable invocation saves intent before dispatch and outcome before acknowledgement. Direct
   interactions and read observations retain their distinct recovery contracts; losing a
   transient interaction cache does not authorize replay.
+- Completion contact belongs to the workflow service that started the exact native turn.
+  AgentManager suppresses duplicate browser completion notices for registered service callers;
+  direct user turns and actionable native inputs retain their normal notices.
 - Pending input is bound to its original owner, epoch and native request shape. Old requests
   expire on native restart. Only the catalog-defined clock request is answered automatically.
 - Native failure may require a new owner generation; Hive reconnect alone must not restart

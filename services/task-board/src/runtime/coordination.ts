@@ -29,6 +29,7 @@ export class TaskBoardCoordination {
     });
     const shared = request.action === "edit"
       ? previous.value.fields.category !== request.fields.category ||
+        request.parentTaskId !== undefined && request.parentTaskId !== (previous.value.parentTaskId ?? null) ||
         canonical(previous.value.fields.dependencies) !== canonical(request.fields.dependencies)
       : request.action === "start" || request.action === "continue"
         ? previous.value.fields.dependencies.length > 0 || !!previous.value.blocker

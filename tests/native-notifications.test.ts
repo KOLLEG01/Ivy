@@ -1,7 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NativeNotifications, NativeNoticePolicy, nativeBrowserNotice, inputBrowserNotice } from '../services/agent-manager/src/notifications.js';
+import { NativeNotifications, NativeNoticePolicy, nativeBrowserNotice, inputBrowserNotice, serviceOwnsCompletion } from '../services/agent-manager/src/notifications.js';
+import type { RpcClient } from '../packages/sdk/src/client.js';
 const owner={serviceNodeId:'agent',nativeVersion:'0.154.0'};
+
+test('exact service callers own completion contact across service-node pages while user turns keep native notices', async () => {
+  const calls: unknown[] = [];
+  const client = { request: async (method: string, params: { cursor?: string }) => {
+    assert.equal(method, 'serviceNodes.list'); calls.push(params);
+    return params.cursor
+      ? { items: [{ principalId: 'workflow-caller', serviceName: 'workflow', ready: false }], nextCursor: null }
+      : { items: [{ principalId: 'agent-caller', serviceName: 'agent-manager' }], nextCursor: 'next' };
+  } } as RpcClient;
+  assert.equal(await serviceOwnsCompletion(client, null), false);
+  assert.equal(calls.length, 0, 'desktop-native turns without a service receipt require no discovery');
+  assert.equal(await serviceOwnsCompletion(client, 'workflow-caller'), true);
+  assert.equal(calls.length, 2);
+  assert.equal(await serviceOwnsCompletion(client, 'direct-user'), false);
+  assert.equal(await serviceOwnsCompletion(client, 'agent-caller'), false, 'the native transport also executes ordinary agent interactions');
+});
 
 test('notice policy follows native project membership, new threads and reassignment without extra reads', () => {
   const policy = new NativeNoticePolicy();

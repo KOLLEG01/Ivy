@@ -1,4 +1,5 @@
 import { taskPrompt } from './task-prompt.js';
+import { forwardDelegatedReview } from './task-delegation.js';
 import { checkBlocker, coordinationPending, peerComment } from './task-coordination.js';
 import { hashJson } from "../../../../packages/sdk/src/node.js";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
@@ -520,6 +521,7 @@ export class TaskBoardScheduler {
     const store = this.engine.store,
       task = await store.read("task-board/task", taskId),
       value = task.value;
+    await forwardDelegatedReview(this.engine, task);
     if (
       value.fields.control !== "agent" ||
       value.claim ||

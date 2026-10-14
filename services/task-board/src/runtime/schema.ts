@@ -8,8 +8,8 @@ import attachment from '../../../../specs/schemas/task-board.attachment.json' wi
 import { upgradeConfigurationRecord, upgradeTaskRecord } from '../../../../packages/sdk/src/client.js';
 
 export const version = '1.0.0' as const;
-export const contractVersion = (key: ContractKey): '1.0.0' | '1.1.0' | '1.2.0' | '1.7.0' => key === 'task-board/task' ? '1.7.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/run' || key === 'task-board/delivery' ? '1.1.0' : version;
-export const readableVersions = (key: ContractKey): string[] => key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0']
+export const contractVersion = (key: ContractKey): '1.0.0' | '1.1.0' | '1.2.0' | '1.8.0' => key === 'task-board/task' ? '1.8.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/run' || key === 'task-board/delivery' ? '1.1.0' : version;
+export const readableVersions = (key: ContractKey): string[] => key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0']
   : key === 'task-board/configuration' ? ['1.0.0', '1.1.0', '1.2.0'] : key === 'task-board/run' || key === 'task-board/delivery' ? ['1.0.0', '1.1.0'] : [version];
 // Before task 1.5.0 and configuration 1.1.0, an execution requirement could name one capability instead of a host.
 const capabilityRequirement = { type: 'object', properties: { kind: { const: 'capability' }, capabilityKey: { $ref: '#/$defs/WireIdentifier' } }, required: ['kind', 'capabilityKey'], additionalProperties: false };
@@ -70,6 +70,11 @@ export function taskBoardContracts(): Wire.DataContract[] {
   const contracts: Wire.DataContract[] = catalog.contracts.filter(value => finalKeys.has(value.key)).map(value => ({ key: value.key, version: value.version, owner: { kind: 'service', serviceName: 'task-board' }, mediaType: 'application/json', retention: retention(value.key), jsonSchema: value.key === 'task-board/task' ? publishedTaskSchema(bundledSchema(value.definition, catalog.schema)) : bundledSchema(value.definition, catalog.schema),
     specMarkdown: `# ${value.key} ${value.version}\n\nTaskBoard owns this exact workflow contract. Primary domain Objects have the configured workflow root as their direct parent. Immutable prepared payloads use the same exact contract below their owning Operation; they are evidence, not primary Tasks or Runs. Apply the state, actor, reference and recovery rules from the TaskBoard specification and decision 0011. Every write uses CAS or a retained create mutation ID. Native side effects require the saved claim, exact native plan and owner outcome evidence; this data schema alone does not authorize execution.` }));
   // Retained revisions in this installation still require their immutable published schemas.
+  const taskPrevious = structuredClone(contracts.find(value => value.key === 'task-board/task')!);
+  taskPrevious.version = '1.7.0';
+  taskPrevious.specMarkdown = taskPrevious.specMarkdown.replace('task-board/task 1.8.0', 'task-board/task 1.7.0');
+  delete (taskPrevious.jsonSchema as { properties: Record<string, unknown> }).properties.parentTaskId;
+  contracts.push(taskPrevious);
   const deliveryPrevious = structuredClone(contracts.find(value => value.key === 'task-board/delivery')!);
   deliveryPrevious.version = '1.0.0';
   deliveryPrevious.specMarkdown = deliveryPrevious.specMarkdown.replace('task-board/delivery 1.1.0', 'task-board/delivery 1.0.0');
@@ -78,7 +83,7 @@ export function taskBoardContracts(): Wire.DataContract[] {
   (deliveryPrevious.jsonSchema as { $defs: { ChatChannel: { properties: { adapter: unknown } } } }).$defs.ChatChannel.properties.adapter = { enum: ['webchat', 'whatsapp'] };
   contracts.push(deliveryPrevious);
   for (const [key, from, to] of [['task-board/task', '1.7.0', '1.6.0'], ['task-board/run', '1.1.0', '1.0.0']] as const) {
-    const previous = structuredClone(contracts.find(value => value.key === key)!);
+    const previous = structuredClone(contracts.find(value => value.key === key && value.version === from)!);
     previous.version = to; previous.specMarkdown = previous.specMarkdown.replace(key + ' ' + from, key + ' ' + to);
     const schema = previous.jsonSchema as { properties: Record<string, any>; $defs: Record<string, any> };
     if (key === 'task-board/task') delete schema.$defs.TaskBoardTaskFields?.properties.allowParallel;

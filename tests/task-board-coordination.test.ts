@@ -5,6 +5,7 @@ import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler
 import { intendedCall, resolveNativeRequest } from '../services/task-board/src/runtime/native-intent.js';
 import { checkBlocker, peerState, workspaceIdentity } from '../services/task-board/src/runtime/task-coordination.js';
 import { nativeWorkflow } from './fixtures/task-board-native.js';
+import { forwardDelegatedReview } from '../services/task-board/src/runtime/task-delegation.js';
 
 async function comment(w: Awaited<ReturnType<typeof nativeWorkflow>>, body = 'Secret ticket content must stay in the ticket.') {
   await w.refresh(); const { task } = w.state(), commentId = randomUUID();
@@ -27,6 +28,8 @@ test('steering contains only a ticket reference and acknowledges only its origin
   assert.equal(request.method, 'turn/steer'); assert.equal(request.params.expectedTurnId, 'native-turn');
   assert.match(JSON.stringify(request.params), /TaskBoard TASK-/);
   assert.doesNotMatch(JSON.stringify(request.params), /Secret ticket content/);
+  assert.match(JSON.stringify(request.params), /Continue the requested work/);
+  assert.doesNotMatch(JSON.stringify(request.params), /Coordination only|Preserve this ticket's result/);
   assert.ok(JSON.stringify(request.params).length < 500);
   const second = await comment(w, 'Another private correction.');
   await w.observe('steer', pin, { result: { turnId: 'native-turn' } });
@@ -94,14 +97,74 @@ test('directed messages wake review for coordination, while ordinary agent comme
   assert.equal(run.originalRequest.action === 'continue' && run.originalRequest.coordinationOnly, true);
   const prompt = await intendedCall(w.f.first.store, { ...run, nativeEpoch: 'fixture-epoch' }, 'turn');
   assert.match(JSON.stringify(prompt.request.params), /coordination only/);
+  assert.match(JSON.stringify(prompt.request.params), /review completed delegated children/);
   assert.doesNotMatch(JSON.stringify(prompt.request.params), /Please coordinate the next change/);
   w.adopt(next);
   await w.running();
+  const update = randomUUID();
+  await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId,
+    expectedRevision: w.state().task.revision, commentId: update, body: 'Another directed coordination update.',
+    authorKind: 'agent', sourceTaskId: source.task.objectId, agentDelivery: 'queue',
+    requests: [], responses: [], attachments: [], replyTo: null });
+  await w.refresh();
+  const steeringPin = await steer(w, [update]);
+  const steering = await w.f.first.store.read('task-board/native-call', steeringPin);
+  const steeringRequest = await resolveNativeRequest(w.f.first.store, steering.value.request);
+  assert.match(JSON.stringify(steeringRequest.params), /Coordination only/);
+  assert.match(JSON.stringify(steeringRequest.params), /Preserve this ticket's result and blocker/);
+  assert.doesNotMatch(JSON.stringify(steeringRequest.params), /Continue the requested work/);
+  await w.observe('steer', steeringPin, { result: { turnId: 'native-turn' } });
   const ended = await w.f.first.nativeUpdate(await w.snapshot('completed', 'Coordination answer.'));
   const after = (await w.f.first.store.read('task-board/task', ended.task!)).value;
   assert.equal(after.workflowState, 'review'); assert.deepEqual(after.latestResult, task.value.latestResult);
   assert.equal(after.comments.filter(c => c.purpose === 'handoff').length, task.value.comments.filter(c => c.purpose === 'handoff').length);
   assert.equal(await scheduler.task(task.pin.objectId), null);
+});
+
+test('delegation retains parent identity, lists children across workspaces and rejects cycles', async t => {
+  const w = await nativeWorkflow(t);
+  const parent = await w.f.planned('agent');
+  const parentTask = await w.f.first.store.read('task-board/task', parent.task);
+  const { userContact: _contact, ...fields } = parentTask.value.fields;
+  const created = await w.f.invoke({ action: 'create', operationId: randomUUID(), parentTaskId: parent.task.objectId,
+    fields: { ...fields, title: 'Delegated work', workspaceRequirement: { kind: 'directory_path', path: '/separate-work' } } });
+  const child = await w.f.first.store.read('task-board/task', created.task!);
+  assert.equal(child.value.parentTaskId, parent.task.objectId);
+  assert.equal(child.value.fields.userContact, 'ticket');
+  assert.deepEqual((await w.f.first.list({ parentTaskId: parent.task.objectId })).items.map(task => task.taskId), [child.pin.objectId]);
+  assert.deepEqual((await w.f.first.list({ parentTaskId: w.state().task.objectId })).items, []);
+  await assert.rejects(w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId: parent.task.objectId,
+    expectedRevision: parent.task.revision, fields: parentTask.value.fields, parentTaskId: child.pin.objectId }), /indirectly/);
+  const unchangedParent = await w.f.first.store.read('task-board/task', parent.task.objectId);
+  assert.equal(unchangedParent.value.parentTaskId, undefined);
+  assert.equal(unchangedParent.value.publication, null);
+  const edited = await w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId: child.pin.objectId,
+    expectedRevision: child.pin.revision, fields: { ...child.value.fields, title: 'Updated delegated work' } });
+  assert.equal((await w.f.first.store.read('task-board/task', edited.task!)).value.parentTaskId, parent.task.objectId);
+});
+
+test('a delegated final result queues parent review once and closes only after acceptance', async t => {
+  const w = await nativeWorkflow(t); await w.running();
+  const parent = await w.f.planned('agent');
+  const child = await w.f.first.store.read('task-board/task', w.state().task);
+  await w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId: child.pin.objectId, expectedRevision: child.pin.revision,
+    fields: { ...child.value.fields, userContact: 'chat' }, parentTaskId: parent.task.objectId });
+  await w.refresh();
+  const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
+  const delegated = await w.f.first.store.read('task-board/task', finished.task!);
+  await forwardDelegatedReview(w.f.first, delegated);
+  await forwardDelegatedReview(w.f.second, delegated);
+  const reviewed = await w.f.first.store.read('task-board/task', parent.task.objectId);
+  assert.equal(reviewed.value.comments.length, 1);
+  assert.equal(reviewed.value.comments[0]?.sourceTaskId, delegated.pin.objectId);
+  assert.equal(reviewed.value.comments[0]?.authorKind, 'agent');
+  assert.equal(reviewed.value.commentDeliveries[0]?.state, 'queued');
+  assert.equal(delegated.value.comments.find(comment => comment.purpose === 'handoff')?.delivery, null);
+  assert.deepEqual(w.f.kernel.store.all("SELECT payload FROM events WHERE topic='task-board.browser-notification'"), []);
+  assert.equal((await w.f.first.store.read('task-board/task', delegated.pin.objectId)).value.workflowState, 'review');
+  const accepted = await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: delegated.pin.objectId,
+    expectedRevision: delegated.pin.revision, workflowState: 'done', detail: 'Parent verified and integrated the delivered scope.' });
+  assert.equal((await w.f.first.store.read('task-board/task', accepted.task!)).value.workflowState, 'done');
 });
 
 test('automatic peers share the canonical directory and host; separate worktrees and hosts are independent', async t => {

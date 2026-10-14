@@ -5,9 +5,22 @@ import { managementFrameBytes } from './limits.js';
 import type { BrowserNotice } from '../../../packages/sdk/src/node.js';
 import { hashJson } from '../../../packages/sdk/src/node.js';
 import { nativeProjectForThread, isInternalProject } from '../../../packages/sdk/src/native-project-membership.js';
+import type { RpcClient } from '../../../packages/sdk/src/client.js';
 
 type ThreadProject = { cwd?: unknown; projectId?: unknown };
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+/** Workflow services own completion contact; the native transport must not notify again. */
+export async function serviceOwnsCompletion(client: RpcClient, caller: string | null): Promise<boolean> {
+  if (!caller) return false;
+  let cursor: string | undefined;
+  do {
+    const page = await client.request('serviceNodes.list', { limit: 200, ...(cursor ? { cursor } : {}) });
+    if (page.items.some(node => node.principalId === caller && node.serviceName !== 'agent-manager')) return true;
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return false;
+}
 
 /** Reuse inventory and push metadata; internal turn activity never needs a native reread. */
 export class NativeNoticePolicy {

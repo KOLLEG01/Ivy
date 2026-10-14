@@ -12,6 +12,7 @@ const actor = { principalId: 'user', serviceNodeId: 'task-board', generation: 1,
 test('published Task contract definitions stay stable when tool descriptions change', () => {
   const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task');
   assert.deepEqual(Object.fromEntries(contracts.map(value => [value.version, hashJson(value)])), {
+    '1.8.0': 'sha256:00a22238b737fc5e1f178c5dd239b88aaa2467220c103bf7ff3094772cc70db7',
     '1.7.0': 'sha256:3292027f5a0bfcc962c9c91fce6363ec046c3b0c910912959900c77af39dfa3b',
     '1.6.0': 'sha256:7c4a5106d614116242641156bb4f15920ff509d255a47119c033363470a6da5d',
     '1.0.0': 'sha256:feb604f282eee8a074b2f0487dc5b11b133a2363d6039b8321fa4e07cd0639d6',

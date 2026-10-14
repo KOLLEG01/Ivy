@@ -6,7 +6,7 @@ import { LocalAgentState } from "./hive-state.js";
 import type { SavedState } from "./hive-state.js";
 import { NativeOperations } from "./operations.js";
 import { NativeInteractions } from "./interactions.js";
-import { NativeNotifications, NativeNoticePolicy, nativeBrowserNotice, inputBrowserNotice } from "./notifications.js";
+import { NativeNotifications, NativeNoticePolicy, nativeBrowserNotice, inputBrowserNotice, serviceOwnsCompletion } from "./notifications.js";
 import { publishBrowserNotice } from "../../../packages/sdk/src/node.js";
 import { answerNativeClock, nativeClockPrincipal } from "./clock.js";
 import {
@@ -128,7 +128,7 @@ export async function startAgentManager(
     settings.limits.maxNotificationBytes,
   );
   const noticePolicy = new NativeNoticePolicy();
-  let sendBrowserNotice: ((threadId: string, notice: BrowserNotice) => Promise<void>) | null = null;
+  let sendBrowserNotice: ((threadId: string, notice: BrowserNotice, turnId?: string) => Promise<void>) | null = null;
   const health = new HealthFile(config),
     work = new Set<Promise<unknown>>();
   let native: NativeOwner | null = null,
@@ -344,7 +344,10 @@ export async function startAgentManager(
         const event = notifications.observe(epoch, value.method, value.params);
         if (service?.ready && !closing) {
           const notice = nativeBrowserNotice(config.serviceNodeId, event);
-          if (notice) void sendBrowserNotice?.((value.params as { threadId: string }).threadId, notice).catch(() => undefined);
+          if (notice) {
+            const params = value.params as { threadId: string; turn: { id: string } };
+            void sendBrowserNotice?.(params.threadId, notice, params.turn.id).catch(() => undefined);
+          }
           try {
             service.connection.notification(
               "agent",
@@ -569,8 +572,12 @@ export async function startAgentManager(
       await refreshProjects(connection);
     };
     const noticeReads = new Map<string, Promise<void>>();
-    sendBrowserNotice = async (threadId, notice) => {
+    sendBrowserNotice = async (threadId, notice, turnId) => {
       if (!service?.ready || closing) return;
+      if (turnId) {
+        await operations.settleTurn(threadId);
+        if (await serviceOwnsCompletion(service.connection, state.completionCaller(threadId, turnId))) return;
+      }
       // Initial discovery and project changes share their existing read; never poll for badges.
       if (projectRefreshWork) await projectRefreshWork;
       else if (!projectObserved) await refreshProjects(service.connection);

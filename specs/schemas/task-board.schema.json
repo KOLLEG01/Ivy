@@ -1741,7 +1741,7 @@
             "chat",
             "phone"
           ],
-          "description": "Contact route: ticket records only in the ticket; chat also contacts Main; phone also contacts by voice. Omit on creation to inherit current task_configuration defaults.userContact; omit on edit to preserve the ticket setting."
+          "description": "Contact route: ticket records only in the ticket; chat also contacts Main; phone also contacts by voice. Omit on root creation to inherit task_configuration defaults.userContact; delegated creation defaults to ticket and delivers completion to the parent. Omit on edit to preserve the setting."
         },
         "allowParallel": {
           "type": "boolean"
@@ -1913,6 +1913,10 @@
         },
         "fields": {
           "$ref": "#/$defs/TaskFieldsInput"
+        },
+        "parentTaskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
+          "description": "When delegating part of your current task, identify that task as the parent. It owns result review, Done and archival. Omitted userContact defaults to ticket for delegated tasks."
         }
       },
       "required": [
@@ -1944,6 +1948,17 @@
         },
         "fields": {
           "$ref": "#/$defs/TaskFieldsInput"
+        },
+        "parentTaskId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Assign or remove the delegating parent. Omit to preserve the current parent."
         }
       },
       "required": [
@@ -2707,6 +2722,10 @@
     "TaskListQuery": {
       "type": "object",
       "properties": {
+        "parentTaskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
+          "description": "List unarchived tasks delegated by this parent task, including separate worktrees and hosts."
+        },
         "relatedTo": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
           "description": "Find other allocated tasks sharing this task canonical working directory and host. Separate worktrees do not match. Read peer tickets before coordinating."
@@ -3276,6 +3295,9 @@
           "minLength": 24,
           "maxLength": 24,
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "parentTaskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
         }
       },
       "required": [
@@ -4805,7 +4827,8 @@
             "1.4.0",
             "1.5.0",
             "1.6.0",
-            "1.7.0"
+            "1.7.0",
+            "1.8.0"
           ]
         },
         "payload": {

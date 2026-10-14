@@ -120,7 +120,7 @@ export class TaskBoardChecks {
     // avoids stack exhaustion and rejects cycles already present in referenced retained records.
     const done = new Set<string>(), visiting = new Set<string>(), tasks = new Map<string, Document<'task-board/task'>>(), pending = fields.dependencies.map(id => ({ id, exit: false, direct: true }));
     if (satisfied) for (const id of fields.dependencies) {
-      const task = await this.store.read('task-board/task', id); tasks.set(id, task);
+      const task = await this.store.read('task-board/task', id, true, true); tasks.set(id, task);
       requireThat(task.value.workflowState === 'done' && !task.value.publication, 'task_board_dependency_waiting', 'Every direct dependency must have an accepted result before starting.');
     }
     while (pending.length) {
@@ -129,7 +129,7 @@ export class TaskBoardChecks {
       requireThat(entry.id !== self && !visiting.has(entry.id), 'task_board_dependency_cycle', 'The dependency graph would contain a cycle.');
       if (done.has(entry.id)) continue;
       requireThat(done.size + visiting.size < 10000, 'task_board_dependency_limit', 'Dependency verification exceeds the 10,000-task complete traversal limit.');
-      const task = tasks.get(entry.id) ?? await this.store.read('task-board/task', entry.id); tasks.set(entry.id, task);
+      const task = tasks.get(entry.id) ?? await this.store.read('task-board/task', entry.id, true, true); tasks.set(entry.id, task);
       requireThat(!task.value.publication, 'task_board_publication_pending', 'A dependency still has an unfinished publication.');
       visiting.add(entry.id); pending.push({ ...entry, exit: true });
       for (const id of task.value.fields.dependencies) pending.push({ id, exit: false, direct: false });

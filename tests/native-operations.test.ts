@@ -30,6 +30,32 @@ test('local receipts use the configured capacity beyond 10,000 rows and preserve
   await state.write('operation', 'original', { ...original, code: 'retained' }, saved.pin);
 });
 
+test('completion ownership retains the exact native turn caller after restart and settles an immediate completion', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'ivy-native-notice-')), path = join(root, 'journal.sqlite');
+  const limits = { maxOperations: 100, maxJournalBytes: 64 * 1024 * 1024, maxPendingInputs: 16, maxNotificationBytes: 1048576 };
+  let state = new LocalAgentState(path, 'agent', limits);
+  t.after(() => { state.close(); rmSync(root, { recursive: true, force: true }); });
+  state.setRuntimeEpoch('runtime');
+  const memory = new NativeJournal({ hostId: 'host', serviceNodeId: 'agent', nativeVersion: 'test', nativeExecutableHash: digest('native') }, limits);
+  memory.beginEpoch('native-epoch');
+  const manager = new NativeOperations(state, memory), key = { callerPrincipalId: 'workflow-caller', operationId: operationId('runtime') };
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const run = manager.run(key, 'turn/start', { threadId: 'managed-thread' }, async () => {
+    memory.dispatch(key, 'native-epoch', manager.requestId(key)); await barrier;
+    return memory.finish(key, 'native-epoch', manager.requestId(key), { result: { turn: { id: 'managed-turn' } } });
+  });
+  let settled = false;
+  const completion = manager.settleTurn('managed-thread').then(() => { settled = true; });
+  await Promise.resolve(); assert.equal(settled, false);
+  release(); await run; await completion;
+  assert.equal(state.completionCaller('managed-thread', 'managed-turn'), 'workflow-caller');
+  assert.equal(state.completionCaller('managed-thread', 'another-turn'), null);
+  assert.equal(state.completionCaller('another-thread', 'managed-turn'), null);
+  state.close(); state = new LocalAgentState(path, 'agent', limits);
+  assert.equal(state.completionCaller('managed-thread', 'managed-turn'), 'workflow-caller');
+});
+
 test('local durable claims precede native effects, survive empty service memory and prevent competing dispatch', async () => {
   const rows=new Map<string,SavedState<unknown>>();let unavailable=false;
   const state:Pick<LocalAgentState,'serviceNodeId'|'read'|'write'>={serviceNodeId:'agent',

@@ -28,6 +28,14 @@ export class LocalAgentState {
   }
   setRuntimeEpoch(value: string): void { requireThat(value.length > 0 && !value.includes(':'), 'invalid_arguments', 'Invalid runtime epoch.'); this.runtimeEpoch = value; }
   close(): void { this.db.close(); }
+  completionCaller(threadId: string, turnId: string): string | null {
+    const rows = this.db.prepare(`SELECT DISTINCT json_extract(value_json,'$.callerPrincipalId') AS caller FROM state
+      WHERE kind='operation' AND json_extract(value_json,'$.method')='turn/start'
+        AND json_extract(value_json,'$.phase')='succeeded'
+        AND json_extract(value_json,'$.params.threadId')=?
+        AND json_extract(value_json,'$.reply.result.turn.id')=? LIMIT 2`).all(threadId, turnId);
+    return rows.length === 1 && typeof rows[0]!['caller'] === 'string' ? rows[0]!['caller'] : null;
+  }
   private id(kind: string, key: string): string { return hashJson([this.serviceNodeId, kind, key]).slice(7); }
   private cleanup(now = Date.now()): void {
     this.db.prepare('DELETE FROM state WHERE kind=? AND terminal_at_ms IS NOT NULL AND terminal_at_ms<=?').run('operation', now - 24 * 60 * 60 * 1000);
