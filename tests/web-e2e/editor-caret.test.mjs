@@ -35,6 +35,20 @@ for (const width of [1440, 390]) test(`Wiki and task editors keep a steady reduc
     await editor.press('End');
     await editor.pressSequentially(' remains editable');
     await expect(editor).toContainText('Steady editor text remains editable');
+    for (const html of [false, true]) {
+      await editor.pressSequentially(' ');
+      await editor.evaluate((element, html) => {
+        const data = new DataTransfer();
+        data.setData('text/plain', html ? 'Reference page' : 'https://example.test/reference');
+        if (html) data.setData('text/html', '<a href="https://example.test/reference">Reference page</a>');
+        element.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+      }, html);
+      const link = editor.locator('a').last();
+      await expect(link).toHaveText(html ? 'Reference page' : 'https://example.test/reference');
+      await editor.pressSequentially(' following text');
+      await expect(link).toHaveText(html ? 'Reference page' : 'https://example.test/reference');
+      await expect(editor).toContainText((html ? 'Reference page' : 'https://example.test/reference') + ' following text');
+    }
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   assert.deepEqual(f.pageErrors, []);

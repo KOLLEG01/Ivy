@@ -483,10 +483,8 @@ const fixed = computed(() => !!props.task?.value.claim),
   placed = computed(() => !!props.task && taskStarted(props.task.value)),
   locked = computed(
     () =>
-      !props.available ||
       props.workspace.role !== "user" ||
-      action.locked.value ||
-      !!error.value,
+      action.locked.value,
   );
 const localDate = (value: string | null) => {
   if (!value) return "";
@@ -500,7 +498,7 @@ const setDate = (key: "dueAt" | "nextReviewAt", event: Event) => {
   form.value[key] = value ? new Date(value).toISOString() : null;
 };
 const save = async () => {
-  if (locked.value) return;
+  if (locked.value || !props.available) return;
   error.value = null;
   if (nativeOptionsInvalid.value) {
     error.value = "Choose a model, reasoning and speed the selected host supports.";
@@ -902,6 +900,7 @@ const cancel = () => {
           type="submit"
           :disabled="
             locked ||
+            !available ||
             !form.title.trim() ||
             nativeOptionsInvalid ||
             !!conflict

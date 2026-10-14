@@ -19,6 +19,107 @@ const fields = (title, category = null) => ({
   dueAt: null,
 });
 
+for (const width of [1440, 390]) test(`task drafts and comments keep keyboard focus through failed background reads at ${width}px`, { timeout: 90000 }, async t => {
+  const f = await taskBoardFixture(t, { viewport: { width, height: 1000 } });
+  const created = await f.invoke({ action: 'create', fields: fields('Background read editing') });
+  const id = created.task.objectId;
+  await f.open('#/new?node=browser-task-board');
+  await f.page.getByRole('radio', { name: 'Me', exact: true }).check();
+  const title = f.page.getByLabel('Title', { exact: true });
+  await title.fill('Retained task draft');
+  for (const label of ['Description', 'Title', 'Comment']) {
+    if (label === 'Comment') await f.page.goto(f.url + '#/tasks?id=' + id + '&node=browser-task-board' + (width === 390 ? '&panel=sheet' : ''));
+    const editor = f.page.getByRole('textbox', { name: label, exact: true });
+    await expect(editor).toBeEditable();
+    await editor.press('End');
+    await editor.pressSequentially(' Before outage');
+    const original = await editor.elementHandle();
+    const save = f.page.getByRole('button', { name: label === 'Comment' ? 'Add comment' : 'Create task', exact: true });
+    await expect(save).toBeEnabled();
+    await f.page.route('**/api/v1/rpc', route => {
+      const body = route.request().postDataJSON();
+      const requests = Array.isArray(body) ? body : [body];
+      return requests.some(request => label !== 'Comment'
+        ? request.method === 'tools.call' && request.params.qualifiedName === 'task-board.workspace'
+        : request.method === 'objects.read' && request.params.objectId === id)
+        ? route.abort() : route.continue();
+    });
+    await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect(f.page.getByRole('alert').filter({ hasText: 'Showing the last successful response' }).first()).toBeVisible();
+    await expect(save).toBeDisabled();
+    await expect(editor).toBeEditable();
+    assert.equal(await original.evaluate(element => element.isConnected && element === document.activeElement), true);
+    await f.page.keyboard.type(' during outage');
+    if (label === 'Title') await expect(editor).toHaveValue('Retained task draft Before outage during outage');
+    else await expect(editor).toContainText('Before outage during outage');
+    await f.page.unroute('**/api/v1/rpc');
+    await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await expect(f.page.getByRole('alert')).toHaveCount(0);
+    await expect(save).toBeEnabled();
+    assert.equal(await original.evaluate(element => element.isConnected && element === document.activeElement), true);
+    if (label === 'Comment') {
+      await save.click();
+      await expect.poll(async () => (await f.task(id)).comments.at(-1)?.body).toContain('Before outage during outage');
+    }
+  }
+  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.deepEqual(f.pageErrors, []);
+});
+
+for (const width of [1440, 390]) test(`comments accept multiple files and further selections without interrupting typing at ${width}px`, { timeout: 90000 }, async t => {
+  const f = await taskBoardFixture(t, { viewport: { width, height: 1000 } });
+  const created = await f.invoke({ action: 'create', fields: fields('Multiple comment attachments') });
+  const id = created.task.objectId;
+  await f.open('#/tasks?id=' + id + '&node=browser-task-board' + (width === 390 ? '&panel=sheet' : ''));
+  const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
+  await editor.fill('Comment evidence');
+  const picker = f.page.locator('input[type=file]');
+  await expect(picker).toHaveAttribute('multiple', '');
+  const files = ['first.txt', 'second.txt', 'third.txt'].map(name => ({
+    name, mimeType: 'text/plain', buffer: Buffer.from('Exact evidence in ' + name),
+  }));
+  let releaseUpload, uploadStarted;
+  const started = new Promise(resolve => { uploadStarted = resolve; });
+  await f.page.route('**/api/v1/rpc', async route => {
+    const body = route.request().postDataJSON();
+    if (body.method === 'tools.call' && body.params.qualifiedName === 'task-board.uploadAttachment' && !releaseUpload) {
+      const held = new Promise(resolve => { releaseUpload = resolve; });
+      uploadStarted();
+      await held;
+    }
+    await route.continue();
+  });
+  await picker.setInputFiles(files.slice(0, 2));
+  await started;
+  await expect(editor).toBeEditable();
+  await expect(f.page.getByRole('button', { name: 'Add files', exact: true })).toBeDisabled();
+  await editor.pressSequentially(' while files upload');
+  releaseUpload();
+  await expect(editor.locator('a')).toHaveCount(2);
+  await expect(f.page.getByRole('button', { name: 'Add files', exact: true })).toBeEnabled();
+  await f.page.unroute('**/api/v1/rpc');
+  await picker.setInputFiles(files.slice(2));
+  await expect(editor.locator('a')).toHaveCount(3);
+  await expect(f.page.getByRole('button', { name: 'Add files', exact: true })).toBeEnabled();
+  await editor.press('End');
+  await editor.pressSequentially(' after all files');
+  await expect(editor.locator('a').last()).toHaveText('third.txt');
+  await f.page.getByRole('button', { name: 'Add comment', exact: true }).click();
+  await expect.poll(async () => (await f.task(id)).comments.length).toBe(1);
+  const saved = await f.task(id), comment = saved.comments[0];
+  assert.equal(saved.attachments.length, 3);
+  assert.deepEqual(comment.attachments.map(attachment => attachment.filename), files.map(file => file.name));
+  assert.match(comment.body, /while files upload/);
+  assert.match(comment.body, /after all files/);
+  for (const [index, attachment] of comment.attachments.entries()) {
+    assert.ok(comment.body.includes('attachment:' + attachment.attachmentId), comment.body);
+    const read = await f.client.request('objects.read', attachment.object);
+    assert.deepEqual(Buffer.from(read.content.value, 'base64'), files[index].buffer);
+  }
+  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.deepEqual(f.pageErrors, []);
+});
+
 for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["mobile", { width: 390, height: 844 }]]) {
   test(`running contact edit preserves inherited native options on ${layout}`, { timeout: 180000 }, async t => {
     const f = await taskBoardFixture(t, { native: true, scheduler: true, viewport });

@@ -41,7 +41,7 @@ const props = defineProps<{ modelValue: string; disabled?: boolean; trustedImage
 // `normalized` reports how the editor serializes externally supplied Markdown, so callers can tell edits from formatting.
 const emit = defineEmits<{ 'update:modelValue': [value: string]; normalized: [value: string, source: string]; uploaded: [] }>();
 const root = ref<HTMLElement>(), fileInput = ref<HTMLInputElement>();
-const uploadError = ref<string | null>(null), previewOpen = ref(false), preview = ref({ source: '', name: '' });
+const uploadError = ref<string | null>(null), uploading = ref(false), previewOpen = ref(false), preview = ref({ source: '', name: '' });
 let crepe: CrepeBuilder | null = null, lastPublished = props.modelValue, replacing = false, edited = false;
 // Only report formatting of supplied Markdown when no user input changed it in the meantime.
 const markEdited = () => { edited = true; };
@@ -73,7 +73,10 @@ const attachmentLinkView = $view(linkSchema.mark, () => mark => {
     if (info) { dom.dataset['fileSize'] = fileSize(info.byteLength); dom.title = info.name + ' · ' + fileSize(info.byteLength); }
     else { delete dom.dataset['fileSize']; dom.title = String(mark.attrs.title || ''); }
   }, { immediate: true });
-  return { dom, contentDOM: contentDOM ?? null, destroy: stop };
+  return { dom, contentDOM: contentDOM ?? null,
+    // File metadata is presentation, not a user edit to the sanitized link DOM.
+    ignoreMutation: mutation => mutation.type === 'attributes' && mutation.target === dom,
+    destroy: stop };
 });
 
 // Lucide "maximize-2" and "x", inlined because node views build plain DOM.
@@ -132,7 +135,7 @@ const safeImageView = $view(imageSchema.node, () => (initialNode, view, getPos) 
 
 // Uploads files through the host app and returns the image or file-link nodes that embed them.
 const uploadedNodes = async (files: File[], schema: Schema) => {
-  const nodes: ProseNode[] = []; uploadError.value = null;
+  const nodes: ProseNode[] = []; uploadError.value = null; uploading.value = true;
   try {
     if (props.disabled) return nodes;
     if (!props.uploadFile) throw new Error('File uploads are not available in this editor.');
@@ -144,6 +147,7 @@ const uploadedNodes = async (files: File[], schema: Schema) => {
       nodes.push(node);
     }
   } catch (cause) { uploadError.value = cause instanceof Error ? cause.message : 'Upload failed. Try again from the attachments panel.'; }
+  finally { uploading.value = false; }
   if (nodes.length) emit('uploaded');
   // Resolve even on failure so Milkdown removes its upload placeholder.
   return nodes;
@@ -178,7 +182,9 @@ onMounted(async () => {
     .addFeature(placeholderFeature, { text: props.placeholder ?? "Write something, or type '/' for commands…", mode: props.variant === 'field' ? 'doc' : 'block' })
     .addFeature(toolbar, { boldLabel: 'Bold', italicLabel: 'Italic', codeLabel: 'Code', linkLabel: 'Link', strikethroughLabel: 'Strikethrough' })
     .addFeature(table);
-  crepe.editor.config(ctx => ctx.update(imageSchema.key, previous => context => ({
+  crepe.editor.config(ctx => ctx.update(linkSchema.key, previous => context => ({
+    ...previous(context), inclusive: false,
+  }))).config(ctx => ctx.update(imageSchema.key, previous => context => ({
     ...previous(context),
     // Remark represents an absent image title as null; ProseMirror requires a string.
     parseMarkdown: { match: node => node.type === 'image', runner: (state, node, type) => {
@@ -246,8 +252,8 @@ onBeforeUnmount(() => {
     <div ref="root" class="markdown-editor is-field" :class="{ 'is-readonly': disabled }" />
     <div v-if="uploadFile || $slots['actions']" class="flex flex-wrap items-center gap-1 border-t px-1.5 py-1">
       <template v-if="uploadFile">
-        <input ref="fileInput" type="file" multiple class="sr-only" tabindex="-1" aria-hidden="true" :disabled="disabled" @change="chooseFiles" />
-        <Button type="button" variant="ghost" size="sm" :disabled="disabled" @click="fileInput?.click()"><Paperclip aria-hidden="true" />Add file</Button>
+        <input ref="fileInput" type="file" multiple class="sr-only" tabindex="-1" aria-hidden="true" :disabled="disabled || uploading" @change="chooseFiles" />
+        <Button type="button" variant="ghost" size="sm" :disabled="disabled || uploading" @click="fileInput?.click()"><Paperclip aria-hidden="true" />Add files</Button>
       </template>
       <slot name="actions" />
     </div>

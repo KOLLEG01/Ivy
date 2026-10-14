@@ -167,16 +167,15 @@ const archive = useObjectArchive(
   client,
   "ivy:task-board:archive:" + base.href + ":" + props.taskId,
 );
-const writable = computed(
+const editable = computed(
   () =>
-    props.available &&
     props.workspace.role === "user" &&
-    !task.error.value &&
     !task.value.value?.read.object.effectivelyArchived &&
     !task.value.value?.value.publication &&
     !archive.busy.value && !archive.pending.value &&
-    !action.locked.value,
+    (!action.locked.value || uploading.value),
 );
+const writable = computed(() => editable.value && props.available && !task.error.value && !action.locked.value);
 const canDelete = computed(() =>
   props.available && props.workspace.role === "user" &&
   !!task.value.value && !task.value.value.value.claim &&
@@ -905,7 +904,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                     variant="field"
                     label="Comment"
                     placeholder="Add a comment. Agent-controlled work will receive it automatically."
-                    :disabled="!writable"
+                    :disabled="!editable"
                     :trusted-image-urls="images.urls.value"
                     :trusted-attachments="images.files.value"
                     :upload-file="uploadFile"

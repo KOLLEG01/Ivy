@@ -46,7 +46,7 @@ const bindingMs = 60_000;
 // All panels share one short readiness observation for their selected owner. An
 // unavailable owner must not receive a separate failing call from every loader.
 const readinessMs = 5_000;
-type ReadReadiness = { until: number; check?: Promise<void>; error?: IvyError };
+type ReadReadiness = { until: number; check?: Promise<string>; error?: IvyError };
 const readReadiness = new WeakMap<RpcClient, Map<string, ReadReadiness>>();
 async function readyForRead(client: RpcClient, node: string): Promise<void> {
   let cache = readReadiness.get(client);
@@ -56,6 +56,7 @@ async function readyForRead(client: RpcClient, node: string): Promise<void> {
     const check = client.request('serviceNodes.get', { serviceNodeId: node }, { timeoutMs: 5000 }).then(owner => {
       if (!owner.connected) throw new IvyError('service_unavailable', 'Provider connection is closed.');
       if (!owner.synced || !owner.ready || !owner.desiredEnabled) throw new IvyError('service_not_ready', 'Provider is not ready.');
+      return owner.serviceName;
     });
     cache.set(node, entry = { until: Date.now() + readinessMs, check });
   }
@@ -89,7 +90,10 @@ async function describeBindings(client: RpcClient, node: string, methods: string
     }
   }
   try {
-    const result = await client.request('discovery.describe', { serviceName: 'agent-manager', serviceNodeId: node, tools: methods });
+    const cached = readReadiness.get(client)?.get(node);
+    const serviceName = await (cached && Date.now() < cached.until ? cached.check : undefined) ??
+      (await client.request('serviceNodes.get', { serviceNodeId: node })).serviceName;
+    const result = await client.request('discovery.describe', { serviceName, serviceNodeId: node, tools: methods });
     if (result.provider?.serviceNodeId !== node || result.items.length !== methods.length ||
       new Set(result.items.map(binding => binding.qualifiedName)).size !== methods.length ||
       result.items.some(binding => !methods.includes(binding.qualifiedName)))

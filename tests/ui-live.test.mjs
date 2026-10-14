@@ -38,7 +38,7 @@ test("native panels share owner readiness, suppress outage calls and recover wit
     if (method === 'discovery.describe') return { provider: { serviceNodeId: params.serviceNodeId },
       items: params.tools.map(qualifiedName => ({ qualifiedName, method: qualifiedName, definition: {}, definitionHash: 'fixture', serviceNodeId: params.serviceNodeId })) };
     assert.equal(method, "serviceNodes.get"); checks.push(params.serviceNodeId);
-    return { ...owners.get(params.serviceNodeId) };
+    return { serviceName: 'agent-manager', ...owners.get(params.serviceNodeId) };
   } };
   const { nativeRead } = load("packages/ui-client/src/native.ts", { "../../sdk/src/client.js": {
     IvyError,
@@ -138,6 +138,7 @@ test('native capability bursts gather bounded exact definitions and isolate miss
   const requests = [], singles = [];
   const definition = method => ({ qualifiedName: method, method, definition: {}, definitionHash: 'fixture' });
   const client = { request: async (method, params) => {
+    if (method === 'serviceNodes.get') return { serviceName: 'agent-manager' };
     assert.equal(method, 'discovery.describe');
     requests.push(params);
     assert.ok(params.tools.length <= 5);
@@ -168,11 +169,41 @@ test('native capability bursts gather bounded exact definitions and isolate miss
   assert.equal(requests.length + singles.length, sent, 'known absence is shared');
 });
 
+test('batched reads discover the selected service owner across non-agent providers', async () => {
+  const owners = new Map([
+    ['tasks', { serviceName: 'task-board', methods: ['task-board.workspace', 'task-board.configuration'] }],
+    ['secretary', { serviceName: 'secretary', methods: ['secretary.binding', 'secretary.assignments'] }],
+    ['agents', { serviceName: 'agent-manager', methods: ['agent.status', 'codex.model/list'] }],
+  ]);
+  const checks = [], descriptions = [], calls = [];
+  const client = { request: async (method, params) => {
+    const owner = owners.get(params.serviceNodeId);
+    if (method === 'serviceNodes.get') {
+      checks.push(params.serviceNodeId);
+      return { serviceName: owner.serviceName, connected: true, synced: true, ready: true, desiredEnabled: true };
+    }
+    assert.equal(method, 'discovery.describe');
+    assert.equal(params.serviceName, owner.serviceName);
+    descriptions.push(params.serviceNodeId);
+    return { provider: { serviceNodeId: params.serviceNodeId },
+      items: params.tools.map(qualifiedName => ({ qualifiedName, definition: {}, definitionHash: 'fixture' })) };
+  } };
+  const { nativeRead } = load('packages/ui-client/src/native.ts', { '../../sdk/src/client.js': {
+    IvyError, canonical: JSON.stringify, newOperationId: async () => 'read-operation',
+    discover: async () => assert.fail('Concurrent methods should share a batch'),
+    callBound: async (_client, binding) => { calls.push(binding.serviceNodeId); return {}; },
+  } });
+  await Promise.all([...owners].flatMap(([node, owner]) => owner.methods.map(method => nativeRead(client, node, method, {}))));
+  assert.deepEqual(checks.sort(), ['agents', 'secretary', 'tasks'], 'discovery reuses the shared readiness observation');
+  assert.deepEqual(descriptions.sort(), ['agents', 'secretary', 'tasks']);
+  assert.deepEqual(calls.sort(), ['agents', 'agents', 'secretary', 'secretary', 'tasks', 'tasks']);
+});
+
 test('native catalog observations expire only that owner and metadata failures never substitute a binding', async () => {
   let version = 'one', fail = false, discoveries = 0;
   const definition = method => ({ qualifiedName: method, method, definition: {}, definitionHash: version });
   const client = { request: async (method, params) => {
-    if (method === 'serviceNodes.get') return { connected: true, ready: true, synced: true, desiredEnabled: true };
+    if (method === 'serviceNodes.get') return { serviceName: 'agent-manager', connected: true, ready: true, synced: true, desiredEnabled: true };
     assert.equal(method, 'discovery.describe');
     if (fail) throw new IvyError('service_unavailable', 'Closed');
     return { provider: { serviceNodeId: params.serviceNodeId }, items: params.tools.map(definition) };
