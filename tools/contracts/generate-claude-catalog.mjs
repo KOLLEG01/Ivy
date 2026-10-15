@@ -26,6 +26,8 @@ const methods = [
   "thread/resume",
   "thread/list",
   "thread/read",
+  "thread/archive",
+  "thread/unarchive",
   "thread/turns/list",
   "thread/items/list",
   "thread/loaded/list",

@@ -122,7 +122,10 @@ export class TaskBoardReconciler {
   }
   private async process(lane: Lane, id: string) {
     try {
-      if (lane === "operations") await this.engine.recoverOperation(id);
+      if (lane === "operations") {
+        await this.engine.recoverOperation(id);
+        this.record('publication:' + id);
+      }
       else if (lane === "deliveries")
         await new TaskBoardDeliveries(this.engine).step(id);
       else if (lane === "runs") {
@@ -154,7 +157,8 @@ export class TaskBoardReconciler {
         ["revision_conflict", "task_board_publication_busy"].includes(error.code)
       )
         return;
-      this.record(id, error);
+      if (lane === 'operations') await this.publicationFailure(id, error, id);
+      else this.record(id, error);
     }
   }
   private async taskKey(lane: Lane, id: string): Promise<string> {
@@ -169,12 +173,14 @@ export class TaskBoardReconciler {
       .finally(() => { this.activeTasks.delete(key); });
     this.activeTasks.set(key, current);
   }
-  private async publicationFailure(id: string, error: unknown): Promise<void> {
-    const key = 'publication:' + id, failure = IvyError.from(error);
-    if (failure.code === 'revision_conflict' && failure.outcome === 'not_executed') {
+  private async publicationFailure(id: string, error: unknown, key = 'publication:' + id): Promise<void> {
+    const failure = IvyError.from(error);
+    if (failure.outcome === 'not_executed') {
       const original = await this.engine.store.read('task-board/operation', id).catch(() => null);
-      if (original?.value.phase === 'failed' && original.value.error?.execution === 'not_executed') {
-        this.record(key); return;
+      // A terminal refusal remains action history, without an outstanding recovery fault.
+      if (original?.value.phase === 'failed' && original.value.error?.execution === 'not_executed' &&
+          original.value.error.code === failure.code && original.value.error.message === failure.message) {
+        this.record(id); this.record('publication:' + id); return;
       }
     }
     this.record(key, error);
@@ -194,7 +200,7 @@ export class TaskBoardReconciler {
         if (!this.activeTasks.has(key)) {
           if (this.activeTasks.size >= 10) return;
           this.startTask(key, async () => {
-            try { await this.engine.recoverOperation(id); this.record("publication:" + id); }
+            try { await this.engine.recoverOperation(id); this.record(id); this.record("publication:" + id); }
             catch (error) { await this.publicationFailure(id, error); }
           });
         }

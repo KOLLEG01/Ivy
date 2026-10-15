@@ -14,8 +14,8 @@ import type { Document, TaskBoardStore } from './store.js';
 type Operation = Document<'task-board/operation'>;
 type Primary = Wire.ResourceRef;
 const callKey = (method: string, primary: Primary) => method + ':' + hashJson(primary).slice(7);
-const missing = (reply: Agent.Reply | null) => !!reply && 'error' in reply &&
-  /not found|does not exist|no rollout found|no such file/i.test(reply.error.message);
+const missing = (reply: Agent.Reply | null, threadId: string) => missingNativeThread(reply, threadId) ||
+  !!reply && 'error' in reply && reply.error.message.trim().toLowerCase() === ('unknown thread: ' + threadId).toLowerCase();
 
 /** Ticket lifecycle actions retain native requests and receipts in the same Operation.
  * A pending action holds only this ticket's gate; unrelated tickets continue normally. */
@@ -100,7 +100,8 @@ export class TaskBoardNativeLifecycle {
           'task_board_native_not_idle', 'Finish the active Codex turn before changing this ticket context.');
         if (archived && /[\\/]archived_sessions[\\/]/.test(path) ||
             !archived && /[\\/]sessions[\\/]/.test(path)) return true;
-      } else if (onlyArchived || archived && missing(read.reply)) return true;
+      } else if (missing(read.reply, primary.nativeId)) return archived || onlyArchived;
+      else throw new IvyError('task_board_native_read_failed', read.reply.error.message);
     }
     const observed = await this.call(operation, key, async () => ({
       owner: owner ?? await this.owner(primary.serviceNodeId), method, params: { threadId: primary.nativeId },
@@ -113,7 +114,7 @@ export class TaskBoardNativeLifecycle {
       }
       return true;
     }
-    if (archived && missing(observed.reply)) return true;
+    if (archived && missing(observed.reply, primary.nativeId)) return true;
     if (!archived) return false;
     throw new IvyError('task_board_native_archive_failed',
       observed.reply && 'error' in observed.reply ? observed.reply.error.message : 'The Codex task could not be archived.');

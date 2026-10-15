@@ -35,6 +35,8 @@ test("Claude adapter catalog exposes only the Ivy lifecycle surface", () => {
     "thread/resume",
     "thread/list",
     "thread/read",
+    "thread/archive",
+    "thread/unarchive",
     "thread/turns/list",
     "thread/items/list",
     "thread/loaded/list",
@@ -378,6 +380,12 @@ test(
     await call("project/delete", { projectId: empty.id });
     assert.equal((await call("project/list", {})).data.length, 1);
     await call("turn/interrupt", { threadId, turnId });
+    const retainedTurns = (await call('thread/read', { threadId, includeTurns: true })).thread.turns;
+    await call('thread/archive', { threadId });
+    await call('thread/archive', { threadId });
+    assert.equal((await call('thread/list', { archived: false })).data.some((thread: { id: string }) => thread.id === threadId), false);
+    assert.ok((await call('thread/list', { archived: true })).data.some((thread: { id: string }) => thread.id === threadId));
+    assert.deepEqual((await call('thread/read', { threadId, includeTurns: true })).thread.turns, retainedTurns);
     await call("account/rateLimits/read", null);
     await call("model/list", {});
     rpc.close();
@@ -394,6 +402,11 @@ test(
     });
     assert.equal(restarted.codexHome, join(root, "codex"));
     rpc.notify("initialized");
+    assert.ok((await call('thread/list', { archived: true })).data.some((thread: { id: string }) => thread.id === threadId));
+    assert.equal((await call('thread/unarchive', { threadId })).thread.id, threadId);
+    assert.equal((await call('thread/unarchive', { threadId })).thread.id, threadId);
+    assert.equal((await call('thread/list', { archived: true })).data.some((thread: { id: string }) => thread.id === threadId), false);
+    assert.deepEqual((await call('thread/read', { threadId, includeTurns: true })).thread.turns, retainedTurns);
     assert.equal((await call("thread/resume", { threadId })).thread.projectId, project.id);
     assert.equal((await call("project/create", projectRequest)).project.id, project.id);
     assert.equal((await call("project/list", {})).data.length, 1);

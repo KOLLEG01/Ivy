@@ -23,6 +23,8 @@ async function lifecycle(t: { after: (fn: () => void) => void }) {
   const native = catalogFor('0.154.0').catalog, calls: Agent.Operation[] = [];
   const threads = new Map<string, { archived: boolean; active?: boolean }>([['native-primary', { archived: false }]]);
   let unarchive: 'success' | 'failed' | 'pending' = 'success', lostReply = false;
+  let readFailure: string | null = null, pathless = false;
+  const archiveFailures = new Map<string, string>();
   const receipt = (operationId: string, method: string, params: Wire.Json, phase: Agent.Operation['phase'], reply: Agent.Reply | null): Agent.Operation => {
     const now = new Date().toISOString();
     return { schemaVersion: 1, callerPrincipalId: w.f.settings.principalId, serviceNodeId: 'native-agent', nativeVersion: '0.154.0',
@@ -36,9 +38,9 @@ async function lifecycle(t: { after: (fn: () => void) => void }) {
       kind: 'agent_operation_absent', operationId: args['operationId'], serviceNodeId: 'native-agent', epoch: 'fixture-epoch' });
     if (call.definition.name === 'read') {
       const params = args['params'] as { threadId: string }, state = threads.get(params.threadId);
-      const reply: Agent.Reply = state ? { result: { thread: { ...w.nativeThread(), id: params.threadId,
-        status: { type: state.active ? 'active' : 'idle' }, path: '/fixture/' + (state.archived ? 'archived_sessions' : 'sessions') + '/' + params.threadId + '.jsonl' } } }
-        : { error: { code: -32000, message: 'Thread not found.' } };
+      const reply: Agent.Reply = readFailure ? { error: { code: -32000, message: readFailure } } : state ? { result: { thread: { ...w.nativeThread(), id: params.threadId,
+        status: { type: state.active ? 'active' : 'idle' }, path: pathless ? null : '/fixture/' + (state.archived ? 'archived_sessions' : 'sessions') + '/' + params.threadId + '.jsonl' } } }
+        : { error: { code: -32000, message: 'Thread not found: ' + params.threadId } };
       return { schemaVersion: 1, observationId: randomUUID(), callerPrincipalId: w.f.settings.principalId,
         serviceNodeId: 'native-agent', nativeVersion: '0.154.0', nativeExecutableHash: native.nativeExecutableHash,
         catalogHash: hashJson(native), epoch: 'fixture-epoch', requestId: randomUUID(), observedAt: new Date().toISOString(),
@@ -52,7 +54,11 @@ async function lifecycle(t: { after: (fn: () => void) => void }) {
       reply = { result: { thread: { ...w.nativeThread(), id, cwd: String(params['cwd']) }, cwd: String(params['cwd']),
         model: 'fixture-model', modelProvider: 'openai', approvalPolicy: 'on-request', approvalsReviewer: 'user',
         sandbox: { type: 'readOnly' }, reasoningEffort: 'high' } };
-    } else if (method === 'thread/archive') threads.get(String(params['threadId']))!.archived = true;
+    } else if (method === 'thread/archive') {
+      const failure = archiveFailures.get(String(params['threadId']));
+      if (failure) { phase = 'failed'; reply = { error: { code: -32000, message: failure } }; }
+      else threads.get(String(params['threadId']))!.archived = true;
+    }
     else if (method === 'thread/unarchive') {
       if (unarchive === 'failed') { phase = 'failed'; reply = { error: { code: -32000, message: 'Original session cannot be restored.' } }; }
       else if (unarchive === 'pending') phase = 'outcome_unknown';
@@ -71,7 +77,8 @@ async function lifecycle(t: { after: (fn: () => void) => void }) {
     taskId: w.state().task.objectId, expectedRevision: (await current()).pin.revision, archived });
   const archive = async (archived: boolean) => { const input = await request(archived); return w.f.first.archive(input, context(input.operationId)); };
   return { w, calls, threads, current, request, archive, setUnarchive: (value: typeof unarchive) => { unarchive = value; },
-    loseReply: () => { lostReply = true; } };
+    loseReply: () => { lostReply = true; }, archiveFailures,
+    setReadFailure: (value: string | null) => { readFailure = value; }, setPathless: () => { pathless = true; } };
 }
 
 async function continuation(f: Awaited<ReturnType<typeof lifecycle>>) {
@@ -148,6 +155,78 @@ test('ticket archive survives pruned Task snapshots and archives retained Run co
   assert.ok(prunedReads > 0);
   assert.ok([...f.threads.values()].every(thread => thread.archived));
   assert.deepEqual(f.calls.map(call => call.method), ['thread/archive', 'thread/archive']);
+});
+
+test('repeated archive preserves the ticket, result and history with a pathless native owner', async t => {
+  const f = await lifecycle(t), before = await f.current(); f.setPathless();
+  const input = await f.request(true), first = await f.w.f.first.archive(input, context(input.operationId));
+  assert.deepEqual(await f.w.f.second.archive(input, context(input.operationId)), first);
+  assert.equal(f.calls.length, 1);
+  assert.equal((await f.archive(true)).effectivelyArchived, true);
+  assert.deepEqual((await f.current()).value, before.value);
+  assert.equal(f.calls.length, 2);
+  await f.archive(false);
+  assert.deepEqual((await f.current()).value, before.value);
+  assert.equal(f.threads.get('native-primary')!.archived, false);
+});
+
+test('already archived and precisely missing native contexts do not block ticket archive', async t => {
+  for (const state of ['archived', 'missing', 'unknown'] as const) {
+    const f = await lifecycle(t), before = await f.current();
+    if (state === 'archived') f.threads.get('native-primary')!.archived = true;
+    else if (state === 'missing') f.threads.delete('native-primary');
+    else f.setReadFailure('unknown thread: native-primary');
+    assert.equal((await f.archive(true)).effectivelyArchived, true);
+    assert.equal(f.calls.length, 0);
+    assert.deepEqual((await f.current()).value, before.value);
+  }
+});
+
+test('unrelated native not_found errors preserve the ticket and cannot authorize a replacement', async t => {
+  for (const archived of [true, false]) {
+    const f = await lifecycle(t); if (!archived) await f.archive(true);
+    const before = await f.current(), callCount = f.calls.length;
+    f.setReadFailure('Configuration file not found: native-primary');
+    await assert.rejects(f.archive(archived), (error: unknown) => error instanceof IvyError && error.code === 'task_board_native_read_failed');
+    assert.deepEqual(await f.current(), before);
+    assert.equal(f.calls.length, callCount);
+  }
+});
+
+test('native disappearance after the read is accepted only for the requested thread', async t => {
+  for (const threadId of ['native-primary', 'another-thread']) {
+    const f = await lifecycle(t), before = await f.current(), input = await f.request(true);
+    f.archiveFailures.set('native-primary', 'Thread not found: ' + threadId);
+    const archive = () => f.w.f.first.archive(input, context(input.operationId));
+    if (threadId === 'native-primary') {
+      assert.equal((await archive()).effectivelyArchived, true);
+      assert.equal((await archive()).effectivelyArchived, true);
+    } else {
+      await assert.rejects(archive(), (error: unknown) => error instanceof IvyError && error.code === 'task_board_native_archive_failed');
+      assert.equal((await f.current()).metadata.effectivelyArchived, false);
+    }
+    assert.equal(f.calls.length, 1);
+    assert.deepEqual((await f.current()).value, before.value);
+  }
+});
+
+test('partial native archive retains the failure and a fresh request completes only remaining work', async t => {
+  const f = await lifecycle(t), before = await f.current();
+  const run = await f.w.f.first.store.read('task-board/run', f.w.state().run);
+  f.threads.set('earlier-thread', { archived: false });
+  await f.w.f.first.store.write('task-board/run', { ...run.value, primaryResourceRef: { ...run.value.primaryResourceRef!, nativeId: 'earlier-thread' } },
+    randomUUID(), { create: { parentId: null, name: 'Partially archived context fixture' } });
+  f.archiveFailures.set('earlier-thread', 'Storage is unavailable.');
+  const input = await f.request(true), reject = (error: unknown) => error instanceof IvyError && error.code === 'task_board_native_archive_failed';
+  await assert.rejects(f.w.f.first.archive(input, context(input.operationId)), reject);
+  assert.equal(f.threads.get('native-primary')!.archived, true);
+  assert.deepEqual(await f.current(), before);
+  await assert.rejects(f.w.f.second.archive(input, context(input.operationId)), reject);
+  assert.equal(f.calls.length, 2);
+  f.archiveFailures.clear();
+  assert.equal((await f.archive(true)).effectivelyArchived, true);
+  assert.deepEqual(f.calls.map(call => (call.params as { threadId: string }).threadId), ['native-primary', 'earlier-thread', 'earlier-thread']);
+  assert.deepEqual((await f.current()).value, before.value);
 });
 
 test('archiving accepted delegated work preserves its parent and closes the child native context', async t => {

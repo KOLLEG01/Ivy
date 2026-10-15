@@ -56,6 +56,28 @@ test('a conclusively rejected stale publication clears its recovery warning whil
   assert.deepEqual(runtime.diagnostics, []);
 });
 
+test('a terminal native catalog refusal clears recovery health without hiding a failed gate cleanup', async t => {
+  const f = taskBoardFixture(t), created = await f.create({ control: 'user' });
+  const operation = await f.first.operations.begin({ action: 'archive', operationId: randomUUID(),
+    taskId: created.task!.objectId, expectedRevision: created.task!.revision, archived: true },
+  { principalId: 'user', serviceNodeId: f.first.owner.serviceNodeId, generation: f.first.owner.generation, source: 'user' });
+  await f.first.coordination.acquire(operation);
+  const runtime = new TaskBoardReconciler(f.first), recover = f.first.recoverOperation.bind(f.first);
+  f.first.recoverOperation = async () => { throw new IvyError('not_found', 'The exact tool is not in the selected provider catalog.', 'unknown'); };
+  await step(runtime);
+  assert.ok(runtime.diagnostics.some(value => value.code === 'not_found'));
+  const refusal = new IvyError('not_found', 'The exact tool is not in the selected provider catalog.');
+  await f.first.operations.failure(operation.pin.objectId, refusal, false);
+  f.first.recoverOperation = async () => { throw new IvyError('service_unavailable', 'Gate cleanup cannot reach Hive.'); };
+  await step(runtime);
+  assert.ok(runtime.diagnostics.some(value => value.code === 'service_unavailable'));
+  f.first.recoverOperation = recover;
+  await step(runtime);
+  assert.deepEqual(runtime.diagnostics, []);
+  assert.equal((await f.first.store.read('task-board/operation', operation.pin.objectId)).value.error?.code, 'not_found');
+  assert.equal(await f.first.coordination.pending(), null);
+});
+
 test('recovery errors stay visible through backoff and clear only after a successful pass', async t => {
   const w = await nativeWorkflow(t), runtime = new TaskBoardReconciler(w.f.first);
   let now = Date.now(), attempts = 0;
