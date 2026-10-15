@@ -1,0 +1,24 @@
+{
+  "id": "social-instagram-webhook-example",
+  "name": "Instagram account webhook capture",
+  "enabled": false,
+  "intervalSeconds": 0,
+  "timeoutSeconds": 30,
+  "memoryMb": 128,
+  "script": "@file:instagram-webhook.mjs",
+  "dependencies": {},
+  "config": {
+    "appId": "00000000000000000",
+    "accountId": "00000000000000000",
+    "appSecretSecret": "instagram_app_webhook_secret",
+    "deduplicationDays": 7,
+    "maximumSeen": 2000
+  },
+  "secretNames": ["instagram_app_webhook_secret"],
+  "inputSecretName": "instagram_webhook_ingress_token",
+  "retention": {
+    "maximumCount": 1000,
+    "maximumAgeDays": 7,
+    "maximumBytes": 104857600
+  }
+}

@@ -1,6 +1,8 @@
 /** Hive's publication policy. Service publications belong to their own registries. */
 export const coreMcpNames: Record<string, string> = {
   "system.status": "hive_status",
+  "settings.get": "hive_settings",
+  "settings.save": "hive_settings_update",
   "system.instructions": "ivy_instructions",
   "system.toolSchema": "ivy_tool_schema",
   "system.inspectStorage": "hive_inspect_storage",
@@ -58,6 +60,7 @@ export const coreMcpNames: Record<string, string> = {
 /** Hive owns its core endpoint policy; registered services own theirs in RegistrySync. */
 export const publicCoreMcpMethods = new Set([
   "system.status",
+  "settings.get",
   "system.instructions",
   "system.toolSchema",
   "objects.stat", "objects.read", "objects.write", "objects.search", "objects.query",

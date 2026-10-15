@@ -6,6 +6,7 @@ import {
   Button,
   Field,
   FieldDescription,
+  FieldError,
   Input,
   Label,
   OptionSelect,
@@ -22,13 +23,19 @@ import type {
   SecretaryConfiguration,
   VoiceRule,
 } from "./types";
-import { client, readDocument, saveConfiguration, tr } from "./runtime";
+import { base, client, readDocument, saveConfiguration, tr } from "./runtime";
 const props = defineProps<{
   node: string;
   hostId: string;
   root: string;
   configuration: Pin | null;
 }>();
+const hiveSettings = useRemote(
+  (signal) => client.request("settings.get", {}, { signal }),
+  0,
+  ["objects/ivy/settings"],
+);
+const hiveSettingsUrl = new URL("./#/system/settings", base).href;
 const draft = ref<SecretaryConfiguration | null>(null),
   baseline = ref(""),
   pin = ref<Pin | null>(props.configuration),
@@ -165,6 +172,34 @@ async function save() {
     :loading="current.loading.value"
   />
   <section class="mx-auto w-full max-w-4xl">
+    <SettingsSection
+      :title="tr('Nachtruhe', 'Quiet hours')"
+      :description="
+        tr(
+          'Die globale Nachtruhe wird in Hive verwaltet und gilt auch für Secretary. Kontaktfenster können sie zusätzlich einschränken.',
+          'Global quiet hours are managed in Hive and also apply to Secretary. Contact windows can restrict contact further.',
+        )
+      "
+    >
+      <FieldError v-if="hiveSettings.error.value">{{
+        hiveSettings.error.value
+      }}</FieldError>
+      <p v-else-if="hiveSettings.value.value" class="text-sm">
+        {{
+          hiveSettings.value.value.settings.quietHours
+            ? `${hiveSettings.value.value.settings.quietHours.start}–${hiveSettings.value.value.settings.quietHours.end} · ${hiveSettings.value.value.settings.quietHours.timeZone}`
+            : tr(
+                "Keine globale Nachtruhe eingestellt.",
+                "No global quiet hours configured.",
+              )
+        }}
+      </p>
+      <Button as-child variant="link" class="px-0"
+        ><a :href="hiveSettingsUrl">{{
+          tr("Hive-Einstellungen öffnen", "Open Hive settings")
+        }}</a></Button
+      >
+    </SettingsSection>
     <Alert
       v-if="current.error.value || error"
       variant="destructive"
@@ -228,7 +263,7 @@ async function save() {
           >
           <Field orientation="horizontal"
             ><Label :for="'window-' + entry.key" class="flex-1 font-normal">{{
-              tr("Kontaktfenster begrenzen", "Limit contact window")
+              tr("Zusätzliches Kontaktfenster", "Additional contact window")
             }}</Label
             ><Switch
               :id="'window-' + entry.key"

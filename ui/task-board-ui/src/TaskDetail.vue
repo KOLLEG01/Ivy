@@ -14,6 +14,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  ExpandableContent,
   ImagePreview,
   Label,
   LazyMarkdownEditor as MarkdownEditor,
@@ -70,6 +71,7 @@ import type { DraftRequest } from "./action";
 import ActionState from "./ActionState.vue";
 import TaskEditor from "./TaskEditor.vue";
 import { useExecutionDefaults } from "./execution-defaults";
+import { useCommentPreferences } from "./comment-preferences";
 import TaskHistory from "./TaskHistory.vue";
 import NativeInput from "../../../packages/ui-client/src/NativeInput.vue";
 import TaskAttachment from "./TaskAttachment.vue";
@@ -94,8 +96,18 @@ const props = defineProps<{
   sheet?: boolean;
 }>();
 const emit = defineEmits<{ changed: []; deleted: [] }>();
+const { preferences: commentPreferences } = useCommentPreferences(() => props.workspace);
 const task = useRemote((signal) =>
     readDocument("task", props.taskId, props.workspace.rootObjectId, signal), 15000, ["objects/task-board/task"]);
+const displayComments = computed(() => [...(task.value.value?.value.comments ?? [])].sort((a, b) =>
+  commentPreferences.value.order === "newest-first" ? b.sequence - a.sequence : a.sequence - b.sequence,
+));
+const newestCommentId = computed(() => displayComments.value
+  .reduce<TaskBoard.Comment | undefined>((latest, comment) =>
+    comment.authorKind === "system" && comment.body === "Ticket edited" ? latest :
+      !latest || comment.sequence > latest.sequence ? comment : latest, undefined)?.commentId);
+const commentSections = computed(() => commentPreferences.value.order === "newest-first"
+  ? ["composer", "comments"] : ["comments", "composer"]);
 const executionDefaults = useExecutionDefaults(
   () => props.workspace,
   () => task.value.value?.value,
@@ -776,6 +788,8 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
               </TabsList>
 
               <TabsContent value="comments" class="mt-3 space-y-4">
+                <template v-for="section in commentSections" :key="section">
+                <template v-if="section === 'comments'">
                 <p
                   v-if="!task.value.value.value.comments.length"
                   class="text-sm text-muted-foreground"
@@ -784,7 +798,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                 </p>
                 <ol v-else class="space-y-3">
                   <li
-                    v-for="comment in task.value.value.value.comments"
+                    v-for="comment in displayComments"
                     :key="comment.commentId"
                   >
                     <p v-if="comment.authorKind === 'system' && comment.body === 'Ticket edited'"
@@ -812,14 +826,20 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                       <Button v-if="comment.sourceTaskId" as-child variant="link" size="sm" class="h-auto px-0">
                         <a :href="taskRoute(workspace.serviceNodeId, comment.sourceTaskId)">From another task</a>
                       </Button>
-                      <ContentView
+                      <ExpandableContent
                         v-if="!comment.nativeInput || comment.replyTo || nativeInput(comment)?.state === 'answered' || nativeInput(comment)?.state === 'expired'"
+                        :enabled="commentPreferences.collapseOlder && comment.commentId !== newestCommentId"
+                        :show-more-label="tr('Mehr anzeigen', 'Show more')"
+                        :show-less-label="tr('Weniger anzeigen', 'Show less')"
+                      >
+                      <ContentView
                         :text="comment.body"
                         media-type="text/markdown"
                         :trusted-image-urls="images.urls.value"
                         :trusted-attachments="images.files.value"
                         :preview-image="previewImage"
                       />
+                      </ExpandableContent>
                       <NativeInput v-if="comment.nativeInput && !comment.replyTo && !['answered', 'expired'].includes(nativeInput(comment)!.state)" compact
                         :input="nativeInput(comment)!" :epoch="comment.nativeInput.identity.epoch"
                         :available="writable" :base="base" :client="client" @answered="refresh" />
@@ -894,6 +914,8 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                     </CommentCard>
                   </li>
                 </ol>
+                </template>
+                <template v-else>
                 <p v-if="task.value.value.read.object.effectivelyArchived" role="status" class="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
                   This task is archived. Restore it from the task actions to comment or change it.
                 </p>
@@ -924,6 +946,8 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                     >
                   </div>
                 </div>
+                </template>
+                </template>
                 <Disclosure
                   v-if="task.value.value.value.attachments.length"
                   v-model:open="attachmentsOpen"

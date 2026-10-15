@@ -11,6 +11,36 @@ import { digest } from "../../dist/packages/contracts/src/canonical.js";
 const navigation = (page) =>
   page.getByRole("navigation", { name: "Page navigation" });
 
+test('Hive quiet hours save at desktop and mobile widths and protect concurrent settings changes', { timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await f.login(); await f.page.goto(f.base + '/#/system/settings');
+  const enable = f.page.getByRole('switch', { name: 'Enable quiet hours', exact: true });
+  await expect(enable).not.toBeChecked(); await enable.click();
+  const form = f.page.locator('form').filter({ has: enable });
+  await f.page.getByLabel('Start', { exact: true }).fill('23:00');
+  await f.page.getByLabel('End', { exact: true }).fill('07:00');
+  await f.page.getByLabel('Time zone', { exact: true }).fill('Europe/Berlin');
+  for (const width of [1440, 390]) {
+    await f.page.setViewportSize({ width, height: 900 });
+    await expect(form.getByRole('button', { name: 'Save', exact: true })).toBeVisible();
+    assert.ok(await f.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  }
+  await form.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(form.getByRole('status')).toContainText('Quiet hours saved in Hive.');
+  const saved = await f.client.request('settings.get', {});
+  assert.deepEqual(saved, { revision: 1, settings: { schemaVersion: 1,
+    quietHours: { start: '23:00', end: '07:00', timeZone: 'Europe/Berlin' } } });
+  await f.page.reload(); await expect(enable).toBeChecked();
+  await f.client.request('settings.save', { mutationId: await newOperationId(f.client), expectedRevision: 1,
+    settings: { schemaVersion: 1, quietHours: null } });
+  await f.page.getByLabel('End', { exact: true }).fill('08:00');
+  await form.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(form).toContainText('The setting has changed. Reload it before saving again.');
+  assert.equal((await f.client.request('settings.get', {})).settings.quietHours, null);
+  await form.getByRole('button', { name: 'Reload', exact: true }).click();
+  await expect(enable).not.toBeChecked(); assert.deepEqual(f.pageErrors, []);
+});
+
 test('UI launcher and rail share priority order and settings stay at the top right on desktop and mobile', { timeout: 60000 }, async t => {
   const f = await fixture(t);
   const ids = ['data-collector-ui', 'secretary-ui', 'dashboards-ui', 'agent-ui', 'task-board-ui', 'wiki-ui'];

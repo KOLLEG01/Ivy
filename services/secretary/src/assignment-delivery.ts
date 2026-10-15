@@ -7,6 +7,8 @@ import type { Document } from './store.js';
 import { assignmentName, effectiveRules } from './assignment-schema.js';
 import { AssignmentVoice } from './assignment-voice.js';
 import { secretaryBrowserNotice } from './browser-notice.js';
+import { automaticNotificationsAllowed, contactWindowOpen } from '../../../packages/sdk/src/node.js';
+export { contactWindowOpen } from '../../../packages/sdk/src/node.js';
 
 export interface AssignmentDeliveryTarget { serviceNodeId: string; channel: Chat.Channel }
 export interface AssignmentDecision { schemaVersion: 1; urgency: 'low' | 'normal' | 'high' | 'critical'; notification: 'none' | 'main' | 'voice'; text: string; reason: string }
@@ -30,14 +32,6 @@ export function assignmentDecision(answer: string): AssignmentDecision {
     'secretary_assignment_result_invalid', 'The assignment decision is incomplete.');
   return { schemaVersion: 1, urgency: row.urgency as AssignmentDecision['urgency'], notification: row.notification as AssignmentDecision['notification'],
     text: row.text as string, reason: row.reason as string };
-}
-
-export function contactWindowOpen(rule: ContactRule, now: Date): boolean {
-  if (!rule.window) return true;
-  const { timeZone, start, end } = rule.window;
-  const parts = new Intl.DateTimeFormat('en', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23', numberingSystem: 'latn' }).formatToParts(now);
-  const at = parts.find(value => value.type === 'hour')!.value + ':' + parts.find(value => value.type === 'minute')!.value;
-  return start < end ? at >= start && at < end : at >= start || at < end;
 }
 
 /** The original operation and recipient are saved before any external handoff. */
@@ -64,10 +58,11 @@ export class AssignmentDelivery {
     const currentConfiguration = await this.engine.store.named('secretary/configuration', 'configuration');
     need(currentAssignment && currentConfiguration, 'secretary_assignment_delivery_unavailable', 'The current assignment and contact rules must be available.');
     const rules = effectiveRules(currentConfiguration.value.rules, currentAssignment.value.rules);
+    const contactAllowed = await automaticNotificationsAllowed(this.engine.client, this.engine.now());
     let urgentVoiceFallback = false;
     if (decision.notification === 'voice') {
       const eligible = currentAssignment.value.enabled && value.effectiveRules.voice.enabled && rules.voice.enabled &&
-        decision.urgency === 'critical' && contactWindowOpen(rules.voice, this.engine.now());
+        decision.urgency === 'critical' && contactAllowed && contactWindowOpen(rules.voice, this.engine.now());
       const result = await this.voice.step(execution, decision, eligible);
       if (result === 'confirmed') return true;
       if (result === 'pending') return false;
@@ -103,7 +98,7 @@ export class AssignmentDelivery {
       : !rule.enabled ? 'main_disabled' : rank[decision.urgency] < rank[rule.minimumUrgency] ? 'below_minimum_urgency' : null;
     const minimumAge = currentAssignment.value.minimumNotificationAgeMinutes ?? this.minimumNotificationAgeMinutes;
     const deferred = !urgentVoiceFallback && now.getTime() < Date.parse(value.trigger.occurredAt) + minimumAge * 60_000 ? 'minimum_message_age'
-      : !contactWindowOpen(rule, now) ? 'outside_contact_window' : null;
+      : !contactAllowed || !contactWindowOpen(rule, now) ? 'outside_contact_window' : null;
     if (!reconcileOnly && !suppressed && !deferred)
       await secretaryBrowserNotice(this.engine, hashJson([value.executionId, value.result]), decision.text);
     if (!saved.value.request) {

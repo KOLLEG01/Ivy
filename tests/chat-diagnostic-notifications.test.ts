@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hashJson, IvyError } from '../packages/sdk/src/node.js';
 import type { Wire } from '../packages/sdk/src/node.js';
-import { DiagnosticNotifications } from '../services/chat-bridge/src/diagnostic-notifications.js';
+import { DiagnosticNotifications, diagnosticNotificationDelayMs } from '../services/chat-bridge/src/diagnostic-notifications.js';
 import { ChatNotices } from '../services/chat-bridge/src/notices.js';
 import { chatNativeFixture } from './fixtures/chat-native.js';
 
@@ -16,8 +16,29 @@ async function fixture(t: Parameters<typeof chatNativeFixture>[0]) {
   const signal = new AbortController().signal;
   const monitor = () => new DiagnosticNotifications(f.first, 'de', () => now);
   const queue = async () => { await new ChatNotices(f.first).recoverPending(); return (await f.first.queue.main()).value.queue; };
-  return { ...f, diagnostic, signal, monitor, queue, now: () => now, advance: (ms = 60_000) => { now += ms; } };
+  return { ...f, diagnostic, signal, monitor, queue, now: () => now,
+    setNow: (at: string) => { now = Date.parse(at); }, advance: (ms = diagnosticNotificationDelayMs) => { now += ms; } };
 }
+
+test('operational notices follow live Hive quiet hours without Secretary and discard resolved overnight incidents', async t => {
+  const f = await fixture(t);
+  const settings = { schemaVersion: 1 as const, quietHours: { timeZone: 'Europe/Berlin', start: '23:00', end: '07:00' } };
+  const saved = await f.first.store.client.request('settings.save', { mutationId: f.operation('quiet-hours'), expectedRevision: 0, settings });
+  const tick = () => f.monitor().tick(f.signal);
+  f.setNow('2026-10-13T21:00:00.000Z'); // 23:00 in Berlin: the configured window just closed.
+  f.kernel.registry.diagnostic(f.diagnostic); await tick(); f.advance(); await tick();
+  assert.equal((await f.queue()).length, 0);
+  f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' }); await tick();
+  f.setNow('2026-10-14T04:50:00.000Z'); // A new failure remains present into the morning.
+  f.kernel.registry.diagnostic(f.diagnostic); await tick(); f.advance(); await tick();
+  assert.equal((await f.queue()).length, 0);
+  settings.quietHours.end = '08:00'; // A live policy change must take effect without restart.
+  await f.first.store.client.request('settings.save', { mutationId: f.operation('quiet-hours-changed'), expectedRevision: saved.revision, settings });
+  f.setNow('2026-10-14T05:00:00.000Z'); await tick();
+  assert.equal((await f.queue()).length, 0);
+  f.setNow('2026-10-14T06:00:00.000Z'); await tick();
+  assert.equal((await f.queue()).length, 1);
+});
 
 test('persistent diagnostics create one durable Main notice, recover once and resume a lost receipt across restart', async t => {
   const f = await fixture(t);
@@ -73,6 +94,20 @@ test('brief failures and the notice monitor\'s own delivery failure do not creat
   f.kernel.registry.diagnostic({ ...f.diagnostic, code: 'chat_diagnostics_unavailable', severity: 'error' });
   f.advance(); await f.monitor().tick(f.signal);
   assert.equal((await f.queue()).length, 0);
+});
+
+test('repeated outages shorter than five minutes remain quiet, but a continuous failure is reported', async t => {
+  const f = await fixture(t);
+  for (let incident = 0; incident < 3; incident++) {
+    f.kernel.registry.diagnostic(f.diagnostic); await f.monitor().tick(f.signal);
+    f.advance(150_000); await f.monitor().tick(f.signal);
+    assert.equal((await f.queue()).length, 0);
+    f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' });
+    await f.monitor().tick(f.signal); f.advance(30_000);
+  }
+  f.kernel.registry.diagnostic(f.diagnostic); await f.monitor().tick(f.signal);
+  f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1);
 });
 
 test('an incomplete diagnostic snapshot never emits a false recovery', async t => {

@@ -344,6 +344,30 @@ test("Instagram exchanges a short-lived token once and requires a new grant afte
   });
 });
 
+test("Instagram honors the supplied actual expiry and rejects an expired grant before requests", async (t) => {
+  const directory = await privateDirectory(t);
+  fixture(t, [
+    { path: "/v25.0/123", body: { user_id: "123" } },
+    { path: "/v25.0/123/media", body: { data: [] } },
+  ]);
+  const config = {
+    ...igConfig,
+    authMode: "long_lived",
+    accessTokenIssuedAt: stamp(2),
+    accessTokenExpiresAt: stamp(-20),
+  };
+  await instagram({ config, secrets: tokenSecrets });
+  assert.equal((await authCache(directory, "instagram")).expiresAt, now + 20 * day);
+  await assert.rejects(instagram({
+    config: { ...config, accessTokenExpiresAt: stamp(1) },
+    secrets: tokenSecrets,
+  }), { code: "authentication_required" });
+  await assert.rejects(instagram({
+    config: { ...config, accessTokenExpiresAt: stamp(3) },
+    secrets: tokenSecrets,
+  }), { code: "configuration_invalid" });
+});
+
 test("Instagram refuses refresh modes for Facebook Login instead of applying the wrong token protocol", async (t) => {
   const noFetch = t.mock.method(globalThis, "fetch", () => {
     throw new Error("Must not request");
@@ -981,8 +1005,10 @@ test("Instagram inbox reports incomplete comments when media counts contradict a
     },
     {
       path: "/v25.0/1/comments",
-      check: (url) =>
-        assert.equal(url.searchParams.get("after"), "next-comments"),
+      check: (url) => {
+        assert.equal(url.searchParams.get("after"), "next-comments");
+        assert.equal(url.searchParams.get("limit"), "50");
+      },
       body: { data: [] },
     },
   ]);

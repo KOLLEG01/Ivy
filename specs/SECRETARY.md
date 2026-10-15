@@ -112,7 +112,10 @@ Sources: [engine](../services/secretary/src/engine.ts),
 - Preserve Teams/WhatsApp text in notices; summarize email faithfully. Keep useful researched
   facts separate from source text. Do not suggest replies or promise action on the user's behalf.
 - Save notice intent with the assessment. Minimum age and quiet time govern new dispatch,
-  not source capture or triage. Only explicit configured urgency rules bypass quiet time.
+  not source capture or triage. Hive's global quiet hours always gate new automatic notices
+  and calls, including critical urgency. Secretary contact windows and local policy may
+  restrict contact further, but cannot bypass the global setting. Its settings UI links
+  to the single Hive settings editor.
 - Main notices discover the single ChatBridge through Hive, without a separately configured
   destination. Offered replies keep their original operation and are polled until WhatsApp
   confirms delivery. Voice escalation retains its original

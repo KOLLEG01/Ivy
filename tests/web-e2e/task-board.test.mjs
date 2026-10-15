@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { expect } from "@playwright/test";
 import { taskBoardFixture } from "./fixtures/task-board-fixture.mjs";
 import { choose } from "./fixtures/select.mjs";
+import { randomUUID } from "node:crypto";
 
 const fields = (title, category = null) => ({
   title,
@@ -119,6 +120,77 @@ for (const width of [1440, 390]) test(`comments accept multiple files and furthe
   assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert.deepEqual(f.pageErrors, []);
 });
+
+for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["mobile", { width: 390, height: 844 }]]) {
+  test(`comment display preferences retain order and expandable previews on ${layout}`, { timeout: 180000 }, async t => {
+    const f = await taskBoardFixture(t, { viewport });
+    const created = await f.invoke({ action: "create", fields: fields("Comment display preferences") });
+    const id = created.task.objectId;
+    const longText = "A long paragraph wraps into several rendered lines at every screen size. ".repeat(55);
+    const add = async (body, requests = []) => f.invoke({ action: "comment", taskId: id,
+      expectedRevision: (await f.client.request("objects.stat", { objectId: id })).currentRevision,
+      commentId: randomUUID(), body, attachments: [], requests, responses: [], replyTo: null, moveToTodo: false,
+    });
+    await add("Older long comment\n\n" + longText + "\n\nEnd of older comment", [
+      { requestId: randomUUID(), type: "approval", title: "Visible approval", detail: "Approval detail remains visible." },
+    ]);
+    await add("Short middle comment");
+    await add("Newest long comment\n\n" + longText + "\n\nEnd of newest comment");
+    const route = "#/tasks?id=" + id + "&node=browser-task-board";
+    await f.open(route);
+    const cards = f.page.locator('[data-slot="comment-card"]');
+    const older = cards.filter({ hasText: "Older long comment" });
+    const latest = cards.filter({ hasText: "Newest long comment" });
+    const editor = f.page.getByLabel("Comment", { exact: true });
+    const ordered = async () => cards.evaluateAll(elements => elements.map(element => element.textContent));
+    const composerPosition = async () => {
+      const input = await editor.boundingBox(), first = await cards.first().boundingBox(), last = await cards.last().boundingBox();
+      return { before: input.y < first.y, after: input.y > last.y + last.height };
+    };
+    await expect(cards).toHaveCount(3);
+    await expect(cards.first()).toContainText("Newest long comment");
+    await expect(cards.last()).toContainText("Older long comment");
+    await expect.poll(async () => (await composerPosition()).before).toBe(true);
+    const more = older.getByRole("button", { name: "Show more", exact: true });
+    await expect(more).toHaveAttribute("aria-expanded", "false");
+    await expect(older.locator('[data-slot="expandable-content-fade"]')).toBeVisible();
+    await expect(older.getByText("Approval detail remains visible.")).toBeVisible();
+    await expect(older.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
+    await expect(latest.getByRole("button", { name: "Show more", exact: true })).toHaveCount(0);
+    await expect(latest.getByText("End of newest comment", { exact: true })).toBeVisible();
+    await expect(cards.filter({ hasText: "Short middle comment" }).getByRole("button", { name: "Show more", exact: true })).toHaveCount(0);
+    const clippedHeight = (await older.boundingBox()).height;
+    await more.focus();
+    await more.press("Enter");
+    await expect(older.getByRole("button", { name: "Show less", exact: true })).toHaveAttribute("aria-expanded", "true");
+    await expect(older.getByText("End of older comment", { exact: true })).toBeVisible();
+    assert.ok((await older.boundingBox()).height > clippedHeight);
+    await older.getByRole("button", { name: "Show less", exact: true }).click();
+    await expect(more).toHaveAttribute("aria-expanded", "false");
+    const storedComments = (await f.task(id)).comments.map(comment => comment.commentId);
+    await f.page.goto(f.url + "#/settings?node=browser-task-board");
+    const order = f.page.getByLabel("Comment order", { exact: true });
+    const shorten = f.page.getByRole("checkbox", { name: "Shorten older comments", exact: true });
+    await expect(order).toHaveAttribute("data-value", "newest-first");
+    await expect(shorten).toBeChecked();
+    await choose(order, "oldest-first");
+    await shorten.click();
+    await f.page.reload();
+    await expect(order).toHaveAttribute("data-value", "oldest-first");
+    await expect(shorten).not.toBeChecked();
+    await f.page.goto(f.url + route);
+    await expect(cards.first()).toContainText("Older long comment");
+    await expect(cards.last()).toContainText("Newest long comment");
+    await expect.poll(async () => (await composerPosition()).after).toBe(true);
+    await expect(more).toHaveCount(0);
+    await expect(older.getByText("End of older comment", { exact: true })).toBeVisible();
+    assert.equal((await ordered()).length, 3);
+    assert.deepEqual((await f.task(id)).comments.map(comment => comment.commentId), storedComments);
+    assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    assert.deepEqual(f.pageErrors, []);
+    assert.deepEqual(f.externalRequests, []);
+  });
+}
 
 for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["mobile", { width: 390, height: 844 }]]) {
   test(`running contact edit preserves inherited native options on ${layout}`, { timeout: 180000 }, async t => {

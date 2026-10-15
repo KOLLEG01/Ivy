@@ -68,11 +68,18 @@ the original transport result or stays unknown. Transport retention and recovery
 `de` for ChatBridge-authored WhatsApp copy; omission uses English. It is a presentation setting,
 not part of the workspace `Definition` or the separate transcription-language setting.
 
-ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting one minute
-enters Main once; confirmed resolution produces one recovery notice. Original notice requests
+ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting five minutes
+enters Main once; resolution must remain stable for five minutes before one recovery notice.
+Hive's shared quiet hours govern operational notices without depending on an optional service.
+Quiet periods retain current failures without queuing resolved incidents or recoveries for later
+delivery. WhatsApp also gates notice replies queued before quiet hours, while explicit user
+replies can progress. Paused notices keep their original message IDs and receipts. Requests
 and deduplication state survive restarts in the existing journal. Incomplete diagnostic reads
 cannot imply recovery. Short reconnects remain quiet, and failures of the notice mechanism
 itself remain visible as a diagnostic without recursively generating notices.
+Receive receipts save immutable reply snapshots before changing delivery state. If retention
+prunes an offered reply revision, recovery verifies its current immutable content against that
+original snapshot and preserves the original offer and acknowledgement identities.
 Checks: [operational notices](../tests/chat-diagnostic-notifications.test.ts),
 [binding evidence](../tests/hive-tool-binding-diagnostics.test.ts).
 

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { normalizeMessageContent } from "baileys";
 import type { WAMessage } from "baileys";
-import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
+import { automaticNotificationsAllowed, IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
 import type {
   Agent,
   Chat,
@@ -86,6 +86,7 @@ export class WhatsAppRuntime {
       this.authStore,
       dataRoot,
       () => this.wake(),
+      () => this.attached ? automaticNotificationsAllowed(this.attached.bridge.main.store.client, new Date()) : Promise.resolve(false),
     );
   }
   private wake(): void {

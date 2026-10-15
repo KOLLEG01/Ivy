@@ -18,7 +18,8 @@ import {
 } from "../services/data-collector/src/schema.js";
 import type { Output } from "../services/data-collector/src/schema.js";
 import { IvyError } from "../packages/sdk/src/node.js";
-import type { RpcClient } from "../packages/sdk/src/node.js";
+import type { RpcClient, Wire } from "../packages/sdk/src/node.js";
+import { mcpToolResult } from "../services/data-collector/src/native-mcp.js";
 
 const settings = settingsSchema.parse({
   secrets: { SELECTED: "selected-fixture", UNSELECTED: "unselected-fixture" },
@@ -63,6 +64,42 @@ async function tempRoot(t: TestContext) {
   });
   return root;
 }
+
+test("collector MCP errors preserve canonical codes and outcomes without provider details", () => {
+  const envelope = JSON.parse(JSON.stringify({ error: new IvyError("target_conflict", "private-provider-message", "not_executed", { token: "private-token" }).toWire() })) as Wire.Json;
+  const replies: Record<string, Wire.Json>[] = [
+    { isError: true, structuredContent: envelope },
+    { isError: true, content: [{ type: "text", text: JSON.stringify(envelope) }] },
+  ];
+  for (const reply of replies) {
+    assert.throws(() => mcpToolResult(reply), (error: unknown) => {
+      assert.ok(error instanceof IvyError);
+      assert.equal(error.code, "target_conflict");
+      assert.equal(error.outcome, "not_executed");
+      assert.equal(error.details, undefined);
+      assert.doesNotMatch(error.message, /private/);
+      return true;
+    });
+  }
+  assert.throws(() => mcpToolResult({ isError: true, content: [{ type: "text", text: "private-unstructured-error" }] }), { code: "provider_unavailable", outcome: "unknown" });
+  assert.throws(() => mcpToolResult({ isError: true, structuredContent: { error: { code: -32000, message: "private", data: { code: "invalid code", outcome: "not_executed" } } } }), { code: "provider_unavailable" });
+  assert.deepEqual(mcpToolResult({ structuredContent: { value: 1 } }), { value: 1 });
+  assert.equal(mcpToolResult({ content: [{ type: "text", text: "null" }] }), null);
+});
+
+test("collector MCP workers retain error identity through the local bridge", processOptions, async (t) => {
+  const root = await tempRoot(t);
+  let closed = 0;
+  const runner = new TaskRunner(root, resolve("."), settings, () => ({
+    async call() { throw new IvyError("target_conflict", "private-provider-message", "not_executed", { token: "private-token" }); },
+    async close() { closed++; },
+  }));
+  const value = task("export default async ({mcp}) => { try { await mcp.call('source.read',{}); } catch(error) { return {data:{code:error.code,outcome:error.outcome,message:error.message,details:error.details??null}}; } throw new Error('missing error'); }");
+  value.mcp = { serviceNodeId: "fixture.agent-manager", cwd: root, server: "fixture", tools: ["source.read"] };
+  const result = await runner.run(value, null, null, new AbortController().signal);
+  assert.deepEqual(result.data, { code: "target_conflict", outcome: "not_executed", message: "MCP request failed.", details: null });
+  assert.equal(closed, 1);
+});
 
 test(
   "collector MCP workers use a run-local bridge and never receive service credentials",

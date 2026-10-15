@@ -91,12 +91,13 @@ export class WhatsAppJournal {
     this.write("UPDATE inbox SET state='done',request=NULL,message=CASE WHEN EXISTS(SELECT 1 FROM kv WHERE key='inbox-content:'||inbox.id) THEN '' ELSE message END WHERE id=?",id);
     for(const key of ['payload:','transcript:','direct-input:','direct-request:','native:','native:input:','interaction:','interaction:input:','steer-binding:','recover-main:'])this.set(key+id,null);
   }
-  enqueue(key: string, jid: string, text: string): string[] {
+  enqueue(key: string, jid: string, text: string, automatic = false): string[] {
     const chars = [...text], ids: string[] = [];
     for (let offset=0;offset<chars.length;offset+=3500) {
       const part=chars.slice(offset,offset+3500).join(''), id=identity('out',key,offset).slice(0,32).toUpperCase(); ids.push(id);
       const previous=this.db.prepare('SELECT jid,text FROM outgoing WHERE id=?').get(id);
       requireThat(!previous || previous['jid']===jid && previous['text']===part,'whatsui_identity_conflict','A saved reply cannot change its recipient or text.');
+      if(automatic)this.set('out-automatic:'+id,true);
       if(!previous){this.write('INSERT OR IGNORE INTO outgoing(id,jid,text) VALUES(?,?,?)',id,jid,part);this.set('out-created:'+id,Date.now());}
     }
     return ids;
@@ -142,7 +143,7 @@ export class WhatsAppJournal {
         outputs.push(id);if(outputs.length===256)break;
       }
       for(const id of outputs){
-        this.write('DELETE FROM outgoing WHERE id=?',id);this.set('out-created:'+id,null);this.set('send-attempt:'+id,null);
+        this.write('DELETE FROM outgoing WHERE id=?',id);this.set('out-created:'+id,null);this.set('send-attempt:'+id,null);this.set('out-automatic:'+id,null);
       }
     });
   }

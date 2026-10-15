@@ -4,11 +4,51 @@ import {
   IvyError,
   NativeOwner,
   newOperationId,
+  responseValue,
   serviceTools,
   validateAgent,
 } from "../../../packages/sdk/src/node.js";
 import type { Agent, RpcClient, Wire } from "../../../packages/sdk/src/node.js";
 import type { Task } from "./schema.js";
+
+export function mcpToolResult(value: Record<string, Wire.Json>): Wire.Json {
+  let payload = value["structuredContent"];
+  let parsed = payload !== undefined && payload !== null;
+  if (payload === undefined || payload === null) {
+    const content = value["content"];
+    if (Array.isArray(content))
+      for (const entry of content) {
+        if (
+          entry && typeof entry === "object" && !Array.isArray(entry) &&
+          entry["type"] === "text" && typeof entry["text"] === "string"
+        ) {
+          try {
+            payload = JSON.parse(entry["text"]) as Wire.Json;
+            parsed = true;
+            break;
+          } catch { /* Preserve non-JSON MCP content below. */ }
+        }
+      }
+  }
+  if (value["isError"] === true) {
+    if (
+      payload && typeof payload === "object" &&
+      !Array.isArray(payload) && "error" in payload
+    ) {
+      try {
+        responseValue({ jsonrpc: "2.0", id: "mcp-tool", error: payload["error"] }, "mcp-tool");
+      } catch (error) {
+        if (
+          error instanceof IvyError && error.code !== "invalid_frame" &&
+          /^[a-z][a-z0-9_]{0,127}$/.test(error.code)
+        )
+          throw new IvyError(error.code, "The MCP tool returned an error.", error.outcome);
+      }
+    }
+    throw new IvyError("provider_unavailable", "The MCP tool returned an error.", "unknown");
+  }
+  return parsed ? payload! : value;
+}
 
 /** A technical, ephemeral MCP context. This transport never starts a model turn. */
 export class NativeMcpSession {
@@ -132,34 +172,7 @@ export class NativeMcpSession {
         tool,
         arguments: args,
       })) as Record<string, Wire.Json>;
-      if (value["isError"] === true)
-        throw new IvyError(
-          "provider_unavailable",
-          "The MCP tool returned an error.",
-        );
-      if (
-        value["structuredContent"] !== undefined &&
-        value["structuredContent"] !== null
-      )
-        return value["structuredContent"];
-      const content = value["content"];
-      if (Array.isArray(content))
-        for (const entry of content) {
-          if (
-            entry &&
-            typeof entry === "object" &&
-            !Array.isArray(entry) &&
-            entry["type"] === "text" &&
-            typeof entry["text"] === "string"
-          ) {
-            try {
-              return JSON.parse(entry["text"]) as Wire.Json;
-            } catch {
-              /* Preserve non-JSON MCP content below. */
-            }
-          }
-        }
-      return value;
+      return mcpToolResult(value);
     });
     this.tail = work.catch(() => undefined);
     return work;

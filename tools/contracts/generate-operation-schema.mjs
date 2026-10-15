@@ -84,6 +84,15 @@ const byLocation = (extra) =>
 const paged = (item) =>
   obj({ items: array(item), nextCursor: nullable(str(8192)) });
 const defs = {
+  HiveSettings: obj({
+    schemaVersion: { const: 1 },
+    quietHours: nullable(obj({
+      timeZone: str(128),
+      start: { type: "string", pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+      end: { type: "string", pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]$" },
+    })),
+  }),
+  HiveSettingsSnapshot: obj({ revision: uint(), settings: ref("HiveSettings") }),
   OpenaiConfiguration: obj({
     schemaVersion: { const: 1 },
     appId: nullable({ type: "string", pattern: "^asdk_app_[a-f0-9]{32}$" }),
@@ -530,6 +539,9 @@ function op(
   };
 }
 op("system.status", obj({}), ref("Status"));
+op("settings.get", obj({}), ref("HiveSettingsSnapshot"));
+op("settings.save", obj({ mutationId, expectedRevision: uint(), settings: ref("HiveSettings") }),
+  ref("HiveSettingsSnapshot"), "client", true);
 op("openai.getConfiguration", obj({}), ref("OpenaiConfigurationSnapshot"));
 op("openai.saveConfiguration", obj({
   mutationId,

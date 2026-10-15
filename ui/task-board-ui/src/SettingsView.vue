@@ -25,11 +25,13 @@ import {
 } from "./execution-options";
 import { useAction } from "./action";
 import ActionState from "./ActionState.vue";
+import { useCommentPreferences } from "./comment-preferences";
 
 const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   available: boolean;
 }>();
+const { preferences: commentPreferences, storageError: preferenceStorageError } = useCommentPreferences(() => props.workspace);
 const draft = ref<TaskBoard.Configuration | null>(null),
   baseline = ref(""),
   pin = ref<TaskBoard.ObjectPin | null>(null);
@@ -200,6 +202,31 @@ const save = async () => {
     :loading="current.loading.value"
   />
   <section class="mx-auto w-full max-w-4xl">
+    <SettingsSection
+      :title="tr('Kommentare', 'Comments')"
+      :description="tr('Diese Anzeigeeinstellungen gelten für diesen Browser und werden sofort gespeichert.', 'These display settings apply to this browser and are saved immediately.')"
+    >
+      <div class="grid gap-4 sm:grid-cols-2">
+        <Field>
+          <Label for="comment-order">{{ tr('Kommentarreihenfolge', 'Comment order') }}</Label>
+          <OptionSelect id="comment-order" v-model="commentPreferences.order" class="w-full">
+            <option value="newest-first">{{ tr('Neueste zuerst', 'Newest first') }}</option>
+            <option value="oldest-first">{{ tr('Älteste zuerst', 'Oldest first') }}</option>
+          </OptionSelect>
+          <FieldDescription>{{ tr('Das Eingabefeld steht bei den neuesten Kommentaren.', 'The input field appears next to the newest comments.') }}</FieldDescription>
+        </Field>
+        <Field>
+          <Label for="collapse-older-comments" class="font-normal">
+            <Checkbox id="collapse-older-comments" v-model="commentPreferences.collapseOlder" />
+            {{ tr('Ältere Kommentare kürzen', 'Shorten older comments') }}
+          </Label>
+          <FieldDescription>{{ tr('Längere Kommentare zeigen zunächst etwa fünf Zeilen. „Mehr anzeigen“ öffnet den vollständigen Text. Der neueste Kommentar bleibt vollständig sichtbar.', 'Longer comments initially show about five lines. Show more reveals the full text. The newest comment stays fully visible.') }}</FieldDescription>
+        </Field>
+      </div>
+      <Alert v-if="preferenceStorageError" variant="destructive" class="mt-4">
+        <AlertDescription>{{ preferenceStorageError }}</AlertDescription>
+      </Alert>
+    </SettingsSection>
     <RemoteState
       :loading="current.loading.value"
       :error="current.error.value"

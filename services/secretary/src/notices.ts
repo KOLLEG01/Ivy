@@ -1,4 +1,4 @@
-import { callBound, serviceTools, hashJson, IvyError, newOperationId, mainNotification, chatInterfaceVersion } from '../../../packages/sdk/src/node.js';
+import { automaticNotificationsAllowed, callBound, serviceTools, hashJson, IvyError, newOperationId, mainNotification, chatInterfaceVersion } from '../../../packages/sdk/src/node.js';
 import type { Chat, Wire } from '../../../packages/sdk/src/node.js';
 import { need, same } from './schema.js';
 import type { Notice, NoticeTarget, Pin } from './schema.js';
@@ -63,6 +63,7 @@ export class SecretaryNotices {
       need(bound.definitionHash === escalation!.requestDefinitionHash, 'tool_definition_changed', 'The configured Phone request definition changed.');
       let callId = voice.callId;
       if (!callId) {
+        if (!await automaticNotificationsAllowed(this.engine.client, this.engine.now())) return;
         const result = await callBound(this.engine.client, bound, { operationId: voice.operationId, recipientId: escalation!.recipientId, route: 'voice', voicePrompt: voicePrompt(notice.text) }, voice.operationId) as Record<string, Wire.Json>;
         callId = typeof result['callId'] === 'string' ? result['callId'] : null;
         need(callId, 'secretary_voice_unresolved', 'PhoneBridge returned no original call identity.');
@@ -110,7 +111,8 @@ export class SecretaryNotices {
     const suppressed = suppression((await this.engine.source(item.value.sourceId)).value.definition, decision.assessment, decision.policy);
     if (suppressed) { need(notice.state === 'suppressed' && notice.reason === suppressed && !notice.request && !notice.evidence, 'secretary_notice_mismatch', 'A suppressed assessment cannot gain a dispatch.'); return; }
     need(notice.state !== 'suppressed', 'secretary_notice_mismatch', 'A required notice cannot be silently suppressed.');
-    const now = this.engine.now(), at = now.toISOString(), isQuiet = quiet(this.engine.settings.policy, decision.assessment.urgency, now);
+    const now = this.engine.now(), at = now.toISOString(), isQuiet =
+      !await automaticNotificationsAllowed(this.engine.client, now) || quiet(this.engine.settings.policy, decision.assessment.urgency, now);
     const isTooYoung = decision.assessment.notification !== 'voice' && now.getTime() < Date.parse(item.value.message.occurredAt) + this.minimumMessageAgeMinutes * 60_000;
     const currentSource = this.engine.settings.sources.find(source => source.sourceId === item.value.sourceId);
     const authorized = currentSource && !ignored(currentSource, item.value.message);

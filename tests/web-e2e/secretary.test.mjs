@@ -123,6 +123,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     assert.ok(queries.every(request => request.params.includeContent === true));
     assert.equal(requests.filter(request => request.method === 'objects.read' && savedIds.has(request.params.objectId)).length, 0);
     await f.page.goto(f.base + '/ui/secretary-ui/#/rules');
+    const globalQuietHours = { start: '23:00', end: '07:00', timeZone: 'Europe/Berlin' };
+    await f.client.request('settings.save', { mutationId: await newOperationId(f.client), expectedRevision: 0,
+      settings: { schemaVersion: 1, quietHours: globalQuietHours } });
+    await expect(f.page.getByText('23:00–07:00 · Europe/Berlin', { exact: true })).toBeVisible();
+    await expect(f.page.getByRole('link', { name: /^(Open Hive settings|Hive-Einstellungen öffnen)$/ })).toHaveAttribute('href', f.base + '/#/system/settings');
     const desktopNotifications = f.page.getByRole('switch', { name: /^(Allow desktop notifications|Desktop-Benachrichtigungen erlauben)$/ });
     const saveSettings = f.page.getByRole('button', { name: /^(Save|Speichern)$/ });
     await expect(desktopNotifications).toBeChecked(); await fits();
@@ -133,6 +138,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await desktopNotifications.click(); await saveSettings.click();
     await expect(f.page.getByRole('status')).toContainText(/Saved revision|Revision .* gespeichert/);
     assert.equal(configurationSaves.length, 2); assert.equal(configurationSaves[1].value.browserNotifications, true);
+    assert.deepEqual((await f.client.request('settings.get', {})).settings.quietHours, globalQuietHours);
     await f.page.reload(); await expect(desktopNotifications).toBeChecked(); await fits();
     assert.deepEqual(f.pageErrors, []); assert.deepEqual(f.externalRequests, []);
   });

@@ -31,7 +31,7 @@ const connection=context.mcp;
 context.mcp={call:async(tool,args={})=>{
 const response=await fetch(connection.url,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+connection.token},body:JSON.stringify({tool,arguments:args}),signal:context.signal});
 const reply=await response.json();
-if(!response.ok||reply.error) throw Object.assign(new Error('MCP request failed.'),{code:reply.error?.code??'provider_unavailable'});
+if(!response.ok||reply.error) throw Object.assign(new Error('MCP request failed.'),{code:reply.error?.code??'provider_unavailable',outcome:reply.error?.outcome??'unknown'});
 return reply.result;
 }};
 }

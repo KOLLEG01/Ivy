@@ -177,7 +177,21 @@ export class ChatOutbox {
       new Set(value.replies.map(pin => pin.objectId)).size === value.replies.length,
       'chat_offer_mismatch', 'An offer must retain its exact receiving operation, channel and selected reply identities.');
     const replies: ReplyDocument[] = [];
-    for (const pin of value.replies) replies.push(await this.reply(pin, value.channel));
+    for (const pin of value.replies) {
+      try { replies.push(await this.reply(pin, value.channel)); }
+      catch (error) {
+        if (!(error instanceof IvyError && error.code === 'revision_pruned')) throw error;
+        const outcome = operation.value.outcome;
+        const snapshot = outcome?.action === 'receive' && outcome.replies.find(reply => same(reply.object, pin));
+        requireThat(snapshot, 'chat_offer_mismatch', 'A pruned offer reply needs its original retained receive snapshot.');
+        const current = await this.reply(pin.objectId, value.channel);
+        requireThat(current.pin.revision >= pin.revision && same(immutableReply(current.value), immutableReply(snapshot.data)) &&
+          (snapshot.data.state !== 'confirmed' || current.value.state === 'confirmed') &&
+          (snapshot.data.state === 'pending' || current.value.state !== 'pending'),
+          'chat_identity_conflict', 'An offered reply can change its delivery state, but not its original immutable content.');
+        replies.push(current);
+      }
+    }
     requireThat(replies.every((reply, index) => reply.value.sequence > value.afterSequence &&
       (index === 0 || reply.value.sequence > replies[index - 1]!.value.sequence)) && value.throughSequence === (replies.at(-1)?.value.sequence ?? value.afterSequence),
       'chat_offer_mismatch', 'An offer cursor cannot skip or reorder its exact selected replies.');
@@ -238,10 +252,12 @@ export class ChatOutbox {
       }
     }
     const offered = await this.offer(saved.pin, caller);
-    for (const reply of offered.replies) await this.mark(reply, 'outcome_unknown', offered.document.value.createdAt, scope);
     const outcome: Chat.ActionOutcome = { action: 'receive', operationId: request.operationId, offer: viewOffer(offered.document), replies: offered.replies.map(view) };
     requireThat(bytes({ ...operation.value, phase: 'succeeded', outcome }) <= maximumPageBytes, 'chat_page_too_large', 'The original complete receive response exceeds its byte limit.');
-    return (await this.operations.finish(scope, outcome)).value;
+    // Keep immutable reply snapshots before mutable state updates can prune their selected revisions.
+    const completed = await this.operations.finish(scope, outcome);
+    for (const reply of offered.replies) await this.mark(reply, 'outcome_unknown', offered.document.value.createdAt, scope);
+    return completed.value;
   }
   async acknowledge(caller: string, original: Chat.AcknowledgeRequest): Promise<Chat.Operation> {
     this.admission.authorize(caller, original.expectedBridge); validateChat('AcknowledgeRequest', original);

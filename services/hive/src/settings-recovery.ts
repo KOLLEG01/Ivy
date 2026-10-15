@@ -10,6 +10,7 @@ import { STORAGE_FORMAT } from './storage-schema.js';
 /** Host-only recovery. The source snapshot can contain secrets; never print Object content. */
 export const settingsContracts = [
   'ivy/host-configuration',
+  'ivy/settings',
   'agent/instructions',
   'agent/mcp-configuration',
   'agent/skills',

@@ -55,6 +55,13 @@ Sources: [Objects](../services/hive/src/objects.ts), [contract admission](../ser
 
 ## Reads and routing
 
+- Hive owns global preferences at `/ivy-settings` using the `ivy/settings` contract.
+  `settings.get` reads their revision; `settings.save` uses CAS and an original mutation receipt.
+  Quiet hours are optional, use distinct local start/end times in an IANA time zone and can
+  cross midnight. The Console is their editor. Clients read the current setting before
+  automatic contact; missing optional services do not affect it. A failed settings read
+  cannot authorize contact. Explicit user interactions are unaffected.
+
 - Queries are bounded, typed and parameterized. Null/missing values, scalar comparisons and
   literal substring matching follow the [query implementation](../services/hive/src/query.ts);
   no caller SQL, regex or implicit structured-value stringification is accepted.

@@ -32,7 +32,8 @@ export class WhatsAppSocket {
   private reading=false;
   private flushing=false;
   private events:Promise<void>=Promise.resolve();
-  constructor(readonly config:WhatsAppConfig,readonly journal:WhatsAppJournal,readonly authStore:WhatsAppAuthStore,readonly dataRoot:string,readonly wake:()=>void){}
+  constructor(readonly config:WhatsAppConfig,readonly journal:WhatsAppJournal,readonly authStore:WhatsAppAuthStore,readonly dataRoot:string,readonly wake:()=>void,
+    readonly automaticContactAllowed:()=>Promise<boolean> = async()=>false){}
   start():void { this.stopped=false; void this.connect().catch(()=>this.reconnect()); }
   private reconnect():void {
     this.connected=false; this.busy.clear();this.composing.clear();this.composingAt=0; if(this.heartbeat)clearInterval(this.heartbeat);this.heartbeat=null;
@@ -140,15 +141,25 @@ export class WhatsAppSocket {
       }
     }catch{this.errorCode='whatsapp_presence_failed';}finally{this.presenceActive=false;}
   }
+  private async contactAllowed():Promise<boolean>{
+    try{
+      const allowed=await this.automaticContactAllowed();
+      if(this.errorCode==='whatsapp_contact_policy_unavailable')this.errorCode=null;
+      return allowed;
+    }catch{this.errorCode='whatsapp_contact_policy_unavailable';return false;}
+  }
   async flush():Promise<void>{
     const socket=this.socket;if(!this.connected || !socket || this.flushing)return;this.flushing=true;
     const blocked=new Set<string>();
     try{
       // Drain chunks in one pass. Retry with the SAME WhatsApp message ID; unresolved failures
       // remain visible but cannot permanently hold all later messages for this recipient.
-      const rows=this.journal.db.prepare("SELECT * FROM outgoing WHERE state IN ('pending','sending') ORDER BY sequence LIMIT 64").all() as unknown as ReturnType<WhatsAppJournal['outgoing']>;
+      let rows=this.journal.db.prepare("SELECT * FROM outgoing WHERE state IN ('pending','sending') ORDER BY sequence LIMIT 64").all() as unknown as ReturnType<WhatsAppJournal['outgoing']>;
+      if(rows.some(item=>this.journal.get<boolean>('out-automatic:'+item.id))&&!await this.contactAllowed())
+        rows=this.journal.db.prepare("SELECT * FROM outgoing WHERE state IN ('pending','sending') AND NOT EXISTS (SELECT 1 FROM kv WHERE key='out-automatic:'||outgoing.id) ORDER BY sequence LIMIT 64").all() as unknown as ReturnType<WhatsAppJournal['outgoing']>;
       for(const item of rows){
         if(blocked.has(item.jid)||this.socket!==socket||!this.connected)continue;
+        if(this.journal.get<boolean>('out-automatic:'+item.id)&&!await this.contactAllowed())continue;
         const key='send-attempt:'+item.id,attempt=this.journal.get<{count:number;at:number}>(key)??{count:0,at:0};
         if(attempt.count>=3){this.journal.mark(item.id,'unknown');this.errorCode='whatsapp_delivery_unknown';continue;}
         if(attempt.at&&Date.now()-attempt.at<2000*2**attempt.count){blocked.add(item.jid);continue;}

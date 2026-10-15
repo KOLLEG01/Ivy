@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Disclosure, Item,
+import {
+  Disclosure,
+  Item,
   Button,
   ContentView,
   Input,
@@ -26,17 +28,26 @@ import { consoleClient, dateLabel, shortHash, usePage } from "../runtime";
 import type { Operation } from "../runtime";
 import { localeText as tr } from "../../../../../packages/ui-client/src/runtime";
 import McpDiscoveryView from "./McpDiscoveryView.vue";
+import QuietHoursSettings from "../QuietHoursSettings.vue";
 
 const mcpBrowserOpen = ref(false);
 
-const page = usePage((signal, cursor) =>
-  consoleClient.request(
-    "hostConfigurations.list",
-    { limit: 50, ...(cursor ? { cursor } : {}) },
-    { signal },
-  ), undefined, ["objects/ivy/host-configuration"]);
-const observations = useRemote((signal) =>
-    consoleClient.request("hosts.observations", { limit: 200 }, { signal }), 10000, ["system"]);
+const page = usePage(
+  (signal, cursor) =>
+    consoleClient.request(
+      "hostConfigurations.list",
+      { limit: 50, ...(cursor ? { cursor } : {}) },
+      { signal },
+    ),
+  undefined,
+  ["objects/ivy/host-configuration"],
+);
+const observations = useRemote(
+  (signal) =>
+    consoleClient.request("hosts.observations", { limit: 200 }, { signal }),
+  10000,
+  ["system"],
+);
 const selected = ref<Operation.HostConfigurationEditor | null>(null),
   hostId = ref(""),
   draft = ref(""),
@@ -48,18 +59,22 @@ const busy = ref(false),
   feedback = ref<string | null>(null);
 const draftStorageKey = "ivy.console.host-configuration-draft.v1";
 const dirty = computed(() => draft.value !== baseDraft.value);
-const history = usePage(async (signal, cursor) =>
-  selected.value
-    ? consoleClient.request(
-        "hostConfigurations.history",
-        {
-          hostId: selected.value.hostId,
-          limit: 50,
-          ...(cursor ? { cursor } : {}),
-        },
-        { signal },
-      )
-    : { items: [], nextCursor: null, historyComplete: true }, undefined, ["objects/ivy/host-configuration"]);
+const history = usePage(
+  async (signal, cursor) =>
+    selected.value
+      ? consoleClient.request(
+          "hostConfigurations.history",
+          {
+            hostId: selected.value.hostId,
+            limit: 50,
+            ...(cursor ? { cursor } : {}),
+          },
+          { signal },
+        )
+      : { items: [], nextCursor: null, historyComplete: true },
+  undefined,
+  ["objects/ivy/host-configuration"],
+);
 const appliedRevision = (item: Operation.HostConfigurationSummary) =>
   observations.value.value?.items.find(
     (value) => value.snapshot.status.hostId === item.hostId,
@@ -353,11 +368,17 @@ watch([hostId, draft, conflictDraft, loadedRevision, selected], persistDraft, {
 </script>
 <template>
   <PageHeader
-    title="Settings"
-    description="View and change each host's complete desired configuration. HostExecutors converge to the current revision while keeping their last valid local state offline."
+    :title="tr('Einstellungen', 'Settings')"
+    :description="
+      tr(
+        'Einstellungen für den Hive und seine Hosts verwalten.',
+        'Manage settings for Hive and its hosts.',
+      )
+    "
     :loading="page.loading.value"
     :updated-at="page.updatedAt.value"
   />
+  <QuietHoursSettings />
   <Disclosure
     v-model:open="mcpBrowserOpen"
     class="mb-6"
@@ -545,13 +566,13 @@ watch([hostId, draft, conflictDraft, loadedRevision, selected], persistDraft, {
           :disabled="busy"
           @click="load(selected.hostId, revision.revision)"
         >
-        <strong>Revision {{ revision.revision }}</strong
-        ><span class="ml-3 text-muted-foreground"
-          >{{ dateLabel(revision.createdAt) }} ·
-          {{ revision.byteLength.toLocaleString() }} bytes ·
-          {{ shortHash(revision.contentHash) }}</span
-        >
-      </button></Item
+          <strong>Revision {{ revision.revision }}</strong
+          ><span class="ml-3 text-muted-foreground"
+            >{{ dateLabel(revision.createdAt) }} ·
+            {{ revision.byteLength.toLocaleString() }} bytes ·
+            {{ shortHash(revision.contentHash) }}</span
+          >
+        </button></Item
       >
     </div>
     <PageControls

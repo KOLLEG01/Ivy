@@ -248,7 +248,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         do {
           const page = await this.call("model/list", {
             limit: 100, includeHidden: false, ...(cursor ? { cursor } : {}),
-          });
+          }, { detachOnTimeout: true });
           this.schemas.validate(definition.outputSchema, page, 256 * 1024);
           for (const item of page["data"] as unknown as (PhoneVoiceModel & { hidden: boolean })[]) {
             if (item.hidden) continue;

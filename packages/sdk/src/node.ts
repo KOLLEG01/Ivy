@@ -1,6 +1,7 @@
 export * from "./client.js";
 export * from "./main-chat.js";
 export * from "./browser-notice.js";
+export * from "./contact-window.js";
 export * from "./service.js";
 export {
   canonical,

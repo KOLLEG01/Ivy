@@ -305,12 +305,57 @@ async function fixture(t: { after(callback: () => void): void }) {
     admission,
     receive,
     ack,
+    collect: () => { kernel.retention.collect(); kernel.retention.collect(); },
     accesses: () => accesses,
     intercept: (callback: typeof after) => {
       after = callback;
     },
   };
 }
+
+test('Chat acknowledgement preserves the original offer after mutable reply revisions are pruned', async t => {
+  const f = await fixture(t), added = await f.add();
+  const received = await f.first.receive('alice', f.receive('pruned-reply-offer'));
+  if (received.outcome?.action !== 'receive') throw Error('Expected offer.');
+  f.collect();
+  await assert.rejects(f.store.read('chat-bridge/reply', received.outcome.replies[0]!.object), hasCode('revision_pruned'));
+  const request = f.ack('pruned-reply-ack', received.outcome.offer.object.objectId, [added.reply.objectId]);
+  const acknowledged = await f.second.acknowledge('alice', request);
+  assert.equal(acknowledged.phase, 'succeeded');
+  assert.equal((await f.store.read('chat-bridge/reply', added.reply.objectId)).value.state, 'confirmed');
+  assert.deepEqual(await f.first.receive('alice', f.receive('pruned-reply-offer')), received);
+  assert.deepEqual(await f.first.acknowledge('alice', request), acknowledged);
+});
+
+test('Chat keeps the original receive snapshot before an uncertain reply state update', async t => {
+  const f = await fixture(t), added = await f.add('Original answer 😀');
+  let lose = true;
+  f.intercept((params) => {
+    if (lose && params.objectId === added.reply.objectId && fields(params)['state'] === 'outcome_unknown') {
+      lose = false; throw new IvyError('transport_lost', 'Lost mutable reply acknowledgement.', 'unknown');
+    }
+  });
+  const request = f.receive('receive-before-state');
+  await assert.rejects(f.first.receive('alice', request), hasCode('transport_lost'));
+  f.collect();
+  const received = await f.second.receive('alice', request);
+  if (received.outcome?.action !== 'receive') throw Error('Expected original receive snapshot.');
+  assert.equal(received.outcome.replies[0]!.data.text, 'Original answer 😀');
+  assert.equal((await f.first.acknowledge('alice', f.ack('recover-before-state', received.outcome.offer.object.objectId, [added.reply.objectId]))).phase, 'succeeded');
+});
+
+test('Chat refuses changed immutable content when recovering a pruned offer reply', async t => {
+  const f = await fixture(t), added = await f.add();
+  const received = await f.first.receive('alice', f.receive('changed-pruned-reply'));
+  if (received.outcome?.action !== 'receive') throw Error('Expected offer.');
+  const current = await f.store.read('chat-bridge/reply', added.reply.objectId);
+  const changed = { ...current.value, text: 'Changed after the original offer.' };
+  const { state: _state, firstOfferedAt: _first, confirmedAt: _confirmed, immutableHash: _hash, ...immutable } = changed;
+  changed.immutableHash = hashJson(immutable);
+  await f.store.write('chat-bridge/reply', changed, 'changed-offered-reply', { objectId: current.pin.objectId, expectedRevision: current.pin.revision });
+  f.collect();
+  await assert.rejects(f.second.acknowledge('alice', f.ack('changed-pruned-ack', received.outcome.offer.object.objectId, [added.reply.objectId])), hasCode('chat_identity_conflict'));
+});
 
 test("an interrupted acknowledgement retains its older offer until recovery completes", async (t) => {
   const f = await fixture(t), added = await f.add();

@@ -46,6 +46,7 @@ import type {
 import { HiveStore } from "./store.js";
 import { Configurations } from "./configurations.js";
 import { OpenaiConfiguration } from "./openai-configuration.js";
+import { HiveSettings } from "./settings.js";
 import { PackageCatalogObject } from "./package-catalog-object.js";
 import { UiFiles } from "./ui-files.js";
 import { dirname, join } from "node:path";
@@ -103,6 +104,7 @@ export class HiveKernel {
   readonly retention: Retention;
   readonly configurations: Configurations;
   readonly openaiConfiguration: OpenaiConfiguration;
+  readonly settings: HiveSettings;
   readonly packageCatalog: PackageCatalogObject;
   private readonly handlers = new Map<string, Handler>();
   private connectionGeneration = 0;
@@ -129,6 +131,7 @@ export class HiveKernel {
     this.retention = new Retention(this.store, this.registry);
     this.configurations = new Configurations(this.store, this.objects);
     this.openaiConfiguration = new OpenaiConfiguration(this.objects);
+    this.settings = new HiveSettings(this.objects);
     this.packageCatalog = new PackageCatalogObject(this.store, this.objects, () => {
       const builds = new Set<string>([this.options.buildId]);
       for (const node of this.registry.nodes()) builds.add(node.buildId);
@@ -558,6 +561,8 @@ export class HiveKernel {
       },
     );
     this.add("openai.getConfiguration", () => this.openaiConfiguration.get());
+    this.add("settings.get", () => this.settings.get());
+    this.add("settings.save", (context, params: Operation.SettingsSaveParams) => this.settings.save(context, params));
     this.add("openai.saveConfiguration", (context, params: Operation.OpenaiSaveConfigurationParams) =>
       this.openaiConfiguration.save(context, params));
     this.add("hostConfigurations.list", (_context, params: PageInput) =>

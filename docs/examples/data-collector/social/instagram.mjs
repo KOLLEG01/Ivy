@@ -38,6 +38,7 @@ async function instagramToken(config, secrets, signal) {
         clientSecretSecret: config.clientSecretSecret ?? null,
         appSecret,
         accessTokenIssuedAt: config.accessTokenIssuedAt ?? null,
+        accessTokenExpiresAt: config.accessTokenExpiresAt ?? null,
       }),
     )
     .digest("hex");
@@ -155,11 +156,21 @@ async function instagramToken(config, secrets, signal) {
           "configuration_invalid",
           "Set accessTokenIssuedAt to the actual long-lived token issuance time.",
         );
+      if (
+        config.accessTokenExpiresAt !== undefined &&
+        typeof config.accessTokenExpiresAt !== "string"
+      )
+        throw failure("configuration_invalid", "accessTokenExpiresAt must be an ISO timestamp.");
+      const expiresAt = config.accessTokenExpiresAt === undefined
+        ? issuedAt + 60 * 86400000
+        : Date.parse(config.accessTokenExpiresAt);
+      if (!Number.isSafeInteger(expiresAt) || expiresAt <= issuedAt)
+        throw failure("configuration_invalid", "accessTokenExpiresAt must be later than token issuance.");
       auth = {
         fingerprint,
         accessToken: supplied,
         issuedAt,
-        expiresAt: issuedAt + 60 * 86400000,
+        expiresAt,
       };
       if (auth.expiresAt > Date.now()) await save(auth);
     }
@@ -609,7 +620,7 @@ async function collectInbox({
       let returnedComments = 0;
       await walk(
         `${mediaId}/comments`,
-        { fields: commentFields, limit: 100 },
+        { fields: commentFields, limit: 50 },
         comments,
         budget,
         async (comment) => {

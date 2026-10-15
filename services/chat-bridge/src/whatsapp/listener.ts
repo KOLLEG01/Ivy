@@ -486,6 +486,7 @@ export class WhatsAppListener {
             "notice:" + reply.object.objectId,
             phone(sender.phoneNumber) + "@s.whatsapp.net",
             reply.data.text,
+            true,
           );
           if (!this.journal.sent(ids)) complete = false;
         }
@@ -530,7 +531,7 @@ export class WhatsAppListener {
       const ids = parts.flatMap(part => {
         const prior = 'mirrored-notice:' + sender.channelId + ':' + part.pin.objectId;
         const key = this.journal.hasOutput(prior) ? prior : 'notice:' + part.pin.objectId;
-        return this.journal.enqueue(key, phone(sender.phoneNumber) + '@s.whatsapp.net', part.value.text);
+        return this.journal.enqueue(key, phone(sender.phoneNumber) + '@s.whatsapp.net', part.value.text, true);
       });
       if (this.journal.sent(ids)) await this.bridge.outbox.confirmNotice(parts);
     }

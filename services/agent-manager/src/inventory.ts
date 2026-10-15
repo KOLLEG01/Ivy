@@ -69,7 +69,16 @@ export class NativeInventory {
   async collectThreads(signal?: AbortSignal): Promise<NativeThreadSnapshot> {
     // Archive enumeration can take longer than twenty seconds on a busy Windows host.
     // A snapshot budget must not shorten the transport watchdog and kill unrelated turns.
-    const { check, read, pages } = this.reader(signal, 120_000);
+    const reader = this.reader(signal, 120_000);
+    try { return await this.collectThreadSnapshot(reader); }
+    catch (error) {
+      if (!(error instanceof IvyError) || error.code !== 'native_inventory_changed') throw error;
+      // A concurrent load, archive or recency update can move a page. Retry the
+      // read once within the original budget; never publish the mixed snapshot.
+      reader.check(); return this.collectThreadSnapshot(reader);
+    }
+  }
+  private async collectThreadSnapshot({ check, read, pages }: ReturnType<NativeInventory['reader']>): Promise<NativeThreadSnapshot> {
     const loaded = async () => {
       const ids = await pages('thread/loaded/list', {}, 5000);
       requireThat(ids.every(value => typeof value === 'string') && new Set(ids).size === ids.length, 'native_inventory_invalid', 'Loaded native thread IDs must be unique strings.'); return new Set(ids as string[]);

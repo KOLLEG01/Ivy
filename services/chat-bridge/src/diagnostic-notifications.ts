@@ -1,9 +1,9 @@
-import { hashJson, newOperationId, requireThat } from '../../../packages/sdk/src/node.js';
+import { automaticNotificationsAllowed, hashJson, newOperationId, requireThat } from '../../../packages/sdk/src/node.js';
 import type { Chat, Wire } from '../../../packages/sdk/src/node.js';
 import type { ChatMain } from './chat-main.js';
 import { ChatNotices } from './notices.js';
 
-export const diagnosticNotificationDelayMs = 60_000;
+export const diagnosticNotificationDelayMs = 5 * 60_000;
 export const diagnosticNotificationPollMs = 30_000;
 export interface DiagnosticNoticeState {
   code: string; label: string; firstSeen: number; active: boolean; resolvedAt: number | null;
@@ -46,6 +46,12 @@ export class DiagnosticNotifications {
       if (entry.recovery?.confirmed && entry.resolvedAt !== null && now - entry.resolvedAt > 7 * 86_400_000) delete state[key];
     }
     this.main.store.saveDiagnosticNoticeState(this.scope, state);
+    if (!await automaticNotificationsAllowed(this.main.store.client, new Date(now), { signal })) {
+      // Do not accumulate overnight recoveries or resolved incidents for the morning.
+      // Original admitted notices and their delivery receipts remain in Main's journal.
+      for (const [key, entry] of Object.entries(state)) if (!entry.active && !entry.recovery?.queued) delete state[key];
+      this.main.store.saveDiagnosticNoticeState(this.scope, state); return;
+    }
     for (const entry of Object.values(state)) {
       signal.throwIfAborted();
       if (!entry.alert && entry.active && now - entry.firstSeen >= diagnosticNotificationDelayMs)

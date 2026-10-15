@@ -45,6 +45,7 @@ import {
 import { translator } from "../services/chat-bridge/src/whatsapp/messages.js";
 import { ChatStore, mutation } from '../services/chat-bridge/src/store.js';
 import type { RpcClient } from '../packages/sdk/src/client.js';
+import { automaticNotificationsAllowed } from '../packages/sdk/src/node.js';
 import { attributedNoticeReply } from '../services/chat-bridge/src/notice-input.js';
 
 test('service notices deliver the canonical reply once, retain attribution after restart and confirm only sent text', async t => {
@@ -85,6 +86,7 @@ test('service notices deliver the canonical reply once, retain attribution after
   await listener.notices();
   await listener.outbox(); await listener.outbox();
   assert.deepEqual(journal.outgoing().map(row => row.text), [text]);
+  assert.ok(journal.outgoing().every(row => journal.get('out-automatic:' + row.id) === true));
   assert.equal(acknowledgements, 0);
   for (const row of journal.outgoing()) journal.mark(row.id, 'sent');
   await new WhatsAppListener(bridge, journal, native, config).notices();
@@ -143,6 +145,40 @@ const input = {
   message: "original",
   received: 1,
 };
+test('WhatsApp defers queued automatic contact across quiet hours and restart while user replies progress', async t => {
+  const { journal, root, auth } = fixture(t);
+  const ids = journal.enqueue('automatic-notice', input.jid, 'Automatic notice', true);
+  for (let index = 1; index <= 64; index++) journal.enqueue('pending-notice-' + index, input.jid, 'Pending notice ' + index, true);
+  journal.enqueue('user-reply', input.jid, 'User reply');
+  await journal.close();
+  const reopened = new WhatsAppJournal(join(root, 'journal.sqlite'));
+  let now = new Date('2026-10-13T21:01:00Z'), unavailable = false;
+  const client = { async request() {
+    if (unavailable) throw new Error('Policy unavailable');
+    return { revision: 1, settings: { schemaVersion: 1,
+      quietHours: { timeZone: 'Europe/Berlin', start: '23:00', end: '07:00' } } };
+  } } as unknown as RpcClient;
+  const transport = new WhatsAppSocket(config, reopened, auth, root, () => {}, () => automaticNotificationsAllowed(client, now));
+  const sent: { text: string; id: string }[] = [];
+  transport.connected = true;
+  transport.socket = { async sendMessage(_jid: string, message: { text: string }, options: { messageId: string }) {
+    sent.push({ text: message.text, id: options.messageId });
+  } } as unknown as WASocket;
+  try {
+    await transport.flush();
+    assert.deepEqual(sent.map(row => row.text), ['User reply']);
+    assert.equal(reopened.get('send-attempt:' + ids[0]), null);
+    unavailable = true; reopened.enqueue('next-user-reply', input.jid, 'Next user reply');
+    await transport.flush();
+    assert.deepEqual(sent.map(row => row.text), ['User reply', 'Next user reply']);
+    unavailable = false; now = new Date('2026-10-14T05:00:00Z');
+    await transport.flush(); await transport.flush();
+    assert.deepEqual(sent.find(row => row.text === 'Automatic notice'), { text: 'Automatic notice', id: ids[0] });
+    assert.equal(sent.length, 67); assert.equal(new Set(sent.map(row => row.id)).size, 67);
+    assert.equal(reopened.sent(ids), true);
+    assert.equal(transport.errorCode, null);
+  } finally { await reopened.close(); }
+});
 test("WhatsApp journal preserves input, exact request, Unicode chunks and uncertain delivery across restart", async (t) => {
   const { journal, root } = fixture(t);
   journal.accept(input);
@@ -332,7 +368,7 @@ test("retention advances past protected rows and preserves partial turn delivery
     journal.set(`message:binding:current:item-${i}:sender`, { ids, at: old });
   }
   journal.set("listener:binding", { lastTurn: "current" });
-  const expired = journal.enqueue("expired", input.jid, "Remove");
+  const expired = journal.enqueue("expired", input.jid, "Remove", true);
   journal.mark(expired[0]!, "sent");
   journal.set("out-created:" + expired[0], old);
   journal.set("message:binding:older:item:sender", { ids: expired, at: old });
@@ -342,6 +378,7 @@ test("retention advances past protected rows and preserves partial turn delivery
   journal.set("turn-delivered:binding:partial", partial);
   journal.prune();
   assert.equal(journal.get("message:binding:older:item:sender"), null);
+  assert.equal(journal.get('out-automatic:' + expired[0]), null);
   assert.equal(
     journal.db.prepare("SELECT 1 FROM outgoing WHERE id=?").get(expired[0]!),
     undefined,

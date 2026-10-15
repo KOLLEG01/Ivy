@@ -57,13 +57,10 @@ export async function openMcpBridge(session: TaskMcp, signal: AbortSignal) {
         .writeHead(200, { "Content-Type": "application/json" })
         .end(encoded);
     } catch (error) {
-      const code =
-        IvyError.from(error).code === "configuration_invalid"
-          ? "configuration_invalid"
-          : "provider_unavailable";
+      const failure = IvyError.from(error);
       response
         .writeHead(400, { "Content-Type": "application/json" })
-        .end(JSON.stringify({ error: { code } }));
+        .end(JSON.stringify({ error: { code: failure.code, outcome: failure.outcome } }));
     }
   });
   server.requestTimeout = 15000;

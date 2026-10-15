@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { IvyError } from '../packages/sdk/src/node.js';
 import { canonical, digest } from "../packages/contracts/src/canonical.js";
 import { phoneVoiceInstructions, phoneVoiceOpeningCue } from "../instructions/phone-voice.js";
 import catalog from "../specs/native/codex-0.159.2/catalog.json" with { type: "json" };
@@ -58,6 +59,7 @@ function fixture(t: test.TestContext) {
   let archivePause: Promise<void> | undefined;
   let readPause: Promise<void> | undefined;
   let loseArchiveReply = false;
+  let modelTimeout = false;
   const descendants = (ancestor: string, thread: Record<string, unknown>): boolean => {
     let parent = thread['parentThreadId'];
     while (typeof parent === 'string') {
@@ -91,6 +93,10 @@ function fixture(t: test.TestContext) {
         } = {},
       ) {
         requests.push({ method, params });
+        if (method === 'model/list' && modelTimeout) {
+          if (!hooks.detachOnTimeout) online = false;
+          throw new IvyError(hooks.detachOnTimeout ? 'native_observation_deadline' : 'native_deadline_exceeded', 'Synthetic slow model discovery.');
+        }
         let result: unknown = {};
         if (method === 'model/list') result = modelPage(params);
         if (method === "project/read")
@@ -213,6 +219,7 @@ function fixture(t: test.TestContext) {
     fingerprint: digest(canonical({ home: settings.codexHome, cwd: settings.cwd, projectId: settings.projectId, config: {} })),
     model,
     modelPage: (read: typeof modelPage) => { modelPage = read; },
+    modelTimeout: (value: boolean) => { modelTimeout = value; },
     admit,
     release: (call: ReturnType<typeof admit>) => {
       const intent = { epoch: call.epoch, callId: call.callId, operationId: randomUUID(),
@@ -277,6 +284,18 @@ test('Model discovery refreshes after cache expiry and reconnect, and never subs
   await assert.rejects(voice.models(), /native catalog unavailable/);
   f.modelPage(() => ({ data: [f.model('after-reconnect', ['minimal'])], nextCursor: null }));
   assert.equal((await voice.models())[0]!.model, 'after-reconnect');
+});
+
+test('a slow model catalogue read preserves the active Voice connection and task', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit();
+  const original = await voice.prepare(call, 0, selection);
+  f.modelTimeout(true);
+  await assert.rejects(voice.models(), { code: 'native_observation_deadline' });
+  assert.equal(await voice.prepare(call, 0, selection), original);
+  assert.equal(f.opens(), 1);
+  f.modelTimeout(false);
+  assert.equal((await voice.models()).length, 2);
+  assert.equal(f.opens(), 1);
 });
 
 test('Model discovery rejects malformed native data and repeated pagination cursors', async t => {

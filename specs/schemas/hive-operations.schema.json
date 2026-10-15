@@ -3,6 +3,68 @@
   "$id": "https://ivy.invalid/schemas/hive-operations.schema.json",
   "title": "Ivy canonical operation parameters and results",
   "$defs": {
+    "HiveSettings": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "quietHours": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "timeZone": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "start": {
+                  "type": "string",
+                  "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                },
+                "end": {
+                  "type": "string",
+                  "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+                }
+              },
+              "required": [
+                "timeZone",
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "quietHours"
+      ],
+      "additionalProperties": false
+    },
+    "HiveSettingsSnapshot": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "settings": {
+          "$ref": "#/$defs/HiveSettings"
+        }
+      },
+      "required": [
+        "revision",
+        "settings"
+      ],
+      "additionalProperties": false
+    },
     "OpenaiConfiguration": {
       "type": "object",
       "properties": {
@@ -2060,6 +2122,41 @@
     },
     "SystemStatusResult": {
       "$ref": "#/$defs/Status"
+    },
+    "SettingsGetParams": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "SettingsGetResult": {
+      "$ref": "#/$defs/HiveSettingsSnapshot"
+    },
+    "SettingsSaveParams": {
+      "type": "object",
+      "properties": {
+        "mutationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "settings": {
+          "$ref": "#/$defs/HiveSettings"
+        }
+      },
+      "required": [
+        "mutationId",
+        "expectedRevision",
+        "settings"
+      ],
+      "additionalProperties": false
+    },
+    "SettingsSaveResult": {
+      "$ref": "#/$defs/HiveSettingsSnapshot"
     },
     "OpenaiGetConfigurationParams": {
       "type": "object",

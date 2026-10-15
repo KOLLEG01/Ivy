@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { callBound, hashJson, IvyError, serviceTools } from '../../../packages/sdk/src/node.js';
+import { automaticNotificationsAllowed, callBound, hashJson, IvyError, serviceTools } from '../../../packages/sdk/src/node.js';
 import type { Wire } from '../../../packages/sdk/src/node.js';
 import { need, same } from './schema.js';
 import type { Pin } from './schema.js';
@@ -77,6 +77,7 @@ export class AssignmentVoice {
     if (saved.value.state === 'failed' || saved.value.state === 'fallback') return 'fallback';
     try {
       if (!saved.value.callId) {
+        if (!await automaticNotificationsAllowed(this.engine.client, this.engine.now())) return 'pending';
         const call = await this.call('request', saved.value.target, saved.value.request as unknown as Wire.Json, saved.value.request.operationId);
         need(call && typeof call['callId'] === 'string', 'secretary_voice_mismatch', 'PhoneBridge returned no original call identity.');
         if (call['operationId'] !== saved.value.request.operationId) {

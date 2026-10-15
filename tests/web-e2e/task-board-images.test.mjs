@@ -55,6 +55,10 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     });
     const hash = id => '#/tasks?node=browser-task-board&panel=sheet&id=' + id;
     await f.open(hash(first));
+    const inlineComment = f.page.locator('[data-slot="comment-card"]').filter({
+      has: f.page.getByRole('button', { name: 'Enlarge First comment', exact: true }),
+    });
+    await inlineComment.getByRole('button', { name: 'Show more', exact: true }).click();
     await expect(f.page.getByRole('button', { name: 'Enlarge First comment', exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Enlarge attached.png', exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Enlarge Overview', exact: true })).toBeVisible();

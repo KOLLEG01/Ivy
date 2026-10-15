@@ -40,12 +40,15 @@ async function fixture(t) {
 }
 
 test('Secretary defers notices, recovers a lost admission and continues the original delivery after an uncertain transport acknowledgement', { timeout: 60000 }, async t => {
-  const f = await fixture(t); f.settings.policy.silentTime = { timeZone: 'Europe/Berlin', start: '22:00', end: '07:00' }; f.setNow('2026-09-07T21:00:00.000Z');
+  const f = await fixture(t); f.settings.policy.urgentBypass = true;
+  await f.client.request('settings.save', { mutationId: await newOperationId(f.client), expectedRevision: 0,
+    settings: { schemaVersion: 1, quietHours: { timeZone: 'Europe/Berlin', start: '22:00', end: '07:00' } } });
+  f.setNow('2026-09-07T21:00:00.000Z');
   const configuration = defaultConfiguration(f.settings, '2026-09-07T21:00:00.000Z');
   assert.equal(configuration.browserNotifications, true);
   const current = await f.engine.store.create('secretary/configuration', 'configuration', configuration, await newOperationId(f.client));
   const disabled = await f.engine.saveConfiguration('chat-owner', { operationId: await newOperationId(f.client), configuration: current.pin, value: { ...configuration, browserNotifications: false } });
-  const id = await f.save(); await f.notices.step(id); assert.equal(f.calls.length, 0); assert.equal((await f.engine.item(id)).value.notice.reason, 'silent_time');
+  const id = await f.save(assessment({ urgency: 'critical' })); await f.notices.step(id); assert.equal(f.calls.length, 0); assert.equal((await f.engine.item(id)).value.notice.reason, 'silent_time');
   assert.equal((await f.browserNotices()).length, 0);
   await f.save(assessment({ disposition: 'record', notification: 'none' }));
   const checkpoint = await f.engine.action('chat-owner', { action: 'checkpoint', operationId: await newOperationId(f.client), expectedScope: f.settings.identity.scope, sourceId: 'personal-inbox', previousCursor: null, nextCursor: 'observed-empty-page', captures: [] });
@@ -82,6 +85,7 @@ for (const state of ['sent', 'outcome_unknown']) test('a critical legacy Voice n
   const serviceNodeId = 'fixture.phone-bridge', definitionHash = 'sha256:' + '1'.repeat(64), updates = [], reads = [];
   let request;
   const client = { async request(method, args) {
+    if (method === 'settings.get') return { revision: 0, settings: { schemaVersion: 1, quietHours: null } };
     if (method === 'serviceNodes.get') return { serviceName: 'phone-bridge', connected: true, synced: true, ready: true };
     if (method === 'tools.list') return { provider: { node: { serviceNodeId } }, items: [{ qualifiedName: 'phone.' + args.namePrefix,
       definition: { interfaceVersion: '1.0.0' }, definitionHash }], nextCursor: null };

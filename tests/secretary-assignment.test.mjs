@@ -497,6 +497,7 @@ for (const state of ['sent', 'outcome_unknown']) test('a critical Voice assignme
   let request;
   const client = { async request(method, args) {
     if (method === 'serviceNodes.get') return { serviceName: 'phone-bridge', connected: true, synced: true, ready: true };
+    if (method === 'settings.get') return { revision: 0, settings: { schemaVersion: 1, quietHours: null } };
     if (method === 'tools.list') return { provider: { node: { serviceNodeId } }, items: [{ qualifiedName: 'phone.' + args.namePrefix,
       definition: { interfaceVersion: '1.0.0' }, definitionHash: 'sha256:' + '1'.repeat(64) }], nextCursor: null };
     if (method === 'tools.call' && args.qualifiedName === 'phone.request') {
@@ -535,8 +536,9 @@ for (const state of ['sent', 'outcome_unknown']) test('a critical Voice assignme
 
 test('the sole registered PhoneBridge is the default and a critical Voice call is reconciled once', async () => {
   const serviceNodeId = 'fixture.phone-bridge', recipientId = 'personal', definitionHash = 'sha256:' + '1'.repeat(64), callId = randomUUID();
-  let stage = 0, registrationState = 'registered', recipients = [recipientId]; const requests = [];
+  let stage = 0, registrationState = 'registered', recipients = [recipientId], quietHours = null; const requests = [];
   const client = { async request(method, args) {
+    if (method === 'settings.get') return { revision: 1, settings: { schemaVersion: 1, quietHours } };
     if (method === 'system.status') return { runtimeEpoch: randomUUID() };
     if (method === 'serviceNodes.list') return { items: [{ serviceNodeId, serviceName: 'phone-bridge', connected: true, synced: true, ready: true, stale: false }], nextCursor: null };
     if (method === 'serviceNodes.get') return { serviceNodeId, serviceName: 'phone-bridge', connected: true, synced: true, ready: true };
@@ -568,6 +570,10 @@ test('the sole registered PhoneBridge is the default and a critical Voice call i
     store.amend = async (current, _key, value) => { const saved = { pin: { ...current.pin, revision: current.pin.revision + 1 }, value }; records.set(current.pin.objectId, saved); return saved; };
     const decision = { schemaVersion: 1, urgency: 'critical', notification: 'voice', text: 'A critical event needs immediate attention.', reason: 'Time-sensitive' };
     const voice = new AssignmentVoice(engine);
+    quietHours = { timeZone: 'Europe/Berlin', start: '11:00', end: '13:00' };
+    assert.equal(await voice.step(execution, decision, true), 'pending');
+    assert.equal(requests.length, 0, 'Global quiet hours block even critical calls before Phone admission.');
+    quietHours = null;
     assert.equal(await voice.step(execution, decision, true), 'pending');
     const prepared = { value: records.get(execution.pin.objectId).value.voice };
     assert.match(prepared.value.request.operationId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);

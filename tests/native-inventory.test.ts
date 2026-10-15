@@ -55,6 +55,26 @@ test('native inventory includes every schema source, archived history, loaded ep
   }
 });
 
+test('a concurrent thread change is read again once without retaining a mixed snapshot', async () => {
+  for (const change of ['ownership', 'page']) {
+    let loads = 0;
+    const native = new NativeInventory({ catalog: catalog('0.154.0'), request: async (method, params) => {
+      if (method === 'thread/loaded/list') {
+        loads++;
+        return { result: { data: change === 'ownership' && loads > 1 ? ['new'] : [], nextCursor: null } };
+      }
+      assert.equal(method, 'thread/list');
+      return { result: { data: (params as Record<string, Wire.Json>)['archived']
+        ? change === 'page' && loads === 1 ? [thread('new')] : [] : [thread('new')], nextCursor: null } };
+    } }, 'epoch');
+    const snapshot = await native.collectThreads();
+    assert.equal(snapshot.threads.length, 1);
+    assert.equal((snapshot.threads[0]!.summary as Agent.ThreadSummary).owner,
+      change === 'ownership' ? 'this-native-connection' : 'historical-unattached');
+    assert.equal(loads, change === 'ownership' ? 4 : 3);
+  }
+});
+
 test('a successful empty native project list replaces earlier projects and a new instance starts empty', async () => {
   let removed = false;
   const rpc = { catalog: catalog('0.154.0'), request: async () => ({ result: { data: removed ? [] : [
@@ -89,7 +109,7 @@ test('incomplete native pages, duplicate IDs, changing ownership, oversized snap
   for (const failure of ['error', 'cursor-loop', 'duplicate', 'changed', 'overflow', 'byte-overflow', 'cancelled']) {
     let loads = 0; const abort = new AbortController();
     const native = new NativeInventory({ catalog: catalog('0.154.0'), request: async (method, params) => {
-      if (method === 'thread/loaded/list') return { result: { data: failure === 'changed' && loads++ ? ['new-owner'] : [], nextCursor: null } };
+      if (method === 'thread/loaded/list') return { result: { data: failure === 'changed' && loads++ % 2 ? ['new-owner'] : [], nextCursor: null } };
       if (method === 'project/list') return { result: { data: [], nextCursor: null } };
       const args = params as Record<string, Wire.Json>;
       if (failure === 'error') return { error: { code: -32000, message: 'fixture read failed' } };
