@@ -401,6 +401,7 @@ test(
     for (let index = 0; index < 23; index++) {
       const result = await f.invoke({
         action: "create",
+        workflowState: "backlog",
         fields: fields("Board task " + String(index).padStart(2, "0")),
       });
       taskId ??= result.task.objectId;

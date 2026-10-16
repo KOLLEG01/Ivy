@@ -160,7 +160,7 @@ for (const bound of ["count", "bytes"] as const) {
   });
 }
 
-test("Tasks receive stable keys, start in Backlog and expose category projections", async (t) => {
+test("Tasks receive stable keys, default to Todo and expose category projections", async (t) => {
   const f = taskBoardFixture(t);
   const { userContact: _defaultContact, ...withoutContact } = fields;
   const firstId = randomUUID(),
@@ -199,7 +199,8 @@ test("Tasks receive stable keys, start in Backlog and expose category projection
   const b = await f.first.store.read("task-board/task", second.task!);
   assert.equal(a.value.taskKey, "TASK-0001");
   assert.equal(b.value.taskKey, "TASK-0002");
-  assert.equal(a.value.workflowState, "backlog");
+  assert.equal(a.value.workflowState, "todo");
+  assert.equal(b.value.workflowState, "todo");
   assert.equal(a.value.fields.control, "agent");
   assert.equal(a.value.fields.userContact, (await f.first.configuration()).configuration.defaults.userContact);
   assert.equal(b.value.fields.userContact, "ticket");

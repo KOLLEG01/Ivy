@@ -258,7 +258,7 @@ const presentations: Record<string, Record<string, ToolPresentation>> = {
     },
     task_create: {
       title: "Create task",
-      description: "Create a TaskBoard task in the backlog. Read task_configuration first and use its current defaults unless the user explicitly requests different settings. Omitted userContact inherits the current board default.",
+      description: "Create a TaskBoard task in Todo by default, or select workflowState explicitly. Todo can queue agent work; manual tasks never start an agent. Waiting requires waiting details; manual Review requires initialResult. Read task_configuration first. Omitted userContact inherits the current board default.",
       destructiveHint: false,
     },
     task_update: {

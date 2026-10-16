@@ -81,7 +81,7 @@ try {
   validateTaskBoard('NativePlanDraft', plan);
   const savedPlan = await action({ action: 'savePlan', plan }, 'plan'); assert.ok(savedPlan.plan);
   const title = config.hostId + ' native review ' + id;
-  const created = await action({ action: 'create', fields: { title, description: 'An actual native question and saved result for user review.', acceptanceCriteria: ['Retain the original live question over TaskBoard restart.', 'Save native output before explicit user acceptance.'],
+  const created = await action({ action: 'create', workflowState: 'backlog', fields: { title, description: 'An actual native question and saved result for user review.', acceptanceCriteria: ['Retain the original live question over TaskBoard restart.', 'Save native output before explicit user acceptance.'],
     project: { namespace: 'codex', kind: 'project', serviceNodeId: owner, nativeId: project.nativeId }, control: 'user', priority: 2, target: { serviceNodeId: owner, hostId: status.hostId }, executionPlan: savedPlan.plan, dependencies: [], nextReviewAt: null, dueAt: null } }, 'create');
   assert.ok(created.task); await save('opening-browser', { taskId: created.task.objectId, plan: savedPlan.plan, model: model.model, effort });
   const directory = join(repository, 'dist/apps/task-board-ui'), definition = JSON.parse(await readFile(join(directory, 'ivy-ui.json'), 'utf8'));

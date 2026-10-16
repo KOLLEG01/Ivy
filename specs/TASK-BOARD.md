@@ -9,6 +9,16 @@ UI requirements: [UI](UI.md).
 - A Task is the durable ticket; Runs are execution attempts. Its stable task key also identifies
   per-task output directories. Workflow state, execution condition and user/agent control are separate.
   Category is organizational metadata, not a capability or execution target.
+- Creation stores its selected workflow state directly; omission means Todo for every caller.
+  Explicit Backlog preserves unscheduled preparation. Waiting requires public deferral details
+  and uses `fields.nextReviewAt` for time waits; linked blockers retain their idle/done distinction.
+  Manual In Progress creates no native execution. Manual Review requires an initial final Result;
+  initial final material may also accompany manual Done. Agent In Progress and Review require
+  their real native claim/completion workflows and cannot be fabricated by creation. Done and
+  Cancelled may record an already closed task without inventing a Run or acceptance.
+  Task, initial manual Result and history publish through one retained Create operation;
+  an unfinished publication cannot schedule work. Offline host/capability waits retain valid
+  registered selections and defer unavailable live model validation until allocation.
 - Permanent deletion removes the Task, its attachments, all Hive revisions, and task-linked
   Run, Result, Review, History, Delivery and comment-read records. It is refused while a claim
   or publication is active, or another Task still depends on it. The deleted task key is not reused.

@@ -48,7 +48,7 @@ test('actual TaskBoard service serves manual tasks and retains caller outcomes a
   const create: TaskBoard.CreateRequest = { action: 'create', operationId: randomUUID(), fields: { ...fields, title: 'Manual service acceptance', control: 'user' } };
   const invoke = async (request: TaskBoard.ActionInput) => await callBound(user, await discover(user, 'task-board.' + request.action, { serviceNodeId: 'task-board-test' }), request as unknown as Wire.Json, request.operationId) as TaskBoard.ActionOutcome;
   const created = await invoke(create); assert.ok(created.task);
-  const listed = await callBound(user, await discover(user, 'task-board.list', { serviceNodeId: 'task-board-test' }), { status: 'backlog' }) as TaskBoard.TaskListResult;
+  const listed = await callBound(user, await discover(user, 'task-board.list', { serviceNodeId: 'task-board-test' }), { status: 'todo' }) as TaskBoard.TaskListResult;
   assert.ok(listed.items.some(item => item.taskId === created.task!.objectId && item.title === create.fields.title));
   const read = await callBound(user, await discover(user, 'task-board.read', { serviceNodeId: 'task-board-test' }), { task: created.task.objectId }) as TaskBoard.TaskView;
   assert.equal(read.task.fields.title, create.fields.title);
@@ -56,7 +56,7 @@ test('actual TaskBoard service serves manual tasks and retains caller outcomes a
   const workerCreated = await callBound(worker, await discover(worker, 'task-board.create', { serviceNodeId: 'task-board-test' }), workerCreate, workerCreate.operationId) as TaskBoard.ActionOutcome;
   assert.ok(workerCreated.task);
   let accepted = created;
-  for (const workflowState of ['todo', 'in_progress', 'done'] as const) accepted = await invoke({ action: 'transition',
+  for (const workflowState of ['in_progress', 'done'] as const) accepted = await invoke({ action: 'transition',
     operationId: randomUUID(), taskId: accepted.task!.objectId, expectedRevision: accepted.task!.revision, workflowState, detail: null });
   const task = await user.request('objects.read', { objectId: accepted.task!.objectId });
   assert.equal(task.content.encoding, 'json'); if (task.content.encoding !== 'json') throw new Error('Expected JSON task.');

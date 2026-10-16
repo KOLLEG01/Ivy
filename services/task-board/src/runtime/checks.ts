@@ -1,4 +1,4 @@
-import { checkBlocker } from './task-coordination.js';
+import { checkBlocker, validateBlocker } from './task-coordination.js';
 import { canonical, digest, hashJson, jsonObjectContentBytes } from '../../../../packages/sdk/src/node.js';
 import { IvyError, requireThat } from '../../../../packages/sdk/src/node.js';
 import type { Agent, TaskBoard } from '../../../../packages/sdk/src/node.js';
@@ -151,7 +151,43 @@ export class TaskBoardChecks {
         'task_board_project_unavailable', `The selected project is not registered${hostId ? ' on ' + hostId : ''}. Choose a project from the execution host's catalog.`);
     }
   }
-  async executionOptions(fields: TaskBoard.TaskFields, task?: TaskBoard.Task): Promise<void> {
+  async initialState(request: TaskBoard.CreateRequest, fields: TaskBoard.TaskFields, actor: TaskBoard.Actor, at: string): Promise<{
+    workflowState: TaskBoard.Task['workflowState']; waiting: TaskBoard.Waiting | null; blocker?: TaskBoard.Blocker;
+  }> {
+    const workflowState = request.workflowState ?? 'todo';
+    requireThat(!request.waiting || workflowState === 'waiting', 'invalid_arguments', 'Waiting details are only valid for an initial waiting state.');
+    requireThat(workflowState !== 'in_progress' || fields.control === 'user',
+      'task_board_user_controlled', 'Agent work needs a real scheduler claim; create it in Todo to request execution.');
+    requireThat(workflowState !== 'review' || fields.control === 'user',
+      'task_board_native_evidence_required', 'Agent review requires its own observed native completion; only manual work can be created in Review.');
+    requireThat(!request.initialResult || ['review', 'done'].includes(workflowState),
+      'invalid_arguments', 'Initial final material is only valid in Review or Done.');
+    if (request.initialResult) {
+      requireThat(fields.control === 'user' && actor.source === 'user', 'task_board_native_evidence_required',
+        'Only user-controlled manual work can supply an initial final Result.');
+      await this.content(request.initialResult);
+    }
+    requireThat(workflowState !== 'review' || !!request.initialResult, 'task_board_result_required', 'Manual Review needs an initial final Result.');
+    if (workflowState !== 'waiting') return { workflowState, waiting: null };
+    requireThat(request.waiting, 'invalid_arguments', 'An initial waiting state needs a reason and details.');
+    const { reason, detail, blocker } = request.waiting;
+    requireThat(reason !== 'dependency' || !!blocker || fields.dependencies.length > 0,
+      'invalid_arguments', 'A dependency wait needs a linked blocker or task dependency.');
+    requireThat(reason !== 'capability' || !!fields.requiredCapabilities?.length,
+      'invalid_arguments', 'A capability wait needs required capabilities.');
+    await this.deferral({ reason, detail, ...(blocker ? { blocker } : {}), nextReviewAt: fields.nextReviewAt }, null, at);
+    return { workflowState, waiting: { reason, detail, since: at }, ...(blocker ? { blocker } : {}) };
+  }
+  async deferral(request: Pick<TaskBoard.DeferRequest, 'reason' | 'detail' | 'nextReviewAt' | 'blocker'>, self: string | null, at: string): Promise<void> {
+    if (request.blocker) {
+      requireThat(request.reason === 'dependency' || request.reason === 'workspace', 'invalid_arguments', 'Task blockers require a dependency or workspace reason.');
+      await validateBlocker(this.store, request.blocker, self);
+    }
+    date(request.nextReviewAt);
+    requireThat(request.reason !== 'time' || !!request.nextReviewAt && request.nextReviewAt > at,
+      'task_board_invalid_date', 'A time deferral needs a future next-review date.');
+  }
+  async executionOptions(fields: TaskBoard.TaskFields, task?: TaskBoard.Task, allowUnavailable = false): Promise<void> {
     const options = fields.nativeOptions;
     if (fields.control !== 'agent' && !options?.model && !options?.reasoningEffort &&
       (!options?.serviceTier || options.serviceTier === 'standard')) return;
@@ -160,7 +196,7 @@ export class TaskBoardChecks {
       : executionWithDefaults(fields, (await configurationView(this.store)).configuration.defaults);
     const serviceNodeId = task?.primaryResourceRef?.serviceNodeId ??
       (task ? (await freshContextRecovery(this.store, task))?.target.serviceNodeId : undefined);
-    await checkConfiguration(this.store, { schemaVersion: 1, defaults }, serviceNodeId);
+    await checkConfiguration(this.store, { schemaVersion: 1, defaults }, serviceNodeId, allowUnavailable);
   }
   async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution, coordinationOnly = false): Promise<Agent.PlanDraft> {
     requireThat(target && workspace && target.hostId === workspace.hostId && target.serviceNodeId === workspace.serviceNodeId,

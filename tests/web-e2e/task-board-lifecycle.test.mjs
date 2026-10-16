@@ -8,7 +8,7 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
   test(`Done menus archive individual tasks and the entire filtered column on ${layout}`, { timeout: 180000 }, async t => {
     const f = await taskBoardFixture(t, { native: true, viewport });
     const create = async (title, category = 'Batch', states = ['todo', 'in_progress', 'done']) => {
-      let outcome = await f.invoke({ action: 'create', fields: { title, description: '', acceptanceCriteria: [], category,
+      let outcome = await f.invoke({ action: 'create', workflowState: 'backlog', fields: { title, description: '', acceptanceCriteria: [], category,
         control: 'user', priority: 2, executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },
         dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null } });
       for (const workflowState of states) outcome = await f.invoke({ action: 'transition', taskId: outcome.task.objectId,
@@ -63,7 +63,7 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
   });
   test(`ticket archive, restoration and explicit fresh Codex work on ${layout}`, { timeout: 180000 }, async t => {
     const f = await taskBoardFixture(t, { native: true, scheduler: true, viewport });
-    let outcome = await f.invoke({ action: 'create', fields: { title: 'Explicit fresh Codex work', description: 'Keep this ticket and its comments.',
+    let outcome = await f.invoke({ action: 'create', workflowState: 'backlog', fields: { title: 'Explicit fresh Codex work', description: 'Keep this ticket and its comments.',
       acceptanceCriteria: [], category: null, control: 'user', priority: 2, executionRequirement: { kind: 'host', hostId: 'isolated-agent-host' },
       workspaceRequirement: { kind: 'task_workspace' }, dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null } });
     for (const workflowState of ['todo', 'in_progress', 'done']) outcome = await f.invoke({ action: 'transition', taskId: outcome.task.objectId,

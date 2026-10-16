@@ -404,7 +404,7 @@ export function taskBoardFixture(
       operationId = randomUUID(),
     ) =>
       first.invoke(
-        { action: "create", operationId, fields: { ...fields, ...overrides } },
+        { action: "create", operationId, workflowState: 'backlog', fields: { ...fields, ...overrides } },
         context(operationId),
       ),
     async planned(control: TaskBoard.TaskFields["control"] = "agent", workspaceRequirement = fields.workspaceRequirement) {
@@ -418,6 +418,7 @@ export function taskBoardFixture(
           {
             action: "create",
             operationId: createId,
+            workflowState: 'backlog',
             fields: { ...fields, control, workspaceRequirement },
           },
           context(createId),

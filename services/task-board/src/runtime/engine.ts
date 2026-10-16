@@ -1,4 +1,4 @@
-import { coordinationPending, peerComment, validateBlocker, workspaceIdentity } from './task-coordination.js';
+import { coordinationPending, peerComment, workspaceIdentity } from './task-coordination.js';
 import { publishBrowserNotice } from '../../../../packages/sdk/src/node.js';
 import { canonical, digest, hashJson, jsonObjectContentBytes } from "../../../../packages/sdk/src/node.js";
 import { connectionOwner } from "../../../../packages/sdk/src/connection-owner.js";
@@ -770,10 +770,13 @@ export class TaskBoardEngine {
           "task_board_category_projection_pending",
           "A categorized Task needs a current canonical category before publication.",
         );
+      let state: Awaited<ReturnType<TaskBoardChecks['initialState']>> | undefined;
       if (first) {
         if (request.parentTaskId) await validateParent(this.store, request.parentTaskId);
         await this.checks.fields(submitted, null);
-        await this.checks.executionOptions(submitted);
+        state = await this.checks.initialState(request, submitted, actor, at);
+        await this.checks.executionOptions(submitted, undefined,
+          state.waiting?.reason === 'host' || state.waiting?.reason === 'capability');
       }
       const initial: TaskBoard.Task = first
         ? {
@@ -785,8 +788,7 @@ export class TaskBoardEngine {
               category:
                 submitted.category === null ? null : normalizedCategory!,
             },
-            workflowState: "backlog",
-            waiting: null,
+            ...state!,
             publication: steps.pin,
             primaryResourceRef: null,
             claim: null,
@@ -813,6 +815,10 @@ export class TaskBoardEngine {
       const pin = await steps.write("task-board/task", initial, {
         create: { parentId: this.store.rootObjectId, name: initial.taskKey },
       });
+      if (request.initialResult) outcome.result = await steps.create('task-board/result', {
+        schemaVersion: 1, taskId: pin.objectId, run: null, kind: 'final', content: request.initialResult,
+        actor, createdAt: at, operationId: request.operationId,
+      }, 'Initial manual result');
       outcome.history = await steps.create(
         "task-board/history",
         this.history(
@@ -826,7 +832,7 @@ export class TaskBoardEngine {
       );
       outcome.task = await steps.write(
         "task-board/task",
-        { ...initial, lastHistory: outcome.history, publication: null },
+        { ...initial, latestResult: outcome.result, lastHistory: outcome.history, publication: null },
         { objectId: pin.objectId, expectedRevision: pin.revision },
       );
       return outcome;
@@ -1566,23 +1572,13 @@ export class TaskBoardEngine {
         break;
       case "defer":
         if (!request.blocker) noClaim();
-        else {
-          requireThat(request.reason === 'dependency' || request.reason === 'workspace', 'invalid_arguments', 'Task blockers require a dependency or workspace reason.');
-          await validateBlocker(this.store, request.blocker, request.taskId);
-        }
         requireThat(
           (["todo", "waiting"].includes(task.workflowState) || !!request.blocker && task.workflowState === 'in_progress') &&
             task.waiting?.reason !== "external_outcome",
           "task_board_invalid_transition",
           "This task cannot be deferred while its outcome is unresolved.",
         );
-        date(request.nextReviewAt);
-        requireThat(
-          request.reason !== "time" ||
-            (request.nextReviewAt && request.nextReviewAt > at),
-          "task_board_invalid_date",
-          "A time deferral needs a future next-review date.",
-        );
+        await this.checks.deferral(request, request.taskId, at);
         break;
       case "reassign":
         await this.checks.fields(

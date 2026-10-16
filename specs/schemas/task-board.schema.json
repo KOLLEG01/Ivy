@@ -1917,6 +1917,27 @@
         "parentTaskId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
           "description": "When delegating part of your current task, identify that task as the parent. It owns result review, Done and archival. Omitted userContact defaults to ticket for delegated tasks."
+        },
+        "workflowState": {
+          "type": "string",
+          "enum": [
+            "backlog",
+            "todo",
+            "in_progress",
+            "waiting",
+            "review",
+            "done",
+            "cancelled"
+          ],
+          "description": "Initial workflow state; omitted means todo. Agent in_progress requires a real scheduler claim and cannot be created directly. Review requires an initial manual final Result."
+        },
+        "waiting": {
+          "$ref": "#/$defs/InitialWaiting",
+          "description": "Required only for waiting. nextReviewAt stays in fields; the service sets since. Internal recovery reasons cannot be supplied."
+        },
+        "initialResult": {
+          "$ref": "#/$defs/ResultContent",
+          "description": "Manual final material for a user-controlled review or done task. Required for review; does not claim native execution."
         }
       },
       "required": [
@@ -2957,6 +2978,34 @@
       "required": [
         "taskId",
         "until"
+      ],
+      "additionalProperties": false
+    },
+    "InitialWaiting": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "enum": [
+            "user",
+            "time",
+            "dependency",
+            "host",
+            "capability",
+            "workspace"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "blocker": {
+          "$ref": "#/$defs/Blocker"
+        }
+      },
+      "required": [
+        "reason",
+        "detail"
       ],
       "additionalProperties": false
     },

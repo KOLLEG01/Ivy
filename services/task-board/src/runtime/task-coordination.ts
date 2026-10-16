@@ -35,7 +35,7 @@ export async function checkBlocker(store: TaskBoardStore, blocker: TaskBoard.Blo
   requireThat(blocker.until === 'done' ? other.workflowState === 'done' : !other.claim && !other.publication && !running,
     'task_board_dependency_waiting', `Waiting for Task ${other.taskKey} to be ${blocker.until}.`);
 }
-export async function validateBlocker(store: TaskBoardStore, blocker: TaskBoard.Blocker, self: string): Promise<void> {
+export async function validateBlocker(store: TaskBoardStore, blocker: TaskBoard.Blocker, self: string | null): Promise<void> {
   const pending = [blocker.taskId], seen = new Set<string>();
   while (pending.length) {
     const id = pending.pop()!;

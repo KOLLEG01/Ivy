@@ -107,7 +107,7 @@ test('actual services recover a pending native question and read one bounded res
   const plan = await invoke({ action: 'savePlan', operationId: randomUUID(), plan: { nativeVersion: '0.154.0', catalogSourceHash: catalog.sourceHash as TaskBoard.NativePlanDraft['catalogSourceHash'], definitions,
     threadStart: {}, threadResume: {}, turnStart: { input: [{ type: 'text', text: 'Produce the isolated native fixture result.', text_elements: [] }] } } as TaskBoard.NativePlanDraft });
   const accepted = await mcp.callTool({ name: 'task_create', arguments: { serviceNodeId: 'task-board',
-    input: { action: 'create', operationId: randomUUID(), fields: taskFields } } });
+    input: { action: 'create', operationId: randomUUID(), workflowState: 'backlog', fields: taskFields } } });
   assert.notEqual(accepted.isError, true);
   const created = (accepted.structuredContent as { result: TaskBoard.ActionOutcome }).result;
   const rejectedEdit = await mcp.callTool({ name: 'task_update', arguments: { serviceNodeId: 'task-board', input: {

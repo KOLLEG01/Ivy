@@ -48,6 +48,7 @@ export async function checkConfiguration(
   store: TaskBoardStore,
   value: TaskBoard.Configuration,
   serviceNodeId?: string,
+  allowUnavailable = false,
 ): Promise<void> {
   validateTaskBoard("Configuration", value);
   const { executionRequirement: requirement, nativeOptions: options } =
@@ -79,6 +80,7 @@ export async function checkConfiguration(
   );
   // A registered offline host may be selected, but explicit native options need live discovery.
   if (!eligible.length) {
+    if (allowUnavailable) return;
     requireThat(
       !options.model &&
         !options.reasoningEffort &&

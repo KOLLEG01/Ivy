@@ -22,7 +22,7 @@ const fields = (title, category = null) => ({
 
 for (const width of [1440, 390]) test(`task drafts and comments keep keyboard focus through failed background reads at ${width}px`, { timeout: 90000 }, async t => {
   const f = await taskBoardFixture(t, { viewport: { width, height: 1000 } });
-  const created = await f.invoke({ action: 'create', fields: fields('Background read editing') });
+  const created = await f.invoke({ action: 'create', workflowState: 'backlog', fields: fields('Background read editing') });
   const id = created.task.objectId;
   await f.open('#/new?node=browser-task-board');
   await f.page.getByRole('radio', { name: 'Me', exact: true }).check();
@@ -195,7 +195,7 @@ for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
 for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["mobile", { width: 390, height: 844 }]]) {
   test(`running contact edit preserves inherited native options on ${layout}`, { timeout: 180000 }, async t => {
     const f = await taskBoardFixture(t, { native: true, scheduler: true, viewport });
-    const created = await f.invoke({ action: "create", fields: { ...fields("Running contact edit"), control: "agent",
+    const created = await f.invoke({ action: "create", workflowState: "backlog", fields: { ...fields("Running contact edit"), control: "agent",
       executionRequirement: { kind: "host", hostId: "isolated-agent-host" } } });
     const id = created.task.objectId;
     await f.invoke({ action: "transition", taskId: id, expectedRevision: created.task.revision, workflowState: "todo", detail: null });
@@ -232,7 +232,7 @@ test("TaskBoardUI receives live list changes from another client", { timeout: 18
 
 test("task edits ignore runtime revisions, clear saved drafts and retain field conflicts", { timeout: 180000 }, async t => {
   const f = await taskBoardFixture(t);
-  const created = await f.invoke({ action: "create", fields: fields("Edit revision checks") });
+  const created = await f.invoke({ action: "create", workflowState: "backlog", fields: fields("Edit revision checks") });
   const id = created.task.objectId;
   const read = () => f.client.request("objects.read", { objectId: id });
   const transition = async workflowState => f.invoke({ action: "transition", taskId: id,
@@ -306,7 +306,7 @@ test("task edits ignore runtime revisions, clear saved drafts and retain field c
 
 test("automatic native recovery stays in progress while user input stays blocked on desktop and mobile", { timeout: 180000 }, async t => {
   const f = await taskBoardFixture(t, { native: true, scheduler: true });
-  const created = await f.invoke({ action: "create", fields: { ...fields("Recover the original execution"), control: "agent",
+  const created = await f.invoke({ action: "create", workflowState: "backlog", fields: { ...fields("Recover the original execution"), control: "agent",
     executionRequirement: { kind: "host", hostId: "isolated-agent-host" } } });
   await f.invoke({ action: "transition", taskId: created.task.objectId, expectedRevision: created.task.revision, workflowState: "todo", detail: null });
   const runtime = f.taskBoard().runtime;
@@ -314,6 +314,8 @@ test("automatic native recovery stays in progress while user input stays blocked
   const admitted = await f.task(created.task.objectId);
   const runId = admitted.claim?.run?.objectId;
   assert.ok(runId, JSON.stringify({ state: admitted.workflowState, waiting: admitted.waiting }));
+  // Drive the following status changes explicitly after automatic admission.
+  await runtime.stop();
   await runtime.native.drain(runId);
   await expect.poll(async () => (await f.task(created.task.objectId)).claim?.phase).toBe("running");
   const original = await f.task(created.task.objectId);
@@ -514,6 +516,7 @@ test(
       .fill("Complete the explicit workflow.\nRetain the attachment.");
     await f.page.getByRole("radio", { name: "Me", exact: true }).click();
     await expect(f.page.getByLabel("Due", { exact: true })).toBeVisible();
+    await choose(f.page.getByLabel('Initial status', { exact: true }), 'backlog');
     await f.page.getByLabel("Category", { exact: true }).fill("Video");
     await f.page.keyboard.press("Tab");
     await f.page
@@ -632,12 +635,14 @@ test(
     const first = await f.invoke({
       action: "create",
       fields: fields("First category task", "Video"),
+      workflowState: "backlog",
     });
     const second = await f.invoke({
       action: "create",
       fields: fields("Second category task", "video"),
+      workflowState: "backlog",
     });
-    await f.invoke({ action: "create", fields: fields("Uncategorized task") });
+    await f.invoke({ action: "create", workflowState: "backlog", fields: fields("Uncategorized task") });
     assert.equal((await f.task(second.task.objectId)).fields.category, "Video");
     await f.open("#/tasks?node=browser-task-board");
     await f.page
@@ -722,7 +727,7 @@ test(
   async (t) => {
     const f = await taskBoardFixture(t);
     for (const title of ["First ranked", "Second ranked", "Third ranked"])
-      await f.invoke({ action: "create", fields: fields(title) });
+      await f.invoke({ action: "create", workflowState: "backlog", fields: fields(title) });
     await f.open("#/tasks?node=browser-task-board");
     const backlog = f.page.getByRole("region", { name: "Backlog", exact: true });
     const order = () => backlog.locator("article h3").allTextContents().then((values) => values.map((value) => value.trim()));

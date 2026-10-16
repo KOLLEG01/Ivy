@@ -16,6 +16,7 @@ const timestamp = { ...str(24, 24), pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2
 const agent = name => ({ $ref: 'https://ivy.invalid/schemas/agent.schema.json#/$defs/' + name });
 const operation = name => ({ $ref: 'https://ivy.invalid/schemas/hive-operations.schema.json#/$defs/' + name });
 const defs = {};
+const workflowStates = ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'];
 Object.assign(defs, {
   NativePlan: agent('Plan'), NativePlanDraft: agent('PlanDraft'),
   NativeRequest: obj({ nativeVersion: id, catalogSourceHash: hash,
@@ -161,6 +162,13 @@ Object.assign(defs.CommentActionRequest.properties, {
 });
 defs.Blocker = obj({ taskId: id, until: { enum: ['idle', 'done'] } });
 defs.DeferRequest.properties.blocker = ref('Blocker');
+defs.InitialWaiting = obj({ reason: defs.DeferRequest.properties.reason, detail: str(16384, 1), blocker: ref('Blocker') }, ['reason', 'detail']);
+Object.assign(defs.CreateRequest.properties, {
+  workflowState: { type: 'string', enum: workflowStates,
+    description: 'Initial workflow state; omitted means todo. Agent in_progress requires a real scheduler claim and cannot be created directly. Review requires an initial manual final Result.' },
+  waiting: { ...ref('InitialWaiting'), description: 'Required only for waiting. nextReviewAt stays in fields; the service sets since. Internal recovery reasons cannot be supplied.' },
+  initialResult: { ...ref('ResultContent'), description: 'Manual final material for a user-controlled review or done task. Required for review; does not claim native execution.' },
+});
 defs.ContinueRequest.properties.coordinationOnly = bool;
 defs.ExecutionRequest = { oneOf: [ref('StartRequest'), ref('ContinueRequest')] };
 defs.ActionRequest = { oneOf: ['Configure', 'SavePlan', 'Create', 'Edit', 'Transition', 'Defer', 'Reassign', 'NewThread', 'Cancel', 'Review', 'SaveResult', 'CommentAction', 'UploadAttachment'].map(name => ref(name + 'Request')) };
