@@ -16,7 +16,11 @@ test('PhoneBridge exposes call and Voice controls while keeping diagnostics on i
   assert.equal(mcp('call'), 'phone_bridge_status');
   assert.equal(mcp('operation'), 'phone_bridge_status');
   assert.equal(mcp('hangup'), 'phone_bridge_hangup');
-  for (const [name, publicName] of [['selectVoice', 'phone_bridge_select_voice'], ['restartVoice', 'phone_bridge_restart_voice']]) {
+  assert.equal(mcp('speakerVoices'), 'phone_bridge_speaker_voices');
+  assert.equal(tools.find(tool => tool.name === 'speakerVoices')?.discovery?.mcp?.surface, 'ivy');
+  assert.equal(tools.find(tool => tool.name === 'speakerVoices')?.annotations?.readOnlyHint, true);
+  for (const [name, publicName] of [['selectVoice', 'phone_bridge_select_voice'], ['restartVoice', 'phone_bridge_restart_voice'],
+    ['selectSpeakerVoice', 'phone_bridge_select_speaker_voice']]) {
     const tool = tools.find(tool => tool.name === name)!;
     assert.equal(mcp(name!), publicName);
     assert.equal(tool.discovery?.mcp?.surface, 'ivy');
@@ -24,7 +28,7 @@ test('PhoneBridge exposes call and Voice controls while keeping diagnostics on i
     assert.equal(tool.annotations?.idempotentHint, true);
   }
   assert.equal(mcp('request'), undefined);
-  for (const name of ['probeLoopback', 'audioSetup', 'codecTest', 'inventory', 'reconnect', 'logs', 'reconcileArchive']) {
+  for (const name of ['probeLoopback', 'audioSetup', 'codecTest', 'inventory', 'reconnect', 'logs']) {
     assert.ok(tools.some(tool => tool.name === name));
     assert.ok(mcp(name)?.startsWith('phone_bridge_'));
     assert.equal(tools.find(tool => tool.name === name)?.discovery?.mcp?.surface, 'ivy_dev');

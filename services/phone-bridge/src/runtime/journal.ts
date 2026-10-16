@@ -23,6 +23,7 @@ export type PhoneJournalIntent = PhoneIntent |
   (Omit<PhoneIntent, 'method'> & { method: 'call.bindVoice' | 'call.stopVoice'; threadId: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.promptVoice' | 'call.forwardVoice'; threadId: string; prompt: string; model?: string; reasoningEffort?: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.selectVoice'; threadId: string; prompt: string; model: string; reasoningEffort: string; commandSequence?: number }) |
+  (Omit<PhoneIntent, 'method'> & { method: 'call.selectSpeakerVoice'; voiceId: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.restartVoice'; voiceGeneration: number; model: string; reasoningEffort: string });
 
 export interface PhoneOperation {
@@ -47,6 +48,7 @@ export interface PhoneCallTarget {
 export interface PhoneCodexTaskCache {
   fingerprint: string; threadId: string | null; creationOperationId: string | null;
   preparationOperationId?: string; preparationTurnId?: string;
+  preparationPromptHash?: string;
 }
 export interface PhoneCodexArchiveTask { threadId: string; operationId: string | null }
 export interface PhoneVoiceText { role: 'user' | 'assistant'; text: string }
@@ -75,6 +77,8 @@ function intentShape(intent: PhoneJournalIntent): void {
   if (intent.method === 'call.restartVoice') requireThat(intent.requestHash === digest(canonical({
     voiceGeneration: intent.voiceGeneration, model: intent.model, reasoningEffort: intent.reasoningEffort,
   })), 'phone_voice_restart_changed', 'Voice restart must retain its original generation and selection.');
+  if (intent.method === 'call.selectSpeakerVoice') requireThat(intent.requestHash === digest(canonical({ voiceId: intent.voiceId })),
+    'phone_speaker_voice_changed', 'Speaker selection must retain its original voice.');
 }
 
 /** Phone's local effect boundary. Only explicit non-secret targets; no credential arguments,
@@ -672,6 +676,15 @@ export class PhoneJournal {
   finishVoiceSelection(intent: PhoneJournalIntent & { method: 'call.selectVoice' }, state: 'sent' | 'outcome_unknown'): PhoneOperation {
     const result = { threadId: intent.threadId, state }; validate('PhoneVoicePromptResult', result);
     return this.finishReceipt(intent, { ok: true, result, error: null });
+  }
+  selectedSpeakerVoice(callId: string): string | null {
+    validate('Uuid', callId);
+    const row = this.statement("SELECT value FROM commands WHERE call_id=? AND method='call.selectSpeakerVoice' AND phase='result' AND json_extract(value,'$.receipt.ok')=1 ORDER BY rowid DESC LIMIT 1").get(callId) ??
+      this.statement("SELECT value FROM receipt_archive WHERE kind='command' AND json_extract(value,'$.intent.callId')=? AND json_extract(value,'$.intent.method')='call.selectSpeakerVoice' AND json_extract(value,'$.receipt.ok')=1 ORDER BY rowid DESC LIMIT 1").get(callId);
+    return row ? (JSON.parse(String(row['value'])) as PhoneOperation & { intent: { voiceId: string } }).intent.voiceId : null;
+  }
+  finishSpeakerVoiceSelection(intent: PhoneJournalIntent & { method: 'call.selectSpeakerVoice' }, result: unknown): PhoneOperation {
+    return this.finishReceipt(intent, { ok: true, result: result as PhoneReply['result'], error: null });
   }
   finishVoiceRestart(intent: PhoneJournalIntent & { method: 'call.restartVoice' }, threadId: string | null): PhoneOperation {
     if (threadId !== null) validate('Uuid', threadId);

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { phoneVoiceInstructions, phoneVoiceOpeningCue } from "../../../../instructions/phone-voice.js";
+import { phoneVoiceInstructions, phoneVoiceOpeningCue, phoneVoicePreparationPrompt } from "../../../../instructions/phone-voice.js";
 import { isAbsolute, join, resolve } from "node:path";
 import { startCodexProcess } from "../../../../packages/host-runtime/src/codex-process.js";
 import type { CodexProcessSettings } from "../../../../packages/host-runtime/src/codex-process.js";
@@ -19,6 +19,7 @@ import type { PhoneCall } from "./admission.js";
 import { phoneCallerIdentity } from "./admission.js";
 import type { PhoneJournal, PhoneJournalIntent, PhoneConversation, PhoneVoiceText } from "./journal.js";
 import type { PhoneVoiceModel, PhoneVoiceSelection } from "./voice-selection.js";
+import type { PhoneSpeakerVoiceCatalog } from "./voice-selection.js";
 
 export interface PhoneCodexVoiceSettings extends CodexProcessSettings {
   cwd: string;
@@ -55,17 +56,16 @@ type Session = {
   items: PhoneVoiceText[];
   transcriptIds: Set<string>;
   prompting: Promise<void> | null;
+  speakerVoiceId: string | null;
 };
-type PreparationTurn = { id: string; status: string };
+type PreparationTurn = { id: string; status: string; items?: Record<string, Wire.Json>[] };
 // This slot has no caller context. The original call journal still owns admission.
 const preparedTaskKey = "prepared-phone-voice";
-const preparationPrompt =
-  "Prepare for a new phone conversation. There is no caller or call request yet. " +
-  "Reply only READY. Do not use tools or perform any actions. " +
-  "The current call context will arrive when voice starts.";
 
 export interface PhoneVoicePort {
   models(): Promise<PhoneVoiceModel[]>;
+  speakerVoices?(): Promise<PhoneSpeakerVoiceCatalog>;
+  speakerVoice?(callId: string): string | null;
   prewarm(principalId: string, selection: PhoneVoiceSelection): Promise<void>;
   prepare(
     call: PhoneCall,
@@ -136,6 +136,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   private readonly schemas = new SchemaValidators();
   private modelCatalog: { models: PhoneVoiceModel[]; expiresAt: number } | null = null;
   private loadingModels: Promise<PhoneVoiceModel[]> | null = null;
+  private speakerCatalog: { catalog: PhoneSpeakerVoiceCatalog; expiresAt: number } | null = null;
+  private loadingSpeakers: Promise<PhoneSpeakerVoiceCatalog> | null = null;
   private archiving: Promise<void> | null = null;
   private archiveCursor = '';
   private bindingCursor = '';
@@ -166,6 +168,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     if (!this.opening)
       this.opening = (async () => {
         this.modelCatalog = null;
+        this.speakerCatalog = null;
         this.reconciled.clear();
         this.preparedSelections.clear();
         this.connection = await this.connect({
@@ -181,6 +184,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           onNotification: (notification) => this.notification(notification),
           onClose: (code) => {
             this.modelCatalog = null;
+            this.speakerCatalog = null;
             for (const session of this.sessions.values()) session.failed = true;
             for (const pending of this.sdps.values()) {
               clearTimeout(pending.timer);
@@ -484,28 +488,36 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     const recovered = cache.preparationOperationId ? await readTurn() : undefined;
     if (cache.preparationOperationId) {
       requireThat(recovered, "phone_voice_prepare_unknown", "The original Voice preparation requires reconciliation; it cannot be repeated.");
-      if (recovered.status === "completed") return;
+      if (recovered.status === "completed" && cache.preparationPromptHash === digest(phoneVoicePreparationPrompt)) {
+        this.validatePreparation(recovered);
+        return;
+      }
+      if (recovered.status === "completed") {
+        // A changed preparation input can run only after the exact previous turn completed.
+        cache = { fingerprint: cache.fingerprint, threadId, creationOperationId: null };
+      } else
       requireThat(recovered.status === "inProgress", "phone_voice_prepare_failed", "The original Voice preparation turn did not complete.");
     }
     let resolve!: () => void, reject!: (error: Error) => void;
     const finished = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
     void finished.catch(() => undefined);
     const timer = setTimeout(() => reject(new IvyError("phone_voice_prepare_unknown", "Voice task preparation remains unconfirmed.", "unknown")), 120000);
-    const pending = { turnId: recovered?.id ?? null, completed: null as PreparationTurn | null, resolve, reject, timer };
+    const continuing = recovered?.status === "inProgress";
+    const pending = { turnId: continuing ? recovered.id : null, completed: null as PreparationTurn | null, resolve, reject, timer };
     this.preparationTurns.set(threadId, pending);
     try {
-      if (recovered) {
+      if (continuing) {
         // Subscribe before the second read so a completion between reads is retained.
         const current = await readTurn();
         if (current && current.status !== "inProgress") pending.completed = current;
       } else {
         const operationId = randomUUID();
-        cache = { ...cache, preparationOperationId: operationId };
+        cache = { ...cache, preparationOperationId: operationId, preparationPromptHash: digest(phoneVoicePreparationPrompt) };
         this.journal.retainCodexTask(preparedTaskKey, cache);
         const value = await this.call("turn/start", {
           threadId,
           clientUserMessageId: operationId,
-          input: [{ type: "text", text: preparationPrompt, text_elements: [] }],
+          input: [{ type: "text", text: phoneVoicePreparationPrompt, text_elements: [] }],
         }, {
           requestId: operationId,
           beforeResolve: (_id, reply) => {
@@ -523,10 +535,52 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       }
       this.completePreparation(threadId);
       await finished;
+      this.validatePreparation(await readTurn());
     } finally {
       clearTimeout(timer);
       this.preparationTurns.delete(threadId);
     }
+  }
+  private validatePreparation(turn: PreparationTurn | undefined): void {
+    const items = turn?.items ?? [];
+    const final = items.filter(item => item["type"] === "agentMessage" &&
+      (item["phase"] == null || item["phase"] === "final_answer")).at(-1);
+    const calls = items.filter(item => item["type"] === "mcpToolCall" && item["status"] === "completed" &&
+      !item["error"] && item["result"] && !(item["result"] as Record<string, Wire.Json>)["isError"]);
+    const instructions = calls.find(item => item["tool"] === "ivy_instructions");
+    requireThat(turn?.status === "completed" && final?.["text"]?.toString().trim() === "READY" &&
+      instructions && instructions["server"] !== "ivy_dev" &&
+      calls.some(item => item["server"] === instructions["server"] && item["tool"] === "phone_bridge_status"),
+      "phone_voice_not_ready", "Voice preparation did not confirm READY with successful regular Ivy MCP checks.");
+  }
+
+  async speakerVoices(): Promise<PhoneSpeakerVoiceCatalog> {
+    await this.open();
+    if (this.speakerCatalog && this.speakerCatalog.expiresAt > Date.now()) return structuredClone(this.speakerCatalog.catalog);
+    this.loadingSpeakers ??= (async () => {
+      const result = await this.call("thread/realtime/listVoices", {}, { detachOnTimeout: true }, 15000);
+      const definition = this.connection!.rpc.catalog.clientRequests.find(item => item.method === "thread/realtime/listVoices")!;
+      this.schemas.validate(definition.outputSchema, result, 64 * 1024);
+      const voices = result["voices"] as { v1: string[]; defaultV1: string };
+      // Native V3 validates against the V1 catalog, including its default.
+      requireThat(voices.v1.length > 0 && new Set(voices.v1).size === voices.v1.length && voices.v1.includes(voices.defaultV1),
+        "phone_speaker_catalog_invalid", "Native V3 speaker catalog is incomplete.");
+      const configuration = await this.call("config/read", { cwd: this.settings.cwd, includeLayers: false }, { detachOnTimeout: true }, 15000);
+      const config = configuration["config"] as Record<string, Wire.Json>;
+      const realtime = config["realtime"] as Record<string, Wire.Json> | null;
+      const defaultVoiceId = this.settings.voice ?? realtime?.["voice"] ?? voices.defaultV1;
+      requireThat(typeof defaultVoiceId === "string" && voices.v1.includes(defaultVoiceId),
+        "phone_speaker_voice_invalid", "Configured speaker voice is not supported by native V3.");
+      const catalog: PhoneSpeakerVoiceCatalog = { protocol: "v3", defaultVoiceId,
+        voices: voices.v1.map(id => ({ id, displayName: id.charAt(0).toUpperCase() + id.slice(1) })) };
+      this.speakerCatalog = { catalog, expiresAt: Date.now() + 60000 };
+      return catalog;
+    })().finally(() => { this.loadingSpeakers = null; });
+    return structuredClone(await this.loadingSpeakers);
+  }
+  speakerVoice(callId: string): string | null {
+    const session = this.sessions.get(callId);
+    return session && !session.cancelled && !session.failed ? session.speakerVoiceId : null;
   }
   private async cachedTask(
     selection: PhoneVoiceSelection,
@@ -933,11 +987,17 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       items: this.boundedHistory([...(this.continuations.get(call.callId)?.items ?? []), { role: "user", text: prompt }]),
       transcriptIds: new Set(),
       prompting: null,
+      speakerVoiceId: null,
       starting: null,
       stopping: null,
     };
     this.sessions.set(call.callId, session);
     session.starting = (async () => {
+      guard();
+      const speakers = await this.speakerVoices();
+      const speakerVoiceId = this.journal.selectedSpeakerVoice(call.callId) ?? speakers.defaultVoiceId;
+      requireThat(speakers.voices.some(item => item.id === speakerVoiceId),
+        "phone_speaker_voice_invalid", "Selected speaker voice is no longer supported by native V3.");
       guard();
       const intent: PhoneJournalIntent & { method: "call.promptVoice" } = {
         method: "call.promptVoice",
@@ -998,12 +1058,13 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           // Each phone conversation carries its complete current context explicitly.
           // Avoid scanning unrelated workspace/history and replaying earlier calls.
           includeStartupContext: false,
-          ...(this.settings.voice ? { voice: this.settings.voice } : {}),
+          voice: speakerVoiceId,
           ...(this.settings.realtimeModel
             ? { model: this.settings.realtimeModel }
             : {}),
         });
         const result = await answer;
+        session.speakerVoiceId = speakerVoiceId;
         guard();
         requireThat(
           !session.cancelled,

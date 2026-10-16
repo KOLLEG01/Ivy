@@ -453,6 +453,7 @@ function fixture(
     promptError = "app_tools_unavailable";
   const events: string[] = [];
   const voicePrewarms: string[] = [];
+  const effectiveSpeakers = new Map<string, string>();
   let voiceModels = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra', 'gpt-6.1-sol', 'provider-custom'].map(model => ({
     model, displayName: model, description: 'Runtime catalog fixture', defaultReasoningEffort: 'high', isDefault: false,
     supportedReasoningEfforts: (model === 'provider-custom' ? ['none', 'minimal', 'high', 'future-effort'] :
@@ -461,6 +462,9 @@ function fixture(
   }));
   const defaultVoiceTasks: PhoneVoicePort = {
     async models() { return structuredClone(voiceModels); },
+    async speakerVoices() { return { protocol: 'v3', defaultVoiceId: 'cove',
+      voices: [{ id: 'cove', displayName: 'Cove' }, { id: 'ember', displayName: 'Ember' }] }; },
+    speakerVoice(callId) { return effectiveSpeakers.get(callId) ?? null; },
     async prewarm(principalId) { voicePrewarms.push(principalId); },
     async prepare(call, generation, selection) {
       voicePrepares++;
@@ -482,6 +486,7 @@ function fixture(
     },
     async start(call, generation, threadId, prompt, _sdp, guard) {
       guard();
+      effectiveSpeakers.set(call.callId, journal.selectedSpeakerVoice(call.callId) ?? 'cove');
       events.push("start");
       prompts.push({ generation, threadId, prompt });
       const intent = {
@@ -554,7 +559,8 @@ function fixture(
     failed() {
       return false;
     },
-    async stop() {
+    async stop(callId) {
+      effectiveSpeakers.delete(callId);
       events.push("stop");
     },
     async close() {
@@ -913,6 +919,64 @@ test('Catalog failures leave readiness inspectable and cannot change a live task
   assert.equal(status.voiceModelsError, 'native_method_unavailable');
   assert.equal(status.busy, false);
   assert.deepEqual(f.selectionUpdates, []);
+});
+
+test('MCP speaker selection is call-bound, validated, retained and applied only by an explicit Voice restart', async t => {
+  const f = fixture(t), flow = f.flow(), bridge = new PhoneBridge(flow, f.native);
+  const catalog = await bridge.invoke('speakerVoices', {}, context('main')) as { voices: { id: string }[]; selection: unknown };
+  assert.deepEqual(catalog.voices.map(voice => voice.id), ['cove', 'ember']);
+  assert.equal(catalog.selection, null);
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice');
+  await until(() => !!f.journal.callCommand(call.callId, 'call.realtime.answer')?.receipt);
+  await tick();
+  for (const voiceId of ['marin', 'invented-voice']) {
+    const operationId = randomUUID();
+    await assert.rejects(bridge.invoke('selectSpeakerVoice', { callId: call.callId, operationId, voiceId }, context('main')),
+      { code: 'phone_speaker_voice_invalid' });
+    assert.equal(f.journal.get(operationId), null);
+  }
+  const operationId = randomUUID(), args = { callId: call.callId, operationId, voiceId: 'ember' };
+  const selected = await bridge.invoke('selectSpeakerVoice', args, context('main'));
+  const read = await bridge.invoke('speakerVoices', { callId: call.callId }, context('main')) as { selection: unknown };
+  assert.deepEqual(read.selection, { callId: call.callId, selectedVoiceId: 'ember', effectiveVoiceId: 'cove',
+    restartRequired: true, appliesOn: 'next_voice_session' });
+  assert.deepEqual((await bridge.invoke('status', {}, context('main')) as { speakerVoice: unknown }).speakerVoice, read.selection);
+  assert.equal(f.prompts.length, 1);
+  assert.deepEqual(await bridge.invoke('selectSpeakerVoice', args, context('main')), selected);
+  assert.deepEqual(await bridge.invoke('operation', { callId: call.callId, operationId }, context('main')), selected);
+  await assert.rejects(bridge.invoke('selectSpeakerVoice', { ...args, voiceId: 'cove' }, context('main')), { code: 'mutation_conflict' });
+  await flow.controlVoice('main', call.callId, randomUUID(), { action: 'restart' });
+  const effective = await bridge.invoke('speakerVoices', { callId: call.callId }, context('main')) as { selection: { effectiveVoiceId: string; restartRequired: boolean } };
+  assert.equal(effective.selection.effectiveVoiceId, 'ember');
+  assert.equal(effective.selection.restartRequired, false);
+  assert.equal(f.prompts.length, 2);
+  assert.equal(f.methods().filter(method => method === 'call.dial').length, 1);
+  await flow.hangup('main', call.callId);
+  assert.deepEqual(await bridge.invoke('selectSpeakerVoice', args, context('main')), selected);
+  assert.equal(f.journal.selectedSpeakerVoice(call.callId), 'ember');
+  const next = await flow.request('main', randomUUID(), 'personal', 'voice');
+  await until(() => !!f.journal.callCommand(next.callId, 'call.realtime.answer')?.receipt);
+  await tick();
+  assert.equal((await bridge.invoke('speakerVoices', { callId: next.callId }, context('main')) as
+    { selection: { selectedVoiceId: string } }).selection.selectedVoiceId, 'cove');
+  await assert.rejects(bridge.invoke('selectSpeakerVoice', { ...args, callId: next.callId }, context('main')), { code: 'mutation_conflict' });
+});
+
+test('Unavailable speaker discovery cannot create a selection or alter the call', async t => {
+  const f = fixture(t), flow = f.flow(settings, { ...f.port,
+    async speakerVoices() { throw new IvyError('native_method_unavailable', 'No speaker catalog'); },
+  }), bridge = new PhoneBridge(flow, f.native);
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice');
+  await until(() => !!f.journal.callCommand(call.callId, 'call.realtime.answer')?.receipt);
+  await tick();
+  const operationId = randomUUID();
+  await assert.rejects(bridge.invoke('selectSpeakerVoice', { callId: call.callId, operationId, voiceId: 'ember' }, context('main')),
+    { code: 'native_method_unavailable' });
+  assert.equal(f.journal.get(operationId), null);
+  const status = await bridge.invoke('status', {}, context('main')) as { speakerVoice: unknown; speakerVoicesError: string };
+  assert.equal(status.speakerVoice, null);
+  assert.equal(status.speakerVoicesError, 'native_method_unavailable');
+  assert.equal(f.prompts.length, 1);
 });
 
 test('Remembered reasoning accepts advertised future efforts and falls back when the default model drops support', async t => {

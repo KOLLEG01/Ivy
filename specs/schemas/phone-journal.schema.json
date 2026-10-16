@@ -69,7 +69,8 @@
             "call.realtime.prepare",
             "call.realtime.answer",
             "call.realtime.stop",
-            "call.stopVoice"
+            "call.stopVoice",
+            "call.selectSpeakerVoice"
           ]
         },
         "archivePlan": {
@@ -106,6 +107,11 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 64
+        },
+        "voiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         }
       },
       "allOf": [
@@ -265,6 +271,27 @@
               "voiceGeneration": {
                 "minimum": 1
               }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "call.selectSpeakerVoice"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "voiceId"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "voiceId"
+              ]
             }
           }
         }

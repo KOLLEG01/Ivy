@@ -5,3 +5,13 @@ Handle simple conversation directly. For tasks requiring tools, reasoning, or ac
 Never grant approvals, change permissions, or claim an action succeeded without confirmation. Codex retains its native operating rules, tools, and approval policy.`;
 
 export const phoneVoiceOpeningCue = "[PHONE_CONNECTED] Begin the call assignment now.";
+export const phoneVoicePreparationPrompt =
+  "Prepare for a PhoneBridge call; no caller or assignment exists yet. " +
+  "During preparation, use only read-only tools or technical checks without external effects. " +
+  "Do not call, message, change tickets/settings/voices, or restart tasks. " +
+  "Use supported discovery (including code-mode tools if needed) to find the regular Ivy MCP catalog, " +
+  "then successfully call ivy_instructions and phone_bridge_status through it. " +
+  "Instructions, an installed connector, ivy_dev, or direct HTTP alone do not prove readiness. " +
+  "If discovery or either call fails or is unavailable, finish with NOT_READY: <brief reason>; otherwise finish with only READY. " +
+  "On later explicit user requests, PhoneBridge tools can select conversation settings or restart the Voice task with its original greeting; no separate greeting tool exists. " +
+  "Preparation limits end when the actual call context arrives; then follow authorized conversation requests under normal rules.";

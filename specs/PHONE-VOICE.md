@@ -23,6 +23,12 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   Complete a context-free model preparation turn in the background; retain its request
   and native turn identity so reconnects cannot repeat an unknown preparation.
   A call arriving during preparation waits for that same task.
+  Preparation permits read-only discovery and requires successful regular Ivy MCP
+  `ivy_instructions` and `phone_bridge_status` calls plus a final `READY`. Validate
+  those calls and the final response from the original completed native turn;
+  `NOT_READY`, missing tools, tool errors and failed turns cannot confirm readiness.
+  Preparation forbids calls, messages, ticket/settings/voice changes and restarts
+  without an assignment. Its limits end when the actual conversation context arrives.
 - A conversation consumes its prepared task. After confirmed hangup and cleanup,
   prepare the next unused task in the background; keep completed call/task history.
   A recovered used task must confirm its previous Voice stop before replacement.
@@ -121,6 +127,20 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   original operation ID. A model selection affects following task turns. Restart
   prepares a new task and reconnects media in the original SIP call; retained
   generations and operations prevent another restart on replay.
+- Audio speaker voices are separate from model/reasoning selection.
+  `phone_bridge_speaker_voices` uses native `thread/realtime/listVoices`, cached
+  for 60 seconds and cleared on reconnect. Native V3 uses the returned V1 group
+  and default; no fixed voice list is supplied by PhoneBridge. The explicit
+  `codexVoice.voice` setting overrides the native `realtime.voice` configuration.
+  With `callId`, the API reports selected/effective voice and `restartRequired`;
+  active-call status also includes `speakerVoice` and discovery errors.
+  `phone_bridge_select_speaker_voice` takes `callId`, `voiceId` and `operationId`.
+  It retains a validated selection for that original call's next Voice session.
+  It does not restart audio. An explicit `phone_bridge_restart_voice` applies the
+  selection during the call, with its existing new-task/original-greeting behavior.
+  Future calls keep their configured default. Reusing the same operation returns
+  its original receipt, including after hangup or a lost response; changed arguments
+  conflict. Read it through `phone_bridge_status` with `callId` and `operationId`.
 - Hangup revokes SIP/audio before awaiting Codex. Confirm the exact task's realtime
   stop and native peer disposal before releasing the admission. Lost transport
   requires reconnecting to the same runtime for cleanup. Service clients never

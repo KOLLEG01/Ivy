@@ -77,6 +77,20 @@ export function validatePhoneService(name: string, value: unknown): void {
 }
 export const phoneTools = [
   {
+    name: "speakerVoices",
+    input: "PhoneSpeakerVoiceQuery",
+    output: "PhoneSpeakerVoices",
+    readOnly: true,
+    description: "List audio speaker voices supported by the configured native Voice runtime for V3 (60-second cache). Optional callId includes selected/effective voices and restartRequired. This is separate from model/reasoning selection.",
+  },
+  {
+    name: "selectSpeakerVoice",
+    input: "PhoneSelectSpeakerVoice",
+    output: "PhoneOperationResult",
+    readOnly: false,
+    description: "Select an audio speaker voice for the original active Voice call, validated against phone_bridge_speaker_voices. Applies on its next Voice session; use phone_bridge_restart_voice explicitly to apply during this call. Does not restart, change the current audio, or change future calls' default. Requires callId, voiceId and operationId; replay returns the original outcome.",
+  },
+  {
     name: "voiceInputs",
     input: "PhoneCallQuery",
     output: "PhoneVoiceInputs",
@@ -257,6 +271,10 @@ function phoneMcp(
   if (name === "hangup") return { name: "phone_bridge_hangup", surface: "ivy" };
   if (name === "selectVoice")
     return { name: "phone_bridge_select_voice", surface: "ivy" };
+  if (name === "speakerVoices")
+    return { name: "phone_bridge_speaker_voices", surface: "ivy" };
+  if (name === "selectSpeakerVoice")
+    return { name: "phone_bridge_select_speaker_voice", surface: "ivy" };
   if (name === "restartVoice")
     return { name: "phone_bridge_restart_voice", surface: "ivy" };
   if (name === "voiceInputs")
@@ -290,6 +308,7 @@ export function phoneRegistry(): Wire.RegistrySync {
         guideMarkdown:
           "Use phone_bridge_status for readiness, configured recipient IDs, original call state, current Voice model selection and original operation outcomes. phone_bridge_call requires recipientId, operationId and a nonempty initialPrompt. PhoneBridge creates a local task with GPT-6.1 Sol/high by default and sends the prompt after connection. During the call, *1<M><R># selects model 1 Luna, 2 Sol or 3 Astra and reasoning 1 low, 2 medium, 3 high, 4 xhigh, 5 max or 6 ultra (not Luna). Selection leaves the current task running; *0# creates a new task with the selected model and reasoning, then starts Voice there. Use phone_bridge_hangup to end the call. " +
           "phone_bridge_status.voiceModels discovers all picker-visible models and their supportedReasoningEfforts from the configured Codex home via model/list, cached for up to 60 seconds. Check voiceModelsError if discovery is unavailable. phone_bridge_select_voice accepts these exact model IDs and efforts without a fixed allowlist. It changes the current task; phone_bridge_restart_voice creates and transfers to a fresh task with that selection and the original greeting. Both require callId and operationId, keep the phone connection, and return the retained operation. Use a new operationId only for a new action; read a lost reply via phone_bridge_status with callId and operationId. " +
+          "Audio speaker voices are separate: phone_bridge_speaker_voices lists native V3 voices and, with callId, selected/effective voice and restartRequired. phone_bridge_select_speaker_voice takes callId, voiceId and operationId; it selects for that call's next Voice session without restarting. Use phone_bridge_restart_voice explicitly to apply now; future calls retain their configured default. A replay returns the original selection outcome. " +
           "If the recipient already has an incoming or outgoing Voice call, phone_bridge_call forwards initialPrompt unchanged to its current task and returns the existing callId. It waits for setup or a task switch and retains the send under the request operationId, so retries cannot duplicate it. " +
           "The internal phone.request method also supports the Windows audio route and authorized direct destinations. " +
           "phone.screen plays an announcement and collects 1/2; phone.bridgeScreening connects an accepted call to Windows audio. " +

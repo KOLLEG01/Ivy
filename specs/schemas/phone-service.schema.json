@@ -400,12 +400,18 @@
               "$ref": "#/$defs/PhoneVoiceSelection"
             },
             "voicePlaybackPrebufferMs": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "minimum": 0,
               "maximum": 200
             },
             "voiceQueueMs": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "minimum": 20,
               "maximum": 200
             },
@@ -428,6 +434,22 @@
             {
               "$ref": "#/$defs/MicroAttachmentStatus"
             }
+          ]
+        },
+        "speakerVoice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhoneSpeakerVoiceState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speakerVoicesError": {
+          "type": [
+            "string",
+            "null"
           ]
         }
       }
@@ -1391,6 +1413,128 @@
       "properties": {
         "state": {
           "const": "submitted"
+        }
+      }
+    },
+    "PhoneSpeakerVoiceQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        }
+      }
+    },
+    "PhoneSelectSpeakerVoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "operationId",
+        "voiceId"
+      ],
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "operationId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "voiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Exact native V3 audio speaker ID from phone_bridge_speaker_voices. Applies to this call after an explicit Voice restart."
+        }
+      }
+    },
+    "PhoneSpeakerVoiceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "callId",
+        "selectedVoiceId",
+        "effectiveVoiceId",
+        "restartRequired",
+        "appliesOn"
+      ],
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "selectedVoiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "effectiveVoiceId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "restartRequired": {
+          "type": "boolean"
+        },
+        "appliesOn": {
+          "const": "next_voice_session"
+        }
+      }
+    },
+    "PhoneSpeakerVoices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "voices",
+        "defaultVoiceId",
+        "selection"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "v3"
+        },
+        "voices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "displayName"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "displayName": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          }
+        },
+        "defaultVoiceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhoneSpeakerVoiceState"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     }

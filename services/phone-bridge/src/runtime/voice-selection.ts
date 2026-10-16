@@ -5,6 +5,12 @@ export interface PhoneVoiceSelection {
   reasoningEffort: string;
 }
 
+export interface PhoneSpeakerVoiceCatalog {
+  protocol: 'v3';
+  defaultVoiceId: string;
+  voices: { id: string; displayName: string }[];
+}
+
 export interface PhoneVoiceModel {
   model: string;
   displayName: string;

@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { IvyError } from '../packages/sdk/src/node.js';
+import type { Wire } from '../packages/sdk/src/node.js';
 import { canonical, digest } from "../packages/contracts/src/canonical.js";
-import { phoneVoiceInstructions, phoneVoiceOpeningCue } from "../instructions/phone-voice.js";
+import { phoneVoiceInstructions, phoneVoiceOpeningCue, phoneVoicePreparationPrompt } from "../instructions/phone-voice.js";
 import catalog from "../specs/native/codex-0.159.2/catalog.json" with { type: "json" };
 import { PhoneCodexVoice } from "../services/phone-bridge/src/runtime/codex-voice.js";
 import type { PhoneCodexVoiceSettings } from "../services/phone-bridge/src/runtime/codex-voice.js";
@@ -60,6 +61,13 @@ function fixture(t: test.TestContext) {
   let readPause: Promise<void> | undefined;
   let loseArchiveReply = false;
   let modelTimeout = false;
+  let preparationItems: Record<string, Wire.Json>[] = [
+    ...['ivy_instructions', 'phone_bridge_status'].map(tool => ({ type: 'mcpToolCall', id: randomUUID(),
+      server: 'ivy', tool, status: 'completed', error: null, result: { content: [] } })),
+    { type: 'agentMessage', id: randomUUID(), phase: 'final_answer', text: 'READY' },
+  ];
+  let speakerResponse: unknown = { voices: { v1: ['cove', 'ember'], defaultV1: 'cove', v2: ['marin'], defaultV2: 'marin' } };
+  let configuredSpeaker: string | null = null;
   const descendants = (ancestor: string, thread: Record<string, unknown>): boolean => {
     let parent = thread['parentThreadId'];
     while (typeof parent === 'string') {
@@ -98,6 +106,8 @@ function fixture(t: test.TestContext) {
           throw new IvyError(hooks.detachOnTimeout ? 'native_observation_deadline' : 'native_deadline_exceeded', 'Synthetic slow model discovery.');
         }
         let result: unknown = {};
+        if (method === 'thread/realtime/listVoices') result = speakerResponse;
+        if (method === 'config/read') result = { config: { realtime: { voice: configuredSpeaker } } };
         if (method === 'model/list') result = modelPage(params);
         if (method === "project/read")
           result = { project: { id: settings.projectId } };
@@ -115,7 +125,7 @@ function fixture(t: test.TestContext) {
         }
         if (method === "thread/read" || method === "thread/resume") {
           const id = String(params["threadId"]);
-          if (method === 'thread/read') await readPause;
+          if (method === 'thread/read' && params['includeTurns'] !== true) await readPause;
           if (!threads.has(id))
             return {
               error: {
@@ -148,6 +158,7 @@ function fixture(t: test.TestContext) {
           const id = String(params["threadId"]);
           const turn = { id: randomUUID(), status: "completed", items: [
             { type: "userMessage", id: randomUUID(), clientId: String(params["clientUserMessageId"]) },
+            ...structuredClone(preparationItems),
           ] };
           threads.get(id)!["turns"] = [turn];
           await preparationPause;
@@ -234,6 +245,9 @@ function fixture(t: test.TestContext) {
       incoming: { sipCallId: "fixture-wire", peerAddress: "127.0.0.1", peerPort: 5060, transport: "udp", fromUri: `sip:${caller}@127.0.0.1` },
     })),
     settings,
+    preparationItems: (items: typeof preparationItems) => { preparationItems = items; },
+    speakerResponse: (value: unknown) => { speakerResponse = value; },
+    configuredSpeaker: (value: string | null) => { configuredSpeaker = value; },
     opens: () => opens,
     forgetTasks: () => threads.clear(),
     killLoops: () => { for (const id of threads.keys()) deadLoops.add(id); },
@@ -253,6 +267,81 @@ function fixture(t: test.TestContext) {
     notification: (value: NativeNotification) => notification(value),
   };
 }
+
+test('Preparation accepts read-only Ivy checks and READY, then passes the conversation assignment to Voice', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit();
+  const threadId = await voice.prepare(call, 0, selection);
+  const prepare = f.requests.find(item => item.method === 'turn/start')!;
+  assert.deepEqual(prepare.params['input'], [{ type: 'text', text: phoneVoicePreparationPrompt, text_elements: [] }]);
+  assert.match(phoneVoicePreparationPrompt, /only read-only tools/);
+  assert.match(phoneVoicePreparationPrompt, /Do not call, message, change tickets\/settings\/voices, or restart tasks/);
+  assert.match(phoneVoicePreparationPrompt, /limits end when the actual call context arrives/);
+  assert.match(phoneVoicePreparationPrompt, /regular Ivy MCP catalog/);
+  const prompt = 'The caller now asks to change conversation settings.';
+  await voice.start(call, 0, threadId, prompt, 'offer', () => {});
+  const start = f.requests.find(item => item.method === 'thread/realtime/start')!;
+  assert.deepEqual(start.params['initialItems'], [{ role: 'user', text: prompt }]);
+  assert.equal(start.params['voice'], 'cove');
+  assert.equal(voice.speakerVoice(call.callId), 'cove');
+});
+
+test('Preparation rejects NOT_READY, bare READY, ivy_dev-only tools, tool failures and false final acknowledgements', async t => {
+  const checks = ['ivy_instructions', 'phone_bridge_status'].map(tool => ({ type: 'mcpToolCall', id: randomUUID(),
+    server: 'ivy', tool, status: 'completed', error: null, result: { content: [] } }));
+  const ready = { type: 'agentMessage', id: randomUUID(), phase: 'final_answer', text: 'READY' };
+  for (const items of [
+    [ready],
+    [...checks, { ...ready, text: 'NOT_READY: regular catalog unavailable' }],
+    [...checks.map(item => ({ ...item, server: 'ivy_dev' })), ready],
+    [{ ...checks[0], status: 'failed', error: { message: 'connection lost' } }, checks[1]!, ready],
+    [{ ...checks[0], result: { isError: true } }, checks[1]!, ready],
+    [checks[0]!, ready],
+    [...checks, { ...ready, phase: 'commentary' }],
+  ]) {
+    const f = fixture(t), voice = f.voice();
+    f.preparationItems(items);
+    await assert.rejects(voice.prewarm('principal', selection), { code: 'phone_voice_not_ready' });
+    // A completed failed readiness check is retained, never silently rerun or accepted on reconnect.
+    f.disconnect();
+    await assert.rejects(voice.prewarm('principal', selection), { code: 'phone_voice_not_ready' });
+    assert.equal(f.requests.filter(item => item.method === 'turn/start').length, 1);
+    assert.equal(f.requests.some(item => item.method === 'thread/realtime/start'), false);
+  }
+});
+
+test('Native speaker discovery uses V3-compatible voices, preserves configured defaults and rejects malformed catalogs', async t => {
+  const f = fixture(t), voice = f.voice();
+  const first = await voice.speakerVoices();
+  assert.deepEqual(first, { protocol: 'v3', defaultVoiceId: 'cove',
+    voices: [{ id: 'cove', displayName: 'Cove' }, { id: 'ember', displayName: 'Ember' }] });
+  first.voices.length = 0;
+  assert.equal((await voice.speakerVoices()).voices.length, 2);
+  assert.equal(f.requests.filter(item => item.method === 'thread/realtime/listVoices').length, 1);
+  f.configuredSpeaker('ember'); f.disconnect();
+  assert.equal((await voice.speakerVoices()).defaultVoiceId, 'ember');
+  f.settings.voice = 'cove'; f.disconnect();
+  assert.equal((await voice.speakerVoices()).defaultVoiceId, 'cove');
+  f.speakerResponse({ voices: { v1: [], defaultV1: 'cove', v2: ['marin'], defaultV2: 'marin' } });
+  f.disconnect();
+  await assert.rejects(voice.speakerVoices(), { code: 'phone_speaker_catalog_invalid' });
+});
+
+test('A retained speaker selection reaches native V3 only after the original call starts its next Voice session', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit();
+  const first = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, first, 'Initial conversation', 'offer', () => {});
+  const intent = { epoch: call.epoch, callId: call.callId, operationId: randomUUID(), method: 'call.selectSpeakerVoice' as const,
+    voiceId: 'ember', requestHash: digest(canonical({ voiceId: 'ember' })) };
+  f.journal.submit(intent);
+  f.journal.finishSpeakerVoiceSelection(intent, { selectedVoiceId: 'ember' });
+  assert.equal(voice.speakerVoice(call.callId), 'cove');
+  assert.equal(f.requests.filter(item => item.method === 'thread/realtime/start').length, 1);
+  const next = await voice.prepare(call, 1, selection);
+  await voice.stop(call.callId, next);
+  await voice.start(call, 1, next, 'Restarted conversation', 'offer', () => {});
+  assert.equal(f.requests.filter(item => item.method === 'thread/realtime/start').at(-1)!.params['voice'], 'ember');
+  assert.equal(voice.speakerVoice(call.callId), 'ember');
+});
 
 test('Native model discovery follows pages and coalesces concurrent reads without preparing a task', async t => {
   const f = fixture(t), voice = f.voice();

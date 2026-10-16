@@ -30,7 +30,7 @@ import {
   selectedPhoneVoiceModel,
   validatePhoneVoiceSelection,
 } from "./voice-selection.js";
-import type { PhoneVoiceModel, PhoneVoiceSelection } from "./voice-selection.js";
+import type { PhoneSpeakerVoiceCatalog, PhoneVoiceModel, PhoneVoiceSelection } from "./voice-selection.js";
 import type { Agent } from "../../../../packages/sdk/src/node.js";
 
 type PhoneVoiceControl =
@@ -113,6 +113,45 @@ export class PhoneFlow {
     requireThat(this.voice, 'phone_voice_unconfigured', 'Voice requires its configured Codex runtime.');
     this.voiceModels = await this.voice.models();
     return structuredClone(this.voiceModels);
+  }
+  async speakerVoiceCatalog(): Promise<PhoneSpeakerVoiceCatalog> {
+    requireThat(this.voice?.speakerVoices, 'phone_voice_unavailable', 'Configured Voice cannot discover speaker voices.');
+    return this.voice.speakerVoices();
+  }
+  speakerVoiceState(callId: string, catalog: PhoneSpeakerVoiceCatalog) {
+    const selectedVoiceId = this.calls.journal.selectedSpeakerVoice(callId) ?? catalog.defaultVoiceId;
+    const effectiveVoiceId = this.voice?.speakerVoice?.(callId) ?? null;
+    return { callId, selectedVoiceId, effectiveVoiceId,
+      restartRequired: effectiveVoiceId !== null && effectiveVoiceId !== selectedVoiceId,
+      appliesOn: 'next_voice_session' as const };
+  }
+  async selectSpeakerVoice(principalId: string, callId: string, operationId: string, voiceId: string): Promise<PhoneOperation> {
+    const call = this.original(principalId, callId, 'read');
+    const prior = this.calls.journal.get(operationId);
+    if (prior) {
+      requireThat(prior.intent.callId === callId && prior.intent.method === 'call.selectSpeakerVoice' && prior.intent.voiceId === voiceId,
+        'mutation_conflict', 'Speaker operation belongs to another call or selection.');
+      return prior;
+    }
+    this.continuing(call);
+    requireThat(this.callRoute(call) === 'voice', 'phone_voice_task_missing', 'Speaker selection requires a Voice call.');
+    requireThat(!this.work.has(callId), 'phone_call_busy', 'Wait for the current call action before selecting a speaker.');
+    const pending = Promise.resolve().then(async () => {
+      const catalog = await this.speakerVoiceCatalog();
+      requireThat(catalog.voices.some(voice => voice.id === voiceId), 'phone_speaker_voice_invalid',
+        'Select a speaker voice advertised by phone_bridge_speaker_voices for native V3.');
+      await this.confirmConnectedForVoice(call);
+      const intent: PhoneJournalIntent & { method: 'call.selectSpeakerVoice' } = {
+        epoch: call.epoch, callId, operationId, method: 'call.selectSpeakerVoice', voiceId,
+        requestHash: digest(canonical({ voiceId })),
+      };
+      this.calls.journal.submit(intent);
+      return this.calls.journal.finishSpeakerVoiceSelection(intent,
+        { ...this.speakerVoiceState(callId, catalog), selectedVoiceId: voiceId,
+          restartRequired: this.voice?.speakerVoice?.(callId) != null && this.voice.speakerVoice(callId) !== voiceId });
+    }).finally(() => this.work.delete(callId));
+    this.work.set(callId, pending.then(() => undefined, () => undefined));
+    return pending;
   }
   voiceInputs(principalId: string, callId: string): unknown[] {
     this.original(principalId, callId, "read");

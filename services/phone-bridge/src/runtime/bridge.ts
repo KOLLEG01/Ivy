@@ -57,6 +57,16 @@ export class PhoneBridge {
     validatePhoneService(tool.input, args);
     let result: unknown;
     switch (name) {
+      case "speakerVoices": {
+        const callId = args["callId"] as string | undefined;
+        if (callId) this.original(caller, callId);
+        const catalog = await this.flow.speakerVoiceCatalog();
+        result = { ...catalog, selection: callId ? this.flow.speakerVoiceState(callId, catalog) : null };
+        break;
+      }
+      case "selectSpeakerVoice":
+        result = await this.flow.selectSpeakerVoice(caller, String(args["callId"]), String(args["operationId"]), String(args["voiceId"]));
+        break;
       case "probeLoopback": {
         requireThat(
           !this.flow.calls.journal.currentCalls().length,
@@ -189,6 +199,11 @@ export class PhoneBridge {
         let voiceModels: unknown[] = [], voiceModelsError: string | null = null;
         try { voiceModels = await this.flow.voiceModelCatalog(); }
         catch (error) { voiceModelsError = IvyError.from(error).code; }
+        let speakerVoice = null, speakerVoicesError: string | null = null;
+        if (voiceCall) {
+          try { speakerVoice = this.flow.speakerVoiceState(voiceCall.callId, await this.flow.speakerVoiceCatalog()); }
+          catch (error) { speakerVoicesError = IvyError.from(error).code; }
+        }
         result = {
           epoch: this.native.epoch,
           registration: observed.registration,
@@ -201,6 +216,8 @@ export class PhoneBridge {
             : null,
           voiceModels,
           voiceModelsError,
+          speakerVoice,
+          speakerVoicesError,
           call: visible[0] ?? null,
           incoming: pending[0] ?? null,
           calls: visible,
