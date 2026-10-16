@@ -61,6 +61,9 @@ async function fixture(
   // Exercise the actual HTTP handler without connecting to Hive or running scripts.
   t.mock.method(ServiceClient.prototype, "start", () => undefined);
   runtime = await startDataCollector(path);
+  runtime.engine.runner.run = async (_task, _state, input) => ({
+    data: input as never,
+  });
   const task = taskSchema.parse({
     id: "fixture-task",
     name: "Ingress fixture",
@@ -93,6 +96,9 @@ async function fixture(
     restart: async () => {
       await runtime!.close();
       runtime = await startDataCollector(path);
+      runtime.engine.runner.run = async (_task, _state, input) => ({
+        data: input as never,
+      });
       return runtime;
     },
   };
@@ -262,7 +268,7 @@ test("Input stays disabled without an explicit mode and token-protected tasks st
   assert.equal(runtime.engine.store.runs("queued").length, 1);
 });
 
-test("Anonymous input is durable and idempotent without Hive, with one outstanding observation per task", async (t) => {
+test("Anonymous input is durable and idempotent without Hive and executes from the restarted cache", async (t) => {
   const f = await fixture(t, {
     inputSecretName: null,
     allowUnauthenticatedInput: true,
@@ -279,9 +285,22 @@ test("Anonymous input is durable and idempotent without Hive, with one outstandi
   );
   assert.equal((await post(f.port, path, { sequence: 2 })).status, 409);
   await restarted.engine.tick();
-  const queued = restarted.engine.store.runs("queued");
-  assert.equal(queued.length, 1);
-  assert.deepEqual(queued[0]!.input, { sequence: 1 });
+  await Promise.all(
+    [...restarted.engine.active.values()].map((entry) => entry.work),
+  );
+  assert.equal(
+    restarted.engine.store.run(accepted.body.runId)!.status,
+    "publishing",
+  );
+  assert.deepEqual(
+    restarted.engine.store.run(accepted.body.runId)!.output!.data,
+    { sequence: 1 },
+  );
+  assert.equal(
+    (await post(f.port, path, { sequence: 2 })).status,
+    202,
+    "pending publication does not block the next input",
+  );
 });
 
 test("Anonymous input rechecks a task switched to token authentication while the body is arriving", async (t) => {

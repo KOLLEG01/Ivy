@@ -11,6 +11,13 @@ export const tr = (de: string, en: string) =>
   navigator.language.toLowerCase().startsWith("de") ? de : en;
 
 export interface TaskRow {
+  jobId?: string;
+  assignmentRevision?: number;
+  desiredRevision?: number | null;
+  desiredEnabled?: boolean;
+  adoptedRevision?: number | null;
+  adoptionError?: string | null;
+  pendingPublications?: number;
   task: Pick<Task, "id" | "name" | "enabled">;
   revision: number;
   status: string;
@@ -109,7 +116,7 @@ export const statusTone = (status: string) =>
         ? "warning"
         : "neutral";
 export const working = (status: string) =>
-  ["queued", "running", "publishing"].includes(status);
+  ["queued", "running"].includes(status);
 
 export const intervalLabel = (seconds: number) =>
   !seconds

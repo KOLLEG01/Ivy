@@ -165,15 +165,12 @@ const submit = () => {
           }}</FieldDescription>
         </Field>
       </FieldGroup>
-      <Field orientation="horizontal">
-        <Switch id="task-enabled" v-model="form.enabled" :disabled="busy" />
-        <FieldLabel for="task-enabled">{{
-          tr(
-            "Planmäßig und per Eingang ausführen",
-            "Run on schedule and on input",
-          )
-        }}</FieldLabel>
-      </Field>
+      <FieldDescription>{{
+        tr(
+          "Speichert einen Entwurf. Übernehmen und Aktivieren erfolgen anschließend in der Taskansicht.",
+          "Saves a draft. Apply and enable it separately in the task view.",
+        )
+      }}</FieldDescription>
     </FieldSet>
 
     <FieldSet>

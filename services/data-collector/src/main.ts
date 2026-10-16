@@ -18,6 +18,7 @@ import { CollectorStore } from "./store.js";
 import { TaskRunner } from "./runner.js";
 import { settingsSchema, registry } from "./schema.js";
 import { NativeMcpSession } from "./native-mcp.js";
+import { CollectorDefinitions } from "./definitions.js";
 
 export async function startDataCollector(path: string) {
   const config = await instanceConfig(path),
@@ -46,8 +47,11 @@ export async function startDataCollector(path: string) {
     ),
     settings,
   );
+  const definitions = new CollectorDefinitions(config.serviceNodeId, engine);
   let closed = false,
     tickWork: Promise<void> | null = null,
+    syncWork: Promise<void> | null = null,
+    nextSyncAt = 0,
     healthWork: Promise<void> = Promise.resolve();
   const writeHealth = (
     ready: boolean,
@@ -74,11 +78,14 @@ export async function startDataCollector(path: string) {
     registry,
     handlers: {
       "data-collector.read": async (args) =>
-        (await engine.read(args)) as Wire.Json,
-      "data-collector.update": (args, context) =>
-        engine.update(args, context) as Wire.Json,
+        (await definitions.read(args)) as Wire.Json,
+      "data-collector.update": async (args, context) =>
+        (await definitions.update(args, context)) as Wire.Json,
     },
-    reconcile: (connection) => engine.attach(connection),
+    reconcile: async (connection) => {
+      await engine.attach(connection);
+      await definitions.sync();
+    },
     readiness: async (connection) => {
       await writeHealth(
         true,
@@ -90,9 +97,10 @@ export async function startDataCollector(path: string) {
     onState: (state) => {
       if (["connecting", "offline", "stopped"].includes(state.status)) {
         engine.detach();
-        void writeHealth(false, "Hive connection is not ready.").catch(
-          () => undefined,
-        );
+        void writeHealth(
+          store.list().length > 0,
+          "Hive unavailable; accepted jobs continue from the durable cache.",
+        ).catch(() => undefined);
       }
     },
     heartbeatMs: 2000,
@@ -183,9 +191,19 @@ export async function startDataCollector(path: string) {
     });
   }
   const timer = setInterval(() => {
-    if (closed || !service.ready || tickWork) return;
+    if (closed) return;
+    if (service.ready && !syncWork && Date.now() >= nextSyncAt) {
+      nextSyncAt = Date.now() + 5000;
+      syncWork = definitions
+        .sync()
+        .catch(() => undefined)
+        .finally(() => {
+          syncWork = null;
+        });
+    }
+    if (tickWork) return;
     tickWork = engine
-      .tick()
+      .tick(false)
       .catch(() => undefined)
       .finally(() => {
         tickWork = null;
@@ -213,6 +231,7 @@ export async function startDataCollector(path: string) {
     const stopped = engine.close();
     await service.stop();
     await tickWork;
+    await syncWork;
     await stopped;
     await healthWork.catch(() => undefined);
     store.close();
@@ -220,7 +239,7 @@ export async function startDataCollector(path: string) {
   };
   await writeHealth(false, "Connecting DataCollector.");
   service.start();
-  return { service, engine, close };
+  return { service, engine, definitions, close };
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {

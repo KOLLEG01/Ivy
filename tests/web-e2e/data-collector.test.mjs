@@ -101,6 +101,20 @@ for (const viewport of [
           exact: true,
         }),
       ).toBeVisible();
+      assert.equal(
+        runtime.engine.store.get("browser-fixture"),
+        null,
+        "saving creates a draft",
+      );
+      await f.page
+        .getByRole("button", {
+          name: label("Apply revision", "Stand übernehmen"),
+          exact: true,
+        })
+        .click();
+      await expect
+        .poll(() => !!runtime.engine.store.get("browser-fixture"))
+        .toBe(true);
       for (let n = 0; n < 2; n++) {
         const previousRunId =
           runtime.engine.store.get("browser-fixture").lastRunId;
@@ -157,6 +171,19 @@ for (const viewport of [
         );
       await f.page
         .getByRole("button", { name: label("Save", "Speichern"), exact: true })
+        .click();
+      assert.equal(
+        runtime.engine.store
+          .get("browser-fixture")
+          .task.script.includes("temperature"),
+        true,
+        "saved draft leaves accepted execution unchanged",
+      );
+      await f.page
+        .getByRole("button", {
+          name: label("Apply revision", "Stand übernehmen"),
+          exact: true,
+        })
         .click();
       await f.page
         .getByRole("button", {

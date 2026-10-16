@@ -12,7 +12,11 @@ import type {
 } from "../../../packages/sdk/src/node.js";
 import { CollectorStore } from "./store.js";
 import type { Run, RecordTask } from "./store.js";
-import { effectiveRetention, readSchema, updateSchema } from "./schema.js";
+import {
+  effectiveRetention,
+  runtimeReadSchema as readSchema,
+  runtimeUpdateSchema as updateSchema,
+} from "./schema.js";
 import type { Settings } from "./schema.js";
 import { TaskRunner } from "./runner.js";
 
@@ -50,11 +54,61 @@ export class CollectorEngine {
   private closing = false;
   private lastMaintenance = 0;
   private nextRecoveryAt = 0;
+  private publication: Promise<void> | null = null;
+  private maintenance: Promise<void> | null = null;
   constructor(
     readonly store: CollectorStore,
     readonly runner: TaskRunner,
     readonly settings: Settings,
-  ) {}
+  ) {
+    this.rootId = settings.rootObjectId ?? store.metadata("rootId") ?? "";
+  }
+  pendingPublications() {
+    return this.store.runs("publishing").length;
+  }
+  async flush() {
+    if (!this.client || this.closing) return;
+    if (this.publication) return this.publication;
+    this.publication = this.publishPending().finally(() => {
+      this.publication = null;
+    });
+    return this.publication;
+  }
+  private commitExecution(run: Run) {
+    if (run.executionCommitted) return;
+    const row = this.task(run.taskId);
+    if (Object.hasOwn(run.output!, "state")) row.state = run.output!.state;
+    row.nextAt = Date.now() + row.task.intervalSeconds * 1000;
+    run.executionCommitted = true;
+    this.store.transaction(() => {
+      this.store.save(row);
+      this.store.saveRun(run);
+    });
+  }
+  private async publishPending() {
+    for (const run of this.store.runs("publishing")) {
+      if (!this.client || this.closing) break;
+      try {
+        await this.publish(run);
+      } catch (error) {
+        const failure = IvyError.from(error);
+        if (
+          failure.outcome === "not_executed" &&
+          [
+            "content_too_large",
+            "invalid_arguments",
+            "target_conflict",
+          ].includes(failure.code)
+        ) {
+          run.status = "failed";
+          run.error = failure.code;
+        } else run.error = "Result publication pending: " + failure.code;
+        this.store.saveRun(run);
+        // Preserve publication order across a lost write/event response.
+        break;
+      }
+    }
+  }
   private hive() {
     requireThat(
       this.client,
@@ -239,6 +293,10 @@ export class CollectorEngine {
             deleted: false,
             lastRunId: previous?.lastRunId ?? null,
             retentionWarning: null,
+            ...(saved?.definition ? { definition: saved.definition } : {}),
+            ...(saved?.resultRootId
+              ? { resultRootId: saved.resultRootId }
+              : {}),
           };
           this.store.save(row);
           return this.visible(row);
@@ -247,7 +305,7 @@ export class CollectorEngine {
         if (input.action !== "disable") this.requireStopped(row);
         if (input.action === "run") {
           requireThat(
-            !this.store.busy(input.id),
+            !this.store.executing(input.id),
             "task_busy",
             "Task already has an active or queued run.",
           );
@@ -336,6 +394,9 @@ export class CollectorEngine {
       id,
       taskId: row.task.id,
       task: structuredClone(row.task),
+      ...(row.definition
+        ? { definition: structuredClone(row.definition) }
+        : {}),
       status: "queued",
       input,
       output: null,
@@ -345,42 +406,27 @@ export class CollectorEngine {
       error: null,
     });
   }
-  async tick() {
-    if (this.ticking || !this.client || this.closing) return;
+  async tick(waitForPublication = true) {
+    if (this.ticking || this.closing) return;
     this.ticking = true;
     try {
       await this.recoverWorkers();
-      for (const run of this.store.runs("publishing")) {
-        try {
-          await this.publish(run);
-        } catch (error) {
-          const failure = IvyError.from(error);
-          if (
-            failure.outcome === "not_executed" &&
-            [
-              "content_too_large",
-              "invalid_arguments",
-              "target_conflict",
-            ].includes(failure.code)
-          ) {
-            run.status = "failed";
-            run.error = failure.code;
-          } else run.error = "Result publication pending: " + failure.code;
-          this.store.saveRun(run);
-        }
-      }
+      for (const run of this.store.runs("publishing"))
+        this.commitExecution(run);
+      const publication = this.flush();
+      void publication.catch(() => undefined);
       for (const row of this.store.list())
         if (
           row.task.enabled &&
           row.task.intervalSeconds > 0 &&
           row.nextAt <= Date.now() &&
           !this.unconfirmed(row) &&
-          !this.store.busy(row.task.id)
+          !this.store.executing(row.task.id)
         ) {
           this.store.transaction(() => this.enqueue(row, randomUUID(), null));
         }
       for (const run of this.store.runs("queued")) {
-        if (this.closing || !this.client) break;
+        if (this.closing) break;
         if (this.active.size >= this.settings.concurrency) break;
         if (this.active.has(run.taskId)) continue;
         const controller = new AbortController();
@@ -392,9 +438,20 @@ export class CollectorEngine {
       if (Date.now() - this.lastMaintenance > 60000) {
         this.lastMaintenance = Date.now();
         this.store.cleanup();
-        for (const row of this.store.list(true))
-          if (row.resultObjectId && !this.store.busy(row.task.id))
-            await this.retain(row);
+        if (this.client && !this.maintenance)
+          this.maintenance = (async () => {
+            for (const row of this.store.list(true)) {
+              if (!this.client || this.closing) break;
+              if (row.resultObjectId && !this.store.busy(row.task.id))
+                await this.retain(row);
+            }
+          })().finally(() => {
+            this.maintenance = null;
+          });
+      }
+      if (waitForPublication) {
+        await publication;
+        await this.maintenance;
       }
     } finally {
       this.ticking = false;
@@ -441,7 +498,8 @@ export class CollectorEngine {
             ? "Task was cancelled."
             : IvyError.from(error).code;
     }
-    this.store.saveRun(run);
+    if (run.status === "publishing") this.commitExecution(run);
+    else this.store.saveRun(run);
     const current = this.store.get(run.taskId);
     if (current && run.error === "outcome_unknown" && !run.workerJobName) {
       current.task.enabled = false;
@@ -483,14 +541,15 @@ export class CollectorEngine {
     // Pending output survives restarts; validate it before any further Hive effects.
     validateEvents(run);
     const client = this.hive(),
-      row = this.task(run.taskId);
+      row = this.task(run.taskId),
+      rootId = row.resultRootId ?? this.rootId;
     if (!row.resultObjectId) {
       const page = await client.request("objects.query", {
         contractKey: "data-collector/result",
         where: {
           op: "and",
           args: [
-            { op: "eq", field: "object.parentId", value: this.rootId },
+            { op: "eq", field: "object.parentId", value: rootId },
             { op: "eq", field: "object.name", value: run.taskId },
           ],
         },
@@ -503,7 +562,7 @@ export class CollectorEngine {
       : null;
     requireThat(
       !current ||
-        (current.object.parentId === this.rootId &&
+        (current.object.parentId === rootId &&
           current.object.contractKey === "data-collector/result" &&
           !current.object.effectivelyArchived),
       "target_conflict",
@@ -525,7 +584,7 @@ export class CollectorEngine {
             }
           : {
               create: {
-                parentId: this.rootId,
+                parentId: rootId,
                 ownerObjectId: null,
                 name: run.taskId,
                 contractKey: "data-collector/result",
@@ -553,8 +612,6 @@ export class CollectorEngine {
       this.store.saveRun(run);
     }
     const final = this.task(run.taskId);
-    if (Object.hasOwn(run.output!, "state")) final.state = run.output!.state;
-    final.nextAt = Date.now() + final.task.intervalSeconds * 1000;
     this.store.transaction(() => {
       this.store.save(final);
       this.store.saveRun({ ...run, status: "succeeded", error: null });
@@ -594,5 +651,7 @@ export class CollectorEngine {
     this.closing = true;
     for (const run of this.active.values()) run.controller.abort();
     await Promise.allSettled([...this.active.values()].map((run) => run.work));
+    await this.publication;
+    await this.maintenance;
   }
 }

@@ -1,5 +1,5 @@
 import { mkdir, writeFile, readFile, stat, rm } from "node:fs/promises";
-import { rmSync } from "node:fs";
+import { rmSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve, relative } from "node:path";
 import { createHash } from "node:crypto";
 import {
@@ -44,6 +44,32 @@ const code=${JSON.stringify(taskErrorCodes)}.indexOf(error?.code);
 process.exit(code < 0 ? 1 : 80 + code); }
 `;
 export class TaskRunner {
+  authenticationFingerprint(taskId: string): string | null {
+    const root = join(this.workRoot, taskId, ".auth");
+    if (!existsSync(root)) return null;
+    const hash = createHash("sha256");
+    const walk = (path: string, prefix = "") => {
+      for (const entry of readdirSync(path, { withFileTypes: true }).sort(
+        (a, b) => a.name.localeCompare(b.name),
+      )) {
+        requireThat(
+          !entry.isSymbolicLink(),
+          "configuration_invalid",
+          "Authentication cache cannot contain symbolic links.",
+        );
+        const name = prefix + entry.name;
+        if (entry.isDirectory()) walk(join(path, entry.name), name + "/");
+        else if (entry.isFile())
+          hash
+            .update(name)
+            .update("\0")
+            .update(readFileSync(join(path, entry.name)))
+            .update("\0");
+      }
+    };
+    walk(root);
+    return "sha256:" + hash.digest("hex");
+  }
   constructor(
     readonly workRoot: string,
     readonly artifactRoot: string,

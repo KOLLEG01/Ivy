@@ -377,7 +377,7 @@ test("A lost Hive write reply is reconciled without another script execution or 
   assert.equal(hive.writes, 1);
 });
 
-test("Restart resumes pending events and commits state without rerunning the script", async (t) => {
+test("Restart resumes pending events with already committed state without rerunning the script", async (t) => {
   const path = join(
     process.env.IVY_TEST_TEMP ?? tmpdir(),
     "collector-restart-" + randomUUID() + ".sqlite",
@@ -413,7 +413,7 @@ test("Restart resumes pending events and commits state without rerunning the scr
   assert.equal(store.run(id)!.status, "publishing");
   assert.equal(store.run(id)!.eventIndex, 1);
   assert.equal(hive.writes, 1);
-  assert.equal(store.get("fixture-task")!.state, null);
+  assert.deepEqual(store.get("fixture-task")!.state, { cursor: 2 });
   await engine.close();
   store.close();
   store = new CollectorStore(path);
@@ -539,12 +539,22 @@ test("Result retention takes the stricter task and service budgets and exposes p
 
 test("Result retention describes pending history without blaming the current value", async (t) => {
   const { engine, store, hive } = await fixture(t);
-  save(engine, task("fixture-task", { retention: { ...defaultRetention, maximumBytes: 10000 } }));
+  save(
+    engine,
+    task("fixture-task", {
+      retention: { ...defaultRetention, maximumBytes: 10000 },
+    }),
+  );
   hive.remainingBytes = 50000;
   await execute(engine);
   await engine.tick();
-  assert.ok(hive.calls.some((call) => call.method === "objects.pruneRevisions"));
-  assert.match(store.get("fixture-task")!.retentionWarning!, /Retained history.*cleanup may still be pending/);
+  assert.ok(
+    hive.calls.some((call) => call.method === "objects.pruneRevisions"),
+  );
+  assert.match(
+    store.get("fixture-task")!.retentionWarning!,
+    /Retained history.*cleanup may still be pending/,
+  );
   hive.remainingBytes = 1;
   await execute(engine);
   await engine.tick();

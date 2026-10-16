@@ -92,7 +92,7 @@ export const outputSchema = z
       .optional(),
   })
   .strict();
-export const readSchema = z.discriminatedUnion("view", [
+export const runtimeReadSchema = z.discriminatedUnion("view", [
   z.object({ view: z.literal("tasks") }),
   z.object({ view: z.literal("task"), id: slug }),
   z.object({
@@ -111,7 +111,7 @@ export const readSchema = z.discriminatedUnion("view", [
   }),
 ]);
 const mutation = { operationId: z.string().min(1).max(256) };
-export const updateSchema = z.discriminatedUnion("action", [
+export const runtimeUpdateSchema = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("save"),
@@ -146,6 +146,145 @@ export const updateSchema = z.discriminatedUnion("action", [
     })
     .strict(),
 ]);
+export const pinSchema = z
+  .object({
+    objectId: z.string().min(1),
+    revision: z.number().int().positive(),
+  })
+  .strict();
+export const scriptDocument = z
+  .object({ schemaVersion: z.literal(1), script: taskSchema.shape.script })
+  .strict();
+export const definitionDocument = z
+  .object({
+    schemaVersion: z.literal(1),
+    homeServiceNodeId: z.string().min(1),
+    task: z.object(taskSchema.shape).omit({ script: true, enabled: true }),
+    script: pinSchema,
+  })
+  .strict();
+export const assignmentDocument = z
+  .object({
+    schemaVersion: z.literal(1),
+    jobId: z.string().min(1),
+    definitionRevision: z.number().int().positive(),
+    serviceNodeId: z.string().min(1),
+    enabled: z.boolean(),
+    deleted: z.boolean().default(false),
+    rootObjectId: z.string().min(1),
+    resultObjectId: z.string().nullable(),
+  })
+  .strict();
+export const observationDocument = z
+  .object({
+    schemaVersion: z.literal(1),
+    jobId: z.string().min(1),
+    serviceNodeId: z.string().min(1),
+    assignmentRevision: z.number().int().positive(),
+    definitionRevision: z.number().int().positive(),
+    accepted: z.boolean(),
+    everAccepted: z.boolean(),
+    quiesced: z.boolean(),
+    error: z.string().nullable(),
+    observedAt: z.string(),
+  })
+  .strict();
+export const definitionReadSchema = z.discriminatedUnion("view", [
+  z.object({ view: z.literal("definitions") }).strict(),
+  z
+    .object({
+      view: z.literal("definition"),
+      jobId: z.string().min(1),
+      revision: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      view: z.literal("definitionHistory"),
+      jobId: z.string().min(1),
+      cursor: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      view: z.literal("script"),
+      objectId: z.string().min(1),
+      revision: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      view: z.literal("handoff"),
+      jobId: z.string().min(1),
+      expectedRevision: z.number().int().positive(),
+    })
+    .strict(),
+]);
+export const definitionUpdateSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      action: z.literal("save"),
+      ...mutation,
+      expectedRevision: z.number().int().min(0),
+      task: taskSchema,
+      jobId: z.string().optional(),
+      scriptRef: pinSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("saveScript"),
+      ...mutation,
+      objectId: z.string().optional(),
+      expectedRevision: z.number().int().min(0),
+      script: taskSchema.shape.script,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("activate"),
+      ...mutation,
+      jobId: z.string().min(1),
+      definitionRevision: z.number().int().positive(),
+      expectedRevision: z.number().int().min(0),
+      enabled: z.boolean(),
+      serviceNodeId: z.string().min(1).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("recover"),
+      ...mutation,
+      jobId: z.string().min(1),
+      expectedRevision: z.number().int().positive(),
+      confirmedStopped: z.literal(true),
+    })
+    .strict(),
+  z.object({ action: z.literal("import"), ...mutation }).strict(),
+  z
+    .object({
+      action: z.literal("freezeHandoff"),
+      ...mutation,
+      jobId: z.string().min(1),
+      expectedRevision: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("prepareHandoff"),
+      ...mutation,
+      jobId: z.string().min(1),
+      expectedRevision: z.number().int().positive(),
+    })
+    .strict(),
+]);
+export const readSchema = z.union([runtimeReadSchema, definitionReadSchema]);
+export const updateSchema = z.union([
+  definitionUpdateSchema,
+  runtimeUpdateSchema.options[1],
+  runtimeUpdateSchema.options[2],
+  runtimeUpdateSchema.options[3],
+]);
 export type Task = z.infer<typeof taskSchema>;
 export type Settings = z.infer<typeof settingsSchema>;
 export type Output = z.infer<typeof outputSchema>;
@@ -176,6 +315,29 @@ export function registry(): Wire.RegistrySync {
         ? "Stable DataCollector result root."
         : "Successful script output; current revision is the latest result. Retention is applied by the owning collector.",
   }));
+  for (const [name, schema] of Object.entries({
+    catalog: z.object({ schemaVersion: z.literal(1) }).strict(),
+    script: scriptDocument,
+    definition: definitionDocument,
+    assignment: assignmentDocument,
+    observation: observationDocument,
+  })) {
+    contracts.push({
+      key: "data-collector/" + name,
+      version: "1.0.0",
+      owner: { kind: "service", serviceName: "data-collector" },
+      mediaType: "application/json",
+      retention: {
+        objects: { mode: "retain" },
+        revisions: { mode: name === "observation" ? "current" : "all" },
+      },
+      jsonSchema: toolSchema(schema),
+      specMarkdown:
+        name === "observation"
+          ? "Last reported adoption and worker quiescence; timestamps may be stale."
+          : "Versioned collector control data. Changes are validated and activated through data-collector.update; never execute an unactivated draft.",
+    });
+  }
   return {
     mcpPrefix: "data_collector",
     discoveryHint:
@@ -185,7 +347,7 @@ export function registry(): Wire.RegistrySync {
         namespace: "data-collector",
         description: "Script tasks and versioned collection results",
         guideMarkdown:
-          "Use data_collector_read with view tasks, task, result, history or operation. Use data_collector_update to save a complete task with expectedRevision (0 for creation), enable, disable, delete or run. Retain operationId for retries. After outcome_unknown, verify on the host that the task's workers stopped, then disable with confirmedStoppedRunId matching lastRunId to unlock it without rerunning. Scripts export default async ({config,secrets,state,input,signal}) and return {data,state?,events?}. Each event including collector metadata must fit 4096 UTF-8 bytes. Dependencies require exact npm versions. Only assigned secrets reach a task; do not put credentials in config, output or state. Tasks can use intervalSeconds=0 for input/manual runs. HTTP input requires an enabled task with inputSecretName or explicit allowUnauthenticatedInput=true, never both. The service listens on its own configured ingress port. Read tasks to discover effective service limits.",
+          "Hive owns versioned scripts and execution definitions. save creates a draft (expectedRevision is the definition revision, 0 for creation); activate selects an exact definitionRevision, target serviceNodeId and enabled state with the current assignment revision. Read definitions, definition, definitionHistory or script for central state. tasks/task expose draft and desired/adopted revisions for this instance. enable activates the latest draft; disable stops the assigned instance; run uses the adopted cache. import explicitly adopts existing local definitions without altering their schedules/state/results. recover requires verified stopped old workers after cache loss. Instantiation on another host requires the old disabled assignment's quiescence acknowledgement. Retain operationId and read operation after lost replies. Existing accepted jobs continue from durable local caches while Hive is unavailable; outputs/events queue locally in order. Secrets remain assigned by name, never include values in scripts/config/history. Dependencies use exact versions. Results and their retention are separate. After outcome_unknown verify workers and disable with confirmedStoppedRunId; never blindly replay external writes.",
         tools: [
           ["read", readSchema, true],
           ["update", updateSchema, false],

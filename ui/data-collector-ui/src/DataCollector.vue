@@ -113,9 +113,24 @@ const run = () =>
 const toggle = () =>
   perform(async () => {
     const row = current.value!;
-    await update(node.value, row.task.enabled ? "disable" : "enable", {
-      id: row.task.id,
-      expectedRevision: row.revision,
+    await update(
+      node.value,
+      (row.desiredEnabled ?? row.task.enabled) ? "disable" : "enable",
+      {
+        id: row.task.id,
+        expectedRevision: row.revision,
+      },
+    );
+    await refresh();
+  });
+const activate = (definitionRevision: number) =>
+  perform(async () => {
+    const row = current.value!;
+    await update(node.value, "activate", {
+      jobId: row.jobId,
+      definitionRevision,
+      expectedRevision: row.assignmentRevision ?? 0,
+      enabled: row.desiredEnabled ?? row.task.enabled,
     });
     await refresh();
   });
@@ -285,6 +300,7 @@ onUnmounted(() => {
         @edit="go(route('edit', { id: current.task.id }))"
         @run="run"
         @toggle="toggle"
+        @activate="activate"
       />
     </template>
     <template v-else>
@@ -300,9 +316,7 @@ onUnmounted(() => {
       />
       <Empty v-if="!busy && !nodes.length" class="border border-dashed">
         <EmptyHeader>
-          <EmptyMedia variant="icon"
-            ><Funnel aria-hidden="true"
-          /></EmptyMedia>
+          <EmptyMedia variant="icon"><Funnel aria-hidden="true" /></EmptyMedia>
           <EmptyTitle>{{
             tr("Kein DataCollector-Dienst", "No DataCollector service")
           }}</EmptyTitle>
@@ -316,9 +330,7 @@ onUnmounted(() => {
       </Empty>
       <Empty v-else-if="loaded && !rows.length" class="border border-dashed">
         <EmptyHeader>
-          <EmptyMedia variant="icon"
-            ><Funnel aria-hidden="true"
-          /></EmptyMedia>
+          <EmptyMedia variant="icon"><Funnel aria-hidden="true" /></EmptyMedia>
           <EmptyTitle>{{ tr("Noch keine Tasks", "No tasks yet") }}</EmptyTitle>
           <EmptyDescription>{{
             tr(
@@ -352,7 +364,9 @@ onUnmounted(() => {
           >
             <CardHeader>
               <div class="flex min-w-0 items-center justify-between gap-3">
-                <CardTitle class="min-w-0 flex-1 truncate">{{ row.task.name }}</CardTitle>
+                <CardTitle class="min-w-0 flex-1 truncate">{{
+                  row.task.name
+                }}</CardTitle>
                 <StatusBadge
                   :label="statusLabel(row.status)"
                   :tone="statusTone(row.status)"

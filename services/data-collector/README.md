@@ -9,14 +9,22 @@ camera images. English and German UI copy follows the browser language.
 
 The [schema](src/schema.ts) defines settings, tasks and the two MCP tools:
 `data_collector_read` and `data_collector_update`. Read tasks for service limits,
-save a complete task with its `expectedRevision` (zero on creation), and use
-enable, disable, run or delete. Mutation calls carry the same inner and routed
+save a complete task as a draft with its `expectedRevision` (zero on creation),
+then `activate` its exact `jobId` and `definitionRevision`, with the current
+assignment `expectedRevision`, `serviceNodeId` and `enabled` setting. Saving
+never replaces the accepted execution. `enable` selects the latest draft;
+`disable`, `run` and `delete` use the task ID. Read `definitions`, `definition`,
+`definitionHistory` and `script` for central history; tasks expose desired and
+adopted revisions and adoption errors. Rollback activates a complete earlier
+definition, including its pinned script and configuration. Mutation calls carry the same inner and routed
 `operationId`; inspect the original operation after a lost reply. Receipts are
 retained for seven days; do not retry an old operation after that window.
 
 Each task exports `default async ({ config, secrets, state, input, signal })` and
 returns `{ data, state?, events?: [{ name, payload }] }`. `data` is any JSON value.
-`state` is private durable task state; it advances only after successful publication.
+`state` is private durable task state; it advances atomically with the local
+successful execution record before publication, so subsequent offline runs
+receive the latest cursor. Failed or interrupted executions do not advance it.
 An optional task `mcp` binding selects an AgentManager node, absolute project `cwd`,
 MCP `server` and explicit `tools` list. The worker receives `mcp.call(tool, args)`;
 DataCollector forwards granted calls through the existing native owner in an
@@ -36,13 +44,22 @@ fit Hive's 4,096-byte UTF-8 limit. All events are checked before writing a resul
 an oversized event fails the run and leaves the task editable. No user notification is sent unless a separate subscriber
 is configured to handle the event.
 
-Multiple instances can connect to the same Hive; each keeps its own task store.
+Hive is the versioned authority for shared scripts, execution definitions and
+assignments. An execution definition pins one exact script revision; changing a
+shared script does not silently change its consumers. Assignments select the
+definition, instance and activation state. Local SQLite contains the accepted
+execution cache, private runtime state and journals. It is not an editing authority.
+The explicit `import` action captures existing local tasks without changing their
+state, schedules, secret references or result bindings.
+
+Multiple instances can connect to the same Hive; each keeps its own execution cache.
 Use `rootName` or `rootObjectId` to select each instance's result root.
 One Hive root contains one result object per task. Each successful run writes a
 new revision; a failed or cancelled run leaves the last successful result current.
-Task definitions, scheduling, state and pending publication are stored in the
+Accepted definitions, scheduling, state and pending publication are stored in the
 instance's `data-collector.sqlite`; include this database in instance backups.
-Results live in Hive. Deleting a task clears its stored definition's script, configuration and state,
+Results live in Hive. Deleting a task hides its central assignment while preserving
+versioned source history. It clears its local script, configuration and state,
 removes its private `.auth` directory and hides it from the API and scheduler. Its internal record keeps the result link
 and retention policy; recreating the same ID reuses that result object. Active,
 disabled and deleted tasks use the same retention cleanup.
@@ -50,9 +67,29 @@ disabled and deleted tasks use the same retention cleanup.
 Execution status comes from the latest run, which is retained until a newer run
 replaces it. Older execution receipts expire after seven days. Pending results
 and events resume publication after restart without running the script again;
-successful publication commits task state and run completion together.
+publication completes the run independently of later local executions.
 Invalid content or a conflicting result target ends publication with an error;
 temporary failures and uncertain replies remain pending for reconciliation.
+
+Hive unavailability does not stop accepted active jobs, including subsequently
+due intervals and HTTP inputs. A restart uses the durable cache without fetching
+a definition before each execution. Results and events queue on local disk and
+publish in order after reconnection; publication never reexecutes scripts.
+External providers and Hive-dependent MCP calls can still fail while unreachable.
+The outbox needs adequate disk space. Interrupted external effects remain unknown;
+this does not provide exactly-once effects across a process crash.
+
+After cache loss, a previous adoption acknowledgement fences automatic resumption.
+Stop and verify old workers and inspect lost cursor/outbox effects before calling
+`recover` with the current assignment revision and `confirmedStopped: true`.
+Recovery reconstructs definitions, not lost private runtime state.
+To move a job, first disable its assignment and wait for the source acknowledgement,
+worker termination and a drained outbox. Activation on another instance freezes
+manual starts and transfers the cursor, next due time and existing result binding.
+Private authentication files are never transferred; their fingerprints must match
+on the new host. An unreachable or unconfirmed old instance blocks takeover even
+when its last reported status was idle. Unlimited offline execution therefore
+does not imply immediate safe failover.
 
 Task retention is capped by the configured service limits, initially 100 MiB,
 1,000 revisions and seven days. Any exceeded limit makes older revisions eligible.
@@ -91,12 +128,14 @@ explicitly use unauthenticated input on the device network.
 
 HTTP 202 means the input was saved in the existing local SQLite run queue,
 including while Hive is disconnected. Queued input survives a restart;
-execution and publication resume when Hive reconnects. There is at most one
+execution continues from the accepted cache while publication waits for Hive.
+There is at most one
 queued or active run per task, so further observations receive 409 until it
 finishes. A stable `Idempotency-Key` prevents duplicate acceptance within the
 receipt window; senders may omit it. Input is limited to 256 KiB.
-Disabling cancels an active process; changes and
-deletion require the task to finish first. A run interrupted by an abrupt service
+Disabling cancels an active process; activation waits for it to stop, and
+deletion waits for execution and publication. Drafts can be saved during execution.
+A run interrupted by an abrupt service
 exit is never replayed. Windows workers use a named Job Object per task; the name
 is stored before execution, and a second launcher cannot join the same job.
 After interruption, DataCollector checks that the exact job has disappeared,

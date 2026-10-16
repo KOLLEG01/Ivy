@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, shallowRef, watch } from "vue";
 import { CircleAlert, Pencil, Play } from "@lucide/vue";
 import {
   Alert,
@@ -36,9 +36,16 @@ import {
 import type { Task, TaskRow } from "./collector";
 
 const props = defineProps<{ node: string; row: TaskRow; busy: boolean }>();
-const emit = defineEmits<{ edit: []; run: []; toggle: [] }>();
+const emit = defineEmits<{
+  edit: [];
+  run: [];
+  toggle: [];
+  activate: [revision: number];
+}>();
+const definitionHistory = ref<Operation.RevisionMetadata[]>([]),
+  selectedDefinition = ref("");
 const task = ref<Task | null>(null),
-  result = ref<Operation.ObjectRead | null>(null),
+  result = shallowRef<Operation.ObjectRead | null>(null),
   history = ref<Operation.RevisionMetadata[]>([]),
   cursor = ref<string | null>(null),
   revision = ref(""),
@@ -50,6 +57,13 @@ async function load(more = false) {
   loading.value = true;
   error.value = "";
   try {
+    if (!more && props.row.jobId) {
+      const definitions = await read<Operation.ObjectsHistoryResult>(
+        props.node,
+        { view: "definitionHistory", jobId: props.row.jobId },
+      );
+      definitionHistory.value = definitions.items;
+    }
     if (!more)
       task.value = (
         await read<{ task: Task }>(props.node, { view: "task", id: id() })
@@ -75,6 +89,10 @@ async function load(more = false) {
   }
 }
 onMounted(() => void load());
+watch(
+  () => props.row.revision,
+  () => void load(),
+);
 watch(revision, () => void load());
 // A finished run publishes a new result; follow it unless an older revision is pinned.
 watch(
@@ -119,12 +137,42 @@ const images = computed(() => {
 
 <template>
   <ToolbarContent side="end">
+    <template v-if="row.jobId">
+      <OptionSelect
+        v-model="selectedDefinition"
+        class="w-auto"
+        :aria-label="tr('Definitionsrevision', 'Definition revision')"
+        :disabled="busy"
+      >
+        <option value="">
+          {{ tr(`Entwurf R${row.revision}`, `Draft R${row.revision}`) }}
+        </option>
+        <option
+          v-for="entry in definitionHistory.filter(
+            (r) => r.revision !== row.revision,
+          )"
+          :key="entry.revision"
+          :value="String(entry.revision)"
+        >
+          R{{ entry.revision }}
+        </option>
+      </OptionSelect>
+      <Button
+        variant="outline"
+        size="sm"
+        :disabled="busy"
+        @click="emit('activate', Number(selectedDefinition || row.revision))"
+        >{{ tr("Stand übernehmen", "Apply revision") }}</Button
+      >
+    </template>
     <Button variant="outline" size="sm" :disabled="busy" @click="emit('edit')"
       ><Pencil aria-hidden="true" />{{ tr("Bearbeiten", "Edit") }}</Button
     >
     <Button
       size="sm"
-      :disabled="busy || working(row.status)"
+      :disabled="
+        busy || working(row.status) || (!!row.jobId && !row.adoptedRevision)
+      "
       @click="emit('run')"
       ><Play aria-hidden="true" />{{ tr("Jetzt ausführen", "Run now") }}</Button
     >
@@ -149,13 +197,15 @@ const images = computed(() => {
       </div>
       <label class="flex items-center gap-2 text-sm">
         <Switch
-          :model-value="row.task.enabled"
+          :model-value="row.desiredEnabled ?? row.task.enabled"
           :disabled="busy"
           :aria-label="tr('Task aktiv', 'Task enabled')"
           @update:model-value="emit('toggle')"
         />
         {{
-          row.task.enabled ? tr("Aktiv", "Enabled") : tr("Pausiert", "Disabled")
+          (row.desiredEnabled ?? row.task.enabled)
+            ? tr("Aktiv", "Enabled")
+            : tr("Pausiert", "Disabled")
         }}
       </label>
     </header>
@@ -167,11 +217,28 @@ const images = computed(() => {
       }}</AlertTitle>
       <AlertDescription>{{ taskError(row.error) }}</AlertDescription>
     </Alert>
+    <Alert v-if="row.adoptionError" variant="destructive"
+      ><AlertDescription
+        >{{ tr("Übernahme fehlgeschlagen: ", "Adoption failed: ")
+        }}{{ row.adoptionError }}</AlertDescription
+      ></Alert
+    >
     <Alert v-if="row.retentionWarning"
       ><AlertDescription>{{ row.retentionWarning }}</AlertDescription></Alert
     >
 
     <PropertyList>
+      <PropertyItem
+        v-if="row.jobId"
+        :label="tr('Gewünscht / übernommen', 'Desired / adopted')"
+        >{{ row.desiredRevision ?? "—" }} /
+        {{ row.adoptedRevision ?? "—" }}</PropertyItem
+      >
+      <PropertyItem
+        v-if="row.pendingPublications"
+        :label="tr('Ausstehende Veröffentlichungen', 'Pending publications')"
+        >{{ row.pendingPublications }}</PropertyItem
+      >
       <PropertyItem :label="tr('Zeitplan', 'Schedule')">{{
         task ? intervalLabel(task.intervalSeconds) : "—"
       }}</PropertyItem>
@@ -220,9 +287,17 @@ const images = computed(() => {
       </CardHeader>
       <CardContent class="space-y-4">
         <Alert v-if="error" variant="destructive">
-          <AlertDescription class="flex flex-wrap items-center justify-between gap-3">
+          <AlertDescription
+            class="flex flex-wrap items-center justify-between gap-3"
+          >
             <span>{{ error }}</span>
-            <Button variant="outline" size="sm" :disabled="loading" @click="load()">{{ tr('Erneut versuchen', 'Retry') }}</Button>
+            <Button
+              variant="outline"
+              size="sm"
+              :disabled="loading"
+              @click="load()"
+              >{{ tr("Erneut versuchen", "Retry") }}</Button
+            >
           </AlertDescription>
         </Alert>
         <Empty v-if="!result && !loading" class="border border-dashed">

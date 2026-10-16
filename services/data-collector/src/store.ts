@@ -13,6 +13,14 @@ export interface RecordTask {
   deleted: boolean;
   lastRunId: string | null;
   retentionWarning: string | null;
+  resultRootId?: string;
+  definition?: {
+    jobId: string;
+    revision: number;
+    assignmentId: string;
+    assignmentRevision: number;
+  };
+  adoptionError?: string | null;
 }
 export interface Run {
   id: string;
@@ -26,6 +34,8 @@ export interface Run {
   eventIndex: number;
   error: string | null;
   workerJobName?: string;
+  executionCommitted?: boolean;
+  definition?: RecordTask["definition"];
 }
 export class CollectorStore {
   readonly db: DatabaseSync;
@@ -121,6 +131,13 @@ export class CollectorStore {
       )
       .get(id);
   }
+  executing(id: string) {
+    return !!this.db
+      .prepare(
+        "SELECT 1 FROM runs WHERE task_id=? AND status IN ('queued','running') LIMIT 1",
+      )
+      .get(id);
+  }
   metadata(key: string): string | null {
     const r = this.db
       .prepare("SELECT value FROM metadata WHERE key=?")
@@ -161,6 +178,24 @@ export class CollectorStore {
     });
   }
   cleanup() {
+    for (const row of this.db
+      .prepare(
+        "SELECT key FROM metadata WHERE key LIKE 'definition-expiry:%' AND CAST(value AS REAL)<?",
+      )
+      .all(Date.now())) {
+      const operationId = String(row["key"]).slice("definition-expiry:".length);
+      for (const kind of [
+        "definition-write:",
+        "definition-operation:",
+        "definition-request:",
+      ]) {
+        const prefix = kind + operationId;
+        this.db
+          .prepare("DELETE FROM metadata WHERE substr(key,1,?)=?")
+          .run(prefix.length, prefix);
+      }
+      this.db.prepare("DELETE FROM metadata WHERE key=?").run(row["key"]!);
+    }
     // Keep each task's latest status; older receipts have a seven-day replay window.
     const before = Date.now() - 7 * 86400000;
     this.db.prepare("DELETE FROM operations WHERE created_at<?").run(before);
