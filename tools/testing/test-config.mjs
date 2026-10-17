@@ -45,6 +45,7 @@ export function kind(file) {
   return "core";
 }
 export function affected(file) {
+  if (/^(?:Cargo\.(?:toml|lock)|rust-toolchain\.toml|packages\/store\/)/.test(file)) return scopes.filter(s => s !== 'tooling');
   if (/^(services\/data-collector|docs\/examples\/data-collector|ui\/data-collector-ui)/.test(file)) return ["data-collector"];
   if (/^(services\/dashboards|ui\/dashboards-ui)/.test(file)) return ["dashboards"];
   // Semantic edges cover dynamic native/schema inputs which an import graph cannot see.
@@ -120,6 +121,12 @@ export function affected(file) {
   return [];
 }
 export const privateRepo = false;
+
+// Explicit Cargo targets keep --files narrow and do not infer service ownership.
+export const rustTests = {
+  'tests/rust/contracts.rs': { package: 'ivy-contracts', test: 'contracts' },
+  'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
+};
 
 // Only reviewed, isolated tests may reuse a successful result. Integration tests always run.
 export const cacheable = (file) =>
