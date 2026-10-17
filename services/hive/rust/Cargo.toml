@@ -4,9 +4,17 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[dependencies]
+ivy-contracts.workspace = true
+
 [dev-dependencies]
 rusqlite = { workspace = true, features = ["backup", "functions", "hooks"] }
+serde_json.workspace = true
 
 [[test]]
 name = "hive-storage-worker"
 path = "../../../tests/rust/hive_storage_worker.rs"
+
+[[test]]
+name = "hive-worker-client"
+path = "../../../tests/rust/hive_worker_client.rs"
