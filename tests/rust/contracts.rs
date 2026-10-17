@@ -1,5 +1,19 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 #[test]
+fn transport_frame_admission_matches_typescript() {
+    use ivy_contracts::validation::*;
+    let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output=std::process::Command::new("node").args(["--experimental-transform-types","--disable-warning=ExperimentalWarning","tests/fixtures/frame-oracle.mjs"]).current_dir(root).output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    let cases:Vec<serde_json::Value>=serde_json::from_slice(&output.stdout).unwrap();
+    for case in cases {
+        let value=parse(case["input"].as_str().unwrap(),100_000).unwrap();
+        let result=match case["kind"].as_str().unwrap(){"request"=>validate_request(&value),"response"=>validate_response_frame(&value),_=>validate_provider_call_frame(&value)};
+        if case["ok"]==true{assert!(result.is_ok(),"{case}: {result:?}");}
+        else{let error=result.unwrap_err();assert_eq!(error.code,case["code"].as_str().unwrap(),"{case}");assert_eq!(error.message,case["message"].as_str().unwrap(),"{case}");}
+    }
+}
+#[test]
 fn utf16_and_javascript_ordering_are_distinct() {
     let value = parse(r#"{"10":1,"2":2,"a":"\ud800","𐀀":3,"":4}"#, 4096).unwrap();
     assert_eq!(
