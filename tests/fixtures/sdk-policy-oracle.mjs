@@ -24,4 +24,4 @@ for(const config of [undefined,{},null,[],{web_search:'live','features.shell_too
   const input={threadStart:config===undefined?{}:{config},threadResume:{extra:1},turnStart:{environments:['x']},other:'preserved'};
   try {assessments.push({input,output:restrictAssessmentParameters(input)});} catch(error){assessments.push({input,error:error.code});}
 }
-process.stdout.write(JSON.stringify({windows,assessments}));
+process.stdout.write(JSON.stringify({windows,assessments,tzVersion:process.versions.tz}));
