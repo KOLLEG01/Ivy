@@ -2,3 +2,4 @@
 pub mod diagnostics;
 pub mod ipc;
 pub mod media;
+pub mod native_rpc;

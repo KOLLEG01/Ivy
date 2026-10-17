@@ -17,3 +17,7 @@ path = "../../../tests/rust/phone_media.rs"
 [[test]]
 name = "phone_diagnostics"
 path = "../../../tests/rust/phone_diagnostics.rs"
+
+[[test]]
+name = "phone_native_rpc"
+path = "../../../tests/rust/phone_native_rpc.rs"
