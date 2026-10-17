@@ -11,6 +11,21 @@ registerHooks({resolve(specifier,context,next) {
 }});
 const {canonical,hashJson}=await import('../../packages/contracts/src/canonical.ts');
 const {deriveOperationId}=await import('../../packages/contracts/src/operation-id.ts');
+const {validateJson}=await import('../../packages/contracts/src/canonical-json.ts');
+if(process.argv[2]==='limits') {
+  const cases=[];
+  for(const value of [[Number.MAX_SAFE_INTEGER+1],{x:Number.MAX_SAFE_INTEGER+1},[null,Number.MAX_SAFE_INTEGER+1],['😀'],{a:[1,2]}]) {
+    for(let maximum=0;maximum<24;maximum++) {
+      const item={input:JSON.stringify(value),maximum};
+      for(const [name,fn] of Object.entries({canonical,validateJson})) {
+        try {fn(value,maximum);item[name]=null;} catch(error){item[name]=error.code;}
+      }
+      cases.push(item);
+    }
+  }
+  process.stdout.write(JSON.stringify(cases));
+  process.exit(0);
+}
 const values=[null,true,false,0,-0,1e-7,1e-6,0.000123,1.2345678901234567,Number.MIN_VALUE,Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER+1,1e20,1e21];
 const strings=['plain ASCII','\u0000\n\t"\\','Straße 日本語','😀','\ud800','\udfff','\ud800A\udfff'];
 for(let point=0;point<=0x10ffff;point+=997) strings.push(String.fromCodePoint(point));
