@@ -1,0 +1,12 @@
+[package]
+name = "ivy-hive"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["backup", "functions", "hooks"] }
+
+[[test]]
+name = "hive-storage-worker"
+path = "../../../tests/rust/hive_storage_worker.rs"
