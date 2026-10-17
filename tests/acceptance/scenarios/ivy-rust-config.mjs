@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, mkdir, realpath } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -28,8 +28,7 @@ const lanes = ['reference','candidate'].map(name => {
 assertLaneIsolation(lanes);
 // This creates transportable private configs, not installation roots on either target.
 const output = resolve(values.output);
-await mkdir(output); // Existing evidence/configs must be reconciled, never overwritten.
-await privateDirectory(output);
+await privateDirectory(output); // Creates a fresh private directory; never adopts existing output.
 const receipt = { schemaVersion:1, servicesStarted:false, resourcesCreated:[], configurations:[] };
 for (const lane of lanes) for (const target of ['linux','windows']) {
   const config = lane[target];

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, writeFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -25,7 +25,7 @@ test('paired core configurations validate the actual serialized settings and sta
   const instance = lanes[0].linux.instances.find(x=>x.componentId==='hive');
   assert.deepEqual(instance.secretPaths,['/settings/credentials']);
   delete instance.settings;
-  assert.throws(()=>validateEmittedSettings(lanes[0].linux,validateHost),/settings/);
+  assert.throws(()=>validateEmittedSettings(lanes[0].linux,validateHost),{code:'invalid_arguments',outcome:'not_executed'});
 });
 
 test('fresh installation retains TaskBoard settings under its component ID after serialization', async () => {
@@ -74,6 +74,22 @@ test('configuration CLI writes four private configs once, and its public receipt
     }
     assertLaneIsolation(lanes);
     await assert.rejects(promisify(execFile)(process.execPath,args,{windowsHide:true,timeout:30000}));
+    // Exercise real private evidence setup without dispatching a network request.
+    const corpus=join(root,'corpus.json'), evidence=join(root,'evidence');
+    await writeFile(corpus,JSON.stringify({schemaVersion:1,sourceCommit:'fixture',contractHash:'fixture',
+      origins:lanes.map(lane=>new URL(lane.linux.publicBaseUrl).origin),externalEffects:'local-fixtures-only',
+      steps:[{id:'invalid',params:{},expected:{}}]}));
+    const differentialArgs=['tests/acceptance/scenarios/ivy-rust-differential.mjs','--distribution',resolve('.'),
+      '--reference',join(output,'reference-linux.json'),'--candidate',join(output,'candidate-linux.json'),
+      '--configuration-receipt',join(output,'receipt.json'),'--corpus',corpus,'--evidence',evidence];
+    await assert.rejects(promisify(execFile)(process.execPath,differentialArgs,{windowsHide:true,timeout:30000}),
+      error=>/Each step needs a request and independent expected result/.test(error.stderr));
+    assert.deepEqual(await readdir(evidence),['inputs.json']);
+    const original=await readFile(join(evidence,'inputs.json'),'utf8');
+    assert.equal(JSON.parse(original).sourceCommit,'fixture');
+    await assert.rejects(promisify(execFile)(process.execPath,differentialArgs,{windowsHide:true,timeout:30000}),
+      error=>/target_conflict/.test(error.stderr));
+    assert.equal(await readFile(join(evidence,'inputs.json'),'utf8'),original);
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 

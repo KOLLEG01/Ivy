@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, open, readFile, realpath } from 'node:fs/promises';
+import { open, readFile, realpath } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -44,7 +44,6 @@ assert.ok(corpus.sourceCommit && corpus.contractHash && corpus.steps.length);
 assert.deepEqual(corpus.origins,[new URL(reference.publicBaseUrl).origin,new URL(candidate.publicBaseUrl).origin]);
 assert.equal(corpus.externalEffects,'local-fixtures-only');
 const evidence = resolve(values.evidence);
-await mkdir(evidence);
 await privateDirectory(evidence);
 const record = async(name,value) => {
   assert.match(name,/^[a-z0-9][a-z0-9-]*$/);
