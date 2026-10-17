@@ -1,5 +1,17 @@
 use ivy_store::{receipts::*, rusqlite::Connection};
 #[test]
+fn unresolved_guards_preserve_array_coercion_and_unpaired_surrogates() {
+    let db=Connection::open_in_memory().unwrap();
+    let archive=ReceiptArchive::new(&db,ReceiptLimits::default()).unwrap();
+    for (index,text) in [r#"{"errorCode":["prefix","outcome_unknown"]}"#,r#"{"code":"\ud800outcome_unknown"}"#,r#"{"phase":[["unknown"]]}"#,r#"{"error":["native_epoch_lost"]}"#].iter().enumerate() {
+        let value=ivy_contracts::json::parse(text,1024).unwrap();
+        assert!(has_unresolved_outcome(&value),"{text}");
+        archive.retain("op",&index.to_string(),text).unwrap();
+        assert_eq!(archive.release("op",&index.to_string()).unwrap_err().code,"receipt_archive_unresolved");
+    }
+    assert_eq!(archive.status().unwrap().records,4);
+}
+#[test]
 fn original_receipts_eviction_and_unknown_are_durable() {
     let db = Connection::open_in_memory().unwrap();
     let archive = ReceiptArchive::new(
