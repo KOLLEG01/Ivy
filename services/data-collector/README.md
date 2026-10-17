@@ -17,8 +17,10 @@ never replaces the accepted execution. `enable` selects the latest draft;
 `definitionHistory` and `script` for central history; tasks expose desired and
 adopted revisions and adoption errors. Rollback activates a complete earlier
 definition, including its pinned script and configuration. Mutation calls carry the same inner and routed
-`operationId`; inspect the original operation after a lost reply. Receipts are
-retained for seven days; do not retry an old operation after that window.
+`operationId`; inspect the original operation after a lost reply. Completed receipts
+use a bounded ring (10,000 entries / 256 MiB), with compact replay guards after
+eviction. Definition-write metadata is eligible for cleanup after seven days only
+once its outcome is resolved; this is not a minimum receipt lifetime.
 
 Each task exports `default async ({ config, secrets, state, input, signal })` and
 returns `{ data, state?, events?: [{ name, payload }] }`. `data` is any JSON value.
@@ -94,7 +96,8 @@ does not imply immediate safe failover.
 
 Task retention is capped by the configured service limits, initially 100 MiB,
 1,000 revisions and seven days. Any exceeded limit makes older revisions eligible.
-Cleanup runs after publication and every minute, including for disabled tasks.
+Remote revision cleanup runs after publication and every fifteen minutes, including
+for disabled tasks. Local journal maintenance runs every minute.
 Hive always preserves the current revision and externally referenced revisions;
 the UI reports references that prevent cleanup. Results must fit Hive's 1 MiB
 JSON document limit. Camera examples use bounded JPEG data URLs.

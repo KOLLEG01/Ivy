@@ -1,0 +1,13 @@
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, document TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,status TEXT NOT NULL,document TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,request TEXT NOT NULL,result TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS retired_operations(id TEXT PRIMARY KEY,request_hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS retired_runs(id TEXT PRIMARY KEY);
+CREATE TRIGGER IF NOT EXISTS retired_operation_insert BEFORE INSERT ON operations
+  WHEN EXISTS(SELECT 1 FROM retired_operations WHERE id=NEW.id)
+  BEGIN SELECT RAISE(ABORT,'operation_expired'); END;
+CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
+CREATE INDEX IF NOT EXISTS runs_task_status ON runs(task_id,status);

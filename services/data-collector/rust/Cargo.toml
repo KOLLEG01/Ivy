@@ -1,0 +1,23 @@
+[package]
+name = "ivy-data-collector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ivy-contracts.workspace = true
+ivy-store.workspace = true
+
+[[test]]
+name = "data-collector-store"
+path = "../../../tests/rust/data-collector-store.rs"
+
+[[test]]
+name = "data-collector-policy"
+path = "../../../tests/rust/data-collector-policy.rs"
+
+[[test]]
+name = "data-collector-worker"
+path = "../../../tests/rust/data-collector-worker.rs"
