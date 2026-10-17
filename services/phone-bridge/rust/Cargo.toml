@@ -4,9 +4,16 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[dependencies]
+ivy-contracts = { workspace = true }
+
 [lib]
 path = "src/lib.rs"
 
 [[test]]
 name = "phone_media"
 path = "../../../tests/rust/phone_media.rs"
+
+[[test]]
+name = "phone_diagnostics"
+path = "../../../tests/rust/phone_diagnostics.rs"

@@ -1,0 +1,26 @@
+import {PhoneDiagnostics} from '../../services/phone-bridge/src/runtime/diagnostics.ts';
+
+let at = '2026-01-01T00:00:00.000Z';
+const diagnostics = new PhoneDiagnostics('phone', () => at);
+const trace = [];
+const snapshot = () => trace.push(diagnostics.snapshot(null));
+diagnostics.registrationObserved(true, {state:'failed',lastKeepAliveError:'private OS detail'});
+diagnostics.pollSucceeded(); snapshot();
+diagnostics.registrationObserved(true, {state:'registered',lastKeepAliveError:'private OS detail'}); snapshot();
+diagnostics.registrationObserved(true, {state:'registered',lastKeepAliveError:null}); snapshot();
+diagnostics.registrationObserved(true, null); snapshot();
+diagnostics.registrationObserved(false, null); snapshot();
+trace.push(diagnostics.voiceFailed('voice_unavailable'));
+trace.push(diagnostics.voiceFailed('voice_unavailable'));
+diagnostics.pollSucceeded(); diagnostics.callSucceeded('another'); snapshot();
+trace.push(diagnostics.voiceSucceeded()); trace.push(diagnostics.voiceSucceeded()); snapshot();
+diagnostics.callFailed('original-private-id','cleanup_unknown'); diagnostics.pollFailed('native_unavailable'); snapshot();
+at = '2026-01-01T00:00:01.000Z';
+diagnostics.callFailed('original-private-id','cleanup_unknown'); diagnostics.pollSucceeded(); snapshot();
+diagnostics.callFailed('second','other_unknown'); snapshot();
+diagnostics.callFailed('original-private-id','new_code'); snapshot();
+diagnostics.callSucceeded('recovery'); snapshot();
+for(let index=0;index<33;index++)diagnostics.callFailed('call'+index,'error'+index);
+diagnostics.callFailed('call1','replacement'); diagnostics.callFailed('call33','error33'); snapshot();
+diagnostics.pollFailed('poll'); diagnostics.voiceFailed('voice'); diagnostics.registrationObserved(true,null); snapshot();
+process.stdout.write(JSON.stringify(trace));
