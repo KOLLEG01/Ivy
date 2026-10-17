@@ -403,6 +403,45 @@ fn eviction_uses_original_terminal_time_then_row_order_and_protects_updated_key(
 }
 
 #[test]
+fn utf16_operation_nonces_survive_admission_reopen_eviction_and_replay_fence() {
+    let f = Fixture::new();
+    let mut state = f.open(1, 64 * 1024 * 1024);
+    let mut original = operation(100, "failed");
+    original.insert("operationId", value(r#""epoch:100:\ud800""#));
+    let saved = state
+        .write_at("operation", "first", &original, None, 100)
+        .unwrap();
+    state.close().unwrap();
+    let mut state = f.open(1, 64 * 1024 * 1024);
+    assert_eq!(
+        state.read("operation", "first").unwrap(),
+        Some(normalized(saved))
+    );
+    state
+        .write_at("operation", "next", &operation(101, "failed"), None, 101)
+        .unwrap();
+    assert_eq!(state.read("operation", "first").unwrap(), None);
+    assert_code(
+        state.write_at("operation", "first", &original, None, 102),
+        "operation_expired",
+    );
+    state.close().unwrap();
+    let checked = Command::new("node").args(["--input-type=module", "-e", r#"
+        import assert from 'node:assert/strict';
+        import { DatabaseSync } from 'node:sqlite';
+        const db = new DatabaseSync(process.argv[1]);
+        assert.equal(db.prepare("SELECT value FROM state_metadata WHERE key='expired_before'").get().value, '100');
+        assert.equal(db.prepare("SELECT count(*) AS n FROM state WHERE key='first'").get().n, 0);
+        db.close();
+    "#]).arg(f.path()).output().unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+#[test]
 fn node_sqlite_and_rust_cross_open_without_rewriting_existing_rows() {
     let f = Fixture::new();
     let created = Command::new("node").args(["--input-type=module", "-e", r#"

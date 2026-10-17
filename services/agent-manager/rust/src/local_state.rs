@@ -7,10 +7,11 @@
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_contracts::{
     hash::hash_json,
-    json::{canonical, parse, stringify},
+    json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
-    operation::parse_operation_id,
+    operation::parse_operation_id_js,
 };
+use ivy_store::receipts::has_unresolved_outcome;
 use ivy_store::rusqlite::{
     self, Connection, OptionalExtension, TransactionBehavior, config::DbConfig, params,
 };
@@ -62,7 +63,7 @@ pub struct LocalAgentState {
     db: Connection,
     pub service_node_id: String,
     limits: Limits,
-    runtime_epoch: Option<String>,
+    runtime_epoch: Option<JsString>,
 }
 
 fn storage_error(_: rusqlite::Error) -> IvyError {
@@ -111,8 +112,8 @@ impl LocalAgentState {
         })
     }
 
-    pub fn set_runtime_epoch(&mut self, epoch: String) -> IvyResult<()> {
-        if epoch.is_empty() || epoch.contains(':') {
+    pub fn set_runtime_epoch(&mut self, epoch: JsString) -> IvyResult<()> {
+        if epoch.0.is_empty() || epoch.0.contains(&(b':' as u16)) {
             return Err(IvyError::new("invalid_arguments", "Invalid runtime epoch."));
         }
         self.runtime_epoch = Some(epoch);
@@ -218,14 +219,14 @@ impl LocalAgentState {
             ));
         }
         if row.is_none() && kind == "operation" {
-            let id = text(value, "operationId");
-            let (Some(id), Some(epoch)) = (id, self.runtime_epoch.as_deref()) else {
+            let id = value.get("operationId").and_then(IvyJson::as_js_string);
+            let (Some(id), Some(epoch)) = (id, self.runtime_epoch.as_ref()) else {
                 return Err(IvyError::new(
                     "operation_expired",
                     "AgentManager has no current Hive runtime epoch.",
                 ));
             };
-            let identity = parse_operation_id(&id)?;
+            let identity = parse_operation_id_js(id)?;
             let expired_before: String = tx
                 .query_row(
                     "SELECT value FROM state_metadata WHERE key='expired_before'",
@@ -236,7 +237,7 @@ impl LocalAgentState {
             let boundary = expired_before
                 .parse::<u64>()
                 .map_err(|_| IvyError::internal())?;
-            if identity.runtime_epoch != epoch
+            if &identity.runtime_epoch != epoch
                 || identity.issued_at_unix_ms as i128 > now as i128 + 60_000
                 || identity.issued_at_unix_ms <= boundary
             {
@@ -362,10 +363,10 @@ fn make_room(
         if has_unresolved_outcome(&value) {
             continue;
         }
-        let Some(id) = text(&value, "operationId") else {
+        let Some(id) = value.get("operationId").and_then(IvyJson::as_js_string) else {
             continue;
         };
-        let Ok(identity) = parse_operation_id(&id) else {
+        let Ok(identity) = parse_operation_id_js(id) else {
             continue;
         };
         let issued_at = identity.issued_at_unix_ms;
@@ -405,53 +406,4 @@ fn make_room(
         ));
     }
     Ok(())
-}
-
-// Preserve the existing nested receipt guard, including JS String(array) when
-// an error/code field contains an array. No conversion to scalar-only JSON.
-fn js_string(value: &IvyJson) -> JsString {
-    match value {
-        IvyJson::String(value) => value.clone(),
-        IvyJson::Object(_) => "[object Object]".into(),
-        IvyJson::Array(values) => {
-            let mut text = Vec::new();
-            for (index, value) in values.iter().enumerate() {
-                if index != 0 {
-                    text.push(b',' as u16);
-                }
-                if !matches!(value, IvyJson::Null) {
-                    text.extend(js_string(value).0);
-                }
-            }
-            JsString(text)
-        }
-        _ => stringify(value, MANAGEMENT_FRAME_BYTES)
-            .unwrap_or_default()
-            .into(),
-    }
-}
-
-fn has_unresolved_outcome(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Array(values) => values.iter().any(has_unresolved_outcome),
-        IvyJson::Object(values) => values.iter().any(|(key, part)| {
-            let key = key.to_utf8().unwrap_or_default();
-            let value = js_string(part);
-            let unknown = JsString::from("outcome_unknown");
-            (["phase", "state", "ownerPhase", "outcome", "execution"].contains(&key.as_str())
-                && ["unknown", "outcome_unknown", "needs_attention"]
-                    .iter()
-                    .any(|text| value == JsString::from(*text)))
-                || (["error", "errorCode", "code"].contains(&key.as_str())
-                    && (value
-                        .0
-                        .windows(unknown.0.len())
-                        .any(|part| part == unknown.0.as_slice())
-                        || ["native_connection_lost", "native_epoch_lost"]
-                            .iter()
-                            .any(|text| value == JsString::from(*text))))
-                || has_unresolved_outcome(part)
-        }),
-        _ => false,
-    }
 }
