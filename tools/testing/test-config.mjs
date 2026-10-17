@@ -176,6 +176,7 @@ export const rustTests = {
   'tests/rust/task-board-evidence.rs': { package: 'ivy-task-board', test: 'task-board-evidence' },
   'tests/rust/task-board-operations.rs': { package: 'ivy-task-board', test: 'task-board-operations' },
   'tests/rust/task-board-blobs.rs': { package: 'ivy-task-board', test: 'task-board-blobs' },
+  'tests/rust/task-board-output.rs': { package: 'ivy-task-board', test: 'task-board-output' },
 };
 
 // Only reviewed, isolated tests may reuse a successful result. Integration tests always run.
