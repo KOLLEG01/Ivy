@@ -126,6 +126,7 @@ export const privateRepo = false;
 export const rustTests = {
   'tests/rust/contracts.rs': { package: 'ivy-contracts', test: 'contracts' },
   'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
+  'tests/rust/sdk.rs': { package: 'ivy-sdk', test: 'sdk' },
 };
 
 // Only reviewed, isolated tests may reuse a successful result. Integration tests always run.
