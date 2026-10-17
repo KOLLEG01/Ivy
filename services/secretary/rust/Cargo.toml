@@ -1,0 +1,33 @@
+[package]
+name = "ivy-secretary"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ivy-contracts.workspace = true
+ivy-store.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+html5ever = "=0.39.0"
+markup5ever_rcdom = "=0.39.0"
+roxmltree = "=0.21.1"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+pdf-extract = "=0.12.1"
+
+[[test]]
+name = "document"
+path = "../../../tests/secretary-rust/document.rs"
+
+[[example]]
+name = "secretary-document-adapter"
+path = "../../../tests/secretary-rust/document-adapter.rs"
+
+[[test]]
+name = "schedule-policy"
+path = "../../../tests/secretary-rust/schedule-policy.rs"
+
+[[test]]
+name = "journal"
+path = "../../../tests/secretary-rust/journal.rs"
