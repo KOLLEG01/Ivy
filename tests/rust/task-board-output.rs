@@ -1,0 +1,56 @@
+use ivy_contracts::{
+    IvyJson as Json, hash::hash_json, json::parse, limits::MANAGEMENT_FRAME_BYTES,
+};
+use ivy_task_board::turn_output::*;
+use std::{path::Path, process::Command};
+
+#[test]
+fn native_output_helpers_match_original_typescript() {
+    let result = Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/task-board-output-oracle.mjs",
+        ])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cases = parse(
+        std::str::from_utf8(&result.stdout).unwrap(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    for case in cases.as_array().unwrap() {
+        let args = case.required("args").unwrap().as_array().unwrap();
+        let string = |index: usize| args[index].as_js_string().unwrap();
+        let actual = match case.required("method").unwrap().as_str().unwrap().as_str() {
+            "pageCursor" => match page_cursor(args.first()) {
+                Ok(value) => value.map(Json::String).unwrap_or(Json::Null),
+                Err(error) => Json::object([(
+                    "error",
+                    Json::object([
+                        ("code", Json::String(error.code_js())),
+                        ("message", Json::String(error.message_js())),
+                        ("outcome", error.outcome.as_str().into()),
+                    ]),
+                )]),
+            },
+            "finalOutputText" => Json::String(final_output_text(&args[0])),
+            "boundedOutputSummary" => Json::String(bounded_output_summary(string(0))),
+            "turnsParams" => turns_params(string(0), args[1].as_js_string()),
+            "outputParams" => output_params(string(0), string(1), args[2].as_js_string()),
+            method => panic!("Unknown oracle method: {method}"),
+        };
+        assert_eq!(
+            hash_json(&actual).unwrap(),
+            case.required("expectedHash").unwrap().as_str().unwrap(),
+            "{}",
+            case.required("name").unwrap().as_str().unwrap()
+        );
+    }
+}

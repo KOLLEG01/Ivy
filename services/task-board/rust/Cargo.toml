@@ -30,3 +30,7 @@ path = "../../../tests/rust/task-board-operations.rs"
 [[test]]
 name = "task-board-blobs"
 path = "../../../tests/rust/task-board-blobs.rs"
+
+[[test]]
+name = "task-board-output"
+path = "../../../tests/rust/task-board-output.rs"
