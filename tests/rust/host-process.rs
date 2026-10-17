@@ -1,6 +1,11 @@
 use ivy_host_runtime::process::{self, Command, LaunchContext};
 use std::{collections::BTreeMap, ffi::OsString, io::Write, path::PathBuf, time::Duration};
 
+// Exercise the private retained-handle failure paths through this selected target.
+#[cfg(windows)]
+#[path = "../../packages/host-runtime/rust/src/platform/windows_launch.rs"]
+mod launch_retirement_checks;
+
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
