@@ -1,0 +1,17 @@
+[package]
+name = "ivy-chat-bridge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+
+[[test]]
+name = "chat-storage"
+path = "../../../tests/rust/chat-storage.rs"
+
+[[test]]
+name = "chat-audio"
+path = "../../../tests/rust/chat-audio.rs"
