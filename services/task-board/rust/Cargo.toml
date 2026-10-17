@@ -1,0 +1,12 @@
+[package]
+name = "ivy-task-board"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "task-board-policy-probe"
+path = "../../../tests/fixtures/task-board-rust-policy.rs"
