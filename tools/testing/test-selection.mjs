@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import ts from 'typescript';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 
 export const slash = path => path.replaceAll('\\', '/');
 const walk = (root, dir) => !existsSync(join(root, dir)) ? [] : readdirSync(join(root, dir), { withFileTypes: true })
@@ -9,7 +10,7 @@ const walk = (root, dir) => !existsSync(join(root, dir)) ? [] : readdirSync(join
 
 export function inventory(root, config) {
   return walk(root, 'tests')
-    .filter(file => /\.(test|integration)\.(ts|mjs)$/.test(file))
+    .filter(file => /\.(test|integration)\.(ts|mjs)$/.test(file) || config.rustTests?.[file])
     .map(file => ({ file, scope: config.scope(file), kind: config.kind(file) }));
 }
 
@@ -19,7 +20,7 @@ function directDependencies(root, file, cache) {
   const result = new Set([file]); cache.set(file, result);
   if (!existsSync(join(root, file))) return result;
   const text = readFileSync(join(root, file), 'utf8');
-  const refs = ts.preProcessFile(text, true, true).importedFiles.map(ref => ref.fileName);
+  const refs = require('typescript').preProcessFile(text, true, true).importedFiles.map(ref => ref.fileName);
   // Include literal runtime inputs and dynamic imports as well as static TypeScript imports.
   for (const match of text.matchAll(/['"`]((?:\.\.?\/|dist\/|specs\/|tools\/|packages\/|services\/|native\/)[^'"`\n$]+)['"`]/g)) refs.push(match[1]);
   for (let ref of refs) {
