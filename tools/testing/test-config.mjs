@@ -174,6 +174,7 @@ export const rustTests = {
   'tests/secretary-rust/journal.rs': { package: 'ivy-secretary', test: 'journal' },
   'tests/secretary-rust/schedule-policy.rs': { package: 'ivy-secretary', test: 'schedule-policy' },
   'tests/secretary-rust/spool.rs': { package: 'ivy-secretary', test: 'spool' },
+  'tests/secretary-rust/media-input.rs': { package: 'ivy-secretary', test: 'media-input' },
   'tests/rust/task-board-evidence.rs': { package: 'ivy-task-board', test: 'task-board-evidence' },
   'tests/rust/task-board-operations.rs': { package: 'ivy-task-board', test: 'task-board-operations' },
   'tests/rust/task-board-blobs.rs': { package: 'ivy-task-board', test: 'task-board-blobs' },
