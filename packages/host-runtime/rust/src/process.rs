@@ -216,14 +216,17 @@ fn capture_pipe<R: AsyncRead + Unpin + Send + 'static>(
             if count == 0 {
                 break;
             }
-            let safe = capture
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(&buffer[..count], false);
-            if let Some(sink) = &sink {
-                let _ =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(stream, &safe)));
-            }
+            capture.lock().unwrap_or_else(|p| p.into_inner()).push_to(
+                &buffer[..count],
+                false,
+                |safe| {
+                    if let Some(sink) = &sink {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            sink(stream, safe)
+                        }));
+                    }
+                },
+            );
         }
     })
 }
@@ -446,11 +449,13 @@ pub async fn spawn(
         }
         let finish_capture = |capture: Capture, stream| {
             let mut capture = capture.lock().unwrap_or_else(|p| p.into_inner());
-            let safe = capture.push(&[], true);
-            if let Some(sink) = context.on_output.as_ref().filter(|_| !context.raw_output) {
-                let _ =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(stream, &safe)));
-            }
+            capture.push_to(&[], true, |safe| {
+                if let Some(sink) = context.on_output.as_ref().filter(|_| !context.raw_output) {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        sink(stream, safe)
+                    }));
+                }
+            });
             (capture.text(), capture.truncated())
         };
         let (stdout, out_truncated) = finish_capture(stdout_capture, OutputStream::Stdout);
