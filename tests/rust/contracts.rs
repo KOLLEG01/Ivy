@@ -1,5 +1,26 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 #[test]
+fn long_unicode_strings_preserve_utf16_and_parser_boundaries() {
+    let text =
+        "\u{7f}\u{80}\u{7ff}\u{800}\u{d7ff}\u{e000}\u{ffff}\u{10000}\u{10ffff}".repeat(32_768);
+    let input = format!(r#"{{"{text}":["{text}\n\ud800","tail"]}}"#);
+    let value = parse(&input, input.len()).unwrap();
+    let (key, values) = &value.as_object().unwrap()[0];
+    assert_eq!(key, &JsString::from(text.as_str()));
+    let mut expected: Vec<u16> = text.encode_utf16().collect();
+    expected.extend([10, 0xd800]);
+    let values = values.as_array().unwrap();
+    assert_eq!(values[0].as_js_string().unwrap().0, expected);
+    assert_eq!(values[1].as_str().unwrap(), "tail");
+    assert_eq!(
+        parse(&input, input.len() - 1).unwrap_err().code,
+        "content_too_large"
+    );
+    for malformed in ["\"é", "\"😀\\", "\"界\\é\"", "\"é\\u界000\"", "[\"😀\",é]"] {
+        assert_eq!(parse(malformed, 100).unwrap_err().code, "invalid_arguments");
+    }
+}
+#[test]
 fn surrogate_identifiers_error_messages_and_strict_native_json() {
     let parent = parse(r#""\ud800:00042:\udfff""#, 100).unwrap();
     let parent = parent.as_js_string().unwrap();
