@@ -1,5 +1,5 @@
 use crate::sqlite::error;
-use ivy_contracts::{IvyError, IvyJson, IvyResult, hash::digest, json::parse};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::{parse,js_string}};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 fn count_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<usize> {
@@ -12,16 +12,13 @@ pub fn has_unresolved_outcome(value: &IvyJson) -> bool {
         IvyJson::Array(values) => values.iter().any(has_unresolved_outcome),
         IvyJson::Object(pairs) => pairs.iter().any(|(key, part)| {
             let key = key.to_utf8().unwrap_or_default();
-            let text = match part {
-                IvyJson::String(s) => s.to_utf8().unwrap_or_default(),
-                _ => String::new(),
-            };
+            let text = js_string(part);
             (["phase", "state", "ownerPhase", "outcome", "execution"].contains(&key.as_str())
-                && ["unknown", "outcome_unknown", "needs_attention"].contains(&text.as_str()))
+                && ["unknown", "outcome_unknown", "needs_attention"].iter().any(|s| text == JsString::from(*s)))
                 || (["error", "errorCode", "code"].contains(&key.as_str())
-                    && (text.contains("outcome_unknown")
+                    && (text.contains_ascii("outcome_unknown")
                         || ["native_connection_lost", "native_epoch_lost"]
-                            .contains(&text.as_str())))
+                            .iter().any(|s| text == JsString::from(*s))))
                 || has_unresolved_outcome(part)
         }),
         _ => false,
