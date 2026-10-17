@@ -12,7 +12,7 @@ import { operationId } from '../packages/contracts/src/operation-id.js';
 import { digest } from '../packages/contracts/src/canonical.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 
-test('local receipts use the configured capacity beyond 10,000 rows and preserve originals when it is reached', async t => {
+test('local receipt history evicts a completed original beyond the configured count without a time guarantee', async t => {
   const root = mkdtempSync(join(tmpdir(), 'ivy-native-capacity-')), path = join(root, 'journal.sqlite');
   const state = new LocalAgentState(path, 'agent', { maxOperations: 10_002, maxJournalBytes: 64 * 1024 * 1024 });
   t.after(() => { state.close(); rmSync(root, { recursive: true, force: true }); });
@@ -22,12 +22,12 @@ test('local receipts use the configured capacity beyond 10,000 rows and preserve
     INSERT INTO state SELECT 'operation','retained-'||i,1,'{}',2,?,? FROM rows`).run(Date.now(), Date.now());
   db.close();
   const original = { operationId: operationId('runtime'), phase: 'succeeded', reply: { result: {} } };
-  const saved = await state.write('operation', 'original', original);
+  await state.write('operation', 'original', original);
   await state.write('operation', 'last', { ...original, operationId: operationId('runtime') });
-  await assert.rejects(state.write('operation', 'over-limit', { ...original, operationId: operationId('runtime') }), { code: 'native_journal_capacity' });
-  assert.deepEqual(await state.read('operation', 'original'), saved);
-  assert.equal(await state.read('operation', 'over-limit'), null);
-  await state.write('operation', 'original', { ...original, code: 'retained' }, saved.pin);
+  await state.write('operation', 'over-limit', { ...original, operationId: operationId('runtime') });
+  assert.equal(await state.read('operation', 'original'), null);
+  assert.ok(await state.read('operation', 'over-limit'));
+  await assert.rejects(state.write('operation', 'original', original), { code: 'operation_expired' });
 });
 
 test('completion ownership retains the exact native turn caller after restart and settles an immediate completion', async t => {

@@ -510,7 +510,7 @@ const definitions = {
     operationId: {
       ...wire("Identifier"),
       description:
-        "Caller-generated <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status, use current Unix milliseconds and a unique 1-128 character nonce without a colon. Valid for 24 hours and at most 60 seconds in the future; a Hive restart changes the epoch. Keep this exact ID and check agent_manager_read after an uncertain result.",
+        "Caller-generated <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status, use current Unix milliseconds and a unique 1-128 character nonce without a colon. Completed unreferenced outcomes use a bounded FIFO ring with no guaranteed duration; live and unresolved operations remain retained. Absent IDs at or before the eviction boundary expire. New IDs must use the current Hive epoch and be at most 60 seconds in the future. Keep this exact ID and check agent_manager_read after an uncertain result.",
     },
     nativeVersion: { enum: nativeVersions },
     method,

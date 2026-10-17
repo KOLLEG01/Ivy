@@ -43,7 +43,7 @@ export class DiagnosticNotifications {
         entry.active = false; entry.resolvedAt ??= now;
       }
       // Completed incidents retain deduplication across service and Hive restarts.
-      if (entry.recovery?.confirmed && entry.resolvedAt !== null && now - entry.resolvedAt > 7 * 86_400_000) delete state[key];
+      if (entry.alert?.confirmed && entry.recovery?.confirmed && entry.resolvedAt !== null && now - entry.resolvedAt > 7 * 86_400_000) delete state[key];
     }
     this.main.store.saveDiagnosticNoticeState(this.scope, state);
     if (!await automaticNotificationsAllowed(this.main.store.client, new Date(now), { signal })) {

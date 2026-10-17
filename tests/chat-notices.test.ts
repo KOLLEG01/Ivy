@@ -184,7 +184,7 @@ test('a native configuration change preserves the original notice, WhatsApp conf
   definition.channels[0]!.displayName = 'Main WhatsApp';
   definition.nativePlan.turnStart.params = { model: 'updated-model' };
   const admission = new ChatAdmission(definition), store = f.firstMain.store;
-  await assert.rejects(store.validateOperationId(request.operationId, Date.now() + 2 * 86_400_000), code('operation_expired'));
+  await store.validateOperationId(request.operationId, Date.now() + 2 * 86_400_000);
   assert.notEqual(admission.definitionHash, f.admission.definitionHash);
   const main = new ChatMain(new ChatOperations(store, admission), new ChatNativeDriver(store, admission, f.firstMain.native.owner));
   const restarted = new ChatNotices(main), outbox = new ChatOutbox(main.operations);

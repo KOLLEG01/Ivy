@@ -182,7 +182,7 @@ export class HostJournal {
   get config(): Host.HostConfig {
     return this.activeConfig;
   }
-  constructor(config: Host.HostConfig) {
+  constructor(config: Host.HostConfig, readonly historyLimits = { count: 10_000, bytes: 64 * 1024 * 1024 }) {
     validateHost("HostConfig", config);
     this.activeConfig = config;
     mkdirSync(config.runtimeRoot, { recursive: true });
@@ -204,6 +204,10 @@ export class HostJournal {
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
         CREATE TABLE IF NOT EXISTS operations(operation_id TEXT PRIMARY KEY, deployment_id TEXT NOT NULL UNIQUE, request_hash TEXT NOT NULL, phase TEXT NOT NULL, created_at TEXT NOT NULL, entry_json TEXT NOT NULL) STRICT;
         CREATE INDEX IF NOT EXISTS operations_by_phase ON operations(phase,created_at,deployment_id);
+        CREATE TABLE IF NOT EXISTS retired_operations(operation_id TEXT PRIMARY KEY,deployment_id TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL) STRICT;
+        CREATE TRIGGER IF NOT EXISTS retired_operation_insert BEFORE INSERT ON operations
+          WHEN EXISTS(SELECT 1 FROM retired_operations WHERE operation_id=NEW.operation_id)
+          BEGIN SELECT RAISE(ABORT,'operation_expired'); END;
         CREATE TABLE IF NOT EXISTS candidates(candidate_id TEXT PRIMARY KEY, component_id TEXT NOT NULL, build_id TEXT NOT NULL, candidate_json TEXT NOT NULL, manifest_json TEXT NOT NULL) STRICT;
         CREATE TABLE IF NOT EXISTS candidate_retirements(candidate_id TEXT PRIMARY KEY, candidate_json TEXT NOT NULL) STRICT;
         CREATE INDEX IF NOT EXISTS candidates_by_build ON candidates(component_id,build_id);
@@ -687,6 +691,8 @@ export class HostJournal {
     const row = this.db
       .prepare("SELECT entry_json FROM operations WHERE deployment_id=?")
       .get(deploymentId);
+    requireThat(row || !this.db.prepare("SELECT 1 FROM retired_operations WHERE deployment_id=?").get(deploymentId),
+      "operation_expired", "The completed deployment left the history ring; reconcile the current host state.");
     requireThat(row, "not_found", "Host-local deployment was not found.");
     return this.normalizeEntry(JSON.parse(String(row["entry_json"])));
   }
@@ -694,9 +700,48 @@ export class HostJournal {
     const row = this.db
       .prepare("SELECT entry_json FROM operations WHERE operation_id=?")
       .get(operationId);
+    requireThat(row || !this.db.prepare("SELECT 1 FROM retired_operations WHERE operation_id=?").get(operationId),
+      "operation_expired", "The completed deployment left the history ring; its identity cannot be reused.");
     return row
       ? this.normalizeEntry(JSON.parse(String(row["entry_json"])))
       : null;
+  }
+  private collectHistory(protectedOperationId: string): void {
+    const totals = this.db.prepare("SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(entry_json AS BLOB))),0) AS bytes FROM operations").get()!;
+    let count = Number(totals["count"]), bytes = Number(totals["bytes"]);
+    if (count <= this.historyLimits.count && bytes <= this.historyLimits.bytes) return;
+    const protectedIds = new Set([protectedOperationId]), latest = new Map<string, number>(), rollback = new Set<string>();
+    const recoveredInstances = new Set<string>(), resolvedFailures = new Set<string>();
+    const entries = this.db.prepare("SELECT operation_id,entry_json FROM operations ORDER BY rowid DESC").all();
+    const references = (value: unknown): void => {
+      if (typeof value === "string") protectedIds.add(value);
+      else if (Array.isArray(value)) for (const part of value) references(part);
+      else if (value && typeof value === "object") for (const part of Object.values(value)) references(part);
+    };
+    const adoption = this.configurationAdoption();
+    for (const action of adoption?.actions ?? []) protectedIds.add(action.operationId);
+    for (const row of entries) {
+      const entry = this.normalizeEntry(JSON.parse(String(row["entry_json"])));
+      if (entry.record.phase === "failed" && recoveredInstances.has(entry.record.instanceId)) {
+        resolvedFailures.add(String(row["operation_id"])); continue;
+      }
+      if (!["succeeded", "rolled_back"].includes(entry.record.phase)) { references(entry); continue; }
+      recoveredInstances.add(entry.record.instanceId);
+      const instance = entry.record.instanceId, retained = latest.get(instance) ?? 0;
+      if (retained < 2) { protectedIds.add(String(row["operation_id"])); latest.set(instance, retained + 1); }
+      if (entry.record.phase === "succeeded" && !rollback.has(instance) &&
+          this.installed(instance)?.candidateId === entry.candidateId && entry.previousCandidateId && entry.previousCandidateId !== entry.candidateId) {
+        protectedIds.add(String(row["operation_id"])); rollback.add(instance);
+      }
+    }
+    for (const row of entries.reverse()) {
+      if (count <= this.historyLimits.count && bytes <= this.historyLimits.bytes) break;
+      const entry = this.normalizeEntry(JSON.parse(String(row["entry_json"])));
+      if ((!["succeeded", "rolled_back"].includes(entry.record.phase) && !resolvedFailures.has(String(row["operation_id"]))) || protectedIds.has(String(row["operation_id"])) || protectedIds.has(entry.record.deploymentId)) continue;
+      this.db.prepare("INSERT INTO retired_operations VALUES(?,?,?)").run(row["operation_id"]!, entry.record.deploymentId, entry.record.requestHash);
+      this.db.prepare("DELETE FROM operations WHERE operation_id=?").run(row["operation_id"]!);
+      count--; bytes -= Buffer.byteLength(String(row["entry_json"]));
+    }
   }
   list(limit = 200): Host.JournalEntry[] {
     return this.db
@@ -1005,6 +1050,8 @@ export class HostJournal {
     validateHost("LocalRequest", request);
     const requestHash = hashJson(request);
     return this.transaction(() => {
+      const retired = this.db.prepare("SELECT request_hash FROM retired_operations WHERE operation_id=?").get(request.operationId);
+      requireThat(!retired || retired["request_hash"] === requestHash, "mutation_conflict", "The evicted deployment had different original arguments.");
       const previous = this.operation(request.operationId);
       if (previous) {
         requireThat(
@@ -1150,6 +1197,7 @@ export class HostJournal {
           now,
           canonical(entry),
         );
+      this.collectHistory(request.operationId);
       return entry;
     });
   }
@@ -1247,6 +1295,7 @@ export class HostJournal {
           "UPDATE operations SET phase=?,entry_json=? WHERE deployment_id=?",
         )
         .run(phase, canonical(entry), deploymentId);
+      this.collectHistory(entry.request.operationId);
       return entry;
     });
   }

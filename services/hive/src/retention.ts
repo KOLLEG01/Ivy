@@ -515,7 +515,7 @@ export class Retention {
       });
     this.store.transaction(() => {
       this.collectEvents(now);
-      this.collectMutations(now);
+      this.collectMutations();
       this.collectUiReleases();
       this.diagnostics?.collectDiagnostics(now);
       this.store.setMetadata(
@@ -595,7 +595,7 @@ export class Retention {
     );
   }
 
-  private collectMutations(now: number): void {
-    this.store.cleanupMutationReceipts(now);
+  private collectMutations(): void {
+    this.store.cleanupMutationReceipts();
   }
 }

@@ -4,11 +4,11 @@ import { triageFixture } from './secretary-triage-fixture.mjs';
 import { principal, assessment } from './secretary-fixture.mjs';
 import { SecretaryStore } from '../dist/services/secretary/src/store.js';
 
-test('terminal technical cleanup keeps its first completion deadline',()=>{
+test('terminal technical history keeps its first release order without a minimum duration',()=>{
   const store=new SecretaryStore({},'root');
   try{
     const first=Date.parse('2026-09-01T00:00:00.000Z');store.completeTechnicalWorkflow('work',first);store.completeTechnicalWorkflow('work',first+23*60*60*1000);
-    assert.equal(Number(store.db.prepare('SELECT delete_after FROM technical_cleanup WHERE root_id=?').get('work').delete_after),first+24*60*60*1000);
+    assert.equal(Number(store.db.prepare('SELECT delete_after FROM technical_cleanup WHERE root_id=?').get('work').delete_after),first);
   }finally{store.close();}
 });
 

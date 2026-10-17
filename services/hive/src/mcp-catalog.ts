@@ -143,7 +143,7 @@ function serviceInput(
               maxLength: 256,
               description:
                 binding.serviceName === "agent-manager"
-                  ? "Caller-generated <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. Valid for 24 hours and at most 60 seconds in the future; a Hive restart changes the epoch. Retain this exact ID and check agent_manager_read after an uncertain result."
+                  ? "Caller-generated <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. Completed unreferenced outcomes use a bounded FIFO ring without a guaranteed duration; live and unresolved operations remain retained. Evicted identities expire. New IDs must use the current Hive epoch and be at most 60 seconds in the future. Retain this exact ID and check agent_manager_read after an uncertain result."
                   : "Stable identity for this action. Retain it and reconcile the original outcome after a lost reply; follow the owning service's ID format.",
             },
           }

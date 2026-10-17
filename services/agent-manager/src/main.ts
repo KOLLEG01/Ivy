@@ -576,7 +576,10 @@ export async function startAgentManager(
       if (!service?.ready || closing) return;
       if (turnId) {
         await operations.settleTurn(threadId);
-        if (await serviceOwnsCompletion(service.connection, state.completionCaller(threadId, turnId))) return;
+        if (await serviceOwnsCompletion(service.connection, state.completionCaller(threadId, turnId))) {
+          state.releaseCompletion(threadId, turnId);
+          return;
+        }
       }
       // Initial discovery and project changes share their existing read; never poll for badges.
       if (projectRefreshWork) await projectRefreshWork;
@@ -596,6 +599,7 @@ export async function startAgentManager(
       }
       if (noticePolicy.isInternal(threadId) === false && service?.ready && !closing)
         await publishBrowserNotice(service.connection, "agent", notice);
+      if (turnId) state.releaseCompletion(threadId, turnId);
     };
     requestThreadRefresh = () => {
       if (service?.ready && hiveConnection)

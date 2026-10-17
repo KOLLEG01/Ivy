@@ -6,6 +6,7 @@ import { base, client } from './runtime';
 import { nativeRead } from '../../../packages/ui-client/src/native';
 import { canonical } from '../../../packages/sdk/src/client.js';
 import { hashJson } from '../../../packages/ui-client/src/hash';
+import { readArchiveOutcome } from '../../../packages/ui-client/src/object-archive';
 type WithoutId<T> = T extends unknown ? Omit<T, 'operationId'> : never;
 export type DraftRequest = WithoutId<TaskBoard.ActionInput | TaskBoard.ArchiveRequest>;
 export interface SavedAction {
@@ -36,6 +37,7 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
   };
   const execute = async () => {
     if (!saved.value || busy.value || !identityMatches()) return;
+    const replay = saved.value.phase !== 'prepared';
     busy.value = true; error.value = null;
     try {
       await checkCurrentIdentity();
@@ -51,7 +53,9 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
       saved.value.outcome = value; saved.value.phase = 'succeeded'; saved.value.detail = 'The workflow action was saved.'; persist();
     } catch (cause) {
       const failure = IvyError.from(cause);
-      saved.value.phase = failure.outcome === 'unknown' || !(cause instanceof IvyError) ? 'unknown' : 'failed';
+      // A rejected retry only describes that attempt; an earlier lost result can
+      // still be unresolved. Only owner reconciliation can settle that identity.
+      saved.value.phase = replay || failure.outcome === 'unknown' || !(cause instanceof IvyError) ? 'unknown' : 'failed';
       saved.value.detail = `${failure.message} (${failure.code}; ${failure.outcome})`;
       try { persist(); } catch (problem) { error.value = String(problem); }
     } finally { busy.value = false; }
@@ -72,6 +76,18 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
     busy.value = true; error.value = null;
     try {
       await checkCurrentIdentity();
+      if (saved.value.call.qualifiedName === 'task-board.archive') {
+        const request = saved.value.call.arguments as TaskBoard.ArchiveRequest;
+        const outcome = await readArchiveOutcome(client, { objectId: request.taskId, archived: request.archived,
+          mutationId: saved.value.call.operationId!, call: saved.value.call });
+        if (outcome) {
+          saved.value.phase = outcome.phase;
+          saved.value.outcome = outcome.operation?.outcome ?? null;
+          saved.value.detail = outcome.phase === 'succeeded' ? 'The archive action was confirmed.' : outcome.message;
+          persist();
+        }
+        return;
+      }
       const operation = await readOperation();
       saved.value.phase = operation.phase === 'succeeded' ? 'succeeded' : operation.phase === 'failed' ? 'failed' : 'pending';
       saved.value.outcome = operation.outcome; saved.value.detail = operation.error?.message ?? 'Original operation: ' + operation.phase + '.'; persist();

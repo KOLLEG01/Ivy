@@ -261,6 +261,53 @@ test("Central drafts, activation, full rollback, shared scripts and stale edits 
   );
 });
 
+test("Unchanged adoption observations do not consume receipts after time passes or a restart", async (t) => {
+  const rig = await fixture(t);
+  let runtime = rig.runtimes[0]!;
+  const saved = (await action(runtime, {
+    action: "save",
+    task: task(),
+    expectedRevision: 0,
+  })) as Saved;
+  const assignment = (await action(runtime, {
+    action: "activate",
+    jobId: saved.jobId,
+    definitionRevision: saved.revision,
+    expectedRevision: 0,
+    enabled: false,
+  })) as Activated;
+  const observation = async () =>
+    (
+      (await runtime.definitions.read({
+        view: "definition",
+        jobId: saved.jobId,
+      })) as { observation: Operation.ObjectRead }
+    ).observation;
+  await runtime.definitions.sync();
+  const original = await observation();
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 31000 });
+  await runtime.definitions.sync();
+  assert.deepEqual(await observation(), original);
+  runtime = await rig.restart(0);
+  await runtime.service.waitReady({ timeoutMs: 15000 });
+  await runtime.definitions.sync();
+  assert.deepEqual(await observation(), original);
+  await action(runtime, {
+    action: "activate",
+    jobId: saved.jobId,
+    definitionRevision: saved.revision,
+    expectedRevision: assignment.assignment.revision,
+    enabled: true,
+  });
+  await runtime.definitions.sync();
+  const changed = await observation();
+  assert.equal(changed.revision.revision, original.revision.revision + 1);
+  assert.equal(
+    (changed.content.value as { quiesced: boolean }).quiesced,
+    false,
+  );
+});
+
 test("Offline due runs and a disconnected restart advance durable state then publish in order without reexecution", async (t) => {
   const rig = await fixture(t);
   let runtime = rig.runtimes[0]!;

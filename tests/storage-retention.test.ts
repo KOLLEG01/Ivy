@@ -380,7 +380,7 @@ test('storage pressure advances collection while repeated attempts remain bounde
   assert.ok(measured.availableBytes.staging > 0);
 });
 
-test('old maintenance details expire beyond 1000 entries while original records preserve rollback and replay', { timeout: 180000 }, async t => {
+test('completed maintenance details form a ring without a minimum age while original records preserve rollback and replay', { timeout: 180000 }, async t => {
   const { config, journal, plans, select, root } = await bootstrapFixture(t);
   await select(3);
   const configPath = plans[3]!.configPath; await atomicJson(configPath, config);
@@ -390,7 +390,7 @@ test('old maintenance details expire beyond 1000 entries while original records 
         instanceId: process.instanceId, componentId: process.componentId, name: process.name, candidateId: process.candidateId!,
         definitionHash: hashJson(process), enabled: true, running: false })) } });
   const requests: Host.BootstrapMaintenanceRequest[] = [];
-  const old = Date.now() - 45 * 86400000;
+  const old = Date.now() - 60_000;
   for (let index = 0; index < 25; index++) {
     const request = makeRequest('old-maintenance-' + index, index === 0 ? plans[3]! : plans[5]!); requests.push(request);
     const at = new Date(old + index * 1000).toISOString();

@@ -284,6 +284,7 @@ export class ChatOutbox {
     }
     requireThat(saved.pin.revision === 1 && same(saved.value, value), 'chat_offer_mismatch', 'An acknowledgement cannot change its original offer, caller or selected reply identities.');
     for (const reply of offered.replies.filter(reply => request.replyIds.includes(reply.pin.objectId))) await this.mark(reply, 'confirmed', saved.value.createdAt, scope);
+    this.store.confirmOffer(offered.document.pin.objectId, request.replyIds);
     return (await this.operations.finish(scope, { action: 'acknowledge', operationId: request.operationId, acknowledgement: { object: saved.pin, data: saved.value } })).value;
   }
 }

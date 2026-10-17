@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "secretary",
   "kind": "service",
-  "version": "0.3.36",
+  "version": "0.3.37",
   "description": "Scheduled assignments, source inbox, notices and follow-up questions",
   "connectsToHive": true,
   "requirements": {

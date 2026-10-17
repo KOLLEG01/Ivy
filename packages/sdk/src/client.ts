@@ -131,8 +131,8 @@ export function scopedOperationId(
     scopedOperationIds.set(client, values);
   }
   const now = Date.now();
-  // Hive refuses an identity after 24 hours. Drop expired scopes in insertion order;
-  // this makes cleanup amortized O(1) and keeps a long-lived connection bounded by recent work.
+  // Bound this live owner's identity cache by age; Hive's receipt ring can evict
+  // an outcome earlier. Durable workflows retain their own identities and evidence.
   for (const [scope, entry] of values) {
     if (entry.issuedAt + 24 * 60 * 60 * 1000 > now) break;
     values.delete(scope);

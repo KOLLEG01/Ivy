@@ -99,7 +99,7 @@ export async function startDataCollector(path: string) {
         engine.detach();
         void writeHealth(
           store.list().length > 0,
-          "Hive unavailable; accepted jobs continue from the durable cache.",
+          "Hive unavailable" + (state.code ? " (" + state.code + ")" : "") + "; accepted jobs continue from the durable cache.",
         ).catch(() => undefined);
       }
     },

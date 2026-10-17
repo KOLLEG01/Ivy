@@ -51,6 +51,8 @@ const props = defineProps<{
   count: number | null;
   href: (id: string) => string;
   disabled: boolean;
+  pendingTaskId?: string | null;
+  archiveDisabled?: boolean;
   swimlane: string;
   layout?: "column" | "list";
   /** Lists archived Tasks of every state instead of one workflow column. */
@@ -300,9 +302,10 @@ const actions = (item: { context: TransitionContext }) =>
   props.archived || props.workspace.role !== "user"
     ? []
     : transitions(item.context);
-const movable = (item: { context: TransitionContext }) =>
+const taskDisabled = (id: string) => props.disabled || id === props.pendingTaskId;
+const movable = (item: { id: string; context: TransitionContext }) =>
   !props.archived &&
-  !props.disabled &&
+  !taskDisabled(item.id) &&
   props.workspace.role === "user" &&
   (ranked.value || transitions(item.context).length > 0);
 defineExpose({ refresh: pages.refresh });
@@ -332,12 +335,12 @@ defineExpose({ refresh: pages.refresh });
       >
       <DropdownMenu v-if="column.id === 'done' && workspace.role === 'user'">
         <DropdownMenuTrigger as-child>
-          <Button variant="ghost" size="icon-sm" class="ml-auto" aria-label="Done actions" :disabled="disabled">
+          <Button variant="ghost" size="icon-sm" class="ml-auto" aria-label="Done actions" :disabled="disabled || archiveDisabled">
             <MoreHorizontal aria-hidden="true" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem :disabled="disabled || !count" @select="emit('archiveAll')">
+          <DropdownMenuItem :disabled="disabled || archiveDisabled || !count" @select="emit('archiveAll')">
             <Archive aria-hidden="true" />Archive all tasks
           </DropdownMenuItem>
         </DropdownMenuContent>
@@ -517,34 +520,34 @@ defineExpose({ refresh: pages.refresh });
               ><DropdownMenuItem
                 v-for="item in actions(task)"
                 :key="item.action"
-                :disabled="disabled"
+                :disabled="taskDisabled(task.id)"
                 @select="emit('transition', task.id, item.action)"
                 >{{ item.label }}</DropdownMenuItem
               ><template v-if="ranked"
                 ><DropdownMenuSeparator /><DropdownMenuItem
                   v-if="previous(index) || pages.page.value > 1"
-                  :disabled="disabled"
+                  :disabled="taskDisabled(task.id)"
                   @select="emit('reorder', task.id, { top: true })"
                   >Move to top</DropdownMenuItem
                 ><DropdownMenuItem
                   v-if="previous(index)"
-                  :disabled="disabled"
+                  :disabled="taskDisabled(task.id)"
                   @select="emit('reorder', task.id, { before: previous(index)!.id })"
                   >Move up</DropdownMenuItem
                 ><DropdownMenuItem
                   v-if="next(index)"
-                  :disabled="disabled"
+                  :disabled="taskDisabled(task.id)"
                   @select="emit('reorder', task.id, { after: next(index)!.id })"
                   >Move down</DropdownMenuItem
                 ><DropdownMenuItem
                   v-if="moreBelow(index)"
-                  :disabled="disabled"
+                  :disabled="taskDisabled(task.id)"
                   @select="emit('reorder', task.id, { before: null })"
                   >Move to bottom</DropdownMenuItem
                 ></template
               ><template v-if="!archived && workspace.role === 'user' && ['done', 'cancelled'].includes(task.context.workflowState)">
                 <DropdownMenuSeparator />
-                <DropdownMenuItem :disabled="disabled || task.context.claimed || task.context.publishing" @select="emit('archive', task.id)">
+                <DropdownMenuItem :disabled="taskDisabled(task.id) || archiveDisabled || task.context.claimed || task.context.publishing" @select="emit('archive', task.id)">
                   <Archive aria-hidden="true" />Archive task
                 </DropdownMenuItem>
               </template></DropdownMenuContent

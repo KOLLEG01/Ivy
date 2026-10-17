@@ -18,7 +18,7 @@ export async function triageFixture(t, existingFixture, fallbackRpc) {
   let sequence = 0, threadSequence = 0, turnSequence = 0;
   const stamp = () => new Date(Date.parse('2026-09-07T09:00:00.000Z') + sequence++).toISOString();
   const binding = name => { const [namespace, ...parts] = name.split('.'), method = parts.join('.');
-    const definition = namespace === 'codex' ? structuredClone(contract.definition(method)) : { namespace, name: method, interfaceVersion: '1.0.0', description: 'Controlled native triage fixture', inputSchema: { type: 'object', additionalProperties: true }, outputSchema: { type: 'object', additionalProperties: true } };
+    const definition = namespace === 'codex' ? structuredClone(contract.definition(method)) : { namespace, name: method, interfaceVersion: '1.0.0', description: 'Controlled native triage fixture', inputSchema: { type: 'object', additionalProperties: true }, outputSchema: { type: 'object', additionalProperties: true }, annotations: { readOnlyHint: !['invoke', 'resolveProject'].includes(method) } };
     if (state.changedDefinition && namespace === 'codex') definition.description += ' changed';
     return { qualifiedName: name, definition, definitionHash: hashJson(definition) }; };
   const rpc = { async request(method, args, options) {

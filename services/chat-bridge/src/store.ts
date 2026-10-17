@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { canonical, hashJson } from '../../../packages/sdk/src/node.js';
+import { hasUnresolvedOutcome, canonical, hashJson } from '../../../packages/sdk/src/node.js';
 import { IvyError, requireThat } from '../../../packages/sdk/src/node.js';
 import { parseOperationId } from '../../../packages/sdk/src/node.js';
 import type { Chat, Operation, Wire } from '../../../packages/sdk/src/node.js';
@@ -24,7 +24,8 @@ export class ChatStore {
   private readonly local: DatabaseSync;
   private runtimeEpoch: string | null = null;
   private lastMaintenance=0;
-  constructor(readonly client: RpcClient, readonly rootObjectId: string | null, dataRoot?: string) {
+  constructor(readonly client: RpcClient, readonly rootObjectId: string | null, dataRoot?: string, readonly limits = { count: 10_000, bytes: 256 * 1024 * 1024 },
+    readonly diagnosticHistoryLimits = { count: 10_000, bytes: 16 * 1024 * 1024 }) {
     this.local = new DatabaseSync(dataRoot ? join(dataRoot, 'chat-bridge.sqlite') : ':memory:');
     this.local.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,key TEXT NOT NULL,name TEXT NOT NULL,parent_id TEXT,current_revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(key,name,parent_id));
@@ -32,6 +33,16 @@ export class ChatStore {
       CREATE TABLE IF NOT EXISTS blobs(id TEXT PRIMARY KEY,key TEXT NOT NULL,name TEXT NOT NULL,parent_id TEXT,bytes BLOB NOT NULL,UNIQUE(key,name,parent_id));
       CREATE TABLE IF NOT EXISTS markers(key TEXT PRIMARY KEY,value_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workflow_cleanup(root_id TEXT PRIMARY KEY,delete_after INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS offer_acknowledgements(offer_id TEXT NOT NULL,reply_id TEXT NOT NULL,PRIMARY KEY(offer_id,reply_id));
+      CREATE TABLE IF NOT EXISTS retired_operations(operation_id TEXT PRIMARY KEY,issued_at INTEGER NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS retired_operation_insert BEFORE INSERT ON revisions
+        WHEN EXISTS(SELECT 1 FROM documents WHERE id=NEW.id AND key='chat-bridge/operation')
+          AND EXISTS(SELECT 1 FROM retired_operations WHERE operation_id=json_extract(NEW.value_json,'$.operationId'))
+        BEGIN SELECT RAISE(ABORT,'operation_expired'); END;
+      INSERT OR IGNORE INTO offer_acknowledgements SELECT json_extract(r.value_json,'$.request.offerId'),j.value
+        FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision,json_each(r.value_json,'$.request.replyIds') j
+        WHERE d.key='chat-bridge/operation' AND json_extract(r.value_json,'$.phase')='succeeded'
+          AND json_extract(r.value_json,'$.request.action')='acknowledge';
       CREATE UNIQUE INDEX IF NOT EXISTS documents_identity ON documents(key,name,COALESCE(parent_id,''));
       CREATE UNIQUE INDEX IF NOT EXISTS blobs_identity ON blobs(key,name,COALESCE(parent_id,''));`);
   }
@@ -41,6 +52,14 @@ export class ChatStore {
     return row ? JSON.parse(String(row['value_json'])) as Record<string, DiagnosticNoticeState> : {};
   }
   saveDiagnosticNoticeState(scope: string, value: Record<string, DiagnosticNoticeState>): void {
+    let count = Object.keys(value).length, bytes = Buffer.byteLength(canonical(value));
+    const completed = Object.entries(value).filter(([, entry]) =>
+      !entry.active && entry.resolvedAt !== null && entry.alert?.confirmed && entry.recovery?.confirmed)
+      .sort((a, b) => a[1].resolvedAt! - b[1].resolvedAt!);
+    for (const [key, entry] of completed) {
+      if (count <= this.diagnosticHistoryLimits.count && bytes <= this.diagnosticHistoryLimits.bytes) break;
+      delete value[key]; count--; bytes = count === 0 ? 2 : bytes - Buffer.byteLength(canonical({ [key]: entry })) + 1;
+    }
     this.local.prepare('INSERT INTO markers VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json')
       .run('diagnostic-notices:' + scope, canonical(value));
   }
@@ -83,8 +102,38 @@ export class ChatStore {
       if(!(row['key']==='chat-bridge/collection'&&Number(row['revision'])>Number(row['current_revision'])-32)&&!protectedPins.has(String(row['id'])+':'+Number(row['revision'])))
         this.local.prepare('DELETE FROM revisions WHERE id=? AND revision=?').run(String(row['id']),Number(row['revision']));
   }
-  private expireOperations(now = Date.now(),force=false): void {
-    if(!force&&now-this.lastMaintenance<60_000)return;
+  private usage(): { rows: number; bytes: number } {
+    const row = this.local.prepare("SELECT (SELECT COUNT(*) FROM revisions)+(SELECT COUNT(*) FROM blobs) AS rows,COALESCE((SELECT SUM(length(CAST(value_json AS BLOB))) FROM revisions),0)+COALESCE((SELECT SUM(length(bytes)) FROM blobs),0)+(SELECT COUNT(*)*1048576 FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/operation' AND json_extract(r.value_json,'$.phase') NOT IN ('succeeded','failed')) AS bytes").get()!;
+    return { rows: Number(row['rows']), bytes: Number(row['bytes']) };
+  }
+  private makeRoom(protectedId: string, incoming: unknown): void {
+    const before = this.usage();
+    if (before.rows <= this.limits.count && before.bytes <= this.limits.bytes) return;
+    this.expireOperations(Date.now(), true, protectedId, incoming);
+    const usage = this.usage();
+    requireThat(usage.rows <= this.limits.count && usage.bytes <= this.limits.bytes,
+      'capacity_exceeded', 'ChatBridge journal capacity is occupied by live or unresolved work.');
+  }
+  confirmOffer(offerId: string, replyIds: string[]): void {
+    this.local.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of replyIds) this.local.prepare('INSERT OR IGNORE INTO offer_acknowledgements VALUES(?,?)').run(offerId, id);
+      this.local.exec('COMMIT');
+    } catch (error) { this.local.exec('ROLLBACK'); throw error; }
+  }
+  private expireOperations(now = Date.now(), force = false, protectedId?: string, incoming?: unknown): void {
+    const needsRoom = () => { const usage = this.usage(); return usage.rows > this.limits.count || usage.bytes > this.limits.bytes; };
+    if (!force && now - this.lastMaintenance < 60_000 && !needsRoom()) return;
+    this.local.prepare(`DELETE FROM workflow_cleanup WHERE
+      NOT EXISTS(SELECT 1 FROM documents WHERE parent_id=workflow_cleanup.root_id) AND
+      NOT EXISTS(SELECT 1 FROM blobs WHERE parent_id=workflow_cleanup.root_id)`).run();
+    const incomingIds = new Set<string>();
+    const visit = (value: unknown): void => {
+      if (typeof value === 'string') incomingIds.add(value);
+      else if (Array.isArray(value)) for (const part of value) visit(part);
+      else if (value && typeof value === 'object') for (const part of Object.values(value)) visit(part);
+    };
+    visit(incoming); if (protectedId) incomingIds.add(protectedId);
     const protectedPins=this.protectedPins(),protectedObjects=new Set([...protectedPins].map(value=>value.slice(0,value.lastIndexOf(':'))));
     const queuedInputs = new Set<string>();
     const queuedNotices = new Set<string>();
@@ -93,52 +142,66 @@ export class ChatStore {
         queuedInputs.add(ticket.inputId);
         if (ticket.identity) queuedNotices.add(hashJson([ticket.identity.senderPrincipalId, ticket.identity.messageId]));
       }
-    const rows = this.local.prepare("SELECT d.id,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/operation'").all();
+    const rows = this.local.prepare("SELECT d.id,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/operation' ORDER BY json_extract(r.value_json,'$.updatedAt'),d.rowid").all();
     const pendingOffers = new Set(rows.flatMap(row => {
       const value = JSON.parse(String(row['value_json'])) as Chat.Operation;
       return !['succeeded', 'failed'].includes(value.phase) && value.request?.action === 'acknowledge' ? [value.request.offerId] : [];
     }));
-    this.local.exec('BEGIN IMMEDIATE');
+    const ownTransaction = !this.local.isTransaction;
+    if (ownTransaction) this.local.exec('BEGIN IMMEDIATE');
     try {
+      let pressure = needsRoom();
       for (const row of rows) {
+        if (!pressure) break;
         const value = JSON.parse(String(row['value_json'])) as Chat.Operation;
-        if (!['succeeded', 'failed'].includes(value.phase) || protectedObjects.has(String(row['id'])) || Date.parse(value.updatedAt) + 86_400_000 >= now) continue;
+        if (!['succeeded', 'failed'].includes(value.phase) || protectedObjects.has(String(row['id'])) || incomingIds.has(String(row['id'])) || hasUnresolvedOutcome({ error: value.error, nativeCall: value.nativeCall })) continue;
+        let issuedAt: number;
+        try { issuedAt = parseOperationId(value.operationId).issuedAtUnixMs; } catch { continue; }
         // Admission can be complete while its input still waits on the native owner.
         if (value.outcome && 'input' in value.outcome && queuedInputs.has(value.outcome.input.object.objectId)) continue;
         if (value.request?.action === 'notify' && queuedNotices.has(hashJson([value.callerPrincipalId, value.operationId]))) continue;
         // A completed Main turn is not completed transport delivery. Keep the producer receipt
         // until its exact first reply has a confirmed WhatsApp acknowledgement.
         if (value.outcome?.action === 'notify' && this.marker('notice-delivered:' + value.outcome.reply.object.objectId) < 0) continue;
-        const offer = this.local.prepare("SELECT id FROM documents WHERE key='chat-bridge/offer' AND name=? AND parent_id IS (SELECT parent_id FROM documents WHERE id=?)")
+        const offer = this.local.prepare("SELECT d.id,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/offer' AND d.name=? AND d.parent_id IS (SELECT parent_id FROM documents WHERE id=?)")
           .get('Chat offer ' + String(row['id']), String(row['id']));
         // An accepted acknowledgement must still resolve its original offer after a restart.
-        if (offer && pendingOffers.has(String(offer['id']))) continue;
+        if (offer && (pendingOffers.has(String(offer['id'])) || incomingIds.has(String(offer['id'])))) continue;
+        if (offer && (JSON.parse(String(offer['value_json'])) as Chat.Offer).replies?.some(reply =>
+          !this.local.prepare('SELECT 1 FROM offer_acknowledgements WHERE offer_id=? AND reply_id=?').get(offer['id']!, reply.objectId))) continue;
         // Offers and acknowledgements share the workspace root with their operation.
         // They are not descendants and must expire with the receipt that owns them.
         for (const [key, name] of [['chat-bridge/offer', 'Chat offer '], ['chat-bridge/acknowledgement', 'Chat acknowledgement ']]) {
           const receipt = this.local.prepare('SELECT id FROM documents WHERE key=? AND name=? AND parent_id IS (SELECT parent_id FROM documents WHERE id=?)').get(key!, name! + String(row['id']), String(row['id']));
-          if (receipt) this.deleteTechnicalTree(String(receipt['id']), true);
+          if (receipt) { this.local.prepare('DELETE FROM offer_acknowledgements WHERE offer_id=?').run(receipt['id']!); this.deleteTechnicalTree(String(receipt['id']), true); }
         }
         if (value.outcome?.action === 'notify') this.local.prepare('DELETE FROM markers WHERE key=?').run('notice-delivered:' + value.outcome.reply.object.objectId);
+        this.local.prepare('INSERT OR IGNORE INTO retired_operations VALUES(?,?)').run(value.operationId, issuedAt);
         this.deleteTechnicalTree(String(row['id']),true);
+        this.local.prepare('INSERT INTO markers VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json')
+          .run('operations.expiredBefore', canonical(Math.max(this.marker('operations.expiredBefore'), issuedAt)));
+        pressure = needsRoom();
       }
-      for(const row of this.local.prepare('SELECT root_id FROM workflow_cleanup WHERE delete_after<=?').all(now)){
+      this.local.prepare('DELETE FROM retired_operations WHERE issued_at<?').run(this.marker('operations.expiredBefore'));
+      for(const row of this.local.prepare('SELECT root_id FROM workflow_cleanup ORDER BY delete_after,rowid').all()){
+        if (!pressure) break;
         const root=String(row['root_id']),ids=this.technicalTree(root,false);
-        if(queuedInputs.has(root)||ids.some(id=>protectedObjects.has(id)))continue;
+        if (queuedInputs.has(root) || [root,...ids].some(id => protectedObjects.has(id) || incomingIds.has(id))) continue;
+        if (ids.some(id => { const row = this.local.prepare('SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.id=?').get(id); return row && hasUnresolvedOutcome(JSON.parse(String(row['value_json']))); })) continue;
         this.deleteTechnicalTree(root,false);this.local.prepare('DELETE FROM workflow_cleanup WHERE root_id=?').run(root);
+        pressure = needsRoom();
       }
       this.local.prepare("DELETE FROM markers WHERE key LIKE 'notice-input:%' AND CAST(value_json AS INTEGER)<=?").run(now);
-      this.local.prepare('INSERT INTO markers VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json').run('operations.expiredBefore', canonical(Math.max(this.marker('operations.expiredBefore'),now-86_400_000)));
-      this.pruneHistoricalRevisions(protectedPins);this.local.exec('COMMIT');this.lastMaintenance=now;
-    }catch(error){this.local.exec('ROLLBACK');throw error;}
+      this.pruneHistoricalRevisions(protectedPins); if (ownTransaction) this.local.exec('COMMIT'); this.lastMaintenance=now;
+    } catch (error) { if (ownTransaction) this.local.exec('ROLLBACK'); throw error; }
   }
-  async validateOperationId(value: string, now = Date.now()): Promise<void> {
+  async validateOperationId(value: string, now = Date.now(), retained = false): Promise<void> {
     if (!this.runtimeEpoch) this.setRuntimeEpoch((await this.client.request('system.status', {})).runtimeEpoch);
     this.expireOperations(now);
     const identity = parseOperationId(value);
-    requireThat(identity.runtimeEpoch === this.runtimeEpoch && identity.issuedAtUnixMs > this.marker('operations.expiredBefore') &&
-      identity.issuedAtUnixMs <= now + 60_000 && identity.issuedAtUnixMs + 86_400_000 >= now,
-    'operation_expired', 'The ChatBridge operation belongs to another or expired runtime window.');
+    requireThat(identity.runtimeEpoch === this.runtimeEpoch && (retained || identity.issuedAtUnixMs > this.marker('operations.expiredBefore') &&
+      identity.issuedAtUnixMs <= now + 60_000),
+    'operation_expired', 'The ChatBridge operation belongs to another runtime or predates the receipt ring.');
   }
   private localDocument<K extends ContractKey>(key: K, reference: string | Chat.ObjectPin, parentId: string | null): Document<K> {
     const id = typeof reference === 'string' ? reference : reference.objectId, head = this.local.prepare('SELECT * FROM documents WHERE id=? AND key=?').get(id, key);
@@ -179,16 +242,13 @@ export class ChatStore {
   async write<K extends ContractKey>(key: K, value: ContractValues[K], mutationId: string, destination: Destination): Promise<Chat.ObjectPin> {
     if (localContractKeys.has(key)) {
       const encoded = canonical(value), now = new Date().toISOString();
-      this.expireOperations();
-      const usage = this.local.prepare('SELECT COUNT(*) AS rows,COALESCE(SUM(length(CAST(value_json AS BLOB))),0) AS bytes FROM revisions').get() as { rows: number; bytes: number };
-      requireThat(usage.rows < 10_000 && usage.bytes + Buffer.byteLength(encoded) <= 256 * 1024 * 1024, 'capacity_exceeded', 'The ChatBridge workflow journal is full.');
       if ('create' in destination) {
         const existing = await this.named(key, destination.create.name, destination.create.parentId);
         if (existing) { requireThat(existing.pin.revision === 1 && hashJson(existing.value) === hashJson(value), 'revision_conflict', 'The local ChatBridge identity differs.'); return existing.pin; }
         const id = randomUUID(); this.local.exec('BEGIN IMMEDIATE');
         try {
           this.local.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run(id, key, destination.create.name, destination.create.parentId, 1, now, now);
-          this.local.prepare('INSERT INTO revisions VALUES(?,?,?,?)').run(id, 1, encoded, now); this.local.exec('COMMIT');
+          this.local.prepare('INSERT INTO revisions VALUES(?,?,?,?)').run(id, 1, encoded, now); this.makeRoom(id, value); this.local.exec('COMMIT');
         } catch (error) { this.local.exec('ROLLBACK'); const winner = await this.named(key, destination.create.name, destination.create.parentId); if (winner) { if (hashJson(winner.value) === hashJson(value)) return winner.pin; throw new IvyError('revision_conflict', 'The local ChatBridge identity already exists.'); } throw error; }
         this.changeVersion++; return { objectId: id, revision: 1 };
       }
@@ -196,7 +256,7 @@ export class ChatStore {
       try {
         const changed = this.local.prepare('UPDATE documents SET current_revision=?,updated_at=? WHERE id=? AND key=? AND current_revision=?').run(next, now, destination.objectId, key, destination.expectedRevision);
         requireThat(changed.changes === 1, 'revision_conflict', 'The local ChatBridge row changed.');
-        this.local.prepare('INSERT INTO revisions VALUES(?,?,?,?)').run(destination.objectId, next, encoded, now); this.pruneHistoricalRevisions(undefined,destination.objectId); this.local.exec('COMMIT');
+        this.local.prepare('INSERT INTO revisions VALUES(?,?,?,?)').run(destination.objectId, next, encoded, now); this.pruneHistoricalRevisions(undefined,destination.objectId); this.makeRoom(destination.objectId, value); this.local.exec('COMMIT');
       } catch (error) { this.local.exec('ROLLBACK'); throw error; }
       this.changeVersion++; return { objectId: destination.objectId, revision: next };
     }
@@ -226,7 +286,7 @@ export class ChatStore {
     if(key==='chat-bridge/input'){
       const input=value as Chat.Input;
       if(['completed','failed','cancelled'].includes(input.state)&&input.finishedAt){
-        this.local.prepare('INSERT INTO workflow_cleanup VALUES(?,?) ON CONFLICT(root_id) DO NOTHING').run(result.object.id,Date.parse(input.finishedAt)+86_400_000);
+        this.local.prepare('INSERT INTO workflow_cleanup VALUES(?,?) ON CONFLICT(root_id) DO NOTHING').run(result.object.id,Date.parse(input.finishedAt));
         this.expireOperations(Date.now(),true);
       }
     }
@@ -255,9 +315,10 @@ export class ChatStore {
     this.expireOperations();
     const existing = this.local.prepare('SELECT id,bytes FROM blobs WHERE key=? AND name=? AND parent_id=?').get(key, name, parentId);
     if (existing) { requireThat(Buffer.from(existing['bytes'] as Uint8Array).equals(bytes), 'revision_conflict', 'The local evidence identity differs.'); return { objectId: String(existing['id']), revision: 1 }; }
-    const usage = this.local.prepare('SELECT COUNT(*) AS rows,COALESCE(SUM(length(bytes)),0) AS bytes FROM blobs').get() as { rows: number; bytes: number };
-    requireThat(usage.rows < 10_000 && usage.bytes + bytes.length <= 256 * 1024 * 1024, 'capacity_exceeded', 'The ChatBridge workflow journal is full.');
-    const id = randomUUID(); this.local.prepare('INSERT INTO blobs VALUES(?,?,?,?,?)').run(id, key, name, parentId, bytes); return { objectId: id, revision: 1 };
+    const id = randomUUID(); this.local.exec('BEGIN IMMEDIATE');
+    try { this.local.prepare('INSERT INTO blobs VALUES(?,?,?,?,?)').run(id, key, name, parentId, bytes); this.makeRoom(id, parentId); this.local.exec('COMMIT'); }
+    catch (error) { this.local.exec('ROLLBACK'); throw error; }
+    return { objectId: id, revision: 1 };
   }
   close(): void { this.local.close(); }
 }

@@ -53,6 +53,7 @@ export class CollectorEngine {
   private ticking = false;
   private closing = false;
   private lastMaintenance = 0;
+  private lastRetentionMaintenance = 0;
   private nextRecoveryAt = 0;
   private publication: Promise<void> | null = null;
   private maintenance: Promise<void> | null = null;
@@ -383,7 +384,7 @@ export class CollectorEngine {
   private enqueue(row: RecordTask, id: string, input: unknown) {
     this.requireStopped(row);
     requireThat(
-      !this.store.run(id),
+      !this.store.usedRunId(id),
       "operation_conflict",
       "Run ID was already used for another collection.",
     );
@@ -438,7 +439,14 @@ export class CollectorEngine {
       if (Date.now() - this.lastMaintenance > 60000) {
         this.lastMaintenance = Date.now();
         this.store.cleanup();
-        if (this.client && !this.maintenance)
+        // Fresh results are pruned on publication. Idle histories need only a
+        // periodic pass for age expiry and released reference pins.
+        if (
+          this.client &&
+          !this.maintenance &&
+          Date.now() - this.lastRetentionMaintenance >= 15 * 60000
+        ) {
+          this.lastRetentionMaintenance = Date.now();
           this.maintenance = (async () => {
             for (const row of this.store.list(true)) {
               if (!this.client || this.closing) break;
@@ -448,6 +456,7 @@ export class CollectorEngine {
           })().finally(() => {
             this.maintenance = null;
           });
+        }
       }
       if (waitForPublication) {
         await publication;

@@ -135,6 +135,11 @@ export class PhoneJournal {
         this.setMeta('targets', String(db.prepare('SELECT count(*) AS count FROM targets').get()!['count']));
       });
       this.archive = new ReceiptArchive(db);
+      db.exec(`CREATE INDEX IF NOT EXISTS receipt_archive_commands_by_call
+        ON receipt_archive(json_extract(value,'$.intent.callId'),json_extract(value,'$.intent.method')) WHERE kind='command';
+        CREATE TRIGGER IF NOT EXISTS retired_command_insert BEFORE INSERT ON commands
+        WHEN EXISTS(SELECT 1 FROM receipt_archive_retired WHERE kind='command' AND key=NEW.operation_id)
+        BEGIN SELECT RAISE(ABORT,'operation_expired'); END;`);
     } catch (error) { db.close(); throw error; }
   }
   private statement(sql: string): StatementSync {
@@ -315,6 +320,27 @@ export class PhoneJournal {
         this.archive.retain('epoch', String(row['epoch']), String(row['epoch']));
         this.statement('DELETE FROM epochs WHERE epoch=?').run(row['epoch']!);
       }
+      // Admission identities, Voice bindings and every uncertain call remain recovery
+      // state. Only independent completed results or fully released calls are history.
+      for (const row of this.statement(`SELECT a.key FROM receipt_archive a
+        WHERE a.kind='command' AND json_extract(a.value,'$.phase')='result'
+          AND json_extract(a.value,'$.intent.method') NOT IN
+            ('call.bindVoice','call.createVoice','call.selectSpeakerVoice','call.archiveVoice','call.release')
+          AND NOT EXISTS(SELECT 1 FROM receipt_archive_history h WHERE h.kind=a.kind AND h.key=a.key)
+          AND NOT EXISTS(SELECT 1 FROM json_tree(a.value) j WHERE
+            j.key IN ('phase','state','ownerPhase','outcome','execution') AND j.value IN ('unknown','outcome_unknown','needs_attention') OR
+            j.key IN ('error','errorCode','code') AND (j.value GLOB '*outcome_unknown*' OR j.value IN ('native_connection_lost','native_epoch_lost')))
+          AND (json_extract(a.value,'$.intent.callId') IS NULL OR (
+            EXISTS(SELECT 1 FROM receipt_archive r WHERE r.kind='command'
+              AND json_extract(r.value,'$.intent.callId')=json_extract(a.value,'$.intent.callId')
+              AND json_extract(r.value,'$.intent.method')='call.release' AND json_extract(r.value,'$.receipt.ok')=1)
+            AND NOT EXISTS(SELECT 1 FROM receipt_archive p WHERE p.kind='command'
+              AND json_extract(p.value,'$.intent.callId')=json_extract(a.value,'$.intent.callId') AND json_extract(p.value,'$.phase')!='result')
+            AND NOT EXISTS(SELECT 1 FROM receipt_archive u,json_tree(u.value) j WHERE u.kind='command'
+              AND json_extract(u.value,'$.intent.callId')=json_extract(a.value,'$.intent.callId')
+              AND (j.key IN ('phase','state','ownerPhase','outcome','execution') AND j.value IN ('unknown','outcome_unknown','needs_attention') OR
+                j.key IN ('error','errorCode','code') AND (j.value GLOB '*outcome_unknown*' OR j.value IN ('native_connection_lost','native_epoch_lost'))))))
+        ORDER BY a.rowid LIMIT 128`).all()) this.archive.release('command', String(row['key']));
       for (const [key, table] of [['count', 'commands'], ['epochs', 'epochs'], ['calls', 'calls'], ['targets', 'targets']] as const)
         this.setMeta(key, String(this.statement(`SELECT count(*) AS count FROM ${table}`).get()!['count']));
     });

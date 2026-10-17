@@ -2137,7 +2137,7 @@
       "properties": {
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         },
         "expectedRevision": {
           "type": "integer",
@@ -2172,7 +2172,7 @@
       "properties": {
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         },
         "expectedRevision": {
           "type": "integer",
@@ -2561,7 +2561,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -2808,7 +2808,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         },
         "maximumCount": {
           "type": "integer",
@@ -3127,7 +3127,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -3159,7 +3159,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -3183,7 +3183,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         },
         "expectedRevision": {
           "type": "integer",
@@ -3214,7 +3214,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -3510,7 +3510,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -3559,7 +3559,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -4383,7 +4383,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -4474,7 +4474,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -4781,7 +4781,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -4828,7 +4828,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -4862,7 +4862,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -5100,7 +5100,7 @@
       "properties": {
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         },
         "title": {
           "type": "string",
@@ -5137,7 +5137,7 @@
       "properties": {
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         },
         "objectId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
@@ -5225,7 +5225,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         }
       },
       "required": [
@@ -5250,7 +5250,7 @@
         },
         "mutationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
-          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
+          "description": "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action."
         },
         "expectedRevision": {
           "type": "integer",

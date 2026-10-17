@@ -594,6 +594,15 @@ test("Deleted and recreated tasks use the same result and retention lifecycle", 
   t.mock.timers.enable({ apis: ["Date"], now: deletedAt + 61000 });
   const beforeDeletedMaintenance = hive.calls.length;
   await engine.tick();
+  assert.equal(
+    hive.calls
+      .slice(beforeDeletedMaintenance)
+      .filter((call) => call.method === "objects.pruneRevisions").length,
+    0,
+    "minute-level local maintenance must not rewrite unchanged Hive history",
+  );
+  t.mock.timers.setTime(deletedAt + 15 * 60000 + 1000);
+  await engine.tick();
   const deletedRetention = hive.calls
     .slice(beforeDeletedMaintenance)
     .filter((call) => call.method === "objects.pruneRevisions");
@@ -611,7 +620,7 @@ test("Deleted and recreated tasks use the same result and retention lifecycle", 
   assert.equal(store.get("fixture-task")!.revision, 3);
   assert.throws(() => save(engine, task(), 1), /changed/);
   const beforeMaintenance = hive.calls.length;
-  t.mock.timers.setTime(Date.now() + 61000);
+  t.mock.timers.setTime(Date.now() + 15 * 60000 + 1000);
   await engine.tick();
   const retentionCalls = hive.calls
     .slice(beforeMaintenance)
@@ -667,7 +676,7 @@ test("A manual run cannot overwrite an automatically scheduled run with the same
   );
 });
 
-test("Crash recovery keeps publication work but bounds interrupted execution receipts", (t) => {
+test("Crash recovery keeps publication work and unresolved interrupted executions", (t) => {
   const path = join(
     process.env.IVY_TEST_TEMP ?? tmpdir(),
     "collector-engine-" + randomUUID() + ".sqlite",
@@ -772,7 +781,7 @@ test("Crash recovery keeps publication work but bounds interrupted execution rec
   row.lastRunId = "publishing";
   store.save(row);
   store.cleanup();
-  assert.equal(store.run("running"), null, "An older terminal run expires");
+  assert.ok(store.run("running"), "Unresolved execution survives after another run becomes current");
 });
 
 test("Named worker recovery waits for actual termination, preserves pauses and never replays interrupted input", async (t) => {

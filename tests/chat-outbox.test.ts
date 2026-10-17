@@ -11,6 +11,7 @@ import {
   hashJson,
 } from "../packages/contracts/src/canonical.js";
 import { IvyError } from "../packages/contracts/src/errors.js";
+import { operationId } from "../packages/contracts/src/operation-id.js";
 import type {
   Chat,
   OperationName,
@@ -359,27 +360,33 @@ test('Chat refuses changed immutable content when recovering a pruned offer repl
 
 test("an interrupted acknowledgement retains its older offer until recovery completes", async (t) => {
   const f = await fixture(t), added = await f.add();
-  const received = await f.first.receive("alice", f.receive("old-offer"));
+  const epoch = (await f.store.client.request("system.status", {})).runtimeEpoch;
+  const received = await f.first.receive("alice", f.receive(operationId(epoch, Date.now() - 1000, "old-offer")));
   if (received.outcome?.action !== "receive") throw Error("Expected offer.");
   const operation = (await f.first.operations.find("alice", received.operationId))!;
   await f.store.write("chat-bridge/operation",
     { ...operation.value, updatedAt: "2000-01-01T00:00:00.000Z" }, "age-offer",
     { objectId: operation.pin.objectId, expectedRevision: operation.pin.revision });
-  const request = f.ack("interrupted-ack", received.outcome.offer.object.objectId, [added.reply.objectId]);
+  const request = f.ack(operationId(epoch), received.outcome.offer.object.objectId, [added.reply.objectId]);
   // A process can stop after accepting the acknowledgement and before confirming replies.
   await f.first.operations.begin("alice", request);
-  const maintenance = f.store as unknown as { expireOperations(now: number, force: boolean): void };
+  const maintenance = f.store as unknown as { expireOperations(now: number, force: boolean): void; usage(): { rows: number } };
+  f.store.limits.count = maintenance.usage().rows - 1;
   maintenance.expireOperations(Date.now(), true);
+  assert.ok(await f.first.operations.find("alice", received.operationId));
+  f.store.limits.count = 10_000;
   assert.equal((await f.second.acknowledge("alice", request)).phase, "succeeded");
   assert.equal((await f.store.read("chat-bridge/reply", added.reply.objectId)).value.state, "confirmed");
+  f.store.limits.count = maintenance.usage().rows - 1;
   maintenance.expireOperations(Date.now(), true);
   assert.equal(await f.first.operations.find("alice", received.operationId), null);
 });
 
-test("a retained acknowledgement remains idempotent after its older offer expires", async (t) => {
+test("a retained acknowledgement remains idempotent after pressure evicts its older offer", async (t) => {
   const f = await fixture(t),
     added = await f.add();
-  const received = await f.first.receive("alice", f.receive("old-offer"));
+  const epoch = (await f.store.client.request("system.status", {})).runtimeEpoch;
+  const received = await f.first.receive("alice", f.receive(operationId(epoch, Date.now() - 1000, "old-offer")));
   if (received.outcome?.action !== "receive") throw Error("Expected offer.");
   const operation = (await f.first.operations.find(
     "alice",
@@ -394,15 +401,16 @@ test("a retained acknowledgement remains idempotent after its older offer expire
       expectedRevision: operation.pin.revision,
     },
   );
-  const request = f.ack("recent-ack", received.outcome.offer.object.objectId, [
+  const request = f.ack(operationId(epoch), received.outcome.offer.object.objectId, [
     added.reply.objectId,
   ]);
   const acknowledged = await f.first.acknowledge("alice", request);
-  (
-    f.store as unknown as {
-      expireOperations(now: number, force: boolean): void;
-    }
-  ).expireOperations(Date.now(), true);
+  const maintenance = f.store as unknown as {
+    expireOperations(now: number, force: boolean): void;
+    usage(): { rows: number };
+  };
+  f.store.limits.count = maintenance.usage().rows - 1;
+  maintenance.expireOperations(Date.now(), true);
   assert.equal(
     await f.first.operations.find("alice", received.operationId),
     null,

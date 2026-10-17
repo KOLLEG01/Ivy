@@ -20,7 +20,7 @@ import { discoverVoiceTarget } from './voice-target.js';
 
 export const operationName = (caller: string, id: string) => 'operation-' + hashJson([caller, id]).slice(7);
 const workflowOperationKey = 'secretary/public-operation';
-interface WorkflowOperation { operationId: string; callerPrincipalId: string; action: 'create_assignment' | 'update_assignment' | 'configure_execution'; requestHash: string; write: Wire.ObjectWrite; phase: 'prepared' | 'failed'; errorCode: string | null; expiresAt: number }
+interface WorkflowOperation { operationId: string; callerPrincipalId: string; action: 'create_assignment' | 'update_assignment' | 'configure_execution'; requestHash: string; write: Wire.ObjectWrite; phase: 'prepared' | 'succeeded' | 'failed'; effect?: Pin; errorCode: string | null }
 export const sourceName = (id: string) => 'source-' + hashJson(id).slice(7);
 export const messageHash = ({ observedAt: _observedAt, ...message }: Message) => hashJson(message);
 export const identityHash = (sourceId: string, message: Message) => hashJson([sourceId, message.accountId, message.conversationId, message.messageId, message.nativeRevision]);
@@ -117,6 +117,7 @@ export class SecretaryEngine {
     const { mutationId, ...arguments_ } = value.write;
     need(mutationId === deriveOperationId(value.operationId, ['secretary-workflow', value.callerPrincipalId]),
       'secretary_evidence_conflict', 'The saved write has a different operation identity.');
+    if (value.phase === 'succeeded' && value.effect) return value.effect;
     const result = await this.client.request('objects.writeReceipt', { mutationId, expectedRequestHash: hashJson({ method: 'objects.write', arguments: arguments_ }) });
     if (!result) return null;
     const expectedKey = value.action === 'configure_execution' ? 'secretary/configuration' : 'secretary/assignment';
@@ -125,6 +126,18 @@ export class SecretaryEngine {
       (!value.write.create || result.object.name === value.write.create.name),
       'secretary_evidence_conflict', 'The original write receipt names another Secretary object.');
     return { objectId: result.object.id, revision: result.revision.revision };
+  }
+  async validateOperationId(id: string): Promise<void> {
+    const identity = parseOperationId(id);
+    need(identity.runtimeEpoch === await this.epoch && identity.issuedAtUnixMs <= Date.now() + 60_000 &&
+      identity.issuedAtUnixMs > this.store.expiredBefore(), 'operation_expired',
+      'The Secretary operation belongs to another runtime or predates the receipt ring.');
+  }
+  private completeWorkflow(row: { pin: Pin; value: WorkflowOperation }, effect: Pin): Pin {
+    if (row.value.phase !== 'succeeded')
+      this.store.technicalAmend(workflowOperationKey, row, { ...row.value, phase: 'succeeded', effect });
+    this.store.completeTechnicalWorkflow(row.pin.objectId);
+    return effect;
   }
   async operationRead(caller: string, scope: Scope, id: string): Promise<OperationOutcome> {
     this.authorize(caller, scope, 'operation'); await this.verifyOwner();
@@ -135,6 +148,7 @@ export class SecretaryEngine {
     need(row && row.value.callerPrincipalId === caller && row.value.operationId === id,
       'not_found', 'The caller has no retained operation with this ID.');
     const effect = await this.workflowReceipt(row.value);
+    if (effect) this.completeWorkflow(row, effect);
     return { operationId: id, action: row.value.action, phase: effect ? 'succeeded' : row.value.phase === 'failed' ? 'failed' : 'unknown',
       effect, errorCode: effect ? null : row.value.errorCode, observedAt };
   }
@@ -145,22 +159,25 @@ export class SecretaryEngine {
     let row = this.store.technicalNamed<WorkflowOperation>(workflowOperationKey, name);
     const retry = !!row;
     if (!row) {
+      await this.validateOperationId(request.operationId);
       need(write, 'secretary_evidence_missing', 'The original Secretary write was not prepared.');
       row = this.store.technicalCreate(workflowOperationKey, name, { operationId: request.operationId, callerPrincipalId: caller,
-        action, requestHash, write, phase: 'prepared', errorCode: null, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
+        action, requestHash, write, phase: 'prepared', errorCode: null });
     }
     need(row.value.callerPrincipalId === caller && row.value.operationId === request.operationId && row.value.action === action && row.value.requestHash === requestHash,
       'mutation_conflict', 'The operation identity already names different Secretary arguments.');
     const receipt = retry ? await this.workflowReceipt(row.value) : null;
-    if (receipt) return receipt;
+    if (receipt) return this.completeWorkflow(row, receipt);
     need(row.value.phase !== 'failed', row.value.errorCode ?? 'secretary_operation_failed', 'The original Secretary write failed.');
-    try { return await this.store.writePrepared(row.value.write); }
+    try { return this.completeWorkflow(row, await this.store.writePrepared(row.value.write)); }
     catch (error) {
       const failure = IvyError.from(error);
       if (!retry && failure.outcome === 'not_executed') {
         const latest = this.store.technicalNamed<WorkflowOperation>(workflowOperationKey, name);
-        if (latest && latest.value.phase === 'prepared')
+        if (latest && latest.value.phase === 'prepared') {
           this.store.technicalAmend(workflowOperationKey, latest, { ...latest.value, phase: 'failed', errorCode: failure.code });
+          this.store.completeTechnicalWorkflow(latest.pin.objectId);
+        }
       }
       throw error;
     }
@@ -194,14 +211,13 @@ export class SecretaryEngine {
   }
   async action(caller: string, request: Request): Promise<Accepted> {
     validate('Request', request); this.authorize(caller, request.expectedScope, request.action, 'sourceId' in request ? request.sourceId : undefined);
+    need(parseOperationId(request.operationId).runtimeEpoch === await this.epoch, 'operation_expired', 'The Secretary operation belongs to another runtime.');
     need(!this.store.technicalNamed<WorkflowOperation>(workflowOperationKey, operationName(caller, request.operationId)),
       'mutation_conflict', 'The operation identity already names an assignment action.');
-    const identity = parseOperationId(request.operationId), now = Date.now();
-    need(identity.runtimeEpoch === await this.epoch && identity.issuedAtUnixMs <= now + 60_000 && identity.issuedAtUnixMs >= this.store.expiredBefore() && now < identity.issuedAtUnixMs + 24 * 60 * 60 * 1000,
-      'operation_expired', 'The Secretary operation belongs to another runtime or is outside its replay window.');
     if (request.action === 'capture') this.validateMessage(request.message, this.sourceDefinition(request.sourceId));
     await this.verifyOwner(); const prior = await this.find(caller, request.operationId);
     if (prior) { need(prior.value.requestHash === hashJson(request), 'mutation_conflict', 'This operation ID already names different arguments.'); return (await this.apply(prior)).value; }
+    await this.validateOperationId(request.operationId);
     const at = this.now().toISOString();
     const sourceId = 'sourceId' in request ? request.sourceId : (await this.item(request.item.objectId)).value.sourceId;
     const sourceSnapshot = await this.source(sourceId);
@@ -366,6 +382,7 @@ export class SecretaryEngine {
     validate('SaveConfigurationRequest', request); validateConfiguration(request.value); await this.verifyOwner();
     const prior = this.store.technicalNamed<WorkflowOperation>(workflowOperationKey, operationName(caller, request.operationId));
     if (prior) return this.saveWorkflow(caller, request, 'configure_execution', null);
+    await this.validateOperationId(request.operationId);
     const current = await this.store.named('secretary/configuration', 'configuration');
     need(current && same(current.pin, request.configuration), 'revision_conflict', 'Reload the current Secretary configuration before saving.');
     const value = { ...structuredClone(request.value), rules: unifiedMainRules(request.value.rules), updatedAt: this.now().toISOString() };
@@ -377,6 +394,7 @@ export class SecretaryEngine {
     const action = request.assignment ? 'update_assignment' : 'create_assignment';
     const prior = this.store.technicalNamed<WorkflowOperation>(workflowOperationKey, operationName(caller, request.operationId));
     if (prior) return this.saveWorkflow(caller, request, action, null);
+    await this.validateOperationId(request.operationId);
     const name = assignmentName(request.value.assignmentId), current = await this.store.named('secretary/assignment', name), now = this.now().toISOString();
     if (!request.assignment) {
       need(!current, 'secretary_identity_conflict', 'A new assignment needs a fresh identity.');

@@ -15,6 +15,7 @@ import { PhoneAdmission } from '../services/phone-bridge/src/runtime/admission.j
 import { PhoneNativeClient, phoneFrameBytes } from '../services/phone-bridge/src/runtime/native.js';
 import type { PhoneIntent, PhoneReply } from '../services/phone-bridge/src/runtime/native.js';
 import phoneManifest from '../services/phone-bridge/deploy.json' with { type: 'json' };
+import type { ReceiptArchive } from '../packages/sdk/src/receipt-archive.js';
 
 const owner = { hostId: 'phone-fixture-host', serviceNodeId: 'phone-fixture-node' };
 const tick = () => new Promise<void>(done => setImmediate(done));
@@ -30,6 +31,41 @@ function intent(epoch: string, method: PhoneIntent['method'] = 'call.dial', call
 function reply(original: Pick<PhoneIntent, 'epoch'>, result: unknown = { accepted: true }): PhoneReply {
   return { version: 1, epoch: original.epoch, requestId: 1, ok: true, result, error: null };
 }
+
+test('Phone releases independent completed history while retaining uncertain native receipts and rollback replay guards', t => {
+  const f = fixture(t), journal = f.open(), epoch = randomUUID(); journal.beginEpoch(epoch);
+  (journal as unknown as { archive: ReceiptArchive }).archive.limits.count = 1;
+  const unknown = intent(epoch, 'registration.reconnect', null); journal.submit(unknown);
+  const uncertain = journal.finish(unknown, { ...reply(unknown), ok: false, result: null, error: 'operation_outcome_unknown' });
+  const first = intent(epoch, 'registration.reconnect', null); journal.submit(first); journal.finish(first, reply(first));
+  const second = intent(epoch, 'registration.reconnect', null); journal.submit(second); journal.finish(second, reply(second));
+  const third = intent(epoch, 'registration.reconnect', null); journal.submit(third); journal.finish(third, reply(third));
+  assert.throws(() => journal.get(first.operationId), { code: 'operation_expired' });
+  assert.deepEqual(journal.get(unknown.operationId), uncertain);
+  journal.close();
+  const reopened = f.open();
+  assert.throws(() => reopened.get(first.operationId), { code: 'operation_expired' });
+  assert.deepEqual(reopened.get(unknown.operationId), uncertain);
+});
+
+test('Phone releases a bounded batch from a large call archive within the native heartbeat deadline', t => {
+  const f = fixture(t), journal = f.open(), epoch = randomUUID();
+  const { archive, db } = journal as unknown as { archive: ReceiptArchive; db: DatabaseSync; compact(): void };
+  db.exec('BEGIN IMMEDIATE');
+  for (let call = 0; call < 400; call++) {
+    const callId = randomUUID();
+    for (const method of ['call.prepare', 'call.dial', 'call.hangup', 'call.release', 'call.archiveVoice', 'call.bindVoice'] as const) {
+      const original = { ...intent(epoch, 'call.prepare', callId), method };
+      archive.retain('command', original.operationId, JSON.stringify({ intent: original, phase: 'result', receipt: reply(original) }));
+    }
+  }
+  db.exec('COMMIT');
+  const start = performance.now();
+  (journal as unknown as { compact(): void }).compact();
+  assert.ok(performance.now() - start < 5000, 'Call history collection must leave the native heartbeat responsive.');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM receipt_archive_history').get()!['count'], 128);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM receipt_archive WHERE kind='command' AND json_extract(value,'$.intent.method')='call.bindVoice'").get()!['count'], 400);
+});
 
 test('Phone deployment declares the actual journal format and refuses older development storage', t => {
   const f = fixture(t); f.open().close();

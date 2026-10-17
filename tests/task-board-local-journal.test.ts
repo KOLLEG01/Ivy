@@ -92,19 +92,16 @@ test("local workflow paging includes nested run checkpoints without exposing the
   assert.equal(page.items[0]!.objectId, call.objectId);
 });
 
-test("completed local workflows expire after their replay window", async (t) => {
+test("a cleanup marker cannot discard an unobserved native call under history pressure", async (t) => {
   const workflow = await nativeWorkflow(t);
   const call = await workflow.prepare("thread");
   workflow.f.first.store.completeLocalWorkflow(
     call.objectId,
     new Date(Date.now() - 2 * 86_400_000).toISOString(),
   );
+  workflow.f.first.store.historyLimits.count = 0;
   await workflow.f.first.store.collectLocal();
-  await assert.rejects(
-    workflow.f.first.store.read("task-board/native-call", call, false),
-    (error: unknown) =>
-      error instanceof IvyError && error.code === "task_board_scope_mismatch",
-  );
+  assert.ok(await workflow.f.first.store.read("task-board/native-call", call, false));
 });
 
 test("the local scan cursor keeps only its current revision", async (t) => {

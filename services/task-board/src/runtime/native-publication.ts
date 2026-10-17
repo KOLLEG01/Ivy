@@ -7,7 +7,6 @@ import { resultCommentFits, same, sharedProjectKey } from './checks.js';
 import { TaskBoardEvidence } from './evidence.js';
 import type { Publication, TaskBoardEngine } from './engine.js';
 import { evidenceIdentity, intendedCall, nativeArray, nativeRecord, nativeString, resolveNativeRequest } from './native-intent.js';
-import { TaskBoardStore } from './store.js';
 import type { Document } from './store.js';
 import { boundedOutputSummary, TaskBoardTurnEvidence } from './turn-evidence.js';
 import type { verifyNativeTranscript } from './full-turn-evidence.js';
@@ -394,9 +393,9 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     // dependencies if the operation's final receipt is interrupted afterwards.
     const publishedAt = new Date().toISOString();
     for (const root of [request.run, ...retiredCalls])
-      store.completeLocalWorkflow(root.objectId, publishedAt, TaskBoardStore.nativeEvidenceWindowMs, operation.pin.objectId);
+      store.completeLocalWorkflow(root.objectId, publishedAt, operation.pin.objectId);
     if (next.owner.source === 'scheduler' && store.localKey(next.originalRequest.intent.objectId) === 'task-board/native-plan')
-      store.completeLocalWorkflow(next.originalRequest.intent.objectId, publishedAt, TaskBoardStore.nativeEvidenceWindowMs, operation.pin.objectId);
+      store.completeLocalWorkflow(next.originalRequest.intent.objectId, publishedAt, operation.pin.objectId);
   }
   return outcome;
 }

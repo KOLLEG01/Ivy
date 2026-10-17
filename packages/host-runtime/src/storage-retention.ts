@@ -108,7 +108,7 @@ async function collectBootstrapPlans(config: Host.HostConfig, journal: HostJourn
 }
 
 async function collectMaintenanceHistory(config: Host.HostConfig, history: MaintenanceHistory,
-  protectedHistory: Set<string>, now: number, progress: RetentionProgress): Promise<void> {
+  protectedHistory: Set<string>, progress: RetentionProgress): Promise<void> {
   const activeOperations = new Set(history.filter(entry => !['succeeded', 'rolled_back'].includes(entry.phase)).flatMap(entry =>
     [entry.request.operationId, entry.request.operationId + '-rollback']));
   let completed = 0;
@@ -116,8 +116,9 @@ async function collectMaintenanceHistory(config: Host.HostConfig, history: Maint
     // Automatic operations already contain only their small request and outcome records.
     if (entry.kind !== 'bootstrap-maintenance') continue;
     if (!['succeeded', 'rolled_back'].includes(entry.phase)) { progress.skipped('maintenance', 'unfinished_operation', true); continue; }
-    if (++completed <= 20 || protectedHistory.has(entry.directory) || activeOperations.has(entry.request.operationId) ||
-      !(Date.parse(entry.updatedAt) < now - 30 * 86400000)) { progress.skipped('maintenance', 'retained_history'); continue; }
+    if (++completed <= 20 || protectedHistory.has(entry.directory) || activeOperations.has(entry.request.operationId)) {
+      progress.skipped('maintenance', 'retained_history'); continue;
+    }
     try {
       const value = entry.record as Host.BootstrapMaintenanceRecord;
       validateHost('BootstrapMaintenanceRecord', value);
@@ -190,7 +191,7 @@ export async function collectHostStorage(config: Host.HostConfig, now = Date.now
     const history = [...await maintenanceHistory(config, 'bootstrap-maintenance', progress), ...await maintenanceHistory(config, 'bootstrap-automatic', progress)]
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     const protectedHistory = await collectBootstrapPlans(config, journal, protectedIds, cutoff, history, progress);
-    await collectMaintenanceHistory(config, history, protectedHistory, now, progress);
+    await collectMaintenanceHistory(config, history, protectedHistory, progress);
     // Requests can also exist before the first selected bootstrap plan is written.
     for (const entry of history) {
       if (['succeeded', 'rolled_back'].includes(entry.phase)) continue;

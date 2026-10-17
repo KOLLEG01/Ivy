@@ -126,3 +126,25 @@ test('an incomplete diagnostic snapshot never emits a false recovery', async t =
   f.first.store.client.request = original;
   assert.equal((await f.queue()).length, 1);
 });
+
+test('confirmed diagnostic notices form a bounded ring while active and unconfirmed incidents survive', async t => {
+  const f = await fixture(t);
+  f.kernel.registry.diagnostic(f.diagnostic); await f.monitor().tick(f.signal);
+  f.advance(); await f.monitor().tick(f.signal);
+  const scope = hashJson([f.admission.definition.principalId, f.admission.definition.workspaceId]);
+  const entry = Object.values(f.first.store.diagnosticNoticeState(scope))[0]!;
+  const completed = { ...entry, active: false, resolvedAt: f.now(),
+    alert: { ...entry.alert!, confirmed: true }, recovery: { ...entry.alert!, confirmed: true } };
+  const state = {
+    active: { ...completed, active: true, resolvedAt: null },
+    unconfirmed: { ...completed, alert: { ...completed.alert, confirmed: false } },
+    oldest: { ...completed, resolvedAt: f.now() - 1 },
+    newest: completed,
+  };
+  f.first.store.diagnosticHistoryLimits.count = 3;
+  f.first.store.saveDiagnosticNoticeState(scope, state);
+  assert.deepEqual(Object.keys(f.second.store.diagnosticNoticeState(scope)), ['active', 'newest', 'unconfirmed']);
+  f.first.store.diagnosticHistoryLimits.bytes = 1;
+  f.first.store.saveDiagnosticNoticeState(scope, state);
+  assert.deepEqual(Object.keys(f.second.store.diagnosticNoticeState(scope)), ['active', 'unconfirmed']);
+});

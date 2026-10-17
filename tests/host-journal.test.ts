@@ -89,6 +89,32 @@ async function fixture(t: TestContext) {
 const code = (expected: string) => (error: unknown) =>
   error instanceof IvyError && error.code === expected;
 
+test('host history preserves unresolved work and rollback evidence while retiring completed deployment identities', async t => {
+  const f = await fixture(t); f.journal.historyLimits.count = 2;
+  const failed = f.journal.accept({ action: 'deploy', instanceId: 'fixture', operationId: 'previous-failure', candidateId: f.candidate.candidateId });
+  f.journal.advance(failed.record.deploymentId, 'prepared', 'failed');
+  const complete = (operationId: string) => {
+    const entry = f.journal.accept({ action: 'deploy', instanceId: 'fixture', operationId, candidateId: f.candidate.candidateId });
+    let phase: Wire.DeploymentRecord['phase'] = 'prepared';
+    for (const next of ['checking', 'draining', 'activating', 'verifying', 'succeeded'] as const) {
+      f.journal.advance(entry.record.deploymentId, phase, next); phase = next;
+    }
+    return entry;
+  };
+  const old = complete('old');
+  const pending = f.journal.accept({ action: 'deploy', instanceId: 'fixture', operationId: 'pending', candidateId: f.candidate.candidateId });
+  complete('second'); complete('third');
+  assert.throws(() => f.journal.get(old.record.deploymentId), code('operation_expired'));
+  assert.throws(() => f.journal.get(failed.record.deploymentId), code('operation_expired'));
+  assert.throws(() => f.journal.accept(old.request), code('operation_expired'));
+  assert.throws(() => f.journal.accept({ ...old.request, action: 'restart' }), code('mutation_conflict'));
+  assert.equal(f.journal.get(pending.record.deploymentId).record.phase, 'prepared');
+  assert.equal(f.journal.operation('second')?.record.phase, 'succeeded');
+  const reopened = new HostJournal(f.config);
+  try { assert.throws(() => reopened.operation('old'), code('operation_expired')); }
+  finally { reopened.close(); }
+});
+
 test("normal deployment excludes exactly the OS-owned bootstrap roots", () => {
   assert.equal(
     requiresBootstrapReplacement({ componentId: "host-executor" }),

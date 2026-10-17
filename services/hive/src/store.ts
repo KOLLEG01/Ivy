@@ -161,7 +161,7 @@ export class HiveStore {
       node_id TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY(node_id, name),
       FOREIGN KEY(node_id, name) REFERENCES subscriptions(node_id, name)
     ) STRICT`);
-    this.db.exec("CREATE INDEX IF NOT EXISTS mutations_expiry ON mutations(max(issued_at_ms,completed_at_ms),receipt_bytes)");
+    this.db.exec("DROP INDEX IF EXISTS mutations_expiry");
     this.cursorSecret = String(
       this.get("SELECT value FROM metadata WHERE key=?", "cursor_secret")![
         "value"
@@ -332,29 +332,44 @@ export class HiveStore {
   get mutationReceiptBytes(): number {
     return Number(this.metadata("mutation_receipt_bytes") ?? 0);
   }
-  cleanupMutationReceipts(now = Date.now()): void {
-    const cutoff = now - 24 * 60 * 60 * 1000;
-    const expired = this.get(
-      "SELECT COALESCE(SUM(receipt_bytes),0) AS bytes FROM mutations WHERE max(issued_at_ms,completed_at_ms)<=?",
-      cutoff,
-    )!;
-    this.run(
-      "DELETE FROM mutations WHERE max(issued_at_ms,completed_at_ms)<=?",
-      cutoff,
+  cleanupMutationReceipts(reservedBytes = 0, reservedCount = 0): void {
+    requireThat(
+      reservedBytes <= mutationReceiptJournalBytes,
+      "result_too_large",
+      "Mutation receipt exceeds the journal byte limit.",
     );
-    this.setMetadata(
-      "mutation_receipt_bytes",
-      String(Math.max(0, this.mutationReceiptBytes - Number(expired["bytes"]))),
-    );
-    this.setMetadata(
-      "mutations_expired_before",
-      String(
-        Math.max(
-          Number(this.metadata("mutations_expired_before") ?? 0),
-          cutoff,
-        ),
+    let count = Number(
+        this.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
       ),
-    );
+      bytes = this.mutationReceiptBytes,
+      expiredBefore = Number(this.metadata("mutations_expired_before") ?? 0);
+    const maximumCount = mutationReceiptCount - reservedCount,
+      maximumBytes = mutationReceiptJournalBytes - reservedBytes;
+    if (count <= maximumCount && bytes <= maximumBytes) return;
+    // Row order is commit order, including receipts with identical or out-of-order
+    // issue timestamps. Replaying a receipt never moves it to the back of the ring.
+    while (count > maximumCount || bytes > maximumBytes) {
+      const oldest = this.all(
+        "SELECT rowid AS receipt_rowid,issued_at_ms,receipt_bytes FROM mutations ORDER BY rowid LIMIT ?",
+        bytes > maximumBytes ? 256 : Math.min(256, count - maximumCount),
+      );
+      requireThat(
+        oldest.length,
+        "storage_invalid",
+        "Mutation receipt usage does not match stored receipts.",
+      );
+      let boundary = 0;
+      for (const row of oldest) {
+        boundary = Number(row["receipt_rowid"]);
+        count--;
+        bytes -= Number(row["receipt_bytes"]);
+        expiredBefore = Math.max(expiredBefore, Number(row["issued_at_ms"]));
+        if (count <= maximumCount && bytes <= maximumBytes) break;
+      }
+      this.run("DELETE FROM mutations WHERE rowid<=?", boundary);
+    }
+    this.setMetadata("mutation_receipt_bytes", String(bytes));
+    this.setMetadata("mutations_expired_before", String(expiredBefore));
   }
   transaction<T>(work: () => T): T {
     const priorChanges = new Set(this.changes);
@@ -513,16 +528,11 @@ export class HiveStore {
       };
       const { mutationId, ...arguments_ } = params;
       const identity = parseOperationId(mutationId),
-        now = Date.now(),
-        deadline = identity.issuedAtUnixMs + 24 * 60 * 60 * 1000;
+        now = Date.now();
       requireThat(
-        identity.runtimeEpoch === this.runtimeEpoch &&
-          identity.issuedAtUnixMs <= now + 60_000 &&
-          identity.issuedAtUnixMs >
-            Number(this.metadata("mutations_expired_before") ?? 0) &&
-          now < deadline,
+        identity.runtimeEpoch === this.runtimeEpoch,
         "mutation_expired",
-        "Mutation identity belongs to another runtime or is outside its replay window.",
+        "Mutation identity belongs to another runtime.",
       );
       const requestHash = hashJson({ method, arguments: arguments_ });
       const prior = this.get(
@@ -547,33 +557,14 @@ export class HiveStore {
           ) as T;
         return reference as T;
       }
-      // Receipt expiry moves at most once per minute unless capacity needs space.
-      if (now - 24 * 60 * 60 * 1000 -
-          Number(this.metadata("mutations_expired_before") ?? 0) >= 60_000)
-        this.cleanupMutationReceipts(now);
-      let receiptCount = Number(
-        this.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
-      );
-      let receiptBytes = this.mutationReceiptBytes;
-      if (
-        receiptCount >= mutationReceiptCount ||
-        receiptBytes + mutationReceiptResultBytes > mutationReceiptJournalBytes
-      ) {
-        this.cleanupMutationReceipts(now);
-        receiptCount = Number(
-          this.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
-        );
-        receiptBytes = this.mutationReceiptBytes;
-      }
+      // Retained outcomes remain replayable even when an eviction has fenced
+      // their issue time. An absent old identity must never become fresh work.
       requireThat(
-        receiptCount < mutationReceiptCount,
-        "capacity_exceeded",
-        "Hive mutation receipt journal is full.",
-      );
-      requireThat(
-        receiptBytes + mutationReceiptResultBytes <= mutationReceiptJournalBytes,
-        "capacity_exceeded",
-        "Hive mutation receipt journal is full.",
+        identity.issuedAtUnixMs <= now + 60_000 &&
+          identity.issuedAtUnixMs >
+            Number(this.metadata("mutations_expired_before") ?? 0),
+        "mutation_expired",
+        "Mutation identity is in the future or predates the receipt ring's replay boundary.",
       );
       const result = work(principal);
       const receipt = canonical(
@@ -588,6 +579,9 @@ export class HiveStore {
             (result.kind ?? "snapshot") +
             receipt,
         ) + 16;
+      // Work, FIFO eviction, the replay boundary and the new receipt commit
+      // together. A failed write leaves every previous outcome available.
+      this.cleanupMutationReceipts(bytes, 1);
       this.run(
         "INSERT INTO mutations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         principal.principalId,

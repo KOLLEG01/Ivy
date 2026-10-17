@@ -38,8 +38,9 @@ Local commands and operating procedure: [host operations](#local-host-operations
   atomically renamed with a `.retiring-` prefix before deletion; interrupted removal
   resumes from those names even if their metadata has gone. Failed and unknown
   preparations remain for diagnosis; unknown ownership pauses source snapshot collection only.
-  Completed bootstrap detail files expire after 30 days, keeping details for the
-  latest 20 maintenance operations, current rollback evidence and unresolved operations.
+  Completed bootstrap detail files form a ring with no minimum retention duration,
+  keeping details for the latest 20 maintenance operations, current rollback evidence
+  and unresolved operations.
   Small request and outcome records remain unchanged for replay and restore; their
   number grows with operation history. Only detail files named in those records are deleted.
   Host status includes the last collection outcome, last complete success, deletion

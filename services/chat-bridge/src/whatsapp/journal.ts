@@ -23,18 +23,20 @@ export class WhatsAppJournal {
   private failure:Error|null=null;
   private closing:Promise<void>|null=null;
   private writes:Promise<void>=Promise.resolve();
-  constructor(path: string) {
+  constructor(path: string, readonly historyLimits = { count: 10_000, bytes: 64 * 1024 * 1024 }) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const disk = new DatabaseSync(path), schema=`
       CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY,sender TEXT NOT NULL,jid TEXT NOT NULL,message TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',request TEXT,received INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS outgoing (sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,jid TEXT NOT NULL,text TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending');
+      CREATE TABLE IF NOT EXISTS retired_inbox(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,retired INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS retired_outgoing(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS inbox_pending ON inbox(received,id) WHERE state='pending';
       CREATE INDEX IF NOT EXISTS outgoing_pending ON outgoing(jid,sequence) WHERE state<>'sent';`;
     disk.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;'+schema);
     this.db=new DatabaseSync(':memory:');this.db.exec(schema);
     this.db.exec('BEGIN');
-    for(const table of ['kv','inbox','outgoing'])for(const row of disk.prepare('SELECT * FROM '+table).all()){
+    for(const table of ['kv','inbox','outgoing','retired_inbox','retired_outgoing'])for(const row of disk.prepare('SELECT * FROM '+table).all()){
       const values=Object.values(row) as Array<string|number|null>;
       this.db.prepare('INSERT INTO '+table+' VALUES('+values.map(()=>'?').join(',')+')').run(...values);
     }
@@ -75,9 +77,18 @@ export class WhatsAppJournal {
     return this.writes;
   }
   accept(row: Omit<Inbox, 'state' | 'request'>): void {
+    const retired = this.db.prepare('SELECT fingerprint FROM retired_inbox WHERE id=?').get(row.id);
     const prior = this.db.prepare('SELECT sender,jid,message FROM inbox WHERE id=?').get(row.id);
-    if (prior) { requireThat(prior['sender'] === row.sender && prior['jid'] === row.jid && prior['message'] === row.message, 'whatsui_identity_conflict', 'The original WhatsApp message changed.'); return; }
-    this.write('INSERT INTO inbox(id,sender,jid,message,received) VALUES(?,?,?,?,?)',row.id,row.sender,row.jid,row.message,row.received);
+    if (prior) {
+      requireThat(prior['sender'] === row.sender && prior['jid'] === row.jid &&
+        (retired ? retired['fingerprint'] === identity(row.sender,row.jid,row.message) : prior['message'] === row.message || prior['message'] === ''),
+      'whatsui_identity_conflict', 'The original WhatsApp message changed.'); return;
+    }
+    if (retired) return; // An evicted completed input must never re-enter the agent queue.
+    this.transaction(() => {
+      this.write('INSERT INTO inbox(id,sender,jid,message,received) VALUES(?,?,?,?,?)',row.id,row.sender,row.jid,row.message,row.received);
+      this.write('INSERT INTO retired_inbox VALUES(?,?,0)',row.id,identity(row.sender,row.jid,row.message));
+    });
   }
   pending(): Inbox[] { return this.db.prepare("SELECT * FROM inbox WHERE state='pending' ORDER BY received,id LIMIT 32").all() as unknown as Inbox[]; }
   saveRequest(id: string, request: unknown): void { this.write('UPDATE inbox SET request=? WHERE id=? AND request IS NULL',JSON.stringify(request),id); }
@@ -95,6 +106,8 @@ export class WhatsAppJournal {
     const chars = [...text], ids: string[] = [];
     for (let offset=0;offset<chars.length;offset+=3500) {
       const part=chars.slice(offset,offset+3500).join(''), id=identity('out',key,offset).slice(0,32).toUpperCase(); ids.push(id);
+      const retired = this.db.prepare('SELECT fingerprint FROM retired_outgoing WHERE id=?').get(id);
+      if (retired) { requireThat(retired['fingerprint'] === identity(jid,part), 'whatsui_identity_conflict', 'A delivered reply cannot change its recipient or text.'); continue; }
       const previous=this.db.prepare('SELECT jid,text FROM outgoing WHERE id=?').get(id);
       requireThat(!previous || previous['jid']===jid && previous['text']===part,'whatsui_identity_conflict','A saved reply cannot change its recipient or text.');
       if(automatic)this.set('out-automatic:'+id,true);
@@ -103,17 +116,19 @@ export class WhatsAppJournal {
     return ids;
   }
   hasOutput(key: string): boolean {
-    return !!this.db.prepare('SELECT 1 FROM outgoing WHERE id=?').get(identity('out', key, 0).slice(0,32).toUpperCase());
+    const id = identity('out', key, 0).slice(0,32).toUpperCase();
+    return !!this.db.prepare('SELECT 1 FROM outgoing WHERE id=? UNION ALL SELECT 1 FROM retired_outgoing WHERE id=? LIMIT 1').get(id,id);
   }
   /** Retain the original wording of a single-part notice across service updates. */
   noticeText(key: string): string | null {
-    return this.db.prepare('SELECT text FROM outgoing WHERE id=?').get(identity('out', key, 0).slice(0,32).toUpperCase())?.['text'] as string ?? null;
+    const id = identity('out', key, 0).slice(0,32).toUpperCase();
+    if (this.db.prepare('SELECT 1 FROM retired_outgoing WHERE id=?').get(id)) return null;
+    return this.db.prepare('SELECT text FROM outgoing WHERE id=?').get(id)?.['text'] as string ?? null;
   }
   outgoing(): Outgoing[] { return this.db.prepare("SELECT * FROM outgoing WHERE state<>'sent' ORDER BY sequence LIMIT 16").all() as unknown as Outgoing[]; }
   mark(id: string, state: 'sending'|'sent'|'unknown'): void { this.write("UPDATE outgoing SET state=? WHERE id=? AND state<>'sent'",state,id); }
-  sent(ids: string[]): boolean { return ids.every(id=>this.db.prepare("SELECT 1 FROM outgoing WHERE id=? AND state='sent'").get(id)); }
-  prune(now=Date.now()):void {
-    const cutoff=now-7*86400_000;
+  sent(ids: string[]): boolean { return ids.every(id=>this.db.prepare("SELECT 1 FROM outgoing WHERE id=? AND state='sent' UNION ALL SELECT 1 FROM retired_outgoing WHERE id=? LIMIT 1").get(id,id)); }
+  prune(_now=Date.now()):void {
     const protectedMessages:string[]=[],protectedOutputs=new Set<string>();
     for(const row of this.db.prepare("SELECT key,value FROM kv WHERE key LIKE 'listener:%'").all()){
       const cursor=JSON.parse(String(row['value'])) as {lastTurn?:string;head?:string},binding=String(row['key']).slice('listener:'.length);
@@ -128,22 +143,35 @@ export class WhatsAppJournal {
         const ids=JSON.parse(String(row['value'])) as string[];
         if(this.sent(ids))this.set(String(row['key']),true);else for(const id of ids)protectedOutputs.add(id);
       }
-      for(const row of this.db.prepare("SELECT id FROM inbox WHERE state='done' AND received<? LIMIT 256").all(cutoff)){
-        const id=String(row['id']);this.finish(id);this.set('read-receipt:'+id,null);this.set('local-input:'+id,null);this.set('inbox-content:'+id,null);
-        this.write('DELETE FROM inbox WHERE id=?',id);
+      const candidates: Array<{ kind: 'inbox'|'outgoing'|'message'; id: string; at: number; bytes: number }> = [];
+      const totals = this.db.prepare("SELECT (SELECT COUNT(*) FROM inbox WHERE id NOT IN (SELECT id FROM retired_inbox WHERE retired=1))+(SELECT COUNT(*) FROM outgoing WHERE id NOT IN (SELECT id FROM retired_outgoing))+(SELECT COUNT(*) FROM kv WHERE key LIKE 'message:%') AS count,COALESCE((SELECT SUM(length(CAST(message AS BLOB))) FROM inbox),0)+COALESCE((SELECT SUM(length(CAST(text AS BLOB))) FROM outgoing),0)+COALESCE((SELECT SUM(length(CAST(value AS BLOB))) FROM kv WHERE key LIKE 'message:%'),0) AS bytes").get()!;
+      let count = Number(totals['count']), bytes = Number(totals['bytes']);
+      if (count <= this.historyLimits.count && bytes <= this.historyLimits.bytes) return;
+      for (const row of this.db.prepare("SELECT id,received,length(CAST(message AS BLOB)) AS bytes FROM inbox WHERE state='done' AND id NOT IN (SELECT id FROM retired_inbox WHERE retired=1)").all())
+        candidates.push({ kind:'inbox', id:String(row['id']), at:Number(row['received']), bytes:Number(row['bytes']) });
+      for (const row of this.db.prepare("SELECT o.id,COALESCE(CAST(k.value AS INTEGER),0) AS at,length(CAST(o.text AS BLOB)) AS bytes FROM outgoing o LEFT JOIN kv k ON k.key='out-created:'||o.id WHERE o.state='sent' AND o.id NOT IN (SELECT id FROM retired_outgoing)").all())
+        if (!protectedOutputs.has(String(row['id']))) candidates.push({ kind:'outgoing', id:String(row['id']), at:Number(row['at']), bytes:Number(row['bytes']) });
+      for (const row of this.db.prepare("SELECT key,value,length(CAST(value AS BLOB)) AS bytes FROM kv WHERE key LIKE 'message:%'").all()) {
+        const key=String(row['key']), value=JSON.parse(String(row['value'])) as { ids:string[]; at:number };
+        if (!protectedMessages.some(prefix=>key.startsWith(prefix)) && this.sent(value.ids))
+          candidates.push({ kind:'message', id:key, at:value.at, bytes:Number(row['bytes']) });
       }
-      const messages:string[]=[],outputs:string[]=[];
-      for(const row of this.db.prepare("SELECT key FROM kv WHERE key LIKE 'message:%' AND json_extract(value,'$.at')<?").iterate(cutoff)){
-        const key=String(row['key']);if(protectedMessages.some(prefix=>key.startsWith(prefix)))continue;
-        messages.push(key);if(messages.length===256)break;
-      }
-      for(const key of messages)this.set(key,null);
-      for(const row of this.db.prepare("SELECT o.id FROM outgoing o JOIN kv k ON k.key='out-created:'||o.id WHERE o.state='sent' AND CAST(k.value AS INTEGER)<?").iterate(cutoff)){
-        const id=String(row['id']);if(protectedOutputs.has(id))continue;
-        outputs.push(id);if(outputs.length===256)break;
-      }
-      for(const id of outputs){
-        this.write('DELETE FROM outgoing WHERE id=?',id);this.set('out-created:'+id,null);this.set('send-attempt:'+id,null);this.set('out-automatic:'+id,null);
+      for (const candidate of candidates.sort((a,b)=>a.at-b.at)) {
+        if (count <= this.historyLimits.count && bytes <= this.historyLimits.bytes) break;
+        const id = candidate.id;
+        if (candidate.kind === 'inbox') {
+          const row=this.db.prepare('SELECT sender,jid,message FROM inbox WHERE id=?').get(id)!;
+          this.write('INSERT INTO retired_inbox VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET retired=1', id, identity(row['sender'],row['jid'],row['message']));
+          this.finish(id); this.set('read-receipt:'+id,null); this.set('local-input:'+id,null); this.set('inbox-content:'+id,null);
+          // Compact identity rows also prevent an older binary from admitting the
+          // same opaque transport ID after an automatic deployment rollback.
+          this.write("UPDATE inbox SET message='',request=NULL,received=? WHERE id=?",Number.MAX_SAFE_INTEGER,id);
+        } else if (candidate.kind === 'outgoing') {
+          const row=this.db.prepare('SELECT jid,text FROM outgoing WHERE id=?').get(id)!;
+          this.write('INSERT OR IGNORE INTO retired_outgoing VALUES(?,?)',id,identity(row['jid'],row['text']));
+          this.write("UPDATE outgoing SET text='' WHERE id=?",id); this.set('out-created:'+id,null); this.set('send-attempt:'+id,null); this.set('out-automatic:'+id,null);
+        } else this.set(id,null);
+        count--; bytes-=candidate.bytes;
       }
     });
   }

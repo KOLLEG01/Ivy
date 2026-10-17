@@ -52,7 +52,8 @@ export class ChatBridge {
     validateChat(catalog.operations[name].input.slice(8), args);
     if (catalog.operations[name].mutation) {
       requireThat(typeof args['operationId'] === 'string' && context.operationId === args['operationId'], 'invalid_arguments', 'The transport and Chat action must use one operation identity.');
-      await this.main.store.validateOperationId(args['operationId']);
+      const retained = await this.main.operations.find(caller, args['operationId']);
+      await this.main.store.validateOperationId(args['operationId'], Date.now(), retained?.value.request.action === name);
     }
     let result: unknown;
     switch (name) {

@@ -927,12 +927,12 @@ test("identical content with a new mutation identity creates a separate revision
   );
 });
 
-test("mutation receipt capacity preserves replay, refuses effects atomically, reclaims expiry and survives restart", (t) => {
+test("mutation receipt ring evicts FIFO, preserves retained replay and fences evictions across restart", (t) => {
   const { store, directory } = fixture(t);
   const now = Date.now();
   const mutationId = (name: string, issuedAt = now) =>
     operationId(store.runtimeEpoch, issuedAt, digest(name).slice(7));
-  const originalId = mutationId("receipt-capacity-original");
+  const originalId = mutationId("receipt-capacity-original", now - 60000);
   const original = store.mutate(
     context,
     "test.receiptCapacity",
@@ -965,6 +965,13 @@ test("mutation receipt capacity preserves replay, refuses effects atomically, re
     mutationReceiptCount,
   );
   let effects = 0;
+  t.mock.timers.enable({ apis: ["Date"], now: now + 2 * 86400000 });
+  store.cleanupMutationReceipts();
+  assert.equal(
+    store.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
+    mutationReceiptCount,
+    "the ring has no time-based expiry",
+  );
   assert.deepEqual(
     store.mutate(
       context,
@@ -977,38 +984,65 @@ test("mutation receipt capacity preserves replay, refuses effects atomically, re
     ),
     original,
   );
-  const refusedId = mutationId("receipt-capacity-refused");
+  const admittedId = mutationId("receipt-capacity-admitted", Date.now());
+  const beforeBytes = store.mutationReceiptBytes;
+  const beforeBoundary = store.metadata("mutations_expired_before");
+  store.db.exec(
+    "CREATE TRIGGER fail_receipt BEFORE INSERT ON mutations BEGIN SELECT RAISE(ABORT, 'injected_receipt_failure'); END",
+  );
   assert.throws(
     () =>
       store.mutate(
         context,
         "test.receiptCapacity",
-        { mutationId: refusedId },
+        { mutationId: admittedId },
         () => {
-          effects++;
-          return { value: { accepted: "refused" } };
+          store.setMetadata("ring_effect", "must roll back");
+          return { value: { accepted: "failed" } };
         },
       ),
-    hasCode("capacity_exceeded"),
+    /injected_receipt_failure/,
   );
+  store.db.exec("DROP TRIGGER fail_receipt");
   assert.equal(effects, 0);
+  assert.equal(store.metadata("ring_effect"), null);
+  assert.equal(store.metadata("mutations_expired_before"), beforeBoundary);
+  assert.equal(store.mutationReceiptBytes, beforeBytes);
   assert.equal(
-    store.get(
-      "SELECT COUNT(*) AS count FROM mutations WHERE mutation_id=?",
-      refusedId,
-    )!["count"],
-    0,
+    store.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
+    mutationReceiptCount,
   );
-
-  store.run(
-    "UPDATE mutations SET issued_at_ms=?,completed_at_ms=? WHERE mutation_id='capacity-0'",
-    now - 24 * 60 * 60 * 1000 - 1,
-    now - 24 * 60 * 60 * 1000 - 1,
+  store.mutate(
+    context,
+    "test.receiptCapacity",
+    { mutationId: admittedId },
+    () => ({ value: { accepted: "admitted" } }),
   );
-  const cutoff = now - 24 * 60 * 60 * 1000;
-  store.run("UPDATE mutations SET issued_at_ms=?,completed_at_ms=? WHERE mutation_id='capacity-1'", cutoff, now);
-  store.run("UPDATE mutations SET issued_at_ms=?,completed_at_ms=? WHERE mutation_id='capacity-2'", now, cutoff);
-  const reclaimedId = mutationId("receipt-capacity-reclaimed", now + 1);
+  const evictionBoundary = store.metadata("mutations_expired_before");
+  assert.deepEqual(
+    store.mutate(
+      context,
+      "test.receiptCapacity",
+      { mutationId: originalId, value: 1 },
+      () => {
+        effects++;
+        return { value: null };
+      },
+    ),
+    original,
+    "replaying did not refresh the original receipt's position",
+  );
+  assert.throws(
+    () =>
+      store.mutate(
+        context,
+        "test.receiptCapacity",
+        { mutationId: originalId, value: 2 },
+        () => ({ value: null }),
+      ),
+    hasCode("mutation_conflict"),
+  );
+  const reclaimedId = mutationId("receipt-capacity-reclaimed", Date.now() + 1);
   const reclaimed = store.mutate(
     context,
     "test.receiptCapacity",
@@ -1016,7 +1050,32 @@ test("mutation receipt capacity preserves replay, refuses effects atomically, re
     () => ({ value: { accepted: "reclaimed" } }),
   );
   assert.deepEqual(reclaimed, { accepted: "reclaimed" });
-  assert.equal(store.get("SELECT COUNT(*) AS count FROM mutations WHERE mutation_id IN ('capacity-1','capacity-2')")!["count"], 2);
+  assert.equal(
+    store.metadata("mutations_expired_before"),
+    evictionBoundary,
+    "evicting an older issue time cannot move the replay boundary backward",
+  );
+  assert.equal(
+    store.get(
+      "SELECT COUNT(*) AS count FROM mutations WHERE mutation_id=?",
+      originalId,
+    )!["count"],
+    0,
+  );
+  assert.throws(
+    () =>
+      store.mutate(
+        context,
+        "test.receiptCapacity",
+        { mutationId: originalId, value: 1 },
+        () => {
+          effects++;
+          return { value: null };
+        },
+      ),
+    hasCode("mutation_expired"),
+  );
+  assert.equal(effects, 0);
   assert.equal(
     store.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
     mutationReceiptCount,
@@ -1040,17 +1099,43 @@ test("mutation receipt capacity preserves replay, refuses effects atomically, re
       reclaimed,
     );
     assert.equal(effects, 0);
+    assert.throws(
+      () =>
+        restarted.mutate(
+          context,
+          "test.receiptCapacity",
+          { mutationId: originalId, value: 1 },
+          () => {
+            effects++;
+            return { value: null };
+          },
+        ),
+      hasCode("mutation_expired"),
+    );
+    assert.equal(
+      restarted.mutationReceiptBytes,
+      Number(
+        restarted.get("SELECT SUM(receipt_bytes) AS bytes FROM mutations")![
+          "bytes"
+        ],
+      ),
+    );
+    assert.equal(effects, 0);
   } finally {
     restarted.close();
   }
 });
 
-test("mutation receipt byte capacity reserves the maximum result before applying work", (t) => {
-  const { store } = fixture(t);
+test("mutation receipt ring uses actual bytes and evicts before the atomic commit", (t) => {
+  const { store, oid } = fixture(t);
   const now = Date.now();
+  store.run(
+    "UPDATE mutations SET receipt_bytes=?",
+    mutationReceiptJournalBytes - 512,
+  );
   store.setMetadata(
     "mutation_receipt_bytes",
-    String(mutationReceiptJournalBytes - mutationReceiptResultBytes),
+    String(mutationReceiptJournalBytes - 512),
   );
   assert.deepEqual(
     store.mutate(
@@ -1067,31 +1152,100 @@ test("mutation receipt byte capacity reserves the maximum result before applying
     ),
     { accepted: "boundary" },
   );
-  store.setMetadata(
-    "mutation_receipt_bytes",
-    String(mutationReceiptJournalBytes - mutationReceiptResultBytes + 1),
+  assert.equal(
+    store.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
+    2,
+    "a small receipt fits without reserving the maximum result size",
   );
   let applied = false;
-  assert.throws(
-    () =>
-      store.mutate(
-        context,
-        "test.receiptBytes",
-        {
-          mutationId: operationId(
-            store.runtimeEpoch,
-            now,
-            digest("receipt-byte-refusal").slice(7),
-          ),
-        },
-        () => {
-          applied = true;
-          return { value: { accepted: true } };
-        },
-      ),
-    hasCode("capacity_exceeded"),
+  const large = "x".repeat(2048);
+  assert.deepEqual(
+    store.mutate(
+      context,
+      "test.receiptBytes",
+      {
+        mutationId: operationId(
+          store.runtimeEpoch,
+          now + 1,
+          digest("receipt-byte-eviction").slice(7),
+        ),
+      },
+      () => {
+        applied = true;
+        return { value: { accepted: large } };
+      },
+    ),
+    { accepted: large },
   );
-  assert.equal(applied, false);
+  assert.equal(applied, true);
+  assert.equal(
+    store.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
+    2,
+  );
+  assert.equal(
+    store.get(
+      "SELECT 1 FROM mutations WHERE mutation_id=?",
+      oid("register-text"),
+    ),
+    undefined,
+  );
+  assert.ok(store.mutationReceiptBytes <= mutationReceiptJournalBytes);
+  assert.equal(
+    store.mutationReceiptBytes,
+    Number(
+      store.get("SELECT SUM(receipt_bytes) AS bytes FROM mutations")!["bytes"],
+    ),
+  );
+});
+
+test("mutation receipt byte eviction advances through bounded FIFO batches", (t) => {
+  const { store } = fixture(t);
+  const now = Date.now();
+  store.run("UPDATE mutations SET receipt_bytes=100");
+  store.run(
+    `WITH RECURSIVE sequence(value) AS (
+    SELECT 0 UNION ALL SELECT value+1 FROM sequence WHERE value<999
+  ) INSERT INTO mutations
+    SELECT ?, 'byte-capacity-'||value, ?, ?, ?, 'snapshot', '{}', 100 FROM sequence`,
+    credential.principalId,
+    digest("byte-capacity"),
+    now - 1000,
+    now,
+  );
+  const beforeBytes = mutationReceiptJournalBytes - 32;
+  store.run(
+    "UPDATE mutations SET receipt_bytes=? WHERE mutation_id='byte-capacity-999'",
+    beforeBytes - 1000 * 100,
+  );
+  store.setMetadata("mutation_receipt_bytes", String(beforeBytes));
+  const mutationId = operationId(store.runtimeEpoch, now + 1, "multi-batch");
+  const value = "x".repeat(mutationReceiptResultBytes - 2);
+  assert.equal(
+    store.mutate(context, "test.byteBatches", { mutationId }, () => ({
+      value,
+    })),
+    value,
+  );
+  const remaining = Number(
+    store.get("SELECT COUNT(*) AS count FROM mutations")!["count"],
+  );
+  const evicted = 1002 - remaining;
+  assert.ok(evicted > 256 && evicted < 1000);
+  assert.ok(
+    store.get("SELECT 1 FROM mutations WHERE mutation_id='byte-capacity-999'"),
+  );
+  const receiptBytes = Number(
+    store.get(
+      "SELECT receipt_bytes FROM mutations WHERE mutation_id=?",
+      mutationId,
+    )!["receipt_bytes"],
+  );
+  assert.equal(
+    store.mutationReceiptBytes,
+    beforeBytes - evicted * 100 + receiptBytes,
+  );
+  assert.ok(store.mutationReceiptBytes <= mutationReceiptJournalBytes);
+  assert.ok(store.mutationReceiptBytes > mutationReceiptJournalBytes - 100);
 });
 
 test("database failure rolls back content, current pointer, FTS, event and mutation ledger", (t) => {

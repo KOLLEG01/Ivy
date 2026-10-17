@@ -18,7 +18,7 @@ export const rpcBatchRequestBytes = 65536;
 /** Aggregate reservations for one authenticated credential or original HTTP client address. */
 export const consumerInFlightRequests = 256;
 
-/** Mutation outcomes retained for the complete 24-hour replay window. */
+/** Maximum retained mutation outcomes in the FIFO receipt ring, without a time guarantee. */
 export const mutationReceiptCount = 100000;
 /** Total encoded mutation-journal storage retained across all principals. */
 export const mutationReceiptJournalBytes = 256 * 1024 * 1024;

@@ -25,6 +25,8 @@ export class TaskBoardOperations {
       "task-board/operation",
       operationName(callerPrincipalId, operationId),
     );
+    requireThat(found || !this.store.retiredOperation(callerPrincipalId, operationId),
+      "operation_expired", "The completed TaskBoard operation was evicted; its identity cannot be reused.");
     requireThat(
       !found ||
         (found.value.callerPrincipalId === callerPrincipalId &&
@@ -346,8 +348,7 @@ export class TaskBoardOperations {
         ["start", "continue"].includes(failed.value.request.action) &&
         "intent" in failed.value.request &&
         this.store.localKey(failed.value.request.intent.objectId) === "task-board/native-plan")
-      this.store.completeLocalWorkflow(failed.value.request.intent.objectId, failed.value.updatedAt,
-        TaskBoardStore.nativeEvidenceWindowMs);
+      this.store.completeLocalWorkflow(failed.value.request.intent.objectId, failed.value.updatedAt);
     return failed;
   }
 }

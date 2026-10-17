@@ -8,7 +8,7 @@ const nullable = value => ({ anyOf: [value, { type: 'null' }] });
 const array = (items, maxItems, minItems = 0) => ({ type: 'array', items, minItems, maxItems });
 const enumeration = (...values) => ({ enum: values });
 const hash = { type: 'string', pattern: '^sha256:[0-9a-f]{64}$' };
-const actionId = { ...text(), description: 'Use <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status, use current Unix milliseconds and a unique 1-128 character nonce without a colon. New writes require the current Hive epoch and expire after 24 hours; retain the ID for secretary_operation_read after an uncertain outcome.' };
+const actionId = { ...text(), description: 'Use <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status, use current Unix milliseconds and a unique 1-128 character nonce without a colon. New writes require the current Hive epoch. Released completed outcomes use a bounded FIFO ring without a guaranteed duration; live, unresolved and unacknowledged work remains retained. Evicted identities expire; retain the ID for secretary_operation_read after an uncertain outcome.' };
 const expectedScope = { ...ref('Scope'), description: 'Copy this value unchanged from secretary_binding for the selected serviceNodeId.' };
 const stamp = { type: 'string', pattern: '^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$' };
 const time = { type: 'string', pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' };

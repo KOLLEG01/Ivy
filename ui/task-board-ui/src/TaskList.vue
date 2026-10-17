@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   Alert,
   AlertDescription,
@@ -165,31 +165,39 @@ watch(filterKey, () => {
   host.value = props.query.get("host") ?? "";
   category.value = props.query.get("category") ?? "";
 });
+const retainedBoardAction = useAction(() => props.workspace, "board"),
+  workflowAction = useAction(() => props.workspace, "board:workflow");
+// An older retained archive must keep its original slot while other tickets move.
+const action = workflowAction.saved.value || retainedBoardAction.saved.value?.call.qualifiedName === "task-board.archive"
+  ? workflowAction : retainedBoardAction;
 const columnRefs = ref<InstanceType<typeof BoardColumn>[]>([]),
   backlogRef = ref<InstanceType<typeof BoardColumn> | null>(null),
   archiveRef = ref<InstanceType<typeof BoardColumn> | null>(null),
-  action = useAction(() => props.workspace, "board"),
   archive = useObjectArchive(client, "ivy:task-board:archive:" + base.href + ":" + props.workspace.serviceNodeId + ":board"),
   archiveError = ref(""),
   error = ref(""),
   preparing = ref(false);
-const retainedArchive = computed(() => action.saved.value?.call.qualifiedName === "task-board.archive");
+const retainedArchive = computed(() => retainedBoardAction.saved.value?.call.qualifiedName === "task-board.archive");
 // Resolve an already retained archive without showing workflow internals on the board.
-onMounted(async () => {
-  if (!retainedArchive.value || !action.identityMatches.value) return;
-  if (!action.canDismiss.value) await action.reconcile();
-  if (action.canDismiss.value) action.dismiss();
+useRemote(async () => {
+  if (!retainedArchive.value || !retainedBoardAction.identityMatches.value) return;
+  if (!retainedBoardAction.canDismiss.value) await retainedBoardAction.reconcile();
+  if (retainedBoardAction.canDismiss.value) retainedBoardAction.dismiss();
   refresh();
-});
+}, 15000);
 const archiveFeedback = computed(() => archiveError.value || archive.error.value ||
-  (retainedArchive.value && !action.busy.value ? action.error.value || action.saved.value?.detail : "") ||
+  (retainedArchive.value && !retainedBoardAction.busy.value ? retainedBoardAction.error.value || retainedBoardAction.saved.value?.detail : "") ||
   (archive.pending.value ? tr("Archivierung noch nicht bestätigt.", "Archive action awaiting confirmation.") : ""));
-const archivePending = computed(() => !!archive.pending.value || retainedArchive.value && !action.canDismiss.value);
+const archivePending = computed(() => !!archive.pending.value || retainedArchive.value && !retainedBoardAction.canDismiss.value);
+const pendingArchiveTaskId = computed(() => archive.pending.value?.objectId ??
+  (retainedArchive.value ? (retainedBoardAction.saved.value?.call.arguments as TaskBoard.ArchiveRequest)?.taskId : null) ?? null);
+watch(() => archive.pending.value, (current, previous) => { if (previous && !current) refresh(); });
 const retryArchive = async () => {
   if (!props.available || preparing.value || props.workspace.role !== "user") return;
   if (retainedArchive.value) {
-    await action.replay();
-    if (action.canDismiss.value) action.dismiss();
+    await retainedBoardAction.reconcile();
+    if (!retainedBoardAction.canDismiss.value) await retainedBoardAction.replay();
+    if (retainedBoardAction.canDismiss.value) retainedBoardAction.dismiss();
   } else if (archive.pending.value) {
     const pending = archive.pending.value;
     archive.clearError();
@@ -227,10 +235,10 @@ const selected = computed({
   },
 });
 const disabled = computed(
-  () => !props.available || preparing.value || action.locked.value || archive.busy.value || !!archive.pending.value,
+  () => !props.available || preparing.value || action.locked.value,
 );
 const transition = async (id: string, operation: BoardTransition) => {
-  if (disabled.value || props.workspace.role !== "user") return;
+  if (disabled.value || id === pendingArchiveTaskId.value || props.workspace.role !== "user") return;
   preparing.value = true;
   error.value = "";
   try {
@@ -266,11 +274,11 @@ const transition = async (id: string, operation: BoardTransition) => {
   }
 };
 const archiveTasks = async (id?: string) => {
-  if (disabled.value || props.workspace.role !== "user") return;
+  if (disabled.value || archivePending.value || archive.busy.value || action.busy.value || props.workspace.role !== "user") return;
   preparing.value = true;
   archiveError.value = "";
   archive.clearError();
-  if (retainedArchive.value && action.canDismiss.value) action.dismiss();
+  if (retainedArchive.value && retainedBoardAction.canDismiss.value) retainedBoardAction.dismiss();
   try {
     const ids: string[] = [];
     if (id) ids.push(id);
@@ -309,7 +317,7 @@ const archiveTasks = async (id?: string) => {
 };
 // Backlog rank is the Tasks' order among their workspace siblings.
 const reorder = async (id: string, placement: Placement) => {
-  if (disabled.value || props.workspace.role !== "user") return;
+  if (disabled.value || id === pendingArchiveTaskId.value || props.workspace.role !== "user") return;
   preparing.value = true;
   error.value = "";
   const place = async (objectId: string, beforeObjectId: string | null) => {
@@ -519,7 +527,7 @@ const drop = (column: string) => {
     >
   </form>
   <ActionState
-    v-if="!retainedArchive && (action.saved.value?.phase !== 'succeeded' || action.error.value)"
+    v-if="action.saved.value?.phase !== 'succeeded' || action.error.value"
     :action="action"
     @changed="recovered"
   /><Alert v-if="error" variant="destructive" class="mb-4"
@@ -564,6 +572,8 @@ const drop = (column: string) => {
         "
         :href="(id) => link({ id, panel: 'sheet' })"
         :disabled="disabled"
+        :pending-task-id="pendingArchiveTaskId"
+        :archive-disabled="archivePending || archive.busy.value || action.busy.value"
         :swimlane="swimlane"
         @transition="transition"
         @drag="dragged = $event"
@@ -571,11 +581,14 @@ const drop = (column: string) => {
         @archive-all="archiveTasks()"
       >
         <template v-if="column.id === 'done'" #feedback>
-          <Alert v-if="archiveFeedback && !archive.busy.value && !action.busy.value" variant="destructive">
+          <Alert v-if="archiveFeedback && !archive.busy.value && !retainedBoardAction.busy.value" variant="destructive">
             <AlertDescription>
               {{ archiveFeedback }}
+              <Button v-if="pendingArchiveTaskId" variant="link" size="sm" as-child>
+                <a :href="link({ id: pendingArchiveTaskId, panel: 'sheet' })">{{ tr("Aufgabe öffnen", "Open task") }}</a>
+              </Button>
               <Button v-if="archivePending" variant="outline" size="sm"
-                :disabled="!available || preparing || archive.busy.value || action.busy.value || !action.identityMatches.value"
+                :disabled="!available || preparing || archive.busy.value || retainedBoardAction.busy.value || !retainedBoardAction.identityMatches.value"
                 @click="retryArchive">{{ tr("Archivierung erneut versuchen", "Retry archive") }}</Button>
             </AlertDescription>
           </Alert>
@@ -600,6 +613,7 @@ const drop = (column: string) => {
       :count="counts.error.value ? null : (counts.value.value?.backlog ?? null)"
       :href="(id) => link({ id, panel: 'sheet' })"
       :disabled="disabled"
+      :pending-task-id="pendingArchiveTaskId"
       :swimlane="backlogSwimlane"
       @transition="transition"
       @reorder="reorder"

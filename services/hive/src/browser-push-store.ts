@@ -205,7 +205,7 @@ export class BrowserPushStore {
       "not_found",
       "Enable notifications first.",
     );
-    this.enqueue(
+    const queued = this.enqueue(
       {
         title: "Ivy",
         body: "Browser notifications are working.",
@@ -214,6 +214,7 @@ export class BrowserPushStore {
       },
       request.endpoint,
     );
+    requireThat(queued, "capacity_exceeded", "Browser push capacity is occupied by pending deliveries.");
     return { queued: true };
   }
   private root() {
@@ -227,13 +228,16 @@ export class BrowserPushStore {
       this.store.get("SELECT MAX(sequence) AS n FROM events")?.["n"] ?? 0,
     );
   }
-  private enqueue(notice: BrowserNotice, endpoint?: string, sequence?: number) {
+  private enqueue(notice: BrowserNotice, endpoint?: string, sequence?: number): boolean {
     const rows = this.store.all(
       `SELECT p.endpoint FROM browser_push p JOIN browser_sessions s ON s.digest=p.session_digest
       JOIN credentials c ON c.digest=s.credential_digest WHERE c.revoked=0${endpoint ? " AND p.endpoint=?" : ""}${sequence === undefined ? "" : " AND p.created_sequence<?"}`,
       ...(endpoint ? [endpoint] : []),
       ...(sequence === undefined ? [] : [sequence]),
     );
+    const additions = rows.filter(row => !this.store.get("SELECT 1 FROM browser_push_outbox WHERE endpoint=? AND tag=?", row["endpoint"]!, notice.tag));
+    const queued = Number(this.store.get("SELECT COUNT(*) AS count FROM browser_push_outbox")!["count"]);
+    if (queued + additions.length > 2048) return false;
     for (const row of rows)
       this.store.run(
         "INSERT OR IGNORE INTO browser_push_outbox(endpoint,tag,notice_json) VALUES (?,?,?)",
@@ -245,25 +249,23 @@ export class BrowserPushStore {
           body: notice.body.slice(0, 300),
         }),
       );
-    this.store.run(
-      "DELETE FROM browser_push_outbox WHERE id IN (SELECT id FROM browser_push_outbox ORDER BY id DESC LIMIT -1 OFFSET 2048)",
-    );
+    return true;
   }
   private eventNotice(
     payload: unknown,
     source: string,
     sequence: number,
-  ): void {
+  ): boolean {
     try {
       this.store.validators.validate(browserNoticeSchema, payload);
     } catch {
-      return;
+      return true;
     } // A different/future event shape cannot block the delivery queue.
     const notice = payload as ServiceNotice,
       tag = digest(source + "\0" + notice.tag);
     if (this.store.get("SELECT 1 FROM browser_push_receipts WHERE tag=?", tag))
-      return;
-    this.enqueue(
+      return true;
+    const queued = this.enqueue(
       {
         title: notice.title,
         body: notice.body,
@@ -273,11 +275,13 @@ export class BrowserPushStore {
       undefined,
       sequence,
     );
+    if (!queued) return false;
     this.store.run(
       "INSERT INTO browser_push_receipts VALUES (?,?)",
       tag,
       Date.now(),
     );
+    return true;
   }
   next(): PushBatch {
     let hasMore = false;
@@ -290,26 +294,23 @@ export class BrowserPushStore {
         "SELECT sequence,topic,topic_version,source,payload FROM events WHERE sequence>? ORDER BY sequence LIMIT 100",
         cursor,
       );
-      if (this.store.get("SELECT 1 FROM browser_push LIMIT 1"))
+      let through = cursor, blocked = false;
+      const subscribed = this.store.get("SELECT 1 FROM browser_push LIMIT 1");
         for (const row of rows) {
-          if (
-            !String(row["topic"]).endsWith(".browser-notification") ||
-            row["topic_version"] !== "1.0.0" ||
-            !String(row["source"]).startsWith("service:")
-          )
-            continue;
-          this.eventNotice(
+          if (subscribed && String(row["topic"]).endsWith(".browser-notification") &&
+            row["topic_version"] === "1.0.0" && String(row["source"]).startsWith("service:") && !this.eventNotice(
             JSON.parse(String(row["payload"])),
             String(row["source"]),
             Number(row["sequence"]),
-          );
+          )) { blocked = true; break; }
+          through = Number(row["sequence"]);
         }
       if (rows.length)
         this.store.setMetadata(
           "browser_push_cursor",
-          String(rows.at(-1)!["sequence"]),
+          String(through),
         );
-      hasMore = rows.length === 100;
+      hasMore = !blocked && rows.length === 100;
       this.store.run(
         "DELETE FROM browser_push_receipts WHERE created_at<?",
         Date.now() - 7 * 86400_000,

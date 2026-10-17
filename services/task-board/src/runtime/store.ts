@@ -1,5 +1,6 @@
 import {
   canonical,
+  hasUnresolvedOutcome,
   digest,
   hashJson,
 } from "../../../../packages/sdk/src/node.js";
@@ -47,8 +48,6 @@ const workspaceKey = (path: string) => /^[a-z]:[\\/]|^\\\\/i.test(path)
 
 /** Generic persistence of TaskBoard's exact contracts. It does not authorize workflow transitions. */
 export class TaskBoardStore {
-  private static readonly replayWindowMs = 24 * 60 * 60 * 1000;
-  static readonly nativeEvidenceWindowMs = 7 * 24 * 60 * 60 * 1000;
   private readonly reads = new AsyncLocalStorage<
     Map<string, Document<ContractKey>>
   >();
@@ -61,6 +60,7 @@ export class TaskBoardStore {
     readonly client: RpcClient,
     readonly rootObjectId: string | null,
     dataRoot?: string,
+    readonly historyLimits = { count: 10_000, bytes: 256 * 1024 * 1024 },
   ) {
     this.dataRoot = dataRoot ?? null;
     this.local = new DatabaseSync(
@@ -78,6 +78,10 @@ export class TaskBoardStore {
       CREATE TABLE IF NOT EXISTS operation_gates(operation_id TEXT NOT NULL,gate_name TEXT NOT NULL,PRIMARY KEY(operation_id,gate_name));
       CREATE TABLE IF NOT EXISTS workspace_reservations(host_id TEXT NOT NULL,canonical_cwd TEXT NOT NULL,task_id TEXT NOT NULL,operation_id TEXT NOT NULL,PRIMARY KEY(host_id,canonical_cwd),UNIQUE(task_id));
       CREATE TABLE IF NOT EXISTS storage_usage(kind TEXT PRIMARY KEY,rows INTEGER NOT NULL,bytes INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS retired_operations(caller_id TEXT NOT NULL,operation_id TEXT NOT NULL,request_hash TEXT NOT NULL,name TEXT NOT NULL,PRIMARY KEY(caller_id,operation_id));
+      CREATE TRIGGER IF NOT EXISTS retired_operation_insert BEFORE INSERT ON documents
+        WHEN NEW.key='task-board/operation' AND EXISTS(SELECT 1 FROM retired_operations WHERE name=NEW.name)
+        BEGIN SELECT RAISE(ABORT,'operation_expired'); END;
       CREATE UNIQUE INDEX IF NOT EXISTS documents_identity ON documents(key,name,COALESCE(parent_id,''));
       CREATE UNIQUE INDEX IF NOT EXISTS blobs_identity ON blobs(key,name,COALESCE(parent_id,''));
       CREATE INDEX IF NOT EXISTS documents_parent ON documents(parent_id);
@@ -142,6 +146,7 @@ export class TaskBoardStore {
     }
   }
   private async retainedLocalRoot(rootId: string): Promise<boolean> {
+    if (this.local.prepare("SELECT 1 FROM active_gates WHERE operation_id=? LIMIT 1").get(rootId)) return true;
     const pending = this.local.prepare(`SELECT 1 FROM cleanup_dependencies c
       JOIN documents d ON d.id=c.operation_id
       JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision
@@ -169,6 +174,7 @@ export class TaskBoardStore {
     if (key !== "task-board/operation") return false;
     const operation = this.localDocument("task-board/operation", rootId, false).value;
     if (!["succeeded", "failed"].includes(operation.phase)) return true;
+    if (operation.error?.execution === "unknown") return true;
     if (operation.actor.source === "scheduler" && "taskId" in operation.request &&
         "expectedRevision" in operation.request &&
         await taskActive(operation.request.taskId, operation.request.expectedRevision)) return true;
@@ -184,15 +190,31 @@ export class TaskBoardStore {
     }
     return false;
   }
-  async collectLocal(now = Date.now()): Promise<void> {
+  retiredOperation(caller: string, operationId: string): string | null {
+    const row = this.local.prepare("SELECT request_hash FROM retired_operations WHERE caller_id=? AND operation_id=?").get(caller, operationId);
+    return row ? String(row["request_hash"]) : null;
+  }
+  async collectLocal(_now = Date.now(), reservedBytes = 0, reservedRows = 0, protectedId?: string, incoming?: unknown): Promise<void> {
+    const full = () => {
+      const usage = this.local.prepare("SELECT SUM(rows) AS rows,SUM(bytes) AS bytes FROM storage_usage").get()!;
+      return Number(usage["rows"]) + reservedRows > this.historyLimits.count || Number(usage["bytes"]) + reservedBytes > this.historyLimits.bytes;
+    };
+    if (!full()) return;
+    const incomingIds = new Set(protectedId ? [protectedId] : []);
+    const references = (value: unknown, found: Set<string>): void => {
+      if (typeof value === "string") found.add(value);
+      else if (Array.isArray(value)) for (const part of value) references(part, found);
+      else if (value && typeof value === "object") for (const part of Object.values(value)) references(part, found);
+    };
+    references(incoming, incomingIds);
     const due = this.local
-      .prepare("SELECT root_id FROM cleanup_roots WHERE delete_after<=? ORDER BY delete_after LIMIT 32")
-      .all(new Date(now).toISOString());
+      .prepare("SELECT root_id FROM cleanup_roots ORDER BY delete_after,rowid")
+      .all();
     for (const row of due) {
+      if (!full()) break;
       const rootId = String(row["root_id"]);
+      const before = this.local.prepare("SELECT current_revision,key,name FROM documents WHERE id=?").get(rootId);
       if (await this.retainedLocalRoot(rootId)) {
-        this.local.prepare("UPDATE cleanup_roots SET delete_after=? WHERE root_id=?")
-          .run(new Date(now + 60 * 60 * 1000).toISOString(), rootId);
         continue;
       }
       const ids = this.local.prepare(`WITH RECURSIVE subtree(id) AS (
@@ -200,6 +222,27 @@ export class TaskBoardStore {
       ) SELECT id FROM subtree`).all(rootId).map(value => String(value["id"]));
       this.local.exec("BEGIN IMMEDIATE");
       try {
+        const after = this.local.prepare("SELECT current_revision FROM documents WHERE id=?").get(rootId);
+        if (before?.["current_revision"] !== after?.["current_revision"] || ids.some(id => incomingIds.has(id)) ||
+            this.local.prepare("SELECT 1 FROM active_gates WHERE operation_id=? LIMIT 1").get(rootId)) {
+          this.local.exec("ROLLBACK"); continue;
+        }
+        const selected = new Set(ids);
+        const rows = this.local.prepare("SELECT d.id,d.key,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision").all();
+        const protectedReference = rows.some(row => {
+          const value = JSON.parse(String(row["value_json"]));
+          if (selected.has(String(row["id"])))
+            return hasUnresolvedOutcome(value) || row["key"] === "task-board/native-call" &&
+              (value.state !== "observed" || !["succeeded", "failed"].includes(value.ownerPhase));
+          const found = new Set<string>(); references(value, found);
+          return [...found].some(id => selected.has(id));
+        });
+        if (protectedReference) { this.local.exec("ROLLBACK"); continue; }
+        if (before?.["key"] === "task-board/operation") {
+          const operation = this.localDocument("task-board/operation", rootId, false).value;
+          this.local.prepare("INSERT OR IGNORE INTO retired_operations VALUES(?,?,?,?)")
+            .run(operation.callerPrincipalId, operation.operationId, operation.requestHash, before["name"]!);
+        }
         for (const id of ids) {
           this.local.prepare("DELETE FROM active_gates WHERE gate_id=?").run(id);
           this.local.prepare("DELETE FROM operation_gates WHERE operation_id=?").run(id);
@@ -224,12 +267,9 @@ export class TaskBoardStore {
   completeLocalWorkflow(
     rootId: string,
     completedAt = new Date().toISOString(),
-    retentionMs = TaskBoardStore.replayWindowMs,
     operationId?: string,
   ): void {
-    const deleteAfter = new Date(
-      Date.parse(completedAt) + retentionMs,
-    ).toISOString();
+    const deleteAfter = new Date(completedAt).toISOString();
     if (operationId) this.local.prepare("INSERT OR IGNORE INTO cleanup_dependencies VALUES(?,?)").run(rootId, operationId);
     this.local
       .prepare(
@@ -636,6 +676,8 @@ export class TaskBoardStore {
     ) {
       const encoded = canonical(value),
         now = new Date().toISOString();
+      await this.collectLocal(Date.now(), Buffer.byteLength(encoded), 1,
+        "create" in destination ? destination.create.parentId ?? undefined : destination.objectId, value);
       if ("create" in destination) {
         const existing = await this.named(
           key,

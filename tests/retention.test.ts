@@ -7,6 +7,7 @@ import type {
   RevisionReferences,
 } from "../packages/contracts/src/types.js";
 import { digest } from "../packages/contracts/src/canonical.js";
+import { mutationReceiptJournalBytes } from "../packages/contracts/src/limits.js";
 import {
   Events,
   maximumSubscriptionsPerNode,
@@ -434,7 +435,7 @@ test("legacy retention usage is fully initialized before new writes adjust it", 
   }
 });
 
-test("epoch replay window and global event prefix gap remain explicit after collection", () => {
+test("runtime epoch fencing and global event prefix gap remain explicit after collection", () => {
   const f = fixture();
   try {
     f.register(contract("test/page", policy("retain", { mode: "current" })));
@@ -448,15 +449,13 @@ test("epoch replay window and global event prefix gap remain explicit after coll
         }),
       code("mutation_expired"),
     );
-    assert.throws(
-      () =>
-        f.objects.archive(context, {
-          objectId: page.object.id,
-          archived: true,
-          mutationId: f.id(Date.now() - 24 * 60 * 60 * 1000),
-        }),
-      code("mutation_expired"),
-    );
+    const oldId = f.id(Date.now() - 2 * 86400000);
+    const oldResult = f.objects.archive(context, {
+      objectId: page.object.id, archived: true, mutationId: oldId,
+    });
+    assert.deepEqual(f.objects.archive(context, {
+      objectId: page.object.id, archived: true, mutationId: oldId,
+    }), oldResult, "issue time alone does not expire a retained ring entry");
     f.store.run(
       "INSERT INTO events(topic,topic_version,source,occurred_at,mutation_id,payload) VALUES (?,?,?,?,?,?)",
       "hive.object.changed",
@@ -527,12 +526,12 @@ test("collected mutation cutoff remains exclusive after a clock rollback", () =>
       archived: true,
       mutationId,
     });
-    f.store.cleanupMutationReceipts(issuedAt + 24 * 60 * 60 * 1000);
+    f.store.cleanupMutationReceipts(mutationReceiptJournalBytes);
     assert.equal(
       f.store.get("SELECT 1 FROM mutations WHERE mutation_id=?", mutationId),
       undefined,
     );
-    Date.now = () => issuedAt + 24 * 60 * 60 * 1000 - 1;
+    Date.now = () => issuedAt - 1;
     assert.throws(
       () =>
         f.objects.archive(context, {

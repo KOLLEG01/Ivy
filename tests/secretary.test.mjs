@@ -7,6 +7,22 @@ import { fixture, message, assessment, principal } from './secretary-fixture.mjs
 import { SecretaryNotices } from '../dist/services/secretary/src/notices.js';
 import { secretaryRegistry } from '../dist/services/secretary/src/schema.js';
 
+test('Secretary releases capture history only after its exact checkpoint and rejects evicted retries', { timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  const firstRequest = f.captureRequest(message()), first = await f.engine.action(principal, firstRequest);
+  await f.engine.action(principal, { action: 'checkpoint', operationId: f.operationId(), expectedScope: f.settings.identity.scope,
+    sourceId: 'personal-inbox', previousCursor: null, nextCursor: 'page-one', captures: [firstRequest.operationId] });
+  const pendingRequest = f.captureRequest(message());
+  await f.engine.action(principal, pendingRequest);
+  f.engine.store.limits.count = 9;
+  const next = await f.engine.action(principal, f.captureRequest(message()));
+  assert.equal(next.phase, 'succeeded');
+  assert.equal(await f.engine.find(principal, firstRequest.operationId), null);
+  assert.equal((await f.engine.find(principal, pendingRequest.operationId)).value.phase, 'succeeded');
+  await assert.rejects(f.engine.action(principal, firstRequest), { code: 'operation_expired' });
+  assert.deepEqual((await f.engine.item(first.effect)).pin, first.effect);
+});
+
 test('Secretary UI requirements match the service interface and published contracts', async () => {
   const ui = JSON.parse(await readFile('ui/secretary-ui/ui.json', 'utf8'));
   const registry = secretaryRegistry();
@@ -79,6 +95,7 @@ test('parallel Secretary actions create one message and one assessment while pre
   for (const result of decisions) if (result.status === 'rejected') assert.equal(result.reason.code, 'revision_conflict'); else if (result.value.phase === 'failed') assert.equal(result.value.errorCode, 'revision_conflict');
   const item = await f.engine.item(saved[0].effect.objectId); assert.equal(item.pin.revision, 2); assert.ok(item.value.decision); assert.equal(item.value.notice.state, 'queued');
   const winner = requests2.find(request => request.operationId === item.value.decision.operationId), original = await f.engine.action(principal, winner);
+  t.mock.method(f.engine, 'noticeTarget', async () => null);
   await new SecretaryNotices(f.engine).step(item.pin.objectId); assert.equal((await f.engine.item(item.pin.objectId)).value.notice.reason, 'channel_not_configured');
   assert.deepEqual(await f.engine.action(principal, winner), original, 'Later notice revisions do not change the original action outcome.');
 });

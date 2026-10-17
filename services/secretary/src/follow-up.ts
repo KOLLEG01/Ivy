@@ -137,7 +137,9 @@ export class SecretaryFollowUp {
     await this.authorize(callerPrincipalId);
     await engine.verifyOwner();
     const name = followUpName(callerPrincipalId, request);
-    const saved = engine.store.technicalNamed<FollowUpRecord>('secretary/follow-up', name) ?? engine.store.technicalCreate<FollowUpRecord>('secretary/follow-up', name, {
+    const prior = engine.store.technicalNamed<FollowUpRecord>('secretary/follow-up', name);
+    if (!prior) await engine.validateOperationId(request.operationId);
+    const saved = prior ?? engine.store.technicalCreate<FollowUpRecord>('secretary/follow-up', name, {
       request, callerPrincipalId, threadId: null, turnId: null, phase: 'prepared', calls: null, answer: null, errorCode: null, expiresAt: engine.now().getTime() + retentionMs });
     need(saved.value.callerPrincipalId === callerPrincipalId && same(saved.value.request, request), 'secretary_follow_up_conflict', 'The retained follow-up operation has different original arguments.');
     return this.result(saved.value);
@@ -188,6 +190,7 @@ export class SecretaryFollowUp {
           need(answers.length === 1, 'secretary_follow_up_answer_missing', 'The Secretary follow-up did not produce one final answer.');
           await engine.verifyOwner();
           saved = engine.store.technicalAmend('secretary/follow-up', saved, { ...saved.value, phase: 'succeeded', answer: answers[0]!, errorCode: null });
+          engine.store.completeTechnicalWorkflow(saved.pin.objectId);
           return;
         }
         need(row['status'] === 'inProgress', 'secretary_follow_up_turn_failed', 'The original Secretary follow-up turn failed.');

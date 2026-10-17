@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "wiki-ui",
   "kind": "app",
-  "version": "0.2.43",
+  "version": "0.2.44",
   "description": "Static Ivy workspace UI",
   "connectsToHive": false,
   "requirements": {

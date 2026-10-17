@@ -65,7 +65,8 @@ and retention policy; recreating the same ID reuses that result object. Active,
 disabled and deleted tasks use the same retention cleanup.
 
 Execution status comes from the latest run, which is retained until a newer run
-replaces it. Older execution receipts expire after seven days. Pending results
+replaces it. Known completed execution history uses a bounded FIFO ring without a minimum
+retention duration. Evicted operation IDs retain compact replay guards. Pending results
 and events resume publication after restart without running the script again;
 publication completes the run independently of later local executions.
 Invalid content or a conflicting result target ends publication with an error;

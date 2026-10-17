@@ -47,7 +47,7 @@ export {
   restrictAssessmentParameters,
   assertAssessmentPolicy,
 } from "./assessment-policy.js";
-export { ReceiptArchive } from "./receipt-archive.js";
+export { ReceiptArchive, hasUnresolvedOutcome } from "./receipt-archive.js";
 export { connectionOwner } from "./connection-owner.js";
 export type {
   NativeOperationJournal,

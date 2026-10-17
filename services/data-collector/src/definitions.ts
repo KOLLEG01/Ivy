@@ -46,7 +46,6 @@ const content = (value: Document): unknown => {
 export class CollectorDefinitions {
   private tail: Promise<unknown> = Promise.resolve();
   private catalogId = "";
-  private lastObserved = new Map<string, string>();
   private errors = new Map<string, string>();
   private observations: Document[] | null = null;
   constructor(
@@ -750,6 +749,9 @@ export class CollectorDefinitions {
       row?.definition?.jobId === desired.jobId &&
       row.definition.assignmentRevision === document.revision.revision;
     const previous = await this.observation(desired.jobId, this.serviceNodeId);
+    const previousValue = previous
+      ? observationDocument.parse(content(previous))
+      : null;
     const value = {
       schemaVersion: 1,
       jobId: desired.jobId,
@@ -758,10 +760,7 @@ export class CollectorDefinitions {
       definitionRevision:
         row?.definition?.revision ?? desired.definitionRevision,
       accepted,
-      everAccepted:
-        accepted ||
-        (!!previous &&
-          observationDocument.parse(content(previous)).everAccepted),
+      everAccepted: accepted || (previousValue?.everAccepted ?? false),
       quiesced:
         !!row &&
         !row.task.enabled &&
@@ -771,13 +770,12 @@ export class CollectorDefinitions {
       error: this.errors.get(desired.jobId) ?? null,
       observedAt: new Date().toISOString(),
     };
-    const identity = canonical(json({ ...value, observedAt: null }));
+    // Service heartbeats report liveness; persist adoption observations only
+    // when their state changes, including after a service restart.
     if (
-      previous &&
-      this.lastObserved.get(desired.jobId) === identity &&
-      Date.now() -
-        Date.parse(observationDocument.parse(content(previous)).observedAt) <
-        30000
+      previousValue &&
+      canonical(json({ ...previousValue, observedAt: null })) ===
+        canonical(json({ ...value, observedAt: null }))
     )
       return;
     const saved = await this.write(
@@ -792,7 +790,6 @@ export class CollectorDefinitions {
         ...this.observations.filter((d) => d.object.id !== saved.object.id),
         saved,
       ];
-    this.lastObserved.set(desired.jobId, identity);
   }
   async sync() {
     return this.serial(async () => {

@@ -76,6 +76,29 @@ function publish(store: HiveStore, value: BrowserNotice | null) {
     );
 }
 
+test('a full push outbox drains pending deliveries before advancing its event cursor', t => {
+  const store = new HiveStore(':memory:'); t.after(() => store.close());
+  const push = initialize(store), target = subscription();
+  push.request(context, { action: 'subscribe', subscription: target });
+  const value = { title: 'Ivy', body: 'Pending', tag: 'old', url: base.href };
+  store.transaction(() => {
+    for (let i = 0; i < 2048; i++) store.run('INSERT INTO browser_push_outbox(endpoint,tag,notice_json) VALUES(?,?,?)',
+      target.endpoint, 'pending-' + i, JSON.stringify(value));
+  });
+  const before = store.metadata('browser_push_cursor');
+  publish(store, notice());
+  const blocked = push.next();
+  assert.equal(blocked.deliveries.length, 4);
+  assert.equal(blocked.hasMore, false);
+  assert.equal(store.metadata('browser_push_cursor'), before);
+  assert.equal(Number(store.get('SELECT COUNT(*) AS count FROM browser_push_outbox')!['count']), 2048);
+  push.complete(blocked.deliveries[0]!.id, 201);
+  push.next();
+  assert.ok(Number(store.metadata('browser_push_cursor')) > Number(before));
+  assert.equal(Number(store.get('SELECT COUNT(*) AS count FROM browser_push_outbox')!['count']), 2048);
+  assert.ok(store.get("SELECT 1 FROM browser_push_outbox WHERE tag='pending-1'"));
+});
+
 test("push subscriptions reject non-browser endpoints and malformed encryption keys", () => {
   const valid = subscription();
   for (const endpoint of [

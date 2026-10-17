@@ -272,10 +272,24 @@ test('Wiki explains inherited archives and uploads past archived filename collis
   await expect(f.page.getByRole('region', { name: 'Edit conflict', exact: true })).toHaveCount(0);
   await expect(f.page.getByLabel('Markdown', { exact: true })).toHaveText('A stale edit after archival.');
   assert.equal((await f.client.request('objects.stat', { objectId: id })).currentRevision, 2);
+  await f.client.request('objects.archive', { mutationId: await newOperationId(f.client), objectId: child.object.id, archived: true });
+  await f.page.route('**/api/v1/rpc', async route => {
+    const request = route.request().postDataJSON();
+    if (request.method === 'objects.archive' && request.params.objectId === child.object.id && !request.params.archived) {
+      await route.fetch(); return route.abort();
+    }
+    return route.fallback();
+  });
   await f.page.goto(f.base + '/ui/wiki-ui/#/page?id=' + child.object.id);
+  await f.page.getByRole('button', { name: 'Page options', exact: true }).click();
+  await f.page.getByRole('menuitem', { name: 'Restore page', exact: true }).click();
+  await expect.poll(async () => (await f.client.request('objects.stat', { objectId: child.object.id })).archivedAt).toBe(null);
+  // A confirmed direct restore is finished even when its parent still hides it.
   await expect(f.page.getByText('This page is inside an archived page. Restore its parent first.', { exact: true })).toBeVisible();
   await f.page.getByRole('button', { name: 'Page options', exact: true }).click();
   await expect(f.page.getByRole('menuitem', { name: 'Restore page', exact: true })).toHaveCount(0);
+  await expect(f.page.getByRole('menuitem', { name: 'Retry original archive', exact: true })).toHaveCount(0);
+  assert.equal(await f.page.evaluate(() => Object.keys(sessionStorage).some(key => key.startsWith('ivy:wiki:archive:'))), false);
   assert.deepEqual(f.pageErrors, []);
 });
 

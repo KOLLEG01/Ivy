@@ -68,7 +68,7 @@ const location = {
 };
 const mutationId = described(
   id,
-  "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead and expires after 24 hours. A Hive restart changes the epoch. Retain this exact ID and inspect the original outcome before retrying an uncertain action.",
+  "Stable mutation identity: <runtimeEpoch>:<issuedAtUnixMs>:<nonce>. Read the current runtimeEpoch from hive_status; use current Unix milliseconds and a unique 1-128 character nonce without a colon. The timestamp may be at most 60 seconds ahead. Receipts occupy a bounded FIFO ring with no guaranteed retention duration. Retained identical requests replay their original result; absent identities at or before the eviction boundary fail with mutation_expired. Retain this exact ID and inspect the original outcome before retrying an uncertain action.",
 );
 const operationId = described(
   id,

@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { canonical, deriveOperationId, hashJson, IvyError, parseOperationId, scopedOperationId } from '../../../packages/sdk/src/node.js';
+import { hasUnresolvedOutcome, canonical, deriveOperationId, hashJson, IvyError, parseOperationId, scopedOperationId } from '../../../packages/sdk/src/node.js';
 import type { Operation, RpcClient, Wire } from '../../../packages/sdk/src/node.js';
 import { contractVersion, need, readableVersions, same, validate } from './schema.js';
 import type { Pin, Values, Destination } from './schema.js';
@@ -46,8 +46,8 @@ export const mutation = (...parts: unknown[]) => {
 /** One service-owned journal for source cursors and bounded operation recovery. */
 export class SecretaryStore {
   readonly db: DatabaseSync;
-  private lastCleanupAt = 0;
-  constructor(readonly client: RpcClient, readonly root: string, dataRoot?: string) {
+  constructor(readonly client: RpcClient, readonly root: string, dataRoot?: string,
+    readonly limits = { count: 10_000, bytes: 256 * 1024 * 1024 }) {
     this.db = new DatabaseSync(dataRoot ? join(dataRoot, 'secretary.sqlite') : ':memory:');
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,key TEXT NOT NULL,name TEXT NOT NULL,current_revision INTEGER NOT NULL,created_at INTEGER NOT NULL,completed_at INTEGER,value_json TEXT NOT NULL,UNIQUE(key,name));
@@ -57,7 +57,19 @@ export class SecretaryStore {
       CREATE TABLE IF NOT EXISTS technical_revisions(id TEXT NOT NULL,revision INTEGER NOT NULL,value_json TEXT NOT NULL,PRIMARY KEY(id,revision));
       CREATE TABLE IF NOT EXISTS technical_blobs(id TEXT PRIMARY KEY,key TEXT NOT NULL,name TEXT NOT NULL,bytes BLOB NOT NULL,UNIQUE(key,name));
       CREATE TABLE IF NOT EXISTS technical_cleanup(root_id TEXT PRIMARY KEY,delete_after INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS journal_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS journal_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS capture_acknowledgements(capture_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS retired_operations(operation_id TEXT PRIMARY KEY,issued_at INTEGER NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS retired_operation_insert BEFORE INSERT ON documents
+        WHEN NEW.key='secretary/operation' AND EXISTS(SELECT 1 FROM retired_operations WHERE operation_id=json_extract(NEW.value_json,'$.operationId'))
+        BEGIN SELECT RAISE(ABORT,'operation_expired'); END;
+      CREATE TRIGGER IF NOT EXISTS retired_technical_operation_insert BEFORE INSERT ON technical_documents
+        WHEN EXISTS(SELECT 1 FROM retired_operations WHERE operation_id=COALESCE(json_extract(NEW.value_json,'$.operationId'),json_extract(NEW.value_json,'$.request.operationId')))
+        BEGIN SELECT RAISE(ABORT,'operation_expired'); END;
+      INSERT OR IGNORE INTO capture_acknowledgements SELECT json_extract(c.value,'$.objectId')
+        FROM documents d,json_each(d.value_json,'$.checkpointCaptures') c
+        WHERE d.key='secretary/operation' AND json_extract(d.value_json,'$.action')='checkpoint'
+          AND json_extract(d.value_json,'$.phase')='succeeded';`);
   }
   private localRow(key: keyof Values, selected: Pin | string): Document<any> {
     const id = typeof selected === 'string' ? selected : selected.objectId;
@@ -67,81 +79,109 @@ export class SecretaryStore {
     const value = JSON.parse(String(row['value_json'])); validate(definitions[key], value);
     return { pin: { objectId: id, revision }, value };
   }
-  private capacity(extra: number): void {
-    const now = Date.now();
-    if (now - this.lastCleanupAt >= 60_000) this.cleanup(now);
-    const query = () => this.db.prepare('SELECT (SELECT COUNT(*) FROM revisions)+(SELECT COUNT(*) FROM technical_revisions)+(SELECT COUNT(*) FROM technical_blobs) AS count,COALESCE((SELECT SUM(length(value_json)) FROM revisions),0)+COALESCE((SELECT SUM(length(value_json)) FROM technical_revisions),0)+COALESCE((SELECT SUM(length(bytes)) FROM technical_blobs),0) AS bytes').get()!;
-    let totals = query();
-    if (Number(totals['count']) >= 10_000 || Number(totals['bytes']) + extra > 256 * 1024 * 1024) { this.cleanup(now); totals = query(); }
-    need(Number(totals['count']) < 10_000 && Number(totals['bytes']) + extra <= 256 * 1024 * 1024, 'capacity_exceeded', 'The Secretary workflow journal is full.');
+  private usage(): { count: number; bytes: number } {
+    const row = this.db.prepare(`SELECT (SELECT COUNT(*) FROM revisions)+(SELECT COUNT(*) FROM technical_revisions)+(SELECT COUNT(*) FROM technical_blobs)+
+      (SELECT COUNT(*) FROM documents WHERE key='secretary/operation' AND completed_at IS NULL) AS count,
+      COALESCE((SELECT SUM(length(CAST(value_json AS BLOB))) FROM revisions),0)+COALESCE((SELECT SUM(length(CAST(value_json AS BLOB))) FROM technical_revisions),0)+COALESCE((SELECT SUM(length(bytes)) FROM technical_blobs),0)+
+      COALESCE((SELECT SUM(length(CAST(value_json AS BLOB))+512) FROM documents WHERE key='secretary/operation' AND completed_at IS NULL),0) AS bytes`).get()!;
+    return { count: Number(row['count']), bytes: Number(row['bytes']) };
   }
-  cleanup(now = Date.now()): void {
-    const cutoff = now - 24 * 60 * 60 * 1000;
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const ids = this.db.prepare("SELECT id,value_json,completed_at FROM documents WHERE key='secretary/operation' AND completed_at<=?").all(cutoff)
-        .filter((row) => {
-          const completedAt = Number(row['completed_at']);
-          try {
-            const value = JSON.parse(String(row['value_json'])) as Values['secretary/operation'];
-            return (
-              now >= Math.max(parseOperationId(value.operationId).issuedAtUnixMs + 24 * 60 * 60 * 1000, completedAt + 24 * 60 * 60 * 1000)
-            );
-          } catch { return completedAt <= cutoff; }
-        })
-        .map(row => String(row['id']));
-      for (const id of ids) { this.db.prepare('DELETE FROM revisions WHERE id=?').run(id); this.db.prepare('DELETE FROM documents WHERE id=?').run(id); }
-      const technical = this.db.prepare('SELECT root_id FROM technical_cleanup WHERE delete_after<=?').all(now).map(row => String(row['root_id']));
-      if (technical.length) {
-        const documents = this.db.prepare("SELECT id,key,value_json FROM technical_documents WHERE key<>'secretary/triage-thread'").all()
-          .map(row => ({ id: String(row['id']), key: String(row['key']), value: JSON.parse(String(row['value_json'])) as unknown }));
-        const available = new Set([...documents.map(row => row.id), ...this.db.prepare('SELECT id FROM technical_blobs').all().map(row => String(row['id']))]);
-        const references = (value: unknown, found: Set<string>): void => {
-          if (typeof value === 'string') { if (available.has(value)) found.add(value); return; }
-          if (Array.isArray(value)) { for (const part of value) references(part, found); return; }
-          if (value && typeof value === 'object') for (const part of Object.values(value)) references(part, found);
-        };
-        for (const root of technical) {
-          const selected = new Set([root]);
-          for (let changed = true; changed;) {
-            changed = false;
-            for (const document of documents) {
-              const found = new Set<string>(); references(document.value, found);
-              if (selected.has(document.id) || [...found].some(id => selected.has(id))) {
-                if (!selected.has(document.id)) { selected.add(document.id); changed = true; }
-                for (const id of found) if (!selected.has(id)) { selected.add(id); changed = true; }
-              }
+  private capacity(extra: number, protectedId?: string, incoming?: unknown, extraCount = 1): void {
+    let usage = this.usage();
+    while (usage.count + extraCount > this.limits.count || usage.bytes + extra > this.limits.bytes) {
+      const before = usage;
+      this.cleanup(Date.now(), extra, extraCount, protectedId, incoming);
+      usage = this.usage();
+      if (usage.count >= before.count && usage.bytes >= before.bytes) break;
+    }
+    need(usage.count + extraCount <= this.limits.count && usage.bytes + extra <= this.limits.bytes,
+      'capacity_exceeded', 'Secretary journal capacity is occupied by live or unresolved work.');
+  }
+  private fence(value: unknown): void {
+    const id = operationIdentity(value);
+    if (!id) return;
+    const boundary = Math.max(this.expiredBefore(), parseOperationId(id).issuedAtUnixMs);
+    this.db.prepare('INSERT OR IGNORE INTO retired_operations VALUES(?,?)').run(id, parseOperationId(id).issuedAtUnixMs);
+    this.db.prepare("INSERT INTO journal_state(key,value) VALUES('expiredBefore',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(boundary));
+    this.db.prepare('DELETE FROM retired_operations WHERE issued_at<?').run(boundary);
+  }
+  cleanup(_now = Date.now(), extraBytes = 0, extraCount = 0, protectedId?: string, incoming?: unknown): void {
+    const work = () => {
+      const needsRoom = () => { const usage = this.usage(); return usage.count + extraCount > this.limits.count || usage.bytes + extraBytes > this.limits.bytes; };
+      if (!needsRoom()) return;
+      this.db.prepare(`INSERT OR IGNORE INTO technical_cleanup SELECT id,0 FROM technical_documents
+        WHERE key IN ('secretary/public-operation','secretary/follow-up') AND json_extract(value_json,'$.phase')='succeeded'`).run();
+      const operations = this.db.prepare("SELECT id,value_json,completed_at FROM documents WHERE key='secretary/operation' AND completed_at IS NOT NULL ORDER BY completed_at,rowid").all();
+      const documents = this.db.prepare('SELECT id,key,value_json FROM technical_documents').all()
+        .map(row => ({ id: String(row['id']), key: String(row['key']), value: JSON.parse(String(row['value_json'])) as Record<string, unknown> }));
+      const available = new Set([...operations.map(row => String(row['id'])), ...documents.map(row => row.id),
+        ...this.db.prepare('SELECT id FROM technical_blobs').all().map(row => String(row['id']))]);
+      const references = (value: unknown, found = new Set<string>()): Set<string> => {
+        if (typeof value === 'string' && available.has(value)) found.add(value);
+        else if (Array.isArray(value)) for (const part of value) references(part, found);
+        else if (value && typeof value === 'object') for (const part of Object.values(value)) references(part, found);
+        return found;
+      };
+      const protectedOperations = new Set<string>(protectedId ? [protectedId] : []);
+      for (const id of references(incoming)) protectedOperations.add(id);
+      for (const document of documents) for (const id of references(document.value)) protectedOperations.add(id);
+      for (const row of this.db.prepare("SELECT value_json FROM documents WHERE key='secretary/operation' AND completed_at IS NULL").all())
+        for (const id of references(JSON.parse(String(row['value_json'])))) protectedOperations.add(id);
+      const roots = this.db.prepare('SELECT root_id,delete_after FROM technical_cleanup ORDER BY delete_after,rowid').all();
+      const candidates = [...operations.map(row => ({ kind: 'operation', id: String(row['id']), at: Number(row['completed_at']), row })),
+        ...roots.map(row => ({ kind: 'technical', id: String(row['root_id']), at: Number(row['delete_after']), row }))].sort((a, b) => a.at - b.at);
+      for (const candidate of candidates) {
+        if (candidate.id === protectedId) continue;
+        if (candidate.kind === 'operation') {
+          const value = JSON.parse(String(candidate.row['value_json'])) as Values['secretary/operation'];
+          if (!['succeeded', 'failed'].includes(value.phase) || protectedOperations.has(candidate.id) || hasUnresolvedOutcome(value)) continue;
+          if (value.action === 'capture' && value.phase === 'succeeded' &&
+            !this.db.prepare('SELECT 1 FROM capture_acknowledgements WHERE capture_id=?').get(candidate.id)) continue;
+          if (!operationIdentity(value.operationId)) continue;
+          this.fence(value.operationId);
+          this.db.prepare('DELETE FROM revisions WHERE id=?').run(candidate.id);
+          this.db.prepare('DELETE FROM documents WHERE id=?').run(candidate.id);
+          this.db.prepare('DELETE FROM capture_acknowledgements WHERE capture_id=?').run(candidate.id);
+          if (!needsRoom()) break;
+          continue;
+        }
+        const selected = new Set([candidate.id]);
+        for (let changed = true; changed;) {
+          changed = false;
+          for (const document of documents) {
+            if (document.key === 'secretary/triage-thread') continue;
+            const found = references(document.value);
+            if (selected.has(document.id) || [...found].some(id => selected.has(id))) {
+              for (const id of [document.id, ...found]) if (!selected.has(id)) { selected.add(id); changed = true; }
             }
           }
-          for (const id of selected) { this.db.prepare('DELETE FROM technical_blobs WHERE id=?').run(id); this.db.prepare('DELETE FROM technical_revisions WHERE id=?').run(id); this.db.prepare("DELETE FROM technical_documents WHERE id=? AND key<>'secretary/triage-thread'").run(id); }
-          this.db.prepare('DELETE FROM technical_cleanup WHERE root_id=?').run(root);
         }
-      }
-      for (const key of ['secretary/follow-up-context', 'secretary/follow-up', 'secretary/public-operation', 'secretary/assignment-handoff', 'secretary/assignment-voice', 'secretary/notice-retry', 'secretary/execution-retry', 'secretary/browser-notice']) {
-        const expired = this.db.prepare('SELECT id,value_json FROM technical_documents WHERE key=?').all(key)
-          .filter((row) => {
-            try {
-              const expiresAt = (JSON.parse(String(row['value_json'])) as { expiresAt?: unknown }).expiresAt;
-              return (
-                typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt <= now
-              );
-            } catch { return false; }
-          })
-          .map(row => String(row['id']));
-        for (const id of expired) {
+        const members = documents.filter(document => selected.has(document.id));
+        if (members.some(document => document.key === 'secretary/follow-up-context' &&
+          (document.value['threadId'] === null || documents.some(other => other.key === 'secretary/follow-up' &&
+            ['prepared', 'running', 'outcome_unknown'].includes(String(other.value['phase'])) &&
+            (other.value['request'] as { itemId?: string } | undefined)?.itemId === document.value['itemId'])))) continue;
+        if ([...references(incoming), protectedId ?? ''].some(id => selected.has(id)) || members.some(document => hasUnresolvedOutcome(document.value) ||
+          ['accepted', 'dispatched', 'prepared', 'running', 'pending', 'archiving'].includes(String(document.value['phase'])))) continue;
+        if (documents.some(document => !selected.has(document.id) && [...references(document.value)].some(id => selected.has(id)))) continue;
+        if (this.db.prepare('SELECT id,value_json FROM documents').all().some(row =>
+          !selected.has(String(row['id'])) && [...references(JSON.parse(String(row['value_json'])))].some(id => selected.has(id)))) continue;
+        for (const document of members) this.fence(document.value['operationId'] ?? (document.value['request'] as Record<string, unknown> | undefined)?.['operationId']);
+        for (const id of selected) {
+          this.db.prepare('DELETE FROM technical_blobs WHERE id=?').run(id);
           this.db.prepare('DELETE FROM technical_revisions WHERE id=?').run(id);
-          this.db.prepare('DELETE FROM technical_documents WHERE id=? AND key=?').run(id, key);
+          this.db.prepare("DELETE FROM technical_documents WHERE id=? AND key<>'secretary/triage-thread'").run(id);
+          this.db.prepare('DELETE FROM technical_cleanup WHERE root_id=?').run(id);
         }
+        if (!needsRoom()) break;
       }
-      const previous = Number(this.db.prepare("SELECT value FROM journal_state WHERE key='expiredBefore'").get()?.['value'] ?? 0);
-      this.db.prepare("INSERT INTO journal_state(key,value) VALUES('expiredBefore',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(Math.max(previous, cutoff)));
-      this.db.exec('COMMIT');
-      this.lastCleanupAt = now;
-    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    };
+    if (this.db.isTransaction) work();
+    else { this.db.exec('BEGIN IMMEDIATE'); try { work(); this.db.exec('COMMIT'); } catch (error) { this.db.exec('ROLLBACK'); throw error; } }
   }
   expiredBefore(): number { return Number(this.db.prepare("SELECT value FROM journal_state WHERE key='expiredBefore'").get()?.['value'] ?? 0); }
   completeTechnicalWorkflow(rootId: string, now = Date.now()): void {
-    this.db.prepare('INSERT INTO technical_cleanup VALUES(?,?) ON CONFLICT(root_id) DO NOTHING').run(rootId, now + 24 * 60 * 60 * 1000);
+    this.db.prepare('INSERT INTO technical_cleanup VALUES(?,?) ON CONFLICT(root_id) DO NOTHING').run(rootId, now);
   }
   decode<K extends keyof Values>(key: K, read: Operation.ObjectRead): Document<K> {
     need(!localKeys.has(key) && read.object.parentId === this.root && !read.object.effectivelyArchived && read.object.contractKey === key && readableVersions(key).includes(read.revision.contractVersion) && read.revision.mediaType === 'application/json' && read.content.encoding === 'json', 'secretary_scope_conflict', 'The Secretary record must remain in its original active root and exact contract.');
@@ -164,20 +204,37 @@ export class SecretaryStore {
   async write<K extends keyof Values>(key: K, value: Values[K], destination: Destination, id: string): Promise<Pin> {
     validate(definitions[key], value); const encoded = canonical(value);
     if (localKeys.has(key)) {
-      this.capacity(Buffer.byteLength(encoded));
       if ('createName' in destination) {
         const objectId = randomUUID();
         this.db.exec('BEGIN IMMEDIATE'); try {
+          const operation = key === 'secretary/operation' ? value as Values['secretary/operation'] : null;
+          const pending = operation?.phase === 'accepted', capture = pending && operation.action === 'capture';
+          // Reserve the terminal receipt and leave room for the checkpoint that
+          // acknowledges captures, even when ordinary admission is full.
+          this.capacity(Buffer.byteLength(encoded) * (pending ? 2 : 1) + (pending ? 512 : 0) + (capture ? 65_536 : 0),
+            undefined, value, (pending ? 2 : 1) + (capture ? 2 : 0));
           const completed = key === 'secretary/operation' && (value as Values['secretary/operation']).phase !== 'accepted' ? Date.now() : null;
           this.db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run(objectId, key, destination.createName, 1, Date.now(), completed, encoded);
           this.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run(objectId, 1, encoded); this.db.exec('COMMIT'); return { objectId, revision: 1 };
         } catch (error) { this.db.exec('ROLLBACK'); throw error; }
       }
       this.db.exec('BEGIN IMMEDIATE'); try {
+        const prior = this.db.prepare('SELECT value_json,completed_at FROM documents WHERE id=?').get(destination.object.objectId);
+        const released = key === 'secretary/operation' && prior?.['completed_at'] === null && (value as Values['secretary/operation']).phase !== 'accepted';
+        if (key === 'secretary/source') {
+          const usage = this.db.prepare('SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(value_json AS BLOB))),0) AS bytes FROM revisions WHERE id=?').get(destination.object.objectId)!;
+          this.capacity(Buffer.byteLength(encoded) - Number(usage['bytes']), destination.object.objectId, value, 1 - Number(usage['count']));
+        } else this.capacity(Buffer.byteLength(encoded) - (released ? Buffer.byteLength(String(prior!['value_json'])) + 512 : 0),
+          destination.object.objectId, value, released ? 0 : 1);
         const next = destination.object.revision + 1, completed = key === 'secretary/operation' && (value as Values['secretary/operation']).phase !== 'accepted' ? Date.now() : null;
         const changed = this.db.prepare('UPDATE documents SET current_revision=?,value_json=?,completed_at=? WHERE id=? AND key=? AND current_revision=?').run(next, encoded, completed, destination.object.objectId, key, destination.object.revision);
         need(changed.changes === 1, 'revision_conflict', 'The local Secretary row changed.');
         this.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run(destination.object.objectId, next, encoded);
+        if (key === 'secretary/operation') {
+          const operation = value as Values['secretary/operation'];
+          if (operation.action === 'checkpoint' && operation.phase === 'succeeded')
+            for (const capture of operation.checkpointCaptures) this.db.prepare('INSERT OR IGNORE INTO capture_acknowledgements VALUES(?)').run(capture.objectId);
+        }
         // A source cursor is current mutable service state. It has no historical reader.
         if (key === 'secretary/source') this.db.prepare('DELETE FROM revisions WHERE id=? AND revision<>?').run(destination.object.objectId, next);
         this.db.exec('COMMIT'); return { objectId: destination.object.objectId, revision: next };
@@ -245,14 +302,22 @@ export class SecretaryStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   technicalCreate<T>(key: string, name: string, value: T): { pin: Pin; name: string; value: T } {
-    const prior = this.technicalNamed<T>(key, name); if (prior) return prior; const encoded = canonical(value); this.capacity(Buffer.byteLength(encoded)); const id = randomUUID();
-    this.db.exec('BEGIN IMMEDIATE'); try { this.db.prepare('INSERT INTO technical_documents VALUES(?,?,?,?,?)').run(id, key, name, 1, encoded); this.db.prepare('INSERT INTO technical_revisions VALUES(?,?,?)').run(id, 1, encoded); this.db.exec('COMMIT'); }
+    const prior = this.technicalNamed<T>(key, name); if (prior) return prior; const encoded = canonical(value); const id = randomUUID();
+    this.db.exec('BEGIN IMMEDIATE'); try { this.capacity(Buffer.byteLength(encoded), undefined, value); this.db.prepare('INSERT INTO technical_documents VALUES(?,?,?,?,?)').run(id, key, name, 1, encoded); this.db.prepare('INSERT INTO technical_revisions VALUES(?,?,?)').run(id, 1, encoded); this.db.exec('COMMIT'); }
     catch (error) { this.db.exec('ROLLBACK'); const winner = this.technicalNamed<T>(key, name); if (winner) return winner; throw error; }
     return { pin: { objectId: id, revision: 1 }, name, value: structuredClone(value) };
   }
   technicalAmend<T>(key: string, current: { pin: Pin }, value: T): { pin: Pin; name: string; value: T } {
-    const encoded = canonical(value); this.capacity(Buffer.byteLength(encoded)); const next = current.pin.revision + 1; this.db.exec('BEGIN IMMEDIATE');
-    try { const changed = this.db.prepare('UPDATE technical_documents SET current_revision=?,value_json=? WHERE id=? AND key=? AND current_revision=?').run(next, encoded, current.pin.objectId, key, current.pin.revision); need(changed.changes === 1, 'revision_conflict', 'The local workflow row changed.'); this.db.prepare('INSERT INTO technical_revisions VALUES(?,?,?)').run(current.pin.objectId, next, encoded); this.db.prepare('DELETE FROM technical_revisions WHERE id=? AND revision<>?').run(current.pin.objectId, next); this.db.exec('COMMIT'); }
+    const encoded = canonical(value); const next = current.pin.revision + 1; this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const usage = this.db.prepare('SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(value_json AS BLOB))),0) AS bytes FROM technical_revisions WHERE id=?').get(current.pin.objectId)!;
+      this.capacity(Buffer.byteLength(encoded) - Number(usage['bytes']), current.pin.objectId, value, 1 - Number(usage['count']));
+      const changed = this.db.prepare('UPDATE technical_documents SET current_revision=?,value_json=? WHERE id=? AND key=? AND current_revision=?').run(next, encoded, current.pin.objectId, key, current.pin.revision);
+      need(changed.changes === 1, 'revision_conflict', 'The local workflow row changed.');
+      this.db.prepare('INSERT INTO technical_revisions VALUES(?,?,?)').run(current.pin.objectId, next, encoded);
+      this.db.prepare('DELETE FROM technical_revisions WHERE id=? AND revision<>?').run(current.pin.objectId, next);
+      this.db.exec('COMMIT');
+    }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return this.technicalRead<T>(key, { objectId: current.pin.objectId, revision: next });
   }
@@ -261,9 +326,10 @@ export class SecretaryStore {
     need(!pin || pin.revision === 1, 'secretary_evidence_conflict', 'The local blob revision is invalid.'); return { pin: { objectId: String(row['id']), revision: 1 }, bytes: Buffer.from(row['bytes'] as Uint8Array) };
   }
   technicalSaveBlob(key: string, name: string, bytes: Buffer): Pin {
-    const prior = this.technicalBlob(key, name); if (prior) { need(prior.bytes.equals(bytes), 'secretary_identity_conflict', 'The local blob identity has different bytes.'); return prior.pin; } this.capacity(bytes.length); const id = randomUUID();
-    try { this.db.prepare('INSERT INTO technical_blobs VALUES(?,?,?,?)').run(id, key, name, bytes); }
-    catch (error) { const winner = this.technicalBlob(key, name); if (winner?.bytes.equals(bytes)) return winner.pin; throw error; } return { objectId: id, revision: 1 };
+    const prior = this.technicalBlob(key, name); if (prior) { need(prior.bytes.equals(bytes), 'secretary_identity_conflict', 'The local blob identity has different bytes.'); return prior.pin; } const id = randomUUID();
+    this.db.exec('BEGIN IMMEDIATE');
+    try { this.capacity(bytes.length); this.db.prepare('INSERT INTO technical_blobs VALUES(?,?,?,?)').run(id, key, name, bytes); this.db.exec('COMMIT'); }
+    catch (error) { this.db.exec('ROLLBACK'); const winner = this.technicalBlob(key, name); if (winner?.bytes.equals(bytes)) return winner.pin; throw error; } return { objectId: id, revision: 1 };
   }
   close(): void { this.db.close(); }
 }

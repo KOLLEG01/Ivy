@@ -357,8 +357,25 @@ test(
   },
 );
 
+test("closed transport payloads can expire immediately without replaying delivered work", async t => {
+  const journal = new WhatsAppJournal(":memory:", { count: 1, bytes: 65536 });
+  t.after(() => journal.close());
+  journal.accept(input); journal.finish(input.id);
+  const sent = journal.enqueue("closed", input.jid, "Delivered"); journal.mark(sent[0]!, "sent");
+  const pending = journal.enqueue("uncertain", input.jid, "Keep exact text"); journal.mark(pending[0]!, "unknown");
+  journal.prune();
+  assert.equal(journal.noticeText("closed"), null);
+  assert.equal(journal.hasOutput("closed"), true);
+  assert.equal(journal.sent(sent), true);
+  journal.accept(input);
+  assert.equal(journal.pending().length, 0);
+  assert.deepEqual(journal.enqueue("closed", input.jid, "Delivered"), sent);
+  assert.throws(() => journal.enqueue("closed", input.jid, "Changed"), { code: "whatsui_identity_conflict" });
+  assert.deepEqual(journal.outgoing().map(row => [row.id, row.text, row.state]), [[pending[0], "Keep exact text", "unknown"]]);
+});
+
 test("retention advances past protected rows and preserves partial turn delivery", async (t) => {
-  const journal = new WhatsAppJournal(":memory:");
+  const journal = new WhatsAppJournal(":memory:", { count:514, bytes:64*1024*1024 });
   t.after(() => journal.close());
   const old = Date.now() - 8 * 86400_000;
   for (let i = 0; i < 256; i++) {
@@ -380,8 +397,8 @@ test("retention advances past protected rows and preserves partial turn delivery
   assert.equal(journal.get("message:binding:older:item:sender"), null);
   assert.equal(journal.get('out-automatic:' + expired[0]), null);
   assert.equal(
-    journal.db.prepare("SELECT 1 FROM outgoing WHERE id=?").get(expired[0]!),
-    undefined,
+    journal.db.prepare("SELECT text FROM outgoing WHERE id=?").get(expired[0]!)?.["text"],
+    "",
   );
   assert.equal(journal.sent([partial[0]!]), true);
   journal.mark(partial[1]!, "sent");
@@ -1105,6 +1122,7 @@ test("transport retention keeps pending work and current-turn deduplication, and
     at: old,
   });
   journal.set("listener:binding", { lastTurn: "turn" });
+  journal.historyLimits.count = 1;
   journal.prune();
   assert.equal(journal.pending().length, 1);
   assert.equal(journal.sent([id!]), true);

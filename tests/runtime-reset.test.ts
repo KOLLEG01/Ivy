@@ -35,9 +35,11 @@ import { HiveStore } from "../services/hive/src/store.js";
 import { Objects } from "../services/hive/src/objects.js";
 import type { RuntimeResetPlan } from "../packages/host-runtime/src/runtime-reset.js";
 import { HiveKernel } from "../services/hive/src/kernel.js";
+import { version as chatContractVersion } from "../services/chat-bridge/src/schema.js";
 import { digest } from "../packages/contracts/src/canonical.js";
 import { IvyError } from "../packages/contracts/src/errors.js";
 import { operationId } from "../packages/contracts/src/operation-id.js";
+import { mutationReceiptJournalBytes } from "../packages/contracts/src/limits.js";
 import type {
   Operation,
   OperationName,
@@ -517,7 +519,7 @@ test("runtime reset republishes every bundled ui and verifies readiness", async 
       contracts: [
         {
           key: "chat-bridge/input",
-          readVersions: ["1.2.0"],
+          readVersions: [chatContractVersion],
           writeVersions: [],
         },
       ],
@@ -567,7 +569,6 @@ test("runtime reset republishes every bundled ui and verifies readiness", async 
     bootstrapContracts.map((contract) => contract.key),
     ["chat-bridge/input"],
   );
-  await rm(join(directory, "index.html"));
   const issuedAt = Date.now(),
     published = await republishResetUis(
       client,
@@ -579,13 +580,14 @@ test("runtime reset republishes every bundled ui and verifies readiness", async 
     (await client.request("uis.inspect", { uiId: "reset-fixture" })).status,
     "ready",
   );
-  kernel.store.cleanupMutationReceipts(issuedAt + 24 * 60 * 60 * 1000);
+  await rm(join(directory, "index.html"));
+  kernel.store.cleanupMutationReceipts(mutationReceiptJournalBytes);
   const resumed = await republishResetUis(
     client,
     bundles,
     operationId(
       kernel.store.runtimeEpoch,
-      issuedAt + 24 * 60 * 60 * 1000,
+      issuedAt + 1,
       "runtime-reset-uis-resumed",
     ),
   );

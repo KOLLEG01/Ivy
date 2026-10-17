@@ -156,8 +156,9 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   Without a handoff, read the newest output item first, then at most two more individually only if
   needed to find an assistant answer. Otherwise publish the confirmed status. Do not collect the full
   output history or fall back to a full turn read for completion; Codex retains that history.
-- Keep raw native evidence for seven days after a closed Run is fully published, then remove it and its current Run
-  references. The ticket, final Result and published attachments remain. Unfinished Runs,
+- Raw native evidence and completed operation payloads enter the bounded local FIFO history
+  after a closed Run is fully published, without a minimum retention duration. Compact replay
+  guards prevent reuse of evicted operation IDs. The ticket, final Result and published attachments remain. Unfinished Runs,
   unfinished publications, pending deliveries and retryable scheduler actions retain the local records they need.
   A full ticket may omit the additional automatic result comment; its complete Result and history
   must still publish without leaving a reservation behind.
