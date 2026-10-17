@@ -1,0 +1,236 @@
+//! Private suspended-launch handshake. Handle values travel from the helper, but
+//! only the owner duplicates them: an unread acknowledgement cannot leak a Job
+//! handle into the owner and defeat kill-on-close cleanup.
+use std::{
+    io::{self, Read, Write},
+    mem::{size_of, zeroed},
+    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    ptr::null_mut,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::windows::named_pipe::{NamedPipeServer, ServerOptions},
+    process::Child,
+    time::Instant,
+};
+use windows_sys::Win32::{
+    Foundation::{DuplicateHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    System::{
+        JobObjects::{
+            IsProcessInJob, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            JobObjectBasicAccountingInformation, QueryInformationJobObject, TerminateJobObject,
+        },
+        Threading::{
+            GetCurrentProcess, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        },
+    },
+};
+
+const PREFIX: &str = r"\\.\pipe\Ivy.Process.";
+const MAGIC: &[u8; 8] = b"IVYJOB01";
+const JOB_QUERY_TERMINATE: u32 = 0x0004 | 0x0008;
+
+fn checked(value: i32) -> io::Result<()> {
+    if value == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn duplicate(source_process: HANDLE, source: HANDLE, access: u32) -> io::Result<OwnedHandle> {
+    let mut copied = null_mut();
+    // SAFETY: the source process handle is held for this call; Windows validates
+    // the source handle and access. The new non-inheritable handle has one owner.
+    checked(unsafe {
+        DuplicateHandle(
+            source_process,
+            source,
+            GetCurrentProcess(),
+            &mut copied,
+            access,
+            0,
+            0,
+        )
+    })?;
+    Ok(unsafe { OwnedHandle::from_raw_handle(copied) })
+}
+
+pub(super) fn valid_pipe_name(name: &str) -> bool {
+    name.strip_prefix(PREFIX)
+        .is_some_and(|suffix| suffix.len() == 36 && uuid::Uuid::parse_str(suffix).is_ok())
+}
+
+/// Keeps parent-death cleanup active even while the helper blocks on its private
+/// acknowledgement pipe. The process exit closes every helper-owned Job handle.
+pub(super) fn watch_parent(parent: HANDLE, job: HANDLE) -> io::Result<()> {
+    let parent = duplicate(unsafe { GetCurrentProcess() }, parent, PROCESS_SYNCHRONIZE)?;
+    let job = duplicate(
+        unsafe { GetCurrentProcess() },
+        job,
+        0x0008, /* JOB_OBJECT_TERMINATE */
+    )?;
+    std::thread::Builder::new()
+        .name("process-owner".into())
+        .spawn(move || {
+            if unsafe { WaitForSingleObject(parent.as_raw_handle(), u32::MAX) } != WAIT_TIMEOUT {
+                // Observers may retain Job handles, so closing ours is insufficient.
+                unsafe {
+                    TerminateJobObject(job.as_raw_handle(), 1);
+                }
+                std::process::exit(1);
+            }
+        })?;
+    Ok(())
+}
+
+pub(super) fn acknowledge(name: &str, child: HANDLE, job: HANDLE) -> io::Result<()> {
+    if !valid_pipe_name(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid private launch pipe.",
+        ));
+    }
+    let mut pipe = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(name)?;
+    let mut frame = [0; 24];
+    frame[..8].copy_from_slice(MAGIC);
+    frame[8..16].copy_from_slice(&(child as usize as u64).to_le_bytes());
+    frame[16..].copy_from_slice(&(job as usize as u64).to_le_bytes());
+    pipe.write_all(&frame)?;
+    let mut go = [0];
+    pipe.read_exact(&mut go)?;
+    if go != [1] {
+        return Err(io::Error::other("Launch acknowledgement rejected."));
+    }
+    Ok(())
+}
+
+pub(crate) struct Listener {
+    pub name: String,
+    pipe: NamedPipeServer,
+}
+impl Listener {
+    pub fn new() -> io::Result<Self> {
+        let name = format!("{PREFIX}{}", uuid::Uuid::new_v4());
+        let pipe = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&name)?;
+        Ok(Self { name, pipe })
+    }
+
+    pub async fn accept(mut self, helper: &mut Child) -> io::Result<Proof> {
+        tokio::select! {
+            result = helper.wait() => {
+                result?;
+                return Err(io::Error::other("Job launcher exited before acknowledgement."));
+            }
+            result = self.pipe.connect() => result?,
+        }
+        let mut frame = [0; 24];
+        self.pipe.read_exact(&mut frame).await?;
+        if &frame[..8] != MAGIC {
+            return Err(io::Error::other("Invalid launch acknowledgement."));
+        }
+        let proof = {
+            let source = helper
+                .raw_handle()
+                .ok_or_else(|| io::Error::other("Job launcher exited."))?;
+            let decode = |bytes: &[u8]| -> io::Result<HANDLE> {
+                let value = u64::from_le_bytes(bytes.try_into().unwrap());
+                let value = usize::try_from(value)
+                    .map_err(|_| io::Error::other("Invalid launch handle."))?;
+                if value == 0 || value == usize::MAX {
+                    return Err(io::Error::other("Invalid launch handle."));
+                }
+                Ok(value as HANDLE)
+            };
+            // Child first: partial failure cannot leave a retained Job handle.
+            let child = duplicate(
+                source,
+                decode(&frame[8..16])?,
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_INFORMATION,
+            )?;
+            let job = duplicate(source, decode(&frame[16..])?, JOB_QUERY_TERMINATE)?;
+            let proof = Proof { child, job };
+            let mut member = 0;
+            checked(unsafe {
+                IsProcessInJob(
+                    proof.child.as_raw_handle(),
+                    proof.job.as_raw_handle(),
+                    &mut member,
+                )
+            })?;
+            if member == 0 {
+                return Err(io::Error::other("Launch child is outside its Job."));
+            }
+            proof
+        };
+        // The child remains suspended until both exact kernel identities belong
+        // to the parent. Cancellation from here drops Proof and terminates its Job.
+        self.pipe.write_all(&[1]).await?;
+        Ok(proof)
+    }
+}
+
+pub(crate) struct Proof {
+    child: OwnedHandle,
+    job: OwnedHandle,
+}
+impl Proof {
+    pub fn terminate(&self) -> io::Result<()> {
+        checked(unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) })
+    }
+
+    fn retired(&self) -> io::Result<bool> {
+        let child = unsafe { WaitForSingleObject(self.child.as_raw_handle(), 0) };
+        if child != WAIT_OBJECT_0 && child != WAIT_TIMEOUT {
+            return Err(io::Error::last_os_error());
+        }
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+        checked(unsafe {
+            QueryInformationJobObject(
+                self.job.as_raw_handle(),
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                null_mut(),
+            )
+        })?;
+        Ok(child == WAIT_OBJECT_0 && accounting.ActiveProcesses == 0)
+    }
+
+    pub async fn retire(&self, deadline: Instant) -> io::Result<()> {
+        // Retaining this Job handle disables last-helper-handle cleanup. Always
+        // terminate explicitly, including normal helper exit and launcher crash.
+        self.terminate()?;
+        loop {
+            if self.retired()? {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Job retirement is unconfirmed.",
+                ));
+            }
+            tokio::time::sleep_until(deadline.min(Instant::now() + Duration::from_millis(10)))
+                .await;
+        }
+    }
+}
+impl Drop for Proof {
+    fn drop(&mut self) {
+        // Also covers cancellation/panic before supervision is installed. Close
+        // alone is insufficient if a third party retains another Job handle.
+        let _ = self.terminate();
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../../../tests/rust/host-windows-launch.rs"]
+mod tests;
