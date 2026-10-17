@@ -6,6 +6,42 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[test]]
+name = "host-scheduler"
+path = "../../../tests/rust/host-scheduler.rs"
+
+[[test]]
+name = "host-paths"
+path = "../../../tests/rust/host-paths.rs"
+
+[[test]]
+name = "host-windows-arguments"
+path = "../../../tests/rust/host-windows-arguments.rs"
+
+[[test]]
+name = "host-process-output"
+path = "../../../tests/rust/host-process-output.rs"
+
+[[test]]
+name = "host-process-output-node"
+path = "../../../tests/rust/host-process-output-node.rs"
+
+[[test]]
+name = "host-process"
+path = "../../../tests/rust/host-process.rs"
+
+[[test]]
+name = "host-package-requirements"
+path = "../../../tests/rust/host-package-requirements.rs"
+
+[[test]]
+name = "host-defaults"
+path = "../../../tests/rust/host-defaults.rs"
+
+[[test]]
+name = "host-logs"
+path = "../../../tests/rust/host-logs.rs"
+
 [dependencies]
 ivy-contracts.workspace = true
 ivy-store.workspace = true
