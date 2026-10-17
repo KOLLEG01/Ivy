@@ -116,7 +116,7 @@ fn journal_cross_open_identity_ownership_and_rollback() {
         tx.rollback().unwrap();
     }
     assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get::<_, u64>(0))
+        db.query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get::<_, i64>(0))
             .unwrap(),
         2
     );
@@ -162,14 +162,14 @@ fn partial_chunk_save_replays_original_pins_and_preserves_usage() {
         read_verified_bytes(&store, &"owner".into(), &manifest, ChunkKey::NativeEvidence).unwrap(),
         body
     );
-    let counts: (u64, u64) = db
+    let counts: (i64, i64) = db
         .query_row(
             "SELECT rows,bytes FROM storage_usage WHERE kind='blobs'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(counts, (3, (body.len() + 9) as u64));
+    assert_eq!(counts, (3, (body.len() + 9) as i64));
     db.execute("DELETE FROM blobs WHERE id=?", params![id])
         .unwrap();
     assert!(
