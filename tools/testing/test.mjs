@@ -33,6 +33,8 @@ if (values.upstream && !['hive', 'sdk'].includes(values.upstream)) throw Error('
 const explicit = values.all || values.upstream || values.scope?.length || values.files?.length || positionals.length;
 const changed = !explicit ? [...new Set([...git(['diff', '--name-only', '-z', values.since ?? 'HEAD']), ...git(['ls-files', '--others', '--exclude-standard', '-z'])])] : [];
 const selected = selectTests(root, config, { changed, scopes: values.upstream ? config.scopes.filter(s => s !== 'tooling') : values.scope, files: [...(values.files ?? []), ...positionals], all: values.all, kinds: values.kind });
+const rustTests = selected.filter(t => config.rustTests?.[t.file]);
+const javascriptTests = selected.filter(t => !config.rustTests?.[t.file]);
 if (values.list) { for (const t of selected) console.log(`${t.scope}\t${t.kind}\t${t.file}`); }
 else if (implicitSelectionTooLarge(selected.length, explicit)) {
   console.error(`Changed selection expands to ${selected.length} test files. Inspect with --list, select --files/--scope, or explicitly request --all. No build or tests started.`);
@@ -76,7 +78,7 @@ else if (selected.length === 0) {
   }
   try {
     const inputCache = new Map();
-    const inputs = selected.some(t => t.scope !== 'tooling') ? new Set(selected.flatMap(t => [...dependencies(root, t.file, inputCache)])) : new Set();
+    const inputs = new Set(selected.filter(t => t.scope !== 'tooling').flatMap(t => [...dependencies(root, t.file, inputCache)]));
     const needsHive = !env.IVY_TEST_HIVE_URL && [...inputs].some(path =>
       /\.(mjs|ts)$/.test(path) && existsSync(join(root, path)) && /IVY_TEST_HIVE_(URL|CREDENTIAL)/.test(readFileSync(join(root, path), 'utf8')));
     const publicRoot = values['public-root'] ?? env.IVY_TEST_PUBLIC_ROOT ?? (config.privateRepo ? undefined : root);
@@ -89,13 +91,14 @@ else if (selected.length === 0) {
     }
     const testBuildStamp = resolve(root, 'dist/.test-build.json');
     const testBuildInputs = [resolve(root, 'tests'), resolve(root, 'dist/packages'), resolve(root, 'dist/services'), resolve(root, 'tsconfig.test.json'), resolve(root, 'tsconfig.runtime.json')];
-    if (values['no-build'] && selected.some(t => t.scope !== 'tooling')) {
+    if (values['no-build'] && rustTests.length) throw Error('--no-build is unavailable for Cargo tests; Cargo verifies incremental inputs itself.');
+    if (values['no-build'] && javascriptTests.some(t => t.scope !== 'tooling')) {
       let stamp;
       try { stamp = JSON.parse(readFileSync(testBuildStamp, 'utf8')); } catch {}
       if (!stamp?.fingerprint || stamp.fingerprint !== fingerprint(testBuildInputs, { selected: pathsForFingerprint(selected) }))
         throw Error('Test outputs are stale or have no source fingerprint; run without --no-build.');
     }
-    if (!values['no-build'] && selected.some(t => t.scope !== 'tooling')) {
+    if (!values['no-build'] && javascriptTests.some(t => t.scope !== 'tooling')) {
       if (selected.some(t => t.kind === 'web')) await run(['node_modules/vue-tsc/bin/vue-tsc.js', '-p', 'tsconfig.web.json', '--noEmit']);
         await run(['tools/build/build-backend.mjs', '--incremental', '--no-native']);
         // The web build replaces dist/apps with production bundles. Run it before the
@@ -110,7 +113,8 @@ else if (selected.length === 0) {
       mkdirSync(resolve(root, 'dist'), { recursive: true });
       writeFileSync(testBuildStamp, JSON.stringify({ fingerprint: fingerprint(testBuildInputs, { selected: pathsForFingerprint(selected) }) }));
     }
-    const paths = selected.map(t => t.file.endsWith('.ts') ? 'dist/' + t.file.replace(/\.ts$/, '.js') : t.file);
+    if (rustTests.length) await run(['tools/testing/test-rust.mjs', ...rustTests.map(t => t.file)], root, values.progress, testTimeout);
+    const paths = javascriptTests.map(t => t.file.endsWith('.ts') ? 'dist/' + t.file.replace(/\.ts$/, '.js') : t.file);
     for (const path of paths) if (!existsSync(join(root, path))) throw Error('Missing test output: ' + path + '; build the selected tests first.');
     // Process-level Secretary tests share one isolated Hive and publish a singleton service.
     const concurrency = selected.some(t => /secretary-.*service\.test\.mjs$/.test(t.file)) ? 1 : jobs;
@@ -128,7 +132,7 @@ else if (selected.length === 0) {
       if (values.progress) console.log('Reusing successful isolated tests; inputs unchanged.');
     } else if (needsHive) {
       await run([resolve(publicRoot, 'tools/testing/with-test-hive.mjs'), '--cwd', root, '--chat-fixture', '--timeout-ms', String(testTimeout), '--', ...args], root, true, testTimeout + 5000);
-    } else await run(args, root, true, testTimeout);
+    } else if (paths.length) await run(args, root, true, testTimeout);
     if (cacheKey && !reuse && cacheKey === fingerprint(cacheInputs, { files: paths, jobs, env: Object.fromEntries(Object.entries(process.env).sort()) })) {
       mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(cachePath, JSON.stringify({ key: cacheKey }));
     }
