@@ -15,3 +15,7 @@ path = "../../../tests/rust/chat-storage.rs"
 [[test]]
 name = "chat-audio"
 path = "../../../tests/rust/chat-audio.rs"
+
+[[test]]
+name = "chat-output"
+path = "../../../tests/rust/chat-output.rs"
