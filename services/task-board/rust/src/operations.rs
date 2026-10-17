@@ -179,23 +179,19 @@ impl<S: Store, C: Fn() -> String> Operations<S, C> {
                 ("name", operation_name(caller, id)?.into()),
             ]),
         )]);
-        // The read is inside the original try boundary, including recovery from
-        // an immutable create that succeeded before its follow-up read failed.
-        let result = async {
-            let pin = self
-                .store
-                .write(
-                    OPERATION,
-                    &value,
-                    &mutation(&identity_hash(caller, id)?.into(), "accept")?,
-                    &destination,
-                )
-                .await?;
-            self.store.read(OPERATION, &pin, true).await
-        }
-        .await;
+        // TS returns the read promise without awaiting it inside the try block.
+        // Its rejection propagates; only the awaited write enters recovery.
+        let result = self
+            .store
+            .write(
+                OPERATION,
+                &value,
+                &mutation(&identity_hash(caller, id)?.into(), "accept")?,
+                &destination,
+            )
+            .await;
         match result {
-            Ok(document) => Ok(document),
+            Ok(pin) => self.store.read(OPERATION, &pin, true).await,
             Err(error) if recoverable_create(&error) => {
                 let winner = self.find(caller, id).await?;
                 require(
@@ -234,16 +230,12 @@ impl<S: Store, C: Fn() -> String> Operations<S, C> {
                 ("objectId", Json::String(id.clone())),
                 ("expectedRevision", revision.clone()),
             ]);
-            let result = async {
-                let pin = self
-                    .store
-                    .write(OPERATION, &updated, &mutation(id, &step)?, &destination)
-                    .await?;
-                self.store.read(OPERATION, &pin, true).await
-            }
-            .await;
+            let result = self
+                .store
+                .write(OPERATION, &updated, &mutation(id, &step)?, &destination)
+                .await;
             match result {
-                Ok(document) => return Ok(document),
+                Ok(pin) => return self.store.read(OPERATION, &pin, true).await,
                 Err(error) if error.code == "revision_conflict" => {}
                 Err(error) => return Err(error),
             }

@@ -26,3 +26,7 @@ path = "../../../tests/rust/task-board-evidence.rs"
 [[test]]
 name = "task-board-operations"
 path = "../../../tests/rust/task-board-operations.rs"
+
+[[test]]
+name = "task-board-blobs"
+path = "../../../tests/rust/task-board-blobs.rs"
