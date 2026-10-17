@@ -1,0 +1,27 @@
+// Execute the unchanged TypeScript codec as a differential oracle, without a backend build.
+import {registerHooks} from 'node:module';
+import {existsSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
+registerHooks({resolve(specifier,context,next) {
+  if (specifier.endsWith('.js') && specifier.startsWith('.') && context.parentURL) {
+    const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);
+    if(existsSync(fileURLToPath(source))) return next(source.href,context);
+  }
+  return next(specifier,context);
+}});
+const {canonical,hashJson}=await import('../../packages/contracts/src/canonical.ts');
+const {deriveOperationId}=await import('../../packages/contracts/src/operation-id.ts');
+const values=[null,true,false,0,-0,1e-7,1e-6,0.000123,1.2345678901234567,Number.MIN_VALUE,Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER+1,1e20,1e21];
+const strings=['plain ASCII','\u0000\n\t"\\','Straße 日本語','😀','\ud800','\udfff','\ud800A\udfff'];
+for(let point=0;point<=0x10ffff;point+=997) strings.push(String.fromCodePoint(point));
+for(const value of strings) values.push({[value]:[value,true,null,123]});
+values.push({'10':1,'2':2,z:3,'𐀀':4,'':5,'01':6,'4294967295':7,'4294967294':8});
+let state=42;
+for(let i=0;i<1000;i++){state=(Math.imul(state,1664525)+1013904223)>>>0;values.push((state-2147483648)*10**((i%40)-25));}
+const results=values.map(value=>{
+  const record={input:JSON.stringify(value),stringify:JSON.stringify(value)};
+  try { record.canonical=canonical(value); record.hash=hashJson(value);record.operation=deriveOperationId('epoch:00123:nonce😀',value); }
+  catch(error){record.error=error.code;}
+  return record;
+});
+process.stdout.write(JSON.stringify(results));
