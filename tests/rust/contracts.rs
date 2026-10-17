@@ -1,16 +1,96 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 #[test]
+fn surrogate_identifiers_error_messages_and_strict_native_json() {
+    let parent = parse(r#""\ud800:00042:\udfff""#, 100).unwrap();
+    let parent = parent.as_js_string().unwrap();
+    let identity = parse_operation_id_js(parent).unwrap();
+    assert_eq!(identity.runtime_epoch.0, [0xd800]);
+    assert_eq!(identity.nonce.0, [0xdfff]);
+    let child = derive_operation_id_js(parent, &IvyJson::Null).unwrap();
+    assert_eq!(parse_operation_id_js(&child).unwrap().issued_at_unix_ms, 42);
+    let message = JsString(vec![0xd800, b'x' as u16]);
+    let error =
+        ivy_contracts::IvyError::new("provider_failed", "error").with_js_message(message.clone());
+    assert_eq!(
+        error.to_wire().get("message"),
+        Some(&IvyJson::String(message))
+    );
+    let strict = ParseOptions {
+        reject_duplicate_keys: true,
+        maximum_container_depth: Some(2),
+    };
+    assert!(parse_with_options(r#"{"x":1,"\u0078":2}"#, 100, strict).is_err());
+    assert!(parse_with_options(r#"{"a":[1]}"#, 100, strict).is_ok());
+    assert!(parse_with_options(r#"{"a":[{}]}"#, 100, strict).is_err());
+    assert!(parse(r#"{"x":1,"x":2}"#, 100).is_ok());
+}
+#[test]
+fn byte_limit_error_precedence_matches_typescript() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/json-oracle.mjs",
+            "limits",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    for case in cases {
+        let value = parse(case["input"].as_str().unwrap(), 1000).unwrap();
+        let maximum = case["maximum"].as_u64().unwrap() as usize;
+        for (name, result) in [
+            ("canonical", canonical(&value, maximum).map(|_| ())),
+            ("validateJson", validate_json(&value, maximum)),
+        ] {
+            assert_eq!(
+                result.err().map(|e| e.code),
+                case[name].as_str().map(str::to_owned),
+                "{case}"
+            );
+        }
+    }
+}
+#[test]
 fn transport_frame_admission_matches_typescript() {
     use ivy_contracts::validation::*;
-    let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output=std::process::Command::new("node").args(["--experimental-transform-types","--disable-warning=ExperimentalWarning","tests/fixtures/frame-oracle.mjs"]).current_dir(root).output().unwrap();
-    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
-    let cases:Vec<serde_json::Value>=serde_json::from_slice(&output.stdout).unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/frame-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     for case in cases {
-        let value=parse(case["input"].as_str().unwrap(),100_000).unwrap();
-        let result=match case["kind"].as_str().unwrap(){"request"=>validate_request(&value),"response"=>validate_response_frame(&value),_=>validate_provider_call_frame(&value)};
-        if case["ok"]==true{assert!(result.is_ok(),"{case}: {result:?}");}
-        else{let error=result.unwrap_err();assert_eq!(error.code,case["code"].as_str().unwrap(),"{case}");assert_eq!(error.message,case["message"].as_str().unwrap(),"{case}");}
+        let value = parse(case["input"].as_str().unwrap(), 100_000).unwrap();
+        let result = match case["kind"].as_str().unwrap() {
+            "request" => validate_request(&value),
+            "response" => validate_response_frame(&value),
+            _ => validate_provider_call_frame(&value),
+        };
+        if case["ok"] == true {
+            assert!(result.is_ok(), "{case}: {result:?}");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, case["code"].as_str().unwrap(), "{case}");
+            assert_eq!(error.message, case["message"].as_str().unwrap(), "{case}");
+        }
     }
 }
 #[test]

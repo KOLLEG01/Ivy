@@ -28,6 +28,9 @@ pub struct IvyError {
     pub message: String,
     pub outcome: Outcome,
     pub details: Option<IvyJson>,
+    /// Exact JS boundary text, when it is not representable as Rust UTF-8.
+    pub wire_code: Option<JsString>,
+    pub wire_message: Option<JsString>,
 }
 
 impl IvyError {
@@ -37,7 +40,34 @@ impl IvyError {
             message: message.into(),
             outcome: Outcome::NotExecuted,
             details: None,
+            wire_code: None,
+            wire_message: None,
         }
+    }
+    pub fn new_js(code: JsString, message: JsString) -> Self {
+        // Lossy forms are diagnostic conveniences only; serialization uses exact code units.
+        let mut error = Self::new(
+            String::from_utf16_lossy(&code.0),
+            String::from_utf16_lossy(&message.0),
+        );
+        error.wire_code = Some(code);
+        error.wire_message = Some(message);
+        error
+    }
+    pub fn with_js_message(mut self, message: JsString) -> Self {
+        self.message = String::from_utf16_lossy(&message.0);
+        self.wire_message = Some(message);
+        self
+    }
+    pub fn message_js(&self) -> JsString {
+        self.wire_message
+            .clone()
+            .unwrap_or_else(|| self.message.clone().into())
+    }
+    pub fn code_js(&self) -> JsString {
+        self.wire_code
+            .clone()
+            .unwrap_or_else(|| self.code.clone().into())
     }
     pub fn with_outcome(mut self, outcome: Outcome) -> Self {
         self.outcome = outcome;
@@ -79,7 +109,7 @@ impl IvyError {
     }
     pub fn to_wire(&self) -> IvyJson {
         let mut data = IvyJson::object([
-            ("code", self.code.clone().into()),
+            ("code", IvyJson::String(self.code_js())),
             ("outcome", self.outcome.as_str().into()),
         ]);
         if let Some(details) = &self.details {
@@ -96,7 +126,9 @@ impl IvyError {
             ),
             (
                 "message",
-                IvyJson::String(JsString(self.message.encode_utf16().take(2048).collect())),
+                IvyJson::String(JsString(
+                    self.message_js().0.into_iter().take(2048).collect(),
+                )),
             ),
             ("data", data),
         ])
