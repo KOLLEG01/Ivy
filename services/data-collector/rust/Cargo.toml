@@ -9,6 +9,10 @@ publish.workspace = true
 [dependencies]
 ivy-contracts.workspace = true
 ivy-store.workspace = true
+ivy-sdk.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
 
 [[test]]
 name = "data-collector-store"
@@ -21,3 +25,7 @@ path = "../../../tests/rust/data-collector-policy.rs"
 [[test]]
 name = "data-collector-worker"
 path = "../../../tests/rust/data-collector-worker.rs"
+
+[[test]]
+name = "data-collector-publication"
+path = "../../../tests/rust/data-collector-publication.rs"

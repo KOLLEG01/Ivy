@@ -3,4 +3,6 @@ pub mod adoption;
 pub mod cache;
 pub mod model;
 pub mod policy;
+pub mod publication;
 pub mod store;
+pub mod store_owner;
