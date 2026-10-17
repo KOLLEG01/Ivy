@@ -434,6 +434,18 @@ fn timezone_contact_windows_and_assessment_policy_match_typescript() {
     );
     let cases = ivy_contracts::json::parse(std::str::from_utf8(&output.stdout).unwrap(), 1_000_000)
         .unwrap();
+    assert_eq!(
+        TimeZone::database_version(),
+        Some(
+            cases
+                .required("tzVersion")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .as_str()
+        ),
+        "timezone database must match the baseline runtime"
+    );
     let windows = cases.required("windows").unwrap().to_serde().unwrap();
     for case in windows.as_array().unwrap() {
         let w = &case["window"];
