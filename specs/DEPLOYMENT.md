@@ -164,8 +164,9 @@ substitute a development build for an installed artifact.
 ## Activation and recovery
 
 - Accept the original request durably before stopping a process. Preserve its operation ID,
-  exact candidate and previous build. Activation is serialized on a host and survives the
-  initiating CLI/service exiting.
+  exact candidate and previous build. Up to two disjoint ordinary activations may run on a
+  host; source preparation, Hive and HostExecutor changes form fair exclusive barriers.
+  Accepted work survives the initiating CLI/service exiting.
 - Check compatibility against actual retained formats/contracts before switching. Drain,
   stop, launch and readiness checks are bounded and use the platform's process-tree ownership.
   Unrelated components remain supervised.
