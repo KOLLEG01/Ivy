@@ -162,22 +162,35 @@ impl JournalIo {
         &mut self,
         body: impl FnOnce(&mut Self) -> StorageResult<T>,
     ) -> StorageResult<T> {
+        self.try_transaction(body)
+    }
+
+    pub fn try_transaction<T, E: From<StorageUnavailable>>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         self.healthy()?;
         if self.batch.is_some() {
             return body(self);
         }
-        self.db.execute_batch("BEGIN")?;
+        self.db
+            .execute_batch("BEGIN")
+            .map_err(StorageUnavailable::from)?;
         self.batch = Some(Vec::new());
         let result = body(self);
         let batch = self.batch.take().expect("transaction owns batch");
         match result {
             Ok(value) => {
-                self.db.execute_batch("COMMIT")?;
+                self.db
+                    .execute_batch("COMMIT")
+                    .map_err(StorageUnavailable::from)?;
                 self.submit(batch)?;
                 Ok(value)
             }
             Err(error) => {
-                self.db.execute_batch("ROLLBACK")?;
+                self.db
+                    .execute_batch("ROLLBACK")
+                    .map_err(StorageUnavailable::from)?;
                 Err(error)
             }
         }
