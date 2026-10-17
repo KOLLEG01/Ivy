@@ -4,3 +4,4 @@ pub mod identity;
 pub mod journal;
 pub mod journal_io;
 pub mod output_chunks;
+pub mod sender;

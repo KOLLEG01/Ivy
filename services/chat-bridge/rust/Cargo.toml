@@ -32,3 +32,7 @@ path = "../../../tests/rust/chat-journal.rs"
 [[test]]
 name = "chat-diagnostics"
 path = "../../../tests/rust/chat-diagnostics.rs"
+
+[[test]]
+name = "chat-sender"
+path = "../../../tests/rust/chat-sender.rs"
