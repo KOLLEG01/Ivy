@@ -4,9 +4,21 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[dependencies]
+ivy-contracts.workspace = true
+ivy-store.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
 [lib]
 path = "src/lib.rs"
 
 [[example]]
 name = "task-board-policy-probe"
 path = "../../../tests/fixtures/task-board-rust-policy.rs"
+
+[[test]]
+name = "task-board-evidence"
+path = "../../../tests/rust/task-board-evidence.rs"

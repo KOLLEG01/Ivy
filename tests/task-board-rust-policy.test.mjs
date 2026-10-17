@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -28,7 +28,9 @@ test('Rust TaskBoard policy matches the TypeScript oracle, including read order 
       return result.stdout;
     };
     const library = join(directory, 'libivy_task_board.rlib');
-    run(compiler, ['--edition=2024', '--crate-type=lib', '--crate-name=ivy_task_board', 'services/task-board/rust/src/lib.rs', '-o', library]);
+    const isolated = join(directory, 'policy.rs');
+    writeFileSync(isolated, `#[path = ${JSON.stringify(resolve('services/task-board/rust/src/coordination.rs'))}] pub mod coordination;\n`);
+    run(compiler, ['--edition=2024', '--crate-type=lib', '--crate-name=ivy_task_board', isolated, '-o', library]);
     const probe = join(directory, process.platform === 'win32' ? 'probe.exe' : 'probe');
     run(compiler, ['--edition=2024', 'tests/fixtures/task-board-rust-policy.rs', '--extern', `ivy_task_board=${library}`, '-o', probe]);
     const inputs = [], expected = [];
