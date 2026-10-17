@@ -30,5 +30,7 @@ services/**/native/**/obj/
 tests/native-phone/bin/
 tests/native-phone/obj/
 coverage/
+/target/
+/outputs/
 .DS_Store
 Thumbs.db

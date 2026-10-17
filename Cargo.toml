@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["packages/contracts/rust", "packages/store", "packages/sdk/rust", "packages/host-runtime/rust"]
+
+[workspace.package]
+version = "0.2.40"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+ivy-contracts = { path = "packages/contracts/rust" }
+ivy-store = { path = "packages/store" }
+ivy-sdk = { path = "packages/sdk/rust" }
+ivy-host-runtime = { path = "packages/host-runtime/rust" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order", "raw_value"] }
+sha2 = "=0.11.1"
+ryu-js = "=1.0.3"
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process", "signal", "fs"] }
+tokio-util = { version = "=0.7.20", features = ["rt"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream", "json", "multipart"] }
+tokio-tungstenite = { version = "=0.30.0", features = ["rustls-tls-native-roots"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "backup", "functions", "hooks", "limits"] }
+uuid = { version = "=1.28.0", features = ["v4"] }
+chrono = "=0.4.45"
+chrono-tz = "=0.10.4"
+futures-util = { version = "=0.3.34", features = ["sink"] }
+base64 = "=0.23.1"
+regex = "=1.13.1"
+windows-sys = "=0.61.2"
+libc = "=0.2.191"
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
