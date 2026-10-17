@@ -47,6 +47,10 @@ Assert-Equal (Read-LabJournal ($header + $pending + $complete) fixture).account.
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('ivy-rust-ledger-' + [guid]::NewGuid())
 [void][IO.Directory]::CreateDirectory($temp)
 $path = Join-Path $temp 'ledger.jsonl'
+$empty = Join-Path $temp 'empty'
+[IO.File]::WriteAllBytes($empty, [byte[]]@())
+try { Assert-Equal (Get-LabFileHash $empty) 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855' }
+finally { [IO.File]::Delete($empty) }
 $stream = [IO.FileStream]::new($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
 try {
     Write-LabEvent $stream @{kind='header';identity='fixture'}

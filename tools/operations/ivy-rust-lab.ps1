@@ -9,6 +9,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-LabFileHash([string]$Path) {
+    # Some managed Windows PowerShell environments do not expose Get-FileHash.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $file = [IO.File]::OpenRead($Path)
+    try { return [BitConverter]::ToString($sha.ComputeHash($file)).Replace('-','').ToLowerInvariant() }
+    finally { $file.Dispose(); $sha.Dispose() }
+}
+
 function Get-LabPath([string]$Path) {
     if ($Path -notmatch '^[A-Za-z]:[\\/]' -or $Path -match '[*?\[\]]|(^|[\\/])\.\.?([\\/]|$)|:.*:') {
         throw "Expected an absolute, literal local path: $Path"
@@ -218,7 +226,7 @@ function Invoke-IvyRustLab([string]$Action, [string]$InputPath, [string]$Journal
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
         $machine = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography').MachineGuid
-        $scriptHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+        $scriptHash = Get-LabFileHash $PSCommandPath
         $identity = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(
             ($plan | ConvertTo-Json -Compress) + $machine + $scriptHash))).Replace('-','').ToLowerInvariant()
     } finally { $sha.Dispose() }
