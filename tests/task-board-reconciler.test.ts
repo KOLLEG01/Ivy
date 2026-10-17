@@ -88,6 +88,41 @@ test('a terminal native catalog refusal clears recovery health without hiding a 
   assert.equal(await f.first.coordination.pending(), null);
 });
 
+for (const completion of ['succeeded', 'failed', 'evicted'] as const)
+test(`a publication warning follows its original action after another owner has ${completion} it`, async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const f = taskBoardFixture(t), created = await f.create({ control: 'user' });
+  const operation = await f.first.operations.begin({ action: 'edit', operationId: randomUUID(),
+    taskId: created.task!.objectId, expectedRevision: created.task!.revision, fields: { ...fields, title: 'External completion' } },
+  { principalId: 'user', serviceNodeId: f.first.owner.serviceNodeId, generation: f.first.owner.generation, source: 'user' });
+  if (completion === 'failed') await todo(f, created.task!);
+  await f.first.coordination.acquire(operation);
+  const runtime = new TaskBoardReconciler(f.first);
+  f.first.recoverOperation = async () => { throw new IvyError('task_board_publication_busy', 'The original gate is busy.', 'unknown'); };
+  // The same failure can be observed through both the gate and operation lanes.
+  await (runtime as unknown as { recoverGates: () => Promise<void> }).recoverGates(); await runtime.settled();
+  now += 30_001; await step(runtime);
+  assert.equal(runtime.diagnostics.filter(value => value.code === 'task_board_publication_busy').length, 2);
+  if (completion === 'failed') await assert.rejects(f.second.recoverOperation(operation.pin.objectId),
+    (error: unknown) => error instanceof IvyError && error.code === 'revision_conflict');
+  else await f.second.recoverOperation(operation.pin.objectId);
+  assert.equal(await f.first.coordination.pending(), null);
+  if (completion === 'evicted') {
+    f.first.store.completeLocalWorkflow(operation.pin.objectId);
+    f.first.store.historyLimits.count = 0;
+    await f.first.store.collectLocal();
+    assert.equal(f.first.store.localKey(operation.pin.objectId), null);
+    assert.ok(f.first.store.retiredOperation(operation.value.callerPrincipalId, operation.value.operationId));
+  }
+  // Subsequent attempts use the real engine; a terminal operation still has to
+  // reconcile any retained gate before its old warning can disappear.
+  f.first.recoverOperation = f.second.recoverOperation.bind(f.second);
+  now += 30_001;
+  for (let pass = 0; pass < 8; pass++) await step(runtime);
+  assert.deepEqual(runtime.diagnostics, []);
+});
+
 test('recovery errors stay visible through backoff and clear only after a successful pass', async t => {
   const w = await nativeWorkflow(t), runtime = new TaskBoardReconciler(w.f.first);
   let now = Date.now(), attempts = 0;
@@ -115,6 +150,20 @@ const todo = async (
     workflowState: "todo",
     detail: null,
   });
+
+test('a completed Run clears its previous recovery failure after leaving the active scan', async t => {
+  const w = await nativeWorkflow(t); await w.running();
+  const runtime = new TaskBoardReconciler(w.f.first);
+  let attempts = 0;
+  runtime.native.step = async () => { attempts++; throw new IvyError('fixture_recovery_error', 'The original Run read failed.'); };
+  await (runtime as unknown as { process: (lane: 'runs', id: string) => Promise<void> }).process('runs', w.state().run.objectId);
+  assert.ok(runtime.diagnostics.some(value => value.code === 'fixture_recovery_error'));
+  const finished = await w.f.second.nativeUpdate(await w.snapshot('completed'));
+  assert.equal((await w.f.first.store.read('task-board/run', finished.run!)).value.phase, 'completed');
+  for (let pass = 0; pass < 8; pass++) await step(runtime);
+  assert.equal(attempts, 1, 'Completed Runs must not restart native work to clear a historical error.');
+  assert.deepEqual(runtime.diagnostics, []);
+});
 
 test("reconciliation excludes Backlog and discovers Todo after startup recovery", async (t) => {
   const f = taskBoardFixture(t),

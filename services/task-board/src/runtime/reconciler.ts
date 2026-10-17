@@ -6,6 +6,7 @@ import { TaskBoardScheduler } from "./scheduler.js";
 import { TaskBoardNativeSignals } from "./native-signals.js";
 import { TaskBoardDeliveries } from "./deliveries.js";
 import { syncNativeComments } from './native-comments.js';
+import { finishedRun } from './native-publication.js';
 
 type Lane = TaskBoard.ScanCursor["lane"];
 const lanes: Lane[] = ["operations", "runs", "tasks", "deliveries"];
@@ -81,7 +82,8 @@ export class TaskBoardReconciler {
   private readonly pages = new Map<Lane, { ids: string[]; next: string | null; taskChanges: number }>();
   private readonly cursors = new Map<Lane, string | null>();
   private readonly failures = new Map<string, Wire.Diagnostic>();
-  private readonly operationRetries = new Map<string, number>();
+  private readonly failedRuns = new Set<string>();
+  private readonly operationRetries = new Map<string, { after: number; identity: Pick<TaskBoard.Operation, 'callerPrincipalId' | 'operationId'> | null }>();
   constructor(readonly engine: TaskBoardEngine) {
     this.native = new TaskBoardNativeOrchestrator(engine);
     this.scheduler = new TaskBoardScheduler(engine);
@@ -131,6 +133,12 @@ export class TaskBoardReconciler {
       else if (lane === "deliveries")
         await new TaskBoardDeliveries(this.engine).step(id);
       else if (lane === "runs") {
+        this.failedRuns.add(id);
+        if ([id, 'inputs:' + id, 'signals:' + id].some(key => this.failures.has(key)) &&
+            finishedRun((await this.engine.store.read('task-board/run', id, true, true)).value)) {
+          this.record(id); this.record('inputs:' + id); this.record('signals:' + id);
+          this.failedRuns.delete(id); return;
+        }
         // Input mirroring must not prevent native recovery when a host is offline.
         try { await syncNativeComments(this.engine, id); this.record('inputs:' + id); }
         catch (error) { this.record('inputs:' + id, error); }
@@ -151,6 +159,7 @@ export class TaskBoardReconciler {
         await this.scheduler.task(id);
       }
       this.record(id);
+      if (lane === 'runs' && !['inputs:' + id, 'signals:' + id].some(key => this.failures.has(key))) this.failedRuns.delete(id);
     } catch (error) {
       if (lane === 'operations') { await this.publicationFailure(id, error, id); return; }
       // Conflicting current revisions are retried from fresh state on a later pass; they do not
@@ -178,11 +187,18 @@ export class TaskBoardReconciler {
   private async recoverOperation(id: string): Promise<void> {
     try {
       await this.engine.recoverOperation(id);
-      this.operationRetries.delete(id);
+      this.clearOperationFailure(id);
     } catch (error) {
-      this.operationRetries.set(id, Date.now() + 30_000);
+      const original = await this.engine.store.read('task-board/operation', id).catch(() => null);
+      this.operationRetries.set(id, { after: Date.now() + 30_000, identity: original
+        ? { callerPrincipalId: original.value.callerPrincipalId, operationId: original.value.operationId }
+        : this.operationRetries.get(id)?.identity ?? null });
       throw error;
     }
+  }
+  private clearOperationFailure(id: string): void {
+    this.operationRetries.delete(id);
+    this.record(id); this.record('publication:' + id);
   }
   private async publicationFailure(id: string, error: unknown, key = 'publication:' + id): Promise<void> {
     const failure = IvyError.from(error);
@@ -191,8 +207,7 @@ export class TaskBoardReconciler {
       // A terminal refusal remains action history, without an outstanding recovery fault.
       if (original?.value.phase === 'failed' && original.value.error?.execution === 'not_executed' &&
           original.value.error.code === failure.code && original.value.error.message === failure.message) {
-        this.operationRetries.delete(id);
-        this.record(id); this.record('publication:' + id); return;
+        this.clearOperationFailure(id); return;
       }
     }
     this.record(key, error);
@@ -209,7 +224,7 @@ export class TaskBoardReconciler {
       try {
         const key = await this.taskKey("operations", id);
         if (this.stopped) return;
-        if (!this.activeTasks.has(key) && (this.operationRetries.get(id) ?? 0) <= Date.now()) {
+        if (!this.activeTasks.has(key) && (this.operationRetries.get(id)?.after ?? 0) <= Date.now()) {
           if (this.activeTasks.size >= maxConcurrentTasks) return;
           this.startTask(key, async () => {
             try { await this.recoverOperation(id); this.record(id); this.record("publication:" + id); }
@@ -253,7 +268,18 @@ export class TaskBoardReconciler {
       }
       requireThat(!page.nextCursor || page.nextCursor !== cursor,
         "task_board_cursor_regression", "A nonempty scan must advance its query cursor.");
-      pending = { ids: page.items.map(item => item.objectId), next: page.nextCursor, taskChanges };
+      const ids = new Set(page.items.map(item => item.objectId));
+      if (lane === 'runs') for (const id of this.failedRuns) ids.add(id);
+      if (lane === 'operations') for (const [id, retry] of this.operationRetries) {
+        if (retry.after > Date.now()) continue;
+        // An original action can finish outside this scan and disappear from its
+        // nonterminal query. Confirm its cleanup, or its durable eviction receipt.
+        if (!store.localKey(id) && retry.identity && store.retiredOperation(retry.identity.callerPrincipalId, retry.identity.operationId)) {
+          this.clearOperationFailure(id); continue;
+        }
+        ids.add(id);
+      }
+      pending = { ids: [...ids], next: page.nextCursor, taskChanges };
       this.pages.set(lane, pending);
     }
     const count = pending.ids.length;
@@ -263,7 +289,7 @@ export class TaskBoardReconciler {
       if (this.stopped) return false;
       // A busy Task is revisited on the next pass; other Tasks keep their slots.
       const active = this.activeTasks.has(key);
-      if (!active && (lane !== "operations" || (this.operationRetries.get(id) ?? 0) <= Date.now())) {
+      if (!active && (lane !== "operations" || (this.operationRetries.get(id)?.after ?? 0) <= Date.now())) {
         if (this.activeTasks.size >= maxConcurrentTasks) return false;
         this.startTask(key, () => this.process(lane, id));
       }
