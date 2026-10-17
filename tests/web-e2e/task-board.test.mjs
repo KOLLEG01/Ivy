@@ -138,15 +138,17 @@ for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     await add("Newest long comment\n\n" + longText + "\n\nEnd of newest comment");
     const route = "#/tasks?id=" + id + "&node=browser-task-board";
     await f.open(route);
-    const cards = f.page.locator('[data-slot="comment-card"]');
+    const cards = f.page.locator('[data-slot="conversation-message"]');
     const older = cards.filter({ hasText: "Older long comment" });
     const latest = cards.filter({ hasText: "Newest long comment" });
     const editor = f.page.getByLabel("Comment", { exact: true });
     const ordered = async () => cards.evaluateAll(elements => elements.map(element => element.textContent));
-    const composerPosition = async () => {
-      const input = await editor.boundingBox(), first = await cards.first().boundingBox(), last = await cards.last().boundingBox();
-      return { before: input.y < first.y, after: input.y > last.y + last.height };
-    };
+    // The composer stays in reading order before or after the messages even while it sticks to the bottom.
+    const composerPosition = async () => editor.evaluate(input => {
+      const messages = [...document.querySelectorAll('[data-slot="conversation-message"]')];
+      return { before: !!(input.compareDocumentPosition(messages[0]) & Node.DOCUMENT_POSITION_FOLLOWING),
+        after: !!(input.compareDocumentPosition(messages.at(-1)) & Node.DOCUMENT_POSITION_PRECEDING) };
+    });
     await expect(cards).toHaveCount(3);
     await expect(cards.first()).toContainText("Newest long comment");
     await expect(cards.last()).toContainText("Older long comment");
@@ -351,7 +353,7 @@ test("task project names resolve on their host with desktop and mobile layouts",
   const created = await f.invoke({ action: "create", fields: { ...fields("Named project"), control: "agent",
     executionRequirement: { kind: "host", hostId: "isolated-agent-host" },
     workspaceRequirement: { kind: "existing_project", projectId: "fixture-project", path: null, useWorktree: false } } });
-  await f.open("#/tasks?id=" + created.task.objectId + "&node=browser-task-board");
+  await f.open("#/tasks?id=" + created.task.objectId + "&node=browser-task-board&tab=details");
   await expect(f.page.getByText("Isolated project", { exact: true })).toBeVisible();
   await expect(f.page.getByText("fixture-project", { exact: true })).toHaveCount(0);
   await f.page.getByRole("button", { name: "Edit task", exact: true }).click();
@@ -525,6 +527,8 @@ test(
     await f.page
       .getByRole("heading", { name: /TASK-[0-9]{4,} · Browser task lifecycle/ })
       .waitFor();
+    await expect(f.page.getByRole("tab", { name: "Chat", exact: true })).toHaveAttribute("aria-selected", "true");
+    await f.page.getByRole("tab", { name: "Details", exact: true }).click();
     await expect(
       f.page.getByRole("heading", { name: "Description", exact: true }),
     ).toBeVisible();
@@ -532,10 +536,7 @@ test(
       f.page.getByRole("complementary", { name: "Task details", exact: true }),
     ).toBeVisible();
     await expect(
-      f.page.getByRole("tab", { name: "Comments (0)", exact: true }),
-    ).toBeVisible();
-    await expect(
-      f.page.getByRole("tab", { name: "History", exact: true }),
+      f.page.getByRole("button", { name: "History", exact: true }),
     ).toBeVisible();
     const id = new URLSearchParams(
       new URL(f.page.url()).hash.split("?")[1],
@@ -553,10 +554,10 @@ test(
     await expect
       .poll(async () => (await f.task(id)).workflowState)
       .toBe("backlog");
-    await f.page.getByRole("tab", { name: "History", exact: true }).click();
+    await f.page.getByRole("button", { name: "History", exact: true }).click();
     await expect(f.page.getByText("created the task")).toBeVisible();
     await expect(f.page.getByRole("definition").filter({ hasText: /Todo.*Backlog/ })).toBeVisible();
-    await f.page.getByRole("tab", { name: /^Comments/ }).click();
+    await f.page.getByRole("tab", { name: "Chat", exact: true }).click();
     await f.page
       .getByRole("button", { name: "Move to Todo", exact: true })
       .click();
@@ -722,7 +723,7 @@ test(
 );
 
 test(
-  "the backlog is ranked by hand through its menu and by dragging",
+  "the backlog and, when chosen, every other column are ranked by hand through the menu and by dragging",
   { timeout: 180000 },
   async (t) => {
     const f = await taskBoardFixture(t);
@@ -748,6 +749,24 @@ test(
     await expect.poll(order).toEqual(["Second ranked", "Third ranked", "First ranked"]);
     await f.page.reload();
     await expect.poll(order).toEqual(["Second ranked", "Third ranked", "First ranked"]);
+    // Other columns follow priority until manual order is chosen; the choice persists in this browser.
+    await f.invoke({ action: "create", workflowState: "todo", fields: { ...fields("Calm todo"), priority: 1 } });
+    await f.invoke({ action: "create", workflowState: "todo", fields: { ...fields("Urgent todo"), priority: 4 } });
+    const todo = f.page.getByRole("region", { name: "Todo", exact: true });
+    const todoOrder = () => todo.locator("article h3").allTextContents().then((values) => values.map((value) => value.trim()));
+    await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
+    await todo.getByRole("button", { name: "Order Todo by priority", exact: true }).click();
+    await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
+    await todo.getByRole("button", { name: "Actions for Urgent todo" }).click();
+    await f.page.getByRole("menuitem", { name: "Move to top", exact: true }).click();
+    await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
+    await todo.getByRole("button", { name: "Actions for Calm todo" }).click();
+    await f.page.getByRole("menuitem", { name: "Move to top", exact: true }).click();
+    await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
+    await f.page.reload();
+    await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
+    await todo.getByRole("button", { name: "Order Todo manually", exact: true }).click();
+    await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
     assert.deepEqual(f.pageErrors, []);
     assert.deepEqual(f.externalRequests, []);
   },

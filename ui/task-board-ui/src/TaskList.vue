@@ -334,9 +334,9 @@ const reorder = async (id: string, placement: Placement) => {
         contractKey: "task-board/task",
         contractVersions: taskContractVersions,
         where: and(rootWhere(props.workspace.rootObjectId), {
-          op: "eq",
+          op: "in",
           field: "data:/workflowState",
-          value: "backlog",
+          value: placement.top,
         }),
         orderBy: [
           { field: "object.position", direction: "asc" },

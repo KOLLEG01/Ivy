@@ -31,6 +31,25 @@ test(
 );
 
 test(
+  "AgentUI embedded by another Ivy UI shows only the task, which only Ivy itself may frame",
+  { timeout: 90000 },
+  async (t) => {
+    const f = await agentFixture(t);
+    await f.open("#/task?node=browser-agent&id=saved-task");
+    const url = new URL(f.page.url());
+    url.search = "?embed";
+    const response = await f.page.goto(url.href);
+    assert.equal(response.headers()["x-frame-options"], "SAMEORIGIN");
+    assert.match(response.headers()["content-security-policy"], /frame-ancestors 'self'/);
+    await expect(f.page.getByPlaceholder("Message this task…")).toBeVisible();
+    await expect(f.page.locator('[data-slot="sidebar"]')).toHaveCount(0);
+    await expect(f.page.getByRole("button", { name: "Task actions", exact: true })).toBeHidden();
+    await expect(f.page.getByRole("button", { name: "Toggle navigation" })).toHaveCount(0);
+    assert.deepEqual(f.pageErrors, []);
+  },
+);
+
+test(
   "AgentUI submits with Enter while Shift+Enter keeps a multiline draft",
   { timeout: 90000 },
   async (t) => {

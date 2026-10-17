@@ -31,6 +31,7 @@ export { default as StatusBadge } from "./patterns/StatusBadge.vue";
 export { default as ActivityIndicator } from "./patterns/ActivityIndicator.vue";
 export { default as LoadingIndicator } from "./patterns/LoadingIndicator.vue";
 export { default as MessageBubble } from "./patterns/MessageBubble.vue";
+export { default as ConversationMessage } from "./patterns/ConversationMessage.vue";
 export { default as RemoteState } from "./patterns/RemoteState.vue";
 export { default as PageHeader } from "./patterns/PageHeader.vue";
 export { default as ToolbarContent } from "./patterns/ToolbarContent.vue";

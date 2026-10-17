@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { markdownBlocks, markdownImageSources, renderMarkdown } from '../packages/ui/src/lib/markdown.js';
 import { definedProps } from '../packages/ui/src/lib/utils.js';
 import { attachmentMarkdown } from '../packages/ui/src/lib/attachments.js';
+import { uiContentPolicy } from '../services/hive/src/ui-security.js';
 
 test('verified attachments render safe image previews and file cards without interpreting filenames as Markdown', () => {
   const src = '#/page?id=file&revision=1', name = 'report [draft] \\ _notes_ <img>.pdf';
@@ -57,4 +58,11 @@ test('document blocks preserve exact Markdown, including opaque syntax, tables, 
   }
   const fenced = markdownBlocks('Before\n\n~~~\nA\n\nB\n~~~\n\nAfter');
   assert.equal(fenced.length, 3); assert.ok(fenced[1]!.content.includes('A\n\nB'));
+});
+
+test('published UI pages may be framed only by Ivy itself; other Hive pages cannot be framed', () => {
+  assert.match(uiContentPolicy('index.html'), /frame-ancestors 'self'; frame-src 'self'/);
+  assert.doesNotMatch(uiContentPolicy('index.html'), /frame-ancestors (?:'none'|\*)/);
+  assert.match(uiContentPolicy(), /frame-ancestors 'none'/);
+  assert.match(uiContentPolicy('dashboard.sandbox.html'), /^sandbox allow-scripts;.*frame-ancestors 'self'/);
 });

@@ -76,7 +76,8 @@ UI requirements: [UI](UI.md).
   failures defer again. General failures, cancellation and unanswered questions require intervention.
   When the condition clears, the scheduler rechecks time, dependencies, host and workspace before
   continuing. User-controlled work and Backlog remain unscheduled. A task waiting for a host
-  names why each AgentManager was skipped. Backlog rank is the ticket's Hive sibling order.
+  names why each AgentManager was skipped. Manual rank in any board column is the ticket's Hive
+  sibling order; it orders the board only, and scheduling still follows priority.
 - The agent performs Git lifecycle work from the ticket's explicit workspace/worktree intent.
   TaskBoard and AgentManager do not silently clone, switch branches or alter repositories.
   Completed workspace directories are retained.

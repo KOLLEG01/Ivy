@@ -1281,6 +1281,7 @@ export class HiveServer {
         const bytes = await this.uiFiles.read(uiId, selected.releaseId, selected.asset);
         response.setHeader('Content-Security-Policy', uiContentPolicy(selected.asset.path));
         if (selected.asset.path.endsWith('.sandbox.html')) response.removeHeader('X-Frame-Options');
+        else response.setHeader('X-Frame-Options', 'SAMEORIGIN');
         const etag = '"' + selected.asset.contentHash + '"';
         response.setHeader("ETag", etag);
         response.setHeader("Vary", "Cookie, Authorization");

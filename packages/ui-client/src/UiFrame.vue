@@ -57,10 +57,13 @@ const login = () =>
   ).href;
 const logoutUrl = new URL("logout", props.base).href;
 const browserApp = useBrowserApp(props.base);
+// Another Ivy UI may frame this one with ?embed; it then shows only the page itself.
+const embedded = new URLSearchParams(location.search).has("embed");
 </script>
 <template>
   <IvyShell
     :ui-name="uiName"
+    :embedded="embedded"
     :browser-app="browserApp"
     :layout="layout"
     :settings-href="settingsHref"

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   Archive,
+  ArrowUpDown,
   Calendar,
   ChevronDown,
   ChevronsDown,
@@ -65,10 +66,26 @@ const emit = defineEmits<{
   archive: [id: string];
   archiveAll: [];
 }>();
-// The backlog is ranked by hand; every other column follows priority.
-const ranked = computed(
-  () => props.column.id === "backlog" && !props.archived && props.workspace.role === "user",
-);
+// Each column is ordered by hand (the Hive sibling position) or by priority; the backlog starts
+// manual, the others by priority. The choice is remembered per browser and column.
+const orderKey = "ivy.task-board.order:" + base.href + ":" + props.column.id;
+const order = ref<"manual" | "priority">("priority");
+try {
+  const stored = localStorage.getItem(orderKey);
+  order.value = stored === "manual" || stored === "priority" ? stored : props.column.id === "backlog" ? "manual" : "priority";
+} catch {
+  order.value = props.column.id === "backlog" ? "manual" : "priority";
+}
+const toggleOrder = () => {
+  order.value = order.value === "manual" ? "priority" : "manual";
+  try {
+    localStorage.setItem(orderKey, order.value);
+  } catch {
+    /* Optional view state. */
+  }
+};
+const manual = computed(() => !props.archived && order.value === "manual");
+const ranked = computed(() => manual.value && props.workspace.role === "user");
 const pages = usePage(async (signal, cursor) => {
     const result = await client.request(
       "objects.query",
@@ -106,7 +123,7 @@ const pages = usePage(async (signal, cursor) => {
               { field: "object.updatedAt", direction: "desc" },
               { field: "object.id", direction: "asc" },
             ]
-          : props.column.id === "backlog"
+          : manual.value
             ? [
                 ...(props.swimlane === "category"
                   ? [{ field: "data:/fields/category", direction: "asc" as const }]
@@ -236,6 +253,8 @@ const pages = usePage(async (signal, cursor) => {
     "ivy.task-board.column:" +
     base.href +
     ":" +
+    order.value +
+    ":" +
     props.workspace.serviceNodeId +
     ":" +
     props.workspace.callerPrincipalId +
@@ -333,9 +352,18 @@ defineExpose({ refresh: pages.refresh });
         :aria-label="count === null ? 'Counting tasks' : count + ' total tasks'"
       >{{ count ?? "…" }}</span
       >
+      <Button
+        variant="ghost"
+        size="sm"
+        class="ml-auto h-7 gap-1 px-2 text-xs font-normal text-muted-foreground"
+        :aria-label="'Order ' + column.title + (order === 'manual' ? ' manually' : ' by priority')"
+        :aria-pressed="order === 'manual'"
+        @click="toggleOrder"
+        ><ArrowUpDown aria-hidden="true" />{{ order === "manual" ? "Manual" : "Priority" }}</Button
+      >
       <DropdownMenu v-if="column.id === 'done' && workspace.role === 'user'">
         <DropdownMenuTrigger as-child>
-          <Button variant="ghost" size="icon-sm" class="ml-auto" aria-label="Done actions" :disabled="disabled || archiveDisabled">
+          <Button variant="ghost" size="icon-sm" aria-label="Done actions" :disabled="disabled || archiveDisabled">
             <MoreHorizontal aria-hidden="true" />
           </Button>
         </DropdownMenuTrigger>
@@ -527,7 +555,7 @@ defineExpose({ refresh: pages.refresh });
                 ><DropdownMenuSeparator /><DropdownMenuItem
                   v-if="previous(index) || pages.page.value > 1"
                   :disabled="taskDisabled(task.id)"
-                  @select="emit('reorder', task.id, { top: true })"
+                  @select="emit('reorder', task.id, { top: column.states })"
                   >Move to top</DropdownMenuItem
                 ><DropdownMenuItem
                   v-if="previous(index)"

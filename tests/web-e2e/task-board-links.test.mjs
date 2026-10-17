@@ -152,6 +152,11 @@ test(
         mediaType: "application/zip",
         bytes: Buffer.from("download fixture"),
       },
+      {
+        filename: "report.html",
+        mediaType: "text/html",
+        bytes: Buffer.from("<h1>Rendered report</h1><script>document.body.dataset.ran = 'yes';</script>"),
+      },
     ];
     for (const file of files) {
       const current = await f.client.request("objects.read", { objectId: id });
@@ -165,12 +170,12 @@ test(
         bytesBase64: file.bytes.toString("base64"),
       });
     }
-    await f.open("#/tasks?id=" + id + "&node=browser-task-board");
+    await f.open("#/tasks?id=" + id + "&node=browser-task-board&tab=details");
     await expect(
-      f.page.getByRole("button", { name: "Attachments (4)" }),
+      f.page.getByRole("button", { name: "Attachments (5)" }),
     ).toBeVisible();
     await expect(f.page.getByText("notes.md")).toHaveCount(0);
-    await f.page.getByRole("button", { name: "Attachments (4)" }).click();
+    await f.page.getByRole("button", { name: "Attachments (5)" }).click();
     await expect(f.page.getByText("notes.md")).toBeVisible();
     await f.page.getByRole("button", { name: "Open notes.md" }).click();
     const dialog = f.page.getByRole("dialog", { name: "notes.md" });
@@ -178,11 +183,20 @@ test(
       dialog.getByRole("heading", { name: "Attachment markdown" }),
     ).toBeVisible();
     await f.page.keyboard.press("Escape");
+    await f.page.getByRole("button", { name: "Open report.html" }).click();
+    const report = f.page.getByRole("dialog", { name: "report.html" });
+    const rendered = report.frameLocator('iframe[title="Rendered HTML"]');
+    await expect(rendered.getByRole("heading", { name: "Rendered report" })).toBeVisible();
+    assert.equal(await report.locator("iframe").getAttribute("sandbox"), "");
+    assert.equal(await rendered.locator("body").getAttribute("data-ran"), null);
+    await report.getByRole("radio", { name: "Source" }).click();
+    await expect(report.getByText("<h1>Rendered report</h1>", { exact: false })).toBeVisible();
+    await f.page.keyboard.press("Escape");
     await expect(f.page.getByRole("img", { name: "pixel.png" })).toBeVisible();
     await expect(f.page.locator('video[aria-label="clip.mp4"]')).toBeVisible();
     const [download] = await Promise.all([
       f.page.waitForEvent("download"),
-      f.page.getByRole("button", { name: "Download" }).last().click(),
+      f.page.getByRole("button", { name: "Download" }).nth(3).click(),
     ]);
     assert.equal(download.suggestedFilename(), "bundle.zip");
     assert.deepEqual(await readFile(await download.path()), files[3].bytes);

@@ -43,5 +43,5 @@ export const priorityLabel = (priority: unknown) => typeof priority === 'number'
 export const shortDate = (value: string) => new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 export const stateIcons = { backlog: CircleDashed, todo: Circle, in_progress: CircleDot, waiting: CirclePause, review: CircleEllipsis, done: CircleCheck, cancelled: CircleX } as Record<string, typeof Circle>;
 export const stateColors: Record<string, string> = { in_progress: 'text-amber-500', review: 'text-sky-500', done: 'text-emerald-500', cancelled: 'text-muted-foreground' };
-/** Where a backlog Task is ranked: before another Task or at the end (null), after another Task, or first. */
-export type Placement = { before: string | null } | { after: string } | { top: true };
+/** Where a Task is ranked: before another Task or at the end (null), after another Task, or first among the given column states. */
+export type Placement = { before: string | null } | { after: string } | { top: string[] };

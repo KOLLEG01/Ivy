@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import {
   Alert,
   AlertDescription,
   AlertTitle,
   Button,
   Checkbox,
-  CommentCard,
   ContentView,
+  ConversationMessage,
   Disclosure,
   DropdownMenu,
   DropdownMenuContent,
@@ -34,13 +34,19 @@ import {
 } from "@ivy/ui";
 import type { UploadedAttachment } from "@ivy/ui";
 import {
+  ArrowDown,
   ArrowLeft,
   Bot,
   CircleAlert,
   ExternalLink,
+  Info,
   Maximize2,
+  MessageSquare,
+  MonitorDot,
   MoreHorizontal,
   Pencil,
+  Sparkles,
+  SquareKanban,
   User,
   X,
 } from "@lucide/vue";
@@ -96,6 +102,17 @@ const props = defineProps<{
   sheet?: boolean;
 }>();
 const emit = defineEmits<{ changed: []; deleted: [] }>();
+// A ticket shows Details, Chat and the agent task as tabs; the conversation opens by default.
+type TaskTab = "details" | "chat" | "agent";
+const tab = ref<TaskTab>(
+  (["details", "agent"] as const).find((value) => value === props.query.get("tab")) ?? "chat",
+);
+// Tabs sit in the top bar from tablet width up and in their own row on phones.
+const wideQuery = matchMedia("(min-width: 768px)");
+const wide = ref(wideQuery.matches);
+const followWidth = (event: MediaQueryListEvent) => { wide.value = event.matches; };
+wideQuery.addEventListener("change", followWidth);
+onBeforeUnmount(() => wideQuery.removeEventListener("change", followWidth));
 const { preferences: commentPreferences } = useCommentPreferences(() => props.workspace);
 const task = useRemote((signal) =>
     readDocument("task", props.taskId, props.workspace.rootObjectId, signal), 15000, ["objects/task-board/task"]);
@@ -166,6 +183,7 @@ const panel = ref(""),
 const pendingAttachments = ref<TaskBoard.TaskAttachment[]>([]),
   uploading = ref(false),
   attachmentsOpen = ref(false),
+  historyOpen = ref(false),
   descriptionExpanded = ref(false),
   commentInput = ref<{ insertMarkdown: (markdown: string) => void }>();
 const terminal = computed(() =>
@@ -195,16 +213,15 @@ const canDelete = computed(() =>
   !archive.busy.value && !archive.pending.value,
 );
 // The agent task that carries this ticket's native conversation, when one exists.
-const agentTaskLink = computed(() => {
+const agentTaskQuery = computed(() => {
   const ref = task.value.value?.value.primaryResourceRef;
-  return ref
-    ? new URL(
-        "agents/#/task?" +
-          new URLSearchParams({ node: ref.serviceNodeId, id: ref.nativeId }),
-        base,
-      ).href
-    : null;
+  return ref ? new URLSearchParams({ node: ref.serviceNodeId, id: ref.nativeId }).toString() : null;
 });
+const agentTaskLink = computed(() =>
+  agentTaskQuery.value ? new URL("agents/#/task?" + agentTaskQuery.value, base).href : null);
+// The Agent tab embeds the same AgentManager task view without its navigation and task actions.
+const agentEmbedLink = computed(() =>
+  agentTaskQuery.value ? new URL("agents/?embed#/task?" + agentTaskQuery.value, base).href : null);
 const nativeWorkAvailable = computed(() => props.workspace.role === 'user' && props.workspace.scheduler.enabled);
 const unresolvedApprovals = computed(() => {
   const comments = task.value.value?.value.comments ?? [],
@@ -219,10 +236,13 @@ const unresolvedApprovals = computed(() => {
     )
     .filter((item) => !answered.has(item.request.requestId));
 });
+// Agent comments that were unread when the ticket opened start after a "New" divider.
+const unreadAtOpen = ref<number | null>(null);
 const markedRevisions = new Set<number>();
 watch(
   () => taskView.value.value,
   async (view) => {
+    if (view && unreadAtOpen.value === null) unreadAtOpen.value = view.unreadAgentComments;
     if (
       !view?.unreadAgentComments ||
       props.workspace.role !== "user" ||
@@ -250,7 +270,52 @@ watch(
       markedRevisions.delete(view.object.revision);
     }
   },
+  { immediate: true },
 );
+const firstUnreadId = computed(() => {
+  const count = unreadAtOpen.value ?? 0;
+  if (!count) return null;
+  const agentComments = (task.value.value?.value.comments ?? [])
+    .filter((comment) => comment.authorKind === "agent")
+    .sort((a, b) => a.sequence - b.sequence);
+  return agentComments.at(-count)?.commentId ?? null;
+});
+// Messages from other tasks name that task by key and title.
+const sourceTaskIds = computed(() => [...new Set((task.value.value?.value.comments ?? [])
+  .flatMap((comment) => comment.sourceTaskId ? [comment.sourceTaskId] : []))]);
+const sourceTasks = useRemote(async (signal) => Object.fromEntries(await Promise.all(
+  sourceTaskIds.value.map(async (id) => {
+    try {
+      const value = await readDocument("task", id, props.workspace.rootObjectId, signal);
+      return [id, { key: value.value.taskKey, title: value.value.fields.title }] as const;
+    } catch {
+      return [id, null] as const;
+    }
+  }))), 0, ["objects/task-board/task"]);
+watch(() => sourceTaskIds.value.join(), () => void sourceTasks.refresh());
+const sourceTask = (id: string) => sourceTasks.value.value?.[id] ?? null;
+type ChatKind = "event" | "user" | "reply" | "external";
+const chatKind = (comment: TaskBoard.Comment): ChatKind =>
+  comment.sourceTaskId ? "external" : comment.authorKind === "user" ? "user" : comment.authorKind === "agent" ? "reply" : "event";
+const senderName = (comment: TaskBoard.Comment) => {
+  const kind = chatKind(comment);
+  return kind === "external"
+    ? sourceTask(comment.sourceTaskId!)?.key ?? tr("Anderer Task", "Another task")
+    : kind === "user" ? tr("Du", "You") : kind === "reply" ? "Agent" : comment.authorKind;
+};
+const minute = 60000;
+const stampLabel = (iso: string) => {
+  const date = new Date(iso);
+  return date.toDateString() === new Date().toDateString()
+    ? date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+};
+// Times appear between groups of messages rather than inside each bubble.
+const chatEntries = computed(() => displayComments.value.map((comment, index) => {
+  const previous = displayComments.value[index - 1];
+  const gap = previous ? Math.abs(Date.parse(comment.createdAt) - Date.parse(previous.createdAt)) : Infinity;
+  return { comment, kind: chatKind(comment), stamp: gap > 10 * minute ? stampLabel(comment.createdAt) : null };
+}));
 const dependencyPage = ref(0),
   dependencies = useRemote(async (signal) =>
       await Promise.all(
@@ -493,6 +558,18 @@ const executionTarget = (fields: TaskBoard.TaskFields) => {
       : tr("Automatisch", "Automatic");
   return fields.executionRequirement ? label : label + " (default)";
 };
+// The top bar names where and how the agent works; the pills open the Details tab.
+const hostPill = computed(() => {
+  const value = task.value.value?.value;
+  return value ? value.claim?.target.hostId ?? executionTarget(value.fields).replace(" (default)", "") : "";
+});
+const modelPill = computed(() => {
+  const options = task.value.value?.value.fields.nativeOptions,
+    defaults = executionDefaults.defaults.value?.nativeOptions;
+  const model = options?.model ?? defaults?.model ?? tr("Host-Standard", "Host default"),
+    effort = options?.reasoningEffort ?? defaults?.reasoningEffort;
+  return effort ? model + " · " + effort : model;
+});
 const projectLabel = (value: TaskBoard.WorkspaceRequirement) =>
   value.kind === "task_workspace"
     ? "No project"
@@ -513,15 +590,43 @@ const nativeInput = (comment: TaskBoard.Comment) => task.value.value?.value.comm
   .find(reply => reply.replyTo === comment.commentId && reply.nativeInput)?.nativeInput ?? comment.nativeInput;
 const copyId = () => void navigator.clipboard?.writeText(props.taskId);
 const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspace.serviceNodeId, props.taskId));
+const commentElement = (id: string | undefined) => id ? document.getElementById("comment-" + id) : null;
+// The conversation opens at the newest message so the latest answer is read first.
+let openedAtNewest = false;
+watch([tab, () => task.value.value?.value.comments.length], async () => {
+  if (openedAtNewest || tab.value !== "chat" || !task.value.value) return;
+  openedAtNewest = true;
+  if (commentPreferences.value.order === "newest-first") return;
+  await nextTick();
+  commentElement(newestCommentId.value)?.scrollIntoView({ block: "start" });
+}, { immediate: true });
+// A message arriving below the visible part of the conversation is announced with a jump button.
+const arrived = ref<TaskBoard.Comment | null>(null);
+let knownSequence = 0;
+watch(() => task.value.value?.value.comments, async (comments) => {
+  const newest = comments?.reduce<TaskBoard.Comment | undefined>((latest, comment) =>
+    !latest || comment.sequence > latest.sequence ? comment : latest, undefined);
+  if (!newest) return;
+  const isNew = knownSequence > 0 && newest.sequence > knownSequence;
+  knownSequence = Math.max(knownSequence, newest.sequence);
+  if (!isNew || newest.authorKind === "user" || tab.value !== "chat" || commentPreferences.value.order === "newest-first") return;
+  await nextTick();
+  const top = commentElement(newest.commentId)?.getBoundingClientRect().top;
+  if (top !== undefined && top > innerHeight) arrived.value = newest;
+});
+const showArrived = () => {
+  commentElement(arrived.value?.commentId)?.scrollIntoView({ block: "start", behavior: "smooth" });
+  arrived.value = null;
+};
 </script>
 
 <template>
-  <div :class="sheet ? 'px-5 pb-8 sm:px-8' : 'mx-auto w-full max-w-6xl'">
+  <Tabs v-model="tab" :class="sheet ? 'px-5 pb-8 sm:px-8' : 'mx-auto w-full max-w-6xl'">
     <component
       :is="sheet ? 'div' : ToolbarContent"
       :class="
         sheet
-          ? 'sticky top-0 z-10 -mx-5 mb-4 flex h-14 items-center gap-2 border-b bg-background px-5 sm:-mx-8 sm:px-8'
+          ? 'sticky top-0 z-10 -mx-5 flex h-14 items-center gap-2 border-b bg-background px-5 sm:-mx-8 sm:px-8'
           : undefined
       "
     >
@@ -537,32 +642,42 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
             ><ArrowLeft aria-hidden="true" /></a
         ></Button>
         <template v-if="task.value.value">
-          <span class="min-w-0 truncate text-sm text-muted-foreground">{{
-            task.value.value.value.taskKey
-          }}</span>
-          <span
-            class="inline-flex min-w-0 items-center gap-1.5 text-sm"
-            ><component
-              :is="
-                stateIcons[task.value.value.value.workflowState] ??
-                stateIcons.todo
-              "
-              class="size-4"
-              :class="
-                stateColors[task.value.value.value.workflowState] ??
-                'text-muted-foreground'
-              "
-              aria-hidden="true"
-            /><span class="max-sm:sr-only truncate">{{
-              stateLabel(task.value.value.value.workflowState)
-            }}</span></span
-          >
+          <component
+            :is="stateIcons[task.value.value.value.workflowState] ?? stateIcons.todo"
+            class="size-4 shrink-0"
+            :class="stateColors[task.value.value.value.workflowState] ?? 'text-muted-foreground'"
+            :aria-label="stateLabel(task.value.value.value.workflowState)"
+            role="img"
+          />
+          <h1 v-if="wide" class="min-w-0 truncate text-sm font-semibold">
+            <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
+          </h1>
+          <span v-else class="min-w-0 truncate text-sm text-muted-foreground">{{ task.value.value.value.taskKey }}</span>
           <StatusBadge
             v-if="task.value.value.read.object.effectivelyArchived"
             label="Archived"
           />
+          <template v-if="wide">
+            <button
+              type="button"
+              class="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 text-xs text-muted-foreground hover:bg-muted"
+              :aria-label="tr('Host: ', 'Host: ') + hostPill"
+              @click="tab = 'details'"
+            ><MonitorDot class="size-3.5" aria-hidden="true" />{{ hostPill }}</button>
+            <button
+              type="button"
+              class="inline-flex h-6 min-w-0 items-center gap-1 rounded-full border px-2 text-xs text-muted-foreground hover:bg-muted"
+              :aria-label="tr('Modell: ', 'Model: ') + modelPill"
+              @click="tab = 'details'"
+            ><Sparkles class="size-3.5 shrink-0" aria-hidden="true" /><span class="truncate">{{ modelPill }}</span></button>
+          </template>
         </template>
       </div>
+      <TabsList v-if="wide && task.value.value" class="shrink-0">
+        <TabsTrigger value="details"><Info aria-hidden="true" />Details</TabsTrigger>
+        <TabsTrigger value="chat"><MessageSquare aria-hidden="true" />Chat</TabsTrigger>
+        <TabsTrigger value="agent"><Bot aria-hidden="true" />Agent</TabsTrigger>
+      </TabsList>
       <div class="flex shrink-0 items-center gap-1.5">
         <Button
           v-for="item in primaryActions"
@@ -642,6 +757,20 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
         ></SheetClose>
       </div>
     </component>
+    <h1 v-if="!wide && task.value.value" class="mt-3 text-lg font-semibold leading-snug break-words">
+      <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
+    </h1>
+    <div
+      v-if="!wide && task.value.value"
+      class="sticky z-10 border-b bg-background py-2"
+      :class="sheet ? 'top-14 -mx-5 px-5 sm:-mx-8 sm:px-8' : 'top-12 -mx-4 px-4'"
+    >
+      <TabsList class="grid w-full grid-cols-3">
+        <TabsTrigger value="details"><Info aria-hidden="true" />Details</TabsTrigger>
+        <TabsTrigger value="chat"><MessageSquare aria-hidden="true" />Chat</TabsTrigger>
+        <TabsTrigger value="agent"><Bot aria-hidden="true" />Agent</TabsTrigger>
+      </TabsList>
+    </div>
     <RemoteState
       :loading="task.loading.value"
       :error="task.error.value"
@@ -649,18 +778,12 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
       @retry="task.refresh"
     />
     <template v-if="task.value.value">
-      <h1
-        class="mb-4 text-xl font-semibold tracking-tight break-words sm:text-2xl"
-      >
-        <span class="sr-only">{{ task.value.value.value.taskKey }} · </span
-        >{{ task.value.value.value.fields.title }}
-      </h1>
       <Alert
         v-if="
           taskView.value.value && task.value.value.value.workflowState !== 'review' &&
           noteworthyCondition(taskView.value.value.executionCondition.state)
         "
-        class="mb-4"
+        class="mt-4"
         :variant="
           conditionTone(taskView.value.value.executionCondition.state) ===
           'bad'
@@ -680,23 +803,23 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
       <ActionState
         v-if="action.saved.value?.phase !== 'succeeded' || action.error.value"
         :action="action"
-        class="mb-4"
+        class="mt-4"
         @changed="refresh"
       />
       <p
         v-if="error || archive.error.value"
         role="alert"
-        class="mb-4 text-sm text-destructive"
+        class="mt-4 text-sm text-destructive"
       >
         {{ error || archive.error.value }}
       </p>
-      <div v-if="archive.pending.value" class="mb-4 flex flex-wrap items-center gap-3" role="status">
+      <div v-if="archive.pending.value" class="mt-4 flex flex-wrap items-center gap-3" role="status">
         <span class="text-sm text-muted-foreground">{{ tr("Archivierungsaktion noch nicht bestätigt.", "Archive action awaiting confirmation.") }}</span>
         <Button variant="outline" size="sm" :disabled="archive.busy.value || !available" @click="retryArchive">
           {{ tr("Erneut prüfen", "Check again") }}
         </Button>
       </div>
-      <section v-if="panel === 'edit'" aria-label="Edit task">
+      <section v-if="panel === 'edit'" class="mt-4" aria-label="Edit task">
         <TaskEditor
           :workspace="workspace"
           :available="available"
@@ -709,142 +832,358 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
           @cancel="panel = ''"
         />
       </section>
-      <div v-else class="task-detail-grid">
-        <div class="min-w-0 space-y-8 [grid-area:main]" @click="openAttachmentLink">
-          <section class="space-y-2" aria-labelledby="task-description">
-            <h2
-              id="task-description"
-              class="text-sm font-semibold text-muted-foreground"
-            >
-              Description
-            </h2>
-            <div
-              v-if="task.value.value.value.fields.description"
-              :class="
-                descriptionNeedsCollapse && !descriptionExpanded
-                  ? 'max-h-60 overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]'
-                  : ''
-              "
-            >
-              <ContentView
-                :text="task.value.value.value.fields.description"
-                media-type="text/markdown"
-                :trusted-image-urls="images.urls.value"
-                :trusted-attachments="images.files.value"
-                :preview-image="previewImage"
-              />
-            </div>
-            <p v-else class="text-sm text-muted-foreground">
-              No description provided.
-            </p>
-            <Button
-              v-if="descriptionNeedsCollapse"
-              variant="link"
-              size="sm"
-              class="px-0"
-              @click="descriptionExpanded = !descriptionExpanded"
-              >{{ descriptionExpanded ? "Show less" : "Show more" }}</Button
-            >
-          </section>
-
-          <section
-            v-if="task.value.value.value.fields.acceptanceCriteria.length"
-            class="space-y-2"
-            aria-labelledby="task-acceptance"
-          >
-            <h2
-              id="task-acceptance"
-              class="text-sm font-semibold text-muted-foreground"
-            >
-              Acceptance criteria
-            </h2>
-            <ul class="list-disc space-y-1 pl-5 text-sm">
-              <li
-                v-for="criterion in task.value.value.value.fields
-                  .acceptanceCriteria"
-                :key="criterion"
+      <template v-else>
+      <TabsContent value="details" class="mt-5">
+        <div class="task-detail-grid">
+          <div class="min-w-0 space-y-8 [grid-area:main]" @click="openAttachmentLink">
+            <section class="space-y-2" aria-labelledby="task-description">
+              <h2
+                id="task-description"
+                class="text-sm font-semibold text-muted-foreground"
               >
-                <ContentView :text="criterion" media-type="text/markdown" :trusted-image-urls="images.urls.value" :trusted-attachments="images.files.value" :preview-image="previewImage" />
-              </li>
-            </ul>
-          </section>
-
-
-
+                Description
+              </h2>
+              <div
+                v-if="task.value.value.value.fields.description"
+                :class="
+                  descriptionNeedsCollapse && !descriptionExpanded
+                    ? 'max-h-60 overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]'
+                    : ''
+                "
+              >
+                <ContentView
+                  :text="task.value.value.value.fields.description"
+                  media-type="text/markdown"
+                  :trusted-image-urls="images.urls.value"
+                  :trusted-attachments="images.files.value"
+                  :preview-image="previewImage"
+                />
+              </div>
+              <p v-else class="text-sm text-muted-foreground">
+                No description provided.
+              </p>
+              <Button
+                v-if="descriptionNeedsCollapse"
+                variant="link"
+                size="sm"
+                class="px-0"
+                @click="descriptionExpanded = !descriptionExpanded"
+                >{{ descriptionExpanded ? "Show less" : "Show more" }}</Button
+              >
+            </section>
+            <section
+              v-if="task.value.value.value.fields.acceptanceCriteria.length"
+              class="space-y-2"
+              aria-labelledby="task-acceptance"
+            >
+              <h2
+                id="task-acceptance"
+                class="text-sm font-semibold text-muted-foreground"
+              >
+                Acceptance criteria
+              </h2>
+              <ul class="list-disc space-y-1 pl-5 text-sm">
+                <li
+                  v-for="criterion in task.value.value.value.fields
+                    .acceptanceCriteria"
+                  :key="criterion"
+                >
+                  <ContentView :text="criterion" media-type="text/markdown" :trusted-image-urls="images.urls.value" :trusted-attachments="images.files.value" :preview-image="previewImage" />
+                </li>
+              </ul>
+            </section>
+            <Disclosure
+              v-if="task.value.value.value.attachments.length"
+              v-model:open="attachmentsOpen"
+              :title="'Attachments (' + task.value.value.value.attachments.length + ')'"
+            >
+              <div v-if="attachmentsOpen" class="space-y-2">
+                <TaskAttachment
+                  v-for="attachment in task.value.value.value.attachments"
+                  :key="attachment.attachmentId"
+                  :attachment="attachment"
+                  :task-id="taskId"
+                  :load-image="images.load"
+                  :preview-image="previewImage"
+                />
+              </div>
+            </Disclosure>
+            <Disclosure v-model:open="historyOpen" title="History">
+              <TaskHistory v-if="historyOpen" :task-id="taskId" :workspace="workspace" />
+            </Disclosure>
+          </div>
+          <aside
+            class="min-w-0 space-y-6 [grid-area:aside] lg:self-start lg:border-l lg:pl-6"
+            aria-label="Task details"
+          >
+            <section aria-labelledby="task-properties">
+              <h2
+                id="task-properties"
+                class="mb-3 text-sm font-semibold text-muted-foreground"
+              >
+                Properties
+              </h2>
+              <PropertyList>
+                <PropertyItem label="Status"
+                  ><StatusBadge
+                    :label="stateLabel(task.value.value.value.workflowState)"
+                    :tone="statusTone(task.value.value.value.workflowState)"
+                /></PropertyItem>
+                <PropertyItem label="Worker">
+                  <Bot
+                    v-if="task.value.value.value.fields.control === 'agent'"
+                    class="size-4 text-muted-foreground"
+                    aria-hidden="true"
+                  /><User v-else class="size-4 text-muted-foreground" aria-hidden="true" />{{
+                    task.value.value.value.fields.control === "agent"
+                      ? "Agent"
+                      : "Me"
+                  }}
+                </PropertyItem>
+                <PropertyItem label="Priority">{{
+                  priorityLabel(task.value.value.value.fields.priority)
+                }}</PropertyItem>
+                <PropertyItem label="Category">{{
+                  task.value.value.value.fields.category ?? "None"
+                }}</PropertyItem>
+                <PropertyItem
+                  v-if="task.value.value.value.fields.dueAt"
+                  label="Due"
+                  >{{
+                    new Date(task.value.value.value.fields.dueAt).toLocaleString()
+                  }}</PropertyItem
+                >
+                <PropertyItem
+                  v-if="task.value.value.value.fields.nextReviewAt"
+                  label="Next review"
+                  >{{
+                    new Date(
+                      task.value.value.value.fields.nextReviewAt,
+                    ).toLocaleString()
+                  }}</PropertyItem
+                >
+                <PropertyItem label="Updates">{{
+                  {
+                    ticket: "Ticket only",
+                    chat: "Ticket and main chat",
+                    phone: "Ticket and voice call",
+                  }[task.value.value.value.fields.userContact] ??
+                  task.value.value.value.fields.userContact
+                }}</PropertyItem>
+              </PropertyList>
+            </section>
+            <section
+              v-if="task.value.value.value.fields.control === 'agent' || task.value.value.value.claim || agentTaskLink || nativeWorkAvailable"
+              aria-labelledby="task-execution"
+            >
+              <div class="mb-3 flex items-center justify-between gap-2">
+                <h2
+                  id="task-execution"
+                  class="text-sm font-semibold text-muted-foreground"
+                >
+                  Execution
+                </h2>
+                <Button
+                  v-if="writable && !terminal"
+                  variant="ghost"
+                  size="sm"
+                  class="h-7"
+                  @click="panel = 'edit'"
+                  ><Pencil aria-hidden="true" />{{ tr("Ändern", "Change") }}</Button
+                >
+              </div>
+              <PropertyList>
+                <PropertyItem label="Host">{{
+                  executionTarget(task.value.value.value.fields)
+                }}</PropertyItem>
+                <PropertyItem
+                  v-if="task.value.value.value.fields.requiredCapabilities?.length"
+                  label="Dependencies"
+                  >{{
+                    task.value.value.value.fields.requiredCapabilities.join(", ")
+                  }}</PropertyItem
+                >
+                <PropertyItem label="Project"
+                  ><span class="break-all">{{
+                    projectLabel(task.value.value.value.fields.workspaceRequirement)
+                  }}</span></PropertyItem
+                >
+                <PropertyItem
+                  v-if="(task.value.value.value.fields.workspaceRequirement.kind === 'existing_project' && !task.value.value.value.fields.workspaceRequirement.useWorktree) || task.value.value.value.fields.workspaceRequirement.kind === 'directory_path'"
+                  label="Project scheduling">{{ task.value.value.value.fields.allowParallel ? 'Parallel' : 'Sequential' }}</PropertyItem>
+                <PropertyItem v-if="task.value.value.value.claim" label="Run"
+                  >{{ task.value.value.value.claim.phase }} on
+                  {{ task.value.value.value.claim.target.hostId }}</PropertyItem
+                >
+                <PropertyItem
+                  v-if="task.value.value.value.claim"
+                  label="Directory"
+                  ><span class="font-mono text-xs break-all">{{
+                    task.value.value.value.claim.workspace.canonicalCwd
+                  }}</span></PropertyItem
+                >
+                <PropertyItem label="Model">{{
+                  inherited(
+                    task.value.value.value.fields.nativeOptions?.model,
+                    executionDefaults.defaults.value?.nativeOptions.model,
+                    tr("Host-Standard", "Host default"),
+                  )
+                }}</PropertyItem>
+                <PropertyItem label="Reasoning">{{
+                  inherited(
+                    task.value.value.value.fields.nativeOptions?.reasoningEffort,
+                    executionDefaults.defaults.value?.nativeOptions
+                      .reasoningEffort,
+                    tr("Modell-Standard", "Model default"),
+                  )
+                }}</PropertyItem>
+                <PropertyItem label="Speed">{{
+                  inherited(
+                    task.value.value.value.fields.nativeOptions?.serviceTier,
+                    executionDefaults.defaults.value?.nativeOptions.serviceTier,
+                    "standard",
+                  )
+                }}</PropertyItem>
+              </PropertyList>
+              <Button
+                v-if="agentTaskLink"
+                variant="outline"
+                size="sm"
+                class="mt-3 w-full"
+                as-child
+                ><a :href="agentTaskLink"
+                  ><ExternalLink aria-hidden="true" />Open agent task</a
+                ></Button
+              >
+              <Button
+                v-if="nativeWorkAvailable"
+                variant="outline"
+                size="sm"
+                class="mt-2 h-auto min-h-9 w-full whitespace-normal py-2"
+                :disabled="!writable || !!task.value.value.value.claim"
+                @click="perform(tr('Neuen Codex-Chat starten', 'Start a new Codex chat'), {
+                  action: 'newThread', reason: 'Explicitly requested from the TaskBoard ticket.',
+                })"
+                ><Bot aria-hidden="true" />{{ tr('Neuen Codex-Chat starten', 'Start a new Codex chat') }}</Button
+              >
+            </section>
+            <section
+              v-if="task.value.value.value.fields.dependencies.length"
+              class="space-y-2"
+              aria-labelledby="task-dependencies"
+            >
+              <h2
+                id="task-dependencies"
+                class="text-sm font-semibold text-muted-foreground"
+              >
+                Blockers
+              </h2>
+              <a
+                v-for="item in dependencies.value.value"
+                :key="item.id"
+                :href="taskRoute(workspace.serviceNodeId, item.id)"
+                class="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"
+                ><span class="min-w-0 truncate">{{ item.title }}</span
+                ><StatusBadge
+                  :label="stateLabel(item.state)"
+                  :tone="statusTone(item.state)"
+              /></a>
+              <PageControls
+                v-if="task.value.value.value.fields.dependencies.length > 20"
+                :page="dependencyPage + 1"
+                :count="dependencies.value.value?.length ?? 0"
+                :has-next="
+                  (dependencyPage + 1) * 20 <
+                  task.value.value.value.fields.dependencies.length
+                "
+                :loading="dependencies.loading.value"
+                @previous="
+                  dependencyPage--;
+                  dependencies.refresh();
+                "
+                @next="
+                  dependencyPage++;
+                  dependencies.refresh();
+                "
+              />
+            </section>
+            <p class="border-t pt-4 text-xs text-muted-foreground">
+              Created
+              {{ new Date(task.value.value.value.createdAt).toLocaleString() }}
+              <br />Updated
+              {{ new Date(task.value.value.value.updatedAt).toLocaleString() }}
+              <br />Revision {{ task.value.value.pin.revision }} · work
+              {{ task.value.value.value.workRevision }}
+            </p>
+          </aside>
         </div>
-        <section
-          class="min-w-0 space-y-3 [grid-area:activity]"
-          aria-labelledby="task-activity"
-        >
-            <h2 id="task-activity" class="sr-only">Activity</h2>
-            <Tabs default-value="comments">
-              <TabsList class="max-w-full justify-start overflow-x-auto">
-                <TabsTrigger value="comments"
-                  >Comments ({{
-                    task.value.value.value.comments.filter((comment) => !(comment.authorKind === 'system' && comment.body === 'Ticket edited')).length
-                  }})</TabsTrigger
-                >
-                <TabsTrigger value="history">History</TabsTrigger>
-              </TabsList>
+      </TabsContent>
 
-              <TabsContent value="comments" class="mt-3 space-y-4">
-                <template v-for="section in commentSections" :key="section">
-                <template v-if="section === 'comments'">
-                <p
-                  v-if="!task.value.value.value.comments.length"
-                  class="text-sm text-muted-foreground"
+      <TabsContent
+        value="chat"
+        class="ivy-chat-surface ivy-conversation min-h-[60dvh] px-3 pt-2 pb-4 sm:px-6"
+        :class="sheet ? 'mt-0 -mx-5 sm:-mx-8' : 'mt-4 rounded-xl'"
+        aria-label="Conversation"
+      >
+        <div class="mx-auto flex max-w-3xl flex-col gap-1">
+          <template v-for="section in commentSections" :key="section">
+            <template v-if="section === 'comments'">
+              <p v-if="!task.value.value.value.comments.length" class="py-8 text-center text-sm text-muted-foreground">
+                {{ tr("Noch keine Nachrichten.", "No messages yet.") }}
+              </p>
+              <ol v-else class="flex min-w-0 flex-col gap-1" @click="openAttachmentLink">
+                <li
+                  v-for="entry in chatEntries"
+                  :id="'comment-' + entry.comment.commentId"
+                  :key="entry.comment.commentId"
+                  class="min-w-0 scroll-mt-32"
                 >
-                  No comments yet.
-                </p>
-                <ol v-else class="space-y-3">
-                  <li
-                    v-for="comment in displayComments"
-                    :key="comment.commentId"
+                  <p
+                    v-if="entry.comment.commentId === firstUnreadId"
+                    class="mt-3 flex items-center gap-3 text-xs font-semibold"
+                  ><span class="h-px flex-1 bg-foreground/50" />{{ tr("Neu", "New") }}<span class="h-px flex-1 bg-foreground/50" /></p>
+                  <p v-if="entry.stamp" class="ivy-chat-stamp">{{ entry.stamp }}</p>
+                  <p
+                    v-if="entry.kind === 'event'"
+                    class="py-1 text-center text-xs text-muted-foreground"
                   >
-                    <p v-if="comment.authorKind === 'system' && comment.body === 'Ticket edited'"
-                      class="px-1 text-xs text-muted-foreground">
-                      {{ tr('Ticket bearbeitet', 'Ticket edited') }} · {{ new Date(comment.createdAt).toLocaleString() }}
-                    </p>
-                    <CommentCard
-                      v-else
-                      :author="
-                        comment.authorKind === 'agent'
-                          ? 'Agent'
-                          : comment.authorKind === 'user'
-                            ? 'You'
-                            : comment.authorKind
-                      "
-                      :meta="new Date(comment.createdAt).toLocaleString()"
-                      ><template #icon
-                        ><span
-                          class="flex size-5 shrink-0 items-center justify-center rounded-full bg-background text-muted-foreground ring-1 ring-border"
-                          aria-hidden="true"
-                          ><Bot
-                            v-if="comment.authorKind === 'agent'"
-                            class="size-3" /><User v-else class="size-3" /></span
-                      ></template>
-                      <Button v-if="comment.sourceTaskId" as-child variant="link" size="sm" class="h-auto px-0">
-                        <a :href="taskRoute(workspace.serviceNodeId, comment.sourceTaskId)">From another task</a>
-                      </Button>
+                    {{ entry.comment.body === 'Ticket edited' ? tr('Ticket bearbeitet', 'Ticket edited') : entry.comment.body }}
+                  </p>
+                  <ConversationMessage
+                    v-else
+                    :variant="entry.kind"
+                    :label="entry.kind === 'reply' ? 'Agent' : ''"
+                    :class="entry.kind === 'user' ? 'mt-1' : ''"
+                  >
+                    <template v-if="entry.kind === 'external'" #label>
+                      <SquareKanban class="size-3.5 shrink-0" aria-hidden="true" />
+                      <a
+                        :href="taskRoute(workspace.serviceNodeId, entry.comment.sourceTaskId!)"
+                        class="inline-flex min-w-0 items-center gap-1 hover:underline"
+                      ><span class="shrink-0 font-semibold text-foreground">{{ senderName(entry.comment) }}</span
+                      ><span v-if="sourceTask(entry.comment.sourceTaskId!)" class="truncate">{{ sourceTask(entry.comment.sourceTaskId!)!.title }}</span
+                      ><ExternalLink class="size-3 shrink-0" aria-hidden="true" /></a>
+                    </template>
+                    <div class="min-w-0 space-y-3">
                       <ExpandableContent
-                        v-if="!comment.nativeInput || comment.replyTo || nativeInput(comment)?.state === 'answered' || nativeInput(comment)?.state === 'expired'"
-                        :enabled="commentPreferences.collapseOlder && comment.commentId !== newestCommentId"
+                        v-if="!entry.comment.nativeInput || entry.comment.replyTo || nativeInput(entry.comment)?.state === 'answered' || nativeInput(entry.comment)?.state === 'expired'"
+                        :enabled="commentPreferences.collapseOlder && entry.comment.commentId !== newestCommentId"
                         :show-more-label="tr('Mehr anzeigen', 'Show more')"
                         :show-less-label="tr('Weniger anzeigen', 'Show less')"
                       >
-                      <ContentView
-                        :text="comment.body"
-                        media-type="text/markdown"
-                        :trusted-image-urls="images.urls.value"
-                        :trusted-attachments="images.files.value"
-                        :preview-image="previewImage"
-                      />
+                        <ContentView
+                          :text="entry.comment.body"
+                          media-type="text/markdown"
+                          :trusted-image-urls="images.urls.value"
+                          :trusted-attachments="images.files.value"
+                          :preview-image="previewImage"
+                        />
                       </ExpandableContent>
-                      <NativeInput v-if="comment.nativeInput && !comment.replyTo && !['answered', 'expired'].includes(nativeInput(comment)!.state)" compact
-                        :input="nativeInput(comment)!" :epoch="comment.nativeInput.identity.epoch"
+                      <NativeInput v-if="entry.comment.nativeInput && !entry.comment.replyTo && !['answered', 'expired'].includes(nativeInput(entry.comment)!.state)" compact
+                        :input="nativeInput(entry.comment)!" :epoch="entry.comment.nativeInput.identity.epoch"
                         :available="writable" :base="base" :client="client" @answered="refresh" />
                       <div
-                        v-for="request in comment.requests"
+                        v-for="request in entry.comment.requests"
                         :key="request.requestId"
                         class="rounded-lg border p-3 text-sm"
                       >
@@ -870,7 +1209,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                               answerApproval(
                                 request.requestId,
                                 'approved',
-                                comment.commentId,
+                                entry.comment.commentId,
                               )
                             "
                             >Approve</Button
@@ -883,7 +1222,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                               answerApproval(
                                 request.requestId,
                                 'rejected',
-                                comment.commentId,
+                                entry.comment.commentId,
                               )
                             "
                             >Reject</Button
@@ -891,7 +1230,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                         </div>
                       </div>
                       <p
-                        v-for="response in comment.responses"
+                        v-for="response in entry.comment.responses"
                         :key="response.requestId"
                         class="text-sm"
                       >
@@ -899,11 +1238,11 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                         {{ response.detail }}
                       </p>
                       <div
-                        v-if="unembedded(comment).length"
+                        v-if="unembedded(entry.comment).length"
                         class="space-y-2"
                       >
                         <TaskAttachment
-                          v-for="attachment in unembedded(comment)"
+                          v-for="attachment in unembedded(entry.comment)"
                           :key="attachment.attachmentId"
                           :attachment="attachment"
                           :task-id="taskId"
@@ -911,263 +1250,76 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
                           :preview-image="previewImage"
                         />
                       </div>
-                    </CommentCard>
-                  </li>
-                </ol>
-                </template>
-                <template v-else>
-                <p v-if="task.value.value.read.object.effectivelyArchived" role="status" class="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
-                  This task is archived. Restore it from the task actions to comment or change it.
-                </p>
-                <div v-else class="space-y-2">
-                  <MarkdownEditor
-                    ref="commentInput"
-                    v-model="commentBody"
-                    variant="field"
-                    label="Comment"
-                    placeholder="Add a comment. Agent-controlled work will receive it automatically."
-                    :disabled="!editable"
-                    :trusted-image-urls="images.urls.value"
-                    :trusted-attachments="images.files.value"
-                    :upload-file="uploadFile"
-                  ><template #actions><WikiLinkPicker :disabled="!writable" @select="commentInput?.insertMarkdown($event)" /></template></MarkdownEditor>
-                  <div class="flex flex-wrap items-center gap-2">
-                    <Label v-if="task.value.value.value.workflowState === 'done' && writable" class="flex items-center gap-2">
-                      <Checkbox v-model="moveToTodo" :disabled="!writable" />
-                      {{ tr('Nach Todo verschieben', 'Move to Todo') }}
-                    </Label>
-                    <span v-if="uploading" role="status" class="text-sm text-muted-foreground">Uploading…</span>
-                    <Button
-                      size="sm"
-                      class="ml-auto"
-                      :disabled="!writable || !commentBody.trim() || uploading"
-                      @click="submitComment"
-                      >Add comment</Button
-                    >
-                  </div>
+                    </div>
+                  </ConversationMessage>
+                </li>
+              </ol>
+            </template>
+            <template v-else>
+              <p v-if="task.value.value.read.object.effectivelyArchived" role="status" class="my-3 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
+                This task is archived. Restore it from the task actions to comment or change it.
+              </p>
+              <div
+                v-else
+                class="space-y-2 py-3"
+                :class="commentPreferences.order === 'newest-first' ? '' : 'sticky bottom-0 bg-gradient-to-t from-[var(--muted)] from-70% to-transparent pt-6 dark:from-[var(--background)]'"
+              >
+                <MarkdownEditor
+                  ref="commentInput"
+                  v-model="commentBody"
+                  variant="field"
+                  label="Comment"
+                  placeholder="Add a comment. Agent-controlled work will receive it automatically."
+                  :disabled="!editable"
+                  :trusted-image-urls="images.urls.value"
+                  :trusted-attachments="images.files.value"
+                  :upload-file="uploadFile"
+                ><template #actions><WikiLinkPicker :disabled="!writable" @select="commentInput?.insertMarkdown($event)" /></template></MarkdownEditor>
+                <div class="flex flex-wrap items-center gap-2">
+                  <Label v-if="task.value.value.value.workflowState === 'done' && writable" class="flex items-center gap-2">
+                    <Checkbox v-model="moveToTodo" :disabled="!writable" />
+                    {{ tr('Nach Todo verschieben', 'Move to Todo') }}
+                  </Label>
+                  <span v-if="uploading" role="status" class="text-sm text-muted-foreground">Uploading…</span>
+                  <Button
+                    size="sm"
+                    class="ml-auto"
+                    :disabled="!writable || !commentBody.trim() || uploading"
+                    @click="submitComment"
+                    >Add comment</Button
+                  >
                 </div>
-                </template>
-                </template>
-                <Disclosure
-                  v-if="task.value.value.value.attachments.length"
-                  v-model:open="attachmentsOpen"
-                  :title="'Attachments (' + task.value.value.value.attachments.length + ')'"
-                  class="border-t pt-3"
-                >
-                  <div v-if="attachmentsOpen" class="space-y-2">
-                    <TaskAttachment
-                      v-for="attachment in task.value.value.value.attachments"
-                      :key="attachment.attachmentId"
-                      :attachment="attachment"
-                      :task-id="taskId"
-                      :load-image="images.load"
-                      :preview-image="previewImage"
-                    />
-                  </div>
-                </Disclosure>
-              </TabsContent>
+              </div>
+            </template>
+          </template>
+        </div>
+        <Button
+          v-if="arrived"
+          size="sm"
+          class="fixed bottom-24 left-1/2 z-20 -translate-x-1/2 rounded-full shadow-lg"
+          @click="showArrived"
+        >{{ tr("Neue Nachricht von ", "New message from ") + senderName(arrived) }}<ArrowDown aria-hidden="true" /></Button>
+      </TabsContent>
 
-              <TabsContent value="history" class="mt-3">
-                <TaskHistory :task-id="taskId" :workspace="workspace" />
-              </TabsContent>
-            </Tabs>
-        </section>
-
-        <aside
-          class="min-w-0 space-y-6 [grid-area:aside] lg:self-start lg:border-l lg:pl-6"
-          aria-label="Task details"
-        >
-          <section aria-labelledby="task-properties">
-            <h2
-              id="task-properties"
-              class="mb-3 text-sm font-semibold text-muted-foreground"
-            >
-              Properties
-            </h2>
-            <PropertyList>
-              <PropertyItem label="Status"
-                ><StatusBadge
-                  :label="stateLabel(task.value.value.value.workflowState)"
-                  :tone="statusTone(task.value.value.value.workflowState)"
-              /></PropertyItem>
-              <PropertyItem label="Worker">
-                <Bot
-                  v-if="task.value.value.value.fields.control === 'agent'"
-                  class="size-4 text-muted-foreground"
-                  aria-hidden="true"
-                /><User v-else class="size-4 text-muted-foreground" aria-hidden="true" />{{
-                  task.value.value.value.fields.control === "agent"
-                    ? "Agent"
-                    : "Me"
-                }}
-              </PropertyItem>
-              <PropertyItem label="Priority">{{
-                priorityLabel(task.value.value.value.fields.priority)
-              }}</PropertyItem>
-              <PropertyItem label="Category">{{
-                task.value.value.value.fields.category ?? "None"
-              }}</PropertyItem>
-              <PropertyItem
-                v-if="task.value.value.value.fields.dueAt"
-                label="Due"
-                >{{
-                  new Date(task.value.value.value.fields.dueAt).toLocaleString()
-                }}</PropertyItem
-              >
-              <PropertyItem
-                v-if="task.value.value.value.fields.nextReviewAt"
-                label="Next review"
-                >{{
-                  new Date(
-                    task.value.value.value.fields.nextReviewAt,
-                  ).toLocaleString()
-                }}</PropertyItem
-              >
-              <PropertyItem label="Updates">{{
-                {
-                  ticket: "Ticket only",
-                  chat: "Ticket and main chat",
-                  phone: "Ticket and voice call",
-                }[task.value.value.value.fields.userContact] ??
-                task.value.value.value.fields.userContact
-              }}</PropertyItem>
-            </PropertyList>
-          </section>
-          <section
-            v-if="task.value.value.value.fields.control === 'agent' || task.value.value.value.claim || agentTaskLink || nativeWorkAvailable"
-            aria-labelledby="task-execution"
-          >
-            <h2
-              id="task-execution"
-              class="mb-3 text-sm font-semibold text-muted-foreground"
-            >
-              Execution
-            </h2>
-            <PropertyList>
-              <PropertyItem label="Host">{{
-                executionTarget(task.value.value.value.fields)
-              }}</PropertyItem>
-              <PropertyItem
-                v-if="task.value.value.value.fields.requiredCapabilities?.length"
-                label="Dependencies"
-                >{{
-                  task.value.value.value.fields.requiredCapabilities.join(", ")
-                }}</PropertyItem
-              >
-              <PropertyItem label="Project"
-                ><span class="break-all">{{
-                  projectLabel(task.value.value.value.fields.workspaceRequirement)
-                }}</span></PropertyItem
-              >
-              <PropertyItem
-                v-if="(task.value.value.value.fields.workspaceRequirement.kind === 'existing_project' && !task.value.value.value.fields.workspaceRequirement.useWorktree) || task.value.value.value.fields.workspaceRequirement.kind === 'directory_path'"
-                label="Project scheduling">{{ task.value.value.value.fields.allowParallel ? 'Parallel' : 'Sequential' }}</PropertyItem>
-              <PropertyItem v-if="task.value.value.value.claim" label="Run"
-                >{{ task.value.value.value.claim.phase }} on
-                {{ task.value.value.value.claim.target.hostId }}</PropertyItem
-              >
-              <PropertyItem
-                v-if="task.value.value.value.claim"
-                label="Directory"
-                ><span class="font-mono text-xs break-all">{{
-                  task.value.value.value.claim.workspace.canonicalCwd
-                }}</span></PropertyItem
-              >
-              <PropertyItem label="Model">{{
-                inherited(
-                  task.value.value.value.fields.nativeOptions?.model,
-                  executionDefaults.defaults.value?.nativeOptions.model,
-                  tr("Host-Standard", "Host default"),
-                )
-              }}</PropertyItem>
-              <PropertyItem label="Reasoning">{{
-                inherited(
-                  task.value.value.value.fields.nativeOptions?.reasoningEffort,
-                  executionDefaults.defaults.value?.nativeOptions
-                    .reasoningEffort,
-                  tr("Modell-Standard", "Model default"),
-                )
-              }}</PropertyItem>
-              <PropertyItem label="Speed">{{
-                inherited(
-                  task.value.value.value.fields.nativeOptions?.serviceTier,
-                  executionDefaults.defaults.value?.nativeOptions.serviceTier,
-                  "standard",
-                )
-              }}</PropertyItem>
-            </PropertyList>
-            <Button
-              v-if="agentTaskLink"
-              variant="outline"
-              size="sm"
-              class="mt-3 w-full"
-              as-child
-              ><a :href="agentTaskLink"
-                ><ExternalLink aria-hidden="true" />Open agent task</a
-              ></Button
-            >
-            <Button
-              v-if="nativeWorkAvailable"
-              variant="outline"
-              size="sm"
-              class="mt-2 h-auto min-h-9 w-full whitespace-normal py-2"
-              :disabled="!writable || !!task.value.value.value.claim"
-              @click="perform(tr('Neuen Codex-Chat starten', 'Start a new Codex chat'), {
-                action: 'newThread', reason: 'Explicitly requested from the TaskBoard ticket.',
-              })"
-              ><Bot aria-hidden="true" />{{ tr('Neuen Codex-Chat starten', 'Start a new Codex chat') }}</Button
-            >
-          </section>
-          <section
-            v-if="task.value.value.value.fields.dependencies.length"
-            class="space-y-2"
-            aria-labelledby="task-dependencies"
-          >
-            <h2
-              id="task-dependencies"
-              class="text-sm font-semibold text-muted-foreground"
-            >
-              Blockers
-            </h2>
-            <a
-              v-for="item in dependencies.value.value"
-              :key="item.id"
-              :href="taskRoute(workspace.serviceNodeId, item.id)"
-              class="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"
-              ><span class="min-w-0 truncate">{{ item.title }}</span
-              ><StatusBadge
-                :label="stateLabel(item.state)"
-                :tone="statusTone(item.state)"
+      <TabsContent value="agent" class="mt-4">
+        <template v-if="agentEmbedLink">
+          <p class="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
+            <Bot class="size-3.5" aria-hidden="true" />{{ hostPill }}
+            <a :href="agentTaskLink!" target="_top" class="ml-auto inline-flex items-center gap-1 underline-offset-4 hover:underline"
+              >{{ tr("In AgentManager öffnen", "Open in AgentManager") }}<ExternalLink class="size-3" aria-hidden="true"
             /></a>
-            <PageControls
-              v-if="task.value.value.value.fields.dependencies.length > 20"
-              :page="dependencyPage + 1"
-              :count="dependencies.value.value?.length ?? 0"
-              :has-next="
-                (dependencyPage + 1) * 20 <
-                task.value.value.value.fields.dependencies.length
-              "
-              :loading="dependencies.loading.value"
-              @previous="
-                dependencyPage--;
-                dependencies.refresh();
-              "
-              @next="
-                dependencyPage++;
-                dependencies.refresh();
-              "
-            />
-          </section>
-          <p class="border-t pt-4 text-xs text-muted-foreground">
-            Created
-            {{ new Date(task.value.value.value.createdAt).toLocaleString() }}
-            <br />Updated
-            {{ new Date(task.value.value.value.updatedAt).toLocaleString() }}
-            <br />Revision {{ task.value.value.pin.revision }} · work
-            {{ task.value.value.value.workRevision }}
           </p>
-        </aside>
-      </div>
+          <iframe
+            :src="agentEmbedLink"
+            :title="tr('Agent-Task', 'Agent task')"
+            class="h-[calc(100dvh-10rem)] min-h-[28rem] w-full rounded-xl border bg-background"
+          />
+        </template>
+        <p v-else class="rounded-lg bg-muted px-3 py-6 text-center text-sm text-muted-foreground">
+          {{ tr("Noch kein Agent-Task. Er erscheint hier, sobald ein Agent an diesem Ticket arbeitet.", "No agent task yet. It appears here once an agent works on this ticket.") }}
+        </p>
+      </TabsContent>
+      </template>
     </template>
     <ImagePreview
       v-model:open="imagePreviewOpen"
@@ -1184,7 +1336,7 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
       @retry="imagePreviewAttempt++"
     />
     <ObjectDeleteDialog v-model:open="deleteOpen" :client="client" :object-id="taskId" :expected-revision="task.value.value?.read.object.currentRevision ?? null" :label="'the ticket “' + (task.value.value?.value.taskKey ?? taskId) + '”'" consequence="This also deletes its attachments and related workflow records." :storage-key="'ivy.task-board.delete:' + base.href + ':' + taskId" @deleted="emit('deleted')" />
-  </div>
+  </Tabs>
 </template>
 <style scoped>
 .task-detail-grid {
@@ -1192,13 +1344,12 @@ const copyLink = () => void navigator.clipboard?.writeText(taskUrl(props.workspa
   min-width: 0;
   gap: 2rem;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "main" "activity" "aside";
+  grid-template-areas: "main" "aside";
 }
 @media (min-width: 1024px) {
   .task-detail-grid {
     grid-template-columns: minmax(0, 1fr) 17rem;
-    grid-template-areas: "main aside" "activity aside";
-    grid-template-rows: auto 1fr;
+    grid-template-areas: "main aside";
   }
 }
 @media (min-width: 1280px) {

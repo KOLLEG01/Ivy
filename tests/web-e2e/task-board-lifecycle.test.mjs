@@ -73,9 +73,12 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     await store.write('task-board/task', { ...original.value, primaryResourceRef: { serviceNodeId: 'browser-agent', namespace: 'codex', kind: 'thread', nativeId: 'saved-task' } },
       randomUUID(), { objectId: id, expectedRevision: original.pin.revision });
     const starts = () => f.current().sent.filter(frame => frame.method === 'thread/start').length;
-    await f.open('#/tasks?id=' + id + '&node=browser-task-board');
+    await f.open('#/tasks?id=' + id + '&node=browser-task-board&tab=details');
     const fresh = f.page.getByRole('button', { name: /^(Start a new Codex chat|Neuen Codex-Chat starten)$/ });
     await expect(fresh).toBeVisible(); await expect(fresh).toBeEnabled(); assert.equal(starts(), 0);
+    await f.page.getByRole('tab', { name: 'Agent', exact: true }).click();
+    await expect(f.page.locator('iframe[title="Agent task"]')).toHaveAttribute('src', /\/agents\/\?embed#\/task\?node=browser-agent&id=saved-task$/);
+    await f.page.getByRole('tab', { name: 'Details', exact: true }).click();
     const archiveAction = async name => {
       await f.page.getByRole('button', { name: 'More actions', exact: true }).click();
       await f.page.getByRole('menuitem', { name, exact: true }).click();

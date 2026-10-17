@@ -13,6 +13,8 @@ test("Task attachments choose a safe readable view or a download", () => {
   assert.equal(attachmentView("archive.mkv", "video/x-matroska"), "download");
   assert.equal(attachmentView("report.pdf", "application/pdf"), "pdf");
   assert.equal(attachmentView("data.json", "application/json"), "text");
+  assert.equal(attachmentView("report.html", "text/html"), "html");
+  assert.equal(attachmentView("report.htm", "application/octet-stream"), "html");
   assert.equal(attachmentView("bundle.zip", "application/zip"), "download");
   assert.equal(attachmentView("active.svg", "image/svg+xml"), "download");
 });

@@ -55,14 +55,16 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     });
     const hash = id => '#/tasks?node=browser-task-board&panel=sheet&id=' + id;
     await f.open(hash(first));
-    const inlineComment = f.page.locator('[data-slot="comment-card"]').filter({
+    const inlineComment = f.page.locator('[data-slot="conversation-message"]').filter({
       has: f.page.getByRole('button', { name: 'Enlarge First comment', exact: true }),
     });
     await inlineComment.getByRole('button', { name: 'Show more', exact: true }).click();
     await expect(f.page.getByRole('button', { name: 'Enlarge First comment', exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Enlarge attached.png', exact: true })).toBeVisible();
-    await expect(f.page.getByRole('button', { name: 'Enlarge Overview', exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Enlarge Foreign', exact: true })).toHaveCount(0);
+    await f.page.getByRole('tab', { name: 'Details', exact: true }).click();
+    await expect(f.page.getByRole('button', { name: 'Enlarge Overview', exact: true })).toBeVisible();
+    await f.page.getByRole('tab', { name: 'Chat', exact: true }).click();
     assert.equal(reads.get(remaining.object.objectId) ?? 0, 0);
     assert.equal(reads.get(foreign.object.objectId) ?? 0, 0);
 
@@ -103,6 +105,7 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     await f.page.getByRole('button', { name: 'Enlarge attached.png', exact: true }).click();
     await show('attached.png', 3);
     await f.page.keyboard.press('Escape');
+    await f.page.getByRole('tab', { name: 'Details', exact: true }).click();
     await f.page.getByRole('button', { name: 'Attachments (4)', exact: true }).click();
     await f.page.getByRole('button', { name: 'Enlarge overview.png', exact: true }).click();
     await show('overview.png', 1);
