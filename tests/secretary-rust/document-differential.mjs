@@ -9,6 +9,7 @@ import { docxBytes, word, pdfBytes } from '../secretary-document-fixture.mjs';
 
 const executable = process.argv[2];
 assert.ok(executable, 'Pass the test-only Rust document adapter executable.');
+const pdfWorker = process.argv.includes('--pdf-worker');
 function pdfStream(stream) {
   const objects = [...pdfBytes(['']).toString().matchAll(/\d+ 0 obj\n([\s\S]*?)\nendobj\n/g)].map(m => m[1]);
   objects[4] = `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}endstream`;
@@ -42,10 +43,13 @@ const cases = [
 ];
 const results = [];
 for (const [name, format, bytes] of cases) {
+  if (pdfWorker && format !== 'pdf') continue;
   let oracle;
   try { oracle = { value: JSON.parse(await extractDocument(format, bytes, 6 * 1024 * 1024)) }; }
   catch (error) { oracle = { code: /^media_[a-z_]+$/.test(error.code) ? error.code : 'media_document_invalid' }; }
-  const run = spawnSync(executable, [format], { input: bytes, windowsHide: true, timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+  const run = pdfWorker
+    ? spawnSync(process.execPath, [executable], { input: bytes, windowsHide: true, timeout: 35000, maxBuffer: 8 * 1024 * 1024 })
+    : spawnSync(executable, [format], { input: bytes, windowsHide: true, timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
   assert.equal(run.status, 0, `${name}: ${run.error ?? run.stderr}`);
   const actual = JSON.parse(run.stdout.toString());
   try { assert.deepEqual(actual, oracle); results.push({ name, pass: true }); }
