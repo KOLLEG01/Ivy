@@ -9,8 +9,14 @@ pub fn quote_argument(value: &[u16]) -> Vec<u16> {
             slashes += 1;
             continue;
         }
-        result.extend(std::iter::repeat_n(b'\\' as u16,
-            if character == b'"' as u16 { slashes * 2 + 1 } else { slashes }));
+        result.extend(std::iter::repeat_n(
+            b'\\' as u16,
+            if character == b'"' as u16 {
+                slashes * 2 + 1
+            } else {
+                slashes
+            },
+        ));
         result.push(character);
         slashes = 0;
     }
@@ -21,7 +27,10 @@ pub fn quote_argument(value: &[u16]) -> Vec<u16> {
 
 pub fn valid_job_name(name: &str) -> bool {
     name.strip_prefix("Global\\Ivy.").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.len() <= 128
-            && suffix.bytes().all(|ch| ch.is_ascii_alphanumeric() || b"._-".contains(&ch))
+        !suffix.is_empty()
+            && suffix.len() <= 128
+            && suffix
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || b"._-".contains(&ch))
     })
 }
