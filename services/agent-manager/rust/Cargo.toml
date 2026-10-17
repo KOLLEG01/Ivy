@@ -1,0 +1,19 @@
+[package]
+name = "ivy-agent-manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ivy-contracts.workspace = true
+ivy-store.workspace = true
+
+[[test]]
+name = "agent-state"
+path = "../../../tests/rust/agent-state.rs"
+
+[[test]]
+name = "agent-notifications"
+path = "../../../tests/rust/agent-notifications.rs"
