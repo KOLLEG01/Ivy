@@ -31,3 +31,7 @@ path = "../../../tests/secretary-rust/schedule-policy.rs"
 [[test]]
 name = "journal"
 path = "../../../tests/secretary-rust/journal.rs"
+
+[[test]]
+name = "spool"
+path = "../../../tests/secretary-rust/spool.rs"
