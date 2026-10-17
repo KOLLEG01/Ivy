@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ivy-contracts.workspace = true
 rusqlite.workspace = true
 
 [[test]]
@@ -19,3 +20,7 @@ path = "../../../tests/rust/chat-audio.rs"
 [[test]]
 name = "chat-output"
 path = "../../../tests/rust/chat-output.rs"
+
+[[test]]
+name = "chat-identity"
+path = "../../../tests/rust/chat-identity.rs"
