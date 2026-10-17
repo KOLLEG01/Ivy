@@ -1,13 +1,18 @@
 //! Native path operations shared by host configuration, launch and recovery.
-use std::{io, path::{Component, Path, PathBuf}};
+use std::{
+    io,
+    path::{Component, Path, PathBuf},
+};
 
 pub fn absolute(path: &Path) -> io::Result<PathBuf> {
     let path = std::path::absolute(path)?;
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::CurDir => {},
-            Component::ParentDir => { result.pop(); },
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
+            }
             component => result.push(component.as_os_str()),
         }
     }
@@ -26,7 +31,9 @@ pub fn inside(root: &Path, path: &Path) -> io::Result<bool> {
         Ok(Path::new(&path).starts_with(Path::new(&root)))
     }
     #[cfg(not(windows))]
-    { Ok(path.starts_with(root)) }
+    {
+        Ok(path.starts_with(root))
+    }
 }
 
 /// Resolve only the existing ancestor; future descendants are never created by
@@ -37,13 +44,17 @@ pub fn resolved_future_path(path: &Path) -> io::Result<PathBuf> {
     loop {
         match std::fs::canonicalize(&ancestor) {
             Ok(mut actual) => {
-                for member in suffix.iter().rev() { actual.push(member); }
+                for member in suffix.iter().rev() {
+                    actual.push(member);
+                }
                 return Ok(actual);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let name = ancestor.file_name().ok_or(error)?.to_os_string();
                 suffix.push(name);
-                if !ancestor.pop() { return Err(io::Error::other("Storage path has no existing ancestor.")); }
+                if !ancestor.pop() {
+                    return Err(io::Error::other("Storage path has no existing ancestor."));
+                }
             }
             Err(error) => return Err(error),
         }
