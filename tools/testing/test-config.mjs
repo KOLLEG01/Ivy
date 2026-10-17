@@ -173,6 +173,7 @@ export const rustTests = {
   'tests/secretary-rust/schedule-policy.rs': { package: 'ivy-secretary', test: 'schedule-policy' },
   'tests/secretary-rust/spool.rs': { package: 'ivy-secretary', test: 'spool' },
   'tests/rust/task-board-evidence.rs': { package: 'ivy-task-board', test: 'task-board-evidence' },
+  'tests/rust/task-board-operations.rs': { package: 'ivy-task-board', test: 'task-board-operations' },
 };
 
 // Only reviewed, isolated tests may reuse a successful result. Integration tests always run.
