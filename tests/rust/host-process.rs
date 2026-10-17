@@ -68,6 +68,51 @@ fn child_fixture() {
         "large" => {
             std::io::stdout().write_all(&vec![b'x'; 200000]).unwrap();
         }
+        "tree" | "tree-exit" => {
+            let root = PathBuf::from(std::env::var_os("IVY_PROCESS_TREE_ROOT").unwrap());
+            let mut descendant = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "child_fixture", "--nocapture"])
+                .env("IVY_PROCESS_FIXTURE", "sleep")
+                .spawn()
+                .unwrap();
+            std::fs::write(
+                root.join("identities"),
+                format!("{} {}", std::process::id(), descendant.id()),
+            )
+            .unwrap();
+            let until = std::time::Instant::now() + Duration::from_secs(30);
+            while std::time::Instant::now() < until {
+                if fixture == "tree-exit" && root.join("release").is_file() {
+                    // The Job owner, not this direct child, must retire descendants.
+                    std::process::exit(0);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = descendant.kill();
+            let _ = descendant.wait();
+        }
+        #[cfg(windows)]
+        "owner" => {
+            let root = PathBuf::from(std::env::var_os("IVY_PROCESS_TREE_ROOT").unwrap());
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (command, executables) = fixture_command();
+                let mut launch = context("tree");
+                launch
+                    .environment
+                    .insert("IVY_PROCESS_TREE_ROOT".into(), root.as_os_str().to_owned());
+                launch.job_name = Some(std::env::var("IVY_PROCESS_JOB_NAME").unwrap());
+                let process = process::spawn(&command, &root, &executables, launch)
+                    .await
+                    .unwrap();
+                std::fs::write(root.join("helper"), process.pid.to_string()).unwrap();
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let _ = process.stop(Duration::ZERO).await;
+            });
+        }
         _ => panic!("Unknown fixture"),
     }
 }
@@ -212,10 +257,8 @@ async fn exact_named_job_excludes_a_second_owner_and_disappears_after_stop() {
     assert!(!job_stopped(&name).unwrap());
     let mut launch = context("sleep");
     launch.job_name = Some(name.clone());
-    let second = process::spawn(&command, &root.0, &executables, launch)
-        .await
-        .unwrap();
-    assert_eq!(second.completion.wait().await.exit_code, Some(1));
+    let second = process::spawn(&command, &root.0, &executables, launch).await;
+    assert_eq!(second.err().unwrap().code, "spawn_failed");
     assert!(
         !job_stopped(&name).unwrap(),
         "the rejected launcher must leave the existing owner intact"
@@ -226,4 +269,151 @@ async fn exact_named_job_excludes_a_second_owner_and_disappears_after_stop() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(job_stopped(&name).unwrap());
+}
+
+#[cfg(windows)]
+mod retirement {
+    use super::*;
+    use std::os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
+    use windows_sys::Win32::{
+        Foundation::WAIT_OBJECT_0,
+        System::{
+            JobObjects::OpenJobObjectW,
+            Threading::{
+                OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess,
+                WaitForSingleObject,
+            },
+        },
+    };
+
+    fn process_handle(pid: u32) -> OwnedHandle {
+        let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid) };
+        assert!(!raw.is_null(), "{}", std::io::Error::last_os_error());
+        unsafe { OwnedHandle::from_raw_handle(raw) }
+    }
+    fn job_observer(name: &str) -> OwnedHandle {
+        let wide: Vec<_> = std::ffi::OsStr::new(name)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let raw = unsafe { OpenJobObjectW(0x0004, 0, wide.as_ptr()) };
+        assert!(!raw.is_null(), "{}", std::io::Error::last_os_error());
+        unsafe { OwnedHandle::from_raw_handle(raw) }
+    }
+    async fn tree_handles(root: &Root) -> Vec<OwnedHandle> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(root.0.join("identities")) {
+                let ids: Vec<u32> = text
+                    .split_whitespace()
+                    .filter_map(|id| id.parse().ok())
+                    .collect();
+                if ids.len() == 2 {
+                    return ids.into_iter().map(process_handle).collect();
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fixture did not publish identities"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    fn assert_retired(handles: &[OwnedHandle]) {
+        for handle in handles {
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) },
+                WAIT_OBJECT_0,
+                "completion preceded actual process termination"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn child_and_grandchild_retire_before_completion_with_external_job_handles() {
+        for launcher in [
+            env!("CARGO_BIN_EXE_ivy-job"),
+            env!("CARGO_BIN_EXE_ivy-host-job"),
+        ] {
+            for finish in ["normal", "stop", "launcher-crash"] {
+                let root = Root::new();
+                let (command, executables) = fixture_command();
+                let name = format!("Global\\Ivy.test-{}", uuid::Uuid::new_v4());
+                let mut launch = context(if finish == "normal" {
+                    "tree-exit"
+                } else {
+                    "tree"
+                });
+                launch.job_launcher = Some(launcher.into());
+                launch.job_name = Some(name.clone());
+                launch.raw_output = true;
+                launch.environment.insert(
+                    "IVY_PROCESS_TREE_ROOT".into(),
+                    root.0.as_os_str().to_owned(),
+                );
+                let process = process::spawn(&command, &root.0, &executables, launch)
+                    .await
+                    .unwrap();
+                let handles = tree_handles(&root).await;
+                let observer = job_observer(&name);
+                let result = match finish {
+                    "normal" => {
+                        std::fs::write(root.0.join("release"), b"exit").unwrap();
+                        tokio::time::timeout(Duration::from_secs(5), process.completion.wait())
+                            .await
+                            .unwrap()
+                    }
+                    "stop" => process.stop(Duration::from_millis(100)).await.unwrap(),
+                    _ => {
+                        let helper = process_handle(process.pid);
+                        assert_ne!(unsafe { TerminateProcess(helper.as_raw_handle(), 123) }, 0);
+                        tokio::time::timeout(Duration::from_secs(5), process.completion.wait())
+                            .await
+                            .unwrap()
+                    }
+                };
+                assert_eq!(result.error_code, None, "{finish}");
+                assert_retired(&handles);
+                assert!(
+                    !ivy_host_runtime::platform::windows_job::job_stopped(&name).unwrap(),
+                    "a held observer keeps the name alive after definite retirement"
+                );
+                drop(observer);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_death_retires_the_tree_even_with_an_external_job_handle() {
+        let root = Root::new();
+        let name = format!("Global\\Ivy.test-{}", uuid::Uuid::new_v4());
+        let mut owner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "child_fixture", "--nocapture"])
+            .env("IVY_PROCESS_FIXTURE", "owner")
+            .env("IVY_PROCESS_TREE_ROOT", &root.0)
+            .env("IVY_PROCESS_JOB_NAME", &name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let handles = tree_handles(&root).await;
+        let observer = job_observer(&name);
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while handles.iter().any(
+            |handle| unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } != WAIT_OBJECT_0,
+        ) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "parent death left a live child"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_retired(&handles);
+        drop(observer);
+    }
 }
