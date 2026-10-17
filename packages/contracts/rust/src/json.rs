@@ -17,7 +17,13 @@ impl From<String> for JsString {
 impl JsString {
     pub fn contains_ascii(&self, needle: &str) -> bool {
         debug_assert!(needle.is_ascii());
-        needle.is_empty() || self.0.windows(needle.len()).any(|window| window.iter().zip(needle.bytes()).all(|(a,b)| *a == u16::from(b)))
+        needle.is_empty()
+            || self.0.windows(needle.len()).any(|window| {
+                window
+                    .iter()
+                    .zip(needle.bytes())
+                    .all(|(a, b)| *a == u16::from(b))
+            })
     }
     pub fn to_utf8(&self) -> IvyResult<String> {
         String::from_utf16(&self.0).map_err(|_| invalid("String contains an unpaired surrogate."))
@@ -38,18 +44,28 @@ pub fn js_string(value: &IvyJson) -> JsString {
         IvyJson::Null => "null".into(),
         IvyJson::Bool(v) => (if *v { "true" } else { "false" }).into(),
         IvyJson::Number(v) => {
-            if v.is_nan() { "NaN".into() }
-            else if *v == f64::INFINITY { "Infinity".into() }
-            else if *v == f64::NEG_INFINITY { "-Infinity".into() }
-            else if *v == 0.0 { "0".into() }
-            else { ryu_js::Buffer::new().format(*v).into() }
-        },
+            if v.is_nan() {
+                "NaN".into()
+            } else if *v == f64::INFINITY {
+                "Infinity".into()
+            } else if *v == f64::NEG_INFINITY {
+                "-Infinity".into()
+            } else if *v == 0.0 {
+                "0".into()
+            } else {
+                ryu_js::Buffer::new().format(*v).into()
+            }
+        }
         IvyJson::Object(_) => "[object Object]".into(),
         IvyJson::Array(values) => {
-            let mut units=Vec::new();
-            for (index,value) in values.iter().enumerate() {
-                if index>0 { units.push(44); }
-                if !value.is_null() { units.extend(js_string(value).0); }
+            let mut units = Vec::new();
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    units.push(44);
+                }
+                if !value.is_null() {
+                    units.extend(js_string(value).0);
+                }
             }
             JsString(units)
         }
@@ -183,6 +199,20 @@ fn complexity() -> IvyError {
 /// Parse JSON with JSON.parse's duplicate-key replacement and f64 number semantics.
 /// Validation of safe numbers belongs to validate_json/canonical, not JSON.parse.
 pub fn parse(text: &str, maximum_bytes: usize) -> IvyResult<IvyJson> {
+    parse_with_options(text, maximum_bytes, ParseOptions::default())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParseOptions {
+    pub reject_duplicate_keys: bool,
+    /// Root object/array counts as one; scalar leaves do not add a container.
+    pub maximum_container_depth: Option<usize>,
+}
+pub fn parse_with_options(
+    text: &str,
+    maximum_bytes: usize,
+    options: ParseOptions,
+) -> IvyResult<IvyJson> {
     if text.len() > maximum_bytes {
         return Err(IvyError::new(
             "content_too_large",
@@ -193,6 +223,7 @@ pub fn parse(text: &str, maximum_bytes: usize) -> IvyResult<IvyJson> {
         bytes: text.as_bytes(),
         at: 0,
         nodes: 0,
+        options,
     };
     let value = p.value(0)?;
     p.space();
@@ -205,6 +236,7 @@ struct Parser<'a> {
     bytes: &'a [u8],
     at: usize,
     nodes: usize,
+    options: ParseOptions,
 }
 impl Parser<'_> {
     fn space(&mut self) {
@@ -237,6 +269,14 @@ impl Parser<'_> {
             return Err(complexity());
         }
         self.space();
+        if matches!(self.bytes.get(self.at), Some(b'[' | b'{'))
+            && self
+                .options
+                .maximum_container_depth
+                .is_some_and(|maximum| depth >= maximum)
+        {
+            return Err(complexity());
+        }
         match self.bytes.get(self.at).copied() {
             Some(b'"') => Ok(IvyJson::String(self.string()?)),
             Some(b'[') => {
@@ -265,6 +305,9 @@ impl Parser<'_> {
                         let key = self.string()?;
                         self.space();
                         self.expect(b':')?;
+                        if self.options.reject_duplicate_keys && v.get_key(&key).is_some() {
+                            return Err(invalid("Duplicate JSON object property."));
+                        }
                         v.insert(key, self.value(depth + 1)?);
                         self.space();
                         if self.take(b'}') {
@@ -406,7 +449,18 @@ pub fn stringify(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, false, false)
 }
 pub fn validate_json(value: &IvyJson, maximum_bytes: usize) -> IvyResult<()> {
-    encode(value, maximum_bytes, false, true).map(|_| ())
+    // The JS validator checks the entire domain before checking wire size.
+    let encoded = encode(value, usize::MAX, false, true)?;
+    if encoded.len() > maximum_bytes {
+        return Err(too_large());
+    }
+    Ok(())
+}
+fn too_large() -> IvyError {
+    IvyError::new(
+        "content_too_large",
+        "JSON exceeds the configured byte limit.",
+    )
 }
 fn encode(
     value: &IvyJson,
@@ -420,6 +474,7 @@ fn encode(
         nodes: 0,
         sorted,
         validate,
+        accounted: 0,
     };
     encoder.value(value, 0)?;
     Ok(encoder.out)
@@ -430,17 +485,28 @@ struct Encoder {
     nodes: usize,
     sorted: bool,
     validate: bool,
+    accounted: usize,
 }
 impl Encoder {
     fn emit(&mut self, text: &str) -> IvyResult<()> {
-        if self.out.len().saturating_add(text.len()) > self.maximum_bytes {
-            return Err(IvyError::new(
-                "content_too_large",
-                "JSON exceeds the configured byte limit.",
-            ));
-        }
+        self.account(text.len())?;
         self.out.push_str(text);
         Ok(())
+    }
+    fn account(&mut self, bytes: usize) -> IvyResult<()> {
+        self.accounted = self.accounted.saturating_add(bytes);
+        if self.accounted > self.maximum_bytes {
+            return Err(too_large());
+        }
+        Ok(())
+    }
+    fn punctuation(&mut self, text: &str) -> IvyResult<()> {
+        if self.sorted {
+            self.out.push_str(text);
+            Ok(())
+        } else {
+            self.emit(text)
+        }
     }
     fn string(&mut self, s: &JsString) -> IvyResult<()> {
         self.emit("\"")?;
@@ -489,14 +555,18 @@ impl Encoder {
                 }
             }
             IvyJson::Array(values) => {
-                self.emit("[")?;
+                self.punctuation("[")?;
                 for (i, v) in values.iter().enumerate() {
                     if i > 0 {
-                        self.emit(",")?;
+                        self.punctuation(",")?;
                     }
                     self.value(v, depth + 1)?;
                 }
-                self.emit("]")
+                self.punctuation("]")?;
+                if self.sorted {
+                    self.account(2 + values.len().saturating_sub(1))?;
+                }
+                Ok(())
             }
             IvyJson::Object(pairs) => {
                 let mut indices: Vec<usize> = (0..pairs.len()).collect();
@@ -505,17 +575,21 @@ impl Encoder {
                 } else {
                     indices.sort_by_key(|i| array_index(&pairs[*i].0).map_or((1, 0), |n| (0, n)));
                 }
-                self.emit("{")?;
+                self.punctuation("{")?;
                 for (i, index) in indices.into_iter().enumerate() {
                     if i > 0 {
-                        self.emit(",")?;
+                        self.punctuation(",")?;
                     }
                     let (k, v) = &pairs[index];
                     self.string(k)?;
                     self.emit(":")?;
                     self.value(v, depth + 1)?;
                 }
-                self.emit("}")
+                self.punctuation("}")?;
+                if self.sorted {
+                    self.account(2 + pairs.len().saturating_sub(1))?;
+                }
+                Ok(())
             }
         }
     }
