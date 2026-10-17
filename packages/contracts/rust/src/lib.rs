@@ -5,6 +5,7 @@ pub mod hash;
 pub mod json;
 pub mod limits;
 pub mod operation;
+pub mod validation;
 
 pub use error::{IvyError, IvyResult, Outcome};
 pub use json::{IvyJson, JsString};
