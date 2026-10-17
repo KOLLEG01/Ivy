@@ -220,6 +220,7 @@ pub fn parse_with_options(
         ));
     }
     let mut p = Parser {
+        text,
         bytes: text.as_bytes(),
         at: 0,
         nodes: 0,
@@ -233,6 +234,7 @@ pub fn parse_with_options(
     Ok(value)
 }
 struct Parser<'a> {
+    text: &'a str,
     bytes: &'a [u8],
     at: usize,
     nodes: usize,
@@ -430,9 +432,9 @@ impl Parser<'_> {
                 32..=127 => out.push(b as u16),
                 _ => {
                     self.at -= 1;
-                    let tail = std::str::from_utf8(&self.bytes[self.at..])
-                        .map_err(|_| invalid("Invalid UTF-8 JSON."))?;
-                    let c = tail.chars().next().unwrap();
+                    // The input is already UTF-8; advance one whole scalar without
+                    // revalidating the remaining document for every non-ASCII byte.
+                    let c = self.text[self.at..].chars().next().unwrap();
                     self.at += c.len_utf8();
                     let mut units = [0; 2];
                     out.extend_from_slice(c.encode_utf16(&mut units));
