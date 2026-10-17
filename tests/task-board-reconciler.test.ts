@@ -38,6 +38,8 @@ test('periodic scans give recovery a turn even when the same waiting Task is alw
 const step = async (runtime: TaskBoardReconciler) => { await runtime.tick(); await runtime.settled(); };
 
 test('a conclusively rejected stale publication clears its recovery warning while uncertain conflicts remain visible', async t => {
+  let now = Date.now(), attempts = 0;
+  t.mock.method(Date, 'now', () => now);
   const f = taskBoardFixture(t), created = await f.create({ control: 'user' });
   await todo(f, created.task!);
   const operation = await f.first.operations.begin({ action: 'transition', operationId: randomUUID(),
@@ -45,10 +47,14 @@ test('a conclusively rejected stale publication clears its recovery warning whil
   { principalId: 'user', serviceNodeId: f.first.owner.serviceNodeId, generation: f.first.owner.generation, source: 'user' });
   await f.first.coordination.acquire(operation);
   const runtime = new TaskBoardReconciler(f.first), recover = f.first.recoverOperation.bind(f.first);
-  f.first.recoverOperation = async () => { throw new IvyError('revision_conflict', 'Fixture result is uncertain.', 'unknown'); };
+  f.first.recoverOperation = async () => { attempts++; throw new IvyError('revision_conflict', 'Fixture result is uncertain.', 'unknown'); };
   await step(runtime);
   assert.ok(runtime.diagnostics.some(value => value.code === 'revision_conflict'));
+  for (let pass = 0; pass < 6; pass++) await step(runtime);
+  assert.equal(attempts, 1, 'Both recovery lanes must respect the retry delay.');
+  assert.equal(runtime.recovered, true, 'A failed publication must not hold unrelated startup work.');
   f.first.recoverOperation = recover;
+  now += 30_001;
   await step(runtime);
   const terminal = await f.first.store.read('task-board/operation', operation.pin.objectId);
   assert.equal(terminal.value.phase, 'failed'); assert.equal(terminal.value.error?.execution, 'not_executed');
@@ -57,6 +63,8 @@ test('a conclusively rejected stale publication clears its recovery warning whil
 });
 
 test('a terminal native catalog refusal clears recovery health without hiding a failed gate cleanup', async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
   const f = taskBoardFixture(t), created = await f.create({ control: 'user' });
   const operation = await f.first.operations.begin({ action: 'archive', operationId: randomUUID(),
     taskId: created.task!.objectId, expectedRevision: created.task!.revision, archived: true },
@@ -69,9 +77,11 @@ test('a terminal native catalog refusal clears recovery health without hiding a 
   const refusal = new IvyError('not_found', 'The exact tool is not in the selected provider catalog.');
   await f.first.operations.failure(operation.pin.objectId, refusal, false);
   f.first.recoverOperation = async () => { throw new IvyError('service_unavailable', 'Gate cleanup cannot reach Hive.'); };
+  now += 30_001;
   await step(runtime);
   assert.ok(runtime.diagnostics.some(value => value.code === 'service_unavailable'));
   f.first.recoverOperation = recover;
+  now += 30_001;
   await step(runtime);
   assert.deepEqual(runtime.diagnostics, []);
   assert.equal((await f.first.store.read('task-board/operation', operation.pin.objectId)).value.error?.code, 'not_found');
@@ -244,9 +254,9 @@ test("an independent Task keeps progressing while another owner remains blocked"
   } finally { release(); await runtime.stop(); }
 });
 
-test("reconciliation admits at most ten Tasks, resumes its pending page and drains on stop", async t => {
+test("reconciliation admits at most twenty Tasks, resumes its pending page and drains on stop", async t => {
   const f = taskBoardFixture(t);
-  for (let index = 0; index < 12; index++) { const created = await f.create({ control: "agent" }); await todo(f, created.task!); }
+  for (let index = 0; index < 22; index++) { const created = await f.create({ control: "agent" }); await todo(f, created.task!); }
   const runtime = new TaskBoardReconciler(f.first);
   await step(runtime); await step(runtime);
   const releases: (() => void)[] = [];
@@ -258,13 +268,13 @@ test("reconciliation admits at most ten Tasks, resumes its pending page and drai
     await new Promise<void>(resolve => releases.push(resolve)); active--; return null;
   };
   try {
-    for (let pass = 0; pass < 3; pass++) await runtime.tick(); assert.equal(active, 10);
+    for (let pass = 0; pass < 3; pass++) await runtime.tick(); assert.equal(active, 20);
     releases[0]!(); await new Promise<void>(resolve => setImmediate(resolve));
-    for (let pass = 0; pass < 4; pass++) await runtime.tick(); assert.equal(seen.size, 11); assert.equal(active, 10);
+    for (let pass = 0; pass < 4; pass++) await runtime.tick(); assert.equal(seen.size, 21); assert.equal(active, 20);
     let stopped = false;
     const stop = runtime.stop().then(() => { stopped = true; });
-    await runtime.tick(); assert.equal(seen.size, 11); assert.equal(stopped, false);
+    await runtime.tick(); assert.equal(seen.size, 21); assert.equal(stopped, false);
     releases.forEach(release => release()); await stop;
-    assert.equal(maximum, 10); assert.equal(active, 0);
+    assert.equal(maximum, 20); assert.equal(active, 0);
   } finally { releases.forEach(release => release()); await runtime.stop(); }
 });

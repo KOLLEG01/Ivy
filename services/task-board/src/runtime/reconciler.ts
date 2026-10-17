@@ -9,6 +9,7 @@ import { syncNativeComments } from './native-comments.js';
 
 type Lane = TaskBoard.ScanCursor["lane"];
 const lanes: Lane[] = ["operations", "runs", "tasks", "deliveries"];
+const maxConcurrentTasks = 20;
 const queries = {
   operations: {
     key: "task-board/operation",
@@ -80,6 +81,7 @@ export class TaskBoardReconciler {
   private readonly pages = new Map<Lane, { ids: string[]; next: string | null; taskChanges: number }>();
   private readonly cursors = new Map<Lane, string | null>();
   private readonly failures = new Map<string, Wire.Diagnostic>();
+  private readonly operationRetries = new Map<string, number>();
   constructor(readonly engine: TaskBoardEngine) {
     this.native = new TaskBoardNativeOrchestrator(engine);
     this.scheduler = new TaskBoardScheduler(engine);
@@ -123,7 +125,7 @@ export class TaskBoardReconciler {
   private async process(lane: Lane, id: string) {
     try {
       if (lane === "operations") {
-        await this.engine.recoverOperation(id);
+        await this.recoverOperation(id);
         this.record('publication:' + id);
       }
       else if (lane === "deliveries")
@@ -150,6 +152,7 @@ export class TaskBoardReconciler {
       }
       this.record(id);
     } catch (error) {
+      if (lane === 'operations') { await this.publicationFailure(id, error, id); return; }
       // Conflicting current revisions are retried from fresh state on a later pass; they do not
       // authorize another mutation or prevent progress past unrelated blocked rows.
       if (
@@ -157,8 +160,7 @@ export class TaskBoardReconciler {
         ["revision_conflict", "task_board_publication_busy"].includes(error.code)
       )
         return;
-      if (lane === 'operations') await this.publicationFailure(id, error, id);
-      else this.record(id, error);
+      this.record(id, error);
     }
   }
   private async taskKey(lane: Lane, id: string): Promise<string> {
@@ -173,6 +175,15 @@ export class TaskBoardReconciler {
       .finally(() => { this.activeTasks.delete(key); });
     this.activeTasks.set(key, current);
   }
+  private async recoverOperation(id: string): Promise<void> {
+    try {
+      await this.engine.recoverOperation(id);
+      this.operationRetries.delete(id);
+    } catch (error) {
+      this.operationRetries.set(id, Date.now() + 30_000);
+      throw error;
+    }
+  }
   private async publicationFailure(id: string, error: unknown, key = 'publication:' + id): Promise<void> {
     const failure = IvyError.from(error);
     if (failure.outcome === 'not_executed') {
@@ -180,6 +191,7 @@ export class TaskBoardReconciler {
       // A terminal refusal remains action history, without an outstanding recovery fault.
       if (original?.value.phase === 'failed' && original.value.error?.execution === 'not_executed' &&
           original.value.error.code === failure.code && original.value.error.message === failure.message) {
+        this.operationRetries.delete(id);
         this.record(id); this.record('publication:' + id); return;
       }
     }
@@ -197,10 +209,10 @@ export class TaskBoardReconciler {
       try {
         const key = await this.taskKey("operations", id);
         if (this.stopped) return;
-        if (!this.activeTasks.has(key)) {
-          if (this.activeTasks.size >= 10) return;
+        if (!this.activeTasks.has(key) && (this.operationRetries.get(id) ?? 0) <= Date.now()) {
+          if (this.activeTasks.size >= maxConcurrentTasks) return;
           this.startTask(key, async () => {
-            try { await this.engine.recoverOperation(id); this.record(id); this.record("publication:" + id); }
+            try { await this.recoverOperation(id); this.record(id); this.record("publication:" + id); }
             catch (error) { await this.publicationFailure(id, error); }
           });
         }
@@ -251,8 +263,8 @@ export class TaskBoardReconciler {
       if (this.stopped) return false;
       // A busy Task is revisited on the next pass; other Tasks keep their slots.
       const active = this.activeTasks.has(key);
-      if (!active) {
-        if (this.activeTasks.size >= 10) return false;
+      if (!active && (lane !== "operations" || (this.operationRetries.get(id) ?? 0) <= Date.now())) {
+        if (this.activeTasks.size >= maxConcurrentTasks) return false;
         this.startTask(key, () => this.process(lane, id));
       }
       pending.ids.shift();

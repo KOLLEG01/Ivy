@@ -70,12 +70,15 @@ not part of the workspace `Definition` or the separate transcription-language se
 
 ChatBridge observes unresolved Hive warning/error diagnostics. A problem lasting five minutes
 enters Main once; resolution must remain stable for five minutes before one recovery notice.
+Diagnostics with the same visible service, error code and dependent service form one incident,
+independently of internal resource IDs. Recovery requires the entire group to remain healthy.
 Hive's shared quiet hours govern operational notices without depending on an optional service.
 Quiet periods retain current failures without queuing resolved incidents or recoveries for later
 delivery. WhatsApp also gates notice replies queued before quiet hours, while explicit user
 replies can progress. Paused notices keep their original message IDs and receipts. Requests
 and deduplication state survive restarts in the existing journal. Incomplete diagnostic reads
-cannot imply recovery. Short reconnects remain quiet, and failures of the notice mechanism
+cannot imply recovery. Combining incidents preserves all unfinished original delivery receipts.
+Short reconnects remain quiet, and failures of the notice mechanism
 itself remain visible as a diagnostic without recursively generating notices.
 Receive receipts save immutable reply snapshots before changing delivery state. If retention
 prunes an offered reply revision, recovery verifies its current immutable content against that

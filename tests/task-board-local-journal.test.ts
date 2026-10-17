@@ -104,6 +104,60 @@ test("a cleanup marker cannot discard an unobserved native call under history pr
   assert.ok(await workflow.f.first.store.read("task-board/native-call", call, false));
 });
 
+test("saturated history yields to requests and shares one reference scan across concurrent writers", async t => {
+  const f = taskBoardFixture(t), store = f.first.store;
+  const db = new DatabaseSync(join(f.plan.location!.cwd, "task-board.sqlite"));
+  try {
+    const at = new Date().toISOString();
+    const insert = (id: string, value: unknown) => {
+      db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,?)").run(id, "task-board/native-plan", id, null, 1, at, at);
+      db.prepare("INSERT INTO revisions VALUES(?,?,?,?)").run(id, 1, JSON.stringify(value), at);
+    };
+    for (let index = 0; index < 160; index++) {
+      insert("history-" + index, { fixture: index, payload: "x".repeat(4096) });
+      store.completeLocalWorkflow("history-" + index, at);
+    }
+    // Earlier roots are retained by a live checkpoint; later unreferenced roots
+    // must still be reached without repeatedly decoding that checkpoint.
+    insert("live-checkpoint", { pins: Array.from({ length: 128 }, (_, index) => "history-" + index) });
+    insert("uncertain", { error: { execution: "unknown" } });
+    store.completeLocalWorkflow("uncertain", at);
+    store.historyLimits.count = store.localUsage().revisions.rows;
+    const parsing = t.mock.method(JSON, "parse");
+    let servedRequests = 0;
+    const timer = setInterval(() => { servedRequests++; }, 0);
+    try {
+      await Promise.all(Array.from({ length: 20 }, () => store.collectLocal(Date.now(), 0, 1)));
+    } finally { clearInterval(timer); }
+    assert.ok(servedRequests > 0, "collection must let timers and request handlers run");
+    assert.ok(parsing.mock.callCount() < 400, "concurrent collection must not repeatedly decode the journal");
+    assert.ok(store.localUsage().revisions.rows < store.historyLimits.count - 10, "reclaim headroom for subsequent writes");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM documents WHERE id='uncertain' OR id='history-0'").get()?.["count"], 2);
+  } finally { db.close(); }
+});
+
+test("collection refreshes references written by another journal owner while yielding", async t => {
+  const f = taskBoardFixture(t), store = f.first.store;
+  const db = new DatabaseSync(join(f.plan.location!.cwd, "task-board.sqlite"));
+  try {
+    const at = new Date().toISOString();
+    for (let index = 0; index < 96; index++) {
+      db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,?)").run("yield-" + index, "task-board/native-plan", "yield-" + index, null, 1, at, at);
+      db.prepare("INSERT INTO revisions VALUES(?,?,?,?)").run("yield-" + index, 1, JSON.stringify({ fixture: index }), at);
+      store.completeLocalWorkflow("yield-" + index, at);
+    }
+    const collection = store.collectLocal(Date.now(), 0, store.historyLimits.count);
+    await new Promise<void>(resolve => setImmediate(() => {
+      db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,?)").run("new-reference", "task-board/native-plan", "new-reference", null, 1, at, at);
+      db.prepare("INSERT INTO revisions VALUES(?,?,?,?)").run("new-reference", 1, JSON.stringify({ pin: "yield-95" }), at);
+      resolve();
+    }));
+    await collection;
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM documents WHERE id IN ('new-reference','yield-95')").get()?.["count"], 2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM documents WHERE id='yield-0'").get()?.["count"], 0);
+  } finally { db.close(); }
+});
+
 test("the local scan cursor keeps only its current revision", async (t) => {
   const f = taskBoardFixture(t),
     at = new Date().toISOString();
@@ -138,6 +192,31 @@ test("the local scan cursor keeps only its current revision", async (t) => {
       .cursor,
     "next",
   );
+});
+
+test("advisory signals retain their current checkpoint and reclaim superseded observations on reopen", async t => {
+  const f = taskBoardFixture(t), store = f.first.store;
+  const value = { schemaVersion: 1 as const, run: { objectId: "fixture-run", revision: 1 },
+    serviceNodeId: "native-agent", nativeVersion: "0.154.0", epoch: "fixture-epoch", threadId: "thread", turnId: "turn",
+    observedAt: new Date().toISOString(), inputsTruncated: false, inputs: [], notificationCursor: 1,
+    notificationGap: false, notificationsPending: false, activity: [] };
+  const first = await store.write("task-board/native-signals", value, randomUUID(),
+    { create: { parentId: "fixture-run", name: "Native signals" } });
+  const second = await store.write("task-board/native-signals", { ...value, notificationCursor: 2 }, randomUUID(),
+    { objectId: first.objectId, expectedRevision: first.revision });
+  await assert.rejects(store.read("task-board/native-signals", first, false),
+    (error: unknown) => error instanceof IvyError && error.code === "task_board_evidence_mismatch");
+  const db = new DatabaseSync(join(f.plan.location!.cwd, "task-board.sqlite"));
+  try {
+    // Reproduce a journal that accumulated earlier advisory observations.
+    db.prepare("INSERT INTO revisions VALUES(?,?,?,?)").run(first.objectId, first.revision, JSON.stringify(value), value.observedAt);
+    const replacement = new TaskBoardStore(store.client, null, f.plan.location!.cwd);
+    try {
+      assert.equal((await replacement.read("task-board/native-signals", second, false)).value.notificationCursor, 2);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM revisions WHERE id=?").get(first.objectId)?.["count"], 1);
+      assert.equal(replacement.localUsage().revisions.rows, db.prepare("SELECT COUNT(*) AS count FROM revisions").get()?.["count"]);
+    } finally { replacement.close(); }
+  } finally { db.close(); }
 });
 
 test("a replacement runtime replays an ambiguous first Task reservation from the shared journal", async (t) => {

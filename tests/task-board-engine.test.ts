@@ -137,6 +137,28 @@ test("attachment identities do not become Hive reference names and leave room fo
   assert.deepEqual((await read("task-board/task", current.pin.objectId)).pin, current.pin);
 });
 
+test("attachment publication recovers a lost upload reply with a new workflow owner and rejects changed bytes", async t => {
+  const f = taskBoardFixture(t), created = await f.create();
+  const request: TaskBoard.UploadAttachmentRequest = { action: "uploadAttachment", operationId: randomUUID(),
+    taskId: created.task!.objectId, expectedRevision: created.task!.revision, attachmentId: randomUUID(),
+    filename: "plan.txt", mediaType: "text/plain", bytesBase64: Buffer.from("Retained plan bytes").toString("base64") };
+  let uploaded: TaskBoard.ObjectPin | null = null;
+  f.intercept((params, result) => {
+    if ("create" in params && params.create.contractKey === "task-board/attachment") {
+      uploaded = { objectId: result.object.id, revision: result.revision.revision };
+      throw new IvyError("connection_lost", "Upload committed before the reply was lost.", "unknown");
+    }
+  });
+  await assert.rejects(f.invoke(request), code("connection_lost"));
+  f.intercept(null);
+  const recovered = await f.invoke(request, "user", f.second);
+  assert.deepEqual(recovered.attachment?.object, uploaded);
+  const task = (await f.second.store.read("task-board/task", recovered.task!)).value;
+  assert.equal(task.publication, null); assert.equal(task.attachments.length, 1);
+  await assert.rejects(f.first.store.writeAttachment(request.taskId, randomUUID(), request.attachmentId,
+    Buffer.from("Different plan bytes")), code("task_board_evidence_mismatch"));
+});
+
 for (const bound of ["count", "bytes"] as const) {
   test(`a manual final Result publishes when comments reach the ${bound} limit`, async (t) => {
     const f = taskBoardFixture(t), created = await f.create({ userContact: "chat" });

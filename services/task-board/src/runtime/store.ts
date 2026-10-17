@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { statfsSync, statSync } from "node:fs";
 import { join, win32 } from "node:path";
+import { setImmediate as yieldToRequests } from "node:timers/promises";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
 import type {
   Operation,
@@ -53,6 +54,7 @@ export class TaskBoardStore {
   >();
   private readonly local: DatabaseSync;
   private readonly dataRoot: string | null;
+  private collection: Promise<void> | null = null;
   withReadCache<T>(work: () => Promise<T>): Promise<T> {
     return this.reads.getStore() ? work() : this.reads.run(new Map(), work);
   }
@@ -104,6 +106,9 @@ export class TaskBoardStore {
       CREATE TRIGGER IF NOT EXISTS blob_usage_delete AFTER DELETE ON blobs BEGIN
         UPDATE storage_usage SET rows=rows-1,bytes=bytes-length(OLD.bytes) WHERE kind='blobs';
       END;`);
+    // Advisory signals replace their earlier checkpoint; native receipts and evidence are separate records.
+    this.local.exec(`DELETE FROM revisions WHERE id IN (SELECT id FROM documents WHERE key='task-board/native-signals')
+      AND revision < (SELECT current_revision FROM documents WHERE documents.id=revisions.id)`);
     // An existing journal can predate incremental auto-vacuum. Convert it only
     // when SQLite has room for a complete temporary copy.
     if (dataRoot && Number(this.local.prepare("PRAGMA auto_vacuum").get()?.["auto_vacuum"]) === 0) {
@@ -195,11 +200,22 @@ export class TaskBoardStore {
     return row ? String(row["request_hash"]) : null;
   }
   async collectLocal(_now = Date.now(), reservedBytes = 0, reservedRows = 0, protectedId?: string, incoming?: unknown): Promise<void> {
-    const full = () => {
+    const full = (headroom = false) => {
       const usage = this.local.prepare("SELECT SUM(rows) AS rows,SUM(bytes) AS bytes FROM storage_usage").get()!;
-      return Number(usage["rows"]) + reservedRows > this.historyLimits.count || Number(usage["bytes"]) + reservedBytes > this.historyLimits.bytes;
+      const factor = headroom ? 0.9 : 1;
+      return Number(usage["rows"]) + reservedRows > this.historyLimits.count * factor || Number(usage["bytes"]) + reservedBytes > this.historyLimits.bytes * factor;
     };
     if (!full()) return;
+    const previous = this.collection;
+    const work = (async () => {
+      await previous;
+      if (full()) await this.collectLocalHistory(full, protectedId, incoming);
+    })();
+    this.collection = work.catch(() => undefined);
+    const current = this.collection;
+    try { await work; } finally { if (this.collection === current) this.collection = null; }
+  }
+  private async collectLocalHistory(full: (headroom?: boolean) => boolean, protectedId?: string, incoming?: unknown): Promise<void> {
     const incomingIds = new Set(protectedId ? [protectedId] : []);
     const references = (value: unknown, found: Set<string>): void => {
       if (typeof value === "string") found.add(value);
@@ -207,16 +223,60 @@ export class TaskBoardStore {
       else if (value && typeof value === "object") for (const part of Object.values(value)) references(part, found);
     };
     references(incoming, incomingIds);
+    // Decode each current document once, rather than the entire journal for every
+    // cleanup root. Refresh changed revisions after awaits before deciding deletion.
+    const documents = new Map<string, { revision: number; references: Set<string>; unresolved: boolean }>();
+    const referrers = new Map<string, Set<string>>();
+    let indexedVersion = "";
+    const databaseVersion = () => String(this.local.prepare("PRAGMA data_version").get()!["data_version"]) + ":" +
+      String(this.local.prepare("SELECT total_changes() AS changes").get()!["changes"]);
+    const forget = (id: string) => {
+      for (const target of documents.get(id)?.references ?? []) {
+        const sources = referrers.get(target)!; sources.delete(id);
+        if (!sources.size) referrers.delete(target);
+      }
+      documents.delete(id);
+    };
+    const refresh = async () => {
+      while (indexedVersion !== databaseVersion()) {
+        const version = databaseVersion();
+        const heads = this.local.prepare("SELECT id,key,current_revision FROM documents").all();
+        const live = new Set<string>();
+        for (const [index, head] of heads.entries()) {
+          const id = String(head["id"]), revision = Number(head["current_revision"]);
+          live.add(id);
+          if (documents.get(id)?.revision !== revision) {
+            const row = this.local.prepare("SELECT value_json FROM revisions WHERE id=? AND revision=?").get(id, revision);
+            if (row) {
+              const value = JSON.parse(String(row["value_json"]));
+              const found = new Set<string>(); references(value, found); forget(id);
+              documents.set(id, { revision, references: found, unresolved: hasUnresolvedOutcome(value) ||
+                head["key"] === "task-board/native-call" && (value.state !== "observed" || !["succeeded", "failed"].includes(value.ownerPhase)) });
+              for (const target of found) {
+                let sources = referrers.get(target);
+                if (!sources) referrers.set(target, sources = new Set());
+                sources.add(id);
+              }
+            }
+          }
+          if (index % 32 === 31) await yieldToRequests();
+        }
+        for (const id of documents.keys()) if (!live.has(id)) forget(id);
+        indexedVersion = version;
+      }
+    };
+    await refresh();
     const due = this.local
       .prepare("SELECT root_id FROM cleanup_roots ORDER BY delete_after,rowid")
       .all();
     for (const row of due) {
-      if (!full()) break;
+      if (!full(true)) break;
       const rootId = String(row["root_id"]);
       const before = this.local.prepare("SELECT current_revision,key,name FROM documents WHERE id=?").get(rootId);
       if (await this.retainedLocalRoot(rootId)) {
         continue;
       }
+      await refresh();
       const ids = this.local.prepare(`WITH RECURSIVE subtree(id) AS (
         SELECT ? UNION ALL SELECT documents.id FROM documents JOIN subtree ON documents.parent_id=subtree.id
       ) SELECT id FROM subtree`).all(rootId).map(value => String(value["id"]));
@@ -228,15 +288,8 @@ export class TaskBoardStore {
           this.local.exec("ROLLBACK"); continue;
         }
         const selected = new Set(ids);
-        const rows = this.local.prepare("SELECT d.id,d.key,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision").all();
-        const protectedReference = rows.some(row => {
-          const value = JSON.parse(String(row["value_json"]));
-          if (selected.has(String(row["id"])))
-            return hasUnresolvedOutcome(value) || row["key"] === "task-board/native-call" &&
-              (value.state !== "observed" || !["succeeded", "failed"].includes(value.ownerPhase));
-          const found = new Set<string>(); references(value, found);
-          return [...found].some(id => selected.has(id));
-        });
+        const protectedReference = ids.some(id => documents.get(id)?.unresolved ||
+          [...referrers.get(id) ?? []].some(source => !selected.has(source)));
         if (protectedReference) { this.local.exec("ROLLBACK"); continue; }
         if (before?.["key"] === "task-board/operation") {
           const operation = this.localDocument("task-board/operation", rootId, false).value;
@@ -759,7 +812,7 @@ export class TaskBoardStore {
             .run(destination.objectId, active.objectId);
           else this.local.prepare("DELETE FROM active_gates WHERE gate_id=?").run(destination.objectId);
         }
-        if (key === "task-board/scan-cursor" || key === "task-board/coordination")
+        if (key === "task-board/scan-cursor" || key === "task-board/coordination" || key === "task-board/native-signals")
           this.local
             .prepare("DELETE FROM revisions WHERE id=? AND revision<?")
             .run(destination.objectId, next);
@@ -892,18 +945,40 @@ export class TaskBoardStore {
       "task-board-attachment",
       operationId,
     ]);
-    const result = await this.client.request("objects.write", {
-      mutationId,
-      contractVersion: version,
-      references: {},
-      create: {
-        parentId: taskId,
-        ownerObjectId: taskId,
-        contractKey: "task-board/attachment",
-        name: "Task attachment " + attachmentId,
-      },
-      content: { encoding: "base64", value: bytes.toString("base64") },
-    });
+    const name = "Task attachment " + attachmentId;
+    let result: Operation.ObjectWriteResult;
+    try {
+      result = await this.client.request("objects.write", {
+        mutationId,
+        contractVersion: version,
+        references: {},
+        create: {
+          parentId: taskId,
+          ownerObjectId: taskId,
+          contractKey: "task-board/attachment",
+          name,
+        },
+        content: { encoding: "base64", value: bytes.toString("base64") },
+      });
+    } catch (error) {
+      if (!(error instanceof IvyError) || !["revision_conflict", "mutation_expired"].includes(error.code)) throw error;
+      const found = await this.client.request("objects.query", {
+        contractKey: "task-board/attachment", limit: 2,
+        where: { op: "and", args: [
+          { op: "eq", field: "object.parentId", value: taskId },
+          { op: "eq", field: "object.name", value: name },
+        ] },
+      });
+      requireThat(found.items.length === 1 && !found.nextCursor, "task_board_evidence_mismatch", "The original attachment identity is unavailable.");
+      const existing = await this.client.request("objects.read", { objectId: found.items[0]!.objectId });
+      requireThat(existing.object.parentId === taskId && existing.object.ownerObjectId === taskId &&
+        !existing.object.effectivelyArchived && existing.object.currentRevision === 1 && existing.revision.revision === 1 &&
+        existing.revision.contractVersion === version && existing.revision.byteLength === bytes.length &&
+        existing.revision.contentHash === digest(bytes) && existing.content.encoding === "base64" &&
+        Buffer.from(existing.content.value, "base64").equals(bytes),
+      "task_board_evidence_mismatch", "The retained attachment must match its exact original bytes and owner.");
+      return pinOf(existing);
+    }
     return pinOf(result);
   }
   async page<K extends ContractKey>(
@@ -918,7 +993,8 @@ export class TaskBoardStore {
     } = {},
   ) {
     if (localContractKeys.has(key)) {
-      const field = (document: Document<K>, path: string): unknown => {
+      type PageDocument = Pick<Document<K>, "pin" | "value"> & { metadata: { parentId: string | null } };
+      const field = (document: PageDocument, path: string): unknown => {
         if (path === "object.id") return document.pin.objectId;
         if (path === "object.parentId") return document.metadata.parentId;
         if (!path.startsWith("data:/")) return undefined;
@@ -931,7 +1007,7 @@ export class TaskBoardStore {
         return value;
       };
       const matches = (
-        document: Document<K>,
+        document: PageDocument,
         predicate: Wire.QueryPredicate,
       ): boolean => {
         if (predicate.op === "and" || predicate.op === "or")
@@ -962,10 +1038,15 @@ export class TaskBoardStore {
         return false;
       };
       const rows = this.local
-        .prepare("SELECT id FROM documents WHERE key=? ORDER BY id")
+        .prepare(`SELECT d.id,d.parent_id,d.current_revision,r.value_json FROM documents d
+          JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key=? ORDER BY d.id`)
         .all(key);
       const documents = rows
-        .map((row) => this.localDocument(key, String(row["id"]), false))
+        .map((row): PageDocument => ({
+          pin: { objectId: String(row["id"]), revision: Number(row["current_revision"]) },
+          metadata: { parentId: row["parent_id"] === null ? null : String(row["parent_id"]) },
+          value: JSON.parse(String(row["value_json"])) as ContractValues[K],
+        }))
         .filter((value) => !options.where || matches(value, options.where));
       const ordered = [...documents].sort((a, b) => {
         for (const order of options.orderBy ?? [

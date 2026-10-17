@@ -78,20 +78,31 @@ test('explicit task blockers resume automatically after the linked task finishes
   await assert.rejects(checkBlocker(w.f.first.store, { taskId: w.state().task.objectId, until: 'done' }), /to be done/);
 });
 
-test('directed messages wake review for coordination, while ordinary agent comments stay quiet', async t => {
+for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a blocked task' : 'review'} for coordination, while ordinary agent comments stay quiet`, async t => {
   const w = await nativeWorkflow(t); await w.running();
   const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
   const source = await w.f.planned('agent'), scheduler = new TaskBoardScheduler(w.f.first);
   await scheduler.task(source.task.objectId);
   let task = await w.f.first.store.read('task-board/task', finished.task!);
+  if (blocked) {
+    const queued = await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: task.pin.objectId,
+      expectedRevision: task.pin.revision, workflowState: 'todo', detail: 'Queue the completed task before retaining its dependency wait.' });
+    task = await w.f.first.store.read('task-board/task', queued.task!);
+    const deferred = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: task.pin.objectId,
+      expectedRevision: task.pin.revision, reason: 'dependency', detail: 'Wait for the active child.', nextReviewAt: null,
+      blocker: { taskId: source.task.objectId, until: 'idle' } });
+    task = await w.f.first.store.read('task-board/task', deferred.task!);
+    await assert.rejects(checkBlocker(w.f.first.store, task.value.blocker), /to be idle/);
+  }
   const send = async (directed: boolean) => {
     const outcome = await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision,
       commentId: randomUUID(), body: 'Please coordinate the next change.', authorKind: 'agent', agentDelivery: 'queue',
       ...(directed ? { sourceTaskId: source.task.objectId } : {}), requests: [], responses: [], attachments: [], replyTo: null });
     task = await w.f.first.store.read('task-board/task', outcome.task!);
   };
-  await send(false); assert.equal(await scheduler.task(task.pin.objectId), null);
-  await send(true); assert.equal(task.value.workflowState, 'review');
+  await send(false); assert.ok(!(await scheduler.task(task.pin.objectId))?.run);
+  task = await w.f.first.store.read('task-board/task', task.pin.objectId);
+  await send(true); assert.equal(task.value.workflowState, blocked ? 'waiting' : 'review');
   const next = await scheduler.task(task.pin.objectId); assert.ok(next?.run);
   const run = (await w.f.first.store.read('task-board/run', next.run)).value;
   assert.equal(run.originalRequest.action === 'continue' && run.originalRequest.coordinationOnly, true);
@@ -116,7 +127,8 @@ test('directed messages wake review for coordination, while ordinary agent comme
   await w.observe('steer', steeringPin, { result: { turnId: 'native-turn' } });
   const ended = await w.f.first.nativeUpdate(await w.snapshot('completed', 'Coordination answer.'));
   const after = (await w.f.first.store.read('task-board/task', ended.task!)).value;
-  assert.equal(after.workflowState, 'review'); assert.deepEqual(after.latestResult, task.value.latestResult);
+  assert.equal(after.workflowState, blocked ? 'waiting' : 'review'); assert.deepEqual(after.latestResult, task.value.latestResult);
+  assert.deepEqual(after.blocker, task.value.blocker);
   assert.equal(after.comments.filter(c => c.purpose === 'handoff').length, task.value.comments.filter(c => c.purpose === 'handoff').length);
   assert.equal(await scheduler.task(task.pin.objectId), null);
 });
