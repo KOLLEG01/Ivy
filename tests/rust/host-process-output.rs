@@ -68,7 +68,7 @@ fn overlapping_secrets_follow_configured_replacement_order() {
 }
 
 #[test]
-fn crossing_secrets_revisit_earlier_matches_before_emitting() {
+fn overlapping_secrets_preserve_order_across_every_split() {
     for (input, secrets, expected) in [
         ("ababa", ["aba", "ba"], "[redacted][redacted]"),
         ("ababa", ["ba", "aba"], "a[redacted][redacted]"),
@@ -86,4 +86,45 @@ fn crossing_secrets_revisit_earlier_matches_before_emitting() {
             assert_eq!(capture.text(), expected);
         }
     }
+}
+
+#[test]
+fn repeated_overlaps_make_progress_with_bounded_matcher_state() {
+    let mut capture = DiagnosticCapture::new(vec![vec![97, 98, 97]], 65536);
+    let mut emitted = 0;
+    for _ in 0..10000 {
+        capture.push_to(b"abababababababab", false, |text| {
+            assert!(text.len() <= 4096);
+            emitted += text.len();
+        });
+        assert!(capture.retained_units() <= 2);
+    }
+    assert!(emitted > 160000);
+    capture.push_to(b"a", true, |_| {});
+    assert_eq!(capture.retained_units(), 0);
+    assert!(capture.truncated());
+    assert!(capture.text().len() <= 65536);
+}
+
+#[test]
+fn replacement_expansion_is_bounded_at_the_sink_and_not_recursive() {
+    let mut capture = DiagnosticCapture::new(vec![vec![101]; 10], 65536);
+    let mut emitted = 0;
+    capture.push_to(b"e", true, |text| {
+        assert!(text.len() <= 4096);
+        emitted += text.len();
+    });
+    // Each pass doubles the e's; only downstream passes see inserted text.
+    assert_eq!(emitted, 1 + 9 * (1024 - 1));
+    assert_eq!(capture.retained_units(), 0);
+}
+
+#[test]
+fn unrelated_matches_do_not_split_surrogate_pairs_at_emission() {
+    let mut capture = DiagnosticCapture::new(vec!["ab".encode_utf16().collect()], 65536);
+    assert_eq!(capture.push("🙂".as_bytes(), false), "🙂");
+    assert_eq!(capture.push(&[], true), "");
+    // Literal JS matching is on UTF-16 units, even for an isolated surrogate.
+    let mut capture = DiagnosticCapture::new(vec![vec![0xd83d]], 65536);
+    assert_eq!(capture.push("🙂".as_bytes(), true), "[redacted]�");
 }
