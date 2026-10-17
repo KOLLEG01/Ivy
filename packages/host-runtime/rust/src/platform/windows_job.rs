@@ -71,7 +71,8 @@ impl Drop for Handle {
     }
 }
 
-/// Never signals or changes the observed job. Only its exact absence proves stopped.
+/// Legacy namespace observation only. Absence does not prove process retirement;
+/// live owners use retained launch handles and Job accounting instead.
 pub fn job_stopped(name: &str) -> io::Result<bool> {
     if !valid_job_name(name) {
         return Err(argument_error("Invalid process job name."));
@@ -188,6 +189,23 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
     } else {
         None
     };
+    let launch_pipe = if arguments
+        .get(executable_index)
+        .is_some_and(|v| v == "--launch-pipe")
+    {
+        let name = arguments
+            .get(executable_index + 1)
+            .and_then(|v| v.to_str())
+            .filter(|name| super::windows_launch::valid_pipe_name(name))
+            .ok_or_else(|| argument_error("Invalid private launch pipe."))?;
+        if parent.is_none() {
+            return Err(argument_error("Private launch requires an owner."));
+        }
+        executable_index += 2;
+        Some(name)
+    } else {
+        None
+    };
     let executable = arguments
         .get(executable_index)
         .ok_or_else(|| argument_error("Missing executable."))?;
@@ -291,6 +309,10 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
     // All subsequent failures terminate the suspended/running child, with job drop
     // also terminating descendants. Parent observation cannot race the job assignment.
     let outcome = (|| {
+        if let Some(pipe) = launch_pipe {
+            super::windows_launch::watch_parent(parent.as_ref().unwrap().0, job.0)?;
+            super::windows_launch::acknowledge(pipe, process.0, job.0)?;
+        }
         if let Some(parent) = &parent {
             if unsafe { WaitForMultipleObjects(1, &parent.0, 0, 0) } != 258 {
                 return Err(io::Error::other("The process owner has exited."));
