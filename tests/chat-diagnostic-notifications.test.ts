@@ -67,6 +67,70 @@ test('persistent diagnostics create one durable Main notice, recover once and re
   assert.equal((await f.queue()).length, 2);
 });
 
+test('resource failures share one notice and recover only after the whole group is healthy', async t => {
+  const f = await fixture(t);
+  const members = Array.from({ length: 4 }, (_, index) => ({ ...f.diagnostic, resource: { objectId: 'signals:run-' + index } }));
+  for (const member of members) f.kernel.registry.diagnostic(member);
+  await f.monitor().tick(f.signal); f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1);
+  for (const member of members.slice(0, 3)) f.kernel.registry.diagnostic({ ...member, status: 'resolved' });
+  await f.monitor().tick(f.signal); f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1, 'Partial recovery must not announce that the service is healthy.');
+  const next = { ...f.diagnostic, resource: { objectId: 'signals:replacement-run' } };
+  f.kernel.registry.diagnostic(next);
+  f.kernel.registry.diagnostic({ ...members[3]!, status: 'resolved' });
+  await new DiagnosticNotifications(f.second, 'de', f.now).tick(f.signal);
+  f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1, 'Changing member identities must preserve the ongoing incident.');
+  f.kernel.registry.diagnostic({ ...next, status: 'resolved' });
+  await f.monitor().tick(f.signal); f.advance(30_000); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 1);
+  f.advance(); await f.monitor().tick(f.signal);
+  const queue = await f.queue(); assert.equal(queue.length, 2);
+  assert.match((await f.first.store.read('chat-bridge/input', queue[1]!.inputId)).value.payload.text, /Erholung festgestellt/u);
+});
+
+test('different callers, dependent services and error codes retain separate notices', async t => {
+  const f = await fixture(t), resource = { callerPrincipalId: 'fixture.reader', serviceNodeId: 'owner.one', objectId: 'private-one' };
+  const diagnostics = [
+    { ...f.diagnostic, resource },
+    { ...f.diagnostic, resource: { ...resource, objectId: 'private-two' } },
+    { ...f.diagnostic, resource: { ...resource, serviceNodeId: 'owner.two' } },
+    { ...f.diagnostic, resource: { ...resource, callerPrincipalId: 'another.reader' } },
+    { ...f.diagnostic, code: 'service_unavailable', resource },
+  ];
+  for (const diagnostic of diagnostics) f.kernel.registry.diagnostic(diagnostic);
+  await f.monitor().tick(f.signal); f.advance(); await f.monitor().tick(f.signal);
+  const queue = await f.queue(); assert.equal(queue.length, 4);
+  const texts = await Promise.all(queue.map(async item => (await f.first.store.read('chat-bridge/input', item.inputId)).value.payload.text));
+  assert.equal(new Set(texts).size, 4);
+  assert.ok(texts.every(text => !text.includes('private-')));
+});
+
+test('grouping saved resource incidents keeps every original pending receipt without repeating their messages', async t => {
+  const f = await fixture(t), scope = hashJson([f.admission.definition.principalId, f.admission.definition.workspaceId]);
+  f.kernel.registry.diagnostic(f.diagnostic); await f.monitor().tick(f.signal);
+  f.advance(); await f.monitor().tick(f.signal);
+  const entry = Object.values(f.first.store.diagnosticNoticeState(scope))[0]!;
+  const secondRequest = { ...entry.alert!.request, operationId: f.operation('second-original-alert') };
+  await new ChatNotices(f.first).notify(f.admission.definition.principalId, secondRequest);
+  assert.equal((await f.queue()).length, 2);
+  // Both original notices were admitted before their acknowledgements were saved.
+  f.first.store.saveDiagnosticNoticeState(scope, {
+    'resource-one': { ...entry, alert: { ...entry.alert!, queued: false } },
+    'resource-two': { ...entry, alert: { request: secondRequest, queued: false, confirmed: false } },
+  });
+  await new DiagnosticNotifications(f.second, 'de', f.now).tick(f.signal);
+  assert.equal((await f.queue()).length, 2);
+  const saved = Object.values(f.second.store.diagnosticNoticeState(scope));
+  assert.equal(saved.filter(value => !value.receiptOnly).length, 1);
+  assert.deepEqual(new Set(saved.flatMap(value => value.alert ? [value.alert.request.operationId] : [])),
+    new Set([entry.alert!.request.operationId, secondRequest.operationId]));
+  f.kernel.registry.diagnostic({ ...f.diagnostic, status: 'resolved' });
+  await f.monitor().tick(f.signal); f.advance(); await f.monitor().tick(f.signal);
+  assert.equal((await f.queue()).length, 3, 'The formerly separate incidents need only one recovery notice.');
+});
+
 test('a brief healthy interval across restart keeps the original incident until recovery is stable', async t => {
   const f = await fixture(t);
   f.kernel.registry.diagnostic(f.diagnostic); await f.monitor().tick(f.signal);
