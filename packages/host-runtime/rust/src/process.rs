@@ -313,6 +313,12 @@ pub async fn spawn(
             "A named process job requires the Windows job launcher.",
         ));
     }
+    #[cfg(windows)]
+    let launch_listener = if use_job {
+        Some(crate::platform::windows_launch::Listener::new().map_err(io_error)?)
+    } else {
+        None
+    };
     let mut process = if use_job {
         let launcher = std::fs::canonicalize(
             context
@@ -332,6 +338,10 @@ pub async fn spawn(
         if let Some(name) = &context.job_name {
             process.args(["--job-name", name]);
         }
+        #[cfg(windows)]
+        if let Some(listener) = &launch_listener {
+            process.args(["--launch-pipe", &listener.name]);
+        }
         process.arg(&resolved.executable);
         process
     } else {
@@ -349,6 +359,7 @@ pub async fn spawn(
                 .unwrap_or(resolved.cwd),
         )
         .env_clear()
+        .kill_on_drop(true)
         .envs(runtime_environment(&context.environment))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -375,6 +386,23 @@ pub async fn spawn(
         .spawn()
         .map_err(|_| IvyError::new("spawn_failed", "Command could not start."))?;
     let pid = child.id().expect("spawned process has an identity");
+    #[cfg(windows)]
+    let launch_proof = if let Some(listener) = launch_listener {
+        match tokio::time::timeout(Duration::from_secs(5), listener.accept(&mut child)).await {
+            Ok(Ok(proof)) => Some(proof),
+            _ => {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                return Err(IvyError::new(
+                    "spawn_failed",
+                    "Command launch acknowledgement failed.",
+                )
+                .with_outcome(Outcome::Unknown));
+            }
+        }
+    } else {
+        None
+    };
     let stdin = child.stdin.take();
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -406,20 +434,30 @@ pub async fn spawn(
     tokio::spawn(async move {
         let status;
         let mut unknown = false;
+        let retirement_deadline;
         tokio::select! {
-            result = child.wait() => { status = result.ok(); }
+            result = child.wait() => {
+                status = result.ok();
+                retirement_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            }
             request = requests.recv() => {
                 // Losing the handle does not silently prove completion. Its tree is
                 // explicitly stopped and reaped, just like an explicit stop request.
                 let grace = request.unwrap_or(Duration::ZERO);
-                #[cfg(windows)] { let _ = child.start_kill(); }
+                retirement_deadline = tokio::time::Instant::now() + grace + Duration::from_secs(2);
+                #[cfg(windows)] {
+                    if let Some(proof) = &launch_proof {
+                        let _ = proof.terminate();
+                    }
+                    let _ = child.start_kill();
+                }
                 #[cfg(unix)] signal_tree(pid, false);
                 match tokio::time::timeout(grace, child.wait()).await {
                     Ok(result) => { status = result.ok(); }
                     Err(_) => {
                         #[cfg(windows)] { let _ = child.start_kill(); }
                         #[cfg(unix)] signal_tree(pid, true);
-                        match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                        match tokio::time::timeout_at(retirement_deadline, child.wait()).await {
                             Ok(result) => { status = result.ok(); }
                             Err(_) => { status = None; unknown = true; }
                         }
@@ -429,10 +467,16 @@ pub async fn spawn(
         }
         #[cfg(unix)]
         signal_tree(pid, true);
-        // A Windows job-helper exit closes the sole Job handle. On POSIX, pipes
-        // retained by escaped descendants do not prove their termination.
+        #[cfg(windows)]
+        if let Some(proof) = &launch_proof {
+            if proof.retire(retirement_deadline).await.is_err() {
+                unknown = true;
+            }
+        }
+        // Pipe draining shares the retirement deadline. Raw protocol owners drain
+        // their own pipes; EOF alone never proves descendant retirement.
         if !readers.is_empty() {
-            let drained = tokio::time::timeout(Duration::from_secs(2), async {
+            let drained = tokio::time::timeout_at(retirement_deadline, async {
                 for reader in &mut readers {
                     let _ = reader.await;
                 }
@@ -442,9 +486,7 @@ pub async fn spawn(
                 for reader in &readers {
                     reader.abort();
                 }
-                if !use_job {
-                    unknown = true;
-                }
+                unknown = true;
             }
         }
         let finish_capture = |capture: Capture, stream| {
@@ -504,11 +546,17 @@ pub async fn run_command(
             "Command input exceeds its bounded size.",
         ));
     }
-    let mut process = spawn(command, root, executables, context).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(command.timeout_ms);
+    let mut process = tokio::time::timeout_at(deadline, spawn(command, root, executables, context))
+        .await
+        .map_err(|_| {
+            IvyError::new("deadline_exceeded", "Command exceeded its finite deadline.")
+                .with_outcome(Outcome::Unknown)
+        })??;
     let completion = process.completion.clone();
     // Include blocked stdin in the command deadline. EPIPE is only evidence for
     // the child, never a reason to terminate its supervising parent.
-    let result = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+    let result = tokio::time::timeout_at(deadline, async {
         if let Some(input) = input {
             if let Some(mut stdin) = process.stdin.take() {
                 let _ = stdin.write_all(input).await;
