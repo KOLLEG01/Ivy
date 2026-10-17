@@ -1,22 +1,18 @@
-import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
-
-// Execute the actual diagnostic algorithm without starting a process or importing
-// the executor. The native Node type stripper keeps this oracle dependency-free.
-const source = readFileSync(new URL('../../packages/host-runtime/src/process.ts', import.meta.url), 'utf8');
-const start = source.indexOf('  const output = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };');
-const end = source.indexOf('  child.stdout!.on(', start);
-if (start < 0 || end < 0) throw new Error('Process diagnostic oracle boundary changed.');
-const body = stripTypeScriptTypes(source.slice(start, end));
-const capture = new Function('secrets', 'chunks', 'maxOutputBytes', `
-  let ended = false, truncated = false;
-  const emitted = [], options = {onOutput: (_stream, text) => emitted.push(text)};
-  ${body}
-  for (const chunk of chunks) received('stdout', Buffer.from(chunk, 'hex'));
-  received('stdout');
-  return {text: output.stdout.toString('utf8'), truncated, emitted};
-`);
+// HE05's approved semantics: whole-stream ordered literal UTF-16 replacement.
+// Chunk timing is deliberately excluded; the Rust sink emits bounded chunks.
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
-const cases = JSON.parse(input);
-process.stdout.write(JSON.stringify(cases.map(value => capture(value.secrets, value.chunks, value.maximum))));
+const cases = input.split('\n');
+process.stdout.write(cases.map(value => {
+  const [limit, secrets, chunks] = value.split('\t');
+  const maximum = Number(limit);
+  let emitted = new TextDecoder().decode(Buffer.concat(chunks.split(',').map(chunk => Buffer.from(chunk, 'hex'))));
+  for (const units of secrets.split(';')) {
+    const secret = units ? units.split(',').map(unit => String.fromCharCode(parseInt(unit, 16))).join('') : '';
+    if (secret.length) emitted = emitted.replaceAll(secret, '[redacted]');
+  }
+  // UTF-8 sinks replace isolated surrogates after all UTF-16 replacement passes.
+  const bytes = Buffer.from(emitted, 'utf8');
+  return [Buffer.from(bytes.subarray(-maximum).toString('utf8')).toString('hex'),
+    bytes.length > maximum, bytes.toString('hex')].join('\t');
+}).join('\n'));
