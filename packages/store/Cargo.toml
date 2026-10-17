@@ -1,0 +1,16 @@
+[package]
+name = "ivy-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ivy-contracts.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+
+[[test]]
+name = "store"
+path = "../../tests/rust/store.rs"
