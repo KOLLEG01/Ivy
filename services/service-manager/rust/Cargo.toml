@@ -1,0 +1,18 @@
+[package]
+name = "ivy-service-manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ivy-contracts.workspace = true
+
+[[test]]
+name = "service-manager-policy"
+path = "../../../tests/rust/service-manager-policy.rs"
+
+[[test]]
+name = "service-manager-data"
+path = "../../../tests/rust/service-manager-data.rs"
