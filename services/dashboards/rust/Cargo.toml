@@ -1,0 +1,27 @@
+[package]
+name = "ivy-dashboards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ivy-contracts.workspace = true
+png = "=0.18.1"
+
+[[test]]
+name = "dashboards-raster"
+path = "../../../tests/rust/dashboards-raster.rs"
+
+[[test]]
+name = "dashboards-browser-path"
+path = "../../../tests/rust/dashboards-browser-path.rs"
+
+[[test]]
+name = "dashboards-png"
+path = "../../../tests/rust/dashboards-png.rs"
+
+[[test]]
+name = "dashboards-document"
+path = "../../../tests/rust/dashboards-document.rs"
