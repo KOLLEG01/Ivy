@@ -1,0 +1,12 @@
+[package]
+name = "ivy-phone-bridge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "phone_media"
+path = "../../../tests/rust/phone_media.rs"
