@@ -168,7 +168,7 @@ function New-LabDirectory([string]$Path) {
             [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl',
             'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     }
-    Set-Acl -LiteralPath $item.FullName -AclObject $acl
+    $item.SetAccessControl($acl)
 }
 
 function Get-LabAccount($Plan) {
@@ -205,6 +205,98 @@ function Get-LabVm($Plan) {
     }
 }
 
+function Get-LabDiskContent([string]$Path, $ExpectedLength = $null) {
+    [void](Get-LabPath $Path)
+    # Hash the initially small, unused dynamic VHD only; reject growth before reading its bytes.
+    $file = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        if ($file.Length -gt 64MB -or ($null -ne $ExpectedLength -and $file.Length -ne $ExpectedLength)) {
+            throw 'Disk content length changed or exceeds the inert 64 MiB baseline limit'
+        }
+        return [pscustomobject]@{ length=$file.Length; sha256=[BitConverter]::ToString($sha.ComputeHash($file)).Replace('-','').ToLowerInvariant() }
+    } finally { $sha.Dispose(); $file.Dispose() }
+}
+
+function Get-LabVmConfiguration($Plan, $VmId) {
+    $vm = Get-VM -Id ([guid]$VmId)
+    if ($vm.State.ToString() -ne 'Off') { throw 'Lab VM must be Off' }
+    if (@(Get-VMSnapshot -VM $vm).Count) { throw 'VM has checkpoints; preserve for manual review' }
+    $firmware = Get-VMFirmware -VM $vm
+    $adapters = @(Get-VMNetworkAdapter -VM $vm | Sort-Object Id | ForEach-Object {
+        $vlan = Get-VMNetworkAdapterVlan -VMNetworkAdapter $_
+        [pscustomobject]@{
+            id=$_.Id.ToString(); name=$_.Name; switchId=$_.SwitchId.ToString(); connected=$_.Connected
+            mac=$_.MacAddress; dynamicMac=$_.DynamicMacAddressEnabled
+            spoofing=$_.MacAddressSpoofing.ToString(); dhcpGuard=$_.DhcpGuard.ToString()
+            routerGuard=$_.RouterGuard.ToString(); mirroring=$_.PortMirroringMode.ToString()
+            vlan=($vlan | Select-Object OperationMode,AccessVlanId,NativeVlanId,AllowedVlanIdListString,PrivateVlanMode,PrimaryVlanId,SecondaryVlanId,SecondaryVlanIdListString)
+        }
+    })
+    return [pscustomobject]@{
+        automaticStart=$vm.AutomaticStartAction.ToString(); automaticStop=$vm.AutomaticStopAction.ToString()
+        checkpointType=$vm.CheckpointType.ToString(); automaticCheckpoints=$vm.AutomaticCheckpointsEnabled
+        snapshotPath=$vm.SnapshotFileLocation; pagingPath=$vm.SmartPagingFilePath
+        dynamicMemory=$vm.DynamicMemoryEnabled; memory=$vm.MemoryStartup; processors=$vm.ProcessorCount
+        secureBoot=$firmware.SecureBoot.ToString(); secureBootTemplate=$firmware.SecureBootTemplate
+        networkBoot=$firmware.PreferredNetworkBootProtocol.ToString()
+        bootOrder=@($firmware.BootOrder | Select-Object BootType,FirmwarePath,Description)
+        disks=@(Get-VMHardDiskDrive -VM $vm | Sort-Object ControllerNumber,ControllerLocation |
+            Select-Object Path,DiskNumber,ControllerType,ControllerNumber,ControllerLocation)
+        dvds=@(Get-VMDvdDrive -VM $vm | Sort-Object ControllerNumber,ControllerLocation |
+            Select-Object Path,ControllerType,ControllerNumber,ControllerLocation)
+        adapters=$adapters
+    }
+}
+
+function Assert-LabDesiredConfiguration($Config, [string]$VmDirectory, [string]$DiskPath, [string]$SwitchId) {
+    if ($Config.automaticStart -ne 'Nothing' -or $Config.automaticStop -ne 'ShutDown' -or
+        $Config.checkpointType -ne 'Disabled' -or $Config.automaticCheckpoints -or
+        (Get-LabPath $Config.snapshotPath) -ne $VmDirectory -or (Get-LabPath $Config.pagingPath) -ne $VmDirectory -or
+        $Config.dynamicMemory -or $Config.memory -ne 4GB -or $Config.processors -ne 4 -or
+        $Config.secureBoot -ne 'On' -or $Config.secureBootTemplate -ne 'MicrosoftUEFICertificateAuthority' -or
+        $Config.disks.Count -ne 1 -or $Config.disks[0].Path -ne $DiskPath -or
+        @($Config.dvds | Where-Object Path).Count -or $Config.adapters.Count -ne 1 -or
+        $Config.adapters[0].switchId -ne $SwitchId -or -not $Config.adapters[0].connected) {
+        throw 'VM configuration does not match inert setup'
+    }
+}
+
+function Assert-LabBaseline($Plan, $State, [string]$DiskPath) {
+    $hasVm = $State.ContainsKey('vm') -and $State.vm.kind -eq 'created'
+    $hasDisk = $State.ContainsKey('disk') -and $State.disk.kind -eq 'created'
+    if (-not $hasVm -and -not $hasDisk) { return }
+    if (-not $State.ContainsKey('configuration') -or $State.configuration.kind -ne 'created') {
+        throw 'Final inert baseline is missing; reconcile partial setup before removal'
+    }
+    $baseline = $State.configuration.value
+    if ($hasDisk) {
+        $content = Get-LabDiskContent $DiskPath $baseline.disk.length
+        if ($content.sha256 -cne $baseline.disk.sha256) { throw 'Disk content changed from final inert baseline' }
+    }
+    if ($hasVm) {
+        $config = Get-LabVmConfiguration $Plan $State.vm.value.id
+        if (($config | ConvertTo-Json -Depth 12 -Compress) -cne ($baseline.vm | ConvertTo-Json -Depth 12 -Compress)) {
+            throw 'VM configuration changed from final inert baseline'
+        }
+    }
+}
+
+function Assert-LabAdministrator {
+    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run the reviewed command from an elevated PowerShell; this script never elevates itself' }
+}
+
+function Protect-LabJournal($Stream) {
+    $acl = [Security.AccessControl.FileSecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in 'S-1-5-18','S-1-5-32-544') {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
+    }
+    $Stream.SetAccessControl($acl)
+}
+
 function Invoke-IvyRustLab([string]$Action, [string]$InputPath, [string]$JournalPath) {
     if ($PSVersionTable.PSEdition -ne 'Desktop') { throw 'Use Windows PowerShell 5.1 for this host provisioning script' }
     $plan = Read-LabPlan $InputPath
@@ -218,8 +310,7 @@ function Invoke-IvyRustLab([string]$Action, [string]$InputPath, [string]$Journal
         return [pscustomobject]@{ snapshot=$snapshot; capacityBlocker=$blocker; account=(Get-LabAccount $plan);
             vm=(Get-LabVm $plan); switch=(Get-LabSwitch $plan); root=(Get-LabDirectory $plan.root) }
     }
-    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run the reviewed command from an elevated PowerShell; this script never elevates itself' }
+    Assert-LabAdministrator
     $JournalPath = Get-LabPath $JournalPath
     if ($JournalPath.StartsWith($parent + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Ledger must be outside the lab tree' }
     if (-not (Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($JournalPath)) -PathType Container)) { throw 'Ledger parent must already exist' }
@@ -238,13 +329,7 @@ function Invoke-IvyRustLab([string]$Action, [string]$InputPath, [string]$Journal
     $stream = [IO.FileStream]::new($JournalPath, $mode, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     try {
         if (-not $exists) {
-            $acl = [Security.AccessControl.FileSecurity]::new()
-            $acl.SetAccessRuleProtection($true, $false)
-            foreach ($sid in 'S-1-5-18','S-1-5-32-544') {
-                $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-                    [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
-            }
-            $stream.SetAccessControl($acl)
+            Protect-LabJournal $stream
             Write-LabEvent $stream @{ kind='header'; identity=$identity; plan=$plan; machine=$machine; scriptHash=$scriptHash; snapshot=$snapshot }
         }
         [void]$stream.Seek(0, [IO.SeekOrigin]::Begin)
@@ -260,6 +345,7 @@ function Invoke-IvyRustLab([string]$Action, [string]$InputPath, [string]$Journal
             vm = { Get-LabVm $plan }
         }
         if ($Action -eq 'Provision') {
+            if ($state.ContainsKey('disk') -or $state.ContainsKey('vm')) { Assert-LabBaseline $plan $state $diskPath }
             # Check every collision before creating any resource. Existing parent directories are not adopted.
             foreach ($key in $readers.Keys) {
                 $current = & $readers[$key]
@@ -278,7 +364,9 @@ function Invoke-IvyRustLab([string]$Action, [string]$InputPath, [string]$Journal
                 $random = New-Object byte[] 32
                 $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
                 try { $rng.GetBytes($random) } finally { $rng.Dispose() }
-                $password = ConvertTo-SecureString ('aA1!' + [Convert]::ToBase64String($random)) -AsPlainText -Force
+                $password = [Security.SecureString]::new()
+                foreach ($character in ('aA1!' + [Convert]::ToBase64String($random)).ToCharArray()) { $password.AppendChar($character) }
+                $password.MakeReadOnly()
                 try { New-LocalUser -Name $plan.account -Password $password -Disabled -Description $plan.labId }
                 finally { $password.Dispose(); [Array]::Clear($random,0,$random.Length) }
             }
@@ -296,14 +384,19 @@ function Invoke-IvyRustLab([string]$Action, [string]$InputPath, [string]$Journal
                 Set-VMMemory -VM $vm -DynamicMemoryEnabled $false -StartupBytes 4GB
                 Set-VMProcessor -VM $vm -Count 4
                 Set-VMFirmware -VM $vm -EnableSecureBoot On -SecureBootTemplate MicrosoftUEFICertificateAuthority
-                Write-LabEvent $stream @{kind='created';key='configuration';operationId=$operation;value=$state.vm.value.id}
+                $config = Get-LabVmConfiguration $plan $state.vm.value.id
+                Assert-LabDesiredConfiguration $config $vmDirectory $diskPath $state.switch.value.id
+                $event = @{kind='created';key='configuration';operationId=$operation;value=[pscustomobject]@{
+                    vm=$config; disk=(Get-LabDiskContent $diskPath)
+                }}
+                Write-LabEvent $stream $event
+                $state.configuration = [pscustomobject]$event
             }
-            $vm = Get-VM -Id ([guid]$state.vm.value.id)
-            if ($vm.State.ToString() -ne 'Off' -or $vm.AutomaticStartAction.ToString() -ne 'Nothing' -or
-                $vm.DynamicMemoryEnabled -or $vm.MemoryStartup -ne 4GB -or $vm.ProcessorCount -ne 4) { throw 'VM configuration drift' }
+            Assert-LabBaseline $plan $state $diskPath
             return [pscustomobject]@{ state='reserved-inert'; ledger=$JournalPath; labId=$plan.labId; memoryGiB=4; booted=$false }
         }
         # Rollback is only for this inert preparation stage. Never stop a VM or remove changed identities.
+        Assert-LabBaseline $plan $state $diskPath
         foreach ($key in $readers.Keys) {
             if ($state.ContainsKey($key) -and $state[$key].kind -eq 'created') {
                 $current = & $readers[$key]
@@ -342,13 +435,16 @@ function Invoke-IvyRustLab([string]$Action, [string]$InputPath, [string]$Journal
         }
         foreach ($key in $removers.Keys) {
             if (-not $state.ContainsKey($key) -or $state[$key].kind -eq 'removed') { continue }
+            Assert-LabBaseline $plan $state $diskPath
             $current = & $readers[$key]
             if ($null -eq $current -or ($current | ConvertTo-Json -Compress) -cne ($state[$key].value | ConvertTo-Json -Compress)) { throw "Resource changed before removal: $key" }
             $operation = [guid]::NewGuid().ToString()
             Write-LabEvent $stream @{kind='pending';key=$key;operationId=$operation;action='remove';value=$state[$key].value}
             & $removers[$key] | Out-Null
             if ($null -ne (& $readers[$key])) { throw "Resource remains after removal: $key" }
-            Write-LabEvent $stream @{kind='removed';key=$key;operationId=$operation;value=$state[$key].value}
+            $event = @{kind='removed';key=$key;operationId=$operation;value=$state[$key].value}
+            Write-LabEvent $stream $event
+            $state[$key] = [pscustomobject]$event
         }
         # Retain directories and Hyper-V residual files for evidence. No recursive deletion or root reuse.
         return [pscustomobject]@{ state='rolled-back'; ledger=$JournalPath; retainedDirectories=@($parent,$plan.root,$vmDirectory) }
