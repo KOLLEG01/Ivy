@@ -159,6 +159,51 @@ test("selection follows cyclic fixture imports, deduplicates files and rejects m
   );
 });
 
+test("partial Rust checkouts select registered files under their owning scopes", (t) => {
+  const root = temporary(t);
+  mkdirSync(join(root, "tests/rust"), { recursive: true });
+  for (const name of ["phone_media.rs", "hive_worker_client.rs", "service-manager-stop.rs"])
+    writeFileSync(join(root, "tests/rust", name), "// isolated selector fixture\n");
+  const selected = selectTests(root, config, { files: ["tests/rust/*.rs"] });
+  assert.deepEqual(selected.map(({ file, scope }) => [file, scope]), [
+    ["tests/rust/hive_worker_client.rs", "hive"],
+    ["tests/rust/phone_media.rs", "phone"],
+    ["tests/rust/service-manager-stop.rs", "host"],
+  ]);
+  assert.throws(() => selectTests(root, config, { files: ["tests/rust/chat-journal.rs"] }), /Unknown test file/);
+});
+
+test("Cargo dispatch groups selected targets and stops after a failed prerequisite or test", (t) => {
+  const root = temporary(t), log = join(root, "cargo.jsonl");
+  // Node stands in for Cargo, so this exercises subprocess arguments without a build.
+  const stub = `const fs=require('node:fs'),path=require('node:path');
+    const args=[path.basename(process.argv[1]),...process.argv.slice(2)];
+    fs.appendFileSync(process.env.IVY_CARGO_TEST_LOG,JSON.stringify(args)+'\\n');
+    if(args[0]===process.env.IVY_CARGO_TEST_FAIL)process.exit(7);`;
+  for (const command of ["build", "test"]) writeFileSync(join(root, command), stub);
+  const run = (fail = "") => {
+    writeFileSync(log, "");
+    const result = spawnSync(process.execPath, [resolve("tools/testing/test-rust.mjs"),
+      "tests/rust/service-manager-stop.rs", "tests/rust/service-manager-policy.rs",
+      "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs"], {
+      cwd: root, windowsHide: true, encoding: "utf8", timeout: 15000,
+      env: { ...process.env, IVY_CARGO: process.execPath, IVY_CARGO_TEST_LOG: log, IVY_CARGO_TEST_FAIL: fail },
+    });
+    return { result, commands: readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) };
+  };
+  const expected = [
+    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--bin", "ivy-job"]] : []),
+    ["test", "--locked", "--package", "ivy-service-manager", "--test", "service-manager-stop", "--test", "service-manager-policy"],
+    ["test", "--locked", "--package", "ivy-phone-bridge", "--test", "phone_media"],
+  ];
+  const success = run();
+  assert.equal(success.result.status, 0, success.result.stderr);
+  assert.deepEqual(success.commands, expected);
+  const failure = run(expected[0][0]);
+  assert.equal(failure.result.status, 7, failure.result.stderr);
+  assert.deepEqual(failure.commands, expected.slice(0, 1));
+});
+
 test("reporter suppresses successful output and prints useful failures without writing reports", (t) => {
   const root = temporary(t),
     file = join(root, "sample.test.mjs"),
