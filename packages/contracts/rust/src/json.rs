@@ -15,6 +15,10 @@ impl From<String> for JsString {
     }
 }
 impl JsString {
+    pub fn contains_ascii(&self, needle: &str) -> bool {
+        debug_assert!(needle.is_ascii());
+        needle.is_empty() || self.0.windows(needle.len()).any(|window| window.iter().zip(needle.bytes()).all(|(a,b)| *a == u16::from(b)))
+    }
     pub fn to_utf8(&self) -> IvyResult<String> {
         String::from_utf16(&self.0).map_err(|_| invalid("String contains an unpaired surrogate."))
     }
@@ -23,6 +27,32 @@ impl JsString {
     }
     pub fn code_point_len(&self) -> usize {
         char::decode_utf16(self.0.iter().copied()).count()
+    }
+}
+
+/// JavaScript String(value) for ordinary JSON values; unlike JSON.stringify,
+/// arrays join recursively and null array elements become empty strings.
+pub fn js_string(value: &IvyJson) -> JsString {
+    match value {
+        IvyJson::String(s) => s.clone(),
+        IvyJson::Null => "null".into(),
+        IvyJson::Bool(v) => (if *v { "true" } else { "false" }).into(),
+        IvyJson::Number(v) => {
+            if v.is_nan() { "NaN".into() }
+            else if *v == f64::INFINITY { "Infinity".into() }
+            else if *v == f64::NEG_INFINITY { "-Infinity".into() }
+            else if *v == 0.0 { "0".into() }
+            else { ryu_js::Buffer::new().format(*v).into() }
+        },
+        IvyJson::Object(_) => "[object Object]".into(),
+        IvyJson::Array(values) => {
+            let mut units=Vec::new();
+            for (index,value) in values.iter().enumerate() {
+                if index>0 { units.push(44); }
+                if !value.is_null() { units.extend(js_string(value).0); }
+            }
+            JsString(units)
+        }
     }
 }
 
