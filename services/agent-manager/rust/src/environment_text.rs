@@ -250,3 +250,186 @@ pub fn with_block(source: &str, block: Option<&str>) -> String {
         if parts.is_empty() { "" } else { "\n" }
     )
 }
+
+fn section_boundary(tail: &str) -> bool {
+    tail.starts_with('.') || tail.starts_with(']')
+}
+
+/// Original case-insensitive section regex preserves captured name case.
+pub fn server_sections(source: &str) -> Vec<String> {
+    const PREFIX: &str = "[mcp_servers.";
+    let mut names = Vec::new();
+    let mut consumed = 0;
+    for start in line_starts(source) {
+        if start < consumed {
+            continue;
+        }
+        let tail = source[start..].trim_start_matches(whitespace);
+        if !tail
+            .get(..PREFIX.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(PREFIX))
+        {
+            continue;
+        }
+        let mut tail = &tail[PREFIX.len()..];
+        let quoted = tail.starts_with('"');
+        if quoted {
+            tail = &tail[1..];
+        }
+        let bytes = tail.as_bytes();
+        if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+            continue;
+        }
+        let count = bytes
+            .iter()
+            .take(64)
+            .take_while(|b| b.is_ascii_alphanumeric() || matches!(**b, b'_' | b'-'))
+            .count();
+        let name = &tail[..count];
+        let mut rest = &tail[count..];
+        if quoted {
+            let Some(value) = rest.strip_prefix('"') else {
+                continue;
+            };
+            rest = value;
+        }
+        if !section_boundary(rest) {
+            continue;
+        }
+        consumed = source.len() - rest.len() + 1;
+        if !names.iter().any(|value| value == name) {
+            names.push(name.into());
+        }
+    }
+    names
+}
+
+pub fn has_app_section(source: &str, app_id: &str) -> bool {
+    let alternatives = [
+        format!("\"{app_id}\""),
+        format!("'{app_id}'"),
+        app_id.into(),
+    ];
+    line_starts(source).any(|start| {
+        source[start..]
+            .trim_start_matches(whitespace)
+            .strip_prefix("[apps.")
+            .is_some_and(|tail| {
+                alternatives.iter().any(|name| {
+                    tail.strip_prefix(name.as_str())
+                        .is_some_and(section_boundary)
+                })
+            })
+    })
+}
+
+const ROOT_KEYS: [&str; 4] = [
+    "approval_policy",
+    "default_permissions",
+    "sandbox_mode",
+    "sandbox_workspace_write",
+];
+fn key_tail<'a>(source: &'a str, key: &str) -> Option<&'a str> {
+    if let Some(tail) = source.strip_prefix('"') {
+        tail.strip_prefix(key)?.strip_prefix('"')
+    } else if let Some(tail) = source.strip_prefix('\'') {
+        tail.strip_prefix(key)?.strip_prefix('\'')
+    } else {
+        source.strip_prefix(key)
+    }
+}
+fn root_boundary(source: &str) -> usize {
+    table_positions(source)
+        .first()
+        .copied()
+        .unwrap_or(source.len())
+}
+
+pub fn root_configuration_keys(source: &str) -> Vec<String> {
+    let root = &source[..root_boundary(source)];
+    let mut keys = Vec::new();
+    let mut consumed = 0;
+    for start in line_starts(root) {
+        if start < consumed {
+            continue;
+        }
+        let tail = root[start..].trim_start_matches(whitespace);
+        for key in ROOT_KEYS {
+            let Some(rest) = key_tail(tail, key) else {
+                continue;
+            };
+            let Some(rest) = rest.trim_start_matches(whitespace).strip_prefix('=') else {
+                continue;
+            };
+            consumed = root.len() - rest.len();
+            if !keys.iter().any(|value| value == key) {
+                keys.push(key.into());
+            }
+            break;
+        }
+    }
+    keys
+}
+
+pub fn has_legacy_sandbox_table(source: &str) -> bool {
+    line_starts(source).any(|start| {
+        source[start..]
+            .trim_start_matches(whitespace)
+            .strip_prefix("[sandbox_workspace_write")
+            .is_some_and(section_boundary)
+    })
+}
+
+/// Adopt only one exact matching assignment per key in the root region.
+/// Comments, duplicate assignments and changed values retain the original errors.
+pub fn adopt_matching_permissions(source: &str) -> IvyResult<String> {
+    let boundary = root_boundary(source);
+    let root = &source[..boundary];
+    let mut ranges = Vec::new();
+    let mut seen = HashSet::new();
+    let mut consumed = 0;
+    for start in line_starts(root) {
+        if start < consumed {
+            continue;
+        }
+        let tail = root[start..].trim_start_matches([' ', '\t']);
+        for (key, expected) in [
+            ("approval_policy", "never"),
+            ("default_permissions", ":danger-full-access"),
+        ] {
+            let Some(rest) = key_tail(tail, key) else {
+                continue;
+            };
+            let Some(rest) = rest.trim_start_matches([' ', '\t']).strip_prefix('=') else {
+                continue;
+            };
+            let value = rest.trim_start_matches([' ', '\t']);
+            let value_start = root.len() - value.len();
+            let value_end = value
+                .find(['\r', '\n'])
+                .map_or(root.len(), |i| value_start + i);
+            let mut end = value_end;
+            if root[end..].starts_with("\r\n") {
+                end += 2;
+            } else if root[end..].starts_with('\n') {
+                end += 1;
+            }
+            let value = root[value_start..value_end].trim_matches(whitespace);
+            if !seen.insert(key)
+                || (value != format!("\"{expected}\"") && value != format!("'{expected}'"))
+            {
+                return Err(conflict(&format!(
+                    "Codex {key} already has a different or ambiguous unmanaged configuration."
+                )));
+            }
+            ranges.push(start..end);
+            consumed = end;
+            break;
+        }
+    }
+    Ok(format!(
+        "{}{}",
+        remove_lines(root, &ranges),
+        &source[boundary..]
+    ))
+}
