@@ -1,6 +1,6 @@
 //! Native SIP sockets stay bound from preparation through confirmed shutdown.
 //! The host supplies already parsed literal endpoints and owns call admission.
-use super::{PreparedInvite, SipEndpoint, SipIoError, tls::TlsClient};
+use super::{ClientExchange, PreparedInvite, SipEndpoint, SipIoError, tls::TlsClient};
 use rsipstack::{
     sip::{Request, Transport},
     transaction::endpoint::EndpointOption,
@@ -77,6 +77,71 @@ pub(super) fn tcp_socket(address: SocketAddr) -> Result<TcpSocket, BindError> {
 }
 fn sip_address(address: SocketAddr, transport: Transport) -> SipAddr {
     SipAddr::new(transport, address.into())
+}
+
+/// A confirmed local route. Its endpoint reference fences binding disposal;
+/// account, request and authentication identities remain the caller's inputs.
+#[derive(Clone)]
+pub struct SipBoundFlow {
+    endpoint: Arc<SipEndpoint>,
+    connection: SipConnection,
+    destination: SipAddr,
+    proxy: Option<SipAddr>,
+    local: SocketAddr,
+    remote: SocketAddr,
+}
+impl SipBoundFlow {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local
+    }
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote
+    }
+    pub fn protocol(&self) -> Transport {
+        self.destination.r#type.unwrap_or_default()
+    }
+    pub fn client(&self, request: Request) -> Result<ClientExchange, SipIoError> {
+        if !live(&self.connection) {
+            return Err(SipIoError::Stopped);
+        }
+        self.endpoint.connected_client(
+            request,
+            self.destination.clone(),
+            self.connection.clone(),
+            self.proxy.clone(),
+        )
+    }
+    pub(crate) fn endpoint(&self) -> &Arc<SipEndpoint> {
+        &self.endpoint
+    }
+    pub(crate) async fn keepalive(&self) -> Result<(), BindError> {
+        let SipConnection::Udp(connection) = &self.connection else {
+            return Err(BindError::InvalidDestination);
+        };
+        connection
+            .send_raw(b"\r\n\r\n", &self.destination)
+            .await
+            .map_err(|_| BindError::ConnectFailed)
+    }
+}
+
+fn tls_name(next_hop: &SipAddr, resolved: SocketAddr) -> Result<ServerName<'static>, BindError> {
+    if next_hop.r#type != Some(Transport::Tls)
+        || next_hop
+            .addr
+            .port
+            .as_ref()
+            .is_some_and(|port| port.value() != resolved.port())
+        || matches!(&next_hop.addr.host, rsipstack::sip::Host::IpAddr(ip) if *ip != resolved.ip())
+    {
+        return Err(BindError::InvalidDestination);
+    }
+    match &next_hop.addr.host {
+        rsipstack::sip::Host::IpAddr(ip) => Ok(ServerName::IpAddress((*ip).into())),
+        rsipstack::sip::Host::Domain(domain) => {
+            ServerName::try_from(domain.to_string()).map_err(|_| BindError::InvalidDestination)
+        }
+    }
 }
 
 pub struct BoundSipTransport {
@@ -233,6 +298,9 @@ impl BoundSipTransport {
     pub fn local_addr(&self) -> SocketAddr {
         self.local
     }
+    pub fn protocol(&self) -> Transport {
+        self.protocol
+    }
     pub fn endpoint(&self) -> Result<Arc<SipEndpoint>, BindError> {
         self.endpoint.clone().ok_or(BindError::Stopped)
     }
@@ -278,22 +346,10 @@ impl BoundSipTransport {
         next_hop: SipAddr,
         via_proxy: bool,
     ) -> Result<PreparedInvite, BindError> {
-        if self.protocol != Transport::Tls
-            || next_hop.r#type != Some(Transport::Tls)
-            || next_hop
-                .addr
-                .port
-                .as_ref()
-                .is_some_and(|port| port.value() != resolved.port())
-            || matches!(&next_hop.addr.host, rsipstack::sip::Host::IpAddr(ip) if *ip != resolved.ip())
-        {
+        if self.protocol != Transport::Tls {
             return Err(BindError::InvalidDestination);
         }
-        let name = match &next_hop.addr.host {
-            rsipstack::sip::Host::IpAddr(ip) => ServerName::IpAddress((*ip).into()),
-            rsipstack::sip::Host::Domain(domain) => ServerName::try_from(domain.to_string())
-                .map_err(|_| BindError::InvalidDestination)?,
-        };
+        let name = tls_name(&next_hop, resolved)?;
         let destination = sip_address(resolved, Transport::Tls);
         let proxy = via_proxy.then(|| destination.clone());
         self.prepare(request, destination, proxy, Some(name)).await
@@ -306,6 +362,98 @@ impl BoundSipTransport {
         proxy: Option<SipAddr>,
         name: Option<ServerName<'static>>,
     ) -> Result<PreparedInvite, BindError> {
+        self.validate_destination(&destination, proxy.as_ref())?;
+        // Validate before opening even a local connection, as for all calls.
+        let mut prepared = PreparedInvite::new(request, destination.clone(), proxy.clone())
+            .map_err(BindError::Endpoint)?;
+        let connection = self.connection(&destination, proxy.as_ref(), name).await?;
+        prepared.bind_connection(self.endpoint()?, connection);
+        Ok(prepared)
+    }
+
+    /// Resolve only the configured/routed next hop. The request URI is never
+    /// used as an implicit fallback destination (notably for REGISTER).
+    pub async fn connect_next_hop(
+        &self,
+        next_hop: SipAddr,
+        via_proxy: bool,
+    ) -> Result<SipBoundFlow, BindError> {
+        if self.closed || self.stop.is_cancelled() {
+            return Err(BindError::Stopped);
+        }
+        if next_hop.r#type.unwrap_or_default() != self.protocol
+            || next_hop
+                .addr
+                .port
+                .as_ref()
+                .is_some_and(|port| port.value() == 0)
+        {
+            return Err(BindError::InvalidDestination);
+        }
+        let resolved = if next_hop.get_socketaddr().is_ok() {
+            next_hop.clone()
+        } else {
+            let endpoint = self.endpoint()?;
+            tokio::select! {
+                biased;
+                _ = self.stop.cancelled() => return Err(BindError::Stopped),
+                result = endpoint.inner().transport_layer.inner.domain_resolver.resolve(&next_hop) => result.map_err(|_| BindError::InvalidDestination)?,
+            }
+        };
+        if resolved.r#type.unwrap_or_default() != self.protocol {
+            return Err(BindError::InvalidDestination);
+        }
+        let remote = resolved
+            .get_socketaddr()
+            .map_err(|_| BindError::InvalidDestination)?;
+        let name = if self.protocol == Transport::Tls {
+            Some(tls_name(&next_hop, remote)?)
+        } else {
+            None
+        };
+        let proxy = via_proxy.then(|| resolved.clone());
+        let connection = self.connection(&resolved, proxy.as_ref(), name).await?;
+        let local = if self.protocol == Transport::Udp && self.local.ip().is_unspecified() {
+            // A route-only probe sends no datagrams and never reconnects the
+            // shared receiving socket. Its chosen IP accompanies OUR port.
+            let mut probe_address = self.local;
+            probe_address.set_port(0);
+            let probe = tokio::net::UdpSocket::bind(probe_address)
+                .await
+                .map_err(|_| BindError::BindFailed)?;
+            probe
+                .connect(remote)
+                .await
+                .map_err(|_| BindError::ConnectFailed)?;
+            let mut local = probe.local_addr().map_err(|_| BindError::ConnectFailed)?;
+            local.set_port(self.local.port());
+            local
+        } else if self.protocol == Transport::Udp {
+            self.local
+        } else {
+            connection
+                .get_addr()
+                .get_socketaddr()
+                .map_err(|_| BindError::ConnectFailed)?
+        };
+        if self.stop.is_cancelled() {
+            return Err(BindError::Stopped);
+        }
+        Ok(SipBoundFlow {
+            endpoint: self.endpoint()?,
+            connection,
+            destination: resolved,
+            proxy,
+            local,
+            remote,
+        })
+    }
+
+    fn validate_destination(
+        &self,
+        destination: &SipAddr,
+        proxy: Option<&SipAddr>,
+    ) -> Result<SocketAddr, BindError> {
         if self.closed || self.stop.is_cancelled() {
             return Err(BindError::Stopped);
         }
@@ -318,16 +466,22 @@ impl BoundSipTransport {
         if remote.port() == 0
             || remote.is_ipv4() != self.local.is_ipv4()
             || destination.r#type.unwrap_or_default() != self.protocol
-            || proxy.as_ref().is_some_and(|value| {
+            || proxy.is_some_and(|value| {
                 value.r#type.unwrap_or_default() != self.protocol
                     || value.get_socketaddr().ok() != Some(remote)
             })
         {
             return Err(BindError::InvalidDestination);
         }
-        // Validate the INVITE before opening even a local TCP connection.
-        let mut prepared = PreparedInvite::new(request, destination.clone(), proxy)
-            .map_err(BindError::Endpoint)?;
+        Ok(remote)
+    }
+    async fn connection(
+        &self,
+        destination: &SipAddr,
+        proxy: Option<&SipAddr>,
+        name: Option<ServerName<'static>>,
+    ) -> Result<SipConnection, BindError> {
+        let remote = self.validate_destination(destination, proxy)?;
         let connection = if let Some(connection) = &self.datagram {
             connection.clone()
         } else {
@@ -391,8 +545,7 @@ impl BoundSipTransport {
                 connection
             }
         };
-        prepared.bind_connection(self.endpoint()?, connection);
-        Ok(prepared)
+        Ok(connection)
     }
 
     /// Keep this owner on failure. A still-owned call/endpoint reference cannot

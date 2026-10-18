@@ -99,6 +99,9 @@ impl Default for RegistrationLease {
     }
 }
 impl RegistrationLease {
+    pub(super) fn original_flow(&self) -> Option<RegistrationFlow> {
+        self.flow.clone()
+    }
     pub fn observation(&mut self, now: Duration) -> RegistrationObservation {
         if self.observation.phase == RegistrationPhase::Registered
             && now

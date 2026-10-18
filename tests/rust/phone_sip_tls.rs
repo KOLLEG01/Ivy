@@ -166,6 +166,89 @@ async fn released(host: &mut BoundSipTransport) {
 }
 
 #[tokio::test]
+async fn register_uses_authenticated_ip_authority_and_retains_bound_tls_flow_for_removal() {
+    use crate::sip::{RegistrationPhase, SipRegistration, SipRegistrationSettings};
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = listener.local_addr().unwrap();
+        let host = Arc::new(binding("0.0.0.0:0", verifier()));
+        let local = host.local_addr();
+        let peer = tokio::spawn(async move {
+            let (stream, source) = listener.accept().await.unwrap();
+            assert_eq!(source.port(), local.port());
+            let mut stream = BufReader::new(server(VALID).accept(stream).await.unwrap());
+            let first = received(&mut stream).await;
+            assert_eq!(first.method, Method::Register);
+            assert_eq!(first.uri.to_string(), "sip:account.example.test");
+            assert!(
+                first
+                    .contact_header()
+                    .unwrap()
+                    .value()
+                    .contains(&source.to_string())
+            );
+            let mut success = response(&first, StatusCode::OK);
+            success
+                .headers
+                .push(rsipstack::sip::headers::Expires::from(60).into());
+            stream
+                .get_mut()
+                .write_all(success.to_string().as_bytes())
+                .await
+                .unwrap();
+            let remove = received(&mut stream).await;
+            assert_eq!(remove.method, Method::Register);
+            assert_eq!(remove.expires_header().unwrap().value(), "0");
+            assert_eq!(
+                first.call_id_header().unwrap(),
+                remove.call_id_header().unwrap()
+            );
+            assert_eq!(remove.cseq_header().unwrap().seq().unwrap(), 2);
+            stream
+                .get_mut()
+                .write_all(response(&remove, StatusCode::OK).to_string().as_bytes())
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(40), listener.accept())
+                    .await
+                    .is_err()
+            );
+            let mut byte = [0];
+            assert!(matches!(stream.read(&mut byte).await, Ok(0) | Err(_)));
+        });
+        let settings = SipRegistrationSettings::new(
+            "sip:public-user@account.example.test",
+            &format!("sips:{remote}"),
+            "contact-user".into(),
+            "digest-user".into(),
+            None,
+            60,
+            10,
+            1,
+            Transport::Tls,
+        )
+        .unwrap();
+        let mut registration =
+            SipRegistration::start(host.clone(), settings, "fixture-only".into(), None).unwrap();
+        while registration.observation().phase != RegistrationPhase::Registered {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(registration.observation().remote.unwrap().address, remote);
+        registration.close().await.unwrap();
+        assert_eq!(registration.observation().remote_removed, Some(true));
+        drop(registration);
+        let mut host = Arc::try_unwrap(host)
+            .ok()
+            .expect("registration released TLS host");
+        released(&mut host).await;
+        peer.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn dns_proxy_and_ip_san_use_the_real_bound_flow() {
     for (bind, authority, proxy) in [
         ("127.0.0.1:0", "sip.example.test", false),

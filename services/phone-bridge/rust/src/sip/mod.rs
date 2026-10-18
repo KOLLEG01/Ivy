@@ -7,9 +7,10 @@ mod dialog;
 mod endpoint;
 mod invite;
 mod registration;
+mod registration_client;
 mod tls;
 
-pub use binding::{BindError, BoundSipTransport};
+pub use binding::{BindError, BoundSipTransport, SipBoundFlow};
 pub use call::{
     CallObservation, DelayedInvite, DelayedInviteMedia, DigestCredentials, PreparedInvite,
 };
@@ -21,3 +22,4 @@ pub use registration::{
     IncomingPeers, RegistrationFlow, RegistrationLease, RegistrationObservation, RegistrationPeer,
     RegistrationPhase, RegistrationTransport, registration_expiry,
 };
+pub use registration_client::{RegistrationError, SipRegistration, SipRegistrationSettings};

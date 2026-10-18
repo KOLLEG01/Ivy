@@ -5,6 +5,8 @@ use ivy_phone_bridge::{
 use std::sync::Arc;
 #[path = "phone_registration.rs"]
 mod registration;
+#[path = "phone_register.rs"]
+mod register;
 #[path = "phone_sip.rs"]
 mod sip;
 #[path = "phone_sip_stack.rs"]
