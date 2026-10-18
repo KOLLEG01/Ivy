@@ -6,7 +6,7 @@ use futures_util::{
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent, hash::hash_json,
-    json::parse, native_catalog_path::native_catalog_path,
+    json::parse, checked_native_contract::native_catalog_path,
 };
 use ivy_sdk::{
     rpc::{RequestOptions, RpcClient},
