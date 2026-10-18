@@ -352,7 +352,7 @@ async fn configuration_and_discovery_match_original_defaults_guards_and_rpc_trac
             let value = r.required("value").unwrap();
             store.documents.borrow_mut().push(Stored {
                 key: r.required("key").unwrap().as_str().unwrap(),
-                name: text(r, "name"),
+                name: r.required("name").unwrap().as_str().unwrap(),
                 document: Document {
                     pin: Json::object([
                         ("objectId", r.required("id").unwrap().clone()),
@@ -405,7 +405,7 @@ async fn configuration_and_discovery_match_original_defaults_guards_and_rpc_trac
                         count: 1000,
                         bytes: 32 * 1024 * 1024,
                     },
-                    now: || "2026-01-02T03:04:05.000Z".into(),
+                    now: || String::from("2026-01-02T03:04:05.000Z"),
                     new_id: || JsString::from("unused"),
                     cache: None,
                 };
