@@ -696,7 +696,7 @@ impl Encoder {
     }
 }
 
-fn array_index(s: &JsString) -> Option<u32> {
+pub(crate) fn array_index(s: &JsString) -> Option<u32> {
     let s = s.to_utf8().ok()?;
     let n = s.parse::<u32>().ok()?;
     if n == u32::MAX || n.to_string() != s {
