@@ -8,6 +8,7 @@ pub mod assignment_preflight;
 pub mod assignment_scheduler;
 pub mod assignment_progress;
 pub mod assignment_windows;
+pub mod assignment_events;
 pub mod assignment_prompt;
 pub mod assignment_result;
 pub mod assignment_decision;

@@ -27,6 +27,8 @@ mod assignment_scheduler_cases;
 mod assignment_progress_cases;
 #[path = "assignment_windows_cases.rs"]
 mod assignment_windows_cases;
+#[path = "assignment_events_cases.rs"]
+mod assignment_events_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;

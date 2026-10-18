@@ -54,8 +54,7 @@ fn joined(parts: &[IvyJson]) -> IvyResult<JsString> {
     }
     Ok(result)
 }
-// Only Number(payload.revision)'s positive-safe-integer result is admissible.
-fn object_revision(value: Option<&IvyJson>) -> IvyResult<f64> {
+pub(crate) fn revision_number(value: Option<&IvyJson>) -> IvyResult<f64> {
     let n = match value {
         Some(IvyJson::Number(n)) => *n,
         Some(IvyJson::Bool(b)) => {
@@ -103,6 +102,11 @@ fn object_revision(value: Option<&IvyJson>) -> IvyResult<f64> {
         }
         None => f64::NAN,
     };
+    Ok(n)
+}
+// Only Number(payload.revision)'s positive-safe-integer result is admissible.
+fn object_revision(value: Option<&IvyJson>) -> IvyResult<f64> {
+    let n = revision_number(value)?;
     need(
         n.is_finite() && n.fract() == 0.0 && n > 0.0 && n <= 9_007_199_254_740_991.0,
         "secretary_object_event_invalid",
