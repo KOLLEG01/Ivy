@@ -184,9 +184,10 @@ pub fn resolve_command(
             "Command executable must be inside the artifact or explicitly mapped by host configuration.",
         ));
     }
-    let script = executable.extension().is_some_and(|extension| {
-        ["cmd", "bat", "ps1"].contains(&extension.to_string_lossy().to_ascii_lowercase().as_str())
-    });
+    // Match the whole-path suffix, including dot-only basenames such as `.CMD`.
+    let bytes = executable.as_os_str().as_encoded_bytes();
+    let script = bytes.len() >= 4 && [b".cmd", b".bat", b".ps1"].iter()
+        .any(|suffix| bytes[bytes.len() - 4..].eq_ignore_ascii_case(*suffix));
     if !executable.is_file() || script {
         return Err(invalid(
             "Commands need a direct executable; shell scripts require an explicit interpreter and argument array.",

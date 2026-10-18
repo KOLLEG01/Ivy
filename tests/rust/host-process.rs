@@ -246,6 +246,25 @@ async fn raw_protocol_pipes_bypass_diagnostic_capture() {
 }
 
 #[test]
+fn command_resolution_rejects_script_suffixes_including_dot_only_basenames() {
+    let root = Root::new();
+    let (mut command, _) = fixture_command();
+    for (name, rejected) in [(".CMD", true), (".bat", true), (".Ps1", true), ("script.CMD", true), ("script.bAt", true), ("script.Ps1", true), (".cmd.exe", false), ("script.ps1.backup", false)] {
+        std::fs::write(root.0.join(name), b"fixture; never executed").unwrap();
+        command.executable = name.into();
+        let result = process::resolve_command(&command, &root.0, &BTreeMap::new());
+        if rejected {
+            let error = result.err().unwrap();
+            assert_eq!(error.code, "invalid_arguments", "{name}");
+            assert_eq!(error.message, "Commands need a direct executable; shell scripts require an explicit interpreter and argument array.");
+        } else { assert!(result.is_ok(), "{name}"); }
+    }
+    std::fs::create_dir(root.0.join("directory.exe")).unwrap();
+    command.executable = "directory.exe".into();
+    assert_eq!(process::resolve_command(&command, &root.0, &BTreeMap::new()).err().unwrap().code, "invalid_arguments");
+}
+
+#[test]
 fn configured_paths_and_case_insensitive_environment_overrides_are_explicit() {
     let root = Root::new();
     let (mut command, executables) = fixture_command();
