@@ -133,7 +133,9 @@ impl AssignmentScheduler<'_, '_, '_> {
             ("serviceNodeId", IvyJson::String(service_node_id)),
             (
                 "threadCwd",
-                location.get("cwd").cloned().unwrap_or(IvyJson::Null),
+                location.get("cwd").cloned().ok_or_else(|| {
+                    IvyError::new("invalid_arguments", "Value is outside the JSON domain.")
+                })?,
             ),
             ("model", IvyJson::Null),
             ("effort", "medium".into()),
