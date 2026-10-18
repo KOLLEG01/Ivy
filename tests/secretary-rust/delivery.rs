@@ -9,6 +9,8 @@ use std::{
 mod browser_notice_cases;
 #[path = "inbox_evidence_cases.rs"]
 mod inbox_evidence_cases;
+#[path = "inbox_recovery_cases.rs"]
+mod inbox_recovery_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 #[path = "workflow_cases.rs"]
