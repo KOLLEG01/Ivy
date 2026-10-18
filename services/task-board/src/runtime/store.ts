@@ -237,8 +237,8 @@ export class TaskBoardStore {
       }
       documents.delete(id);
     };
-    const refresh = async () => {
-      while (indexedVersion !== databaseVersion()) {
+    const refresh = function* (this: TaskBoardStore): Generator<void> {
+      if (indexedVersion !== databaseVersion()) {
         const version = databaseVersion();
         const heads = this.local.prepare("SELECT id,key,current_revision FROM documents").all();
         const live = new Set<string>();
@@ -250,7 +250,9 @@ export class TaskBoardStore {
             if (row) {
               const value = JSON.parse(String(row["value_json"]));
               const found = new Set<string>(); references(value, found); forget(id);
-              documents.set(id, { revision, references: found, unresolved: hasUnresolvedOutcome(value) ||
+              // Prepared domain payloads are immutable snapshots, not owners of
+              // the native uncertainty they happened to show when copied.
+              documents.set(id, { revision, references: found, unresolved: localContractKeys.has(String(head["key"]) as ContractKey) && hasUnresolvedOutcome(value) ||
                 head["key"] === "task-board/native-call" && (value.state !== "observed" || !["succeeded", "failed"].includes(value.ownerPhase)) });
               for (const target of found) {
                 let sources = referrers.get(target);
@@ -259,38 +261,42 @@ export class TaskBoardStore {
               }
             }
           }
-          if (index % 32 === 31) await yieldToRequests();
+          if (index % 32 === 31) yield;
         }
         for (const id of documents.keys()) if (!live.has(id)) forget(id);
         indexedVersion = version;
       }
-    };
-    await refresh();
+    }.bind(this);
+    // Build the initial index cooperatively. A busy journal need not become idle
+    // to finish this pass; refresh changed heads inside the deletion transaction.
+    for (const _ of refresh()) await yieldToRequests();
     const due = this.local
       .prepare("SELECT root_id FROM cleanup_roots ORDER BY delete_after,rowid")
       .all();
-    for (const row of due) {
+    for (const [index, row] of due.entries()) {
       if (!full(true)) break;
+      if (index % 32 === 31) await yieldToRequests();
       const rootId = String(row["root_id"]);
       const before = this.local.prepare("SELECT current_revision,key,name FROM documents WHERE id=?").get(rootId);
-      if (await this.retainedLocalRoot(rootId)) {
-        continue;
-      }
-      await refresh();
-      const ids = this.local.prepare(`WITH RECURSIVE subtree(id) AS (
+      const subtree = () => this.local.prepare(`WITH RECURSIVE subtree(id) AS (
         SELECT ? UNION ALL SELECT documents.id FROM documents JOIN subtree ON documents.parent_id=subtree.id
       ) SELECT id FROM subtree`).all(rootId).map(value => String(value["id"]));
+      let ids = subtree(), selected = new Set(ids);
+      const protectedReference = () => ids.some(id => documents.get(id)?.unresolved ||
+        [...referrers.get(id) ?? []].some(source => !selected.has(source)));
+      // Reject protected history before doing owner reads for its receipts.
+      for (const _ of refresh()) { /* No await between this snapshot and its use. */ }
+      if (protectedReference() || await this.retainedLocalRoot(rootId)) continue;
       this.local.exec("BEGIN IMMEDIATE");
       try {
+        for (const _ of refresh()) { /* Include writes made during the owner read. */ }
+        ids = subtree(); selected = new Set(ids);
         const after = this.local.prepare("SELECT current_revision FROM documents WHERE id=?").get(rootId);
         if (before?.["current_revision"] !== after?.["current_revision"] || ids.some(id => incomingIds.has(id)) ||
             this.local.prepare("SELECT 1 FROM active_gates WHERE operation_id=? LIMIT 1").get(rootId)) {
           this.local.exec("ROLLBACK"); continue;
         }
-        const selected = new Set(ids);
-        const protectedReference = ids.some(id => documents.get(id)?.unresolved ||
-          [...referrers.get(id) ?? []].some(source => !selected.has(source)));
-        if (protectedReference) { this.local.exec("ROLLBACK"); continue; }
+        if (protectedReference()) { this.local.exec("ROLLBACK"); continue; }
         if (before?.["key"] === "task-board/operation") {
           const operation = this.localDocument("task-board/operation", rootId, false).value;
           this.local.prepare("INSERT OR IGNORE INTO retired_operations VALUES(?,?,?,?)")
@@ -309,7 +315,10 @@ export class TaskBoardStore {
         this.local
           .prepare("DELETE FROM cleanup_roots WHERE root_id=?")
           .run(rootId);
+        const collectedVersion = databaseVersion();
         this.local.exec("COMMIT");
+        for (const id of ids) forget(id);
+        indexedVersion = collectedVersion;
       } catch (error) {
         this.local.exec("ROLLBACK");
         throw error;
@@ -729,8 +738,8 @@ export class TaskBoardStore {
     ) {
       const encoded = canonical(value),
         now = new Date().toISOString();
-      await this.collectLocal(Date.now(), Buffer.byteLength(encoded), 1,
-        "create" in destination ? destination.create.parentId ?? undefined : destination.objectId, value);
+      // The reconciler collects history periodically. Workflow writes must not
+      // queue behind cleanup's remote receipt checks, especially gate releases.
       if ("create" in destination) {
         const existing = await this.named(
           key,

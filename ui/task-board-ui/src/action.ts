@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import type { Ref } from 'vue';
 import { discover, IvyError, newOperationId } from '../../../packages/sdk/src/client.js';
 import type { TaskBoard, Wire } from './runtime';
@@ -91,9 +91,26 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
       const operation = await readOperation();
       saved.value.phase = operation.phase === 'succeeded' ? 'succeeded' : operation.phase === 'failed' ? 'failed' : 'pending';
       saved.value.outcome = operation.outcome; saved.value.detail = operation.error?.message ?? 'Original operation: ' + operation.phase + '.'; persist();
-    } catch (cause) { error.value = cause instanceof Error ? cause.message : 'The original outcome is unavailable.'; }
+    } catch (cause) {
+      if (cause instanceof IvyError && cause.code === 'operation_expired') {
+        // The owner only retires terminal operations. A released receipt cannot
+        // be replayed, but must not keep unrelated new comments locked forever.
+        saved.value.phase = 'failed';
+        saved.value.detail = 'The original action has finished and its receipt was released. Check the task before repeating it.';
+        try { persist(); } catch (problem) { error.value = String(problem); }
+      } else error.value = cause instanceof Error ? cause.message : 'The original outcome is unavailable.';
+    }
     finally { busy.value = false; }
   };
+  // A lost HTTP reply must not leave this tab locked after the owner finishes.
+  // Observe the original identity; only an explicit resume replays its request.
+  let reconciliation: ReturnType<typeof setTimeout> | undefined;
+  watch([() => saved.value?.phase, busy], ([phase, running]) => {
+    if (reconciliation) clearTimeout(reconciliation);
+    if (!running && (phase === 'unknown' || phase === 'pending') && identityMatches() && !storageError.value)
+      reconciliation = setTimeout(() => { void reconcile(); }, 5000);
+  }, { immediate: true });
+  onBeforeUnmount(() => { if (reconciliation) clearTimeout(reconciliation); });
   const canRetryPreparation = computed(() => !!error.value && !storageError.value && !busy.value && (!saved.value || ['succeeded', 'failed'].includes(saved.value.phase)));
   const canDismiss = computed(() => !busy.value && !storageError.value && identityMatches() && !!saved.value && ['succeeded', 'failed'].includes(saved.value.phase));
   const dismiss = () => {

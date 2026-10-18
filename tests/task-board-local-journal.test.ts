@@ -158,6 +158,75 @@ test("collection refreshes references written by another journal owner while yie
   } finally { db.close(); }
 });
 
+test("history collection finishes while another owner keeps writing", async t => {
+  const f = taskBoardFixture(t), store = f.first.store;
+  const db = new DatabaseSync(join(f.plan.location!.cwd, "task-board.sqlite"));
+  let writing = true, writes = 0;
+  try {
+    const at = new Date().toISOString();
+    for (let index = 0; index < 96; index++) {
+      const id = "busy-history-" + index;
+      db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,?)").run(id, "task-board/native-plan", id, null, 1, at, at);
+      db.prepare("INSERT INTO revisions VALUES(?,?,?,?)").run(id, 1, JSON.stringify({ fixture: index }), at);
+      store.completeLocalWorkflow(id, at);
+    }
+    const write = () => {
+      if (!writing) return;
+      db.prepare("INSERT OR REPLACE INTO markers VALUES('busy-writer',?)").run(String(++writes));
+      if (writes < 500) setImmediate(write);
+    };
+    setImmediate(write);
+    await store.collectLocal(Date.now(), 0, store.historyLimits.count);
+    assert.ok(writes > 0 && writes < 500, "cleanup must not wait for a globally idle journal");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM documents WHERE id LIKE 'busy-history-%'").get()?.["count"], 0);
+  } finally { writing = false; db.close(); }
+});
+
+test("a completed publication can release its old snapshot of another run's uncertainty", async t => {
+  const f = taskBoardFixture(t), created = await f.create();
+  const operation = await f.first.operations.find("user", created.operationId);
+  assert.ok(operation);
+  const db = new DatabaseSync(join(f.plan.location!.cwd, "task-board.sqlite"));
+  try {
+    const at = new Date().toISOString();
+    db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,?)").run("historical-task", "task-board/task", "historical-task", operation.pin.objectId, 1, at, at);
+    db.prepare("INSERT INTO revisions VALUES(?,?,?,?)").run("historical-task", 1, JSON.stringify({ claim: { phase: "outcome_unknown" } }), at);
+    f.first.store.historyLimits.count = 0;
+    await f.first.store.collectLocal();
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM documents WHERE id='historical-task'").get()?.["count"], 0);
+    assert.ok(f.first.store.retiredOperation("user", created.operationId));
+  } finally { db.close(); }
+});
+
+test("workflow writes continue while history waits for a remote receipt check", async t => {
+  const f = taskBoardFixture(t), store = f.first.store;
+  const db = new DatabaseSync(join(f.plan.location!.cwd, "task-board.sqlite"));
+  const at = new Date().toISOString();
+  let started!: () => void, release!: () => void;
+  const checking = new Promise<void>(resolve => { started = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const request = store.client.request.bind(store.client);
+  t.mock.method(store.client, "request", async (method: string, input: { objectId?: string }) => {
+    if (method === "objects.read" && input.objectId === "slow-history-task") {
+      started(); await held; throw new IvyError("not_found", "History task is gone.");
+    }
+    return request(method as never, input as never);
+  });
+  db.prepare("INSERT INTO documents VALUES(?,?,?,?,?,?,?)").run("slow-attempt", "task-board/scheduler-attempt", "slow-attempt", null, 1, at, at);
+  db.prepare("INSERT INTO revisions VALUES(?,?,?,?)").run("slow-attempt", 1, JSON.stringify({ task: { objectId: "slow-history-task", revision: 1 } }), at);
+  store.completeLocalWorkflow("slow-attempt", at);
+  store.historyLimits.count = 0;
+  const collection = store.collectLocal();
+  try {
+    await checking;
+    const written = store.write("task-board/scan-cursor", { schemaVersion: 1, principalId: "fixture", serviceNodeId: "fixture",
+      lane: "tasks", queryHash: hashJson("fixture"), cursor: null, updatedAt: at }, randomUUID(),
+      { create: { parentId: null, name: "Live progress" } });
+    const result = await Promise.race([written, new Promise<null>(resolve => { const timer = setTimeout(() => resolve(null), 1000); timer.unref(); })]);
+    assert.ok(result, "a workflow checkpoint must not wait behind remote history collection");
+  } finally { release(); await collection; db.close(); }
+});
+
 test("the local scan cursor keeps only its current revision", async (t) => {
   const f = taskBoardFixture(t),
     at = new Date().toISOString();

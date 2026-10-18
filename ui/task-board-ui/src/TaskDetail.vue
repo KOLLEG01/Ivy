@@ -30,6 +30,7 @@ import {
   TabsTrigger,
   ToolbarContent,
   markdownImageSources,
+  attachmentMarkdown,
   useRemote,
 } from "@ivy/ui";
 import type { UploadedAttachment } from "@ivy/ui";
@@ -188,7 +189,7 @@ const pendingAttachments = ref<TaskBoard.TaskAttachment[]>([]),
   historyOpen = ref(false),
   wikiPickerOpen = ref(false),
   descriptionExpanded = ref(false),
-  commentInput = ref<{ insertMarkdown: (markdown: string) => void }>();
+  commentInput = ref<{ insertMarkdown: (markdown: string, focus?: boolean) => void }[]>([]);
 const terminal = computed(() =>
   ["done", "cancelled"].includes(task.value.value?.value.workflowState ?? ""),
 );
@@ -204,11 +205,9 @@ const editable = computed(
   () =>
     props.workspace.role === "user" &&
     !task.value.value?.read.object.effectivelyArchived &&
-    !task.value.value?.value.publication &&
-    !archive.busy.value && !archive.pending.value &&
-    (!action.locked.value || uploading.value),
+    !archive.busy.value && !archive.pending.value,
 );
-const writable = computed(() => editable.value && props.available && !task.error.value && !action.locked.value);
+const writable = computed(() => editable.value && props.available && !task.error.value && !action.locked.value && !task.value.value?.value.publication);
 const canDelete = computed(() =>
   props.available && props.workspace.role === "user" &&
   !!task.value.value && !task.value.value.value.claim &&
@@ -353,7 +352,7 @@ const refresh = () => {
   void taskView.refresh();
 };
 const perform = async (label: string, body: ExistingAction) => {
-  if (!writable.value || !task.value.value) return;
+  if (!writable.value || !task.value.value) return null;
   error.value = null;
   try {
     const current = await readDocument(
@@ -371,11 +370,13 @@ const perform = async (label: string, body: ExistingAction) => {
       refresh();
       emit("changed");
     }
+    return outcome;
   } catch (cause) {
     error.value =
       cause instanceof Error
         ? cause.message
         : "The action could not be prepared.";
+    return null;
   }
 };
 const transition = (
@@ -389,7 +390,8 @@ const transition = (
   });
 const submitComment = async () => {
   if (!commentBody.value.trim() || uploading.value) return;
-  await perform("Add task comment", {
+  const draft = commentBody.value;
+  const outcome = await perform("Add task comment", {
     action: "comment",
     commentId: crypto.randomUUID(),
     body: commentBody.value.trim(),
@@ -399,7 +401,7 @@ const submitComment = async () => {
     attachments: pendingAttachments.value,
     replyTo: null,
   });
-  if (!action.error.value) {
+  if (outcome && commentBody.value === draft) {
     commentBody.value = "";
     moveToTodo.value = false;
     pendingAttachments.value = [];
@@ -501,6 +503,26 @@ const uploadFile = async (file: File): Promise<UploadedAttachment> => {
     refresh();
   }
 };
+watch([() => action.saved.value?.phase, action.busy, uploading], async ([phase, busy, sendingFile]) => {
+  const saved = action.saved.value;
+  if (phase !== 'succeeded' || busy || sendingFile || !saved || !action.identityMatches.value) return;
+  const request = saved.call.arguments as TaskBoard.ActionInput;
+  if (request.action === 'uploadAttachment' && saved.outcome?.attachment) {
+    const attachment = saved.outcome.attachment;
+    if (!pendingAttachments.value.some(value => value.attachmentId === attachment.attachmentId)) {
+      pendingAttachments.value.push(attachment);
+      const markdown = attachmentMarkdown({ src: attachmentSource(attachment.attachmentId), name: attachment.filename,
+        image: attachmentView(attachment.filename, attachment.mediaType) === 'image' });
+      await nextTick();
+      if (commentInput.value[0]) commentInput.value[0].insertMarkdown(markdown, false);
+      else commentBody.value += '\n' + markdown;
+    }
+  } else if (request.action === 'comment' && commentBody.value.trim() === request.body &&
+      pendingAttachments.value.every(value => request.attachments.some(attachment => attachment.attachmentId === value.attachmentId))) {
+    commentBody.value = ''; moveToTodo.value = false; pendingAttachments.value = [];
+  }
+  refresh(); emit('changed');
+});
 // Images shown inside the comment text are not listed again below it.
 const unembedded = (comment: TaskBoard.Comment) =>
   comment.attachments.filter((attachment) =>
@@ -783,7 +805,7 @@ const showArrived = () => {
     <template v-if="task.value.value">
       <Alert
         v-if="
-          taskView.value.value && task.value.value.value.workflowState !== 'review' &&
+          taskView.value.value && !(tab === 'chat' && task.value.value.value.publication) && task.value.value.value.workflowState !== 'review' &&
           noteworthyCondition(taskView.value.value.executionCondition.state)
         "
         class="mt-4"
@@ -804,13 +826,13 @@ const showArrived = () => {
         }}</AlertDescription></Alert
       >
       <ActionState
-        v-if="action.saved.value?.phase !== 'succeeded' || action.error.value"
+        v-if="tab !== 'chat' && (action.saved.value?.phase !== 'succeeded' || action.error.value)"
         :action="action"
         class="mt-4"
         @changed="refresh"
       />
       <p
-        v-if="error || archive.error.value"
+        v-if="tab !== 'chat' && (error || archive.error.value)"
         role="alert"
         class="mt-4 text-sm text-destructive"
       >
@@ -1264,9 +1286,16 @@ const showArrived = () => {
               </p>
               <div
                 v-else
+                data-slot="task-comment-composer"
                 class="space-y-1.5 py-3"
                 :class="commentPreferences.order === 'newest-first' ? '' : 'ivy-chat-surface sticky bottom-0 z-10'"
               >
+                <ActionState v-if="action.saved.value?.phase !== 'succeeded' || action.error.value" :action="action" @changed="refresh" />
+                <Alert v-if="task.value.value.value.publication" role="status">
+                  <AlertTitle>{{ tr('Änderung wird gespeichert', 'Saving task update') }}</AlertTitle>
+                  <AlertDescription>{{ tr('Ein vorheriger Vorgang wird noch abgeschlossen. Dein Text bleibt erhalten.', 'A previous action is still being completed. Your draft is retained.') }}</AlertDescription>
+                </Alert>
+                <p v-if="error || archive.error.value" role="alert" class="text-sm text-destructive">{{ error || archive.error.value }}</p>
                 <div v-if="(task.value.value.value.workflowState === 'done' && writable) || uploading" class="flex flex-wrap items-center gap-3 px-2 text-sm">
                   <Label v-if="task.value.value.value.workflowState === 'done' && writable" class="flex items-center gap-2">
                     <Checkbox v-model="moveToTodo" :disabled="!writable" />
@@ -1299,7 +1328,7 @@ const showArrived = () => {
                     ><ArrowUp aria-hidden="true" /></Button>
                   </template>
                 </MarkdownEditor>
-                <WikiLinkPicker v-model:open="wikiPickerOpen" :trigger="false" :disabled="!writable" @select="commentInput?.insertMarkdown($event)" />
+                <WikiLinkPicker v-model:open="wikiPickerOpen" :trigger="false" :disabled="!writable" @select="commentInput[0]?.insertMarkdown($event)" />
               </div>
             </template>
           </template>
