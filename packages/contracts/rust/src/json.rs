@@ -38,8 +38,27 @@ impl JsString {
     }
 }
 
-/// JavaScript String(value) for ordinary JSON values; unlike JSON.stringify,
-/// arrays join recursively and null array elements become empty strings.
+/// JavaScript String(value) for JSON values, including failed object coercion.
+/// JSON objects cannot supply callable overrides; an own toString shadows the
+/// inherited method and makes string-hint conversion fail. Array conversion
+/// applies the same rule recursively, but does not inspect object properties.
+pub fn try_js_string(value: &IvyJson) -> IvyResult<JsString> {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            IvyJson::Array(values) => pending.extend(values.iter()),
+            IvyJson::Object(_) if value.get("toString").is_some() => {
+                return Err(IvyError::internal());
+            }
+            _ => {}
+        }
+    }
+    Ok(js_string(value))
+}
+
+/// Unchecked JSON string rendering. Call try_js_string at a JavaScript String
+/// boundary unless object coercion is already checked or impossible. Arrays join
+/// recursively and null array elements become empty strings.
 pub fn js_string(value: &IvyJson) -> JsString {
     enum Part<'a> {
         Value(&'a IvyJson),
