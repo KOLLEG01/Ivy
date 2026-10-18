@@ -1,6 +1,74 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 
 #[test]
+fn nfc_matches_node_scalars_decompositions_reordering_and_utf16_boundaries() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .arg("tests/fixtures/nfc-oracle.mjs")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let oracle: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let units = |value: &serde_json::Value| -> Vec<u16> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| u16::try_from(v.as_u64().unwrap()).unwrap())
+            .collect()
+    };
+    let mut mappings: std::collections::HashMap<u32, (Vec<u16>, Vec<u16>)> = oracle["mappings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                u32::try_from(row[0].as_u64().unwrap()).unwrap(),
+                (units(&row[1]), units(&row[2])),
+            )
+        })
+        .collect();
+    assert!(mappings.len() > 13_000);
+    let mut scalars = 0;
+    for point in 0..=0x10ffff {
+        let Some(c) = char::from_u32(point) else {
+            continue;
+        };
+        scalars += 1;
+        let input = JsString::from(c.to_string());
+        let expected = if let Some((nfc, nfd)) = mappings.remove(&point) {
+            assert_eq!(JsString(nfd).normalize_nfc().0, nfc, "NFD U+{point:04X}");
+            nfc
+        } else {
+            input.0.clone()
+        };
+        assert_eq!(
+            input.normalize_nfc().0,
+            expected,
+            "U+{point:04X}; Node {} ICU {} Unicode {}",
+            oracle["node"],
+            oracle["icu"],
+            oracle["unicode"]
+        );
+    }
+    assert_eq!(Some(scalars), oracle["scalarCount"].as_u64());
+    assert!(mappings.is_empty());
+    assert!(oracle["contexts"].as_array().unwrap().len() > 20_000);
+    for (index, row) in oracle["contexts"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(
+            JsString(units(&row["input"])).normalize_nfc().0,
+            units(&row["nfc"]),
+            "context {index}"
+        );
+    }
+}
+
+#[test]
 fn uppercase_and_trim_start_match_node_scalars_units_and_surrogates() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")

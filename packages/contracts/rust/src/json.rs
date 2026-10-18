@@ -24,7 +24,7 @@ impl From<String> for JsString {
 impl JsString {
     /// ECMAScript's locale-independent full Unicode lowercase mapping.
     pub fn to_lowercase(&self) -> Self {
-        self.map_case(str::to_lowercase)
+        self.map_unicode_segments(str::to_lowercase)
     }
     /// English locale lowercase, retaining unpaired UTF-16 units as non-cased
     /// boundaries and preserving context within each well-formed segment.
@@ -33,7 +33,15 @@ impl JsString {
     }
     /// ECMAScript's locale-independent full Unicode uppercase mapping.
     pub fn to_uppercase(&self) -> Self {
-        self.map_case(str::to_uppercase)
+        self.map_unicode_segments(str::to_uppercase)
+    }
+    /// ECMAScript String.normalize("NFC"), preserving unpaired UTF-16 units.
+    pub fn normalize_nfc(&self) -> Self {
+        self.map_unicode_segments(|value| {
+            icu_normalizer::ComposingNormalizer::new_nfc()
+                .normalize(value)
+                .into_owned()
+        })
     }
     /// ECMAScript trimStart whitespace, retaining all remaining UTF-16 units.
     pub fn trim_start(&self) -> Self {
@@ -44,7 +52,7 @@ impl JsString {
             .unwrap_or(self.0.len());
         Self(self.0[start..].to_vec())
     }
-    fn map_case(&self, mapping: fn(&str) -> String) -> Self {
+    fn map_unicode_segments(&self, mapping: fn(&str) -> String) -> Self {
         let mut output = Vec::new();
         let mut segment = String::new();
         for c in char::decode_utf16(self.0.iter().copied()) {
