@@ -78,7 +78,7 @@ fn session_grants_and_observation_generations_have_distinct_lifetimes() {
 #[test]
 fn pcm_ring_matches_fifo_under_wrap_overflow_and_zero_length_reads() {
     let mut queue = AudioQueue::new(23, 0, false, false).unwrap();
-    let mut model = VecDeque::new();
+    let mut model: VecDeque<f32> = VecDeque::new();
     let mut dropped = 0;
     let mut seed = 0x91e0_u32;
     let mut random = || {
