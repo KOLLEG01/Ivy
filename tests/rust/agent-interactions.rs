@@ -23,6 +23,8 @@ mod native_daemon_cases;
 mod native_executable_cases;
 #[path = "agent-native-handshake.rs"]
 mod native_handshake_cases;
+#[path = "agent-native-home.rs"]
+mod native_home_cases;
 #[path = "agent-native-proxy.rs"]
 mod native_proxy_cases;
 #[path = "agent-native-rpc.rs"]
