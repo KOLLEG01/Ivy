@@ -81,6 +81,8 @@ mod notice_scan_cases;
 mod notices_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
+#[path = "triage_prompt_cases.rs"]
+mod triage_prompt_cases;
 #[path = "workflow_cases.rs"]
 mod workflow_cases;
 
