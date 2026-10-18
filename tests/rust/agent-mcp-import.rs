@@ -275,6 +275,7 @@ fn offline_command_imports_a_copy_then_refuses_bad_snapshots_without_side_effect
         "wrong-scope",
         "inheritance-only",
         "bad-openai",
+        "oversized-credential",
         "relative-home",
         "arguments",
     ] {
@@ -294,6 +295,7 @@ fn offline_command_imports_a_copy_then_refuses_bad_snapshots_without_side_effect
                 input.insert("document", doc);
             }
             "bad-openai" => input.insert("openai", IvyJson::Null),
+            "oversized-credential" => input.insert("credential", "x".repeat(4097).into()),
             "relative-home" => input.insert("home", "relative".into()),
             _ => {}
         }

@@ -15,11 +15,15 @@ fn invalid() -> IvyError {
         "MCP import requires home, hostId, hiveUrl, credential, document and openai on stdin.",
     )
 }
-fn string(request: &IvyJson, name: &str) -> IvyResult<JsString> {
+// These are the existing Host InstanceConfig field bounds; this standalone
+// boundary receives the fields directly rather than loading that whole config.
+fn string(request: &IvyJson, name: &str, maximum: usize) -> IvyResult<JsString> {
     request
         .get(name)
         .and_then(IvyJson::as_js_string)
-        .filter(|value| !value.0.is_empty())
+        .filter(|value| {
+            !value.0.is_empty() && String::from_utf16_lossy(&value.0).chars().count() <= maximum
+        })
         .cloned()
         .ok_or_else(invalid)
 }
@@ -61,7 +65,7 @@ fn run() -> IvyResult<IvyJson> {
     {
         return Err(invalid());
     }
-    let home = string(&request, "home")?;
+    let home = string(&request, "home", 2048)?;
     if !node_path::is_absolute(Style::native(), &home) {
         return Err(IvyError::new(
             "invalid_arguments",
@@ -71,9 +75,9 @@ fn run() -> IvyResult<IvyJson> {
     let prepared = prepare_mcp_import_snapshot(
         request.required("document")?,
         request.required("openai")?,
-        &string(&request, "hostId")?,
-        &string(&request, "hiveUrl")?,
-        &string(&request, "credential")?,
+        &string(&request, "hostId", 128)?,
+        &string(&request, "hiveUrl", 2048)?,
+        &string(&request, "credential", 4096)?,
     )?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
