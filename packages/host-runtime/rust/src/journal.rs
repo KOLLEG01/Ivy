@@ -5,6 +5,8 @@ use ivy_contracts::{JsString, core_schema::{validate_host, validate_shared}, has
 use ivy_sdk::clock::{Clock, SystemClock, parse_date};
 use ivy_store::{rusqlite::{Connection, OptionalExtension, Params, params}, sqlite};
 use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
+#[path = "journal_policy_import.rs"]
+mod policy_import_records;
 
 const TERMINAL: [&str; 4] = ["succeeded", "rolled_back", "failed", "needs_attention"];
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -89,8 +91,8 @@ impl HostJournal {
     }
     pub async fn config(&self) -> IvyResult<IvyJson> { self.with(|s| Ok(s.config.clone())).await }
     pub async fn accepted_configuration(&self, source: PathBuf) -> IvyResult<IvyJson> { self.with(move |s| read_accepted_configuration(&s.config, &source)).await }
-    /// None means an unassociated legacy target. The owner must retain its
-    /// frozen startup policy; present but invalid evidence is always an error.
+    /// None needs an explicit one-time policy import before normal ownership.
+    /// Present but invalid evidence is always an error, never a fallback.
     pub async fn accepted_target_policy(&self, target: IvyJson) -> IvyResult<Option<IvyJson>> {
         self.with(move |s| s.policy(&target).map(|policy| policy.map(|(_, config)| config))).await
     }

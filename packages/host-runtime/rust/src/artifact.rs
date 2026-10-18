@@ -70,6 +70,18 @@ pub async fn verify_launch_candidate(candidate: IvyJson, artifact_root: impl Int
     let root = artifact_root.into();
     internal(tokio::task::spawn_blocking(move || verify_launch(&candidate, &root, entrypoint.as_ref())).await)?
 }
+/// Owners call this with the candidate's frozen journal manifest before drain.
+/// Keep the legacy function above available for ordinary v1 callers; inspecting
+/// native intent needs both retained command paths and the shutdown policy.
+pub async fn verify_launch_candidate_with_manifest(candidate:IvyJson,artifact_root:impl Into<PathBuf>,entrypoint:Option<JsString>,manifest:IvyJson)->IvyResult<()>{
+    let root=artifact_root.into();
+    internal(tokio::task::spawn_blocking(move || {
+        verify_launch(&candidate, &root, entrypoint.as_ref())?;
+        let manifest=release_manifest(&manifest)?;
+        require(manifest.get("buildId")==candidate.get("buildId")&&manifest.get("componentId")==candidate.get("componentId"),"build_mismatch","Launch manifest differs from its prepared release identity.")?;
+        crate::native_dispatch::verify(&candidate,&path_value(candidate.required("artifactRoot")?)?,&manifest)
+    }).await)?
+}
 
 /// The v1 dispatcher/host supplies the discovered intentional Node workload
 /// runtime. Package OS and architecture requirements apply to this Rust host.
@@ -104,6 +116,7 @@ pub async fn verify_candidate(candidate: IvyJson, artifact_root: impl Into<PathB
             "build_mismatch", "Candidate manifest does not identify its release.")?;
         let entrypoint = manifest.get("entrypoint").and_then(|v| v.get("args")).and_then(IvyJson::as_array).and_then(|args| args.first()).and_then(IvyJson::as_js_string);
         verify_launch(&candidate, &root, entrypoint)?;
+        crate::native_dispatch::verify(&candidate,&candidate_root,&manifest)?;
         if cfg!(windows) {
             for selected in crate::portable_native_files::portable_native_files(&manifest.required("componentId")?.as_str()?) {
                 let local = candidate_root.join(selected);
