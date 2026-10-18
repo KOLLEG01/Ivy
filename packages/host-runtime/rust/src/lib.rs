@@ -43,6 +43,7 @@ pub mod process;
 pub mod process_fence;
 pub mod process_output;
 pub mod preparations;
+pub mod preparation_files;
 pub mod preparation_tools;
 pub mod runtime_dependencies;
 pub mod preparation_progress;
