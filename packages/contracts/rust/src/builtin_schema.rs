@@ -76,12 +76,25 @@ impl SchemaBundle {
         reference: &JsString,
         strict_percent: bool,
     ) -> IvyResult<(usize, &IvyJson)> {
-        // AJV normalizes either spelling of an empty fragment before lookup.
-        let units = reference
-            .0
-            .strip_suffix(&[35, 47])
-            .or_else(|| reference.0.strip_suffix(&[35]))
-            .unwrap_or(&reference.0);
+        // Compiled refs normalize their ID before resolution. Public getSchema
+        // lookup instead parses the original fragment: a later '#' is key data.
+        let units = if strict_percent {
+            reference
+                .0
+                .strip_suffix(&[35, 47])
+                .or_else(|| reference.0.strip_suffix(&[35]))
+                .unwrap_or(&reference.0)
+        } else {
+            let hash = reference.0.iter().position(|c| *c == 35);
+            match hash {
+                Some(hash)
+                    if reference.0[hash + 1..].is_empty() || reference.0[hash + 1..] == [47] =>
+                {
+                    &reference.0[..hash]
+                }
+                _ => &reference.0,
+            }
+        };
         let split = units.iter().position(|unit| *unit == u16::from(b'#'));
         let end = split.unwrap_or(units.len());
         let identity = String::from_utf16(&units[..end]).map_err(|_| IvyError::internal())?;
