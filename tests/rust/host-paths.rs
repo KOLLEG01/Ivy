@@ -76,6 +76,57 @@ fn fixture_node(version: &str) -> NodeRuntime {
     NodeRuntime { executable: PathBuf::from("unused-fixture-node"), version: version.into() }
 }
 
+fn compare_config_oracle(input: IvyJson, result: ivy_contracts::IvyResult<IvyJson>) {
+    use std::{io::Write, process::{Command, Stdio}};
+    let mut child = Command::new("node")
+        .args(["--experimental-transform-types", "--disable-warning=ExperimentalWarning", "tests/fixtures/host-config-oracle.mjs"])
+        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(ivy_contracts::json::stringify(&input, usize::MAX).unwrap().as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let expected = ivy_contracts::json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let actual = match result {
+        Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),
+        Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+    };
+    assert_eq!(ivy_contracts::json::canonical(&actual, usize::MAX).unwrap(), ivy_contracts::json::canonical(&expected, usize::MAX).unwrap(), "{input:?}");
+}
+
+#[tokio::test]
+async fn service_configuration_matches_original_node_file_and_identity_boundaries() {
+    let fixture = ServiceFixture::new();
+    let path = fixture.0.join("config.json");
+    let path_json = IvyJson::from(path.to_string_lossy().to_string());
+    for bytes in [b"null".as_slice(), b"[1,true]", b"{bad", &[b'"', 0xff, b'"'], b"\xef\xbb\xbf{}", b"{\"__proto__\":{\"x\":1},\"text\":\"\\ud800\"}"] {
+        fs::write(&path, bytes).unwrap();
+        for limit in [2, 1024] {
+            compare_config_oracle(IvyJson::object([("kind", "file".into()), ("path", path_json.clone()), ("limit", IvyJson::Number(limit as f64))]), config::json_file(&path, limit).await);
+        }
+    }
+    let valid = fixture.value(); fixture.build(&valid).await;
+    for mode in ["valid", "unknown-property", "root-overlap", "build-mismatch", "null-build"] {
+        let mut value = valid.clone();
+        match mode {
+            "unknown-property" => value.insert("extra", true.into()),
+            "root-overlap" => value.insert("dataRoot", value.required("artifactRoot").unwrap().clone()),
+            "build-mismatch" => value.insert("version", "wrong".into()),
+            "null-build" => config::atomic_json(fixture.0.join("artifact/dist/build-info.json"), IvyJson::Null).await.unwrap(),
+            _ => (),
+        }
+        fixture.save(value).await;
+        compare_config_oracle(IvyJson::object([("kind", "instance".into()), ("path", path_json.clone())]), config::instance_config(&path, &fixture_node("24.18.0")).await.map(|value| value.json().clone()));
+    }
+    for args in [vec![], vec!["--config".to_string()], vec!["--config".into(), "relative".into()], vec!["--config".into(), path.to_string_lossy().to_string(), "--config".into(), "relative".into()]] {
+        let native = args.iter().map(Into::into).collect::<Vec<_>>();
+        compare_config_oracle(IvyJson::object([("kind", "path".into()), ("args", IvyJson::Array(args.iter().cloned().map(Into::into).collect())), ("environment", path_json.clone())]), config::configuration_path(&native, Some(path.clone().into_os_string())).map(|p| p.to_string_lossy().to_string().into()));
+    }
+    #[cfg(windows)]
+    for input in ["\\relative-to-drive\\config.json", "/relative-to-drive/config.json", "C:relative.json", "\\\\server\\share\\config.json"] {
+        compare_config_oracle(IvyJson::object([("kind", "path".into()), ("args", IvyJson::Array(vec!["--config".into(), input.into()])), ("environment", IvyJson::Null)]), config::configuration_path(&["--config".into(), input.into()], None).map(|p| p.to_string_lossy().to_string().into()));
+    }
+}
+
 #[tokio::test]
 async fn instance_configuration_checks_build_before_creating_runtime_roots() {
     let fixture = ServiceFixture::new();
