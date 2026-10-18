@@ -1,5 +1,5 @@
 use super::*;
-use ivy_contracts::{json::canonical, operation::parse_operation_id_js};
+use ivy_contracts::{hash::hash_json, json::canonical, operation::parse_operation_id_js};
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
     assignment_decision::assignment_decision,
@@ -27,6 +27,111 @@ fn outcome(result: Result<IvyJson, IvyError>) -> IvyJson {
             ("message", e.message.into()),
             ("outcome", e.outcome.as_str().into()),
         ]),
+    }
+}
+// Only a fresh, durably admitted ID is mapped between the independent runtimes.
+// Retained IDs are compared exactly. Mapping response bytes also updates valid
+// content metadata so the real Store still validates every read boundary.
+struct AdmissionScripted {
+    inner: Scripted,
+    expected: Option<IvyJson>,
+    admitted: Mutex<Option<IvyJson>>,
+}
+fn replace_id(value: &IvyJson, from: &IvyJson, to: &IvyJson) -> IvyJson {
+    if value == from {
+        return to.clone();
+    }
+    match value {
+        IvyJson::Array(values) => {
+            IvyJson::Array(values.iter().map(|v| replace_id(v, from, to)).collect())
+        }
+        IvyJson::Object(values) => IvyJson::Object(
+            values
+                .iter()
+                .map(|(k, v)| (k.clone(), replace_id(v, from, to)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+impl RpcClient for AdmissionScripted {
+    fn request<'a>(
+        &'a self,
+        method: &'a str,
+        params: IvyJson,
+        options: RequestOptions,
+    ) -> RequestFuture<'a> {
+        Box::pin(async move {
+            if self.expected.is_some() && method == "objects.write" {
+                if let Some(id) = params
+                    .get("content")
+                    .and_then(|v| v.get("value"))
+                    .and_then(|v| v.get("delivery"))
+                    .and_then(|v| v.get("request"))
+                    .and_then(|v| v.get("operationId"))
+                {
+                    parse_operation_id_js(id.as_js_string().unwrap()).unwrap();
+                    let mut admitted = self.admitted.lock().unwrap();
+                    if let Some(original) = admitted.as_ref() {
+                        assert_eq!(id, original, "Original admitted ID changed");
+                    } else {
+                        *admitted = Some(id.clone());
+                    }
+                }
+            }
+            if self.expected.is_some()
+                && method == "tools.call"
+                && matches!(
+                    params
+                        .get("qualifiedName")
+                        .and_then(|v| v.as_str().ok())
+                        .as_deref(),
+                    Some("chat.operation" | "chat.notify")
+                )
+            {
+                let admitted = self.admitted.lock().unwrap();
+                assert!(
+                    admitted.is_some(),
+                    "Provider called before durable admission"
+                );
+                assert_eq!(
+                    params.required("arguments")?.get("operationId"),
+                    admitted.as_ref()
+                );
+                if params.get("qualifiedName") == Some(&"chat.notify".into()) {
+                    assert_eq!(params.get("operationId"), admitted.as_ref());
+                }
+            }
+            let value = self.inner.request(method, params, options).await?;
+            let actual = self.admitted.lock().unwrap().clone();
+            if let (Some(expected), Some(actual)) = (&self.expected, actual) {
+                let mut mapped = replace_id(&value, expected, &actual);
+                if let (Some(content), Some(revision)) =
+                    (value.get("content"), value.get("revision"))
+                {
+                    if content.get("encoding") == Some(&"json".into()) {
+                        let original = content.required("value")?;
+                        let changed = mapped.required("content")?.required("value")?;
+                        let mut metadata = revision.clone();
+                        if revision.get("contentHash") == Some(&hash_json(original)?.into()) {
+                            metadata.insert("contentHash", hash_json(changed)?.into());
+                        }
+                        if revision.get("byteLength").and_then(IvyJson::as_f64)
+                            == Some(canonical(original, 32 * 1024 * 1024)?.len() as f64)
+                        {
+                            metadata.insert(
+                                "byteLength",
+                                IvyJson::Number(canonical(changed, 32 * 1024 * 1024)?.len() as f64),
+                            );
+                        }
+                        mapped.insert("revision", metadata);
+                    }
+                }
+                Ok(mapped)
+            } else {
+                Ok(value)
+            }
+        })
     }
 }
 #[tokio::test]
@@ -63,22 +168,29 @@ async fn original_assignment_main_delivery_and_decisions() {
         );
     }
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 87);
+    assert_eq!(rows.len(), 109);
     let clock = DeliveryClock(corpus.required("now").unwrap().as_f64().unwrap() as i64);
     for (index, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
-        let client = Arc::new(Scripted {
-            steps: Mutex::new(
-                input
-                    .required("steps")
-                    .unwrap()
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .cloned()
-                    .collect(),
-            ),
-            trace: Mutex::new(Vec::new()),
+        let client = Arc::new(AdmissionScripted {
+            inner: Scripted {
+                steps: Mutex::new(
+                    input
+                        .required("steps")
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .collect(),
+                ),
+                trace: Mutex::new(Vec::new()),
+            },
+            expected: input
+                .get("generatedOperationId")
+                .filter(|v| !v.is_null())
+                .cloned(),
+            admitted: Mutex::new(None),
         });
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();
         let execution = input.required("execution").unwrap();
@@ -154,7 +266,15 @@ async fn original_assignment_main_delivery_and_decisions() {
                 .await
                 .map(IvyJson::Bool),
         );
-        let mut trace = client.trace.lock().unwrap().clone();
+        let mut trace = client.inner.trace.lock().unwrap().clone();
+        if let (Some(expected), Some(actual)) =
+            (&client.expected, client.admitted.lock().unwrap().as_ref())
+        {
+            trace = trace
+                .iter()
+                .map(|v| replace_id(v, actual, expected))
+                .collect();
+        }
         for call in &mut trace {
             if call.get("method") == Some(&"objects.write".into()) {
                 let mut params = call.required("params").unwrap().clone();
@@ -175,7 +295,7 @@ async fn original_assignment_main_delivery_and_decisions() {
             ("trace", IvyJson::Array(trace)),
             (
                 "remaining",
-                IvyJson::Number(client.steps.lock().unwrap().len() as f64),
+                IvyJson::Number(client.inner.steps.lock().unwrap().len() as f64),
             ),
             (
                 "issues",
