@@ -1,8 +1,7 @@
 //! Local host time replies. Approval, auth and tool inputs stay caller-owned.
 use crate::native_journal::{Identity, NativeJournal};
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::canonical,
-    limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson, IvyResult, hash::hash_json, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_host_runtime::codex_rpc::{HookFuture, NativeRpc};
 use ivy_sdk::native_evidence::native_instant;
@@ -21,12 +20,22 @@ fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
 }
 /// Run outside a callback on this same RPC actor. Startup queues clock inputs
 /// until the launch owner supplies its initialized RPC, as in the original.
-pub async fn answer_native_clock(
+pub fn answer_native_clock(
     memory: Arc<Mutex<NativeJournal>>,
     rpc: &NativeRpc,
     input: &IvyJson,
+) -> impl std::future::Future<Output = IvyResult<()>> + Send {
+    // Like the original synchronous answer call, dispatch belongs to the native
+    // owner once invoked. Dropping the returned waiter cannot cancel that work.
+    let worker = tokio::spawn(answer_clock(memory, rpc.clone(), input.clone()));
+    async move { worker.await.map_err(|_| IvyError::internal())? }
+}
+async fn answer_clock(
+    memory: Arc<Mutex<NativeJournal>>,
+    rpc: NativeRpc,
+    input: IvyJson,
 ) -> IvyResult<()> {
-    let input_identity = field(input, "identity")?.clone();
+    let input_identity = field(&input, "identity")?.clone();
     let (identity, reply) = {
         let mut journal = memory.lock().unwrap();
         require(
@@ -52,7 +61,7 @@ pub async fn answer_native_clock(
                 .as_ref()
                 .map(|original| canonical(field(original, "params")?, MANAGEMENT_FRAME_BYTES))
                 .transpose()?
-                == Some(canonical(field(input, "params")?, MANAGEMENT_FRAME_BYTES)?),
+                == Some(canonical(field(&input, "params")?, MANAGEMENT_FRAME_BYTES)?),
             "native_clock_conflict",
             "The host clock must retain its original observed request and time.",
         )?;

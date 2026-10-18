@@ -8,7 +8,7 @@ use ivy_agent_manager::{
     },
 };
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString,
+    IvyError, IvyJson, IvyResult,
     hash::hash_json,
     json::{parse, stringify},
 };
@@ -465,6 +465,40 @@ async fn terminal_callback_does_not_retain_a_dropped_coordinator_or_sqlite_owner
     work.drain().await;
 }
 
+#[tokio::test]
+async fn dropping_clock_waiter_preserves_its_original_answer() {
+    let mut f = Fixture::new(&IvyJson::Null);
+    f.emit(&IvyJson::object([
+        ("id", "clock".into()),
+        ("method", "currentTime/read".into()),
+        ("params", IvyJson::object([("threadId", "thread".into())])),
+    ]))
+    .await;
+    let input = f.trace.lock().unwrap().inputs.last().unwrap().clone();
+    drop(answer_native_clock(f.operations.journal(), &f.rpc, &input));
+    let sent = f.peer.sent().await;
+    assert_eq!(sent.get("id"), Some(&IvyJson::from("clock")));
+    assert_eq!(
+        sent.get("result"),
+        Some(&IvyJson::object([(
+            "currentTimeAt",
+            IvyJson::Number(1792281600.0)
+        )]))
+    );
+    assert_eq!(
+        f.operations
+            .journal()
+            .lock()
+            .unwrap()
+            .input(field(&input, "identity"))
+            .unwrap()
+            .unwrap()
+            .get("state"),
+        Some(&IvyJson::from("answering"))
+    );
+    f.finish().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wire_result_and_answer_resolution_persist_through_real_sqlite() {
     let root = super::super::Fixture::new();
@@ -518,10 +552,10 @@ async fn wire_result_and_answer_resolution_persist_through_real_sqlite() {
     let input_identity = IvyJson::object([
         ("serviceNodeId", "agent".into()),
         ("epoch", "live".into()),
-        ("requestId", 7.0.into()),
+        ("requestId", IvyJson::Number(7.0)),
     ]);
     f.emit(&IvyJson::object([
-        ("id", 7.0.into()),
+        ("id", IvyJson::Number(7.0)),
         ("method", "item/tool/requestUserInput".into()),
         ("params", IvyJson::object([("threadId", "thread".into())])),
     ]))
@@ -537,7 +571,10 @@ async fn wire_result_and_answer_resolution_persist_through_real_sqlite() {
             input_identity,
             IvyJson::object([(
                 "error",
-                IvyJson::object([("code", (-32000.0).into()), ("message", "declined".into())]),
+                IvyJson::object([
+                    ("code", IvyJson::Number(-32000.0)),
+                    ("message", "declined".into()),
+                ]),
             )]),
         )
         .unwrap();
@@ -558,7 +595,10 @@ async fn wire_result_and_answer_resolution_persist_through_real_sqlite() {
         ("method", "serverRequest/resolved".into()),
         (
             "params",
-            IvyJson::object([("requestId", 7.0.into()), ("threadId", "thread".into())]),
+            IvyJson::object([
+                ("requestId", IvyJson::Number(7.0)),
+                ("threadId", "thread".into()),
+            ]),
         ),
     ]))
     .await;
