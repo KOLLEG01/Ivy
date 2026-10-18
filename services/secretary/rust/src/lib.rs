@@ -3,6 +3,7 @@ pub mod assignment_object;
 pub mod assignment_schema;
 pub mod assignment_workflow;
 pub mod assignment_voice;
+pub mod assignment_voice_engine;
 pub mod browser_notice;
 pub mod document;
 pub mod inbox_evidence;

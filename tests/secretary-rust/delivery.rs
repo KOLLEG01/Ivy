@@ -7,6 +7,8 @@ use std::{
 
 #[path = "assignment_voice_cases.rs"]
 mod assignment_voice_cases;
+#[path = "assignment_voice_engine_cases.rs"]
+mod assignment_voice_engine_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
