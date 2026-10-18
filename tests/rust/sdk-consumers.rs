@@ -34,6 +34,76 @@ fn failure(error: IvyError) -> IvyJson {
         ),
     ])
 }
+
+#[test]
+fn query_projection_and_utc_date_match_typescript() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/sdk-query-date-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 4_000);
+    for row in rows {
+        let input = parse(row["input"].as_str().unwrap(), 1_000_000).unwrap();
+        let expected = parse(row["result"].as_str().unwrap(), 1_000_000).unwrap();
+        let value = field(&input, "value");
+        let actual = if field(&input, "kind").as_str().unwrap() == "query" {
+            match query_document(value) {
+                Ok(document) => {
+                    assert!(std::ptr::eq(document, field(value, "document")));
+                    success(document.clone())
+                }
+                Err(error) => failure(error),
+            }
+        } else {
+            let millis = value
+                .as_f64()
+                .unwrap_or_else(|| match value.as_str().unwrap().as_str() {
+                    "NaN" => f64::NAN,
+                    "Infinity" => f64::INFINITY,
+                    "-Infinity" => f64::NEG_INFINITY,
+                    _ => panic!("unknown numeric fixture"),
+                });
+            match ivy_sdk::clock::date_to_iso(millis) {
+                Ok(iso) => success(IvyJson::String(iso)),
+                Err(error) => {
+                    // JS throws RangeError; the Rust API exposes an IvyResult without
+                    // inventing a wire RangeError code. Compare its native message.
+                    assert_eq!(error.code, "invalid_arguments");
+                    assert_eq!(error.outcome, Outcome::NotExecuted);
+                    IvyJson::object([
+                        ("ok", false.into()),
+                        (
+                            "error",
+                            IvyJson::object([
+                                ("code", IvyJson::Null),
+                                ("message", IvyJson::String(error.message_js())),
+                                ("outcome", IvyJson::Null),
+                            ]),
+                        ),
+                    ])
+                }
+            }
+        };
+        assert_eq!(actual, expected, "input={}", row["input"]);
+    }
+    assert_eq!(
+        ivy_sdk::clock::date_to_iso(-0.0).unwrap(),
+        ivy_sdk::clock::date_to_iso(0.0).unwrap()
+    );
+}
+
 #[derive(Default)]
 struct Scripted {
     steps: Mutex<VecDeque<IvyJson>>,
