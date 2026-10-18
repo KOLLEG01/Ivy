@@ -13,6 +13,7 @@ pub mod concurrency;
 pub mod config;
 pub mod default_settings;
 pub mod health;
+pub mod journal;
 pub mod logs;
 pub mod layout;
 pub mod node_runtime;

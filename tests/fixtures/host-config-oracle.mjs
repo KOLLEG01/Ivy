@@ -13,7 +13,22 @@ const {IvyError} = await import('../../packages/contracts/src/errors.ts');
 const input = JSON.parse(readFileSync(0, 'utf8'));
 try {
   let value;
-  if (input.kind === 'file') value = await jsonFile(input.path, input.limit);
+  if (input.kind === 'journal') {
+    const {HostJournal} = await import('../../packages/host-runtime/src/journal.ts');
+    const OriginalDate = Date;
+    globalThis.Date = class extends OriginalDate {
+      constructor(...args) { super(...(args.length ? args : [input.now])); }
+      static now() { return input.now; }
+    };
+    Object.defineProperty(process, 'pid', {value: input.pid});
+    const journal = new HostJournal(input.config);
+    try {
+      if (Object.hasOwn(input, 'sequence')) journal.db.prepare('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('hostReportSequence', input.sequence);
+      value = input.operation === 'config' ? journal.config : journal[input.operation](...input.args);
+      if (value === undefined) value = null;
+    } finally { journal.close(); }
+  }
+  else if (input.kind === 'file') value = await jsonFile(input.path, input.limit);
   else if (input.kind === 'accepted') {
     const accepted = await import('../../packages/host-runtime/src/accepted-configuration.ts');
     value = accepted[input.operation](...input.args);
