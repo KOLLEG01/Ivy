@@ -16,5 +16,6 @@ pub mod package_requirements;
 pub mod paths;
 pub mod platform;
 pub mod process;
+pub mod process_fence;
 pub mod process_output;
 pub mod scheduler;
