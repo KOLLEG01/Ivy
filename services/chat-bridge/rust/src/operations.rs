@@ -1,7 +1,7 @@
 //! Durable admitted-action receipts. Main changes and native execution remain
 //! separate transitions; only proven unapplied admission may be refused.
 use crate::{
-    admission::ChatAdmission,
+    admission::{ChatAdmission, expected_bridge},
     store::{ChatStore, Destination, Document, Reference, mutation},
 };
 use ivy_contracts::{
@@ -134,9 +134,13 @@ impl<'a> ChatOperations<'a> {
         Ok(result)
     }
     pub async fn begin(&self, caller: &JsString, original: &Json) -> IvyResult<Document> {
+        // The original `channel in request` expression rejects primitive receivers.
+        if !matches!(original, Json::Object(_) | Json::Array(_)) {
+            return Err(IvyError::internal());
+        }
         self.admission.authorize(
             caller,
-            original.required("expectedBridge")?,
+            expected_bridge(original)?,
             original.get("channel").filter(|v| truthy(v)),
         )?;
         validate_chat("AdmittedActionRequest", original)?;

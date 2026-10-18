@@ -11,6 +11,17 @@ pub fn same_channel(a: &Json, b: &Json) -> bool {
         .all(|key| a.get(key) == b.get(key))
 }
 
+// Match ordinary request.expectedBridge access before contract validation:
+// null throws, while an absent property reaches the JSON-domain check.
+pub(crate) fn expected_bridge(request: &Json) -> IvyResult<&Json> {
+    if request.is_null() {
+        return Err(IvyError::internal());
+    }
+    request
+        .get("expectedBridge")
+        .ok_or_else(|| IvyError::new("invalid_arguments", "Value is outside the JSON domain."))
+}
+
 pub struct ChatAdmission {
     definition: Json,
     definition_hash: String,
@@ -116,8 +127,10 @@ impl ChatAdmission {
     pub fn send(&self, caller: &JsString, request: &Json) -> IvyResult<AdmittedSend> {
         self.authorize(
             caller,
-            request.required("expectedBridge")?,
-            request.get("channel"),
+            expected_bridge(request)?,
+            request
+                .get("channel")
+                .filter(|value| crate::main_context::truthy(value)),
         )?;
         validate_chat("SendRequest", request)?;
         let payload = request.required("payload")?;

@@ -36,6 +36,8 @@ add('root-mismatch','check',c=>c.root='other');
 const begin=(overrides={})=>({action:'begin',caller:'alice',request:structuredClone(request),...overrides});
 const finish=(overrides={})=>({action:'finish',outcome:structuredClone(outcome),...overrides});
 const refuse={action:'refuse',code:'synthetic_refusal',message:'Proven unapplied.'};
+for(const shape of [null,{},true,4,'request',[]])add('admission-receiver-'+JSON.stringify(shape),'run',c=>c.steps=[begin({request:shape})]);
+add('admission-missing-bridge','run',c=>{const missing=structuredClone(request);delete missing.expectedBridge;c.steps=[begin({request:missing})];});
 add('admit-complete-and-reopen','run',c=>c.steps=[begin(),begin(),{action:'reopen'},{action:'find',caller:'alice',operationId},finish(),finish(),{action:'reopen'},{action:'find',caller:'alice',operationId},refuse]);
 add('opaque-caller-and-operation-survive-reopen','run',c=>{
  const caller='\ud800',req=structuredClone(request),out=structuredClone(outcome);

@@ -39,6 +39,10 @@ name = "chat-main-context"
 path = "../../../tests/rust/chat-main-context.rs"
 
 [[test]]
+name = "chat-queries"
+path = "../../../tests/rust/chat-queries.rs"
+
+[[test]]
 name = "chat-storage"
 path = "../../../tests/rust/chat-storage.rs"
 
