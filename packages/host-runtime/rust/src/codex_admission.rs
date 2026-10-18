@@ -58,6 +58,28 @@ pub struct NativeAdmission {
 }
 
 impl NativeAdmission {
+    pub fn check_capacity(
+        &self,
+        detach_on_timeout: bool,
+        priority: Priority,
+    ) -> Result<(), AdmissionError> {
+        let interaction = priority == Priority::Interaction;
+        if self.pending.len() >= if interaction { 64 } else { 56 } {
+            return Err(AdmissionError::Capacity);
+        }
+        if detach_on_timeout
+            && self.expired.len()
+                + self
+                    .pending
+                    .iter()
+                    .filter(|(_, p)| p.detach_on_timeout)
+                    .count()
+                >= if interaction { 64 } else { 16 }
+        {
+            return Err(AdmissionError::Capacity);
+        }
+        Ok(())
+    }
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -73,21 +95,7 @@ impl NativeAdmission {
         request: PendingRequest,
         priority: Priority,
     ) -> Result<(), AdmissionError> {
-        let interaction = priority == Priority::Interaction;
-        if self.pending.len() >= if interaction { 64 } else { 56 } {
-            return Err(AdmissionError::Capacity);
-        }
-        if request.detach_on_timeout
-            && self.expired.len()
-                + self
-                    .pending
-                    .iter()
-                    .filter(|(_, item)| item.detach_on_timeout)
-                    .count()
-                >= if interaction { 64 } else { 16 }
-        {
-            return Err(AdmissionError::Capacity);
-        }
+        self.check_capacity(request.detach_on_timeout, priority)?;
         if request.timeout_ms == 0 || request.timeout_ms > 600_000 {
             return Err(AdmissionError::InvalidDeadline);
         }

@@ -360,7 +360,7 @@ fn make_room(
         .map_err(storage_error)?;
     for (key, json, size) in candidates {
         let value = parse(&json, MANAGEMENT_FRAME_BYTES)?;
-        if has_unresolved_outcome(&value) {
+        if has_unresolved_outcome(&value)? {
             continue;
         }
         let Some(id) = value.get("operationId").and_then(IvyJson::as_js_string) else {

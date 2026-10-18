@@ -9,6 +9,11 @@ use std::sync::{
 };
 use tokio::sync::oneshot;
 
+// The native cache consumes this transport. Keep its stream/hook qualification
+// in the existing affected interaction target while host module wiring is owned upstream.
+#[path = "agent-native-rpc.rs"]
+mod native_rpc_cases;
+
 fn json(s: &str) -> IvyJson {
     parse(s, 1024 * 1024).unwrap()
 }

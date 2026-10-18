@@ -1,0 +1,18 @@
+import {PassThrough} from 'node:stream';
+import {readFileSync} from 'node:fs';
+import {NativeRpc} from '../../dist/packages/host-runtime/src/codex-rpc.js';
+const trace=[],input=new PassThrough(),output=new PassThrough();
+const catalog=JSON.parse(readFileSync('specs/native/codex-0.154.0/catalog.json','utf8'));
+input.on('data',bytes=>trace.push({sent:JSON.parse(bytes.toString('utf8'))}));
+const rpc=new NativeRpc(catalog,input,output,{onRequest:request=>trace.push({request}),onNotification:notification=>trace.push({notification}),onClose:close=>trace.push({close})});
+const emit=frame=>output.write(JSON.stringify(frame)+'\n');
+const id='i\ud800';
+const pending=rpc.request('account/logout',null,{requestId:id,beforeSend:()=>trace.push('intent'),beforeResolve:()=>trace.push('receipt')});
+const line=Buffer.from(JSON.stringify({id,result:{untouched:['Grüße',null,false]}})+'\n');
+for(const byte of line)output.write(Buffer.from([byte]));
+trace.push({reply:await pending});rpc.notify('initialized');
+for(const id of [-2,'-2'])emit({id,method:'currentTime/read',params:{threadId:'original'}});
+emit({method:'serverRequest/resolved',params:{requestId:-2,threadId:'original'}});
+for(const id of [-2,'-2'])rpc.answer('currentTime/read',id,{result:{}},()=>trace.push('answer-intent'));
+rpc.close('fixture_closed');input.destroy();output.destroy();
+console.log(JSON.stringify(trace));
