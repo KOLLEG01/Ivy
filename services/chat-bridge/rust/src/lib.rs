@@ -5,6 +5,8 @@ pub mod input_media;
 pub mod main_context;
 pub mod native_driver;
 pub mod native_plan;
+pub mod notice_input;
+pub mod notices;
 pub mod operations;
 pub mod outbox;
 pub mod queries;
