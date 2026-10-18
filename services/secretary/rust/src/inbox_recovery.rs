@@ -4,6 +4,25 @@ use crate::{
     store::{Record, conflict, mutation},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, hash::hash_json};
+use std::{borrow::BorrowMut, cell::RefCell};
+
+/// Synchronous access keeps foreground and preflight diagnostics ordered without
+/// retaining an exclusive borrow across an RPC wait.
+pub(crate) trait RecoveryIssues {
+    fn issue(&self, key: &str, code: &str);
+    fn clear(&self, key: &str);
+}
+impl<T: BorrowMut<RecoveryScan>> RecoveryIssues for RefCell<T> {
+    fn issue(&self, key: &str, code: &str) {
+        self.borrow_mut().borrow_mut().issue(key, code);
+    }
+    fn clear(&self, key: &str) {
+        self.borrow_mut()
+            .borrow_mut()
+            .issues
+            .retain(|(id, _)| id != key);
+    }
+}
 
 fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {

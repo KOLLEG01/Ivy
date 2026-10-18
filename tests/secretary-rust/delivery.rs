@@ -21,6 +21,8 @@ mod assignment_native_cases;
 mod assignment_execution_cases;
 #[path = "assignment_preflight_cases.rs"]
 mod assignment_preflight_cases;
+#[path = "assignment_driver_cases.rs"]
+mod assignment_driver_cases;
 #[path = "assignment_scheduler_cases.rs"]
 mod assignment_scheduler_cases;
 #[path = "assignment_progress_cases.rs"]

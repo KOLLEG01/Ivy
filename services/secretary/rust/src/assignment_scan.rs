@@ -1,8 +1,9 @@
 //! Bounded execution pages and durable retry recovery, in the original scan order.
 use crate::{
     assignment_advance::AssignmentAdvance,
+    assignment_driver::{CollectedPreflight, PreflightWork},
     assignment_runner::{execution_failure_disposition, release_lease},
-    inbox_recovery::RecoveryScan,
+    inbox_recovery::{RecoveryIssues, RecoveryScan},
     store::Record,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
@@ -59,6 +60,17 @@ impl AssignmentScan {
         preflight: &mut HashSet<JsString>,
         issues: &mut RecoveryScan,
     ) -> IvyResult<Vec<IvyJson>> {
+        let work = CollectedPreflight::new(preflight);
+        self.scan_with_work(advance, &work, &std::cell::RefCell::new(issues))
+            .await?;
+        Ok(work.jobs.into_inner())
+    }
+    pub(crate) async fn scan_with_work(
+        &mut self,
+        advance: &AssignmentAdvance<'_, '_, '_, '_>,
+        preflight: &dyn PreflightWork,
+        issues: &dyn RecoveryIssues,
+    ) -> IvyResult<()> {
         let execution = advance.execution;
         let evidence = execution.native.evidence;
         let store = evidence.store;
@@ -182,7 +194,6 @@ impl AssignmentScan {
             .as_array()
             .ok_or_else(IvyError::internal)?
             .len() as f64;
-        let mut jobs = Vec::new();
         for row in [&page, &deliveries, &due]
             .into_iter()
             .map(|page| {
@@ -226,15 +237,15 @@ impl AssignmentScan {
                 }) {
                     return Ok(());
                 }
-                if let Some(job) = advance.advance(current, preflight, issues).await? {
-                    jobs.push(job);
-                }
+                advance
+                    .advance_with_work(current, preflight, issues)
+                    .await?;
                 if let Some(retry) = retry {
                     store
                         .journal
                         .delete_technical(RETRY_KEY, &retry.pin.object_id)?;
                 }
-                issues.issues.retain(|(id, _)| id != &key);
+                issues.clear(&key);
                 Ok(())
             }
             .await;
@@ -254,7 +265,7 @@ impl AssignmentScan {
                 }
             }
         }
-        Ok(jobs)
+        Ok(())
     }
     async fn recover(
         &self,
@@ -262,7 +273,7 @@ impl AssignmentScan {
         current: &IvyJson,
         code: &str,
         key: &str,
-        issues: &mut RecoveryScan,
+        issues: &dyn RecoveryIssues,
     ) -> IvyResult<()> {
         let execution = advance.execution;
         let store = execution.native.evidence.store;
@@ -310,7 +321,7 @@ impl AssignmentScan {
                 store.journal.create_technical(RETRY_KEY, &id, &next)?;
             }
             if disposition == "pending" {
-                issues.issues.retain(|(id, _)| id != key);
+                issues.clear(key);
             } else {
                 issues.issue(key, code);
             }

@@ -1,4 +1,4 @@
-import {writeFileSync} from 'node:fs';
+import {writeFileSync,existsSync} from 'node:fs';
 const [mode,...args]=process.argv.slice(2);
 switch(mode){
  case 'empty':break;
@@ -13,5 +13,10 @@ switch(mode){
  case 'stderr':process.stderr.write('e'.repeat(70000));break;
  case 'combined':process.stdout.write('o'.repeat(32768));process.stderr.write('e'.repeat(32768));break;
  case 'sleep':writeFileSync(args[0],String(process.pid));process.stdout.write('ready');setInterval(()=>{},1000);break;
+ case 'gate':{
+  writeFileSync(args[0],String(process.pid));
+  const timer=setInterval(()=>{if(existsSync(args[1])){clearInterval(timer);process.stdout.write('owned output');process.exitCode=Number(args[2]);}},10);
+  break;
+ }
  default:throw Error('Unknown fixture mode');
 }
