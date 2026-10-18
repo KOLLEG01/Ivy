@@ -48,6 +48,16 @@ fn legacy_block(begin: &str, sections: Option<&[String]>, end: &str) -> Option<S
     })
 }
 
+pub(crate) fn validate_authority(state: Option<&IvyJson>, authority: &str) -> IvyResult<()> {
+    let version = state.and_then(|s| s.get("schemaVersion"));
+    require(
+        !state_present(state)
+            || ((version == Some(&IvyJson::Number(1.0)) || version == Some(&IvyJson::Number(2.0)))
+                && state.and_then(|s| s.get("authority")) == Some(&IvyJson::from(authority))),
+        "Another Hive or host owns this Codex MCP output.",
+    )
+}
+
 /// Retain the version-1/version-2 state meanings and existing recovery-by-hash
 /// checks. The caller owns filesystem locking, compare/replace and state commit.
 pub fn plan_mcp_output(input: McpOutputInput<'_>) -> IvyResult<McpOutput> {
@@ -60,13 +70,7 @@ pub fn plan_mcp_output(input: McpOutputInput<'_>) -> IvyResult<McpOutput> {
     let state_version = input.state.and_then(|s| s.get("schemaVersion"));
     let v1 = state_version == Some(&IvyJson::Number(1.0));
     let v2 = state_version == Some(&IvyJson::Number(2.0));
-    require(
-        !state_present(input.state)
-            || ((v1 || v2)
-                && input.state.and_then(|s| s.get("authority"))
-                    == Some(&IvyJson::from(input.authority))),
-        "Another Hive or host owns this Codex MCP output.",
-    )?;
+    validate_authority(input.state, input.authority)?;
     let applied_hash = input.state.and_then(|s| s.get("appliedBlockHash"));
     let accepted: HashSet<String> = [applied_hash, Some(&block_hash)]
         .into_iter()

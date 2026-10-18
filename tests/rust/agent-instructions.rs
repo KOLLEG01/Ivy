@@ -5,6 +5,8 @@ mod environment_cases;
 mod environment_conflict_cases;
 #[path = "agent-environment-text.rs"]
 mod environment_text_cases;
+#[path = "agent-mcp-files.rs"]
+mod mcp_file_cases;
 #[path = "agent-mcp-output.rs"]
 mod mcp_output_cases;
 #[path = "agent-mcp-prepare.rs"]
