@@ -248,15 +248,8 @@ impl AssignmentDelivery<'_, '_, '_> {
                 execution.required("pin")?.required("objectId")?,
             )
             .await?;
-        let legacy = store.journal.named(
-            "secretary/assignment-handoff",
-            &value.required("executionId")?.as_str()?,
-            true,
-        )?;
         let mut saved = if !field(latest.required("value")?, "delivery").is_null() {
             latest.required("value")?.required("delivery")?.clone()
-        } else if let Some(legacy) = legacy {
-            self.save(&mut latest, legacy.value).await?
         } else {
             self.save(
                 &mut latest,

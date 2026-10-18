@@ -28,6 +28,27 @@ fn epoch_fixture(value: &ivy_contracts::JsString) -> ivy_sdk::operation_ids::Run
     ivy_sdk::operation_ids::start_runtime_epoch(Arc::new(Fixed(value.clone())))
 }
 
+// Fault injection after explicit conversion: unused old rows cannot influence
+// the current execution worker, even when their archived JSON is unreadable.
+fn poison_legacy_record(journal: &ivy_secretary::journal::Journal, key: &str, name: &str) {
+    let id = format!("unread-legacy-{key}");
+    journal
+        .db
+        .execute(
+            "INSERT OR REPLACE INTO technical_documents VALUES(?,?,?,?,?)",
+            ivy_store::rusqlite::params![id, key, name, 1, "{}"],
+        )
+        .unwrap();
+    journal
+        .db
+        .execute(
+            "INSERT OR REPLACE INTO technical_revisions VALUES(?,?,?)",
+            ivy_store::rusqlite::params![id, 1, "{"],
+        )
+        .unwrap();
+    assert!(journal.named(key, name, true).is_err());
+}
+
 #[path = "assignment_delivery_cases.rs"]
 mod assignment_delivery_cases;
 #[path = "assignment_driver_cases.rs"]
@@ -69,12 +90,12 @@ mod engine_cases;
 mod engine_epoch_cases;
 #[path = "engine_inbox_cases.rs"]
 mod engine_inbox_cases;
+#[path = "execution_import_cases.rs"]
+mod execution_import_cases;
 #[path = "follow_up_cases.rs"]
 mod follow_up_cases;
 #[path = "generation_cases.rs"]
 mod generation_cases;
-#[path = "reconcile_cases.rs"]
-mod reconcile_cases;
 #[path = "inbox_evidence_cases.rs"]
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
@@ -85,12 +106,14 @@ mod notice_evidence_cases;
 mod notice_scan_cases;
 #[path = "notices_cases.rs"]
 mod notices_cases;
+#[path = "reconcile_cases.rs"]
+mod reconcile_cases;
 #[path = "registry_cases.rs"]
 mod registry_cases;
-#[path = "service_handlers_cases.rs"]
-mod service_handlers_cases;
 #[path = "service_cases.rs"]
 mod service_cases;
+#[path = "service_handlers_cases.rs"]
+mod service_handlers_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 #[path = "triage_prompt_cases.rs"]

@@ -4,6 +4,7 @@ use ivy_sdk::clock::Clock;
 use ivy_secretary::{
     assignment_decision::assignment_decision,
     assignment_delivery::AssignmentDelivery,
+    execution_import::import_execution_delivery,
     inbox_evidence::InboxEvidence,
     inbox_recovery::RecoveryScan,
     journal::{Journal, Limits},
@@ -261,10 +262,31 @@ async fn original_assignment_main_delivery_and_decisions() {
         let mut issues = RecoveryScan::default();
         issues.issue("unrelated", "retained");
         let result = outcome(
-            delivery
-                .step(execution, &mut issues)
-                .await
-                .map(IvyJson::Bool),
+            async {
+                if input.get("legacy").is_some_and(|value| !value.is_null()) {
+                    import_execution_delivery(&evidence, execution).await?;
+                }
+                if execution
+                    .required("value")?
+                    .get("delivery")
+                    .is_some_and(|value| !value.is_null())
+                    || input.get("legacy").is_some_and(|value| !value.is_null())
+                {
+                    poison_legacy_record(
+                        &journal,
+                        "secretary/assignment-handoff",
+                        &execution
+                            .required("value")?
+                            .required("executionId")?
+                            .as_str()?,
+                    );
+                }
+                delivery
+                    .step(execution, &mut issues)
+                    .await
+                    .map(IvyJson::Bool)
+            }
+            .await,
         );
         let mut trace = client.inner.trace.lock().unwrap().clone();
         if let (Some(expected), Some(actual)) =

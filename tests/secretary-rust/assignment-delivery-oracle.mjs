@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {importExecutionDelivery} from './execution-import-reference.mjs';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {schemaSamples} from '../fixtures/schema-samples.mjs';
@@ -75,7 +76,7 @@ async function add(label,config={}){
  const execution=store.decode('secretary/execution',read(itemId));
  const controller=new AbortController();if(config.cancel)controller.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
  const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings,owner:{serviceNodeId:'fixture.secretary'},signal:controller.signal,now:()=>new Date(at),recoveryIssues:issues});
- let result;try{result={value:await new AssignmentDelivery(engine,config.minimumAge??0).step(execution)};}catch(cause){const e=IvyError.from(cause);result={code:e.code,message:e.message,outcome:e.outcome};}finally{store.close();}
+ let result;try{if(legacy)await importExecutionDelivery(engine,execution);result={value:await new AssignmentDelivery(engine,config.minimumAge??0).step(execution)};}catch(cause){const e=IvyError.from(cause);result={code:e.code,message:e.message,outcome:e.outcome};}finally{store.close();}
  assert.equal(unexpected,undefined,label);
  const generatedOperationId=config.fresh?trace.find(r=>r.method==='objects.write'&&r.params.content.value.delivery?.request)?.params.content.value.delivery.request.operationId??null:null;
  if(generatedOperationId)parseOperationId(generatedOperationId);

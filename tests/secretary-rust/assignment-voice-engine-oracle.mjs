@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {importExecutionDelivery} from './execution-import-reference.mjs';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {schemaSamples} from '../fixtures/schema-samples.mjs';
@@ -54,7 +55,7 @@ async function add(label,options={}){
  const configured=config.fresh?{...settings,policy:{...settings.policy,voiceEscalation:target}}:settings;
  const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:configured,owner:{serviceNodeId:'fixture.secretary'},signal:controller.signal,now:()=>new Date(at)});
  let result;
- try{const value=config.complete?await new AssignmentVoice(engine).completeFallback(execution):await new AssignmentVoice(engine).step(execution,decision,config.eligible??true);result={value:value??null};}
+ try{if(config.legacy)await importExecutionDelivery(engine,execution);const value=config.complete?await new AssignmentVoice(engine).completeFallback(execution):await new AssignmentVoice(engine).step(execution,decision,config.eligible??true);result={value:value??null};}
  catch(cause){const e=IvyError.from(cause);result={code:e.code,message:e.message,outcome:e.outcome};}
  finally{store.close();}
  rows.push({input:{label,execution,decision,settings:configured,generatedOperationId:config.fresh?trace.find(r=>r.method==='objects.write')?.params.content.value.voice.request.operationId:null,eligible:config.eligible??true,complete:config.complete??false,cancel:config.cancel??false,legacy:config.legacy??null,steps},expected:{result,trace,remaining:0}});

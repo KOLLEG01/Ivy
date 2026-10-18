@@ -3,6 +3,7 @@ use ivy_contracts::{json::canonical, operation::parse_operation_id_js};
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
     assignment_voice_engine::AssignmentVoice,
+    execution_import::import_execution_delivery,
     inbox_evidence::InboxEvidence,
     journal::{Journal, Limits},
     store::Store,
@@ -119,6 +120,30 @@ async fn original_assignment_voice_durable_reconciliation() {
             tools: &tools,
             clock: &clock,
         };
+        if input.get("legacy").is_some_and(|value| !value.is_null()) {
+            import_execution_delivery(&evidence, execution)
+                .await
+                .unwrap();
+        }
+        if execution
+            .required("value")
+            .unwrap()
+            .get("voice")
+            .is_some_and(|value| !value.is_null())
+            || input.get("legacy").is_some_and(|value| !value.is_null())
+        {
+            poison_legacy_record(
+                &journal,
+                "secretary/assignment-voice",
+                &execution
+                    .required("value")
+                    .unwrap()
+                    .required("executionId")
+                    .unwrap()
+                    .as_str()
+                    .unwrap(),
+            );
+        }
         let outcome = if input.get("complete") == Some(&IvyJson::Bool(true)) {
             engine
                 .complete_fallback(execution)
