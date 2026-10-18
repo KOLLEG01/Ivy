@@ -23,7 +23,8 @@ fn schema_parsing_and_registry_match_the_original_zod_source() {
         let expected = row.get("accepted") == Some(&IvyJson::Bool(true));
         assert_eq!(actual.is_ok(), expected, "case {index} {name}: {}", stringify(input, usize::MAX).unwrap());
         if expected {
-            assert_eq!(canonical(&actual.unwrap(), usize::MAX).unwrap(), canonical(row.get("value").unwrap(), usize::MAX).unwrap(), "case {index} {name}");
+            let actual = actual.unwrap();
+            assert!(ivy_contracts::builtin_schema::json_equal(&actual, row.get("value").unwrap()), "case {index} {name}: {}", stringify(&actual, usize::MAX).unwrap());
         } else {
             let error = actual.unwrap_err();
             assert_eq!(error.code, "internal_error");
