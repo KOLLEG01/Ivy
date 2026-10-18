@@ -5,6 +5,96 @@ use ivy_contracts::{
 };
 
 #[test]
+fn compiler_resource_resolution_matches_aliases_pointers_and_scopes() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/schema-resolution-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 30);
+    let mut checked = 0;
+    for row in rows {
+        let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
+        let admitted = ivy_contracts::schema::admit_schema(&schema).unwrap();
+        let resources = admitted.compiler_resources();
+        assert_eq!(
+            resources.is_ok(),
+            row["registered"].as_bool().unwrap(),
+            "registration {}",
+            row["schema"]
+        );
+        let Ok(resources) = resources else {
+            continue;
+        };
+        for query in row["queries"].as_array().unwrap() {
+            let IvyJson::String(ref base) =
+                parse(query["base"].as_str().unwrap(), 100_000).unwrap()
+            else {
+                panic!("base");
+            };
+            let IvyJson::String(ref reference) =
+                parse(query["ref"].as_str().unwrap(), 100_000).unwrap()
+            else {
+                panic!("reference");
+            };
+            let actual = match resources.resolve(base, reference) {
+                Ok(Some(target)) => {
+                    let root = if std::ptr::eq(target.root_schema, admitted.schema()) {
+                        "submitted".into()
+                    } else {
+                        IvyJson::String(
+                            target
+                                .root_schema
+                                .get("$id")
+                                .and_then(IvyJson::as_js_string)
+                                .unwrap()
+                                .clone(),
+                        )
+                    };
+                    IvyJson::object([
+                        ("ok", true.into()),
+                        ("found", true.into()),
+                        (
+                            "schema",
+                            stringify(target.schema, 1_000_000).unwrap().into(),
+                        ),
+                        ("base", IvyJson::String(target.base_id)),
+                        ("root", root),
+                        ("rootBase", IvyJson::String(target.root_base_id)),
+                    ])
+                }
+                Ok(None) => IvyJson::object([("ok", true.into()), ("found", false.into())]),
+                Err(error) => {
+                    assert_eq!(error.code_js(), "registry_invalid".into());
+                    IvyJson::object([("ok", false.into())])
+                }
+            };
+            assert_eq!(
+                stringify(&actual, 2_000_000).unwrap(),
+                query["result"].as_str().unwrap(),
+                "schema {} base {} ref {}",
+                row["schema"],
+                query["base"],
+                query["ref"]
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 4000);
+}
+
+#[test]
 fn inline_compiler_walk_matches_branch_selection_and_scopes() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")

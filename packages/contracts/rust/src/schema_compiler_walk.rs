@@ -19,6 +19,14 @@ pub struct CompilerWalk<'a> {
 }
 
 fn has_rules(schema: &IvyJson) -> bool {
+    has_rules_except_ref(schema, false)
+}
+
+pub(super) fn has_rules_but_ref(schema: &IvyJson) -> bool {
+    has_rules_except_ref(schema, true)
+}
+
+fn has_rules_except_ref(schema: &IvyJson, without_ref: bool) -> bool {
     const RULES: &[&str] = &[
         "$ref",
         "type",
@@ -50,9 +58,10 @@ fn has_rules(schema: &IvyJson) -> bool {
         "properties",
         "items",
     ];
-    entries(schema)
-        .iter()
-        .any(|(key, _)| RULES.iter().any(|rule| *key == &JsString::from(*rule)))
+    entries(schema).iter().any(|(key, _)| {
+        (!without_ref || *key != &JsString::from("$ref"))
+            && RULES.iter().any(|rule| *key == &JsString::from(*rule))
+    })
 }
 
 fn always_valid(schema: &IvyJson) -> bool {

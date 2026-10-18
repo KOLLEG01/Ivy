@@ -396,6 +396,12 @@ pub fn full_path(id: &JsString) -> IvyResult<JsString> {
     Ok(result)
 }
 
+pub(crate) fn reference_parts(id: &JsString) -> IvyResult<(JsString, Option<JsString>)> {
+    // The pinned serializer copies its input, so scheme serialization does not
+    // erase the parsed fragment used by compiler pointer selection.
+    Ok((full_path(id)?, parse(id, false)?.fragment))
+}
+
 fn serialize(value: &Reference, skip_escape: bool) -> IvyResult<JsString> {
     let mut out = Vec::new();
     if let Some(scheme) = &value.scheme {
