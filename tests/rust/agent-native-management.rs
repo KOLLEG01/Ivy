@@ -10,7 +10,7 @@ use ivy_contracts::{
     hash::{hash_json, tool_definition_hash},
     json::parse,
 };
-use ivy_sdk::service_connection::{InvocationContext, ToolHandler};
+use ivy_sdk::service::{InvocationContext, ToolHandler};
 use std::{
     collections::HashMap,
     path::PathBuf,

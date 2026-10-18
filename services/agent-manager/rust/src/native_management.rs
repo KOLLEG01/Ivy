@@ -21,7 +21,7 @@ use ivy_host_runtime::{
     codex_admission::Priority,
     codex_rpc::{HookFuture, NativeRpc, RequestOptions},
 };
-use ivy_sdk::service_connection::{InvocationContext, ServiceFuture, ToolHandler};
+use ivy_sdk::service::{InvocationContext, ServiceFuture, ToolHandler};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, atomic::AtomicBool},
