@@ -36,6 +36,10 @@ name = "schema"
 path = "../../../tests/rust/schema.rs"
 
 [[test]]
+name = "schema-runtime"
+path = "../../../tests/rust/schema-runtime.rs"
+
+[[test]]
 name = "canonical-bundle"
 path = "../../../tests/rust/canonical-bundle.rs"
 
