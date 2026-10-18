@@ -1,5 +1,5 @@
 import {existsSync,readFileSync} from 'node:fs';
-import {registerHooks} from 'node:module';
+import {registerHooks,stripTypeScriptTypes} from 'node:module';
 import {fileURLToPath} from 'node:url';
 const contracts=new URL('../../../packages/contracts/src/',import.meta.url);
 const sdk='data:text/javascript;base64,'+Buffer.from([
@@ -11,6 +11,9 @@ registerHooks({resolve(specifier,context,next){
   if(specifier==='../../../packages/sdk/src/node.js')return {url:sdk,shortCircuit:true};
   if(specifier.startsWith('.')&&specifier.endsWith('.js')&&context.parentURL){const url=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(url)))return next(url.href,context);}
   return next(specifier,context);
+},load(url,context,next){
+  if(url.endsWith('.ts'))return {format:'module',source:stripTypeScriptTypes(readFileSync(fileURLToPath(url),'utf8'),{mode:'transform'}),shortCircuit:true};
+  return next(url,context);
 }});
 const {chatRegistry}=await import('../../../services/chat-bridge/src/registry.ts');
 process.stdout.write(JSON.stringify(chatRegistry()));
