@@ -13,6 +13,7 @@ pub mod mcp_manager;
 pub mod mcp_output;
 pub mod mcp_prepare;
 pub mod mcp_render;
+pub mod native_journal;
 pub mod notifications;
 pub mod skills;
 pub mod skills_output;
