@@ -435,7 +435,7 @@ async fn host_configuration_matches_original_admission_and_directory_effects() {
                         ("data", val(&r, "data")),
                     ]),
                 );
-                actions.push(file(val(&r, "blocked"), "file"));
+                actions.push(file(val(&r, "blocked/work"), "file"));
             }
             "agent-default" => instances[0].insert("settings", J::object([] as [(&str, J); 0])),
             "agent-owned" => {
