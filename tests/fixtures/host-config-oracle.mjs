@@ -14,6 +14,15 @@ const input = JSON.parse(readFileSync(0, 'utf8'));
 try {
   let value;
   if (input.kind === 'file') value = await jsonFile(input.path, input.limit);
+  else if (input.kind === 'health') {
+    const {checkHealth} = await import('../../packages/host-runtime/src/health.ts');
+    Date.now = () => input.now;
+    value = await checkHealth(input.config, input.endpoint, input.verifyRegistration);
+  }
+  else if (input.kind === 'endpoint') {
+    const {localHiveEndpoint} = await import('../../packages/host-runtime/src/health.ts');
+    value = localHiveEndpoint(input.config, input.docker).href;
+  }
   else if (input.kind === 'instance') value = await instanceConfig(input.path);
   else if (input.kind === 'path') {
     process.argv = [process.execPath, 'fixture', ...input.args];

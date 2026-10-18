@@ -238,3 +238,160 @@ async fn cancelled_health_waiter_cannot_release_the_active_file_writer() {
     assert_eq!(value.get("ready"), Some(&IvyJson::Bool(false)));
     assert!(!fs::read_dir(path.parent().unwrap()).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
 }
+
+struct FixedHealthClock(i64);
+impl ivy_sdk::clock::Clock for FixedHealthClock {
+    fn utc_millis(&self) -> i64 { self.0 }
+    fn monotonic(&self) -> std::time::Instant { std::time::Instant::now() }
+}
+fn hive_settings(host: &str, port: u16) -> IvyJson {
+    IvyJson::object([
+        ("listenHost", host.into()), ("listenPort", IvyJson::Number(port as f64)),
+        ("credentials", IvyJson::Array(vec![IvyJson::object([("principalId", "fixture".into()), ("token", "fixture-credential".into())])])),
+        ("backup", IvyJson::object([("directory", "unused".into()), ("intervalHours", IvyJson::Number(24.0)), ("retain", IvyJson::Number(7.0))])),
+    ])
+}
+
+#[test]
+fn local_hive_endpoint_matches_node_url_and_docker_mapping_rules() {
+    use ivy_host_runtime::health::local_hive_endpoint;
+    for host in ["0.0.0.0", "::", "::1", "127.0.0.1", "localhost", "[::1]", "bad host"] {
+        let config = IvyJson::object([("publicBaseUrl", "https://example.invalid:9443/prefix?query=1#fragment".into()), ("settings", hive_settings(host, 39081))]);
+        compare_config_oracle(IvyJson::object([("kind", "endpoint".into()), ("config", config.clone())]), local_hive_endpoint(&config, None).map(|url| url.to_string().into()));
+    }
+    let config = IvyJson::object([("publicBaseUrl", "https://example.invalid/ivy".into()), ("settings", hive_settings("0.0.0.0", 39081))]);
+    for hosts in [vec![], vec!["127.0.0.1"], vec!["::"], vec!["127.0.0.1", "::1"], vec!["192.0.2.1"]] {
+        let docker = IvyJson::object([("ports", IvyJson::Array(hosts.iter().map(|host| IvyJson::object([
+            ("host", (*host).into()), ("port", IvyJson::Number(80.0)), ("containerPort", IvyJson::Number(39081.0)),
+        ])).collect()))]);
+        compare_config_oracle(IvyJson::object([("kind", "endpoint".into()), ("config", config.clone()), ("docker", docker.clone())]), local_hive_endpoint(&config, Some(&docker)).map(|url| url.to_string().into()));
+    }
+}
+
+#[tokio::test]
+async fn health_readiness_matches_node_time_and_identity_boundaries() {
+    use ivy_host_runtime::health::check_health_with_clock;
+    let fixture = ServiceFixture::new();
+    let config = config::InstanceConfig::from_json(fixture.value()).unwrap();
+    let writer = HealthFile::with_launch_id(config.clone(), Some("launch".into()));
+    writer.write(true, "ready".into(), Some(7)).await.unwrap();
+    let path = config.data_root().join("health.json");
+    let baseline = config::json_file(&path, 4096).await.unwrap();
+    let now = 1_767_225_600_000_i64;
+    for case in 0..13 {
+        let mut value = baseline.clone();
+        let offset = match case { 1 => -14999, 2 => -15000, 3 => 1000, 4 => 1001, _ => 0 };
+        value.insert("observedAt", chrono::DateTime::from_timestamp_millis(now + offset).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Millis, true).into());
+        match case {
+            5 => { value.insert("observedAt", "invalid".into()); },
+            6 => { value.insert("observedAt", "Thu, 01 Jan 2026 00:00:00 GMT".into()); },
+            7 => { value.insert("ready", false.into()); },
+            8 => { value.insert("instanceId", "different".into()); },
+            9 => { value.insert("buildId", format!("sha256:{}", "b".repeat(64)).into()); },
+            10 => { value.insert("pid", IvyJson::Number(999.0)); value.insert("bootId", "other".into()); },
+            11 => { value.insert("componentId", "other".into()); },
+            12 => { value = IvyJson::Null; }, _ => (),
+        }
+        config::atomic_json(&path, value).await.unwrap();
+        compare_config_oracle(IvyJson::object([("kind", "health".into()), ("config", config.json().clone()), ("now", IvyJson::Number(now as f64)), ("verifyRegistration", false.into())]),
+            check_health_with_clock(&config, None, false, &FixedHealthClock(now)).await);
+    }
+}
+
+// Two real requests (Rust and original Node) share one isolated response fixture.
+fn health_rpc_fixture(result: IvyJson, expected_method: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    use std::{io::{Read, Write}, time::{Duration, Instant}};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/base", listener.local_addr().unwrap());
+    let thread = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+                    Err(error) => panic!("health fixture accept: {error}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut bytes = Vec::new(); let header_end;
+            loop { let mut b = [0]; stream.read_exact(&mut b).unwrap(); bytes.push(b[0]); if bytes.ends_with(b"\r\n\r\n") { header_end = bytes.len(); break; } assert!(bytes.len() < 16384); }
+            let headers = String::from_utf8(bytes.clone()).unwrap().to_ascii_lowercase();
+            assert!(headers.starts_with("post /base/api/v1/rpc "));
+            assert!(headers.contains("authorization: bearer fixture-credential\r\n"));
+            let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
+            assert!(length < 16384); bytes.resize(header_end + length, 0); stream.read_exact(&mut bytes[header_end..]).unwrap();
+            let request = ivy_contracts::json::parse(std::str::from_utf8(&bytes[header_end..]).unwrap(), 16384).unwrap();
+            assert_eq!(request.get("method"), Some(&IvyJson::from(expected_method)));
+            if expected_method == "serviceNodes.get" { assert_eq!(request.required("params").unwrap().get("serviceNodeId"), Some(&IvyJson::from("host.service"))); }
+            let body = ivy_contracts::json::stringify(&IvyJson::object([("jsonrpc", "2.0".into()), ("id", request.required("id").unwrap().clone()), ("result", result.clone())]), 16384).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    (endpoint, thread)
+}
+
+#[tokio::test]
+async fn health_rpc_matches_node_registration_and_hive_identity_checks() {
+    use ivy_host_runtime::health::check_health_with_clock;
+    let fixture = ServiceFixture::new(); let now = 1_767_225_600_000_i64;
+    for hive in [false, true] {
+        for failure in ["none", "ready", "build", "connected", "synced"] {
+            if hive && ["connected", "synced"].contains(&failure) { continue; }
+            let mut source = fixture.value();
+            let build = source.required("buildId").unwrap().clone();
+            let mut response = if hive {
+                IvyJson::object([("callerPrincipalId", "fixture".into()), ("version", "1.0".into()), ("buildId", build.clone()),
+                    ("hiveProtocol", IvyJson::Number(1.0)), ("runtimeEpoch", "epoch".into()), ("ready", true.into()),
+                    ("serverTime", "2026-01-01T00:00:00.000Z".into()), ("storageFormat", IvyJson::Number(4.0)), ("publicBaseUrl", "https://example.invalid".into())])
+            } else {
+                let mut v = IvyJson::object([("serviceNodeId", "host.service".into()), ("hostId", "host".into()), ("serviceName", "service".into()),
+                    ("instanceMode", "singleton".into()), ("principalId", "fixture".into()), ("version", "1.0".into()), ("buildId", build.clone()), ("hiveProtocol", IvyJson::Number(1.0)),
+                    ("connected", true.into()), ("synced", true.into()), ("ready", true.into()), ("stale", false.into()), ("desiredEnabled", true.into())]);
+                for key in ["nativeVersion", "lastContactAt", "lastSuccessfulSyncAt", "lastFailedSyncAt", "lastObservationAt", "diagnostic"] { v.insert(key, IvyJson::Null); } v
+            };
+            if failure == "build" { response.insert("buildId", format!("sha256:{}", "b".repeat(64)).into()); }
+            else if failure != "none" { response.insert(failure, false.into()); }
+            let (endpoint, server) = health_rpc_fixture(response, if hive { "system.status" } else { "serviceNodes.get" });
+            source.insert("publicBaseUrl", endpoint.clone().into());
+            if hive { source.insert("componentId", "hive".into()); source.insert("settings", hive_settings("127.0.0.1", 39081)); }
+            let config = config::InstanceConfig::from_json(source.clone()).unwrap();
+            HealthFile::new(config.clone()).write(true, "".into(), None).await.unwrap();
+            let path = config.data_root().join("health.json"); let mut value = config::json_file(&path, 4096).await.unwrap();
+            value.insert("observedAt", "2026-01-01T00:00:00.000Z".into()); config::atomic_json(&path, value).await.unwrap();
+            let result = check_health_with_clock(&config, Some(&endpoint), true, &FixedHealthClock(now)).await;
+            compare_config_oracle(IvyJson::object([("kind", "health".into()), ("config", source), ("now", IvyJson::Number(now as f64)), ("verifyRegistration", true.into()), ("endpoint", endpoint.into())]), result);
+            server.join().unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_health_cli_preserves_config_precedence_and_json_exit_contract() {
+    let fixture = ServiceFixture::new(); let mut source = fixture.value(); source.remove("credential");
+    fixture.save(source.clone()).await; fixture.build(&source).await;
+    let config = config::InstanceConfig::from_json(source.clone()).unwrap();
+    HealthFile::new(config).write(true, "ready".into(), Some(7)).await.unwrap();
+    let node = std::process::Command::new("node").args(["-p", "process.execPath"]).output().unwrap();
+    let node = String::from_utf8(node.stdout).unwrap().trim().to_string();
+    for mode in ["environment", "argument", "invalid", "build"] {
+        if mode == "build" { let mut value = source.clone(); value.insert("buildId", format!("sha256:{}", "b".repeat(64)).into()); fixture.build(&value).await; }
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ivy-health"));
+        command.env("IVY_NODE_EXECUTABLE", &node).env_remove("IVY_HIVE_HEALTH_URL").env("IVY_INSTANCE_CONFIG", fixture.0.join("config.json"));
+        if mode == "argument" { command.env("IVY_INSTANCE_CONFIG", "relative").arg("--config").arg(fixture.0.join("config.json")); }
+        if mode == "invalid" { command.arg("--config").arg("relative"); }
+        let result = command.output().unwrap();
+        assert!(result.stderr.is_empty());
+        let output = ivy_contracts::json::parse(std::str::from_utf8(&result.stdout).unwrap(), 1024).unwrap();
+        if ["environment", "argument"].contains(&mode) {
+            assert!(result.status.success(), "{output:?}");
+            assert_eq!(output.get("buildId"), source.get("buildId")); assert_eq!(output.get("generation"), Some(&IvyJson::Number(7.0)));
+        } else {
+            assert_eq!(result.status.code(), Some(1));
+            assert_eq!(output.get("ok"), Some(&IvyJson::Bool(false)));
+            assert_eq!(output.get("code"), Some(&IvyJson::from(if mode == "build" { "build_mismatch" } else { "invalid_arguments" })));
+        }
+    }
+}
+
