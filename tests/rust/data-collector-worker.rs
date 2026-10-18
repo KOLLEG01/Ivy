@@ -1,4 +1,6 @@
 use ivy_data_collector::policy::WORKER;
+#[path = "data-collector-runner.inc.rs"]
+mod runner;
 use std::{
     io::Write,
     process::{Command, Stdio},

@@ -6,6 +6,7 @@ pub mod model;
 pub mod policy;
 pub mod provider;
 pub mod runtime;
+pub mod runner;
 pub mod publication;
 pub mod schema;
 pub mod store;
