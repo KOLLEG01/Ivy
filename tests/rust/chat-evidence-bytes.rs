@@ -1,4 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[path = "chat-native-evidence-cases.rs"]
+mod native_evidence;
 use ivy_chat_bridge::{
     evidence_bytes::{read_chat_evidence, save_chat_evidence},
     limits::EVIDENCE_CHUNK_BYTES,
