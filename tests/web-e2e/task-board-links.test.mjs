@@ -60,7 +60,7 @@ test(
     const picker = f.page.getByRole("dialog", { name: "Insert Wiki page" });
     await picker.getByLabel("Search Wiki pages").fill("Reference note");
     await picker.getByRole("button", { name: "Reference note" }).click();
-    const wikiUrl = f.base + "/ui/wiki-ui/#/page?id=" + wiki.object.id;
+    const wikiUrl = f.base + "/wiki/#/page?id=" + wiki.object.id;
     await expect(
       description.getByRole("link", { name: "Reference note" }),
     ).toHaveAttribute("href", wikiUrl);
