@@ -13,7 +13,18 @@ const {IvyError} = await import('../../packages/contracts/src/errors.ts');
 const input = JSON.parse(readFileSync(0, 'utf8'));
 try {
   let value;
-  if (input.kind === 'artifact') {
+  if (input.kind === 'source') {
+    const source = await import('../../packages/host-runtime/src/source.ts');
+    value = await source[input.operation](...input.args);
+    if (value === undefined) value = null;
+  }
+  else if (input.kind === 'preparations') {
+    const preparations = await import('../../packages/host-runtime/src/preparations.ts');
+    value = await preparations[input.operation](...input.args);
+    if (value === undefined) value = null;
+  }
+  else if (input.kind === 'candidateIdentity') value = (await import('../../packages/host-runtime/src/candidate-identity.ts')).candidateBuildId(...input.args);
+  else if (input.kind === 'artifact') {
     if (input.node) Object.defineProperty(process, 'version', {value: input.node});
     const artifact = await import('../../packages/host-runtime/src/artifact.ts');
     value = await artifact[input.operation](...input.args);

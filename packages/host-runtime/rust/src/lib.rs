@@ -1,6 +1,7 @@
 //! Common host domain library; module implementations and index are HostExecutor-owned.
 pub use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome};
 pub mod build_identity;
+pub mod candidate_identity;
 pub mod accepted_configuration;
 pub mod artifact;
 pub mod codex_admission;
@@ -26,4 +27,6 @@ pub mod portable_native_files;
 pub mod process;
 pub mod process_fence;
 pub mod process_output;
+pub mod preparations;
 pub mod scheduler;
+pub mod source;
