@@ -4,18 +4,18 @@ use ivy_task_board::{evidence_bytes::*, local_blobs::*};
 use serde_json::json;
 use std::path::PathBuf;
 
-#[path = "../fixtures/task-board-evidence-support.rs"]
-mod support;
-#[path = "../fixtures/task-board-retention.rs"]
-mod retention;
-#[path = "../fixtures/task-board-workspaces.rs"]
-mod workspaces;
 #[path = "../fixtures/task-board-artifact.rs"]
 mod artifact;
 #[path = "../fixtures/task-board-journal-store.rs"]
 mod journal_store;
 #[path = "../fixtures/task-board-publication.rs"]
 mod publication;
+#[path = "../fixtures/task-board-retention.rs"]
+mod retention;
+#[path = "../fixtures/task-board-evidence-support.rs"]
+mod support;
+#[path = "../fixtures/task-board-workspaces.rs"]
+mod workspaces;
 use support::oracle;
 
 struct Temporary(PathBuf);
