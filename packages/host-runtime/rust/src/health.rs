@@ -3,6 +3,75 @@ use crate::{IvyError, IvyJson, IvyResult, config::{InstanceConfig, FileError, CO
 use ivy_contracts::{JsString, core_schema::validate_host};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use ivy_sdk::{clock::{Clock, SystemClock, parse_date}, rpc::{ClientOptions, HiveClient, RequestOptions, RpcClient}};
+use std::time::Duration;
+
+fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
+    if condition { Ok(()) } else { Err(IvyError::new(code, message)) }
+}
+
+/// Use a local Hive listener without weakening the SDK's remote HTTPS rule.
+pub fn local_hive_endpoint(config: &IvyJson, docker: Option<&IvyJson>) -> IvyResult<url::Url> {
+    let settings = config.required("settings")?;
+    validate_host("HiveSettings", settings)?;
+    let mappings = docker.map(|docker| -> IvyResult<Vec<&IvyJson>> {
+        let ports = docker.required("ports")?.as_array().ok_or_else(IvyError::internal)?;
+        Ok(ports.iter().filter(|port| {
+            port.get("containerPort") == settings.get("listenPort") &&
+                port.get("host").and_then(|v| v.as_str().ok()).is_some_and(|v| ["127.0.0.1", "::1", "0.0.0.0", "::"].contains(&v.as_str()))
+        }).collect())
+    }).transpose()?;
+    require(mappings.as_ref().is_none_or(|ports| ports.len() == 1), "invalid_arguments", "Hive health needs exactly one loopback-accessible host port mapping for its listener.")?;
+    let binding = mappings.as_ref().and_then(|ports| ports.first()).copied();
+    let host = binding.and_then(|p| p.get("host")).unwrap_or(settings.required("listenHost")?).as_str()?;
+    let hostname = match host.as_str() {
+        "0.0.0.0" => "127.0.0.1".into(), "::" => "[::1]".into(),
+        _ if host.contains(':') => format!("[{host}]"), _ => host,
+    };
+    let mut endpoint = url::Url::parse(&config.required("publicBaseUrl")?.as_str()?).map_err(|_| IvyError::internal())?;
+    // URL setters silently ignore invalid assignments, as in the original JS.
+    let _ = endpoint.set_scheme("http");
+    let _ = endpoint.set_host(Some(&hostname));
+    let port = binding.and_then(|p| p.get("port")).unwrap_or(settings.required("listenPort")?);
+    let port = port.as_f64().ok_or_else(IvyError::internal)? as u16;
+    let _ = endpoint.set_port(Some(port));
+    Ok(endpoint)
+}
+
+pub async fn check_health(config: &InstanceConfig, hive_endpoint: Option<&str>, verify_registration: bool) -> IvyResult<IvyJson> {
+    check_health_with_clock(config, hive_endpoint, verify_registration, &SystemClock).await
+}
+
+/// The injected clock changes only time observation, never validation or I/O.
+pub async fn check_health_with_clock(config: &InstanceConfig, hive_endpoint: Option<&str>, verify_registration: bool, clock: &dyn Clock) -> IvyResult<IvyJson> {
+    let value = crate::config::json_file(config.data_root().join("health.json"), CONFIGURATION_BYTES).await?;
+    validate_host("Health", &value)?;
+    let source = config.json();
+    let observed = parse_date(value.required("observedAt")?.as_js_string().ok_or_else(IvyError::internal)?);
+    require(value.get("ready") == Some(&IvyJson::Bool(true)) && value.get("instanceId") == source.get("instanceId") &&
+        value.get("buildId") == source.get("buildId") && clock.utc_millis() as f64 - observed < 15_000.0 && observed <= clock.utc_millis() as f64 + 1000.0,
+        "service_not_ready", "Instance health is stale, mismatched or not ready.")?;
+    let options = || RequestOptions { timeout: Duration::from_millis(5000), ..Default::default() };
+    if source.get("componentId") == Some(&IvyJson::from("hive")) {
+        let settings = source.required("settings")?;
+        validate_host("HiveSettings", settings)?;
+        let endpoint = match hive_endpoint.filter(|v| !v.is_empty()) {
+            Some(value) => url::Url::parse(value).map_err(|_| IvyError::internal())?,
+            None => local_hive_endpoint(source, None)?,
+        };
+        let token = settings.required("credentials")?.as_array().and_then(|v| v.first()).ok_or_else(IvyError::internal)?.required("token")?.as_str()?;
+        let client = HiveClient::new(endpoint.as_str(), ClientOptions { credential: Some(token), ..Default::default() })?;
+        let status = client.request("system.status", IvyJson::object(Vec::<(String, IvyJson)>::new()), options()).await?;
+        require(status.get("ready") == Some(&IvyJson::Bool(true)) && status.get("buildId") == source.get("buildId"),
+            "service_not_ready", "Hive API/storage identity is not ready.")?;
+    } else if let Some(credential) = source.get("credential").filter(|v| verify_registration && v.as_js_string().is_some_and(|s| !s.0.is_empty())) {
+        let client = HiveClient::new(&source.required("publicBaseUrl")?.as_str()?, ClientOptions { credential: Some(credential.as_str()?), ..Default::default() })?;
+        let node = client.request("serviceNodes.get", IvyJson::object([("serviceNodeId", source.required("serviceNodeId")?.clone())]), options()).await?;
+        require(["connected", "synced", "ready"].iter().all(|key| node.get(key) == Some(&IvyJson::Bool(true))) && node.get("buildId") == source.get("buildId"),
+            "service_not_ready", "The current Hive service registration is not synchronized and ready.")?;
+    }
+    Ok(value)
+}
 
 pub struct HealthFile {
     config: InstanceConfig,
