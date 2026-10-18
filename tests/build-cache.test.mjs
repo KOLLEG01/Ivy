@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { cachedBuild, compilerCache, fingerprint } from '../tools/build/build-cache.mjs';
+import { rustRootInputFingerprint, rustRootInputPaths } from '../tools/build/rust-root-inputs.mjs';
 
 test('build cache checks source changes, deletions, output integrity, force and failed builds', async t => {
   const root = mkdtempSync(join(tmpdir(), 'ivy-cache-unit-'));
@@ -47,4 +48,34 @@ test('relative fingerprints identify equal immutable inputs across snapshot root
   assert.equal(fingerprint([first], { compiler: 'fixed' }, first), fingerprint([second], { compiler: 'fixed' }, second));
   writeFileSync(join(second, 'nested', 'input'), 'changed');
   assert.notEqual(fingerprint([first], { compiler: 'fixed' }, first), fingerprint([second], { compiler: 'fixed' }, second));
+});
+
+test('native root cache inputs include config creation, edits and deletion without credentials or generated state', t => {
+  const root = mkdtempSync(join(tmpdir(), 'ivy-cache-unit-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const initial = rustRootInputFingerprint(root);
+  for (const path of rustRootInputPaths) {
+    const file = join(root, path);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, 'first');
+    const first = rustRootInputFingerprint(root);
+    assert.notEqual(first, initial, path);
+    writeFileSync(file, 'second');
+    assert.notEqual(rustRootInputFingerprint(root), first, path);
+    rmSync(file);
+    assert.equal(rustRootInputFingerprint(root), initial, path);
+  }
+  for (const path of ['target/debug/cache', '.local/cargo/cache', '.cargo/credentials', '.cargo/credentials.toml', '.cargo/registry/index', '.cargo/git/checkouts/cache']) {
+    const file = join(root, path);
+    mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, 'private or generated');
+  }
+  assert.equal(rustRootInputFingerprint(root), initial);
+  const copy = mkdtempSync(join(tmpdir(), 'ivy-cache-copy-'));
+  t.after(() => rmSync(copy, { recursive: true, force: true }));
+  writeFileSync(join(root, 'Cargo.toml'), '[workspace]\n');
+  cpSync(root, copy, { recursive: true });
+  assert.equal(rustRootInputFingerprint(root), rustRootInputFingerprint(copy));
+  mkdirSync(join(root, '.cargo/config.toml'));
+  writeFileSync(join(root, '.cargo/config.toml/credentials'), 'must not be hashed');
+  assert.throws(() => rustRootInputFingerprint(root), /regular files/);
 });

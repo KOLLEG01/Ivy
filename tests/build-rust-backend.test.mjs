@@ -43,6 +43,11 @@ test('native compilation selects real component binaries, required features and 
   assert.equal(options.env.IVY_BUILD_ID, f.identity.buildId);
   assert.equal(options.env.CARGO_TARGET_DIR, join(f.root, '.local/cargo/example'));
   assert.equal(existsSync(join(f.root, 'dist')), false);
+  mkdirSync(join(f.root, '.cargo'));
+  writeFileSync(join(f.root, '.cargo/config.toml'), '[build]\n');
+  const configured = f.build();
+  assert.notEqual(configured.rootInputFingerprint, result.rootInputFingerprint);
+  assert.deepEqual(configured.identity, result.identity);
 }));
 
 test('native builds expose shared instruction assets outside target-specific executable directories', () => {

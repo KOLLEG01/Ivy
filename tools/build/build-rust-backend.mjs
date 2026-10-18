@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mjs';
 import { buildInstructions } from './build-instructions.mjs';
+import { rustRootInputFingerprint } from './rust-root-inputs.mjs';
 
 const targets = new Map([
   ['x86_64-pc-windows-msvc', 'win32-x64'],
@@ -37,6 +38,7 @@ export function compileRustBackend({ component, target, root = process.cwd(), id
   const targetDirectory = resolve(root, '.local', 'cargo', component);
   const releaseDirectory = resolve(targetDirectory, target, 'release');
   const outputDirectory = resolve(root, '.local', 'build', 'rust', component, platform);
+  const rootInputFingerprint = rustRootInputFingerprint(root);
   identity ??= buildIdentity(root);
   const options = { cwd: root, env: { ...process.env, IVY_BUILD_ID: identity.buildId, CARGO_TARGET_DIR: targetDirectory, CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? '1' } };
   const metadata = JSON.parse(cargo(['metadata', '--locked', '--no-deps', '--format-version', '1', '--manifest-path', manifest], options));
@@ -75,7 +77,7 @@ export function compileRustBackend({ component, target, root = process.cwd(), id
   if (existsSync(buildInfo) && realpathSync(buildInfo) !== buildInfo) throw new Error('Native build identity must not use file links.');
   writeFileSync(buildInfo, JSON.stringify(identity, null, 2) + '\n');
   const instructionFiles = buildInstructions({ root, component, outputRoot: resolve(root, '.local', 'build', 'rust', component) });
-  return { component, target, platform, identity, outputDirectory, files, instructionFiles };
+  return { component, target, platform, identity, rootInputFingerprint, outputDirectory, files, instructionFiles };
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

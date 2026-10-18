@@ -13,6 +13,18 @@ import { tmpdir } from "node:os";
 import { componentRoots, stageBackend } from "../tools/build/build-backend.mjs";
 import { buildInstructions } from "../tools/build/build-instructions.mjs";
 import { runInNewContext } from "node:vm";
+import { isRustRootInput } from "../tools/build/rust-root-inputs.mjs";
+import { affected, scopes } from "../tools/testing/test-config.mjs";
+
+test("native source root classification is bounded and root configuration selects affected services", () => {
+  for (const path of ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml"]) {
+    assert.equal(isRustRootInput(path), true, path);
+    assert.deepEqual(affected(path), scopes.filter(scope => scope !== "tooling"), path);
+  }
+  for (const path of ["target/debug/cache", ".local/cargo/cache", ".cargo/credentials", ".cargo/credentials.toml", ".cargo/registry/index", ".cargo/git/cache", ".cargo/config.toml.bak", "nested/Cargo.toml", "../Cargo.toml", "./Cargo.toml", "cargo.toml", ".cargo\\config.toml"]) {
+    assert.equal(isRustRootInput(path), false, path);
+  }
+});
 
 test("host executor package includes its independent automatic bootstrap worker", () => {
   assert.ok(

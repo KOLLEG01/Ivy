@@ -1,3 +1,5 @@
+import { isRustRootInput } from '../build/rust-root-inputs.mjs';
+
 export const scopes = [
   "data-collector",
   "dashboards",
@@ -45,7 +47,7 @@ export function kind(file) {
   return "core";
 }
 export function affected(file) {
-  if (/^(?:Cargo\.(?:toml|lock)|rust-toolchain\.toml|packages\/store\/)/.test(file)) return scopes.filter(s => s !== 'tooling');
+  if (isRustRootInput(file) || /^packages\/store\//.test(file)) return scopes.filter(s => s !== 'tooling');
   if (/^(services\/data-collector|docs\/examples\/data-collector|ui\/data-collector-ui)/.test(file)) return ["data-collector"];
   if (/^(services\/dashboards|ui\/dashboards-ui)/.test(file)) return ["dashboards"];
   // Semantic edges cover dynamic native/schema inputs which an import graph cannot see.
