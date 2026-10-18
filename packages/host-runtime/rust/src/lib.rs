@@ -22,6 +22,7 @@ pub mod native_catalog_compatibility;
 pub mod package_requirements;
 pub mod paths;
 pub mod platform;
+pub mod portable_native_files;
 pub mod process;
 pub mod process_fence;
 pub mod process_output;

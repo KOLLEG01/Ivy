@@ -13,7 +13,15 @@ const {IvyError} = await import('../../packages/contracts/src/errors.ts');
 const input = JSON.parse(readFileSync(0, 'utf8'));
 try {
   let value;
-  if (input.kind === 'journal') {
+  if (input.kind === 'artifact') {
+    if (input.node) Object.defineProperty(process, 'version', {value: input.node});
+    const artifact = await import('../../packages/host-runtime/src/artifact.ts');
+    value = await artifact[input.operation](...input.args);
+    if (value === undefined) value = null;
+  }
+  else if (input.kind === 'realpath') value = await (await import('node:fs/promises')).realpath(input.path);
+  else if (input.kind === 'portableNativeFiles') value = (await import('../../packages/host-runtime/src/portable-native-files.ts')).portableNativeFiles(input.componentId);
+  else if (input.kind === 'journal') {
     const {HostJournal} = await import('../../packages/host-runtime/src/journal.ts');
     const OriginalDate = Date;
     globalThis.Date = class extends OriginalDate {

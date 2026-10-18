@@ -4,6 +4,28 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+/// Node's realpath returns ordinary DOS/UNC paths on Windows. Keep native UTF-16
+/// while removing only the extended prefix introduced by std::fs::canonicalize.
+pub fn realpath(path: &Path) -> io::Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let units: Vec<u16> = resolved.as_os_str().encode_wide().collect();
+        let extended: Vec<u16> = "\\\\?\\".encode_utf16().collect();
+        let unc: Vec<u16> = "\\\\?\\UNC\\".encode_utf16().collect();
+        if units.starts_with(&unc) {
+            let mut ordinary: Vec<u16> = "\\\\".encode_utf16().collect();
+            ordinary.extend_from_slice(&units[unc.len()..]);
+            return Ok(std::ffi::OsString::from_wide(&ordinary).into());
+        }
+        if units.starts_with(&extended) && units.get(5) == Some(&(b':' as u16)) {
+            return Ok(std::ffi::OsString::from_wide(&units[extended.len()..]).into());
+        }
+    }
+    Ok(resolved)
+}
+
 pub fn absolute(path: &Path) -> io::Result<PathBuf> {
     let path = std::path::absolute(path)?;
     let mut result = PathBuf::new();

@@ -4,6 +4,8 @@ use std::{fs, path::PathBuf};
 
 #[path = "host-journal-cases.rs"]
 mod journal_cases;
+#[path = "host-artifact-cases.rs"]
+mod artifact_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
