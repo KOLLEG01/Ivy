@@ -1,12 +1,14 @@
 #[cfg(test)]
 mod tests {
     use ivy_phone_bridge::sip::{
-        CallAction, DelayedOfferCall, InviteExchange, SipEndpoint, SipError, SipIoError,
+        CallError, CallObservation, CallOutcome, DelayedInvite, DelayedInviteMedia,
+        DigestCredentials, FinalPhase, InviteExchange, PreparedInvite, SipEndpoint, SipError,
+        SipIoError,
     };
     use rsipstack::{
         EndpointBuilder,
         sip::{
-            Method, Request, Response, StatusCode,
+            Method, Request, Response, SipMessage, StatusCode,
             headers::*,
             prelude::{HeadersExt, ToTypedHeader},
         },
@@ -17,10 +19,19 @@ mod tests {
         },
         transport::{SipAddr, TransportLayer, udp::UdpConnection},
     };
-    use std::time::Duration;
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
         net::{TcpListener, TcpStream, UdpSocket},
+        sync::{Notify, Semaphore},
     };
     use tokio_util::sync::CancellationToken;
 
@@ -34,6 +45,12 @@ mod tests {
     }
     impl Peer {
         async fn receive(&mut self) -> Request {
+            match self.message().await {
+                SipMessage::Request(request) => request,
+                _ => panic!("request expected"),
+            }
+        }
+        async fn message(&mut self) -> SipMessage {
             match self {
                 Self::Udp(socket, remote) => {
                     let mut bytes = [0; 8192];
@@ -70,7 +87,11 @@ mod tests {
             }
         }
         async fn send(&mut self, response: &Response) {
-            let bytes = response.to_string();
+            self.send_message(&SipMessage::Response(response.clone()))
+                .await;
+        }
+        async fn send_message(&mut self, message: &SipMessage) {
+            let bytes = message.to_string();
             match self {
                 Self::Udp(socket, remote) => {
                     socket
@@ -83,6 +104,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    struct Media {
+        negotiated: AtomicUsize,
+        starts: AtomicUsize,
+        started: Notify,
+        ready: Semaphore,
+    }
+    impl Media {
+        fn new(permits: usize) -> Self {
+            Self {
+                negotiated: AtomicUsize::new(0),
+                starts: AtomicUsize::new(0),
+                started: Notify::new(),
+                ready: Semaphore::new(permits),
+            }
+        }
+    }
+    impl DelayedInviteMedia for Media {
+        fn is_closed(&self) -> bool {
+            false
+        }
+        fn failed(&self) -> bool {
+            false
+        }
+        fn negotiate_offer(&self, offer: &str) -> Option<String> {
+            self.negotiated.fetch_add(1, Ordering::SeqCst);
+            (offer == OFFER).then(|| ANSWER.to_owned())
+        }
+        fn rejected_answer(&self, offer: &str) -> Option<String> {
+            (offer == OFFER).then(|| REJECTED.to_owned())
+        }
+        fn start(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+            Box::pin(async move {
+                self.starts.fetch_add(1, Ordering::SeqCst);
+                self.started.notify_one();
+                let permit = self.ready.acquire().await.unwrap();
+                permit.forget();
+                true
+            })
+        }
+    }
+    async fn observed(call: &DelayedInvite, ready: impl Fn(CallObservation) -> bool) {
+        let mut changes = call.observations();
+        loop {
+            if ready(*changes.borrow()) {
+                return;
+            }
+            changes.changed().await.unwrap();
+        }
+    }
+    fn prepared(request: Request) -> PreparedInvite {
+        let destination = SipAddr::try_from(&request.destination()).unwrap();
+        PreparedInvite::new(request, destination, None).unwrap()
     }
     async fn network(
         tcp: bool,
@@ -345,25 +420,55 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             for method in [Method::Invite, Method::Bye] {
                 for remote in [false, true] {
-                    let options = EndpointOption { t1: Duration::from_millis(10), t1x64: Duration::from_millis(80), ..Default::default() };
-                    let (mut endpoint, mut peer, local, peer_port, _) = network(false, options).await;
+                    let options = EndpointOption {
+                        t1: Duration::from_millis(10),
+                        t1x64: Duration::from_millis(80),
+                        ..Default::default()
+                    };
+                    let (mut endpoint, mut peer, local, peer_port, _) =
+                        network(false, options).await;
                     let mut request = addressed("", local, peer_port, false);
                     request.method = method;
-                    request.headers.unique_push(CSeq::new(format!("1 {method}")).into());
+                    request
+                        .headers
+                        .unique_push(CSeq::new(format!("1 {method}")).into());
                     let mut transaction = endpoint.client(request, None).unwrap();
                     let original = peer.receive().await;
                     if remote {
-                        peer.send(&response(&original, StatusCode::RequestTimeout, peer_port, "")).await;
-                        assert_eq!(transaction.next_response().await.unwrap().status_code.code(), 408);
+                        peer.send(&response(
+                            &original,
+                            StatusCode::RequestTimeout,
+                            peer_port,
+                            "",
+                        ))
+                        .await;
+                        assert_eq!(
+                            transaction
+                                .next_response()
+                                .await
+                                .unwrap()
+                                .status_code
+                                .code(),
+                            408
+                        );
                         assert!(transaction.completed().await.is_ok());
                     } else {
-                        assert!(matches!(transaction.next_response().await, Err(SipIoError::TimedOut)));
-                        assert!(matches!(transaction.completed().await, Err(SipIoError::TimedOut)));
+                        assert!(matches!(
+                            transaction.next_response().await,
+                            Err(SipIoError::TimedOut)
+                        ));
+                        assert!(matches!(
+                            transaction.completed().await,
+                            Err(SipIoError::TimedOut)
+                        ));
                     }
-                    transaction.retire().await.unwrap(); endpoint.shutdown().await.unwrap();
+                    transaction.retire().await.unwrap();
+                    endpoint.shutdown().await.unwrap();
                 }
             }
-        }).await.expect("local/remote timeout distinction deadline");
+        })
+        .await
+        .expect("local/remote timeout distinction deadline");
     }
 
     fn response(request: &Request, status: StatusCode, peer: u16, body: &str) -> Response {
@@ -394,117 +499,366 @@ mod tests {
     #[tokio::test]
     async fn cancelled_delayed_offer_keeps_original_udp_transaction_and_ack_body() {
         tokio::time::timeout(Duration::from_secs(8), async {
-            let token = CancellationToken::new();
-            let transport = TransportLayer::new(token.child_token());
-            let udp = UdpConnection::create_connection("127.0.0.1:0".parse().unwrap(), None, Some(token.child_token())).await.unwrap();
-            let port = udp.get_addr().addr.port.map(u16::from).unwrap();
-            transport.add_transport(udp.into());
-            let mut endpoint = SipEndpoint::start(transport, token.child_token(), EndpointOption::default());
-            let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-            let peer_port = peer.local_addr().unwrap().port();
-            let peer_task = tokio::spawn(async move {
-                let mut bytes = [0; 8192];
-                let mut original = None;
-                let mut wire = Vec::new();
-                let mut ack_count = 0;
-                let mut bye_seen = false;
-                while ack_count < 2 || !bye_seen {
-                    let (count, address) = peer.recv_from(&mut bytes).await.unwrap();
-                    assert!(address.ip().is_loopback());
-                    let request = Request::try_from(std::str::from_utf8(&bytes[..count]).unwrap()).unwrap();
-                    wire.push(request.clone());
-                    match request.method {
-                        Method::Invite => {
-                            original = Some(request.clone());
-                            let ringing = response(&request, StatusCode::Ringing, peer_port, "");
-                            peer.send_to(ringing.to_string().as_bytes(), address).await.unwrap();
-                        }
-                        Method::Cancel => {
-                            let original = original.as_ref().unwrap();
-                            assert_eq!(request.call_id_header().unwrap(), original.call_id_header().unwrap());
-                            assert_eq!(request.cseq_header().unwrap().seq().unwrap(), original.cseq_header().unwrap().seq().unwrap());
-                            assert_eq!(request.top_via_header().unwrap(), original.top_via_header().unwrap());
-                            let accepted = response(&request, StatusCode::OK, peer_port, "");
-                            peer.send_to(accepted.to_string().as_bytes(), address).await.unwrap();
-                            let final_response = response(original, StatusCode::OK, peer_port, OFFER);
-                            peer.send_to(final_response.to_string().as_bytes(), address).await.unwrap();
-                        }
-                        Method::Ack => {
-                            ack_count += 1;
-                            assert_eq!(request.body, REJECTED.as_bytes());
-                            assert_eq!(request.to_header().unwrap().tag().unwrap().unwrap().value(), "original-peer");
-                            if ack_count == 1 {
-                                let final_response = response(original.as_ref().unwrap(), StatusCode::OK, peer_port, OFFER);
-                                peer.send_to(final_response.to_string().as_bytes(), address).await.unwrap();
-                            }
-                        }
-                        Method::Bye => {
-                            bye_seen = true;
-                            assert!(ack_count > 0, "BYE cannot overtake negotiated ACK");
-                            let accepted = response(&request, StatusCode::OK, peer_port, "");
-                            peer.send_to(accepted.to_string().as_bytes(), address).await.unwrap();
-                        }
-                        other => panic!("Unexpected request {other}"),
-                    }
-                }
-                wire
-            });
-            let invite: Request = format!("INVITE sip:peer@127.0.0.1:{peer_port} SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:{port};branch=z9hG4bKoriginal\r\nFrom: <sip:fixture@example.invalid>;tag=local-original\r\nTo: <sip:peer@example.invalid>\r\nCall-ID: isolated-original\r\nCSeq: 1 INVITE\r\nContact: <sip:fixture@127.0.0.1:{port}>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n").try_into().unwrap();
-            let mut exchange = InviteExchange::new(invite.clone()).unwrap();
-            let mut transaction = endpoint.client(invite.clone(), None).unwrap();
-            let mut lifecycle = DelayedOfferCall::default();
-            lifecycle.start().unwrap(); lifecycle.sending(1).unwrap();
-            assert!(matches!(endpoint.client(invite, None), Err(SipIoError::DuplicateTransaction)));
-            assert_eq!(endpoint.shutdown().await, Err(SipIoError::InUse));
-            loop {
-                let response = transaction.next_response().await.unwrap();
-                if response.status_code.code() >= 180 { break; }
-            }
-            assert!(lifecycle.provisional(1, false).is_empty());
-            assert_eq!(lifecycle.hangup(), vec![CallAction::Cancel]);
-            let cancel = exchange.cancel_request().unwrap();
-            let mut cancellation = endpoint.client(cancel, None).unwrap();
-            let final_response = loop {
-                let response = transaction.next_response().await.unwrap();
-                if response.status_code.code() == 200 { break response; }
-            };
-            assert_eq!(cancellation.next_response().await.unwrap().status_code.code(), 200);
-            assert!(!lifecycle.cleanup_confirmed(), "CANCEL response does not settle the original call");
-            assert!(lifecycle.final_response(1, 200));
-            assert_eq!(lifecycle.negotiated(true, false).unwrap(), CallAction::Acknowledge { reject_media: true });
-            exchange.select_final(&final_response).unwrap();
-            let ack = exchange.prepare_ack(&final_response, Some(REJECTED), endpoint.inner()).unwrap();
-            transaction.send_ack(&ack).await.unwrap();
-            assert_eq!(lifecycle.acknowledged(true, false).unwrap(), vec![CallAction::Bye { authenticated: false }]);
-            let mut bye = ack.clone();
-            bye.method = Method::Bye; bye.body.clear();
-            bye.headers.retain(|h| !matches!(h, Header::ContentType(_) | Header::ContentLength(_)));
-            bye.headers.unique_push(ContentLength::from(0).into());
-            bye.headers.unique_push(CSeq::new("2 BYE").into());
-            bye.headers.unique_push(Via::new(format!("SIP/2.0/UDP 127.0.0.1:{port};branch=z9hG4bKbye")).into());
-            let mut ending = endpoint.client(bye, None).unwrap();
-            let repeated = transaction.next_response().await.unwrap();
-            assert_eq!(repeated.call_id_header().unwrap(), final_response.call_id_header().unwrap());
-            assert_eq!(repeated.to_header().unwrap(), final_response.to_header().unwrap());
-            let cached = exchange.ack_for_retransmission(&repeated).unwrap();
-            assert_eq!(cached, &ack);
-            transaction.send_ack(cached).await.unwrap();
-            loop {
-                let response = ending.next_response().await.unwrap();
-                if response.status_code.code() >= 200 {
-                    lifecycle.bye_response(response.status_code.code(), false).unwrap(); break;
+            let (endpoint, mut peer, local, peer_port, _) =
+                network(false, EndpointOption::default()).await;
+            let endpoint = Arc::new(endpoint);
+            let media = Arc::new(Media::new(0));
+            let credentials =
+                DigestCredentials::new("fixture".into(), "fixture-only".into()).unwrap();
+            let mut request = addressed("", local, peer_port, false);
+            let destination = SipAddr::try_from(&request.destination()).unwrap();
+            request.uri = "sip:peer@prepared.invalid".try_into().unwrap();
+            let call = DelayedInvite::start(
+                endpoint.clone(),
+                PreparedInvite::new(request, destination, None).unwrap(),
+                Some(credentials),
+                5,
+                media.clone(),
+            )
+            .unwrap();
+            let original = peer.receive().await;
+            peer.send(&response(&original, StatusCode::Ringing, peer_port, ""))
+                .await;
+            call.hangup().await.unwrap();
+            assert!(call.observation().ending);
+            assert_eq!(call.try_close().await, Err(CallError::CleanupUnconfirmed));
+            let cancel = peer.receive().await;
+            assert_eq!(cancel.method, Method::Cancel);
+            assert_eq!(cancel.uri, original.uri);
+            assert_eq!(
+                cancel.call_id_header().unwrap(),
+                original.call_id_header().unwrap()
+            );
+            assert_eq!(
+                cancel.top_via_header().unwrap(),
+                original.top_via_header().unwrap()
+            );
+            assert_eq!(
+                cancel.cseq_header().unwrap().seq().unwrap(),
+                original.cseq_header().unwrap().seq().unwrap()
+            );
+            peer.send(&response(&cancel, StatusCode::OK, peer_port, ""))
+                .await;
+            assert!(
+                !call.observation().cleanup_confirmed,
+                "CANCEL response cannot release original ownership"
+            );
+            let accepted = response(&original, StatusCode::OK, peer_port, OFFER);
+            peer.send(&accepted).await;
+            let ack = peer.receive().await;
+            assert_eq!(ack.method, Method::Ack);
+            assert_eq!(ack.body, REJECTED.as_bytes());
+            peer.send(&accepted).await;
+            let mut replay = None;
+            let mut bye = None;
+            while replay.is_none() || bye.is_none() {
+                let request = peer.receive().await;
+                match request.method {
+                    Method::Ack => replay = Some(request),
+                    Method::Bye => bye = Some(request),
+                    method => panic!("Unexpected {method}"),
                 }
             }
-            assert!(!lifecycle.is_active()); assert!(lifecycle.cleanup_confirmed());
-            lifecycle.close().unwrap();
-            let wire = peer_task.await.unwrap();
-            let acks: Vec<_> = wire.iter().filter(|r| r.method == Method::Ack).collect();
-            assert_eq!(acks.len(), 2); assert_eq!(acks[0], acks[1]);
-            assert_eq!(wire.iter().filter(|r| r.method == Method::Invite).count(), 1);
-            cancellation.retire().await.unwrap(); ending.retire().await.unwrap(); transaction.retire().await.unwrap();
+            assert_eq!(replay.unwrap(), ack);
+            let bye = bye.unwrap();
+            assert_eq!(
+                bye.call_id_header().unwrap(),
+                original.call_id_header().unwrap()
+            );
+            assert_eq!(bye.to_header().unwrap(), ack.to_header().unwrap());
+            let mut challenge = response(&bye, StatusCode::Unauthorized, peer_port, "");
+            challenge.headers.unique_push(
+                WwwAuthenticate::new(
+                    "Digest realm=\"fixture\", nonce=\"bye-fixture\", algorithm=MD5, qop=\"auth\"",
+                )
+                .into(),
+            );
+            peer.send(&challenge).await;
+            let authenticated = peer.receive().await;
+            assert_eq!(authenticated.method, Method::Bye);
+            assert_eq!(
+                authenticated.cseq_header().unwrap().seq().unwrap(),
+                bye.cseq_header().unwrap().seq().unwrap() + 1
+            );
+            assert!(
+                authenticated
+                    .headers
+                    .iter()
+                    .any(|h| matches!(h, Header::Authorization(_)))
+            );
+            let authorization = authenticated
+                .headers
+                .iter()
+                .find_map(|h| match h {
+                    Header::Authorization(value) => Some(value.value()),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(rsipstack::dialog::authenticate::verify_digest(
+                &rsipstack::sip::typed::Authorization::parse(authorization).unwrap(),
+                "fixture-only",
+                &Method::Bye,
+                authorization
+            ));
+            assert_eq!(call.wait_answer().await, CallOutcome::Ended);
+            assert_eq!(call.try_close().await, Err(CallError::CleanupUnconfirmed));
+            peer.send(&response(&authenticated, StatusCode::OK, peer_port, ""))
+                .await;
+            call.close().await.unwrap();
+            assert!(call.observation().closed);
+            assert!(!call.observation().active);
+            assert_eq!(media.negotiated.load(Ordering::SeqCst), 0);
+            assert_eq!(media.starts.load(Ordering::SeqCst), 0);
+            let mut endpoint = Arc::try_unwrap(endpoint)
+                .ok()
+                .expect("call owner stopped before release");
             assert_eq!(endpoint.inner().get_stats().running_transactions, 0);
             endpoint.shutdown().await.unwrap();
-        }).await.expect("loopback call deadline");
+        })
+        .await
+        .expect("owned cancelled call deadline");
+    }
+
+    #[tokio::test]
+    async fn hangup_and_bye_complete_while_owned_media_start_is_pending() {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            for tcp in [false, true] {
+                let (endpoint, mut peer, local, peer_port, _) = network(tcp, EndpointOption::default()).await;
+                let endpoint = Arc::new(endpoint); let media = Arc::new(Media::new(0));
+                let credentials = DigestCredentials::new("digest-fixture".into(), "fixture-only".into()).unwrap();
+                let call = DelayedInvite::start(endpoint.clone(), prepared(addressed("", local, peer_port, tcp)), Some(credentials), 5, media.clone()).unwrap();
+                let original = peer.receive().await;
+                let mut challenge = response(&original, StatusCode::ProxyAuthenticationRequired, peer_port, "");
+                challenge.headers.unique_push(ProxyAuthenticate::new("Digest realm=\"fixture\", nonce=\"call-fixture\", algorithm=MD5, qop=\"auth\"").into());
+                peer.send(&challenge).await;
+                assert_eq!(peer.receive().await.method, Method::Ack);
+                let authenticated = peer.receive().await;
+                assert_eq!(authenticated.method, Method::Invite);
+                assert_eq!(authenticated.body, b"");
+                assert_eq!(authenticated.call_id_header().unwrap(), original.call_id_header().unwrap());
+                peer.send(&response(&authenticated, StatusCode::OK, peer_port, OFFER)).await;
+                let ack = peer.receive().await;
+                assert_eq!(ack.method, Method::Ack); assert_eq!(ack.body, ANSWER.as_bytes());
+                media.started.notified().await;
+                assert_eq!(call.observation().phase, FinalPhase::StartingMedia);
+                assert!(!call.observation().active);
+                call.hangup().await.unwrap();
+                let bye = peer.receive().await;
+                assert_eq!(bye.method, Method::Bye, "BYE cannot wait for the blocked media-start future");
+                assert_eq!(bye.to_header().unwrap(), ack.to_header().unwrap());
+                peer.send(&response(&bye, StatusCode::CallTransactionDoesNotExist, peer_port, "")).await;
+                observed(&call, |state| state.cleanup_confirmed).await;
+                assert!(!call.observation().quiescent);
+                assert_eq!(call.try_close().await, Err(CallError::CleanupUnconfirmed));
+                media.ready.add_permits(1);
+                assert_eq!(call.wait_answer().await, CallOutcome::Ended);
+                call.close().await.unwrap(); call.close().await.unwrap();
+                assert!(!call.observation().active);
+                assert!(!call.observation().uncertain);
+                assert_eq!(media.starts.load(Ordering::SeqCst), 1);
+                assert_eq!(media.negotiated.load(Ordering::SeqCst), 1);
+                let mut endpoint = Arc::try_unwrap(endpoint).ok().expect("stopped media and call actor released endpoint");
+                endpoint.shutdown().await.unwrap();
+            }
+        }).await.expect("owned media-start/hangup deadline");
+    }
+
+    fn remote_bye(
+        ack: &Request,
+        local: u16,
+        peer_port: u16,
+        sequence: u32,
+        via_branch: &str,
+    ) -> Request {
+        let mut bye = ack.clone();
+        bye.method = Method::Bye;
+        bye.body.clear();
+        bye.uri = format!("sip:fixture@127.0.0.1:{local}").try_into().unwrap();
+        bye.headers
+            .unique_push(From::new(ack.to_header().unwrap().value()).into());
+        bye.headers
+            .unique_push(To::new(ack.from_header().unwrap().value()).into());
+        bye.headers
+            .unique_push(CSeq::new(format!("{sequence} BYE")).into());
+        bye.headers.unique_push(
+            Via::new(format!(
+                "SIP/2.0/UDP 127.0.0.1:{peer_port};branch=z9hG4bK{via_branch}"
+            ))
+            .into(),
+        );
+        bye.headers
+            .retain(|h| !matches!(h, Header::ContentType(_) | Header::ContentLength(_)));
+        bye.headers.unique_push(ContentLength::from(0).into());
+        bye
+    }
+    async fn status(peer: &mut Peer) -> u16 {
+        match peer.message().await {
+            SipMessage::Response(response) => response.status_code.code(),
+            _ => panic!("response expected"),
+        }
+    }
+    #[tokio::test]
+    async fn early_remote_bye_is_tag_and_sequence_fenced_before_media_start_finishes() {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let (endpoint, mut peer, local, peer_port, _) =
+                network(false, EndpointOption::default()).await;
+            let mut incoming = endpoint.incoming_transactions().unwrap();
+            let endpoint = Arc::new(endpoint);
+            let media = Arc::new(Media::new(0));
+            let mut request = addressed("", local, peer_port, false);
+            let destination = SipAddr::try_from(&request.destination()).unwrap();
+            request.uri = "sip:peer@prepared.invalid".try_into().unwrap();
+            let call = DelayedInvite::start(
+                endpoint.clone(),
+                PreparedInvite::new(request, destination, None).unwrap(),
+                None,
+                5,
+                media.clone(),
+            )
+            .unwrap();
+            let original = peer.receive().await;
+            assert_eq!(
+                original.uri.to_string(),
+                "sip:peer@prepared.invalid",
+                "resolved target must not rewrite the original digest URI"
+            );
+            peer.send(&response(&original, StatusCode::OK, peer_port, OFFER))
+                .await;
+            let ack = peer.receive().await;
+            assert_eq!(ack.method, Method::Ack);
+            media.started.notified().await;
+            let mut foreign = remote_bye(&ack, local, peer_port, 1, "foreign");
+            foreign
+                .headers
+                .unique_push(From::new("<sip:peer@example.invalid>;tag=foreign-peer").into());
+            peer.send_message(&SipMessage::Request(foreign)).await;
+            let mut returned = call
+                .deliver_control(incoming.recv().await.unwrap())
+                .err()
+                .expect("foreign transaction stays with host dispatcher");
+            returned
+                .reply(StatusCode::CallTransactionDoesNotExist)
+                .await
+                .unwrap();
+            drop(returned);
+            assert_eq!(status(&mut peer).await, 481);
+            assert!(!call.observation().cleanup_confirmed);
+            peer.send_message(&SipMessage::Request(remote_bye(
+                &ack, local, peer_port, 0, "stale",
+            )))
+            .await;
+            assert!(call.deliver_control(incoming.recv().await.unwrap()).is_ok());
+            assert_eq!(status(&mut peer).await, 500);
+            assert!(!call.observation().cleanup_confirmed);
+            peer.send_message(&SipMessage::Request(remote_bye(
+                &ack, local, peer_port, 1, "current",
+            )))
+            .await;
+            assert!(call.deliver_control(incoming.recv().await.unwrap()).is_ok());
+            assert_eq!(status(&mut peer).await, 200);
+            assert_eq!(call.wait_answer().await, CallOutcome::Ended);
+            assert_eq!(call.try_close().await, Err(CallError::CleanupUnconfirmed));
+            media.ready.add_permits(1);
+            call.close().await.unwrap();
+            assert!(!call.observation().active);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), peer.message())
+                    .await
+                    .is_err(),
+                "remote BYE suppresses local BYE"
+            );
+            let mut endpoint = Arc::try_unwrap(endpoint)
+                .ok()
+                .expect("remote BYE call owner stopped");
+            endpoint.shutdown().await.unwrap();
+        })
+        .await
+        .expect("remote BYE/media-start deadline");
+    }
+
+    #[tokio::test]
+    async fn cancelled_native_waiter_and_wrong_sdp_type_do_not_release_or_start_media() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (endpoint, mut peer, local, peer_port, _) =
+                network(false, EndpointOption::default()).await;
+            let endpoint = Arc::new(endpoint);
+            let media = Arc::new(Media::new(0));
+            let call = DelayedInvite::start(
+                endpoint.clone(),
+                prepared(addressed("", local, peer_port, false)),
+                None,
+                5,
+                media.clone(),
+            )
+            .unwrap();
+            let original = peer.receive().await;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(5), call.wait_answer())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(call.try_close().await, Err(CallError::CleanupUnconfirmed));
+            let mut accepted = response(&original, StatusCode::OK, peer_port, OFFER);
+            accepted
+                .headers
+                .unique_push(ContentType::new("text/plain").into());
+            peer.send(&accepted).await;
+            let ack = peer.receive().await;
+            assert_eq!(ack.method, Method::Ack);
+            assert_eq!(ack.body, REJECTED.as_bytes());
+            let bye = peer.receive().await;
+            assert_eq!(bye.method, Method::Bye);
+            peer.send(&response(&bye, StatusCode::OK, peer_port, ""))
+                .await;
+            assert_eq!(call.wait_answer().await, CallOutcome::Ended);
+            call.close().await.unwrap();
+            assert_eq!(media.negotiated.load(Ordering::SeqCst), 0);
+            assert_eq!(media.starts.load(Ordering::SeqCst), 0);
+            let mut endpoint = Arc::try_unwrap(endpoint)
+                .ok()
+                .expect("original owner released after confirmed BYE");
+            endpoint.shutdown().await.unwrap();
+        })
+        .await
+        .expect("cancelled native waiter/invalid SDP deadline");
+    }
+
+    #[tokio::test]
+    async fn local_invite_timeout_preserves_unknown_original_call_owner() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let options = EndpointOption {
+                t1: Duration::from_millis(10),
+                t1x64: Duration::from_millis(80),
+                ..Default::default()
+            };
+            let (endpoint, mut peer, local, peer_port, _) = network(false, options).await;
+            let endpoint = Arc::new(endpoint);
+            let media = Arc::new(Media::new(0));
+            let call = DelayedInvite::start(
+                endpoint.clone(),
+                prepared(addressed("", local, peer_port, false)),
+                None,
+                5,
+                media.clone(),
+            )
+            .unwrap();
+            assert_eq!(peer.receive().await.method, Method::Invite);
+            assert_eq!(call.wait_answer().await, CallOutcome::Unknown);
+            let observation = call.observation();
+            assert!(observation.uncertain);
+            assert!(!observation.cleanup_confirmed);
+            assert!(!observation.active);
+            assert_eq!(call.try_close().await, Err(CallError::CleanupUnconfirmed));
+            assert!(
+                Arc::try_unwrap(endpoint).is_err(),
+                "uncertain original still owns its endpoint"
+            );
+            assert_eq!(media.starts.load(Ordering::SeqCst), 0);
+            // Test-runtime shutdown models native process loss; this case does
+            // not claim a normal call release or remote cleanup confirmation.
+        })
+        .await
+        .expect("unknown original call deadline");
     }
 
     fn original(body: &str) -> Request {

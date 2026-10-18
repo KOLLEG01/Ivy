@@ -240,7 +240,7 @@ impl InviteExchange {
     }
 }
 
-fn protected(value: &str, maximum: usize) -> bool {
+pub(super) fn protected(value: &str, maximum: usize) -> bool {
     !value.trim().is_empty()
         && value.encode_utf16().count() <= maximum
         && !value.chars().any(char::is_control)

@@ -9,7 +9,7 @@ use rsipstack::{
         key::{TransactionKey, TransactionRole},
         transaction::{Transaction, TransactionEvent, TransactionEventSender},
     },
-    transport::{SipAddr, TransportLayer},
+    transport::{SipAddr, SipConnection, TransportLayer},
 };
 use std::{
     collections::HashMap,
@@ -117,9 +117,13 @@ impl MessageInspector for FinalResponses {
                         if from.is_none() {
                             route.fail(if response.status_code.code() == 408 {
                                 SipIoError::TimedOut
-                            } else { SipIoError::SendFailed });
-                        } else if route.invite && (200..=299).contains(&response.status_code.code())
-                            && route.finals.try_send(response.clone()).is_err() {
+                            } else {
+                                SipIoError::SendFailed
+                            });
+                        } else if route.invite
+                            && (200..=299).contains(&response.status_code.code())
+                            && route.finals.try_send(response.clone()).is_err()
+                        {
                             route.fail(SipIoError::ResponseOverflow);
                         }
                     }
@@ -151,6 +155,14 @@ pub struct SipEndpoint {
     endpoint: Endpoint,
     routes: FinalResponses,
     serving: Option<JoinHandle<Result<(), SipIoError>>>,
+}
+
+/// The confirmed original flow, retained independently of an ACK send task.
+/// UDP in-dialog requests resolve the selected route; TCP/TLS retain affinity.
+pub(crate) struct DialogFlow {
+    endpoint: EndpointInnerRef,
+    connection: Option<SipConnection>,
+    destination: Option<SipAddr>,
 }
 impl SipEndpoint {
     /// Transport binding/TLS policy and call admission belong to the host.
@@ -203,6 +215,46 @@ impl SipEndpoint {
         let registration = self.reserve(key.clone(), request.method == Method::Invite)?;
         let transaction = Transaction::new_client(key, request, self.endpoint.inner.clone(), None);
         Ok(ClientExchange::start(transaction, proxy, registration))
+    }
+    pub(crate) fn resolved_client(
+        &self,
+        request: Request,
+        destination: SipAddr,
+        proxy: Option<SipAddr>,
+    ) -> Result<ClientExchange, SipIoError> {
+        if request.method == Method::Ack || destination.get_socketaddr().is_err() {
+            return Err(SipIoError::InvalidRequest);
+        }
+        let key = TransactionKey::from_request(&request, TransactionRole::Client)
+            .map_err(|_| SipIoError::InvalidRequest)?;
+        let channels = self.reserve(key.clone(), request.method == Method::Invite)?;
+        let mut transaction =
+            Transaction::new_client(key, request, self.endpoint.inner.clone(), None);
+        transaction.destination = Some(destination);
+        Ok(ClientExchange::start(transaction, proxy, channels))
+    }
+    pub(crate) fn dialog_client(
+        &self,
+        request: Request,
+        flow: &DialogFlow,
+        proxy: Option<SipAddr>,
+    ) -> Result<ClientExchange, SipIoError> {
+        if !Arc::ptr_eq(&flow.endpoint, &self.endpoint.inner) || request.method == Method::Ack {
+            return Err(SipIoError::InvalidRequest);
+        }
+        let key = TransactionKey::from_request(&request, TransactionRole::Client)
+            .map_err(|_| SipIoError::InvalidRequest)?;
+        let channels = self.reserve(key.clone(), request.method == Method::Invite)?;
+        let mut transaction = Transaction::new_client(
+            key,
+            request,
+            self.endpoint.inner.clone(),
+            flow.connection.clone(),
+        );
+        if flow.connection.is_some() {
+            transaction.destination = flow.destination.clone();
+        }
+        Ok(ClientExchange::start(transaction, proxy, channels))
     }
     /// Adopt only an unsent authentication continuation produced by the stack.
     pub fn continuation(
@@ -288,8 +340,8 @@ pub struct ClientExchange {
 }
 impl ClientExchange {
     fn start(mut transaction: Transaction, proxy: Option<SipAddr>, channels: Channels) -> Self {
-        if let Some(proxy) = proxy.as_ref() {
-            transaction.destination = Some(proxy.clone());
+        if transaction.destination.is_none() {
+            transaction.destination = proxy.clone();
         }
         *channels.registration.route.stop.lock().unwrap() = Some(transaction.tu_sender.clone());
         let (responses, received) = mpsc::channel(RESPONSE_QUEUE);
@@ -307,7 +359,9 @@ impl ClientExchange {
                         break Some(SipIoError::Stopped);
                     };
                     let failure = *route.failure.borrow();
-                    if let Some(error) = failure { break Some(error); }
+                    if let Some(error) = failure {
+                        break Some(error);
+                    }
                     let final_response = response.status_code.code() >= 200;
                     let routed = route.invite && (200..=299).contains(&response.status_code.code());
                     if !routed && responses.try_send(response).is_err() {
@@ -395,6 +449,17 @@ impl ClientExchange {
             return Err(error);
         }
         Ok(&finished.transaction)
+    }
+    pub(crate) async fn dialog_flow(&mut self) -> Result<DialogFlow, SipIoError> {
+        let original = self.completed().await?;
+        Ok(DialogFlow {
+            endpoint: original.endpoint_inner.clone(),
+            connection: original
+                .connection
+                .clone()
+                .filter(|connection| connection.is_reliable()),
+            destination: original.destination.clone(),
+        })
     }
     /// The call owner must await this send fully before media startup or BYE.
     /// InviteExchange validates/saves the exact selected-dialog ACK first.
