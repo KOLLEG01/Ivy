@@ -146,6 +146,7 @@ export const rustTests = {
   'tests/rust/sdk-native-observations.rs': { package: 'ivy-sdk', test: 'sdk-native-observations' },
   'tests/rust/sdk-native-turn-contents.rs': { package: 'ivy-sdk', test: 'sdk-native-turn-contents' },
   'tests/rust/host-scheduler.rs': { package: 'ivy-host-runtime', test: 'host-scheduler' },
+  'tests/rust/host-build-identity.rs': { package: 'ivy-host-runtime', test: 'host-build-identity' },
   'tests/rust/host-paths.rs': { package: 'ivy-host-runtime', test: 'host-paths' },
   'tests/rust/host-windows-arguments.rs': { package: 'ivy-host-runtime', test: 'host-windows-arguments' },
   'tests/rust/host-process-output.rs': { package: 'ivy-host-runtime', test: 'host-process-output' },
