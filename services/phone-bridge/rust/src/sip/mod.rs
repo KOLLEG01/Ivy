@@ -2,8 +2,10 @@
 //! the native call owner serializes these transitions and awaits their effects.
 mod delayed_offer;
 mod dialog;
+mod endpoint;
 mod invite;
 
 pub use delayed_offer::{CallAction, CallError, CallOutcome, DelayedOfferCall, FinalPhase};
 pub use dialog::{Dialog, DialogRequest, ReinviteAdmission};
+pub use endpoint::{ClientExchange, SipEndpoint, SipIoError};
 pub use invite::{InviteExchange, SipError};
