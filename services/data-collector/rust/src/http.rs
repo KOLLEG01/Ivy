@@ -53,6 +53,7 @@ impl Server {
                             });
                             let _=http1::Builder::new().timer(TokioTimer::new())
                                 .header_read_timeout(Duration::from_secs(10))
+                                .max_headers(2000)
                                 .max_buf_size(16_384)
                                 .serve_connection(TokioIo::new(socket),service).await;
                         });

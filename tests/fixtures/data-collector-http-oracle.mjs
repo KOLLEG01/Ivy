@@ -21,6 +21,7 @@ const openIngress=new Function('createServer','timingSafeEqual','randomUUID','Iv
 const defaults={method:'POST',path:'/tasks/task/run',headers:['Authorization','Bearer synthetic','Idempotency-Key','run'],body:'{"ok":true}'};
 const cases=[];const add=(name,changes={},kind='ingress')=>cases.push({name,kind,...defaults,...changes});
 add('normal');add('bare-token',{headers:['Authorization','synthetic','Idempotency-Key','run']});
+add('many-headers',{headers:[...defaults.headers,...Array.from({length:150},(_,i)=>['X-'+i,'a']).flat()]});
 add('unauthorized',{headers:['Authorization','Bearer other']});add('missing-auth',{headers:[]});
 add('lowercase-bearer',{headers:['Authorization','bearer synthetic']});add('wrong-method',{method:'GET'});
 add('query-is-not-route',{path:'/tasks/task/run?x=1'});add('alias',{path:'/webhook'});
