@@ -47,6 +47,9 @@ pub struct TaskRunner {
 fn io_error(_: std::io::Error) -> IvyError {
     IvyError::internal()
 }
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
 fn text_bytes(value: &IvyJson) -> IvyResult<Vec<u8>> {
     let text = value.as_js_string().ok_or_else(IvyError::internal)?;
     Ok(String::from_utf16_lossy(&text.0).into_bytes())
@@ -124,8 +127,8 @@ impl TaskRunner {
             .map(|v| format!(r"\\{v}"))
             .unwrap_or_else(|| text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned());
         Ok(format!(
-            "Global\\Ivy.Collector.{:x}",
-            Sha256::digest(text.to_lowercase().as_bytes())
+            "Global\\Ivy.Collector.{}",
+            digest(text.to_lowercase().as_bytes())
         ))
     }
     async fn execute(
@@ -235,10 +238,7 @@ impl TaskRunner {
         let cwd = self.directory(&id)?;
         fs::create_dir_all(&cwd).await.map_err(io_error)?;
         let dependencies = model::field(&task, "dependencies")?;
-        let hash = format!(
-            "{:x}",
-            Sha256::digest(stringify(dependencies, usize::MAX)?.as_bytes())
-        );
+        let hash = digest(stringify(dependencies, usize::MAX)?.as_bytes());
         let installed = fs::read_to_string(cwd.join("dependencies.sha256"))
             .await
             .unwrap_or_default();
