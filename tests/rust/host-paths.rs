@@ -144,7 +144,9 @@ async fn stop_fence_exclusive_writer_and_invalid_marker_fail_closed() {
     assert!(clear_process_stop_fence(&root, stop_fence()).await.unwrap());
     let path = root.join("process-stop-fence.json"); fs::create_dir(&path).unwrap();
     assert_eq!(process_stop_fence(&root).await.unwrap_err().code, "outcome_unknown");
-    assert!(!record_process_stop_fence(&root, stop_fence()).await.unwrap());
+    compare_config_oracle(IvyJson::object([("kind", "fence".into()), ("operation", "recordProcessStopFence".into()),
+        ("path", root.to_string_lossy().to_string().into()), ("fence", stop_fence())]),
+        record_process_stop_fence(&root, stop_fence()).await.map(Into::into));
     assert!(clear_process_stop_fence(&root, stop_fence()).await.is_err());
     fs::remove_dir(&path).unwrap();
     assert!(record_process_stop_fence(&root, IvyJson::Null).await.is_err());
