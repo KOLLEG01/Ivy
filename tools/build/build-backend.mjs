@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildIdentity } from "../../packages/host-runtime/src/build-identity.mjs";
 import { buildNative, nativeOutputNames } from "./build-native.mjs";
+import { buildInstructions } from "./build-instructions.mjs";
 
 export const componentRoots = {
   "data-collector": ["services/data-collector/src/main.ts", "packages/host-runtime/src/health.ts"],
@@ -247,6 +248,7 @@ export function stageBackend(identity, component = null) {
     "packages/host-runtime/src/build-identity.mjs",
     "dist/packages/host-runtime/src/build-identity.mjs",
   );
+  buildInstructions({ component });
   writeFileSync(
     "dist/build-info.json",
     JSON.stringify(identity, null, 2) + "\n",

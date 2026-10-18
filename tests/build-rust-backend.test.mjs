@@ -6,28 +6,28 @@ import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { compileRustBackend } from '../tools/build/build-rust-backend.mjs';
 
-function fixture(run) {
+function fixture(run, component = 'example') {
   const root = mkdtempSync(join(tmpdir(), 'ivy-rust-build-'));
-  const manifest = join(root, 'services/example/rust/Cargo.toml');
+  const manifest = join(root, `services/${component}/rust/Cargo.toml`);
   mkdirSync(join(dirname(manifest), 'src'), { recursive: true });
-  writeFileSync(join(root, 'Cargo.toml'), '[workspace]\nresolver="3"\nmembers=["services/example/rust"]\n');
-  writeFileSync(join(root, 'Cargo.lock'), 'version=4\n[[package]]\nname="ivy-example"\nversion="0.0.0"\n');
+  writeFileSync(join(root, 'Cargo.toml'), `[workspace]\nresolver="3"\nmembers=["services/${component}/rust"]\n`);
+  writeFileSync(join(root, 'Cargo.lock'), `version=4\n[[package]]\nname="ivy-${component}"\nversion="0.0.0"\n`);
   writeFileSync(join(root, 'rust-toolchain.toml'), readFileSync(new URL('../rust-toolchain.toml', import.meta.url)));
-  writeFileSync(manifest, '[package]\nname="ivy-example"\nversion="0.0.0"\nedition="2024"\n[features]\nbrowser=[]\n[[bin]]\nname="ivy-example"\npath="src/main.rs"\nrequired-features=["browser"]\n[[bin]]\nname="ivy-example-helper"\npath="src/helper.rs"\n');
+  writeFileSync(manifest, `[package]\nname="ivy-${component}"\nversion="0.0.0"\nedition="2024"\n[features]\nbrowser=[]\n[[bin]]\nname="ivy-${component}"\npath="src/main.rs"\nrequired-features=["browser"]\n[[bin]]\nname="ivy-${component}-helper"\npath="src/helper.rs"\n`);
   for (const name of ['main', 'helper']) writeFileSync(join(dirname(manifest), 'src', name + '.rs'), 'fn main(){println!("native-builder");}\n');
   const identity = { schemaVersion: 1, version: '1.2.3', buildId: 'sha256:' + 'a'.repeat(64) };
-  const targets = [{ name: 'ivy-example', kind: ['bin'], 'required-features': ['browser'] }, { name: 'ivy-example-helper', kind: ['bin'] }, { name: 'ivy_example', kind: ['lib'] }];
+  const targets = [{ name: `ivy-${component}`, kind: ['bin'], 'required-features': ['browser'] }, { name: `ivy-${component}-helper`, kind: ['bin'] }, { name: 'ivy_example', kind: ['lib'] }];
   const calls = [];
   const cargo = (args, options) => {
     calls.push({ args, options });
-    if (args[0] === 'metadata') return JSON.stringify({ workspace_members: ['selected'], packages: [{ id: 'selected', name: 'ivy-example', manifest_path: manifest, targets }] });
+    if (args[0] === 'metadata') return JSON.stringify({ workspace_members: ['selected'], packages: [{ id: 'selected', name: `ivy-${component}`, manifest_path: manifest, targets }] });
     return targets.filter(t => t.kind.includes('bin')).map(target => {
       const executable = join(options.env.CARGO_TARGET_DIR, 'x86_64-pc-windows-msvc/release', target.name + '.exe');
       mkdirSync(dirname(executable), { recursive: true }); writeFileSync(executable, 'fixture ' + target.name);
       return JSON.stringify({ reason: 'compiler-artifact', package_id: 'selected', target, executable });
     }).join('\n');
   };
-  try { run({ root, manifest, identity, targets, calls, cargo, build: extra => compileRustBackend({ root, component: 'example', target: 'x86_64-pc-windows-msvc', identity, cargo, ...extra }) }); }
+  try { run({ root, manifest, identity, targets, calls, cargo, build: extra => compileRustBackend({ root, component, target: 'x86_64-pc-windows-msvc', identity, cargo, ...extra }) }); }
   finally { rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -44,6 +44,16 @@ test('native compilation selects real component binaries, required features and 
   assert.equal(options.env.CARGO_TARGET_DIR, join(f.root, '.local/cargo/example'));
   assert.equal(existsSync(join(f.root, 'dist')), false);
 }));
+
+test('native builds expose shared instruction assets outside target-specific executable directories', () => fixture(f => {
+  mkdirSync(join(f.root, 'instructions'));
+  const policy = 'shared policy \ud800';
+  writeFileSync(join(f.root, 'instructions/secretary-notification-policy.ts'), 'export const secretaryNotificationPolicy = ' + JSON.stringify(policy) + ';\n');
+  const result = f.build();
+  assert.equal(result.files.length, 2);
+  assert.deepEqual(result.instructionFiles, [join(f.root, '.local/build/rust/secretary/instructions/secretary-notification-policy.json')]);
+  assert.equal(JSON.parse(readFileSync(result.instructionFiles[0], 'utf8')), policy);
+}, 'secretary'));
 
 test('libraries and unregistered crates never fall back to TypeScript', () => fixture(f => {
   f.targets.splice(0, 2);

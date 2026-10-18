@@ -11,6 +11,8 @@ import {
 import { join, dirname, relative } from "node:path";
 import { tmpdir } from "node:os";
 import { componentRoots, stageBackend } from "../tools/build/build-backend.mjs";
+import { buildInstructions } from "../tools/build/build-instructions.mjs";
+import { runInNewContext } from "node:vm";
 
 test("host executor package includes its independent automatic bootstrap worker", () => {
   assert.ok(
@@ -45,6 +47,7 @@ test("incremental backend staging removes retired contracts and preserves curren
       mkdirSync(dirname(join(root, path)), { recursive: true });
       writeFileSync(join(root, path), path);
     }
+    writeFileSync(join(root, "instructions/secretary-notification-policy.ts"), 'export const secretaryNotificationPolicy = "shared policy";\n');
     process.chdir(root);
     stageBackend({ buildId: "fixture" });
     assert.equal(existsSync("dist/specs/native/codex-0.149.1"), false);
@@ -55,9 +58,54 @@ test("incremental backend staging removes retired contracts and preserves curren
     assert.equal(readFileSync("dist/instructions/hive-mcp-agent-summary.md", "utf8"), "instructions/hive-mcp-agent-summary.md");
     assert.equal(readFileSync("dist/instructions/hive-mcp-examples.md", "utf8"), "instructions/hive-mcp-examples.md");
     assert.equal(readFileSync("dist/instructions/ivy-dev-mcp-instructions.md", "utf8"), "instructions/ivy-dev-mcp-instructions.md");
+    assert.equal(JSON.parse(readFileSync("dist/instructions/secretary-notification-policy.json", "utf8")), "shared policy");
   } finally {
     process.chdir(previous);
     assert.ok(relative(parent, root).startsWith("ivy-build-inputs-"));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("instruction assets retain cooked UTF-16 text without executing source modules", () => {
+  const parent = tmpdir(), root = mkdtempSync(join(parent, "ivy-instruction-inputs-"));
+  const source = join(root, "instructions/secretary-notification-policy.ts");
+  const literal = '`start\\n\\uD800\r\nend\\t\\uDFFF\\u0000`';
+  try {
+    mkdirSync(dirname(source), { recursive: true });
+    writeFileSync(source, 'export const secretaryNotificationPolicy: string = ' + literal + ';\nthrow new Error("must not execute");\n');
+    const files = buildInstructions({ root, component: "secretary" });
+    assert.deepEqual(files, [join(root, "dist/instructions/secretary-notification-policy.json")]);
+    const bytes = readFileSync(files[0], "utf8");
+    assert.equal(JSON.parse(bytes), runInNewContext(literal));
+    assert.ok(bytes.includes('\\ud800') && bytes.includes('\\udfff'));
+    assert.equal(bytes.endsWith("\n"), true);
+    writeFileSync(source, 'export const secretaryNotificationPolicy = "changed";\n');
+    buildInstructions({ root, component: "secretary" });
+    assert.equal(JSON.parse(readFileSync(files[0], "utf8")), "changed");
+    for (const invalid of [
+      'export const secretaryNotificationPolicy = `computed ${1}`;',
+      'export let secretaryNotificationPolicy = "mutable";',
+      'export const secretaryNotificationPolicy = "unterminated;',
+    ]) {
+      writeFileSync(source, invalid);
+      assert.throws(() => buildInstructions({ root, component: "secretary" }), /Instruction export|Invalid instruction/);
+      assert.equal(JSON.parse(readFileSync(files[0], "utf8")), "changed");
+    }
+    assert.deepEqual(buildInstructions({ root, component: "hive" }), []);
+  } finally {
+    assert.ok(relative(parent, root).startsWith("ivy-instruction-inputs-"));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the packaged policy equals the canonical shared export", async () => {
+  const parent = tmpdir(), root = mkdtempSync(join(parent, "ivy-policy-output-"));
+  try {
+    const { secretaryNotificationPolicy } = await import("../instructions/secretary-notification-policy.ts");
+    const [file] = buildInstructions({ component: "secretary", outputRoot: root });
+    assert.equal(JSON.parse(readFileSync(file, "utf8")), secretaryNotificationPolicy);
+  } finally {
+    assert.ok(relative(parent, root).startsWith("ivy-policy-output-"));
     rmSync(root, { recursive: true, force: true });
   }
 });

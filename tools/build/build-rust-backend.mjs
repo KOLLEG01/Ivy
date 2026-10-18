@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, realpathSync, statSync, writeFileS
 import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mjs';
+import { buildInstructions } from './build-instructions.mjs';
 
 const targets = new Map([
   ['x86_64-pc-windows-msvc', 'win32-x64'],
@@ -73,7 +74,8 @@ export function compileRustBackend({ component, target, root = process.cwd(), id
   const buildInfo = resolve(outputDirectory, 'build-info.json');
   if (existsSync(buildInfo) && realpathSync(buildInfo) !== buildInfo) throw new Error('Native build identity must not use file links.');
   writeFileSync(buildInfo, JSON.stringify(identity, null, 2) + '\n');
-  return { component, target, platform, identity, outputDirectory, files };
+  const instructionFiles = buildInstructions({ root, component, outputRoot: resolve(root, '.local', 'build', 'rust', component) });
+  return { component, target, platform, identity, outputDirectory, files, instructionFiles };
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
