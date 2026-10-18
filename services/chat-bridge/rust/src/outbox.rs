@@ -97,6 +97,11 @@ struct Offer {
     replies: Vec<Document>,
 }
 
+pub struct PendingNotices {
+    pub replies: Vec<Document>,
+    pub next_cursor: Option<Json>,
+}
+
 pub struct ChatOutbox<'a> {
     pub operations: &'a ChatOperations<'a>,
 }
@@ -412,7 +417,7 @@ impl<'a> ChatOutbox<'a> {
         )?;
         Ok(selected)
     }
-    pub async fn pending_notices(&self, cursor: Option<&JsString>) -> IvyResult<Json> {
+    pub async fn pending_notices(&self, cursor: Option<&JsString>) -> IvyResult<PendingNotices> {
         let mut params = Json::object([
             ("contractKey", "chat-bridge/reply".into()),
             (
@@ -484,20 +489,18 @@ impl<'a> ChatOutbox<'a> {
                 "chat_identity_conflict",
                 "A service reply requires its original completed producer operation.",
             )?;
-            replies.push(view(
-                &self
-                    .reply(
-                        Reference::Pinned(&saved.pin),
-                        field(&saved.value, "channel")?,
-                    )
-                    .await?,
-            ));
+            replies.push(
+                self.reply(
+                    Reference::Pinned(&saved.pin),
+                    field(&saved.value, "channel")?,
+                )
+                .await?,
+            );
         }
-        let mut result = Json::object([("replies", Json::Array(replies))]);
-        if let Some(cursor) = page.get("nextCursor") {
-            result.insert("nextCursor", cursor.clone());
-        }
-        Ok(result)
+        Ok(PendingNotices {
+            replies,
+            next_cursor: page.get("nextCursor").cloned(),
+        })
     }
     pub async fn notice_parts(&self, first: &Document) -> IvyResult<Vec<Document>> {
         let origin = field(&first.value, "origin")?;

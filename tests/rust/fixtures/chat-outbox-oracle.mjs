@@ -2,13 +2,14 @@ import './chat-store-loader.mjs';
 import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
 const {ChatStore}=await import('../../../services/chat-bridge/src/store.ts');
 const {ChatAdmission}=await import('../../../services/chat-bridge/src/admission.ts');
 const {ChatOperations}=await import('../../../services/chat-bridge/src/operations.ts');
 const {ChatOutbox}=await import('../../../services/chat-bridge/src/outbox.ts');
 const {mainName}=await import('../../../services/chat-bridge/src/queue.ts');
 const {IvyError}=await import('../../../packages/contracts/src/errors.ts');
-const {hashJson}=await import('../../../packages/contracts/src/canonical.ts');
+const {hashJson,canonical}=await import('../../../packages/contracts/src/canonical.ts');
 const {parseOperationId}=await import('../../../packages/contracts/src/operation-id.ts');
 const {unpersistedNativePlan}=await import('../../fixtures/native-plan.ts');
 const now=1790000000123,at=new Date(now).toISOString(),RealDate=Date;
@@ -33,6 +34,13 @@ function finalNotice(){
 }
 const value=(r,path)=>path.startsWith('data:/')?path.slice(6).split('/').reduce((v,k)=>v?.[k],r.content.value):path.split('.').reduce((v,k)=>v?.[k],r);
 function matches(r,p){switch(p.op){case 'and':return p.args.every(p=>matches(r,p));case 'or':return p.args.some(p=>matches(r,p));case 'isNull':return value(r,p.field)===null;case 'eq':return value(r,p.field)===p.value;case 'ne':return value(r,p.field)!==p.value;case 'gt':return value(r,p.field)>p.value;case 'lte':return value(r,p.field)<=p.value;default:throw Error('Unsupported predicate '+p.op);}}
+// Promise.all read lanes can interleave differently. Preserve every complete
+// read request/count while keeping all write and status barriers in order.
+function readBatches(calls){
+ const result=[];let batch=[];
+ const flush=()=>{batch.sort((a,b)=>canonical(a)<canonical(b)?-1:canonical(a)>canonical(b)?1:0);result.push(...batch);batch=[];};
+ for(const call of calls){if(['objects.query','objects.read'].includes(call.method))batch.push(call);else{flush();result.push(call);}}flush();return result;
+}
 class Client{
  constructor(records){this.records=structuredClone(records);this.versions=new Map(records.map(r=>[r.object.id,new Map([[1,structuredClone(r)]]) ]));this.calls=[];this.fault=null;this.queryCursor=undefined;}
  async request(method,p){
@@ -111,6 +119,16 @@ add('complete-byte-bounded-pages',[receive(),receive('next',{afterOffer:'receive
  c.compact=true;c.records=[];const artifact={object:pin('artifact'),contentHash:'sha256:'+'1'.repeat(64),byteLength:1,mediaType:'text/plain',label:'\0'.repeat(256)};
  for(let i=0;i<8;i++){const group=answer(String(i),i*2+1,channel,{text:'\0'.repeat(16384),artifacts:Array.from({length:32},()=>artifact)});group[0].content.value.payload.text='\0'.repeat(65536);c.records.push(...group);}
 });
+for(const kind of ['complete','retained','accepted','wrong-reply'])add('pending-native-notice-'+kind,[{action:'pending'},{action:'parts'},{action:'confirm'},reopen,{action:'pending'}],c=>{
+ c.notifier=kind;if(kind==='retained')c.definition.channels[0].channel.channelId='replacement';
+});
+add('publication-boundary-hides-reserved-replies',[history(),receive()],c=>c.boundary='publication');
+add('pending-notify-hides-unpublished-answer',[history(),receive(),{action:'pending'}],c=>{c.boundary='notify';c.notifier='accepted';});
+add('changed-pruned-offer-content',[receive(),prune,{action:'alter-reply'},ack()]);
+for(const crash of ['receive-accept','receive-offer','receive-finish','ack-accept','ack-publish','ack-finish'])
+ add('original-interruption-'+crash,[reopen,receive(),ack(),reopen,receive(),ack()],c=>c.crash=crash);
+const bridge=new ChatAdmission(definition).expected('alice');
+for(const method of ['history','receive','acknowledge'])add('malformed-'+method,[null,{},true,4,[],{expectedBridge:null},{expectedBridge:bridge},{expectedBridge:bridge,channel:false}].map(request=>({action:'raw',method,request})));
 
 const root=mkdtempSync(join(tmpdir(),'ivy-chat-outbox-base-'));const base=new ChatStore({},null,root);base.close();
 const database=readFileSync(join(root,'chat-bridge.sqlite')).toString('base64');rmSync(root,{recursive:true,force:true});
@@ -138,10 +156,52 @@ for(const c of cases){
     const doc=await store.named('chat-bridge/'+kind,prefix+op.pin.objectId);if(doc){ids.set(doc.pin.objectId,kind+':'+name);documents.push({name,kind,object:doc.pin,data:doc.value});}
    }
   }
-  const data=normalize({output,documents,records:client.records,calls:client.calls},ids);
-  return{hash:hashJson(data),...(!c.compact?{snapshot:data}:{})};
+  const db=new DatabaseSync(join(path,'chat-bridge.sqlite'),{readOnly:true});
+  const markers=db.prepare('SELECT key,value_json FROM markers ORDER BY key').all().map(r=>({key:r.key,value:JSON.parse(r.value_json)}));
+  const acknowledgements=db.prepare('SELECT offer_id,reply_id FROM offer_acknowledgements').all();db.close();
+  const data=normalize({output,documents,records:client.records,calls:readBatches(client.calls),markers,acknowledgements},ids);
+  data.acknowledgements.sort((a,b)=>canonical(a)<canonical(b)?-1:canonical(a)>canonical(b)?1:0);
+  return{hash:hashJson(data),...(!c.compact?{snapshot:data}:{hashes:Object.fromEntries(Object.entries(data).map(([k,v])=>[k,hashJson(v)]))})};
  }
  try{
+  if(c.notifier){
+   const input=client.records.find(r=>r.object.id==='input-a').content.value;
+   input.identity.senderPrincipalId='producer';input.identity.messageId=input.operationId;
+   const originalAdmission=new ChatAdmission(definition),preparedOps=new ChatOperations(store,originalAdmission);
+   const request={action:'notify',operationId:input.operationId,expectedBridge:originalAdmission.expected('producer'),channel,source:pin('source'),text:'Internal fixture notice'};
+   requests.set('producer',request);const op=await preparedOps.begin('producer',request);
+   if(c.notifier!=='accepted')await preparedOps.finish(op.pin.objectId,{action:'notify',operationId:request.operationId,reply:{object:pin(c.notifier==='wrong-reply'?'foreign':'reply-a'),data:client.records.find(r=>r.object.id==='reply-a').content.value}});
+   for(const r of client.records)client.versions.set(r.object.id,new Map([[r.revision.revision,structuredClone(r)]]));
+  }
+  if(c.boundary){
+   const pending=c.boundary==='notify'?await ops.find('producer',requests.get('producer').operationId):null;
+   const input=client.records.find(r=>r.object.id==='input-a').content.value;
+   const ticket={inputId:'input-a',identity:input.identity,requestHash:input.requestHash,binding:input.binding,sequence:1,admittedAt:at};
+   const publication=c.boundary==='publication'?{inputId:'input-a',collection:pin('collection'),result:pin('result-a'),firstSequence:2,partCount:2,publishedParts:0,createdAt:at}:null;
+   const main={schemaVersion:1,definition:c.definition,definitionHash:admission.definitionHash,binding:input.binding,conversation:pin('conversation'),pendingAction:pending?.pin??null,publication,queue:publication?[ticket]:[],nextSequence:publication?5:2,updatedAt:at};
+   await store.write('chat-bridge/main',main,'fixture-main',{create:{parentId:null,name:mainName(c.definition)}});
+  }
+  if(c.crash){
+   const receiveRequest={action:'receive',operationId:`chat:${now}:receive`,expectedBridge:admission.expected('alice'),channel,afterSequence:0,limit:8};
+   requests.set('receive',receiveRequest);
+   if(c.crash.startsWith('ack'))await outbox.receive('alice',receiveRequest);
+   const ackRequest=c.crash.startsWith('ack')?{action:'acknowledge',operationId:`chat:${now}:ack`,expectedBridge:admission.expected('alice'),offerId:(await offer('receive')).pin.objectId,replyIds:['reply-a']}:null;
+   if(ackRequest)requests.set('ack',ackRequest);
+   const original=store.write.bind(store);let stopped=false;
+   store.write=async(key,value,mutation,destination)=>{
+    const selected=await original(key,value,mutation,destination);
+    const stage=key==='chat-bridge/offer'?'receive-offer':key==='chat-bridge/acknowledgement'?'ack-publish':key==='chat-bridge/operation'?(value.request.action==='receive'?'receive-':'ack-')+(value.phase==='accepted'?'accept':value.phase==='succeeded'?'finish':'other'):null;
+    if(!stopped&&stage===c.crash){stopped=true;throw new IvyError('outcome_unknown','Fixture reply lost after '+stage+'.','unknown');}return selected;
+   };
+   c.interruption=await outcome(()=>ackRequest?outbox.acknowledge('alice',ackRequest):outbox.receive('alice',receiveRequest));
+   if(!stopped)throw Error('Original crash stage was not reached: '+c.crash);
+  }
+  if(c.notifier||c.boundary||c.crash){
+   store.close();c.database=readFileSync(join(path,'chat-bridge.sqlite')).toString('base64');c.records=structuredClone(client.records);
+   c.versions=Object.fromEntries([...client.versions].map(([id,versions])=>[id,Object.fromEntries(versions)]));c.requests=Object.fromEntries(requests);
+   c.scopeCacheWarm=client.calls.some(call=>call.method==='objects.write');client.calls=[];
+   store=new ChatStore(client,c.definition.rootObjectId,path);ops=new ChatOperations(store,admission);outbox=new ChatOutbox(ops);
+  }
   c.expected=[];
   for(const step of c.steps){
    const output=await outcome(async()=>{
@@ -151,9 +211,12 @@ for(const c of cases){
      case 'fault':client.fault=structuredClone(step.fault);return null;
      case 'cursor':client.queryCursor=step.value;return null;
      case 'prune':for(const r of client.records)client.versions.set(r.object.id,new Map([[r.revision.revision,structuredClone(r)]]));return null;
+     case 'alter-reply':{const r=client.records.find(r=>r.object.id==='reply-a');r.content.value.text='Different immutable reply';const{state,firstOfferedAt,confirmedAt,immutableHash,...immutable}=r.content.value;r.content.value.immutableHash=hashJson(immutable);client.versions.get(r.object.id).set(r.revision.revision,structuredClone(r));return null;}
      case 'reply':return outbox.reply(step.id,channel).then(d=>({object:d.pin,data:d.value}));
      case 'parts':parts=await outbox.noticeParts(await outbox.reply('reply-a',channel));return parts.map(d=>({object:d.pin,data:d.value}));
      case 'confirm':await outbox.confirmNotice(step.empty?[]:parts);return null;
+     case 'pending':return outbox.pendingNotices();
+     case 'raw':return outbox[step.method](caller,step.request);
      case 'history':{
       const request={expectedBridge:admission.expected(caller),channel:step.bad==='channel'?other:channel,afterSequence:step.after??0,limit:step.limit??8};
       if(step.bad==='expectedBridge')request.expectedBridge.callerPrincipalId='foreign';return outbox.history(caller,request);
@@ -173,4 +236,24 @@ for(const c of cases){
   }
  }finally{store.close();rmSync(path,{recursive:true,force:true});}
 }
-process.stdout.write(JSON.stringify({now,definition,channel,database,cases}));
+const races=[];
+for(const kind of ['receive-same','receive-alias','ack-same','ack-alias','ack-subsets']){
+ const path=mkdtempSync(join(tmpdir(),'ivy-chat-outbox-race-'));writeFileSync(join(path,'chat-bridge.sqlite'),Buffer.from(database,'base64'));
+ const records=[...answer(),...answer('b',3)],client=new Client(records),admission=new ChatAdmission(definition);
+ const stores=[new ChatStore(client,null,path),new ChatStore(client,null,path)],outboxes=stores.map(s=>new ChatOutbox(new ChatOperations(s,admission)));
+ const makeReceive=name=>({action:'receive',operationId:`chat:${now}:${name}`,expectedBridge:admission.expected('alice'),channel,afterSequence:0,limit:8});
+ let requests;
+ try{
+  if(kind.startsWith('receive'))requests=[makeReceive('race'),makeReceive(kind==='receive-same'?'race':'alias')];
+  else{
+   const received=await outboxes[0].receive('alice',makeReceive('original'));
+   const makeAck=(name,ids)=>({action:'acknowledge',operationId:`chat:${now}:${name}`,expectedBridge:admission.expected('alice'),offerId:received.outcome.offer.object.objectId,replyIds:ids});
+   requests=[makeAck('race',['reply-a']),makeAck(kind==='ack-same'?'race':'alias',kind==='ack-subsets'?['reply-b']:['reply-a'])];
+  }
+  const results=await Promise.allSettled(outboxes.map((o,i)=>kind.startsWith('receive')?o.receive('alice',requests[i]):o.acknowledge('alice',requests[i])));
+  const operations=[];
+  for(let i=0;i<2;i++)operations.push(await outboxes[i].operations.find('alice',requests[i].operationId));
+  races.push({kind,records,requests,expected:{successes:results.filter(r=>r.status==='fulfilled').length,errors:results.filter(r=>r.status==='rejected').map(r=>IvyError.from(r.reason).code).sort(),phases:operations.map(o=>o.value.phase).sort(),sameOperation:operations[0].pin.objectId===operations[1].pin.objectId,states:client.records.filter(r=>r.object.contractKey==='chat-bridge/reply').map(r=>({id:r.object.id,state:r.content.value.state}))}});
+ }finally{for(const s of stores)s.close();rmSync(path,{recursive:true,force:true});}
+}
+process.stdout.write(JSON.stringify({now,definition,channel,database,cases,races}));

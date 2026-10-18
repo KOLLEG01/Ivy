@@ -349,6 +349,7 @@ async fn snapshot(
     client: &Client,
     requests: &Requests,
     output: Json,
+    path: &Path,
 ) -> Json {
     let ops = ChatOperations::new(store, admission).unwrap();
     let mut documents = Vec::new();
@@ -395,15 +396,68 @@ async fn snapshot(
         }
     }
     let state = client.0.lock().unwrap();
-    normalize(
+    let mut calls = Vec::new();
+    let mut batch = Vec::new();
+    let flush = |batch: &mut Vec<Json>, calls: &mut Vec<Json>| {
+        batch.sort_by_cached_key(|call| JsString::from(canonical(call, usize::MAX).unwrap()));
+        calls.append(batch);
+    };
+    for call in &state.calls {
+        if ["objects.query", "objects.read"].contains(&text(call, "method").as_str()) {
+            batch.push(call.clone());
+        } else {
+            flush(&mut batch, &mut calls);
+            calls.push(call.clone());
+        }
+    }
+    flush(&mut batch, &mut calls);
+    let db = rusqlite::Connection::open_with_flags(
+        path.join("chat-bridge.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let markers = db
+        .prepare("SELECT key,value_json FROM markers ORDER BY key")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (key, value) = row.unwrap();
+            Json::object([
+                ("key", key.into()),
+                ("value", parse(&value, usize::MAX).unwrap()),
+            ])
+        })
+        .collect();
+    let acknowledgements = db
+        .prepare("SELECT offer_id,reply_id FROM offer_acknowledgements")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (offer, reply) = row.unwrap();
+            Json::object([("offer_id", offer.into()), ("reply_id", reply.into())])
+        })
+        .collect();
+    let mut data = normalize(
         &Json::object([
             ("output", output),
             ("documents", Json::Array(documents)),
             ("records", Json::Array(state.records.clone())),
-            ("calls", Json::Array(state.calls.clone())),
+            ("calls", Json::Array(calls)),
+            ("markers", Json::Array(markers)),
+            ("acknowledgements", Json::Array(acknowledgements)),
         ]),
         &ids,
-    )
+    );
+    let mut acknowledgements = array(&data, "acknowledgements").to_vec();
+    acknowledgements.sort_by_cached_key(|row| JsString::from(canonical(row, usize::MAX).unwrap()));
+    data.insert("acknowledgements", Json::Array(acknowledgements));
+    data
 }
 async fn offer(
     store: &ChatStore,
@@ -484,11 +538,50 @@ async fn immutable_offers_history_and_authenticated_confirmation_match_original(
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Qualification can retain the exact synthetic SQLite/oracle bytes used by
+    // this run without creating a persistent test output directory by default.
+    if let Some(path) = std::env::var_os("IVY_CHAT_OUTBOX_ORACLE_CAPTURE") {
+        std::fs::write(path, &output.stdout).unwrap();
+    }
     let fixture = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
     let now = number(&fixture, "now") as i64;
     for case in array(&fixture, "cases") {
-        let path = Fixture::new(field(&fixture, "database"));
+        let path = Fixture::new(
+            case.get("database")
+                .unwrap_or_else(|| field(&fixture, "database")),
+        );
         let client = Arc::new(Client::new(array(case, "records").to_vec()));
+        // Original setup can retain the authenticated client's epoch cache even
+        // when its SQLite store is reopened. Recreate that same fixture state.
+        if case.get("scopeCacheWarm") == Some(&Json::Bool(true)) {
+            ivy_sdk::operation_ids::scoped_operation_id(
+                client.clone(),
+                &Json::Array(vec!["chat".into(), "fixture-cache".into()]),
+            )
+            .await
+            .unwrap();
+            client.0.lock().unwrap().calls.clear();
+        }
+        if let Some(versions) = case.get("versions") {
+            client.0.lock().unwrap().versions = versions
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(id, versions)| {
+                    (
+                        id.to_utf8().unwrap(),
+                        versions
+                            .as_object()
+                            .unwrap()
+                            .iter()
+                            .map(|(revision, record)| {
+                                (revision.to_utf8().unwrap().parse().unwrap(), record.clone())
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+        }
         let definition = field(case, "definition");
         let admission = ChatAdmission::new(definition).unwrap();
         let root = definition
@@ -504,7 +597,11 @@ async fn immutable_offers_history_and_authenticated_confirmation_match_original(
         )
         .await
         .unwrap();
-        let mut requests = vec![];
+        let mut requests = case
+            .get("requests")
+            .and_then(Json::as_object)
+            .unwrap_or(&[])
+            .to_vec();
         let mut parts = vec![];
         for (index, step) in array(case, "steps").iter().enumerate() {
             let action = text(step, "action");
@@ -556,6 +653,35 @@ async fn immutable_offers_history_and_authenticated_confirmation_match_original(
                                     .collect();
                                 Ok(Json::Null)
                             }
+                            "alter-reply" => {
+                                let mut state = client.0.lock().unwrap();
+                                let selected = state
+                                    .records
+                                    .iter_mut()
+                                    .find(|r| {
+                                        field(r, "object").get("id") == Some(&Json::from("reply-a"))
+                                    })
+                                    .unwrap();
+                                let mut value = field(field(selected, "content"), "value").clone();
+                                value.insert("text", "Different immutable reply".into());
+                                let mut immutable = value.clone();
+                                for key in
+                                    ["state", "firstOfferedAt", "confirmedAt", "immutableHash"]
+                                {
+                                    immutable.remove(key);
+                                }
+                                value.insert("immutableHash", hash_json(&immutable)?.into());
+                                selected.insert(
+                                    "content",
+                                    Json::object([("encoding", "json".into()), ("value", value)]),
+                                );
+                                let selected = selected.clone();
+                                state.versions.get_mut("reply-a").unwrap().insert(
+                                    number(field(&selected, "revision"), "revision") as i64,
+                                    selected,
+                                );
+                                Ok(Json::Null)
+                            }
                             "reply" => Ok(view(
                                 &outbox
                                     .reply(
@@ -585,6 +711,35 @@ async fn immutable_offers_history_and_authenticated_confirmation_match_original(
                                     )
                                     .await?;
                                 Ok(Json::Null)
+                            }
+                            "raw" => match text(step, "method").as_str() {
+                                "history" => outbox.history(&caller, field(step, "request")).await,
+                                "receive" => outbox.receive(&caller, field(step, "request")).await,
+                                "acknowledge" => {
+                                    outbox.acknowledge(&caller, field(step, "request")).await
+                                }
+                                _ => unreachable!(),
+                            },
+                            "pending" => {
+                                let pending = outbox.pending_notices(None).await?;
+                                let replies = pending
+                                    .replies
+                                    .into_iter()
+                                    .map(|doc| {
+                                        Json::object([
+                                            ("key", doc.key.into()),
+                                            ("pin", doc.pin.json()),
+                                            ("value", doc.value),
+                                            ("metadata", doc.metadata),
+                                            ("revision", doc.revision),
+                                        ])
+                                    })
+                                    .collect();
+                                let mut output = Json::object([("replies", Json::Array(replies))]);
+                                if let Some(cursor) = pending.next_cursor {
+                                    output.insert("nextCursor", cursor);
+                                }
+                                Ok(output)
                             }
                             "history" | "receive" => {
                                 let after = if let Some(name) = step.get("afterOffer") {
@@ -653,7 +808,7 @@ async fn immutable_offers_history_and_authenticated_confirmation_match_original(
                     .await,
                 )
             };
-            let actual = snapshot(&store, &admission, &client, &requests, output).await;
+            let actual = snapshot(&store, &admission, &client, &requests, output, &path.0).await;
             let expected = &array(case, "expected")[index];
             if hash_json(&actual).unwrap() != text(expected, "hash") {
                 if let Some(expected) = expected.get("snapshot") {
@@ -664,12 +819,129 @@ async fn immutable_offers_history_and_authenticated_confirmation_match_original(
                             .unwrap_or_else(|| "hash mismatch".into())
                     );
                 }
+                let hashes = Json::Object(
+                    actual
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .map(|(key, value)| (key.clone(), hash_json(value).unwrap().into()))
+                        .collect(),
+                );
                 panic!(
-                    "{} step{index} {action}: compact snapshot mismatch",
-                    text(case, "label")
+                    "{} step{index} {action}: compact snapshot mismatch: {}",
+                    text(case, "label"),
+                    difference(&hashes, field(expected, "hashes"), "$").unwrap()
                 );
             }
         }
         store.close().await.unwrap();
+    }
+    for race in array(&fixture, "races") {
+        let path = Fixture::new(field(&fixture, "database"));
+        let client = Arc::new(Client::new(array(race, "records").to_vec()));
+        let admission = ChatAdmission::new(field(&fixture, "definition")).unwrap();
+        let time = Arc::new(Time(now));
+        let first = ChatStore::with_clock(client.clone(), None, Some(path.0.clone()), time.clone())
+            .await
+            .unwrap();
+        let second = ChatStore::with_clock(client.clone(), None, Some(path.0.clone()), time)
+            .await
+            .unwrap();
+        {
+            let first_ops = ChatOperations::new(&first, &admission).unwrap();
+            let second_ops = ChatOperations::new(&second, &admission).unwrap();
+            let first_box = ChatOutbox::new(&first_ops);
+            let second_box = ChatOutbox::new(&second_ops);
+            let caller = JsString::from("alice");
+            let kind = text(race, "kind");
+            let mut requests = array(race, "requests").to_vec();
+            if kind.starts_with("ack") {
+                let original = Json::object([
+                    ("action", "receive".into()),
+                    ("operationId", format!("chat:{now}:original").into()),
+                    ("expectedBridge", admission.expected(&caller)),
+                    ("channel", field(&fixture, "channel").clone()),
+                    ("afterSequence", Json::Number(0.0)),
+                    ("limit", Json::Number(8.0)),
+                ]);
+                let received = first_box.receive(&caller, &original).await.unwrap();
+                let id = field(field(field(&received, "outcome"), "offer"), "object")
+                    .required("objectId")
+                    .unwrap()
+                    .clone();
+                for request in &mut requests {
+                    request.insert("offerId", id.clone());
+                }
+            }
+            let (a, b) = if kind.starts_with("receive") {
+                tokio::join!(
+                    first_box.receive(&caller, &requests[0]),
+                    second_box.receive(&caller, &requests[1])
+                )
+            } else {
+                tokio::join!(
+                    first_box.acknowledge(&caller, &requests[0]),
+                    second_box.acknowledge(&caller, &requests[1])
+                )
+            };
+            let successes = [&a, &b].iter().filter(|r| r.is_ok()).count();
+            let mut errors = [&a, &b]
+                .iter()
+                .filter_map(|r| r.as_ref().err().map(|e| e.code.clone()))
+                .collect::<Vec<_>>();
+            errors.sort();
+            let one = first_ops
+                .find(&caller, js(&requests[0], "operationId"))
+                .await
+                .unwrap()
+                .unwrap();
+            let two = second_ops
+                .find(&caller, js(&requests[1], "operationId"))
+                .await
+                .unwrap()
+                .unwrap();
+            let mut phases = vec![
+                field(&one.value, "phase").clone(),
+                field(&two.value, "phase").clone(),
+            ];
+            phases.sort_by_cached_key(|v| v.as_str().unwrap());
+            let states = client
+                .0
+                .lock()
+                .unwrap()
+                .records
+                .iter()
+                .filter(|r| {
+                    field(r, "object").get("contractKey") == Some(&Json::from("chat-bridge/reply"))
+                })
+                .map(|r| {
+                    Json::object([
+                        ("id", field(field(r, "object"), "id").clone()),
+                        (
+                            "state",
+                            field(field(field(r, "content"), "value"), "state").clone(),
+                        ),
+                    ])
+                })
+                .collect();
+            let actual = Json::object([
+                ("successes", Json::Number(successes as f64)),
+                (
+                    "errors",
+                    Json::Array(errors.into_iter().map(Json::from).collect()),
+                ),
+                ("phases", Json::Array(phases)),
+                (
+                    "sameOperation",
+                    (one.pin.object_id == two.pin.object_id).into(),
+                ),
+                ("states", Json::Array(states)),
+            ]);
+            if let Some(diff) = difference(&actual, field(race, "expected"), "$") {
+                panic!("{kind}: {diff}");
+            }
+        }
+        first.close().await.unwrap();
+        second.close().await.unwrap();
     }
 }
