@@ -12,6 +12,10 @@ ivy-store.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+ivy-sdk.workspace = true
+futures-util.workspace = true
+
 [[test]]
 name = "agent-state"
 path = "../../../tests/rust/agent-state.rs"

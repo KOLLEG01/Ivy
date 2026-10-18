@@ -15,6 +15,8 @@ use tokio::sync::oneshot;
 mod app_tools_launch_cases;
 #[path = "agent-native-rpc.rs"]
 mod native_rpc_cases;
+#[path = "agent-native-compatibility.rs"]
+mod native_compatibility_cases;
 
 fn json(s: &str) -> IvyJson {
     parse(s, 1024 * 1024).unwrap()
