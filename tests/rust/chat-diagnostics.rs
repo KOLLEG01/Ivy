@@ -73,6 +73,7 @@ fn grouping_preserves_original_receipts_and_reopen_matches_committed_typescript(
         cases.push(reopened);
     }
     let diagnostics=parse(r#"[
+      {"code":"failure","source":"service:reader"},
       {"code":"failure","source":"service:reader","resource":{"objectId":"private-one"}},
       {"code":"failure","source":"service:reader","resource":{"objectId":"private-two"}},
       {"code":"failure","source":"service:other","resource":{"callerPrincipalId":"reader","serviceNodeId":"dependency"}},

@@ -238,6 +238,18 @@ fn utf16_sql_binding_empty_output_and_pending_conflicts_match_typescript() {
 }
 
 #[test]
+fn ordinary_journal_values_do_not_inherit_canonical_depth_or_node_limits() {
+    // These are accepted by the original journal's JSON.parse/stringify path.
+    let deep = format!("{}null{}", "[".repeat(256), "]".repeat(256));
+    let wide = format!("[{}null]", "null,".repeat(400_000));
+    for value in [deep, wide] {
+        differential(&format!(
+            r#"[{{"op":"set","key":"ordinary","value":{value}}},{{"op":"snapshot"}}]"#
+        ));
+    }
+}
+
+#[test]
 fn monotone_confirmation_and_tombstones_survive_restart() {
     let path = std::env::temp_dir().join(format!(
         "ivy-chat-journal-domain-{}-{}",

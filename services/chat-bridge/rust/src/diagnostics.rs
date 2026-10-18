@@ -6,7 +6,8 @@ fn flag(value: &Json, key: &str) -> bool {
     value.get(key).and_then(Json::as_bool) == Some(true)
 }
 fn optional<'a>(value: &'a Json, key: &str) -> &'a Json {
-    value.get(key).unwrap_or(&Json::Null)
+    static MISSING: Json = Json::Null;
+    value.get(key).unwrap_or(&MISSING)
 }
 fn present(value: &Json) -> bool {
     !value.is_null()

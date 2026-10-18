@@ -9,9 +9,7 @@ fn ordinary_json_identities_match_node_without_canonical_reordering() {
         r#"["sender","fixture@invalid",{"type":"Buffer","data":"AAH/"}]"#,
         r#"["😃",-0,1e-7,1e21]"#,
     ] {
-        let IvyJson::Array(parts) = parse(raw, usize::MAX).unwrap() else {
-            unreachable!()
-        };
+        let parts = parse(raw, usize::MAX).unwrap().into_array().unwrap();
         let output = std::process::Command::new("node").args(["--input-type=module", "-e",
             "import {createHash} from 'node:crypto'; process.stdout.write(createHash('sha256').update(JSON.stringify(JSON.parse(process.argv[1]))).digest('hex'));", raw]).output().unwrap();
         assert!(output.status.success());
