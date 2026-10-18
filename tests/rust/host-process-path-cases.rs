@@ -3,7 +3,7 @@ use ivy_host_runtime::{IvyJson, paths, process};
 use std::{collections::BTreeMap, fs, io::Write, path::Path, process::Command};
 
 fn expected(executable: &Path, cwd: &Path) -> IvyJson {
-    let result = Command::new("node").args(["-e", "const fs=require('node:fs');process.stdout.write(JSON.stringify({executable:fs.realpathSync(process.argv[1]),cwd:fs.realpathSync(process.argv[2])}))"])
+    let result = Command::new("node").args(["-e", "const fs=require('node:fs/promises');Promise.all([fs.realpath(process.argv[1]),fs.realpath(process.argv[2])]).then(([executable,cwd])=>process.stdout.write(JSON.stringify({executable,cwd})))"])
         .arg(executable).arg(cwd).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     ivy_contracts::json::parse(&String::from_utf8(result.stdout).unwrap(), usize::MAX).unwrap()
