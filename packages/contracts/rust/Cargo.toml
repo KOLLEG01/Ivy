@@ -49,3 +49,7 @@ path = "../../../tests/rust/checked-native-contract.rs"
 [[test]]
 name = "native-catalog-path"
 path = "../../../tests/rust/native-catalog-path.rs"
+
+[[test]]
+name = "json-coercion"
+path = "../../../tests/rust/json-coercion.rs"
