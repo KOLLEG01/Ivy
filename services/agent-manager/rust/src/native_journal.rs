@@ -4,11 +4,11 @@ use ivy_contracts::{
     agent_schema::{NativeFrameKind, validate_agent, validate_agent_frame},
     hash::hash_json,
     json::{canonical, object_entries, stringify},
-    limits::MANAGEMENT_FRAME_BYTES,
+    limits::{
+        MANAGEMENT_FRAME_BYTES, NATIVE_ANSWER_FRAME_BYTES, NATIVE_FRAME_BYTES,
+        NATIVE_REQUEST_FRAME_BYTES,
+    },
     wire_schema::validate_shared,
-};
-use ivy_host_runtime::codex_rpc::{
-    NATIVE_ANSWER_FRAME_BYTES, NATIVE_FRAME_BYTES, NATIVE_REQUEST_FRAME_BYTES,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -861,6 +861,16 @@ impl NativeJournal {
         request_id: &IvyJson,
         thread_id: &JsString,
     ) -> IvyResult<Option<IvyJson>> {
+        self.resolve_input_json(epoch, request_id, &IvyJson::String(thread_id.clone()))
+    }
+    /// Native envelopes are structurally validated. Preserve the original
+    /// nullable-thread comparison even for an untyped notification field.
+    pub fn resolve_input_json(
+        &mut self,
+        epoch: &JsString,
+        request_id: &IvyJson,
+        thread_id: &IvyJson,
+    ) -> IvyResult<Option<IvyJson>> {
         require(
             self.epoch.as_ref() == Some(epoch),
             "native_state_conflict",
@@ -879,7 +889,7 @@ impl NativeJournal {
         };
         require(
             value.get("threadId") == Some(&IvyJson::Null)
-                || value.get("threadId") == Some(&IvyJson::String(thread_id.clone())),
+                || value.get("threadId") == Some(thread_id),
             "native_input_conflict",
             "Native input resolution names a different thread.",
         )?;

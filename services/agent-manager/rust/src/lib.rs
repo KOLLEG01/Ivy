@@ -15,6 +15,8 @@ pub mod mcp_prepare;
 pub mod mcp_render;
 pub mod native_journal;
 pub mod native_operations;
+pub mod native_clock;
+pub mod native_dispatch;
 pub mod notifications;
 pub mod skills;
 pub mod skills_output;

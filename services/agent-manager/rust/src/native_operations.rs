@@ -1,6 +1,7 @@
 //! Durable native claims. Memory coordinates live calls; SQLite owns receipts.
 use crate::{
     local_state::{LocalAgentState, Pin, SavedState},
+    native_clock::NATIVE_CLOCK_PRINCIPAL,
     native_journal::{Identity, NativeJournal},
 };
 use ivy_contracts::{
@@ -126,6 +127,91 @@ struct Inner {
 pub struct NativeOperations {
     inner: Arc<Inner>,
 }
+
+/// Terminal observations enqueue reconciliation outside the native RPC actor.
+/// Shutdown drains these tasks before closing the shared SQLite connection.
+#[derive(Clone, Default)]
+pub struct ReceiptWork {
+    state: Arc<Mutex<ReceiptTasks>>,
+}
+#[derive(Default)]
+struct ReceiptTasks {
+    next: u64,
+    tasks: BTreeMap<u64, watch::Receiver<bool>>,
+}
+struct ReceiptCompletion {
+    work: ReceiptWork,
+    index: u64,
+    sender: Option<watch::Sender<bool>>,
+    report: Arc<dyn Fn(IvyError) + Send + Sync>,
+}
+impl ReceiptCompletion {
+    fn finish(&mut self) {
+        self.work.state.lock().unwrap().tasks.remove(&self.index);
+        if let Some(sender) = self.sender.take() {
+            sender.send_replace(true);
+        }
+    }
+}
+impl Drop for ReceiptCompletion {
+    fn drop(&mut self) {
+        if self.sender.is_some() {
+            (self.report)(IvyError::internal());
+            self.finish();
+        }
+    }
+}
+impl ReceiptWork {
+    fn spawn(
+        &self,
+        work: impl Future<Output = IvyResult<()>> + Send + 'static,
+        report: Arc<dyn Fn(IvyError) + Send + Sync>,
+    ) -> IvyResult<()> {
+        let (sender, receiver) = watch::channel(false);
+        let index = {
+            let mut state = self.state.lock().unwrap();
+            let index = state.next;
+            state.next = state.next.checked_add(1).ok_or_else(IvyError::internal)?;
+            state.tasks.insert(index, receiver);
+            index
+        };
+        let mut completion = ReceiptCompletion {
+            work: self.clone(),
+            index,
+            sender: Some(sender),
+            report,
+        };
+        tokio::spawn(async move {
+            if let Err(error) = work.await {
+                (completion.report)(error);
+            }
+            completion.finish();
+        });
+        Ok(())
+    }
+    pub async fn drain(&self) {
+        loop {
+            let next = self
+                .state
+                .lock()
+                .unwrap()
+                .tasks
+                .first_key_value()
+                .map(|(_, value)| value.clone());
+            let Some(mut receiver) = next else {
+                return;
+            };
+            loop {
+                if *receiver.borrow_and_update() {
+                    break;
+                }
+                if receiver.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
 // The task owns completion, independently of callers dropping their wait handles.
 struct Completion {
     inner: Arc<Inner>,
@@ -180,6 +266,34 @@ impl NativeOperations {
                 active: Mutex::new(ActiveCalls::default()),
             }),
         }
+    }
+    pub fn journal(&self) -> Arc<Mutex<NativeJournal>> {
+        self.inner.memory.clone()
+    }
+    /// Installs the service's terminal callback. A weak coordinator avoids a
+    /// journal -> callback -> coordinator -> journal ownership cycle.
+    pub fn reconcile_terminals(&self, report: Arc<dyn Fn(IvyError) + Send + Sync>) -> ReceiptWork {
+        let work = ReceiptWork::default();
+        let worker = work.clone();
+        let owner = Arc::downgrade(&self.inner);
+        self.inner
+            .memory
+            .lock()
+            .unwrap()
+            .set_on_terminal(Some(Box::new(move |value| {
+                if value.get("callerPrincipalId") == Some(&IvyJson::from(NATIVE_CLOCK_PRINCIPAL)) {
+                    return Ok(());
+                }
+                let Some(inner) = owner.upgrade() else {
+                    return Ok(());
+                };
+                let identity = Identity::from_operation(value)?;
+                worker.spawn(
+                    async move { NativeOperations { inner }.settle(&identity).await },
+                    report.clone(),
+                )
+            })));
+        work
     }
     fn key(identity: &Identity) -> IvyResult<String> {
         hash_json(&identity.value())

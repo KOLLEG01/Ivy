@@ -23,9 +23,9 @@ use tokio::{
     time::Instant,
 };
 
-pub const NATIVE_REQUEST_FRAME_BYTES: usize = 6_291_456;
-pub const NATIVE_FRAME_BYTES: usize = 25_165_824;
-pub const NATIVE_ANSWER_FRAME_BYTES: usize = 4_194_304;
+pub use ivy_contracts::limits::{
+    NATIVE_ANSWER_FRAME_BYTES, NATIVE_FRAME_BYTES, NATIVE_REQUEST_FRAME_BYTES,
+};
 pub type HookFuture = Pin<Box<dyn Future<Output = IvyResult<()>> + Send>>;
 pub type BeforeSend = Arc<dyn Fn(IvyJson) -> HookFuture + Send + Sync>;
 pub type BeforeResolve = Arc<dyn Fn(IvyJson, IvyJson) -> HookFuture + Send + Sync>;

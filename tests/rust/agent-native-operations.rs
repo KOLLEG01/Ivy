@@ -23,6 +23,8 @@ use std::{
     time::Duration,
 };
 use tokio::sync::watch;
+#[path = "agent-native-dispatch.rs"]
+mod dispatch_cases;
 
 fn data() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
