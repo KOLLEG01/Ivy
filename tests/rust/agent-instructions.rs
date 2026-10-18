@@ -1,4 +1,6 @@
 use ivy_agent_manager::instructions::compose_instructions;
+#[path = "agent-environment.rs"]
+mod environment_cases;
 use ivy_contracts::{
     IvyJson, JsString,
     hash::hash_json,
