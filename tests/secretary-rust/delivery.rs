@@ -17,6 +17,8 @@ mod assignment_runner_cases;
 mod assignment_result_cases;
 #[path = "assignment_native_cases.rs"]
 mod assignment_native_cases;
+#[path = "assignment_execution_cases.rs"]
+mod assignment_execution_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
