@@ -513,10 +513,14 @@ fn snapshot(
         let (row,key,id,revision,value)=r.unwrap();*last=row;
         Json::object([("key",key.into()),("id",id.into()),("revision",Json::Number(revision as f64)),("value",parse(&value,usize::MAX).unwrap())])
     }).collect();
-    assert!(
-        gate.expected.lock().unwrap().is_empty(),
-        "Missing original shared gate"
-    );
+    {
+        let pending = gate.expected.lock().unwrap();
+        assert!(
+            pending.is_empty(),
+            "Missing original shared gate: next={:?}; actual output={output:?}",
+            pending.front().and_then(|v| v.get("kind")),
+        );
+    }
     let mut remote = client.0.lock().unwrap();
     for call in &remote.calls {
         if let Some(id) = field(call, "params").get("mutationId") {
