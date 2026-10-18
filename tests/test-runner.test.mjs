@@ -164,6 +164,8 @@ test("partial Rust checkouts select registered files under their owning scopes",
   mkdirSync(join(root, "tests/rust"), { recursive: true });
   for (const name of ["phone_media.rs", "hive_worker_client.rs", "service-manager-stop.rs"])
     writeFileSync(join(root, "tests/rust", name), "// isolated selector fixture\n");
+  mkdirSync(join(root, "tests/secretary-rust"));
+  writeFileSync(join(root, "tests/secretary-rust/delivery.rs"), "// Host process consumer\n");
   const selected = selectTests(root, config, { files: ["tests/rust/*.rs"] });
   assert.deepEqual(selected.map(({ file, scope }) => [file, scope]), [
     ["tests/rust/hive_worker_client.rs", "hive"],
@@ -171,6 +173,8 @@ test("partial Rust checkouts select registered files under their owning scopes",
     ["tests/rust/service-manager-stop.rs", "host"],
   ]);
   assert.throws(() => selectTests(root, config, { files: ["tests/rust/chat-journal.rs"] }), /Unknown test file/);
+  const hostConsumers = selectTests(root, config, { changed: ["packages/host-runtime/rust/src/process.rs"] });
+  assert.ok(hostConsumers.some(item => item.file === "tests/secretary-rust/delivery.rs"));
 });
 
 test("Cargo dispatch groups selected targets and stops after a failed prerequisite or test", (t) => {

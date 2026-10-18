@@ -80,7 +80,7 @@ export function affected(file) {
     return scopes.filter((x) => x !== "tooling");
   if (/^services\/service-manager\//.test(file)) return ["host"];
   if (/^packages\/host-runtime\//.test(file))
-    return ["host", "agent", "phone", "hive", "dashboards"];
+    return ["host", "agent", "phone", "hive", "dashboards", "secretary"];
   if (
     /^(services\/phone-bridge|tests\/native-phone|specs\/schemas\/phone|tools\/(?:build|operations|package|testing)\/.*phone)/.test(
       file,
