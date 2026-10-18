@@ -175,9 +175,10 @@ impl RpcClient for Client {
                 return Ok(saved.clone());
             }
             let applies = state.fault.as_ref().is_some_and(|f| {
-                f.get("key").is_some()
-                    && f.get("key") == p.get("create").and_then(|c| c.get("contractKey"))
-                    || f.get("objectId").is_some() && f.get("objectId") == p.get("objectId")
+                // Match the original fixture's strict equality, including two
+                // omitted properties comparing as undefined === undefined.
+                f.get("key") == p.get("create").and_then(|c| c.get("contractKey"))
+                    || f.get("objectId") == p.get("objectId")
             });
             let fault = if applies { state.fault.take() } else { None };
             if let Some(fault) = &fault {

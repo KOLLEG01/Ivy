@@ -495,6 +495,15 @@ async fn original_cancellation_prevention_interrupt_and_settlement() {
             array(case, "records").to_vec(),
             Some(field(case, "history")),
         ));
+        if !flag(case, "skipCancel") {
+            // The original prepares this cancellation on the same RPC client
+            // before copying SQLite and clearing its trace. Preserve that warm
+            // epoch cache; cases skipping cancellation keep their fresh client.
+            ivy_sdk::operation_ids::runtime_epoch(client.clone())
+                .await
+                .unwrap();
+            client.0.0.lock().unwrap().calls.clear();
+        }
         let clock = Arc::new(Time(AtomicI64::new(number(corpus, "now") as i64)));
         let live = Mutex::new(Live {
             controls: Json::object([("epoch", "original-epoch".into())]),
