@@ -5,6 +5,61 @@ use ivy_contracts::{
 };
 
 #[test]
+fn compiler_plans_match_original_reference_target_compilation() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/schema-compiler-plan-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 1500);
+    for row in rows {
+        let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
+        let admitted = ivy_contracts::schema::admit_schema(&schema).unwrap();
+        let plan = admitted.compiler_plan();
+        assert_eq!(
+            plan.is_ok(),
+            row["ok"].as_bool().unwrap(),
+            "schema {}",
+            row["schema"]
+        );
+        if let Ok(plan) = plan {
+            assert!(!plan.units.is_empty());
+            for reference in plan.references {
+                assert!(
+                    plan.units[reference.from_unit].nodes[reference.from_node]
+                        .reference
+                        .is_some()
+                );
+                assert!(reference.to_unit < plan.units.len());
+            }
+        }
+    }
+}
+
+#[test]
+fn compiler_plans_reuse_consuming_reference_targets_on_a_small_stack() {
+    std::thread::Builder::new().stack_size(256 * 1024).spawn(|| {
+        let schema = parse(r##"{"$defs":{"node":{"type":"object","properties":{"one":{"$ref":"#/$defs/node"},"two":{"$ref":"#/$defs/node"}}}},"$ref":"#/$defs/node"}"##, 100_000).unwrap();
+        let admitted = ivy_contracts::schema::admit_schema(&schema).unwrap();
+        let plan = admitted.compiler_plan().unwrap();
+        assert_eq!(plan.units.len(), 2);
+        assert_eq!(plan.references.len(), 3);
+        assert_eq!(plan.references.iter().filter(|r| r.to_unit == 1).count(), 3);
+    }).unwrap().join().unwrap();
+}
+
+#[test]
 fn compiler_resource_resolution_matches_aliases_pointers_and_scopes() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")
