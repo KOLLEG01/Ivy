@@ -59,6 +59,8 @@ mod assignment_windows_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
+#[path = "config_cases.rs"]
+mod config_cases;
 #[path = "engine_assignments_cases.rs"]
 mod engine_assignments_cases;
 #[path = "engine_cases.rs"]
