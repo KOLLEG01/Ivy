@@ -68,7 +68,23 @@ impl SchemaBundle {
         }
     }
     fn resolve(&self, current: usize, reference: &str) -> IvyResult<(usize, &IvyJson)> {
-        let (identity, fragment) = reference.split_once('#').unwrap_or((reference, ""));
+        self.resolve_js(current, &reference.into(), false)
+    }
+    fn resolve_js(
+        &self,
+        current: usize,
+        reference: &JsString,
+        strict_percent: bool,
+    ) -> IvyResult<(usize, &IvyJson)> {
+        // AJV normalizes either spelling of an empty fragment before lookup.
+        let units = reference
+            .0
+            .strip_suffix(&[35, 47])
+            .or_else(|| reference.0.strip_suffix(&[35]))
+            .unwrap_or(&reference.0);
+        let split = units.iter().position(|unit| *unit == u16::from(b'#'));
+        let end = split.unwrap_or(units.len());
+        let identity = String::from_utf16(&units[..end]).map_err(|_| IvyError::internal())?;
         let document = if identity.is_empty() {
             current
         } else {
@@ -84,38 +100,29 @@ impl SchemaBundle {
                 });
             *self
                 .identities
-                .get(identity)
+                .get(&identity)
                 .or_else(|| relative.as_ref().and_then(|name| self.identities.get(name)))
                 .ok_or_else(|| {
                     IvyError::new("internal_error", "Unknown internal schema resource.")
                 })?
         };
-        let mut schema = self
+        let schema = self
             .documents
             .get(document)
             .ok_or_else(IvyError::internal)?;
-        if !fragment.is_empty() {
-            if !fragment.starts_with('/') {
-                return Err(IvyError::new(
-                    "internal_error",
-                    "Invalid internal schema pointer.",
-                ));
-            }
-            for key in fragment[1..].split('/') {
-                let key = key.replace("~1", "/").replace("~0", "~");
-                schema = match schema {
-                    IvyJson::Array(values) => key
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|index| values.get(index)),
-                    _ => schema.get(&key),
-                }
-                .ok_or_else(|| {
+        let mut selected = crate::schema_lookup::Value::Json(schema);
+        if let Some(start) = split.filter(|start| start + 1 < units.len()) {
+            let fragment = JsString(units[start + 1..].to_vec());
+            for key in crate::schema_lookup::compiler_pointer_parts(&fragment, strict_percent)? {
+                selected = selected.property(&key)?.ok_or_else(|| {
                     IvyError::new("internal_error", "Unknown internal schema pointer.")
                 })?;
             }
         }
-        Ok((document, schema))
+        // AJV treats non-schema scalar/function properties as empty schemas;
+        // null and absent properties still fail resolution.
+        static ACCEPT: IvyJson = IvyJson::Bool(true);
+        Ok((document, selected.schema()?.unwrap_or(&ACCEPT)))
     }
 }
 

@@ -1,4 +1,35 @@
 use ivy_contracts::{builtin_schema::SchemaBundle, json::parse};
+
+#[test]
+fn compiler_reference_fragments_match_pinned_ajv() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .arg("tests/fixtures/schema-reference-oracle.mjs")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 1500);
+    let bundle =
+        SchemaBundle::new(&[include_str!("../fixtures/schema-reference.schema.json")]).unwrap();
+    for row in rows {
+        let value = parse(row["input"].as_str().unwrap(), 10000).unwrap();
+        let result = bundle.matches(row["reference"].as_str().unwrap(), &value);
+        assert_eq!(
+            result.is_ok(),
+            row["result"]["ok"].as_bool().unwrap(),
+            "{row}: {result:?}"
+        );
+        if let Ok(valid) = result {
+            assert_eq!(valid, row["result"]["valid"].as_bool().unwrap(), "{row}");
+        }
+    }
+}
 #[test]
 fn repository_schemas_match_the_existing_ajv_boundary() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");

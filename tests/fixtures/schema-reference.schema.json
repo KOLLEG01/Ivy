@@ -1,0 +1,27 @@
+{
+  "$id": "https://ivy.invalid/reference-test.json",
+  "$defs": {
+    "plain": { "type": "string" },
+    "a/b": { "type": "number" },
+    "a~b": false,
+    "é": { "const": "accent" },
+    "😀": { "const": "astral" },
+    "�": { "const": "replacement" },
+    "\ud800": { "const": "surrogate" },
+    "%": { "const": "percent" },
+    "%ZZ": { "const": "malformed" },
+    "%2F": { "const": "encoded slash" },
+    "#": { "const": "hash" },
+    "?": true,
+    "": { "const": "empty" },
+    "~1": { "const": "literal tilde" },
+    "nested": {
+      "const": { "rows": [false, { "type": "string" }], "text": "😀", "nil": null, "flag": true, "number": 17 }
+    },
+    "escapedAlias": { "$ref": "#/$defs/a%7E1b" },
+    "surrogateAlias": { "$ref": "#/$defs/\ud800" },
+    "percentAlias": { "$ref": "#/$defs/%25" },
+    "malformedAlias": { "$ref": "#/$defs/%ZZ" },
+    "prototypeAlias": { "$ref": "#/$defs/nested/const/rows/constructor/prototype" }
+  }
+}

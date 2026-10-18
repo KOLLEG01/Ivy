@@ -148,3 +148,35 @@ pub(crate) fn pointer_key(text: &str) -> IvyResult<String> {
         .replace("~1", "/")
         .replace("~0", "~"))
 }
+
+/// URI fragments are distinct from admission's literal JSON pointers. Both AJV
+/// entry paths replace unpaired UTF-16 surrogates with U+FFFD. Resolving a $ref
+/// rejects malformed percent escapes; direct getSchema lookup escapes them.
+pub(crate) fn compiler_pointer_parts(
+    fragment: &JsString,
+    strict_percent: bool,
+) -> IvyResult<Vec<String>> {
+    let text = String::from_utf16_lossy(&fragment.0);
+    let path = text.strip_prefix('/').ok_or_else(IvyError::internal)?;
+    path.split('/')
+        .map(|part| {
+            let input = part.as_bytes();
+            let mut index = 0;
+            while strict_percent && index < input.len() {
+                if input[index] == b'%' {
+                    let hex = |offset: usize| {
+                        input
+                            .get(offset)
+                            .and_then(|byte| (*byte as char).to_digit(16))
+                    };
+                    hex(index + 1).ok_or_else(IvyError::internal)?;
+                    hex(index + 2).ok_or_else(IvyError::internal)?;
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+            }
+            pointer_key(part)
+        })
+        .collect()
+}

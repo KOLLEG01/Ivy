@@ -201,7 +201,11 @@ impl SchemaBundle {
                         checks.push(Check::Evaluate(target_doc, target, value));
                     }
                     if let Some(reference) = schema.get("$ref") {
-                        let (target_doc, target) = self.resolve(doc, &reference.as_str()?)?;
+                        let (target_doc, target) = self.resolve_js(
+                            doc,
+                            reference.as_js_string().ok_or_else(IvyError::internal)?,
+                            true,
+                        )?;
                         checks.push(Check::Evaluate(target_doc, target, value));
                     }
                     checks.push(Check::Simple(schema, value));
