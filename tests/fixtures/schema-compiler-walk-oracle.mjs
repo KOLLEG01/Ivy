@@ -80,5 +80,9 @@ for(const root of ids)for(const child of ids)for(const leaf of leaves){
 }
 add({$defs:{x:{type:'string'}},properties:{x:{$ref:'#/$defs/x'}}});
 add({$defs:{x:{type:'string'}},if:{$ref:'#/$defs/x'},then:{title:'unused'}});
+for(const key of ['a/b','a~b','','2','10','01','\ud800','\udc00','😀','雪','\0','é','e\u0301']){
+  for(const child of [{type:'string'}, {}, {$id:'child'}, {format:false}])
+    add({properties:{[key]:child}});
+}
 add(true);add(false);add({});
 process.stdout.write(JSON.stringify(rows));
