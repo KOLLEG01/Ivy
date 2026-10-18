@@ -23,8 +23,9 @@ export function useCommentPreferences(
       ])
     );
   });
+  // The conversation reads like a chat by default: oldest first, newest answer next to the input.
   const preferences = ref<CommentPreferences>({
-    order: "newest-first",
+    order: "oldest-first",
     collapseOlder: true,
   });
   const storageError = ref("");
@@ -35,7 +36,7 @@ export function useCommentPreferences(
         const stored = JSON.parse(localStorage.getItem(key.value) ?? "null");
         preferences.value = {
           order:
-            stored?.order === "oldest-first" ? "oldest-first" : "newest-first",
+            stored?.order === "newest-first" ? "newest-first" : "oldest-first",
           collapseOlder:
             typeof stored?.collapseOlder === "boolean"
               ? stored.collapseOlder

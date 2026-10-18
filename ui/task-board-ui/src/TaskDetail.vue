@@ -36,6 +36,8 @@ import type { UploadedAttachment } from "@ivy/ui";
 import {
   ArrowDown,
   ArrowLeft,
+  ArrowUp,
+  Link2,
   Bot,
   CircleAlert,
   ExternalLink,
@@ -184,6 +186,7 @@ const pendingAttachments = ref<TaskBoard.TaskAttachment[]>([]),
   uploading = ref(false),
   attachmentsOpen = ref(false),
   historyOpen = ref(false),
+  wikiPickerOpen = ref(false),
   descriptionExpanded = ref(false),
   commentInput = ref<{ insertMarkdown: (markdown: string) => void }>();
 const terminal = computed(() =>
@@ -385,7 +388,7 @@ const transition = (
     detail,
   });
 const submitComment = async () => {
-  if (!commentBody.value.trim()) return;
+  if (!commentBody.value.trim() || uploading.value) return;
   await perform("Add task comment", {
     action: "comment",
     commentId: crypto.randomUUID(),
@@ -1261,34 +1264,42 @@ const showArrived = () => {
               </p>
               <div
                 v-else
-                class="space-y-2 py-3"
-                :class="commentPreferences.order === 'newest-first' ? '' : 'sticky bottom-0 bg-gradient-to-t from-[var(--muted)] from-70% to-transparent pt-6 dark:from-[var(--background)]'"
+                class="space-y-1.5 py-3"
+                :class="commentPreferences.order === 'newest-first' ? '' : 'ivy-chat-surface sticky bottom-0 z-10'"
               >
-                <MarkdownEditor
-                  ref="commentInput"
-                  v-model="commentBody"
-                  variant="field"
-                  label="Comment"
-                  placeholder="Add a comment. Agent-controlled work will receive it automatically."
-                  :disabled="!editable"
-                  :trusted-image-urls="images.urls.value"
-                  :trusted-attachments="images.files.value"
-                  :upload-file="uploadFile"
-                ><template #actions><WikiLinkPicker :disabled="!writable" @select="commentInput?.insertMarkdown($event)" /></template></MarkdownEditor>
-                <div class="flex flex-wrap items-center gap-2">
+                <div v-if="(task.value.value.value.workflowState === 'done' && writable) || uploading" class="flex flex-wrap items-center gap-3 px-2 text-sm">
                   <Label v-if="task.value.value.value.workflowState === 'done' && writable" class="flex items-center gap-2">
                     <Checkbox v-model="moveToTodo" :disabled="!writable" />
                     {{ tr('Nach Todo verschieben', 'Move to Todo') }}
                   </Label>
-                  <span v-if="uploading" role="status" class="text-sm text-muted-foreground">Uploading…</span>
-                  <Button
-                    size="sm"
-                    class="ml-auto"
-                    :disabled="!writable || !commentBody.trim() || uploading"
-                    @click="submitComment"
-                    >Add comment</Button
-                  >
+                  <span v-if="uploading" role="status" class="text-muted-foreground">Uploading…</span>
                 </div>
+                <MarkdownEditor
+                  ref="commentInput"
+                  v-model="commentBody"
+                  variant="composer"
+                  label="Comment"
+                  :placeholder="tr('Nachricht', 'Message')"
+                  :disabled="!editable"
+                  :trusted-image-urls="images.urls.value"
+                  :trusted-attachments="images.files.value"
+                  :upload-file="uploadFile"
+                  @submit="submitComment"
+                >
+                  <template #add>
+                    <DropdownMenuItem :disabled="!writable" @select="wikiPickerOpen = true"><Link2 aria-hidden="true" />Insert Wiki page</DropdownMenuItem>
+                  </template>
+                  <template #send>
+                    <Button
+                      size="icon"
+                      class="size-9 self-end rounded-full"
+                      aria-label="Add comment"
+                      :disabled="!writable || !commentBody.trim() || uploading"
+                      @click="submitComment"
+                    ><ArrowUp aria-hidden="true" /></Button>
+                  </template>
+                </MarkdownEditor>
+                <WikiLinkPicker v-model:open="wikiPickerOpen" :trigger="false" :disabled="!writable" @select="commentInput?.insertMarkdown($event)" />
               </div>
             </template>
           </template>
