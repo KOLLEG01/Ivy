@@ -50,12 +50,16 @@ impl SchemaBundle {
         schema: &IvyJson,
         value: &IvyJson,
     ) -> IvyResult<bool> {
+        let entry = (document, schema);
         let mut pending = vec![Step::Check(Check::Evaluate(
             document,
             schema,
             Input::Value(value),
         ))];
         let mut active = HashSet::new();
+        // AJV's dynamic-anchor environment is shared by the complete validation:
+        // the first encountered definition wins, including across sibling refs.
+        let mut anchors = HashMap::<JsString, (usize, &IvyJson)>::new();
         let mut result = true;
         while let Some(step) = pending.pop() {
             let check = match step {
@@ -181,6 +185,21 @@ impl SchemaBundle {
                     }
                     pending.push(Step::Exit(identity));
                     let mut checks = Vec::new();
+                    if let Some(anchor) =
+                        schema.get("$dynamicAnchor").and_then(IvyJson::as_js_string)
+                    {
+                        anchors.entry(anchor.clone()).or_insert((doc, schema));
+                    }
+                    if let Some(reference) =
+                        schema.get("$dynamicRef").and_then(IvyJson::as_js_string)
+                    {
+                        if reference.0.first() != Some(&35) {
+                            return Err(IvyError::internal());
+                        }
+                        let anchor = JsString(reference.0[1..].to_vec());
+                        let (target_doc, target) = anchors.get(&anchor).copied().unwrap_or(entry);
+                        checks.push(Check::Evaluate(target_doc, target, value));
+                    }
                     if let Some(reference) = schema.get("$ref") {
                         let (target_doc, target) = self.resolve(doc, &reference.as_str()?)?;
                         checks.push(Check::Evaluate(target_doc, target, value));
