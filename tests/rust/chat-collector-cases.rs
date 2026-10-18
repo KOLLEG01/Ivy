@@ -1,5 +1,5 @@
 use super::super::Fixture;
-use super::{Gate, array, equal, error, field, member, merge, result, text};
+use super::{Gate, array, equal, field, member, merge, result, text};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -11,7 +11,7 @@ use ivy_chat_bridge::{
     store::{ChatStore, Pin, Reference},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString, Outcome,
+    IvyError, IvyJson as Json, IvyResult, Outcome,
     checked_native_contract::CheckedNativeContracts,
     hash::digest,
     json::{canonical, parse},
@@ -20,7 +20,6 @@ use ivy_sdk::{
     clock::Clock,
     rpc::{RequestFuture, RequestOptions, RpcClient},
 };
-use rusqlite::params;
 use std::{
     collections::{HashMap, VecDeque},
     path::Path,
