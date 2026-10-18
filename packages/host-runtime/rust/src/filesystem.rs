@@ -158,6 +158,30 @@ fn remove_windows(path:&Path,force:bool)->std::io::Result<()>{
 /// Missing entries are accepted before and during removal; links are removed
 /// themselves. Keep an admitted removal alive if its caller stops waiting.
 pub async fn remove_force(path:impl Into<PathBuf>)->IvyResult<()>{remove(path.into(),None,0,true).await}
+/// Node rm(path,{force:true}) without recursive directory removal.
+pub async fn remove_file_force(path:impl Into<PathBuf>)->IvyResult<()>{
+    let path=path.into();
+    blocking(move||{
+        let path=fs_path(&path);
+        match fs::remove_file(&path){
+            Ok(())=>Ok(()),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(()),
+            #[cfg(windows)]
+            Err(error) if error.kind()==std::io::ErrorKind::PermissionDenied=>{
+                use std::os::windows::fs::MetadataExt;
+                let metadata=fs::symlink_metadata(&path).map_err(|_|IvyError::internal())?;
+                if metadata.file_type().is_symlink()&&metadata.file_attributes()&0x10!=0 {
+                    fs::remove_dir(&path).map_err(|_|IvyError::internal())
+                }else{
+                    if metadata.is_dir(){return Err(IvyError::internal())}
+                    let mut permissions=metadata.permissions();permissions.set_readonly(false);
+                    fs::set_permissions(&path,permissions).map_err(|_|IvyError::internal())?;
+                    fs::remove_file(&path).map_err(|_|IvyError::internal())
+                }
+            },
+            Err(_)=>Err(IvyError::internal()),
+        }
+    }).await
+}
 pub(crate) async fn remove_payload(path:PathBuf,directory:bool,retries:u64)->IvyResult<()>{remove(path,Some(directory),retries,false).await}
 async fn remove(path:PathBuf,directory:Option<bool>,retries:u64,force:bool)->IvyResult<()>{
     blocking(move||{
