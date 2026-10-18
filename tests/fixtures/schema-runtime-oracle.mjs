@@ -15,8 +15,9 @@ const values=[null,false,true,0,1,-1,2,0.3,1e21,1e-7,'','a','A','aa','\n','é','
 function add(schema,inputs=values,pool=null){
   const validator=pool??new SchemaValidators();
   for(const value of inputs){
+    const schemaText=JSON.stringify(schema);
     let result;try{validator.validate(schema,value);result={ok:true};}catch(error){result={ok:false,wire:IvyError.from(error).toWire()};}
-    rows.push({schema:JSON.stringify(schema),value:JSON.stringify(value),result:JSON.stringify(result)});
+    rows.push({schema:schemaText,value:JSON.stringify(value),result:JSON.stringify(result)});
   }
 }
 const leaves=[true,false,{},...['null','boolean','integer','number','string','array','object'].map(type=>({type})),{type:[]},{type:['null','string']},{type:''},
@@ -81,6 +82,7 @@ for(const keyword of ['type','nullable','enum','required','allOf','anyOf','oneOf
 }
 for(const keyword of ['allOf','anyOf','oneOf','prefixItems'])for(const argument of [[3],[null],[[]],[{}],['a']])add(escaped({[keyword]:argument}));
 add(escaped({items:{type:''},uniqueItems:true}));
+for(const type of ['string',['string','null'],['string','boolean']])add(escaped({items:{type,nullable:true},uniqueItems:true}),[[null,'null'],[null,null],['__proto__','__proto__'],[null,'__proto__','__proto__'],['null','null'],[null,'true',true]]);
 add(escaped({properties:JSON.parse('{"a":true,"b":true,"c":true,"d":true,"e":true,"f":true,"g":true,"h":true,"i":true,"__proto__":false}'),additionalProperties:false}));
 add({required:['']},[{}, {'':null}]);
 for(const argument of ['',false,0,null,{},[],{toString:1}]){
