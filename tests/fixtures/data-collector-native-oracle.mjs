@@ -2,7 +2,8 @@ import {readFileSync,existsSync} from 'node:fs';
 import {stripTypeScriptTypes,registerHooks,createRequire} from 'node:module';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 const require=createRequire(process.env.IVY_TEST_PACKAGE_JSON||import.meta.url);
-registerHooks({resolve(s,c,n){if(s==='ajv'||s==='ws')return n(pathToFileURL(require.resolve(s)).href,c);if(s.startsWith('.')&&s.endsWith('.js')){const u=new URL(s.slice(0,-3)+'.ts',c.parentURL);if(existsSync(fileURLToPath(u)))return n(u.href,c);}return n(s,c);}});
+const dependencies=new Map(['ajv','ajv/dist/2020.js','ws','re2js'].map(s=>[s,pathToFileURL(require.resolve(s)).href]));
+registerHooks({resolve(s,c,n){if(dependencies.has(s))return n(dependencies.get(s),c);if(s.startsWith('.')&&s.endsWith('.js')){const u=new URL(s.slice(0,-3)+'.ts',c.parentURL);if(existsSync(fileURLToPath(u)))return n(u.href,c);}return n(s,c);}});
 const {NativeOwner}=await import('../../packages/sdk/src/native-owner.ts');
 const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const {hashJson}=await import('../../packages/contracts/src/canonical.ts');
@@ -21,7 +22,8 @@ for(const kind of ['normal','concurrent','ungranted','relative','not-ready','bad
  const configuration={serviceNodeId:target.serviceNodeId,cwd:kind==='relative'?'relative':process.platform==='win32'?'C:/workspace':'/workspace',server:'fixture',tools:['echo','second']};
  function operation(call){
   const method=call.method;let result=method==='thread/start'?{thread:{id:'thread',ephemeral:kind!=='bad-ephemeral'}}:method==='thread/unsubscribe'?null:kind==='tool-error'?{isError:true,structuredContent:{error:{code:-32000,message:'private diagnostic',data:{code:'provider_unavailable',outcome:'unknown'}}}}:{structuredContent:{tool:call.params.tool,args:call.params.arguments}};
-  return {schemaVersion:1,operationId:call.operationId,callerPrincipalId:kind==='wrong-caller'?'other':'caller',serviceNodeId:target.serviceNodeId,nativeVersion:target.nativeVersion,nativeExecutableHash:target.nativeExecutableHash,method,params:call.params,requestHash:hashJson({method,params:call.params}),createdAt:time,updatedAt:time,phase:kind==='failed-start'&&method==='thread/start'?'failed':'succeeded',epoch:kind==='changed-epoch'?'other':'epoch',requestId:1,reply:{result},code:null};
+  const failed=kind==='failed-start'&&method==='thread/start';
+  return {schemaVersion:1,operationId:call.operationId,callerPrincipalId:kind==='wrong-caller'?'other':'caller',serviceNodeId:target.serviceNodeId,nativeVersion:target.nativeVersion,nativeExecutableHash:target.nativeExecutableHash,method,params:call.params,requestHash:hashJson({method,params:call.params}),createdAt:time,updatedAt:time,phase:failed?'failed':'succeeded',epoch:kind==='changed-epoch'?'other':'epoch',requestId:1,reply:failed?null:{result},code:failed?'fixture_failure':null};
  }
  const client={async request(method,params){
   trace.push({method,params:structuredClone(params)});

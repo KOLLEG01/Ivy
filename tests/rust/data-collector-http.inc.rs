@@ -329,8 +329,8 @@ async fn raw_http_matches_original_ingress_and_mcp_status_auth_headers_and_limit
         assert!(
             json_equal(&response, expected.get("response").unwrap()),
             "{name}: actual {} expected {}",
-            stringify(&response).unwrap(),
-            stringify(expected.get("response").unwrap()).unwrap()
+            stringify(&response, usize::MAX).unwrap(),
+            stringify(expected.get("response").unwrap(), usize::MAX).unwrap()
         );
         assert!(
             json_equal(&queued, expected.get("queued").unwrap()),

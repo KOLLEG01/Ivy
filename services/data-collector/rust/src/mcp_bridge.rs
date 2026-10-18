@@ -162,7 +162,7 @@ async fn handle(
         .cloned()
         .unwrap_or_else(|| IvyJson::object(Vec::<(&str, IvyJson)>::new()));
     let result = session.call(tool, args).await?;
-    let encoded = stringify(&IvyJson::object([("result", result)]))?;
+    let encoded = stringify(&IvyJson::object([("result", result)]), usize::MAX)?;
     if encoded.len() > MCP_BYTES {
         return Err(IvyError::new(
             "provider_unavailable",

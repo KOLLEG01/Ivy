@@ -98,7 +98,7 @@ pub fn encoded(status: u16, body: String) -> Reply {
         .unwrap()
 }
 pub fn json(status: u16, body: IvyJson) -> IvyResult<Reply> {
-    Ok(encoded(status, stringify(&body)?))
+    Ok(encoded(status, stringify(&body, usize::MAX)?))
 }
 pub fn close_response(mut response: Reply) -> Reply {
     response.headers_mut().insert(

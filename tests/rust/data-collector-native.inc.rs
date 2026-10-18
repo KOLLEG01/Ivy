@@ -109,8 +109,22 @@ impl Client {
                 .into(),
             ),
             ("requestId", IvyJson::Number(1.0)),
-            ("reply", IvyJson::object([("result", result)])),
-            ("code", IvyJson::Null),
+            (
+                "reply",
+                if kind == "failed-start" && method == "thread/start" {
+                    IvyJson::Null
+                } else {
+                    IvyJson::object([("result", result)])
+                },
+            ),
+            (
+                "code",
+                if kind == "failed-start" && method == "thread/start" {
+                    "fixture_failure".into()
+                } else {
+                    IvyJson::Null
+                },
+            ),
         ])
     }
 }
@@ -348,16 +362,16 @@ async fn native_mcp_matches_original_owner_calls_serialization_polling_and_clean
         assert!(
             json_equal(&error, row.get("error").unwrap()),
             "{kind}: {} expected {}",
-            stringify(&error).unwrap(),
-            stringify(row.get("error").unwrap()).unwrap()
+            stringify(&error, usize::MAX).unwrap(),
+            stringify(row.get("error").unwrap(), usize::MAX).unwrap()
         );
         let mut trace = IvyJson::Array(client.trace.lock().unwrap().clone());
         normalize(&mut trace, &mut BTreeMap::new());
         assert!(
             json_equal(&trace, row.get("trace").unwrap()),
             "{kind}: {} expected {}",
-            stringify(&trace).unwrap(),
-            stringify(row.get("trace").unwrap()).unwrap()
+            stringify(&trace, usize::MAX).unwrap(),
+            stringify(row.get("trace").unwrap(), usize::MAX).unwrap()
         );
     }
 }
