@@ -1,6 +1,123 @@
 use ivy_secretary::{policy::*, schedule::*};
 
 #[test]
+fn original_object_and_message_event_policy_differential() {
+    use ivy_contracts::{IvyJson, JsString, json::parse};
+    use ivy_secretary::{assignment_message::*, assignment_object::*};
+    use std::{collections::HashMap, process::Command};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut command = Command::new("node");
+    command
+        .arg("tests/secretary-rust/assignment-events-oracle.mjs")
+        .current_dir(root);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output().expect("Original Node oracle required");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let corpus = parse(
+        std::str::from_utf8(&output.stdout).unwrap(),
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    let dates: HashMap<JsString, f64> = corpus
+        .required("dates")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let pair = row.as_array().unwrap();
+            (
+                pair[0].as_js_string().unwrap().clone(),
+                pair[1].as_f64().unwrap_or(f64::NAN),
+            )
+        })
+        .collect();
+    let date = |value: &JsString| *dates.get(value).expect("Unrecorded date dependency");
+    let rows = corpus.required("rows").unwrap().as_array().unwrap();
+    assert!(rows.len() >= 500);
+    for (index, row) in rows.iter().enumerate() {
+        let a = row.required("args").unwrap().as_array().unwrap();
+        let result = match row.required("method").unwrap().as_str().unwrap().as_str() {
+            "pointer" => Ok(pointer(&a[0], a[1].as_js_string().unwrap())),
+            "objectProjection" => {
+                let paths = a[1]
+                    .required("paths")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_js_string().unwrap().clone())
+                    .collect::<Vec<_>>();
+                Ok(object_projection(&a[0], &paths))
+            }
+            "projectionChanged" => projection_changed(&a[0], &a[1]).map(IvyJson::Bool),
+            "observationReady" => {
+                let condition =
+                    a[1].get("observation")
+                        .filter(|v| !v.is_null())
+                        .map(|v| Observation {
+                            complete_path: v
+                                .required("completePath")
+                                .unwrap()
+                                .as_js_string()
+                                .unwrap()
+                                .clone(),
+                            observed_at_path: v
+                                .required("observedAtPath")
+                                .unwrap()
+                                .as_js_string()
+                                .unwrap()
+                                .clone(),
+                            maximum_age_seconds: v
+                                .required("maximumAgeSeconds")
+                                .unwrap()
+                                .as_f64()
+                                .unwrap(),
+                        });
+                Ok(IvyJson::Bool(observation_ready(
+                    &a[0],
+                    condition.as_ref(),
+                    a[2].as_js_string().unwrap(),
+                    a[3].as_f64().unwrap_or(0.0),
+                    &date,
+                )))
+            }
+            "messageChannel" => Ok(message_channel(&a[0], &date).unwrap_or(IvyJson::Null)),
+            "messageBatch" => Ok(message_batch(&a[0], &date).unwrap_or(IvyJson::Null)),
+            "messageUnreadSnapshot" => message_unread_snapshot(
+                &a[0],
+                a[1].required("dueAt").unwrap().as_js_string().unwrap(),
+                &date,
+            )
+            .map(IvyJson::Bool),
+            method => panic!("Unknown method {method}"),
+        };
+        let actual = match result {
+            Ok(value) => IvyJson::object([("value", value)]),
+            Err(error) => IvyJson::object([
+                ("code", error.code.into()),
+                ("message", error.message.into()),
+                ("outcome", error.outcome.as_str().into()),
+            ]),
+        };
+        assert_eq!(
+            &actual,
+            row.required("expected").unwrap(),
+            "case {index}: {:?}",
+            row.required("method").unwrap()
+        );
+    }
+}
+
+#[test]
 fn original_assignment_rules_triggers_and_names_differential() {
     use ivy_contracts::{IvyJson, json::parse};
     use ivy_secretary::assignment_schema::*;
