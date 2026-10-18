@@ -3,6 +3,7 @@ pub mod diagnostics;
 pub mod input_media;
 pub mod native_driver;
 pub mod operations;
+pub mod queue;
 pub mod registry;
 pub mod schema;
 pub mod store;
