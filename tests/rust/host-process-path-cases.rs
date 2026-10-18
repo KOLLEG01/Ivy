@@ -8,8 +8,8 @@ fn expected(executable: &Path, cwd: &Path) -> IvyJson {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     ivy_contracts::json::parse(&String::from_utf8(result.stdout).unwrap(), usize::MAX).unwrap()
 }
+fn canonical(value: &IvyJson) -> String { ivy_contracts::json::canonical(value, usize::MAX).unwrap() }
 fn compare(case: &str, actual: IvyJson, expected: IvyJson) {
-    let canonical = |value| ivy_contracts::json::canonical(value, usize::MAX).unwrap();
     assert_eq!(canonical(&actual), canonical(&expected), "{case}");
     if let Some(file) = std::env::var_os("IVY_HOST_PROCESS_PATH_CORPUS") {
         writeln!(fs::OpenOptions::new().create(true).append(true).open(file).unwrap(), "{}",
