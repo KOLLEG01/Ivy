@@ -3,10 +3,10 @@ use ivy_contracts::{
     automation_schema::validate_automation,
     chat_schema::validate_chat,
     component_schema::validate_component,
-    core_schema::{validate_host, validate_transport},
+    core_schema::{validate_host, validate_shared as validate_core_shared, validate_transport},
     json::parse,
     secretary_schema::validate_secretary,
-    wire_schema::validate_shared,
+    wire_schema::{matches_shared, validate_shared},
 };
 
 #[test]
@@ -39,16 +39,22 @@ fn domain_contracts_match_typescript_admission_and_errors() {
             _ => row["input"].as_str().unwrap().to_owned(),
         };
         let value = parse(&input, usize::MAX).unwrap();
-        let result = match domain {
-            "agent" => validate_agent(name, &value),
-            "host" => validate_host(name, &value),
-            "shared" => validate_shared(name, &value),
-            "transport" => validate_transport(name, &value),
-            "automation" => validate_automation(name, &value),
-            "chat" => validate_chat(name, &value),
-            "secretary" => validate_secretary(name, &value),
-            "component" => validate_component(&value),
-            _ => unreachable!(),
+        let result = if domain == "matches" {
+            matches_shared(name, &value).map(Some)
+        } else {
+            match domain {
+                "agent" => validate_agent(name, &value),
+                "host" => validate_host(name, &value),
+                "shared" => validate_core_shared(name, &value),
+                "wire" => validate_shared(name, &value),
+                "transport" => validate_transport(name, &value),
+                "automation" => validate_automation(name, &value),
+                "chat" => validate_chat(name, &value),
+                "secretary" => validate_secretary(name, &value),
+                "component" => validate_component(&value),
+                _ => unreachable!(),
+            }
+            .map(|()| None)
         };
         let summary = format!("{domain} {name}: {} input bytes", input.len());
         assert_eq!(
@@ -73,6 +79,11 @@ fn domain_contracts_match_typescript_admission_and_errors() {
                 "{summary}"
             );
         } else {
+            assert_eq!(
+                serde_json::to_value(result.unwrap()).unwrap(),
+                row["returned"],
+                "{summary}"
+            );
             *accepted.entry(domain.into()).or_default() += 1;
         }
     }
@@ -84,6 +95,8 @@ fn domain_contracts_match_typescript_admission_and_errors() {
         "host",
         "agent",
         "shared",
+        "wire",
+        "matches",
         "transport",
     ] {
         assert!(
