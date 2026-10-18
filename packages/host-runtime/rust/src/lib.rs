@@ -2,3 +2,9 @@
 pub use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome};
 pub mod build_identity;
 pub mod concurrency;
+pub mod exec_file;
+pub mod node_path;
+pub mod paths;
+pub mod platform;
+pub mod process;
+pub mod process_output;
