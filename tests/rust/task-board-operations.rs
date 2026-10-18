@@ -15,6 +15,9 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
+#[path = "../fixtures/task-board-keys.rs"]
+mod task_keys;
+
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()
 }
