@@ -339,10 +339,6 @@ impl Store<'_> {
             ("mutationId", IvyJson::String(id.clone())),
             ("contractVersion", (*key.versions().last().unwrap()).into()),
             ("references", record_references(key, value)?),
-            (
-                "content",
-                IvyJson::object([("encoding", "json".into()), ("value", value.clone())]),
-            ),
         ]);
         if let Some(name) = destination.get("createName") {
             request.insert(
@@ -359,6 +355,10 @@ impl Store<'_> {
             request.insert("objectId", p.required("objectId")?.clone());
             request.insert("expectedRevision", p.required("revision")?.clone());
         }
+        request.insert(
+            "content",
+            IvyJson::object([("encoding", "json".into()), ("value", value.clone())]),
+        );
         Ok(request)
     }
     pub async fn write_prepared(&self, request: IvyJson) -> IvyResult<IvyJson> {
