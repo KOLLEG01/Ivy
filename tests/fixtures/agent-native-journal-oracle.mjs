@@ -45,7 +45,7 @@ function materialize(value){
 }
 function capture(value){
   if(value===undefined)value=null;
-  const text=encodeJson(value);return Buffer.byteLength(text)>4096?{encodedBytes:Buffer.byteLength(text),hash:hashJson(value)}:{value};
+  const text=encodeJson(value);return Buffer.byteLength(text)>4096?{encodedBytes:Buffer.byteLength(text),hash:hashJson(value)}:{value:structuredClone(value)};
 }
 const RealDate=Date,base=Date.parse('2026-10-18T00:00:00.000Z');
 for(const row of cases){
