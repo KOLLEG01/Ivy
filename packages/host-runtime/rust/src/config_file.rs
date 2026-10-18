@@ -18,7 +18,7 @@ pub(crate) fn read_json(path: &Path, limit: usize) -> Result<IvyJson, FileError>
     if !metadata.is_file() || metadata.len() > limit as u64 {
         return Err(FileError::Invalid(IvyError::new("invalid_arguments", "Configuration must be a bounded regular file.")));
     }
-    let bytes = fs::read(path).map_err(file_error)?;
+    let bytes = crate::filesystem::read_file_bytes(path).map_err(file_error)?;
     // Node readFile(..., 'utf8') replaces malformed input before JSON.parse.
     json::parse(&String::from_utf8_lossy(&bytes), usize::MAX)
         .map_err(|_| FileError::Invalid(IvyError::internal()))

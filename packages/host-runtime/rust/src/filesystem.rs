@@ -158,6 +158,16 @@ fn remove_windows(path:&Path,force:bool)->std::io::Result<()>{
 /// Missing entries are accepted before and during removal; links are removed
 /// themselves. Keep an admitted removal alive if its caller stops waiting.
 pub async fn remove_force(path:impl Into<PathBuf>)->IvyResult<()>{remove(path.into(),None,0,true).await}
+/// Ordinary libuv reads retain the caller account's Windows backup semantics.
+pub(crate) fn read_file_bytes(path:&Path)->std::io::Result<Vec<u8>>{
+    #[cfg(windows)]{
+        use std::{io::Read,os::windows::fs::OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+        let mut file=fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)?;
+        let mut bytes=Vec::new();file.read_to_end(&mut bytes)?;Ok(bytes)
+    }
+    #[cfg(not(windows))]{fs::read(path)}
+}
 /// Node rm(path,{force:true}) without recursive directory removal.
 pub async fn remove_file_force(path:impl Into<PathBuf>)->IvyResult<()>{
     let path=path.into();

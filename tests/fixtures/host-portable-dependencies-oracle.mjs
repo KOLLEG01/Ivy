@@ -74,6 +74,7 @@ try{
   else if(input.operation==='policy')value=await helpers.responsePolicy(input.dependency);
   else if(input.operation==='listing')value=helpers.listingPolicy({stdout:input.stdout,truncated:input.truncated});
   else if(input.operation==='unlink'){await rm(input.path,{force:true});value=null;}
+  else if(input.operation==='jsonFile')value=await jsonFile(input.path,input.limit);
   else if(input.operation==='install'){
     await helpers.materializePortableDependencies({packages:{[input.dependency.location]:{...input.dependency,os:['linux']}}},new Set([input.dependency.location]),input.originalRoot,input.temporaryRoot,input.executables);value=null;
   }else throw Error('Unknown portable fixture operation');

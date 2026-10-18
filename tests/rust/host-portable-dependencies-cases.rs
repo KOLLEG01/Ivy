@@ -135,3 +135,15 @@ async fn archive_file_cleanup_clears_readonly_and_preserves_real_directories(){
         if case=="directory"{refuses(&answer,"internal_error");assert_eq!(fs::read(actual.join("archive/retained")).unwrap(),b"must remain");}else{succeeds(&answer);}
     }
 }
+
+#[tokio::test]
+async fn bounded_json_reader_preserves_original_regular_file_and_account_sharing_behavior(){
+    let fixture=Fixture::new();let bytes=br#"{"name":"fixture","version":"1.2.3"}"#;let file=fixture.write("package ü 空 😀.json",bytes);
+    for limit in [bytes.len(),bytes.len()-1]{compare(IvyJson::object([("operation","jsonFile".into()),("path",path(&file)),("limit",IvyJson::Number(limit as f64))]),ivy_host_runtime::config::json_file(&file,limit).await);}
+    #[cfg(windows)]{
+        use std::os::windows::fs::OpenOptionsExt;
+        let held=fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
+        compare(IvyJson::object([("operation","jsonFile".into()),("path",path(&file)),("limit",IvyJson::Number(1024.0))]),ivy_host_runtime::config::json_file(&file,1024).await);drop(held);
+    }
+    for file in [fixture.0.join("absent"),fixture.0.clone(),fixture.0.join("invalid\0name")]{compare(IvyJson::object([("operation","jsonFile".into()),("path",path(&file)),("limit",IvyJson::Number(1024.0))]),ivy_host_runtime::config::json_file(&file,1024).await);}
+}
