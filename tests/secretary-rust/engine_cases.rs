@@ -47,7 +47,8 @@ async fn original_engine_initialization_settings_queries_and_status() {
     assert_eq!(rows.len(), 108);
     for row in rows {
         let input = row.required("input").unwrap();
-        let label = input.required("label").unwrap().as_str().unwrap();
+        let label =
+            String::from_utf16_lossy(&input.required("label").unwrap().as_js_string().unwrap().0);
         let client = Arc::new(Scripted {
             steps: Mutex::new(
                 input
