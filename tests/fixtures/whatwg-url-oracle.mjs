@@ -1,6 +1,8 @@
 import {IvyError} from '../../packages/contracts/src/errors.ts';
+import {resolve} from 'node:path';
+import {pathToFileURL} from 'node:url';
 
-const inputs = new Set([
+export const inputs = new Set([
   '', '/', '/mcp', '//localhost/mcp', 'https:', 'https://', 'http://[::1',
   'http://[::1%25lo0]/', 'https://example.invalid:65536/', 'https://exa mple.invalid/',
   'https://%FF/', 'https://%/', 'http://1.2.3.999/', 'http://09/',
@@ -34,13 +36,21 @@ for (const value of [' ', '\t', '\r', '\n', '\0', 'é', '😀', '\ud800', '\udc0
   inputs.add(`https://u${value}:p${value}@example.invalid/mcp`);
   inputs.add(`${value}https://example.invalid/mcp${value}`);
 }
+if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){
+const credentials=process.argv[2]==='credentials';
+if(credentials){
+  for(const scheme of ['http','https','ws','wss','ftp','custom','file'])for(const credential of ['user:pass','user:','user',':pass',':','u@v:p:a','u%40v:p%3Aa','é:😀','\ud800:\udfff'])for(const suffix of ['/a/../repo?q#h','/a%2Fb','/a\\b'])inputs.add(`${scheme}://${credential}@example.invalid${suffix}`);
+  for(const input of ['git@example.invalid:repo.git','user:pass@example.invalid','ssh://git:token@example.invalid/repo','git+ssh://git:token@example.invalid/repo','custom://user:pass@/repo','custom://user:pass@EXAMPLE.invalid:0/a','custom:opaque  ?q','custom:opaque  #h','mailto:user:pass@example.invalid','data:text/plain,user:pass@example.invalid','file://user:pass@server/share','file:////server/share','file://server/C|/repo','file:///C:/repo'])inputs.add(input);
+}
 const rows = [...inputs].map(input => {
   let result;
   try {
     const u = new URL(input);
-    result = {ok: true, value: Object.fromEntries(
+    if(credentials){u.username='';u.password='';result={ok:true,value:u.href};}
+    else result = {ok: true, value: Object.fromEntries(
       ['href', 'protocol', 'hostname', 'username', 'password', 'hash'].map(k => [k, u[k]]))};
   } catch (error) { result = {ok: false, error: IvyError.from(error).toWire()}; }
   return {input: JSON.stringify(input), result: JSON.stringify(result)};
 });
 process.stdout.write(JSON.stringify(rows));
+}

@@ -2,58 +2,63 @@ use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 
 #[test]
 fn url_projection_matches_node_constructor_fields_and_failures() {
-    use ivy_contracts::whatwg_url::parse_url;
+    use ivy_contracts::whatwg_url::{clear_url_credentials, parse_url};
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let output = std::process::Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/whatwg-url-oracle.mjs",
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(rows.len() > 700);
-    for row in rows {
-        let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
-        let expected = parse(row["result"].as_str().unwrap(), 100_000).unwrap();
-        let actual = match parse_url(input.as_js_string().unwrap()) {
-            Ok(u) => IvyJson::object([
-                ("ok", true.into()),
-                (
-                    "value",
-                    IvyJson::object([
-                        ("href", u.href.into()),
-                        ("protocol", u.protocol.into()),
-                        ("hostname", u.hostname.into()),
-                        ("username", u.username.into()),
-                        ("password", u.password.into()),
-                        ("hash", u.hash.into()),
+    for mode in ["projection", "credentials"] {
+        let output = std::process::Command::new("node")
+            .args([
+                "--experimental-transform-types",
+                "--disable-warning=ExperimentalWarning",
+                "tests/fixtures/whatwg-url-oracle.mjs",
+            ])
+            .arg(mode)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(rows.len() > 700);
+        for row in rows {
+            let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
+            let expected = parse(row["result"].as_str().unwrap(), 100_000).unwrap();
+            let actual = if mode == "credentials" {
+                match clear_url_credentials(input.as_js_string().unwrap()) {
+                    Ok(value) => {
+                        IvyJson::object([("ok", true.into()), ("value", IvyJson::String(value))])
+                    }
+                    Err(error) => {
+                        IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
+                    }
+                }
+            } else {
+                match parse_url(input.as_js_string().unwrap()) {
+                    Ok(u) => IvyJson::object([
+                        ("ok", true.into()),
+                        (
+                            "value",
+                            IvyJson::object([
+                                ("href", u.href.into()),
+                                ("protocol", u.protocol.into()),
+                                ("hostname", u.hostname.into()),
+                                ("username", u.username.into()),
+                                ("password", u.password.into()),
+                                ("hash", u.hash.into()),
+                            ]),
+                        ),
                     ]),
-                ),
-            ]),
-            Err(error) => IvyJson::object([
-                ("ok", false.into()),
-                (
-                    "error",
-                    IvyJson::object([
-                        ("code", IvyJson::String(error.code_js())),
-                        ("message", IvyJson::String(error.message_js())),
-                        ("outcome", error.outcome.as_str().into()),
-                    ]),
-                ),
-            ]),
-        };
-        assert_eq!(actual, expected, "URL input: {}", row["input"]);
+                    Err(error) => {
+                        IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
+                    }
+                }
+            };
+            assert_eq!(actual, expected, "URL input: {}", row["input"]);
+        }
     }
 }
-
 
 #[test]
 fn uppercase_and_trim_start_match_node_scalars_units_and_surrogates() {
