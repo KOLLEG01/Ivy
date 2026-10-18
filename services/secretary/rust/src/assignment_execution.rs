@@ -270,14 +270,14 @@ impl AssignmentExecution<'_, '_, '_> {
         }
         Ok(current)
     }
-    async fn update(&self, current: &IvyJson, value: &IvyJson) -> IvyResult<IvyJson> {
+    pub(crate) async fn update(&self, current: &IvyJson, value: &IvyJson) -> IvyResult<IvyJson> {
         AssignmentRunner {
             evidence: self.native.evidence,
         }
         .update(current, value)
         .await
     }
-    fn now(&self) -> IvyResult<JsString> {
+    pub(crate) fn now(&self) -> IvyResult<JsString> {
         date_to_iso(self.clock.utc_millis() as f64)
     }
     pub async fn with_operation(&self, current: &IvyJson, key: &str) -> IvyResult<IvyJson> {

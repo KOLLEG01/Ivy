@@ -46,7 +46,7 @@ async fn original_assignment_execution_transitions_and_traces() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert!(rows.len() >= 110);
+    assert_eq!(rows.len(), 156);
     for (index, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();
@@ -123,7 +123,22 @@ async fn original_assignment_execution_transitions_and_traces() {
                 .unwrap(),
         };
         let current = input.required("current").unwrap();
+        let mut preflight: std::collections::HashSet<ivy_contracts::JsString> = input
+            .get("preflightActive")
+            .and_then(IvyJson::as_array)
+            .unwrap_or(&[])
+            .iter()
+            .map(|v| v.as_js_string().unwrap().clone())
+            .collect();
+        let mut issues = ivy_secretary::inbox_recovery::RecoveryScan::default();
         let outcome = match input.required("kind").unwrap().as_str().unwrap().as_str() {
+            "advance" => ivy_secretary::assignment_advance::AssignmentAdvance {
+                execution: &runner,
+                minimum_notification_age_minutes: 0.0,
+            }
+            .advance(current, &mut preflight, &mut issues)
+            .await
+            .map(|v| v.unwrap_or(IvyJson::Null)),
             "start" => runner.start(current).await,
             "run" => runner.run(current).await,
             "archive" => runner.archive(current).await,
@@ -194,11 +209,29 @@ async fn original_assignment_execution_transitions_and_traces() {
             "Case {index}: {:?}",
             input.get("label")
         );
-        let actual = IvyJson::object([
+        let mut actual = IvyJson::object([
             ("result", result),
             ("trace", IvyJson::Array(trace)),
             ("remaining", IvyJson::Array(remaining)),
         ]);
+        if input.get("kind") == Some(&"advance".into()) {
+            let mut active: Vec<_> = preflight.into_iter().collect();
+            active.sort();
+            actual.insert(
+                "preflightActive",
+                IvyJson::Array(active.into_iter().map(IvyJson::String).collect()),
+            );
+            actual.insert(
+                "issues",
+                IvyJson::Array(
+                    issues
+                        .issues
+                        .into_iter()
+                        .map(|(key, value)| IvyJson::Array(vec![key.into(), value.into()]))
+                        .collect(),
+                ),
+            );
+        }
         assert_eq!(
             &actual,
             row.required("expected").unwrap(),
