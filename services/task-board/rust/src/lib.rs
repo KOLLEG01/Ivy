@@ -6,5 +6,6 @@ pub mod local_blobs;
 pub mod local_gates;
 pub mod local_journal;
 pub mod local_retention;
+pub mod local_workspaces;
 pub mod operations;
 pub mod turn_output;

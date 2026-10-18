@@ -8,6 +8,8 @@ use std::path::PathBuf;
 mod support;
 #[path = "../fixtures/task-board-retention.rs"]
 mod retention;
+#[path = "../fixtures/task-board-workspaces.rs"]
+mod workspaces;
 use support::oracle;
 
 struct Temporary(PathBuf);
