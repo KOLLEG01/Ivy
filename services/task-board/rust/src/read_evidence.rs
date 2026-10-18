@@ -66,14 +66,14 @@ fn string<'a>(value: &'a Json, key: &str) -> IvyResult<&'a JsString> {
         .as_js_string()
         .ok_or_else(IvyError::internal)
 }
-fn parent_id(parent: &Json) -> IvyResult<&JsString> {
+pub(crate) fn parent_id(parent: &Json) -> IvyResult<&JsString> {
     if let Some(id) = parent.as_js_string() {
         Ok(id)
     } else {
         string(parent, "objectId")
     }
 }
-fn manifest(value: &Json) -> IvyResult<Manifest<Json>> {
+pub(crate) fn manifest(value: &Json) -> IvyResult<Manifest<Json>> {
     // Document reads already enforce their exact stored schema, including integer bounds.
     let number = |v: &Json, key: &str| -> IvyResult<usize> {
         v.required(key)?

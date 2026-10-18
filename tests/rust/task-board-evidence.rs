@@ -7,6 +7,8 @@ use std::cell::RefCell;
 mod support;
 use support::oracle;
 
+#[path = "../fixtures/task-board-native-evidence.rs"]
+mod native_evidence;
 #[path = "../fixtures/task-board-read-evidence.rs"]
 mod read_evidence;
 

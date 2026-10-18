@@ -8,6 +8,8 @@ use std::path::PathBuf;
 mod artifact;
 #[path = "../fixtures/task-board-journal-store.rs"]
 mod journal_store;
+#[path = "../fixtures/task-board-native-intent.rs"]
+mod native_intent;
 #[path = "../fixtures/task-board-publication.rs"]
 mod publication;
 #[path = "../fixtures/task-board-retention.rs"]
