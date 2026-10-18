@@ -1,7 +1,10 @@
 use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
+#[path = "json_number.rs"]
+mod number;
 #[path = "json_value.rs"]
 mod value_traits;
+pub use number::number_from_string;
 
 /// ECMAScript string code units, including unpaired surrogates. Ord is UTF-16 order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
