@@ -11,6 +11,8 @@ mod native_dispatch_cases;
 mod package_archive_cases;
 #[path = "host-filesystem-cases.rs"]
 mod filesystem_cases;
+#[path = "host-build-input-cases.rs"]
+mod build_input_cases;
 #[path = "host-source-cases.rs"]
 mod source_cases;
 #[path = "host-action-cases.rs"]
@@ -113,9 +115,12 @@ fn fixture_node(version: &str) -> NodeRuntime {
 }
 
 fn compare_config_oracle(input: IvyJson, result: ivy_contracts::IvyResult<IvyJson>) {
+    compare_oracle_fixture(input,result,"tests/fixtures/host-config-oracle.mjs");
+}
+fn compare_oracle_fixture(input: IvyJson, result: ivy_contracts::IvyResult<IvyJson>, fixture: &str) {
     use std::{io::Write, process::{Command, Stdio}};
     let mut child = Command::new("node")
-        .args(["--experimental-transform-types", "--disable-warning=ExperimentalWarning", "tests/fixtures/host-config-oracle.mjs"])
+        .args(["--experimental-transform-types", "--disable-warning=ExperimentalWarning", fixture])
         .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(ivy_contracts::json::stringify(&input, usize::MAX).unwrap().as_bytes()).unwrap();
