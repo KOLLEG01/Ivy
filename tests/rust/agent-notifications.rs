@@ -1,4 +1,6 @@
 use ivy_agent_manager::notifications::NativeNotifications;
+#[path = "agent-registry.rs"]
+mod registry_cases;
 use ivy_contracts::IvyJson;
 
 fn fixture(bytes: usize) -> NativeNotifications {
