@@ -949,6 +949,11 @@ async fn durable_notice_claims_recovery_and_delivery_match_original() {
                                     )
                                     .await
                             }
+                            "notify-raw" => {
+                                notices
+                                    .notify(&"producer".into(), step.required("request")?)
+                                    .await
+                            }
                             "begin" => {
                                 let mut request = corpus
                                     .required("requests")?
@@ -1027,6 +1032,21 @@ async fn durable_notice_claims_recovery_and_delivery_match_original() {
                             "patch-input" => {
                                 let doc = input(&store, "a").await?;
                                 client.patch_input(&doc.pin.object_id, step.required("patch")?);
+                                Ok(Json::Null)
+                            }
+                            "patch-reply" => {
+                                let op = operation(&ops, "a").await?;
+                                let selected = pin(op
+                                    .value
+                                    .required("outcome")?
+                                    .required("reply")?
+                                    .required("object")?);
+                                let reply = store
+                                    .read("chat-bridge/reply", Reference::Pinned(&selected))
+                                    .await
+                                    .map_err(|e| e.into_ivy())?;
+                                update(&store, "chat-bridge/reply", reply, step.required("patch")?)
+                                    .await?;
                                 Ok(Json::Null)
                             }
                             "patch-ticket" => {
@@ -1185,6 +1205,34 @@ async fn durable_notice_claims_recovery_and_delivery_match_original() {
                             "publish-final" => {
                                 publish(&ops, &client, "a", true).await?;
                                 Ok(Json::Null)
+                            }
+                            "send-user" => {
+                                let request = Json::object([
+                                    ("action", "send".into()),
+                                    (
+                                        "operationId",
+                                        format!("chat:{}:user", number(corpus, "now") as i64)
+                                            .into(),
+                                    ),
+                                    ("expectedBridge", admission.expected(&"user".into())),
+                                    ("channel", corpus.required("channel")?.clone()),
+                                    ("messageId", "user-message".into()),
+                                    ("expectedBinding", binding.json()),
+                                    (
+                                        "payload",
+                                        Json::object([
+                                            ("text", "User input".into()),
+                                            ("images", Json::Array(vec![])),
+                                        ]),
+                                    ),
+                                ]);
+                                let value = ChatQueue::new(&ops, None)
+                                    .send(&"user".into(), &request)
+                                    .await?;
+                                other = ops
+                                    .find(&"user".into(), js(&request, "operationId"))
+                                    .await?;
+                                Ok(value)
                             }
                             "finish-with-reply" => {
                                 let op = operation(&ops, &text(step, "name")).await?;

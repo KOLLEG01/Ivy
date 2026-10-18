@@ -144,6 +144,10 @@ add('stale-undelivered-pin-is-not-settled',[notify(),{action:'retain-input'},pat
 add('non-notice-input-is-not-settled',[{action:'begin-other'},{action:'finish-other'}]);
 add('producer-cannot-query-another-notice',[notify(),{...query,caller:'other'},query]);
 add('notice-reads-original-native-reply',[notify(),{action:'publish',name:'a'},query,reopen,query]);
+add('rewritten-native-answer-is-not-delivery-proof',[notify(),{action:'publish',name:'a'},{action:'patch-reply',patch:{text:'Rewritten content'}},query]);
+add('native-reply-survives-definition-change',[notify(),{action:'publish',name:'a'},{action:'definition-change'},query,notify()]);
+add('notice-user-queue-order',[notify(),{action:'send-user'},notify('b')]);
+add('notify-extra-channel-is-refused-before-io',[{action:'notify-raw',request:{...requests.a,channel:{...channel,channelId:'unconfigured'}}}]);
 add('notice-checks-exact-input-answer',[notify(),notify('b'),{action:'publish',name:'b'},{action:'finish-with-reply',name:'a',replyName:'b'},query]);
 add('notice-refuses-final-notice-origin',[notify(),{action:'publish-final'},query]);
 add('retained-input-survives-definition-change',[notify(),{action:'definition-change'},notify()]);
@@ -219,6 +223,7 @@ for(const c of cases){
   for(const step of c.steps){
    const output=await result(async()=>{switch(step.action){
     case 'notify':return notices().notify(step.caller,requests[step.name]);
+    case 'notify-raw':return notices().notify('producer',step.request);
     case 'begin':return(await ops.begin('producer',requestFor(step.name))).value;
     case 'claim':await update('chat-bridge/main',await rawMain(),{pendingAction:(await operation()).pin});return null;
     case 'recover':await notices().recoverPending();return null;
@@ -230,6 +235,7 @@ for(const c of cases){
     case 'patch-main':await update('chat-bridge/main',await rawMain(),step.patch);return null;
     case 'patch-operation':await update('chat-bridge/operation',await operation(),step.patch);return null;
     case 'patch-input':await patchInputRecord(step.patch);return null;
+    case 'patch-reply':{const op=await operation(),reply=await store.read('chat-bridge/reply',op.value.outcome.reply.object);await update('chat-bridge/reply',reply,step.patch);return null;}
     case 'patch-ticket':{const doc=await rawMain();await update('chat-bridge/main',doc,{queue:[{...doc.value.queue[0],...step.patch}]});return null;}
     case 'source':{const r=client.records.find(r=>r.object.id==='source');if(step.missing){client.records=client.records.filter(r=>r!==r);return null;}if(step.archived)r.object.effectivelyArchived=true;if(step.pruned)r.revision.revision=2;client.versions.get('source').set(1,structuredClone(r));return null;}
     case 'definition-change':{const changed=structuredClone(definition);changed.channels[0].displayName='Changed';admission=new ChatAdmission(changed);ops=new ChatOperations(store,admission);return null;}
@@ -241,6 +247,7 @@ for(const c of cases){
     case 'notice':return notices().notice(step.caller,{operationId:requests[step.name].operationId});
     case 'publish':await publish(step.name);return null;
     case 'publish-final':await publish('a',true);return null;
+    case 'send-user':{const request={action:'send',operationId:`chat:${now}:user`,expectedBridge:admission.expected('user'),channel,messageId:'user-message',expectedBinding:binding,payload:{text:'User input',images:[]}};const value=await main.queue.send('user',request);other=await ops.find('user',request.operationId);return value;}
     case 'finish-with-reply':{const op=await operation(step.name),other=await operation(step.replyName);await ops.finish(op.pin.objectId,{...other.value.outcome,operationId:op.value.operationId});return null;}
     case 'reopen':store.close();store=new ChatStore(client,null,root);ops=new ChatOperations(store,admission);return null;
     default:throw Error('Unknown fixture action '+step.action);
@@ -250,6 +257,7 @@ for(const c of cases){
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
  if(c.label==='new-notice-replay-and-producer-isolation'&&c.expected.at(-1).records.filter(r=>r.object.contractKey==='chat-bridge/input').length!==3)throw Error('Notice replay/producer isolation was not exercised.');
  if(c.label==='notice-reads-original-native-reply'&&!c.expected.at(-1).output.value?.data?.origin?.inputId)throw Error('Original native reply was not exercised.');
+ if(c.label==='notice-user-queue-order'&&JSON.stringify(c.expected.at(-1).main.value.queue.map(v=>v.sequence))!=='[1,2,3]')throw Error('User and notice queue order was not exercised.');
  if(c.label==='recover-after-thirty-two-input-conflicts'&&c.expected[1].calls.filter(v=>v.method==='objects.write').length!==32)throw Error('Input contention bound was not exercised.');
  if(c.label==='recover-after-thirty-two-claim-conflicts'&&c.expected[1].output.error?.code!=='chat_contention')throw Error('Claim contention bound was not exercised.');
 }
