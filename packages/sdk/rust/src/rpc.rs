@@ -19,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 pub type RequestFuture<'a> = Pin<Box<dyn Future<Output = IvyResult<IvyJson>> + Send + 'a>>;
 pub trait RpcClient: Send + Sync {
+    /// Only an actual provider generation owns a bound-owner cache.
+    fn service_connection(&self) -> Option<&crate::service::ServiceConnection> { None }
     fn request<'a>(
         &'a self,
         method: &'a str,
