@@ -22,6 +22,7 @@ const {CollectorEngine}=await load('engine',[
   [sdk,'const {canonical,IvyError,requireThat,scopedOperationId}=globalThis.__collectorRuntime;'],
   [/import\s*\{\s*CollectorStore\s*\}\s*from\s*".\/store.js";/,'const {CollectorStore}=globalThis.__collectorRuntime;'],
   [/import\s*\{[^}]+\}\s*from\s*".\/schema.js";/,'const {effectiveRetention,runtimeReadSchema:readSchema,runtimeUpdateSchema:updateSchema}=globalThis.__collectorRuntime;'],
+  [/import\s*\{\s*TaskRunner\s*\}\s*from\s*".\/runner.js";/,''],
 ]);
 const store=new CollectorStore(process.argv[3]);
 let clears=0,cancelled=0,clearFailure=false;
