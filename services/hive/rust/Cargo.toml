@@ -6,11 +6,12 @@ publish = false
 
 [dependencies]
 ivy-contracts.workspace = true
+ivy-host-runtime.workspace = true
 rusqlite = { workspace = true, features = ["backup", "functions", "hooks"] }
 getrandom.workspace = true
 uuid.workspace = true
 base64.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
 
 [dev-dependencies]
 serde_json.workspace = true
@@ -19,6 +20,13 @@ tokio = { workspace = true, features = ["test-util"] }
 [[bin]]
 name = "ivy-hive-offline-backup"
 path = "src/bin/offline_backup.rs"
+
+# Integration-test process; no deployment plan references this executable.
+[[bin]]
+name = "ivy-hive-worker-fixture"
+path = "../../../tests/fixtures/hive-worker-child.rs"
+test = false
+bench = false
 
 [[test]]
 name = "hive-storage-worker"

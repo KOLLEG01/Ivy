@@ -3,6 +3,8 @@ use ivy_contracts::{IvyError, IvyJson, Outcome};
 mod admission;
 #[path = "hive_dispatch_gate.rs"]
 mod dispatch_gate;
+#[path = "hive_worker_process.rs"]
+mod worker_process;
 use ivy_hive::worker_client::{
     Effects, Lifecycle, MAX_QUEUED_BYTES, RequestId, RequestOptions, WorkerClient,
 };
