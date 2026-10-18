@@ -1,6 +1,6 @@
 //! Codex home selection and explicit instance ownership, without filesystem effects.
 use super::node_path::{self, Context, Style};
-use ivy_contracts::{IvyError, IvyResult, JsString};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use std::collections::BTreeMap;
 
 #[derive(Default)]
@@ -165,6 +165,112 @@ pub fn instance_owned_codex_home(
         return Ok(None);
     }
     let home = resolve_codex_home(settings, context)?.path;
+    let local = context.paths.relative(data_root, &home);
+    let outside = if context.paths.style == Style::Windows {
+        [46, 46, 92]
+    } else {
+        [46, 46, 47]
+    };
+    Ok((!local.0.is_empty()
+        && local.0 != [46, 46]
+        && !local.0.starts_with(&outside)
+        && !node_path::is_absolute(context.paths.style, &local))
+    .then_some(home))
+}
+
+fn json_truthy(value: &IvyJson) -> bool {
+    match value {
+        IvyJson::Null | IvyJson::Bool(false) => false,
+        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
+        IvyJson::String(value) => !value.0.is_empty(),
+        _ => true,
+    }
+}
+fn json_setting<'a>(settings: &'a IvyJson, name: &str) -> IvyResult<Option<&'a IvyJson>> {
+    // Property access on null throws; other JSON primitives simply have no
+    // named Codex settings. Preserve the existing IvyError.from boundary.
+    if settings.is_null() {
+        return Err(IvyError::internal());
+    }
+    Ok(settings.get(name))
+}
+
+/// HostConfig settings are extensible JSON, not validated HomeSettings. Keep
+/// presence/nullish selection and native string-method failures at this boundary.
+pub fn resolve_codex_home_json(
+    settings: &IvyJson,
+    context: &HomeContext<'_>,
+) -> IvyResult<HomeResolution> {
+    let codex = json_setting(settings, "codexHome")?;
+    let native = json_setting(settings, "nativeHome")?;
+    if codex.is_some_and(json_truthy) && native.is_some_and(json_truthy) {
+        let a = codex
+            .and_then(IvyJson::as_js_string)
+            .ok_or_else(IvyError::internal)?;
+        let b = native
+            .and_then(IvyJson::as_js_string)
+            .ok_or_else(IvyError::internal)?;
+        if home_identity(context.paths.style, a) != home_identity(context.paths.style, b) {
+            return Err(invalid(
+                "codexHome and the existing explicit nativeHome must not select different homes.",
+            ));
+        }
+    }
+    let configured = codex.filter(|value| !value.is_null()).or(native);
+    let Some(configured) = configured else {
+        return resolve_codex_home(&HomeSettings::default(), context);
+    };
+    let path = configured.as_js_string().ok_or_else(IvyError::internal)?;
+    let mut result = resolve_codex_home(
+        &HomeSettings {
+            codex_home: Some(path.clone()),
+            native_home: None,
+        },
+        context,
+    )?;
+    // An explicitly null codexHome can select nativeHome while still supplying
+    // the original host-configuration source label.
+    result.source = if codex.is_some() {
+        "host-configuration"
+    } else {
+        "existing-native-home"
+    };
+    Ok(result)
+}
+
+pub fn uses_external_app_server_json(settings: &IvyJson) -> IvyResult<bool> {
+    let mode = json_setting(settings, "appServer")?.and_then(|value| value.get("mode"));
+    Ok(mode != Some(&IvyJson::from("owned-stdio"))
+        && mode != Some(&IvyJson::from("claude-adapter")))
+}
+
+/// External expected homes are returned verbatim, including null/non-string
+/// JSON. Host's shared-home validation owns their absolute-path admission.
+pub fn expected_server_home_json(
+    settings: &IvyJson,
+    context: &HomeContext<'_>,
+) -> IvyResult<IvyJson> {
+    if let Some(server) = json_setting(settings, "appServer")? {
+        if server.get("mode") == Some(&IvyJson::from("external-proxy")) {
+            if let Some(home) = server.get("expectedCodexHome") {
+                return Ok(home.clone());
+            }
+        }
+    }
+    resolve_codex_home_json(settings, context).map(|home| IvyJson::String(home.path))
+}
+
+pub fn instance_owned_codex_home_json(
+    settings: &IvyJson,
+    data_root: &JsString,
+    context: &HomeContext<'_>,
+) -> IvyResult<Option<JsString>> {
+    if json_setting(settings, "codexHome")?.is_none()
+        && json_setting(settings, "nativeHome")?.is_none()
+    {
+        return Ok(None);
+    }
+    let home = resolve_codex_home_json(settings, context)?.path;
     let local = context.paths.relative(data_root, &home);
     let outside = if context.paths.style == Style::Windows {
         [46, 46, 92]

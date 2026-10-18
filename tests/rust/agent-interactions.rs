@@ -25,6 +25,8 @@ mod native_executable_cases;
 mod native_handshake_cases;
 #[path = "agent-native-home.rs"]
 mod native_home_cases;
+#[path = "agent-native-home-json.rs"]
+mod native_home_json_cases;
 #[path = "agent-native-proxy.rs"]
 mod native_proxy_cases;
 #[path = "agent-native-rpc.rs"]
