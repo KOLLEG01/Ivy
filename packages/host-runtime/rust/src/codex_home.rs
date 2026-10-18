@@ -20,7 +20,9 @@ pub struct HomeContext<'a> {
     pub paths: &'a Context,
     pub environment: &'a BTreeMap<JsString, JsString>,
     pub user_home: Option<&'a JsString>,
-    pub cwd: Option<&'a JsString>,
+    /// Explicit options.cwd or raw native process cwd: a resolve argument,
+    /// distinct from the path engine's style-specific fallback cwd.
+    pub cwd: &'a JsString,
     /// The host's executing-account home, equivalent to os.homedir(). Never a
     /// deployment-global home or a service data directory substituted as fallback.
     pub account_home: &'a JsString,
@@ -112,9 +114,7 @@ pub fn resolve_codex_home(
         .filter(|s| !s.0.is_empty())
     {
         return Ok(HomeResolution {
-            path: context
-                .paths
-                .resolve(&[context.cwd.unwrap_or(&context.paths.cwd).clone(), inherited]),
+            path: context.paths.resolve(&[context.cwd.clone(), inherited]),
             source: "environment",
         });
     }

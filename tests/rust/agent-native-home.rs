@@ -57,7 +57,7 @@ fn home_resolution_external_reference_and_strict_ownership_match_node() {
         let paths = node_path::Context {
             style,
             cwd: row
-                .get("processCwd")
+                .get("lexicalCwd")
                 .unwrap()
                 .as_js_string()
                 .unwrap()
@@ -69,7 +69,11 @@ fn home_resolution_external_reference_and_strict_ownership_match_node() {
             paths: &paths,
             environment: &environment,
             user_home: options.get("userHome").and_then(IvyJson::as_js_string),
-            cwd: options.get("cwd").and_then(IvyJson::as_js_string),
+            cwd: options
+                .get("cwd")
+                .unwrap_or_else(|| row.get("processCwd").unwrap())
+                .as_js_string()
+                .unwrap(),
             account_home: row.get("accountHome").unwrap().as_js_string().unwrap(),
         };
         let resolution = capture(resolve_codex_home(&settings, &context).map(|v| {
@@ -106,7 +110,12 @@ fn home_resolution_external_reference_and_strict_ownership_match_node() {
         // the explicit platform/options used by the separate resolver above.
         let ambient_paths = node_path::Context {
             style: node_path::Style::native(),
-            cwd: paths.cwd.clone(),
+            cwd: row
+                .get("processCwd")
+                .unwrap()
+                .as_js_string()
+                .unwrap()
+                .clone(),
             drive_cwds: paths.drive_cwds.clone(),
         };
         let ambient_environment = map(row.get("ambientEnvironment").unwrap());
@@ -114,7 +123,7 @@ fn home_resolution_external_reference_and_strict_ownership_match_node() {
             paths: &ambient_paths,
             environment: &ambient_environment,
             user_home: None,
-            cwd: None,
+            cwd: &ambient_paths.cwd,
             account_home: context.account_home,
         };
         for server in expected.get("servers").unwrap().as_array().unwrap() {

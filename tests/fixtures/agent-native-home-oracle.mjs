@@ -1,4 +1,5 @@
 import {homedir} from 'node:os';
+import {posix,win32} from 'node:path';
 import {resolveCodexHome,instanceOwnedCodexHome,expectedServerHome,usesExternalAppServer} from '../../dist/packages/host-runtime/src/codex-home.js';
 const capture=fn=>{try{return {result:fn()};}catch(e){return {error:{code:e.code??'internal_error',message:e.message}};}};
 const driveCwds=Object.fromEntries(Object.entries(process.env).filter(([key])=>/^=[a-z]:$/i.test(key)).map(([key,value])=>[key.slice(1),value]));
@@ -23,7 +24,7 @@ for(const platform of ['win32','linux']){
     const modes=[undefined,{mode:'owned-stdio'},{mode:'claude-adapter'},{mode:'external-proxy'},{mode:'external-proxy',expectedCodexHome:''},{mode:'external-proxy',expectedCodexHome:'raw/../external'}];
     // expectedServerHome uses live defaults, so pin those separate ambient inputs.
     const servers=modes.map(appServer=>{const value={...settings,...(appServer?{appServer}:{})};return {mode:appServer??null,external:usesExternalAppServer(value),expected:capture(()=>expectedServerHome(value))};});
-    rows.push({platform,settings,options,processCwd:process.cwd(),driveCwds,accountHome:homedir(),ambientEnvironment:Object.fromEntries(['CODEX_HOME','USERPROFILE','HOME'].filter(k=>process.env[k]!==undefined).map(k=>[k,process.env[k]])),roots,
+    rows.push({platform,settings,options,processCwd:process.cwd(),lexicalCwd:(platform==='win32'?win32:posix).resolve(),driveCwds,accountHome:homedir(),ambientEnvironment:Object.fromEntries(['CODEX_HOME','USERPROFILE','HOME'].filter(k=>process.env[k]!==undefined).map(k=>[k,process.env[k]])),roots,
       expected:{resolution:capture(()=>resolveCodexHome(settings,options)),owned:roots.map(root=>capture(()=>instanceOwnedCodexHome(settings,root,platform))),servers}});
   }
 }
