@@ -36,7 +36,8 @@ const {checkedNativeContract}=await import('../../../packages/contracts/src/chec
 const {unpersistedNativePlan}=await import('../../fixtures/native-plan.ts');
 const definition={workspaceId:'chat',principalId:'chat-service',rootObjectId:null,
  project:{serviceNodeId:'native-agent',namespace:'codex',kind:'project',nativeId:'/synthetic/project'},
- nativePlan:unpersistedNativePlan('0.159.2'),channels:[]};
+ nativePlan:unpersistedNativePlan('0.159.2'),channels:[{
+   channel:{adapter:'whatsapp',accountId:'account',channelId:'channel'},displayName:'Synthetic channel'}]};
 const source=checkedNativeContract(definition.nativePlan.nativeVersion,{sourceHash:definition.nativePlan.catalogSourceHash});
 const owner={serviceNodeId:'chat-provider',generation:7};
 const node={principalId:'chat-service',serviceName:'chat-bridge',connected:true,synced:true};
