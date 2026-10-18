@@ -7,6 +7,19 @@ fn path(root: &Path) -> PathBuf { root.join("process-stop-fence.json") }
 fn unknown(message: &str) -> IvyError {
     IvyError::new("outcome_unknown", message).with_outcome(Outcome::Unknown)
 }
+fn already_exists(error: &std::io::Error, path: &Path) -> bool {
+    if error.kind() == std::io::ErrorKind::AlreadyExists { return true; }
+    // Win32 CREATE_NEW reports ACCESS_DENIED for an existing directory. Node's
+    // libuv maps that case to EEXIST; preserve exclusive-create's false result.
+    #[cfg(windows)] {
+        use std::os::windows::fs::MetadataExt;
+        if error.raw_os_error() == Some(5) {
+            return fs::symlink_metadata(path).is_ok_and(|m| m.file_attributes() & 0x10 != 0);
+        }
+    }
+    #[cfg(not(windows))] let _ = path;
+    false
+}
 fn observe(root: &Path) -> IvyResult<Option<IvyJson>> {
     let path = path(root);
     match fs::symlink_metadata(&path) {
@@ -51,9 +64,10 @@ pub async fn record_process_stop_fence(data_root: impl Into<PathBuf>, fence: Ivy
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = match options.open(path(&root)) {
+        let fence_path = path(&root);
+        let mut file = match options.open(&fence_path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) if already_exists(&error, &fence_path) => return Ok(false),
             Err(_) => return Err(IvyError::internal()),
         };
         let mut bytes = json::canonical(&fence, usize::MAX)?.into_bytes();
