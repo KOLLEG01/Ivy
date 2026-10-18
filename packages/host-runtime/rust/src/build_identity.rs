@@ -1,24 +1,29 @@
-use ivy_contracts::{IvyError, IvyJson, IvyResult, hash::digest, json::parse};
+use ivy_contracts::{
+    IvyError, IvyJson, IvyResult,
+    hash::digest,
+    json::{js_string, parse},
+};
 use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BuildIdentity {
     pub schema_version: u32,
-    pub version: String,
+    /// Package metadata is retained verbatim; None represents a missing version.
+    pub version: Option<IvyJson>,
     pub build_id: String,
 }
 pub fn build_identity(root: &Path) -> IvyResult<BuildIdentity> {
-    let package = std::fs::read_to_string(root.join("package.json"))
-        .map_err(|e| IvyError::new("invalid_arguments", e.to_string()))?;
-    let package = parse(&package, 1_048_576)?;
-    let version = package
-        .get("version")
-        .ok_or_else(|| IvyError::new("invalid_arguments", "Package version is missing."))?
-        .as_str()?;
+    let bytes = std::fs::read(root.join("package.json")).map_err(|_| IvyError::internal())?;
+    let package =
+        parse(&String::from_utf8_lossy(&bytes), usize::MAX).map_err(|_| IvyError::internal())?;
+    // JSON.parse accepts primitive roots; only null forbids property access.
+    if package.is_null() {
+        return Err(IvyError::internal());
+    }
+    let version = package.get("version").cloned();
     let supplied = std::env::var("IVY_BUILD_ID").ok();
     let build_id = match supplied {
         Some(id)
@@ -31,6 +36,7 @@ pub fn build_identity(root: &Path) -> IvyResult<BuildIdentity> {
             id
         }
         _ => {
+            let version = version_text(version.as_ref())?;
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(|_| IvyError::internal())?
@@ -45,11 +51,32 @@ pub fn build_identity(root: &Path) -> IvyResult<BuildIdentity> {
     })
 }
 impl BuildIdentity {
+    /// Serialize through the lossless JSON codec, including lone UTF-16 surrogates.
     pub fn json(&self) -> IvyJson {
-        IvyJson::object([
-            ("schemaVersion", IvyJson::Number(1.0)),
-            ("version", self.version.clone().into()),
-            ("buildId", self.build_id.clone().into()),
-        ])
+        let mut fields = vec![("schemaVersion", IvyJson::Number(self.schema_version as f64))];
+        if let Some(version) = &self.version {
+            fields.push(("version", version.clone()));
+        }
+        fields.push(("buildId", self.build_id.clone().into()));
+        IvyJson::object(fields)
     }
+}
+
+fn version_text(version: Option<&IvyJson>) -> IvyResult<String> {
+    let Some(version) = version else {
+        return Ok("undefined".into());
+    };
+    // String-hint conversion uses an object's own toString before valueOf.
+    // JSON cannot contain callable overrides; an own toString prevents conversion.
+    let mut pending = vec![version];
+    while let Some(value) = pending.pop() {
+        match value {
+            IvyJson::Array(values) => pending.extend(values.iter()),
+            IvyJson::Object(_) if value.get("toString").is_some() => {
+                return Err(IvyError::internal());
+            }
+            _ => {}
+        }
+    }
+    Ok(String::from_utf16_lossy(&js_string(version).0))
 }
