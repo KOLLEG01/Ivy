@@ -37,10 +37,10 @@ pub async fn stop_child(
     grace: Duration,
     request_shutdown: impl Future<Output = IvyResult<()>>,
 ) -> IvyResult<Arc<ProcessResult>> {
-    if grace > Duration::from_secs(60) {
+    if grace > Duration::from_secs(600) {
         return Err(IvyError::new(
             "invalid_arguments",
-            "Process stop grace must be finite and at most one minute.",
+            "Cooperative shutdown grace must be finite and at most ten minutes.",
         ));
     }
     let completion = child.completion.clone();

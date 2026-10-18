@@ -2,6 +2,9 @@
 pub use ivy_host_runtime::process;
 #[path = "../../packages/host-runtime/rust/src/runtime_owner/stop.rs"]
 mod stop;
+#[cfg(windows)]
+#[path = "service-manager-owner-cases.rs"]
+mod owner_cases;
 
 use ivy_contracts::{IvyError, json::parse, limits::MANAGEMENT_FRAME_BYTES};
 use process::{Command, LaunchContext, OwnedProcess};
@@ -117,7 +120,7 @@ fn control_is_bound_to_instance_launch_and_boot() {
 async fn cooperative_exit_completes_before_any_forced_stop() {
     let fixture = Fixture::new();
     let child = fixture.spawn("cooperate").await;
-    let result = stop::stop_child(&child, Duration::from_secs(3), async {
+    let result = stop::stop_child(&child, Duration::from_secs(61), async {
         tokio::fs::write(fixture.0.join("control.json"), "shutdown")
             .await
             .unwrap();
