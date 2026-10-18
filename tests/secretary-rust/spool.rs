@@ -2,6 +2,7 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult,
     json::{canonical, parse},
 };
+use ivy_secretary::media_schema::{MediaSchema, validate_media};
 use ivy_secretary::media_spool::{MAXIMUM_BYTES, SpoolJournal, Validation};
 use ivy_store::rusqlite::Connection;
 use std::{
@@ -48,13 +49,8 @@ fn fixtures() -> &'static IvyJson {
 fn fixture(name: &str) -> IvyJson {
     fixtures().required(name).unwrap().clone()
 }
-struct OracleValidation;
-impl Validation for OracleValidation {
-    fn media(&self, name: &str, value: &IvyJson) -> IvyResult<()> {
-        let request = IvyJson::object([("name", name.into()), ("value", value.clone())]);
-        oracle("validate", None, Some(&canonical(&request, 1_048_576)?));
-        Ok(())
-    }
+struct NativeValidationUnavailable;
+impl Validation for NativeValidationUnavailable {
     fn operation(&self, _: &IvyJson) -> IvyResult<()> {
         Err(IvyError::new(
             "test_scope",
@@ -68,17 +64,49 @@ impl Validation for OracleValidation {
         ))
     }
 }
-fn memory() -> SpoolJournal<OracleValidation> {
+fn memory() -> SpoolJournal<NativeValidationUnavailable> {
     SpoolJournal::from_owned_connection(
         Connection::open_in_memory().unwrap(),
         &fixture("owner"),
-        OracleValidation,
+        NativeValidationUnavailable,
     )
     .unwrap()
 }
 
 #[test]
 fn admission_reserves_capacity_and_failed_attempts_are_never_retried() {
+    let rows = parse(&oracle("validation-cases", None, None), 16 * 1024 * 1024).unwrap();
+    let names = [
+        MediaSchema::Attachment,
+        MediaSchema::Materialization,
+        MediaSchema::DownloadEvidence,
+        MediaSchema::Admission,
+        MediaSchema::Intent,
+        MediaSchema::Manifest,
+        MediaSchema::ReadPlan,
+        MediaSchema::ReadCall,
+        MediaSchema::Coverage,
+    ];
+    for row in rows.as_array().unwrap() {
+        let name = row.required("name").unwrap().as_str().unwrap();
+        let selected = names.iter().find(|v| v.name() == name).unwrap();
+        let input = row.required("input").unwrap().as_str().unwrap();
+        let value = parse(&input, 2 * 1024 * 1024).unwrap();
+        let actual = match validate_media(*selected, &value) {
+            Ok(()) => IvyJson::Null,
+            Err(e) => IvyJson::object([
+                ("code", e.code.clone().into()),
+                ("message", e.message.clone().into()),
+                ("outcome", e.outcome.as_str().into()),
+            ]),
+        };
+        assert_eq!(
+            canonical(&actual, 4096).unwrap(),
+            canonical(row.required("error").unwrap(), 4096).unwrap(),
+            "{name}: {}",
+            input.chars().take(200).collect::<String>()
+        );
+    }
     let mut spool = memory();
     let mut intent = fixture("intent");
     let materialization = fixture("materialization");
@@ -141,7 +169,7 @@ fn format_gate_owner_identity_and_non_strict_schema_are_preserved() {
         0
     );
     let wrong = IvyJson::object([("principalId", "other".into())]);
-    let result = SpoolJournal::from_owned_connection(spool.db, &wrong, OracleValidation);
+    let result = SpoolJournal::from_owned_connection(spool.db, &wrong, NativeValidationUnavailable);
     assert_eq!(result.err().unwrap().code, "media_spool_owner_changed");
     for version in [0, 2] {
         let db = Connection::open_in_memory().unwrap();
@@ -150,7 +178,7 @@ fn format_gate_owner_identity_and_non_strict_schema_are_preserved() {
         ))
         .unwrap();
         assert_eq!(
-            SpoolJournal::from_owned_connection(db, &fixture("owner"), OracleValidation)
+            SpoolJournal::from_owned_connection(db, &fixture("owner"), NativeValidationUnavailable)
                 .err()
                 .unwrap()
                 .code,
@@ -173,7 +201,8 @@ fn node_and_rust_cross_open_acquired_and_interrupted_attempts() {
     oracle("create", Some(&root.0), None);
     let db = Connection::open(root.0.join("media.sqlite")).unwrap();
     let mut spool =
-        SpoolJournal::from_owned_connection(db, &fixture("owner"), OracleValidation).unwrap();
+        SpoolJournal::from_owned_connection(db, &fixture("owner"), NativeValidationUnavailable)
+            .unwrap();
     let original = fixture("intent")
         .required("operationId")
         .unwrap()

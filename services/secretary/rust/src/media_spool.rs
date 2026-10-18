@@ -10,6 +10,7 @@ use ivy_store::{
     sqlite,
 };
 use std::collections::HashSet;
+use crate::media_schema::{MediaSchema, validate_media};
 
 const FRAME: usize = 32 * 1024 * 1024;
 pub const MAXIMUM_BYTES: i64 = 32 * 1024 * 1024;
@@ -18,10 +19,9 @@ const NATIVE_RESERVE: i64 = 8 * 1024 * 1024;
 const MESSAGE: &str =
     "Media spool must retain its exact original owner, intent, evidence and complete bytes.";
 
-/// Supplied by the shared schema/native adapter; no persistence method can skip
-/// its original public schema or native-progress validation gate.
+/// Supplied by the native adapter. Media schemas are always checked locally;
+/// native operation/progress validation remains required before persistence.
 pub trait Validation {
-    fn media(&self, name: &str, value: &IvyJson) -> IvyResult<()>;
     fn operation(&self, value: &IvyJson) -> IvyResult<()>;
     fn progress(&self, previous: &IvyJson, next: &IvyJson) -> IvyResult<()>;
 }
@@ -158,9 +158,8 @@ impl<V: Validation> SpoolJournal<V> {
         ]))
     }
     pub fn prepare(&self, intent: &IvyJson, materialization: &IvyJson) -> IvyResult<Attempt> {
-        self.validation.media("MediaIntent", intent)?;
-        self.validation
-            .media("MediaMaterialization", materialization)?;
+        validate_media(MediaSchema::Intent, intent)?;
+        validate_media(MediaSchema::Materialization, materialization)?;
         let admission = field(intent, "admission")?;
         check(
             field(field(intent, "item")?, "objectId")? == field(admission, "itemObjectId")?
@@ -232,7 +231,7 @@ impl<V: Validation> SpoolJournal<V> {
         bytes: &[u8],
     ) -> IvyResult<()> {
         let result = (|| {
-            self.validation.media("MediaDownloadEvidence", evidence)?;
+            validate_media(MediaSchema::DownloadEvidence, evidence)?;
             self.db.execute("UPDATE attempts SET phase='acquired',evidence=?,payload=? WHERE operation_id=? AND phase='downloading'",params![encode(evidence)?,bytes,sql_text(operation_id)]).map_err(sqlite::error)?;
             Ok(())
         })();
@@ -267,7 +266,7 @@ impl<V: Validation> SpoolJournal<V> {
         )
     }
     pub fn prepare_read(&self, plan: &IvyJson) -> IvyResult<IvyJson> {
-        self.validation.media("MediaReadPlan", plan)?;
+        validate_media(MediaSchema::ReadPlan, plan)?;
         let item = field(plan, "item")?;
         if let Some(old) = self.read_plan(item)? {
             return Ok(old);
@@ -316,7 +315,7 @@ impl<V: Validation> SpoolJournal<V> {
         ))
     }
     pub fn prepare_native_call(&self, call: &IvyJson) -> IvyResult<NativeCall> {
-        self.validation.media("MediaReadCall", call)?;
+        validate_media(MediaSchema::ReadCall, call)?;
         let (plan_hash, slot) = Self::coordinates(call)?;
         if let Some(old) = self.native_call(&plan_hash, slot)? {
             check(same(&old.call, call)?, "media_native_intent_mismatch")?;
