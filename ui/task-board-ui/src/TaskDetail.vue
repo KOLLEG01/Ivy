@@ -1192,7 +1192,7 @@ const showArrived = () => {
                     <div class="min-w-0 space-y-3">
                       <ExpandableContent
                         v-if="!entry.comment.nativeInput || entry.comment.replyTo || nativeInput(entry.comment)?.state === 'answered' || nativeInput(entry.comment)?.state === 'expired'"
-                        :enabled="commentPreferences.collapseOlder && entry.comment.commentId !== newestCommentId"
+                        :enabled="commentPreferences.collapseOlder && entry.kind !== 'user' && entry.comment.commentId !== newestCommentId"
                         :show-more-label="tr('Mehr anzeigen', 'Show more')"
                         :show-less-label="tr('Weniger anzeigen', 'Show less')"
                       >

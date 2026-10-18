@@ -58,7 +58,7 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     const inlineComment = f.page.locator('[data-slot="conversation-message"]').filter({
       has: f.page.getByRole('button', { name: 'Enlarge First comment', exact: true }),
     });
-    await inlineComment.getByRole('button', { name: 'Show more', exact: true }).click();
+    await expect(inlineComment.getByRole('button', { name: 'Show more', exact: true })).toHaveCount(0);
     await expect(f.page.getByRole('button', { name: 'Enlarge First comment', exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Enlarge attached.png', exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Enlarge Foreign', exact: true })).toHaveCount(0);

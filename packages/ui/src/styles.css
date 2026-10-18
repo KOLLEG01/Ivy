@@ -238,6 +238,27 @@
   background: color-mix(in srgb, currentColor 14%, transparent);
   border-color: color-mix(in srgb, currentColor 25%, transparent);
 }
+/* Images in your own messages are compact rounded thumbnails; a message that is only an image
+   shows the picture itself instead of a bubble around it. */
+.ivy-message-bubble .ivy-markdown .ivy-embedded-image {
+  display: block;
+  width: auto;
+  max-width: min(100%, 18rem);
+  max-height: 18rem;
+  margin: 0.25rem 0;
+  border-radius: 0.875rem;
+  object-fit: cover;
+}
+.ivy-message-bubble .ivy-markdown .ivy-image-button {
+  display: block;
+}
+.ivy-message-bubble:has(.ivy-markdown > p:only-child > .ivy-image-button:only-child) {
+  padding: 0;
+  background: transparent;
+}
+.ivy-message-bubble:has(.ivy-markdown > p:only-child > .ivy-image-button:only-child) .ivy-embedded-image {
+  margin: 0;
+}
 .ivy-message-bubble .ivy-markdown blockquote {
   border-color: color-mix(in srgb, currentColor 35%, transparent);
   color: inherit;

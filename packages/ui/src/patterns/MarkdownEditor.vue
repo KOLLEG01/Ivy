@@ -331,12 +331,15 @@ onBeforeUnmount(() => {
 .markdown-field.is-readonly { opacity: .6; }
 .markdown-editor.is-field :deep(.ProseMirror) { min-height: 6rem; padding: .5rem .75rem; font-size: .875rem; line-height: 1.6; }
 .markdown-editor.is-field :deep(.milkdown-block-handle) { display: none; }
-.markdown-composer { display: flex; min-width: 0; align-items: flex-end; gap: .25rem; border: 1px solid var(--input); border-radius: 1.375rem; background: var(--card); padding: .3rem; box-shadow: 0 1px 3px 0 rgb(0 0 0 / .06); transition: border-color .15s, box-shadow .15s; }
-.markdown-composer:focus-within { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring), transparent 60%); }
+/* Composer geometry follows desktop assistants: a 3.25rem pill whose 2.25rem round controls and
+   first text line share one centre line; it grows upward and the controls stay at the bottom. */
+.markdown-composer { box-sizing: border-box; display: flex; min-width: 0; min-height: 3.25rem; align-items: flex-end; gap: .25rem; border: 1px solid var(--input); border-radius: 1.625rem; background: var(--card); padding: calc(.5rem - 1px); box-shadow: 0 2px 10px color-mix(in srgb, var(--foreground) 6%, transparent); transition: border-color .15s, box-shadow .15s; }
+.markdown-composer:focus-within { border-color: color-mix(in srgb, var(--foreground) 25%, var(--input)); }
 .markdown-composer.is-readonly { opacity: .6; }
-.markdown-composer > :deep(button) { flex-shrink: 0; }
-.markdown-editor.is-composer { flex: 1 1 auto; min-width: 0; max-height: min(40dvh, 18rem); overflow-y: auto; align-self: center; }
-.markdown-editor.is-composer :deep(.ProseMirror) { min-height: 0; padding: .3rem .25rem; font-size: .9375rem; line-height: 1.5; }
-.markdown-editor.is-composer :deep(.ProseMirror > :first-child) { margin-top: 0; }
-.markdown-editor.is-composer :deep(.ProseMirror > :last-child) { margin-bottom: 0; }
+.markdown-composer > :deep(button) { display: grid; place-items: center; flex-shrink: 0; width: 2.25rem; height: 2.25rem; padding: 0; border-radius: 9999px; }
+.markdown-composer > :deep(button svg) { width: 1.125rem; height: 1.125rem; }
+.markdown-editor.is-composer { flex: 1 1 auto; min-width: 0; max-height: min(40dvh, 18rem); overflow-y: auto; }
+.markdown-editor.is-composer :deep(.milkdown .ProseMirror) { min-height: 2.25rem; padding: .375rem .25rem; font-size: .9375rem; line-height: 1.5rem; }
+.markdown-editor.is-composer :deep(.ProseMirror > *) { margin: 0 !important; padding-block: 0 !important; }
+.markdown-editor.is-composer :deep(.ProseMirror p) { min-height: 1.5rem; line-height: 1.5rem; }
 </style>

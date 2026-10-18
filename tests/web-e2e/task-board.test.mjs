@@ -153,22 +153,14 @@ for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     await expect(cards.first()).toContainText("Older long comment");
     await expect(cards.last()).toContainText("Newest long comment");
     await expect.poll(async () => (await composerPosition()).after).toBe(true);
+    // Your own messages are never shortened, whatever the preference; only agent replies are.
     const more = older.getByRole("button", { name: "Show more", exact: true });
-    await expect(more).toHaveAttribute("aria-expanded", "false");
-    await expect(older.locator('[data-slot="expandable-content-fade"]')).toBeVisible();
+    await expect(more).toHaveCount(0);
+    await expect(older.getByText("End of older comment", { exact: true })).toBeVisible();
     await expect(older.getByText("Approval detail remains visible.")).toBeVisible();
     await expect(older.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
     await expect(latest.getByRole("button", { name: "Show more", exact: true })).toHaveCount(0);
     await expect(latest.getByText("End of newest comment", { exact: true })).toBeVisible();
-    await expect(cards.filter({ hasText: "Short middle comment" }).getByRole("button", { name: "Show more", exact: true })).toHaveCount(0);
-    const clippedHeight = (await older.boundingBox()).height;
-    await more.focus();
-    await more.press("Enter");
-    await expect(older.getByRole("button", { name: "Show less", exact: true })).toHaveAttribute("aria-expanded", "true");
-    await expect(older.getByText("End of older comment", { exact: true })).toBeVisible();
-    assert.ok((await older.boundingBox()).height > clippedHeight);
-    await older.getByRole("button", { name: "Show less", exact: true }).click();
-    await expect(more).toHaveAttribute("aria-expanded", "false");
     const storedComments = (await f.task(id)).comments.map(comment => comment.commentId);
     await f.page.goto(f.url + "#/settings?node=browser-task-board");
     const order = f.page.getByLabel("Comment order", { exact: true });
