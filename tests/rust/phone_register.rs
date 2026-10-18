@@ -47,7 +47,16 @@ impl Peer {
         let request: Request = std::str::from_utf8(&bytes).unwrap().try_into().unwrap();
         assert_eq!(request.method, Method::Register);
         assert!(request.body.is_empty());
-        assert_eq!(request.content_length_header().unwrap().value(), "0");
+        assert_eq!(
+            request.headers.iter().find_map(
+                |header| if let Header::ContentLength(value) = header {
+                    Some(value.value())
+                } else {
+                    None
+                }
+            ),
+            Some("0")
+        );
         request
     }
     async fn send(&mut self, response: &Response) {
@@ -95,7 +104,8 @@ impl Listener {
     }
 }
 fn response(request: &Request, code: u16, extra: &str) -> Response {
-    let via = request.top_via_header().unwrap().value();
+    let via = request.top_via_header().unwrap();
+    let via = via.value();
     let from = request.from_header().unwrap().value();
     let to = request.to_header().unwrap().value();
     let call = request.call_id_header().unwrap().value();

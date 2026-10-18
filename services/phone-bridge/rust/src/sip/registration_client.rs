@@ -2,14 +2,13 @@
 //! Observers may disappear; the original wire work and socket fence remain.
 use super::invite::{bounded_secret, protected};
 use super::{
-    BindError, BoundSipTransport, ClientExchange, RegistrationLease, RegistrationObservation,
-    RegistrationPeer, RegistrationTransport, SipBoundFlow, registration_expiry,
+    BindError, BoundSipTransport, RegistrationLease, RegistrationObservation, RegistrationPeer,
+    RegistrationTransport, SipBoundFlow, registration_expiry,
 };
 use rsipstack::{
     dialog::authenticate::{Credential, handle_client_authenticate},
     sip::{
-        Header, Method, Request, Response, Scheme, Transport, Uri, headers::*,
-        prelude::HeadersExt,
+        Header, Method, Request, Response, Scheme, Transport, Uri, headers::*, prelude::HeadersExt,
     },
     transaction::{make_via_branch, random_text},
     transport::SipAddr,
