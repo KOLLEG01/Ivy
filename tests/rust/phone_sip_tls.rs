@@ -256,14 +256,33 @@ async fn dns_proxy_and_ip_san_use_the_real_bound_flow() {
 }
 
 #[tokio::test]
-async fn authenticated_flow_cache_includes_pre_resolution_authority() {
+async fn routed_alias_is_authenticated_before_reusing_the_original_flow() {
     let peer = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote = peer.local_addr().unwrap();
     let acceptor = server(VALID);
+    let mut host = binding("127.0.0.1:0", verifier());
+    let local = host.local_addr();
     let task = tokio::spawn(async move {
-        let (stream, _) = peer.accept().await.unwrap();
-        let mut stream = acceptor.accept(stream).await.unwrap();
+        let (stream, source) = peer.accept().await.unwrap();
+        assert_eq!(source, local);
+        let stream = acceptor.accept(stream).await.unwrap();
         assert_eq!(stream.get_ref().1.server_name(), Some("sip.example.test"));
+        let mut stream = BufReader::new(stream);
+        for id in ["first-authority", "alias-after-refusal"] {
+            let request = received(&mut stream).await;
+            assert_eq!(request.call_id_header().unwrap().value(), id);
+            assert_eq!(request.uri.to_string(), "sips:callee@call.example.test");
+            stream
+                .get_mut()
+                .write_all(
+                    response(&request, StatusCode::from(486))
+                        .to_string()
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(received(&mut stream).await.method, Method::Ack);
+        }
         let mut byte = [0];
         assert!(matches!(stream.read(&mut byte).await, Ok(0) | Err(_)));
         assert!(
@@ -272,20 +291,35 @@ async fn authenticated_flow_cache_includes_pre_resolution_authority() {
                 .is_err()
         );
     });
-    let mut host = binding("127.0.0.1:0", verifier());
-    for (name, proxy) in [("sip.example.test", false), ("proxy.example.test", true)] {
-        drop(
-            host.prepare_tls_invite(
-                invite(host.local_addr(), name),
-                remote,
-                next_hop(name, remote.port()),
-                proxy,
-            )
-            .await
-            .unwrap(),
-        );
-    }
-    assert_eq!(host.connections.lock().await.len(), 2);
+    let prepared = host
+        .prepare_tls_invite(
+            invite(local, "first-authority"),
+            remote,
+            next_hop("sip.example.test", remote.port()),
+            false,
+        )
+        .await
+        .unwrap();
+    let call = DelayedInvite::start(
+        host.endpoint().unwrap(),
+        prepared,
+        None,
+        5,
+        Arc::new(NoMedia),
+    )
+    .unwrap();
+    assert_eq!(call.wait_answer().await, CallOutcome::Ended);
+    call.close().await.unwrap();
+    drop(call);
+    let alias = host
+        .prepare_tls_invite(
+            invite(local, "alias-after-refusal"),
+            remote,
+            next_hop("proxy.example.test", remote.port()),
+            true,
+        )
+        .await
+        .unwrap();
     // A third authority on the same IP cannot bypass its own name check.
     let invalid = host
         .prepare_tls_invite(
@@ -296,6 +330,12 @@ async fn authenticated_flow_cache_includes_pre_resolution_authority() {
         )
         .await;
     assert!(matches!(invalid, Err(BindError::TlsRejected)));
+    // Refusal sent no INVITE and did not close the established good flow.
+    let call =
+        DelayedInvite::start(host.endpoint().unwrap(), alias, None, 5, Arc::new(NoMedia)).unwrap();
+    assert_eq!(call.wait_answer().await, CallOutcome::Ended);
+    call.close().await.unwrap();
+    drop(call);
     released(&mut host).await;
     task.await.unwrap();
 }
