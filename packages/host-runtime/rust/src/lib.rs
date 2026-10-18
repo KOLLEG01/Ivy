@@ -11,6 +11,7 @@ pub mod codex_rpc;
 pub mod concurrency;
 pub mod config;
 pub mod default_settings;
+pub mod executor_lock;
 pub mod health;
 pub mod logs;
 pub mod node_runtime;
