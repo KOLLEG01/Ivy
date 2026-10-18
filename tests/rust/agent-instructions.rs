@@ -11,6 +11,8 @@ mod environment_conflict_cases;
 mod environment_text_cases;
 #[path = "agent-mcp-files.rs"]
 mod mcp_file_cases;
+#[path = "agent-mcp-import.rs"]
+mod mcp_import_cases;
 #[path = "agent-mcp-manager.rs"]
 mod mcp_manager_cases;
 #[path = "agent-mcp-output.rs"]

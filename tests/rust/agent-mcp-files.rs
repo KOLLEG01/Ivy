@@ -49,6 +49,9 @@ fn string(v: &IvyJson) -> String {
     v.as_js_string().unwrap().to_utf8().unwrap()
 }
 fn oracle(name: &str) -> IvyJson {
+    if name == "agent-mcp-output-oracle" {
+        return super::mcp_output_cases::original().clone();
+    }
     let out = Command::new("node")
         .arg(format!("tests/fixtures/{name}.mjs"))
         .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
@@ -91,6 +94,25 @@ async fn actual_files_match_original_ownership_cases() {
         )
         .await;
         let expected = row.get("expected").unwrap();
+        if super::mcp_output_cases::requires_import(row) {
+            assert!(
+                matches!(result,Err(ref error)if error.code=="target_conflict"),
+                "unmigrated runtime case {index}"
+            );
+            assert_eq!(
+                fs::read(home.join("config.toml")).unwrap(),
+                before.as_bytes()
+            );
+            if stored {
+                assert_eq!(
+                    parse(&fs::read_to_string(&state_path).unwrap(), 2 * 1024 * 1024).unwrap(),
+                    *row.get("state").unwrap()
+                );
+            } else {
+                assert!(!state_path.exists());
+            }
+            continue;
+        }
         match result {
             Ok(result) => {
                 let actual = IvyJson::object([

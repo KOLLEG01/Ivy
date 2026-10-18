@@ -1,11 +1,15 @@
 //! Authoritative MCP preparation before acquiring the output filesystem lock.
 use crate::{
-    environment::{EnvironmentKind, read_environment_document, select_environment_document},
+    environment::{
+        EnvironmentKind, SelectedEnvironment, read_environment_document,
+        select_environment_document,
+    },
     mcp_output::{McpOutput, McpOutputInput, plan_mcp_output},
     mcp_render::{hive_mcp_urls, render_mcp_sections},
 };
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, core_schema::validate_output, hash::hash_json,
+    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent,
+    core_schema::validate_output, hash::hash_json,
 };
 use ivy_sdk::rpc::{RequestOptions, RpcClient};
 
@@ -53,6 +57,46 @@ pub async fn prepare_mcp(
             RequestOptions::default(),
         )
         .await?;
+    assemble_mcp(desired, openai, urls, host_id, hive_url, credential)
+}
+
+/// Explicit import uses an operator-supplied selected document and OpenAI
+/// snapshot. Credentials enter through protected input, never command arguments.
+pub fn prepare_mcp_import_snapshot(
+    document: &IvyJson,
+    openai: &IvyJson,
+    host_id: &JsString,
+    hive_url: &JsString,
+    credential: &JsString,
+) -> IvyResult<PreparedMcp> {
+    validate_agent("McpDocument", document)?;
+    if document.get("hostId") != Some(&IvyJson::Null)
+        && document.get("hostId") != Some(&IvyJson::String(host_id.clone()))
+    {
+        return Err(IvyError::new(
+            "target_conflict",
+            "Managed environment document belongs to another scope.",
+        ));
+    }
+    if !matches!(document.get("enabled"), Some(IvyJson::Bool(_))) {
+        return Err(IvyError::new(
+            "invalid_arguments",
+            "Explicit MCP import requires a selected enabled or disabled document.",
+        ));
+    }
+    let desired = select_environment_document(document, None, None)?;
+    let urls = hive_mcp_urls(hive_url)?;
+    assemble_mcp(desired, openai.clone(), urls, host_id, hive_url, credential)
+}
+
+fn assemble_mcp(
+    desired: SelectedEnvironment,
+    openai: IvyJson,
+    urls: std::collections::HashSet<String>,
+    host_id: &JsString,
+    hive_url: &JsString,
+    credential: &JsString,
+) -> IvyResult<PreparedMcp> {
     validate_output("openai.getConfiguration", &openai)?;
     let app_id = openai
         .get("configuration")
