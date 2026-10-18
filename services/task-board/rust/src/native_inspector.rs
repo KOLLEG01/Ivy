@@ -125,6 +125,28 @@ fn read_time(v: &Json) -> f64 {
         .unwrap_or(f64::NAN)
 }
 
+pub(crate) async fn management_read(
+    tools: &ToolClients,
+    node: &JsString,
+    name: &str,
+    args: Json,
+) -> IvyResult<Json> {
+    tools
+        .service_tools(
+            node.clone(),
+            &[InterfaceRequirement {
+                namespace: "agent".into(),
+                interface_version: "1.0.0".into(),
+            }],
+        )?
+        .read(
+            &format!("agent.{name}").into(),
+            args,
+            ToolCallOptions::default(),
+        )
+        .await
+}
+
 impl<S: InspectionStore> NativeInspector<'_, S> {
     pub(crate) async fn management(
         &self,
@@ -132,21 +154,7 @@ impl<S: InspectionStore> NativeInspector<'_, S> {
         name: &str,
         args: Json,
     ) -> IvyResult<Json> {
-        self.store
-            .tools()
-            .service_tools(
-                node.clone(),
-                &[InterfaceRequirement {
-                    namespace: "agent".into(),
-                    interface_version: "1.0.0".into(),
-                }],
-            )?
-            .read(
-                &format!("agent.{name}").into(),
-                args,
-                ToolCallOptions::default(),
-            )
-            .await
+        management_read(self.store.tools(), node, name, args).await
     }
     fn owner(&self, run: &Json) -> IvyResult<NativeOwnerIdentity> {
         let plan = run.required("plan")?;

@@ -8,6 +8,8 @@ use std::{path::Path, process::Command};
 mod inspector;
 #[path = "../fixtures/task-board-signals.rs"]
 mod signals;
+#[path = "../fixtures/task-board-native-comments.rs"]
+mod native_comments;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {

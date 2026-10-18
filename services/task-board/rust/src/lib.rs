@@ -3,6 +3,7 @@ pub mod evidence_bytes;
 pub mod read_evidence;
 pub mod native_inspector;
 pub mod native_signals;
+pub mod native_comments;
 pub mod local_blobs;
 pub mod local_gates;
 pub mod local_journal;
