@@ -206,6 +206,13 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
     } else {
         None
     };
+    let argv0 = if arguments.get(executable_index).is_some_and(|v| v == "--argv0") {
+        let value=arguments.get(executable_index+1).ok_or_else(||argument_error("Missing original argv0 value."))?;
+        let value=wide(value)?;
+        if value.contains(&34) { return Err(argument_error("Original executable name cannot contain quotes.")); }
+        executable_index+=2;
+        Some(value)
+    } else { None };
     let executable = arguments
         .get(executable_index)
         .ok_or_else(|| argument_error("Missing executable."))?;
@@ -237,12 +244,16 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
     })?;
 
     let mut command = Vec::new();
-    for argument in &arguments[executable_index..] {
+    for (index, argument) in arguments[executable_index..].iter().enumerate() {
         if !command.is_empty() {
             command.push(b' ' as u16);
         }
-        let raw = wide(argument)?;
-        command.extend(quote_argument(&raw[..raw.len() - 1]));
+        let raw = if index==0 { argv0.clone().map_or_else(||wide(argument),Ok)? } else { wide(argument)? };
+        if index==0 && argv0.is_some() {
+            // The Windows CRT parses argv[0] separately: quotes delimit it,
+            // while backslashes remain literal rather than escaping the close.
+            command.push(34);command.extend_from_slice(&raw[..raw.len()-1]);command.push(34);
+        } else { command.extend(quote_argument(&raw[..raw.len() - 1])); }
     }
     command.push(0);
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
