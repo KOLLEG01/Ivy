@@ -2,6 +2,18 @@
 //! from the instruction bundle; this module does not maintain a second policy.
 use crate::assignment_message::message_batch;
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::canonical};
+use std::path::Path;
+
+/// Load the shared JSON-string asset from the selected distribution. Preserve
+/// UTF-16 code units; invalid package data never falls back to a second policy.
+pub fn load_notification_policy(distribution_root: &Path) -> IvyResult<JsString> {
+    let text = std::fs::read_to_string(
+        distribution_root.join("instructions/secretary-notification-policy.json"),
+    )
+    .map_err(|_| IvyError::internal())?;
+    let value = ivy_contracts::json::parse(&text, usize::MAX).map_err(|_| IvyError::internal())?;
+    value.as_js_string().cloned().ok_or_else(IvyError::internal)
+}
 
 pub fn assignment_prompt(
     execution: &IvyJson,
