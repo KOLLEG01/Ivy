@@ -5,6 +5,7 @@ pub mod instructions;
 pub mod interactions;
 pub mod local_state;
 pub mod mcp_files;
+pub mod mcp_manager;
 pub mod mcp_output;
 pub mod mcp_prepare;
 pub mod mcp_render;

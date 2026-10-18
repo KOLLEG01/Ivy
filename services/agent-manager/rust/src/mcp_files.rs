@@ -23,7 +23,7 @@ fn conflict(message: &str) -> IvyError {
     IvyError::new("target_conflict", message)
 }
 
-fn regular_bytes(path: &Path) -> IvyResult<Option<Vec<u8>>> {
+pub(crate) fn regular_bytes(path: &Path) -> IvyResult<Option<Vec<u8>>> {
     let info = match fs::symlink_metadata(path) {
         Ok(info) => info,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -123,8 +123,10 @@ pub async fn apply_mcp(
     hive_url: &JsString,
     credential: &JsString,
 ) -> IvyResult<AppliedMcp> {
-    let home =
-        internal(tokio::task::spawn_blocking(move || internal(fs::canonicalize(home))).await)??;
+    let home = internal(
+        tokio::task::spawn_blocking(move || internal(ivy_host_runtime::paths::realpath(&home)))
+            .await,
+    )??;
     let prepared = prepare_mcp(connection, defaults, host_id, hive_url, credential).await?;
     let root = home.join(".ivy-agent-mcp");
     let check_root = root.clone();

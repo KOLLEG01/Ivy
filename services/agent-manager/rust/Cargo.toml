@@ -11,11 +11,11 @@ ivy-contracts.workspace = true
 ivy-store.workspace = true
 ivy-sdk.workspace = true
 ivy-host-runtime.workspace = true
+chrono.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
 sha2.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
