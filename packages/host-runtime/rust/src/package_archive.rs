@@ -2,7 +2,7 @@
 use crate::{IvyError, IvyJson, IvyResult, artifact, config, node_path, paths,
     portable_native_files::portable_native_files, process::{self, LaunchContext}};
 use ivy_contracts::{core_schema::validate_host, json};
-use std::{collections::{BTreeMap, BTreeSet}, fs, io::{self, Read, Write}, path::{Path, PathBuf}, sync::Arc, time::{Duration, Instant}};
+use std::{cell::Cell, collections::{BTreeMap, BTreeSet}, fs, io::{self, Read, Write}, path::{Path, PathBuf}, rc::Rc, sync::Arc, time::{Duration, Instant}};
 
 pub const MAXIMUM_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 const MAXIMUM_LIST_BYTES: usize = 8 * 1024 * 1024;
@@ -104,47 +104,43 @@ pub async fn create_package_archive(candidate: IvyJson, executables: BTreeMap<St
     }).await)?
 }
 
-#[derive(Debug)]
-struct ArchiveTooLarge;
-impl std::fmt::Display for ArchiveTooLarge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Package archive size is invalid.") }
+#[derive(Clone, Copy)]
+enum ArchiveLimit { Bytes, Deadline }
+// These objects stay on one blocking thread. Retain the first limit failure at
+// the operation boundary: compression/tar wrappers can discard custom I/O types.
+struct ArchiveBounds { deadline: Instant, failure: Cell<Option<ArchiveLimit>> }
+impl ArchiveBounds {
+    fn failed(&self, reason: ArchiveLimit) { if self.failure.get().is_none() { self.failure.set(Some(reason)); } }
+    fn check(&self) -> io::Result<()> {
+        if Instant::now() < self.deadline { Ok(()) }
+        else { self.failed(ArchiveLimit::Deadline); Err(io::Error::new(io::ErrorKind::TimedOut, "Package archive deadline")) }
+    }
 }
-impl std::error::Error for ArchiveTooLarge {}
-fn archive_io<T>(value: io::Result<T>) -> IvyResult<T> {
-    value.map_err(|error| {
-        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
-        while let Some(current) = cause {
-            if current.is::<ArchiveTooLarge>() { return IvyError::new("artifact_changed", "Package archive size is invalid."); }
-            // io::Error::source can skip its custom payload's outer type. Inspect
-            // get_ref so tar's contextual wrappers retain our bounded failures.
-            if let Some(error) = current.downcast_ref::<io::Error>() {
-                if error.kind() == io::ErrorKind::TimedOut {
-                    return IvyError::new("deadline_exceeded", "Package archive exceeded its finite deadline.").with_outcome(crate::Outcome::Unknown);
-                }
-                cause = error.get_ref().map(|inner| inner as &(dyn std::error::Error + 'static));
-            } else { cause = current.source(); }
-        }
-        IvyError::internal()
-    })
-}
-fn check_deadline(deadline: Instant) -> io::Result<()> {
-    if Instant::now() < deadline { Ok(()) } else { Err(io::Error::new(io::ErrorKind::TimedOut, "Package archive deadline")) }
-}
-struct ArchiveWriter { file: fs::File, bytes: u64, deadline: Instant }
+struct ArchiveWriter { file: fs::File, bytes: u64, bounds: Rc<ArchiveBounds> }
 impl Write for ArchiveWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        check_deadline(self.deadline)?;
-        if bytes.len() as u64 > MAXIMUM_ARCHIVE_BYTES - self.bytes { return Err(io::Error::other(ArchiveTooLarge)); }
+        self.bounds.check()?;
+        if bytes.len() as u64 > MAXIMUM_ARCHIVE_BYTES - self.bytes {
+            self.bounds.failed(ArchiveLimit::Bytes); return Err(io::Error::other("Package archive size is invalid."));
+        }
         let count = self.file.write(bytes)?; self.bytes += count as u64; Ok(count)
     }
-    fn flush(&mut self) -> io::Result<()> { check_deadline(self.deadline)?; self.file.flush() }
+    fn flush(&mut self) -> io::Result<()> { self.bounds.check()?; self.file.flush() }
 }
-struct ArchiveReader { file: fs::File, deadline: Instant }
+struct ArchiveReader { file: fs::File, bounds: Rc<ArchiveBounds> }
 impl Read for ArchiveReader {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> { check_deadline(self.deadline)?; self.file.read(bytes) }
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> { self.bounds.check()?; self.file.read(bytes) }
 }
 fn native_archive(artifact_root: PathBuf, linux_executables: Vec<PathBuf>) -> IvyResult<PathBuf> {
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let bounds = Rc::new(ArchiveBounds { deadline: Instant::now() + Duration::from_secs(180), failure: Cell::new(None) });
+    let result = native_archive_inner(artifact_root, linux_executables, bounds.clone());
+    match bounds.failure.get() {
+        Some(ArchiveLimit::Bytes) => Err(IvyError::new("artifact_changed", "Package archive size is invalid.")),
+        Some(ArchiveLimit::Deadline) => Err(IvyError::new("deadline_exceeded", "Package archive exceeded its finite deadline.").with_outcome(crate::Outcome::Unknown)),
+        None => result,
+    }
+}
+fn native_archive_inner(artifact_root: PathBuf, linux_executables: Vec<PathBuf>, bounds: Rc<ArchiveBounds>) -> IvyResult<PathBuf> {
     let actual_root = internal(paths::realpath(&artifact_root))?;
     let package_root = artifact_root.parent().ok_or_else(IvyError::internal)?;
     let mut selected = BTreeSet::new();
@@ -168,7 +164,7 @@ fn native_archive(artifact_root: PathBuf, linux_executables: Vec<PathBuf>) -> Iv
     require(metadata.is_file() && !metadata.file_type().is_symlink(), "artifact_changed", "Package manifest is not a regular file.")?;
     entries.push((manifest, PathBuf::from("component.json"), false));
     while let Some((directory, local)) = directories.pop() {
-        archive_io(check_deadline(deadline))?;
+        internal(bounds.check())?;
         let metadata = internal(fs::symlink_metadata(&directory))?;
         require(metadata.is_dir() && !metadata.file_type().is_symlink(), "artifact_changed", "Native package accepts contained files and directories only.")?;
         entries.push((directory.clone(), local.clone(), true));
@@ -189,11 +185,11 @@ fn native_archive(artifact_root: PathBuf, linux_executables: Vec<PathBuf>) -> Iv
         Ok(metadata) => require(metadata.is_file() && !metadata.file_type().is_symlink(), "artifact_changed", "Package archive must be a regular file.")?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}, Err(_) => return Err(IvyError::internal()),
     }
-    let output = ArchiveWriter { file: internal(fs::File::create(&destination))?, bytes: 0, deadline };
+    let output = ArchiveWriter { file: internal(fs::File::create(&destination))?, bytes: 0, bounds: bounds.clone() };
     let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(output, flate2::Compression::default()));
     builder.follow_symlinks(false);
     for (source, name, directory) in entries {
-        archive_io(check_deadline(deadline))?;
+        internal(bounds.check())?;
         let metadata = internal(fs::symlink_metadata(&source))?;
         require(!metadata.file_type().is_symlink() && metadata.is_dir() == directory && (directory || metadata.is_file())
             && (name == Path::new("component.json") || internal(paths::inside(&actual_root, &internal(paths::realpath(&source))?))?),
@@ -206,17 +202,17 @@ fn native_archive(artifact_root: PathBuf, linux_executables: Vec<PathBuf>) -> Iv
         if !utf8_name.is_ascii() {
             // PAX path is explicitly UTF-8; raw GNU names are locale-dependent
             // in the unchanged Windows receiver. The standard library writes it.
-            archive_io(builder.append_pax_extensions([("path", utf8_name.as_bytes())]))?;
+            internal(builder.append_pax_extensions([("path", utf8_name.as_bytes())]))?;
         }
-        if directory { header.set_size(0); archive_io(builder.append_data(&mut header, &name, io::empty()))?; }
+        if directory { header.set_size(0); internal(builder.append_data(&mut header, &name, io::empty()))?; }
         else {
             let file = internal(fs::File::open(&source))?;
             require(internal(file.metadata())?.len() == metadata.len(), "artifact_changed", "Native package file changed during archive creation.")?;
-            archive_io(builder.append_data(&mut header, &name, ArchiveReader { file, deadline }))?;
+            internal(builder.append_data(&mut header, &name, ArchiveReader { file, bounds: bounds.clone() }))?;
         }
     }
-    let output = archive_io(builder.into_inner())?;
-    archive_io(output.finish())?;
+    let output = internal(builder.into_inner())?;
+    internal(output.finish())?;
     Ok(destination)
 }
 
