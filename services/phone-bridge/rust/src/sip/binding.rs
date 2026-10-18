@@ -51,6 +51,8 @@ fn live(connection: &SipConnection) -> bool {
         .cancel_token()
         .is_none_or(|token| !token.is_cancelled())
 }
+// Zero linger preserves the original abortive close, without a positive wait.
+#[allow(deprecated)]
 fn tcp_socket(address: SocketAddr) -> Result<TcpSocket, BindError> {
     let socket = if address.is_ipv4() {
         TcpSocket::new_v4()

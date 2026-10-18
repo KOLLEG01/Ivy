@@ -761,7 +761,7 @@ impl CallActor {
                 .reply(if status == 200 {
                     StatusCode::OK
                 } else {
-                    StatusCode::InternalServerError
+                    StatusCode::from(500)
                 })
                 .await
                 .is_ok()
