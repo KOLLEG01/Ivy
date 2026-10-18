@@ -5,6 +5,7 @@ pub mod main_context;
 pub mod native_driver;
 pub mod native_plan;
 pub mod operations;
+pub mod outbox;
 pub mod queries;
 pub mod queue;
 pub mod registry;
