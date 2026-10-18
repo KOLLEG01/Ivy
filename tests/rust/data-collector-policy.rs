@@ -4,6 +4,9 @@ use ivy_contracts::{
 };
 use ivy_data_collector::{model, policy};
 
+#[path = "data-collector-schema.inc.rs"]
+mod schema;
+
 fn json(text: &str) -> IvyJson {
     parse(text, usize::MAX).unwrap()
 }

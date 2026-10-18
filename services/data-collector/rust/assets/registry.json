@@ -1,0 +1,1388 @@
+{
+  "mcpPrefix": "data_collector",
+  "discoveryHint": "DataCollector runs isolated Node scripts on intervals or configured HTTP inputs and stores versioned results in Hive.",
+  "namespaces": [
+    {
+      "namespace": "data-collector",
+      "description": "Script tasks and versioned collection results",
+      "guideMarkdown": "Hive owns versioned scripts and execution definitions. save creates a draft (expectedRevision is the definition revision, 0 for creation); activate selects an exact definitionRevision, target serviceNodeId and enabled state with the current assignment revision. Read definitions, definition, definitionHistory or script for central state. tasks/task expose draft and desired/adopted revisions for this instance. enable activates the latest draft; disable stops the assigned instance; run uses the adopted cache. import explicitly adopts existing local definitions without altering their schedules/state/results. recover requires verified stopped old workers after cache loss. Instantiation on another host requires the old disabled assignment's quiescence acknowledgement. Retain operationId and read operation after lost replies. Existing accepted jobs continue from durable local caches while Hive is unavailable; outputs/events queue locally in order. Secrets remain assigned by name, never include values in scripts/config/history. Dependencies use exact versions. Results and their retention are separate. After outcome_unknown verify workers and disable with confirmedStoppedRunId; never blindly replay external writes.",
+      "tools": [
+        {
+          "namespace": "data-collector",
+          "name": "read",
+          "interfaceVersion": "1.0.0",
+          "description": "Read collector tasks, results, history or an original operation.",
+          "discovery": {
+            "mcp": {
+              "name": "data_collector_read",
+              "surface": "ivy"
+            },
+            "keywords": [
+              "collection",
+              "scripts"
+            ]
+          },
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "tasks"
+                      }
+                    },
+                    "required": [
+                      "view"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "task"
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                      }
+                    },
+                    "required": [
+                      "view",
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "result"
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                      },
+                      "revision": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "view",
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "history"
+                      },
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                      },
+                      "cursor": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "view",
+                      "id"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "operation"
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "view",
+                      "operationId"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "definitions"
+                      }
+                    },
+                    "required": [
+                      "view"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "definition"
+                      },
+                      "jobId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "revision": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "view",
+                      "jobId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "definitionHistory"
+                      },
+                      "jobId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "cursor": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "view",
+                      "jobId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "script"
+                      },
+                      "objectId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "revision": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "view",
+                      "objectId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "view": {
+                        "type": "string",
+                        "const": "handoff"
+                      },
+                      "jobId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "expectedRevision": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "view",
+                      "jobId",
+                      "expectedRevision"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            ]
+          },
+          "outputSchema": {},
+          "annotations": {
+            "readOnlyHint": true,
+            "idempotentHint": true
+          }
+        },
+        {
+          "namespace": "data-collector",
+          "name": "update",
+          "interfaceVersion": "1.0.0",
+          "description": "Save, enable, disable, delete or run a script task.",
+          "discovery": {
+            "mcp": {
+              "name": "data_collector_update",
+              "surface": "ivy"
+            },
+            "keywords": [
+              "collection",
+              "scripts"
+            ]
+          },
+          "inputSchema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "const": "save"
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "expectedRevision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "task": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "intervalSeconds": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 31536000
+                          },
+                          "timeoutSeconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 3600
+                          },
+                          "memoryMb": {
+                            "type": "integer",
+                            "minimum": 32,
+                            "maximum": 2048
+                          },
+                          "script": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 262144
+                          },
+                          "dependencies": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string",
+                              "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9.-]+)?$"
+                            }
+                          },
+                          "config": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "$ref": "#/$defs/__schema0"
+                            }
+                          },
+                          "secretNames": {
+                            "maxItems": 50,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                            }
+                          },
+                          "mcp": {
+                            "type": "object",
+                            "properties": {
+                              "serviceNodeId": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "cwd": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 4096
+                              },
+                              "server": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 256
+                              },
+                              "tools": {
+                                "minItems": 1,
+                                "maxItems": 100,
+                                "type": "array",
+                                "items": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256
+                                }
+                              }
+                            },
+                            "required": [
+                              "serviceNodeId",
+                              "cwd",
+                              "server",
+                              "tools"
+                            ],
+                            "additionalProperties": false
+                          },
+                          "inputSecretName": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "allowUnauthenticatedInput": {
+                            "type": "boolean"
+                          },
+                          "retention": {
+                            "type": "object",
+                            "properties": {
+                              "maximumCount": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000000
+                              },
+                              "maximumAgeDays": {
+                                "type": "number",
+                                "exclusiveMinimum": 0,
+                                "maximum": 36500
+                              },
+                              "maximumBytes": {
+                                "type": "integer",
+                                "exclusiveMinimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "maximumCount",
+                              "maximumAgeDays",
+                              "maximumBytes"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "enabled",
+                          "intervalSeconds",
+                          "timeoutSeconds",
+                          "memoryMb",
+                          "script",
+                          "dependencies",
+                          "config",
+                          "secretNames",
+                          "retention"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "jobId": {
+                        "type": "string"
+                      },
+                      "scriptRef": {
+                        "type": "object",
+                        "properties": {
+                          "objectId": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "objectId",
+                          "revision"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "operationId",
+                      "expectedRevision",
+                      "task"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "const": "saveScript"
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "objectId": {
+                        "type": "string"
+                      },
+                      "expectedRevision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "script": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 262144
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "operationId",
+                      "expectedRevision",
+                      "script"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "const": "activate"
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "jobId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "definitionRevision": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "expectedRevision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "serviceNodeId": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "operationId",
+                      "jobId",
+                      "definitionRevision",
+                      "expectedRevision",
+                      "enabled"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "const": "recover"
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "jobId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "expectedRevision": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "confirmedStopped": {
+                        "type": "boolean",
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "operationId",
+                      "jobId",
+                      "expectedRevision",
+                      "confirmedStopped"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "const": "import"
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "operationId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "const": "freezeHandoff"
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "jobId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "expectedRevision": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "operationId",
+                      "jobId",
+                      "expectedRevision"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string",
+                        "const": "prepareHandoff"
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "jobId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "expectedRevision": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "operationId",
+                      "jobId",
+                      "expectedRevision"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "enable",
+                      "delete"
+                    ]
+                  },
+                  "operationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                  },
+                  "expectedRevision": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "action",
+                  "operationId",
+                  "id",
+                  "expectedRevision"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "disable"
+                  },
+                  "operationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                  },
+                  "expectedRevision": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "confirmedStoppedRunId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  }
+                },
+                "required": [
+                  "action",
+                  "operationId",
+                  "id",
+                  "expectedRevision"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "const": "run"
+                  },
+                  "operationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+                  },
+                  "input": {
+                    "$ref": "#/$defs/__schema1"
+                  }
+                },
+                "required": [
+                  "action",
+                  "operationId",
+                  "id"
+                ],
+                "additionalProperties": false
+              }
+            ],
+            "$defs": {
+              "__schema0": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/__schema0"
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": {
+                      "$ref": "#/$defs/__schema0"
+                    }
+                  }
+                ]
+              },
+              "__schema1": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/__schema1"
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": {
+                      "$ref": "#/$defs/__schema1"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "outputSchema": {},
+          "annotations": {
+            "readOnlyHint": false,
+            "idempotentHint": true
+          }
+        }
+      ],
+      "topics": [
+        {
+          "topic": "data-collector.event",
+          "version": "1.0.0",
+          "title": "Collected event",
+          "description": "A collected script event, such as camera motion.",
+          "payloadSchema": {
+            "type": "object"
+          },
+          "eventKinds": [
+            {
+              "kind": "collected",
+              "title": "Collected event",
+              "description": "An event emitted by a task."
+            }
+          ]
+        }
+      ],
+      "inventoryKinds": []
+    }
+  ],
+  "contracts": [
+    {
+      "key": "data-collector/root",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "data-collector"
+      },
+      "mediaType": "application/json",
+      "retention": {
+        "objects": {
+          "mode": "retain"
+        },
+        "revisions": {
+          "mode": "current"
+        }
+      },
+      "jsonSchema": {
+        "type": "object"
+      },
+      "specMarkdown": "Stable DataCollector result root."
+    },
+    {
+      "key": "data-collector/result",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "data-collector"
+      },
+      "mediaType": "application/json",
+      "retention": {
+        "objects": {
+          "mode": "retain"
+        },
+        "revisions": {
+          "mode": "all"
+        }
+      },
+      "jsonSchema": {
+        "type": "object"
+      },
+      "specMarkdown": "Successful script output; current revision is the latest result. Retention is applied by the owning collector."
+    },
+    {
+      "key": "data-collector/catalog",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "data-collector"
+      },
+      "mediaType": "application/json",
+      "retention": {
+        "objects": {
+          "mode": "retain"
+        },
+        "revisions": {
+          "mode": "all"
+        }
+      },
+      "jsonSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "number",
+            "const": 1
+          }
+        },
+        "required": [
+          "schemaVersion"
+        ],
+        "additionalProperties": false
+      },
+      "specMarkdown": "Versioned collector control data. Changes are validated and activated through data-collector.update; never execute an unactivated draft."
+    },
+    {
+      "key": "data-collector/script",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "data-collector"
+      },
+      "mediaType": "application/json",
+      "retention": {
+        "objects": {
+          "mode": "retain"
+        },
+        "revisions": {
+          "mode": "all"
+        }
+      },
+      "jsonSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "number",
+            "const": 1
+          },
+          "script": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 262144
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "script"
+        ],
+        "additionalProperties": false
+      },
+      "specMarkdown": "Versioned collector control data. Changes are validated and activated through data-collector.update; never execute an unactivated draft."
+    },
+    {
+      "key": "data-collector/definition",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "data-collector"
+      },
+      "mediaType": "application/json",
+      "retention": {
+        "objects": {
+          "mode": "retain"
+        },
+        "revisions": {
+          "mode": "all"
+        }
+      },
+      "jsonSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "number",
+            "const": 1
+          },
+          "homeServiceNodeId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "intervalSeconds": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 31536000
+              },
+              "timeoutSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "memoryMb": {
+                "type": "integer",
+                "minimum": 32,
+                "maximum": 2048
+              },
+              "dependencies": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[a-zA-Z0-9.-]+)?$"
+                }
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/__schema0"
+                }
+              },
+              "secretNames": {
+                "maxItems": 50,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                }
+              },
+              "mcp": {
+                "type": "object",
+                "properties": {
+                  "serviceNodeId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "cwd": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "server": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "tools": {
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    }
+                  }
+                },
+                "required": [
+                  "serviceNodeId",
+                  "cwd",
+                  "server",
+                  "tools"
+                ],
+                "additionalProperties": false
+              },
+              "inputSecretName": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "allowUnauthenticatedInput": {
+                "type": "boolean"
+              },
+              "retention": {
+                "type": "object",
+                "properties": {
+                  "maximumCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000000
+                  },
+                  "maximumAgeDays": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 36500
+                  },
+                  "maximumBytes": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "maximumCount",
+                  "maximumAgeDays",
+                  "maximumBytes"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "intervalSeconds",
+              "timeoutSeconds",
+              "memoryMb",
+              "dependencies",
+              "config",
+              "secretNames",
+              "retention"
+            ],
+            "additionalProperties": false
+          },
+          "script": {
+            "type": "object",
+            "properties": {
+              "objectId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "revision": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "objectId",
+              "revision"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "homeServiceNodeId",
+          "task",
+          "script"
+        ],
+        "additionalProperties": false,
+        "$defs": {
+          "__schema0": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/__schema0"
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/$defs/__schema0"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "specMarkdown": "Versioned collector control data. Changes are validated and activated through data-collector.update; never execute an unactivated draft."
+    },
+    {
+      "key": "data-collector/assignment",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "data-collector"
+      },
+      "mediaType": "application/json",
+      "retention": {
+        "objects": {
+          "mode": "retain"
+        },
+        "revisions": {
+          "mode": "all"
+        }
+      },
+      "jsonSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "number",
+            "const": 1
+          },
+          "jobId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "definitionRevision": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "serviceNodeId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "deleted": {
+            "default": false,
+            "type": "boolean"
+          },
+          "rootObjectId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "resultObjectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "jobId",
+          "definitionRevision",
+          "serviceNodeId",
+          "enabled",
+          "deleted",
+          "rootObjectId",
+          "resultObjectId"
+        ],
+        "additionalProperties": false
+      },
+      "specMarkdown": "Versioned collector control data. Changes are validated and activated through data-collector.update; never execute an unactivated draft."
+    },
+    {
+      "key": "data-collector/observation",
+      "version": "1.0.0",
+      "owner": {
+        "kind": "service",
+        "serviceName": "data-collector"
+      },
+      "mediaType": "application/json",
+      "retention": {
+        "objects": {
+          "mode": "retain"
+        },
+        "revisions": {
+          "mode": "current"
+        }
+      },
+      "jsonSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "schemaVersion": {
+            "type": "number",
+            "const": 1
+          },
+          "jobId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "serviceNodeId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "assignmentRevision": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "definitionRevision": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "accepted": {
+            "type": "boolean"
+          },
+          "everAccepted": {
+            "type": "boolean"
+          },
+          "quiesced": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "jobId",
+          "serviceNodeId",
+          "assignmentRevision",
+          "definitionRevision",
+          "accepted",
+          "everAccepted",
+          "quiesced",
+          "error",
+          "observedAt"
+        ],
+        "additionalProperties": false
+      },
+      "specMarkdown": "Last reported adoption and worker quiescence; timestamps may be stale."
+    }
+  ],
+  "requiredContracts": [
+    {
+      "key": "data-collector/root",
+      "readVersions": [
+        "1.0.0"
+      ],
+      "writeVersions": [
+        "1.0.0"
+      ]
+    },
+    {
+      "key": "data-collector/result",
+      "readVersions": [
+        "1.0.0"
+      ],
+      "writeVersions": [
+        "1.0.0"
+      ]
+    },
+    {
+      "key": "data-collector/catalog",
+      "readVersions": [
+        "1.0.0"
+      ],
+      "writeVersions": [
+        "1.0.0"
+      ]
+    },
+    {
+      "key": "data-collector/script",
+      "readVersions": [
+        "1.0.0"
+      ],
+      "writeVersions": [
+        "1.0.0"
+      ]
+    },
+    {
+      "key": "data-collector/definition",
+      "readVersions": [
+        "1.0.0"
+      ],
+      "writeVersions": [
+        "1.0.0"
+      ]
+    },
+    {
+      "key": "data-collector/assignment",
+      "readVersions": [
+        "1.0.0"
+      ],
+      "writeVersions": [
+        "1.0.0"
+      ]
+    },
+    {
+      "key": "data-collector/observation",
+      "readVersions": [
+        "1.0.0"
+      ],
+      "writeVersions": [
+        "1.0.0"
+      ]
+    }
+  ]
+}
