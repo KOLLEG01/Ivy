@@ -424,7 +424,7 @@ impl ServiceConnection {
         if self
             .0
             .buffered
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 n.checked_add(size)
                     .filter(|n| *n <= MANAGEMENT_SOCKET_BUFFER_BYTES)
             })
