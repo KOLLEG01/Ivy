@@ -6,6 +6,8 @@ use std::{path::Path, process::Command};
 
 #[path = "../fixtures/task-board-inspector.rs"]
 mod inspector;
+#[path = "../fixtures/task-board-signals.rs"]
+mod signals;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {

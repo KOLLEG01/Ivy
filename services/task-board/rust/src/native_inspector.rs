@@ -126,7 +126,12 @@ fn read_time(v: &Json) -> f64 {
 }
 
 impl<S: InspectionStore> NativeInspector<'_, S> {
-    async fn management(&self, node: &JsString, name: &str, args: Json) -> IvyResult<Json> {
+    pub(crate) async fn management(
+        &self,
+        node: &JsString,
+        name: &str,
+        args: Json,
+    ) -> IvyResult<Json> {
         self.store
             .tools()
             .service_tools(
