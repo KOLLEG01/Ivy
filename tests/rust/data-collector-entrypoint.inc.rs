@@ -101,6 +101,22 @@ async fn launch_bounded(
     environment_config: bool,
     timeout_ms: u64,
 ) -> OwnedProcess {
+    launch_configuration(
+        fixture,
+        health,
+        environment_config,
+        timeout_ms,
+        &fixture.root.join("config.json"),
+    )
+    .await
+}
+async fn launch_configuration(
+    fixture: &Fixture,
+    health: bool,
+    environment_config: bool,
+    timeout_ms: u64,
+    configuration: &std::path::Path,
+) -> OwnedProcess {
     let entry = if health {
         "packages/host-runtime/src/health.js"
     } else {
@@ -111,7 +127,7 @@ async fn launch_bounded(
         args.extend(["--exact", DRIVER, "--nocapture", "--"].map(OsString::from));
     }
     if !environment_config {
-        args.extend(["--config".into(), fixture.root.join("config.json").into()]);
+        args.extend(["--config".into(), configuration.into()]);
     }
     let environment = BTreeMap::from([
         ("IVY_TEST_COLLECTOR_ENTRYPOINT".into(), "1".into()),
@@ -122,14 +138,11 @@ async fn launch_bounded(
         ),
         (
             "IVY_INSTANCE_CONFIG".into(),
-            fixture
-                .root
-                .join(if environment_config {
-                    "config.json"
-                } else {
-                    "unused.json"
-                })
-                .into(),
+            if environment_config {
+                configuration.into()
+            } else {
+                fixture.root.join("unused.json").into()
+            },
         ),
     ]);
     process::spawn(
@@ -156,7 +169,14 @@ async fn complete(process: &OwnedProcess) -> Arc<process::ProcessResult> {
         .unwrap()
 }
 async fn health(fixture: &Fixture, ok: bool) -> IvyJson {
-    let child = launch(fixture, true, false).await;
+    health_configuration(fixture, &fixture.root.join("config.json"), ok).await
+}
+async fn health_configuration(
+    fixture: &Fixture,
+    configuration: &std::path::Path,
+    ok: bool,
+) -> IvyJson {
+    let child = launch_configuration(fixture, true, false, 30_000, configuration).await;
     let result = complete(&child).await;
     assert_eq!(result.exit_code, Some(if ok { 0 } else { 1 }), "{result:?}");
     assert_eq!(result.error_code, None, "{result:?}");
@@ -312,16 +332,23 @@ async fn native_dispatcher_composes_process_entry_health_control_and_workload_he
                         .unwrap();
                     let mut stale = value.clone();
                     stale.insert("observedAt", "2020-01-01T00:00:00.000Z".into());
-                    atomic_json(fixture.root.join("data/health.json"), stale)
+                    // The running owner's heartbeat may replace its file while
+                    // the checker starts. Validate an inactive copied snapshot.
+                    let stale_root = fixture.root.join("stale-data");
+                    let mut stale_config = config.clone();
+                    stale_config
+                        .insert("dataRoot", stale_root.to_string_lossy().to_string().into());
+                    atomic_json(stale_root.join("health.json"), stale)
                         .await
                         .unwrap();
+                    let stale_path = fixture.root.join("stale-health-config.json");
+                    atomic_json(&stale_path, stale_config).await.unwrap();
                     assert_eq!(
-                        health(&fixture, false).await.get("code"),
+                        health_configuration(&fixture, &stale_path, false)
+                            .await
+                            .get("code"),
                         Some(&"service_not_ready".into())
                     );
-                    atomic_json(fixture.root.join("data/health.json"), value.clone())
-                        .await
-                        .unwrap();
                     health(&fixture, true).await;
                 }
                 fixture.control(&value, false).await;

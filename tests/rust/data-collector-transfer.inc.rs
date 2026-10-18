@@ -283,7 +283,13 @@ async fn scenario(original: bool) -> IvyJson {
         .clone();
     assert_ne!(source_root, target_root);
 
-    let task = parse(r#"{"id":"transfer","name":"Transfer","enabled":false,"intervalSeconds":3600,"timeoutSeconds":10,"memoryMb":64,"dependencies":{},"config":{},"secretNames":[],"script":"import {appendFileSync} from 'node:fs'; export default async ({state,input,signal})=>{if(input?.hold){appendFileSync('marker',JSON.stringify({hold:true})+'\\n');await new Promise(resolve=>signal.addEventListener('abort',resolve,{once:true}));}const cursor=(state?.cursor??0)+1;appendFileSync('marker',JSON.stringify({cursor})+'\\n');return {data:{cursor,previous:state?.cursor??null},state:{cursor}};}"}"#, usize::MAX).unwrap();
+    let mut task = parse(r#"{"id":"transfer","name":"Transfer","enabled":false,"intervalSeconds":3600,"timeoutSeconds":10,"memoryMb":64,"dependencies":{},"config":{},"secretNames":[],"script":"import {appendFileSync} from 'node:fs'; export default async ({state,input,signal})=>{if(input?.hold){appendFileSync('marker',JSON.stringify({hold:true})+'\\n');await new Promise(resolve=>signal.addEventListener('abort',resolve,{once:true}));}const cursor=(state?.cursor??0)+1;appendFileSync('marker',JSON.stringify({cursor})+'\\n');return {data:{cursor,previous:state?.cursor??null},state:{cursor}};}"}"#, usize::MAX).unwrap();
+    let settings = schema::parse_schema(
+        "settingsSchema",
+        source.config.required("settings").unwrap(),
+    )
+    .unwrap();
+    task.insert("retention", settings.required("retention").unwrap().clone());
     let saved = invoke(
         &client,
         SOURCE,
