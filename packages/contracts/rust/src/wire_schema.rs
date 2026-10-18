@@ -15,7 +15,7 @@ pub fn bundle() -> IvyResult<&'static SchemaBundle> {
 pub fn matches_shared(name: &str, value: &IvyJson) -> IvyResult<bool> {
     bundle()?
         .matches_named(WIRE_ID, name, value)?
-        .ok_or_else(IvyError::internal)
+        .ok_or_else(|| IvyError::new("internal_error", "Unknown shared contract."))
 }
 pub fn validate_shared(name: &str, value: &IvyJson) -> IvyResult<()> {
     if matches_shared(name, value)? {
