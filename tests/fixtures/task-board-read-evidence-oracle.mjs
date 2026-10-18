@@ -23,7 +23,7 @@ const mutationSource=readFileSync(new URL('../../services/task-board/src/runtime
   .match(/export const mutation = [\s\S]*?;/)[0].replace('export ','');
 const mutation=new Function('hashJson',stripTypeScriptTypes(mutationSource)+'\nreturn mutation;')(hashJson);
 const Evidence=new Function('canonical','digest','hashJson','requireThat','validateNativeRead','validateTaskBoard','catalogFor',
-  'evidenceMaximumBytes','saveEvidenceChunks','readEvidenceChunks','mutation',stripTypeScriptTypes(load('read-evidence'))+'\nreturn TaskBoardReadEvidence;')
+  'evidenceMaximumBytes','saveEvidenceChunks','readEvidenceChunks','mutation',stripTypeScriptTypes(load('read-evidence'),{mode:'transform'})+'\nreturn TaskBoardReadEvidence;')
   (canonical,digest,hashJson,requireThat,validateNativeRead,validateTaskBoard,catalogFor,evidenceMaximumBytes,saveEvidenceChunks,readEvidenceChunks,mutation);
 const parentId='00000000-0000-4000-8000-000000000800',pin={objectId:parentId,revision:1};
 const source=catalogFor('0.159.2'),time='2026-01-02T03:04:05.006Z';
