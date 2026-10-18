@@ -121,7 +121,7 @@ try {
   journal.advance(record.deploymentId,record.phase,'failed',{errorCode:'fixture_terminal_failure'});
   const terminal = await call('deploy',deploy);
   assert.equal(terminal.deploymentId,record.deploymentId);assert.equal(terminal.phase,'failed');
-  await assert.rejects(call('deploy',{...deploy,candidateId:undefined,source:join(root,'missing-source')}),e=>e.code==='mutation_conflict');
+  await assert.rejects(call('deploy',{instanceId:'fixture',operationId:deploy.operationId,source:join(root,'missing-source')}),e=>e.code==='mutation_conflict');
   results.push('routed operation binding and terminal replay');
   for (const action of ['rollback','restart','enable','disable']) {
     const args = {instanceId:'fixture',operationId:'native-'+action,...(action==='rollback'?{targetBuild:candidateId}:{})};

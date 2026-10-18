@@ -205,6 +205,9 @@ fn native_executable_interoperates_with_unchanged_hive_and_public_sdk() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    if let Some(path) = std::env::var_os("IVY_MANAGER_INTEGRATION_TRACE") {
+        std::fs::write(path, &output.stdout).unwrap();
+    }
     let result = parse(
         std::str::from_utf8(&output.stdout).unwrap().trim(),
         MANAGEMENT_FRAME_BYTES,
