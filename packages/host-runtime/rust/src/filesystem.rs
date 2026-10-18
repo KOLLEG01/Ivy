@@ -107,22 +107,34 @@ pub fn node_error_code(error: &std::io::Error) -> Option<&'static str> {
     }
 }
 #[cfg(windows)]
-fn remove_windows(path:&Path)->std::io::Result<()>{
+fn remove_windows(path:&Path,force:bool)->std::io::Result<()>{
     let metadata=match fs::symlink_metadata(path){Ok(value)=>value,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(e)=>return Err(e)};
     if metadata.is_dir()&&!metadata.file_type().is_symlink(){
-        for entry in fs::read_dir(path)?{remove_windows(&entry?.path())?;}fs::remove_dir(path)
+        for entry in fs::read_dir(path)?{remove_windows(&entry?.path(),force)?;}
+        if force && metadata.permissions().readonly(){let mut permissions=metadata.permissions();permissions.set_readonly(false);fs::set_permissions(path,permissions)?;}
+        fs::remove_dir(path)
     }else{
         use std::os::windows::fs::MetadataExt;
         if metadata.file_type().is_symlink()&&metadata.file_attributes()&0x10!=0{return fs::remove_dir(path)}
         match fs::remove_file(path){Err(e) if e.kind()==std::io::ErrorKind::PermissionDenied=>{let mut permissions=metadata.permissions();permissions.set_readonly(false);fs::set_permissions(path,permissions)?;fs::remove_file(path)},result=>result}
     }
 }
-pub(crate) async fn remove_payload(path:PathBuf,directory:bool,retries:u64)->IvyResult<()>{
+/// Node rm(path,{recursive:true,force:true}) with its default zero retries.
+/// Missing entries are accepted before and during removal; links are removed
+/// themselves. Keep an admitted removal alive if its caller stops waiting.
+pub async fn remove_force(path:impl Into<PathBuf>)->IvyResult<()>{remove(path.into(),None,0,true).await}
+pub(crate) async fn remove_payload(path:PathBuf,directory:bool,retries:u64)->IvyResult<()>{remove(path,Some(directory),retries,false).await}
+async fn remove(path:PathBuf,directory:Option<bool>,retries:u64,force:bool)->IvyResult<()>{
     blocking(move||{
-        let path=fs_path(&path);internal(fs::symlink_metadata(&path))?;
+        let path=fs_path(&path);
+        let metadata=match fs::symlink_metadata(&path){Ok(metadata)=>metadata,Err(error) if force&&error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(_)=>return Err(IvyError::internal())};
+        let directory=directory.unwrap_or_else(||{
+            #[cfg(windows)]{use std::os::windows::fs::MetadataExt;metadata.file_attributes()&0x10!=0}
+            #[cfg(not(windows))]{metadata.is_dir()}
+        });
         for attempt in 0..=retries {
             let result=if directory{fs::remove_dir_all(&path)}else{fs::remove_file(&path)};
-            #[cfg(windows)] let result=match result{Err(e) if directory&&e.kind()==std::io::ErrorKind::PermissionDenied=>remove_windows(&path),result=>result};
+            #[cfg(windows)] let result=match result{Err(e) if (directory||force)&&e.kind()==std::io::ErrorKind::PermissionDenied=>remove_windows(&path,force),result=>result};
             match result{
                 Ok(())=>return Ok(()),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
                 Err(e) if attempt<retries&&retry_remove(&e)=>std::thread::sleep(std::time::Duration::from_millis((attempt+1)*100)),
