@@ -134,6 +134,8 @@ export const rustTests = {
   'tests/rust/native-catalog-path.rs': { package: 'ivy-contracts', test: 'native-catalog-path' },
   'tests/rust/json-coercion.rs': { package: 'ivy-contracts', test: 'json-coercion' },
   'tests/rust/cli-publish-ui.rs': { package: 'ivy-cli', test: 'cli-publish-ui' },
+  'tests/rust/cli-arguments.rs': { package: 'ivy-cli', test: 'cli-arguments' },
+  'tests/rust/number-string.rs': { package: 'ivy-contracts', test: 'number-string' },
   'tests/rust/builtin_schema.rs': { package: 'ivy-contracts', test: 'builtin_schema' },
   'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
   'tests/rust/sdk.rs': { package: 'ivy-sdk', test: 'sdk' },
