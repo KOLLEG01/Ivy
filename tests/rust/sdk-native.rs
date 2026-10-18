@@ -55,6 +55,66 @@ fn checked(result: IvyResult<()>) -> IvyJson {
         Err(error) => failure(error),
     }
 }
+
+#[test]
+fn retained_plan_identity_matches_original_catalog_and_error_order() {
+    use ivy_contracts::native_contract::NativeContract;
+    use ivy_sdk::native_plan::validate_native_plan_identity;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/native-plan-identity-oracle.mjs",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let mut count = 0;
+    for row in rows {
+        let source = std::fs::read_to_string(root.join(row["path"].as_str().unwrap())).unwrap();
+        let mut catalog = parse(&source, usize::MAX).unwrap();
+        if let Some(removed) = row["removedMethod"].as_str() {
+            let methods = catalog
+                .required("clientRequests")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|method| method.get("method") != Some(&IvyJson::from(removed)))
+                .cloned()
+                .collect();
+            catalog.insert("clientRequests", IvyJson::Array(methods));
+        }
+        let contract = NativeContract::new(&catalog).unwrap();
+        for case in row["cases"].as_array().unwrap() {
+            count += 1;
+            let plan = parse(case["plan"].as_str().unwrap(), usize::MAX).unwrap();
+            let before = stringify(&plan, usize::MAX).unwrap();
+            let expected = parse(
+                &serde_json::to_string(&case["expected"]).unwrap(),
+                usize::MAX,
+            )
+            .unwrap();
+            assert_eq!(
+                checked(validate_native_plan_identity(&contract, &plan)),
+                expected,
+                "{} {} {}",
+                row["path"],
+                row["removedMethod"],
+                case["name"]
+            );
+            assert_eq!(stringify(&plan, usize::MAX).unwrap(), before);
+        }
+    }
+    assert!(count > 300);
+}
 fn call_json(call: &NativeOperationCall) -> IvyJson {
     IvyJson::object([
         ("operationId", IvyJson::String(call.operation_id.clone())),
