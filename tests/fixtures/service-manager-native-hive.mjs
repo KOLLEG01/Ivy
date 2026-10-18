@@ -9,6 +9,7 @@ import {HiveClient, discover, callBound, newOperationId} from '../../packages/sd
 import {HostJournal} from '../../packages/host-runtime/src/journal.ts';
 import {atomicJson} from '../../packages/host-runtime/src/config.ts';
 import {hostConfig} from '../../packages/host-runtime/src/host-config.ts';
+import {runtimeResetMarker} from '../../packages/host-runtime/src/runtime-maintenance.ts';
 import {digest} from '../../packages/contracts/src/canonical.ts';
 
 const [binary, root, job] = process.argv.slice(2);
@@ -108,6 +109,21 @@ try {
     state:'ready',activeDeploymentId:null,code:null,observedAt:new Date().toISOString()});
   await executor();let executorWork = Promise.resolve();
   executorTimer = setInterval(()=>{executorWork=executorWork.then(executor);void executorWork.catch(()=>{});},250);
+  const rejectedStart = code => {
+    const output = spawnSync(binary,['--config',instancePath],{env:{...process.env,IVY_NODE_EXECUTABLE:process.execPath,IVY_LAUNCH_ID:'failed-start'},
+      windowsHide:true,encoding:'utf8',timeout:10000});
+    assert.equal(output.status,1,output.stderr);assert.equal(output.stdout,'');
+    assert.deepEqual(JSON.parse(output.stderr.trim()),{code,message:'ServiceManager failed to start.'});
+  };
+  const marker = runtimeResetMarker(accepted);
+  assert.equal(marker,join(root,'reset','maintenance.json'));
+  await mkdir(join(root,'reset'),{recursive:true});await writeFile(marker,'{}');
+  rejectedStart('maintenance_active');await rm(marker);
+  await atomicJson(instancePath,{...instance,serviceNodeId:'unconfigured.manager'});
+  rejectedStart('target_conflict');await atomicJson(instancePath,instance);
+  await mkdir(join(managerData,'health.json'),{recursive:true});
+  rejectedStart('internal_error');await rm(join(managerData,'health.json'),{recursive:true});
+  results.push('actual reset and membership refusal, failed initial-health cleanup');
   await start();
   const bindings = new Map();
   const call = async (name,args={},operation=args.operationId) => {
@@ -164,6 +180,7 @@ try {
   }
   results.push('real Hive reports and hint, independent local topology adoption');
   await atomicJson(configPath,{...next,hostId:'another-host'});
+  await assert.rejects(call('restart',{instanceId:'fixture',operationId:'wrong-local-host'},'different-route'),e=>e.code==='mutation_conflict');
   await assert.rejects(call('restart',{instanceId:'fixture',operationId:'wrong-local-host'}),e=>e.code==='target_conflict');
   assert.equal(journal.operation('wrong-local-host'),null);
   await atomicJson(configPath,next);
