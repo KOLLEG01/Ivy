@@ -48,6 +48,8 @@ test("incremental backend staging removes retired contracts and preserves curren
       writeFileSync(join(root, path), path);
     }
     writeFileSync(join(root, "instructions/secretary-notification-policy.ts"), 'export const secretaryNotificationPolicy = "shared policy";\n');
+    mkdirSync(join(root, "services/chat-bridge/src"), { recursive: true });
+    writeFileSync(join(root, "services/chat-bridge/src/main-context.ts"), 'export const mainInstructions = "Main policy";\n');
     process.chdir(root);
     stageBackend({ buildId: "fixture" });
     assert.equal(existsSync("dist/specs/native/codex-0.149.1"), false);
@@ -59,6 +61,7 @@ test("incremental backend staging removes retired contracts and preserves curren
     assert.equal(readFileSync("dist/instructions/hive-mcp-examples.md", "utf8"), "instructions/hive-mcp-examples.md");
     assert.equal(readFileSync("dist/instructions/ivy-dev-mcp-instructions.md", "utf8"), "instructions/ivy-dev-mcp-instructions.md");
     assert.equal(JSON.parse(readFileSync("dist/instructions/secretary-notification-policy.json", "utf8")), "shared policy");
+    assert.equal(JSON.parse(readFileSync("dist/instructions/chat-main-instructions.json", "utf8")), "Main policy");
   } finally {
     process.chdir(previous);
     assert.ok(relative(parent, root).startsWith("ivy-build-inputs-"));
@@ -102,8 +105,11 @@ test("the packaged policy equals the canonical shared export", async () => {
   const parent = tmpdir(), root = mkdtempSync(join(parent, "ivy-policy-output-"));
   try {
     const { secretaryNotificationPolicy } = await import("../instructions/secretary-notification-policy.ts");
+    const { mainInstructions } = await import("../services/chat-bridge/src/main-context.ts");
     const [file] = buildInstructions({ component: "secretary", outputRoot: root });
     assert.equal(JSON.parse(readFileSync(file, "utf8")), secretaryNotificationPolicy);
+    const [main] = buildInstructions({ component: "chat-bridge", outputRoot: root });
+    assert.equal(JSON.parse(readFileSync(main, "utf8")), mainInstructions);
   } finally {
     assert.ok(relative(parent, root).startsWith("ivy-policy-output-"));
     rmSync(root, { recursive: true, force: true });

@@ -5,7 +5,8 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 const texts = [
-  { component: 'secretary', name: 'secretary-notification-policy', exportName: 'secretaryNotificationPolicy' },
+  { component: 'secretary', name: 'secretary-notification-policy', sourcePath: 'instructions/secretary-notification-policy.ts', exportName: 'secretaryNotificationPolicy' },
+  { component: 'chat-bridge', name: 'chat-main-instructions', sourcePath: 'services/chat-bridge/src/main-context.ts', exportName: 'mainInstructions' },
 ];
 
 function literalText(path, exportName) {
@@ -33,7 +34,7 @@ export function buildInstructions({ root = process.cwd(), outputRoot = resolve(r
   root = realpathSync(root);
   const selected = texts.filter(text => component === null || text.component === component);
   const values = selected.map(text => {
-    const source = resolve(root, 'instructions', text.name + '.ts');
+    const source = resolve(root, text.sourcePath);
     if (realpathSync(source) !== source) throw new Error('Instruction sources must not use directory or file links.');
     return { ...text, value: literalText(source, text.exportName) };
   });

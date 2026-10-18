@@ -45,15 +45,20 @@ test('native compilation selects real component binaries, required features and 
   assert.equal(existsSync(join(f.root, 'dist')), false);
 }));
 
-test('native builds expose shared instruction assets outside target-specific executable directories', () => fixture(f => {
-  mkdirSync(join(f.root, 'instructions'));
-  const policy = 'shared policy \ud800';
-  writeFileSync(join(f.root, 'instructions/secretary-notification-policy.ts'), 'export const secretaryNotificationPolicy = ' + JSON.stringify(policy) + ';\n');
-  const result = f.build();
-  assert.equal(result.files.length, 2);
-  assert.deepEqual(result.instructionFiles, [join(f.root, '.local/build/rust/secretary/instructions/secretary-notification-policy.json')]);
-  assert.equal(JSON.parse(readFileSync(result.instructionFiles[0], 'utf8')), policy);
-}, 'secretary'));
+test('native builds expose shared instruction assets outside target-specific executable directories', () => {
+  for (const [component, source, exportName, name] of [
+    ['secretary', 'instructions/secretary-notification-policy.ts', 'secretaryNotificationPolicy', 'secretary-notification-policy'],
+    ['chat-bridge', 'services/chat-bridge/src/main-context.ts', 'mainInstructions', 'chat-main-instructions'],
+  ]) fixture(f => {
+    const path = join(f.root, source), policy = 'shared policy \ud800';
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, 'export const ' + exportName + ' = ' + JSON.stringify(policy) + ';\n');
+    const result = f.build();
+    assert.equal(result.files.length, 2);
+    assert.deepEqual(result.instructionFiles, [join(f.root, `.local/build/rust/${component}/instructions/${name}.json`)]);
+    assert.equal(JSON.parse(readFileSync(result.instructionFiles[0], 'utf8')), policy);
+  }, component);
+});
 
 test('libraries and unregistered crates never fall back to TypeScript', () => fixture(f => {
   f.targets.splice(0, 2);
