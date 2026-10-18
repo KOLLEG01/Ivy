@@ -1,0 +1,25 @@
+[package]
+name = "ivy-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ivy-contracts.workspace = true
+ivy-sdk.workspace = true
+tokio.workspace = true
+base64.workspace = true
+icu_normalizer.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[[bin]]
+name = "ivy-publish-ui"
+path = "src/publish_ui_main.rs"
+
+[[test]]
+name = "cli-publish-ui"
+path = "../../../tests/rust/cli-publish-ui.rs"
