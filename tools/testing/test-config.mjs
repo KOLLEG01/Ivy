@@ -142,7 +142,10 @@ export const rustTests = {
   'tests/rust/sdk-consumers.rs': { package: 'ivy-sdk', test: 'sdk-consumers' },
   'tests/rust/sdk-provider.rs': { package: 'ivy-sdk', test: 'sdk-provider' },
   'tests/rust/sdk-native-project.rs': { package: 'ivy-sdk', test: 'sdk-native-project' },
-  'tests/secretary-rust/delivery.rs': { package: 'ivy-secretary', test: 'delivery' },
+  'tests/secretary-rust/delivery.rs': {
+    package: 'ivy-secretary', test: 'delivery',
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+  },
   'tests/rust/sdk-date-parse.rs': { package: 'ivy-sdk', test: 'sdk-date-parse' },
   'tests/rust/sdk-native-discovery.rs': { package: 'ivy-sdk', test: 'sdk-native-discovery' },
   'tests/rust/sdk-native-observations.rs': { package: 'ivy-sdk', test: 'sdk-native-observations' },
