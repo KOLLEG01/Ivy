@@ -31,7 +31,8 @@ const add=(label,texts,edit=()=>{})=>{
 add('empty-result',[]);
 add('original-unicode-bytes',['Original\n\r\0😀é漢字\ufffd']);
 add('parts-join-without-inserted-separators',['one\n','\n😀two','last']);
-add('many-distinct-immutable-parts',Array.from({length:65},(_,i)=>'Part '+i+'\n'));
+add('many-distinct-immutable-parts',Array.from({length:64},(_,i)=>'Part '+i+'\n'));
+add('schema-part-count-before-read',Array.from({length:65},(_,i)=>'Part '+i));
 add('exact-one-mib-part',['x'.repeat(1024*1024)],row=>{
  row.records[0].repeat={unit:'x',count:1024*1024};row.records[0].value.content.value='';
 });
@@ -55,13 +56,6 @@ add('declared-byte-length',['Original'],row=>row.result.textParts[0].byteLength+
 add('missing-original-revision',['Original'],row=>row.records=[]);
 add('first-read-outage',['one'],row=>row.failureAt=1);
 add('second-read-outage',['one','two'],row=>row.failureAt=2);
-{
- const text='x'.repeat(1024*1024),pin=artifact('part-0',text),saved=record('part-0',text);
- saved.content.value='';
- const row=add('complete-total-byte-bound',[]);
- row.result.textParts=Array.from({length:65},(_,i)=>({...pin,object:{objectId:'total-'+i,revision:1}}));
- row.records=row.result.textParts.map(part=>({value:{...structuredClone(saved),object:{...saved.object,id:part.object.objectId}},repeat:{unit:'x',count:1024*1024}}));
-}
 for(const row of reads){
  const calls=[];
  const store={client:{async request(method,params){
@@ -74,7 +68,7 @@ for(const row of reads){
   return value;
  }}};
  row.expected=await outcome(()=>readChatResultText(store,row.inputId,row.result));row.calls=calls;
- if(row.label==='complete-total-byte-bound'&&(row.expected.error?.code!=='chat_collection_limit'||calls.length!==64))throw Error('Total text bound was not exercised.');
+ if(row.label==='schema-part-count-before-read'&&(!row.expected.error||calls.length))throw Error('Result schema part-count admission was not exercised.');
  if(row.label==='parts-join-without-inserted-separators'&&row.expected.value!=='one\n\n😀twolast')throw Error('Complete text concatenation was not exercised.');
 }
 const presentations=[];
