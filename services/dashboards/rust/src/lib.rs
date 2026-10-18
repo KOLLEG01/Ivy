@@ -4,6 +4,7 @@ pub mod cdp;
 pub mod document;
 pub mod png;
 pub mod raster;
+pub mod sources;
 
 pub fn registry() -> ivy_contracts::IvyJson {
     ivy_contracts::json::parse(

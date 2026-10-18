@@ -1,0 +1,339 @@
+[
+  {
+    "name": "text-and-json",
+    "sources": {
+      "text": {
+        "objectId": "t"
+      },
+      "json": {
+        "objectId": "j"
+      }
+    },
+    "objects": {
+      "t": {
+        "object": {
+          "contractKey": "text",
+          "effectivelyArchived": false
+        },
+        "content": {
+          "encoding": "text",
+          "value": "plain\ud800"
+        }
+      },
+      "j": {
+        "object": {
+          "contractKey": "data",
+          "effectivelyArchived": false
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "fresh": true
+          }
+        }
+      }
+    },
+    "expected": {
+      "value": {
+        "text": "plain\ud800",
+        "json": {
+          "fresh": true
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "t"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "j"
+        }
+      }
+    ]
+  },
+  {
+    "name": "direct-token-scrub",
+    "sources": {
+      "d": {
+        "objectId": "d"
+      }
+    },
+    "objects": {
+      "d": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "effectivelyArchived": false
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "Dashboard",
+            "imageToken": "SECRET",
+            "metadata": {
+              "nested": true
+            }
+          }
+        }
+      }
+    },
+    "expected": {
+      "value": {
+        "d": {
+          "title": "Dashboard",
+          "metadata": {
+            "nested": true
+          }
+        }
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "d"
+        }
+      }
+    ]
+  },
+  {
+    "name": "contract-first-page-order",
+    "sources": {
+      "feed": {
+        "contractKey": "dashboards/dashboard",
+        "limit": 2
+      }
+    },
+    "objects": {
+      "a": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "effectivelyArchived": false
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "A",
+            "imageToken": "SECRET"
+          }
+        }
+      },
+      "b": {
+        "object": {
+          "contractKey": "dashboards/dashboard",
+          "effectivelyArchived": false
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "title": "B",
+            "imageToken": null
+          }
+        }
+      }
+    },
+    "page": {
+      "items": [
+        {
+          "objectId": "b"
+        },
+        {
+          "objectId": "a"
+        }
+      ],
+      "nextCursor": "must-not-follow"
+    },
+    "expected": {
+      "value": {
+        "feed": [
+          {
+            "title": "B"
+          },
+          {
+            "title": "A"
+          }
+        ]
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.query",
+        "params": {
+          "contractKey": "dashboards/dashboard",
+          "limit": 2
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "b"
+        }
+      },
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "a"
+        }
+      }
+    ]
+  },
+  {
+    "name": "empty-page",
+    "sources": {
+      "feed": {
+        "contractKey": "empty",
+        "limit": 50
+      }
+    },
+    "objects": {},
+    "page": {
+      "items": [],
+      "nextCursor": null
+    },
+    "expected": {
+      "value": {
+        "feed": []
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.query",
+        "params": {
+          "contractKey": "empty",
+          "limit": 50
+        }
+      }
+    ]
+  },
+  {
+    "name": "archived-precedence",
+    "sources": {
+      "x": {
+        "objectId": "x"
+      }
+    },
+    "objects": {
+      "x": {
+        "object": {
+          "contractKey": "ivy/host-configuration",
+          "effectivelyArchived": true
+        },
+        "content": {
+          "encoding": "base64",
+          "value": ""
+        }
+      }
+    },
+    "expected": {
+      "error": {
+        "code": "not_found",
+        "message": "A dashboard source is archived."
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "x"
+        }
+      }
+    ]
+  },
+  {
+    "name": "configuration-forbidden",
+    "sources": {
+      "x": {
+        "objectId": "x"
+      }
+    },
+    "objects": {
+      "x": {
+        "object": {
+          "contractKey": "ivy/host-configuration",
+          "effectivelyArchived": false
+        },
+        "content": {
+          "encoding": "json",
+          "value": {
+            "credential": "SECRET"
+          }
+        }
+      }
+    },
+    "expected": {
+      "error": {
+        "code": "forbidden",
+        "message": "System configuration is not a dashboard source."
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "x"
+        }
+      }
+    ]
+  },
+  {
+    "name": "binary-rejected",
+    "sources": {
+      "x": {
+        "objectId": "x"
+      }
+    },
+    "objects": {
+      "x": {
+        "object": {
+          "contractKey": "data",
+          "effectivelyArchived": false
+        },
+        "content": {
+          "encoding": "base64",
+          "value": "AA=="
+        }
+      }
+    },
+    "expected": {
+      "error": {
+        "code": "invalid_arguments",
+        "message": "Dashboard sources must be JSON or text."
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "x"
+        }
+      }
+    ]
+  },
+  {
+    "name": "missing-fails-snapshot",
+    "sources": {
+      "x": {
+        "objectId": "missing"
+      }
+    },
+    "objects": {},
+    "expected": {
+      "error": {
+        "code": "not_found",
+        "message": "missing"
+      }
+    },
+    "calls": [
+      {
+        "method": "objects.read",
+        "params": {
+          "objectId": "missing"
+        }
+      }
+    ]
+  }
+]
