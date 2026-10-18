@@ -54,6 +54,7 @@ tokio-tungstenite.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 sha2.workspace = true
+url.workspace = true
 futures-util.workspace = true
 
 [target.'cfg(windows)'.dependencies]
