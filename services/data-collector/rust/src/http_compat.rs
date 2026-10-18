@@ -396,7 +396,7 @@ impl AsyncWrite for NodeIo {
         let result = Pin::new(&mut this.socket).poll_write(cx, bytes);
         if matches!(result,Poll::Ready(Ok(n)) if n>0)
             && bytes.starts_with(b"HTTP/1.")
-            && bytes.get(9..12).is_some_and(|code| code >= b"200")
+            && bytes.get(9..12).is_some_and(|code| code >= b"200".as_slice())
         {
             this.capture.lock().unwrap().response_started = true;
         }
