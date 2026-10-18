@@ -139,6 +139,7 @@ export const rustTests = {
   'tests/rust/ui-route.rs': { package: 'ivy-contracts', test: 'ui-route' },
   'tests/rust/builtin_schema.rs': { package: 'ivy-contracts', test: 'builtin_schema' },
   'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
+  'tests/rust/sdk-operation-ids.rs': { package: 'ivy-sdk', test: 'sdk-operation-ids' },
   'tests/rust/sdk.rs': { package: 'ivy-sdk', test: 'sdk' },
   'tests/rust/sdk-native.rs': { package: 'ivy-sdk', test: 'sdk-native' },
   'tests/rust/sdk-consumers.rs': { package: 'ivy-sdk', test: 'sdk-consumers' },
