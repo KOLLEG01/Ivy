@@ -9,6 +9,7 @@ pub mod local_gates;
 pub mod local_journal;
 pub mod local_retention;
 pub mod local_workspaces;
+pub mod journal_store;
 pub mod operations;
 pub mod task_keys;
 pub mod turn_output;
