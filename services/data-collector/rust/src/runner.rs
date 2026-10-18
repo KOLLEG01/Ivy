@@ -48,7 +48,10 @@ fn io_error(_: std::io::Error) -> IvyError {
     IvyError::internal()
 }
 fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 fn text_bytes(value: &IvyJson) -> IvyResult<Vec<u8>> {
     let text = value.as_js_string().ok_or_else(IvyError::internal)?;

@@ -19,6 +19,8 @@ mod provider;
 
 #[path = "data-collector-engine.inc.rs"]
 mod engine;
+#[path = "data-collector-definition-journal.inc.rs"]
+mod definition_journal;
 
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()
