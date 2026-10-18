@@ -56,6 +56,9 @@ fn uppercase_and_trim_start_match_node_scalars_units_and_surrogates() {
     let whitespace: std::collections::HashSet<u16> =
         units(&oracle["whitespace"]).into_iter().collect();
     assert_eq!(whitespace.len(), 25);
+    let trim_whitespace: std::collections::HashSet<u16> =
+        units(&oracle["trimWhitespace"]).into_iter().collect();
+    assert_eq!(trim_whitespace.len(), 25);
     for unit in 0..=u16::MAX {
         let input = JsString(vec![unit, 120]);
         let expected = if whitespace.contains(&unit) {
@@ -64,11 +67,19 @@ fn uppercase_and_trim_start_match_node_scalars_units_and_surrogates() {
             input.0.clone()
         };
         assert_eq!(input.trim_start().0, expected, "U+{unit:04X}");
+        let input = JsString(vec![unit, 120, unit]);
+        let expected = if trim_whitespace.contains(&unit) {
+            vec![120]
+        } else {
+            input.0.clone()
+        };
+        assert_eq!(input.trim().0, expected, "full trim U+{unit:04X}");
     }
     for row in oracle["contexts"].as_array().unwrap() {
         let input = JsString(units(&row["input"]));
         assert_eq!(input.to_uppercase().0, units(&row["upper"]));
-        assert_eq!(input.trim_start().0, units(&row["trim"]));
+        assert_eq!(input.trim_start().0, units(&row["trimStart"]));
+        assert_eq!(input.trim().0, units(&row["trim"]));
     }
 }
 
