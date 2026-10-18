@@ -11,6 +11,8 @@ mod source_cases;
 mod action_cases;
 #[path = "host-preparation-cases.rs"]
 mod preparation_cases;
+#[path = "host-policy-import-cases.rs"]
+mod policy_import_cases;
 #[path = "host-storage-space-cases.rs"]
 mod storage_space_cases;
 #[path = "host-node-path-cases.rs"]
