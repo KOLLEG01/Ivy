@@ -5,6 +5,94 @@ use ivy_contracts::{
 };
 
 #[test]
+fn resource_ids_match_compiler_normalization_and_local_indexing() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/schema-resource-index-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let corpus: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = corpus["fullPaths"].as_array().unwrap();
+    assert!(rows.len() > 250);
+    for row in rows {
+        let IvyJson::String(ref input) = parse(row["input"].as_str().unwrap(), 100_000).unwrap()
+        else {
+            panic!("Expected ID string");
+        };
+        let actual = match ivy_contracts::schema::uri::full_path(&input) {
+            Ok(path) => IvyJson::object([
+                ("ok", true.into()),
+                (
+                    "id",
+                    IvyJson::String(ivy_contracts::schema::uri::normalize_id(&input)),
+                ),
+                ("path", IvyJson::String(path)),
+            ]),
+            Err(error) => {
+                assert_eq!(error.code_js(), "registry_invalid".into());
+                IvyJson::object([("ok", false.into())])
+            }
+        };
+        assert_eq!(
+            stringify(&actual, 100_000).unwrap(),
+            row["result"].as_str().unwrap(),
+            "ID {}",
+            row["input"]
+        );
+    }
+    let rows = corpus["indexes"].as_array().unwrap();
+    assert!(rows.len() > 2500);
+    for row in rows {
+        let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
+        let admitted = ivy_contracts::schema::admit_schema(&schema).unwrap();
+        let actual = match admitted.resource_index() {
+            Ok(index) => {
+                let mut refs = Vec::new();
+                let mut local = Vec::new();
+                for reference in index.references.iter().filter(|r| r.alias) {
+                    if reference.id.0.first() == Some(&35) {
+                        local.push((
+                            reference.id.clone(),
+                            index.graph.nodes[reference.node].schema.clone(),
+                        ));
+                    } else {
+                        refs.push((
+                            reference.id.clone(),
+                            IvyJson::String(reference.full_path.clone()),
+                        ));
+                    }
+                }
+                IvyJson::object([
+                    ("ok", true.into()),
+                    ("refs", IvyJson::Object(refs)),
+                    ("local", IvyJson::Object(local)),
+                ])
+            }
+            Err(error) => {
+                assert_eq!(error.code_js(), "registry_invalid".into());
+                IvyJson::object([("ok", false.into())])
+            }
+        };
+        assert_eq!(
+            stringify(&actual, 1_000_000).unwrap(),
+            row["result"].as_str().unwrap(),
+            "schema {}",
+            row["schema"]
+        );
+    }
+}
+
+#[test]
 fn uri_resolution_matches_compiler_authority_and_scope_rules() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")
@@ -20,10 +108,12 @@ fn uri_resolution_matches_compiler_authority_and_scope_rules() {
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert!(rows.len() > 3000);
     for row in rows {
-        let IvyJson::String(base) = parse(row["base"].as_str().unwrap(), 100_000).unwrap() else {
+        let IvyJson::String(ref base) = parse(row["base"].as_str().unwrap(), 100_000).unwrap()
+        else {
             panic!("Expected base string");
         };
-        let IvyJson::String(relative) = parse(row["relative"].as_str().unwrap(), 100_000).unwrap()
+        let IvyJson::String(ref relative) =
+            parse(row["relative"].as_str().unwrap(), 100_000).unwrap()
         else {
             panic!("Expected relative string");
         };
@@ -64,7 +154,8 @@ fn uri_components_match_compiler_encoding_and_dot_segments() {
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert!(rows.len() > 2000);
     for row in rows {
-        let IvyJson::String(input) = parse(row["input"].as_str().unwrap(), 100_000).unwrap() else {
+        let IvyJson::String(ref input) = parse(row["input"].as_str().unwrap(), 100_000).unwrap()
+        else {
             panic!("Expected string input");
         };
         let actual = IvyJson::Array(

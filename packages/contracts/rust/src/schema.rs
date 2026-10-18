@@ -6,7 +6,9 @@ use std::sync::{Arc, OnceLock};
 mod meta;
 #[path = "schema_resources.rs"]
 mod resources;
-pub use resources::{SchemaResourceGraph, SchemaResourceNode};
+pub use resources::{
+    SchemaResourceGraph, SchemaResourceIndex, SchemaResourceNode, SchemaResourceReference,
+};
 #[path = "schema_uri.rs"]
 pub mod uri;
 
@@ -27,6 +29,11 @@ impl AdmittedSchema {
     /// URI resolution, duplicate-ID checks and validator compilation are separate.
     pub fn resource_graph(&self) -> SchemaResourceGraph<'_> {
         resources::collect(&self.schema)
+    }
+    /// Index local resource scopes and declarations, rejecting duplicate IDs.
+    /// Compiler-wide registrations and validator compilation are separate.
+    pub fn resource_index(&self) -> IvyResult<SchemaResourceIndex<'_>> {
+        resources::index(&self.schema)
     }
 }
 

@@ -91,7 +91,7 @@ fn check_percent(input: &JsString) -> IvyResult<()> {
     }
     Ok(())
 }
-fn parse(input: &JsString) -> IvyResult<Reference> {
+fn parse(input: &JsString, strict: bool) -> IvyResult<Reference> {
     let units = &input.0;
     let mut out = Reference::default();
     let mut i = 0;
@@ -111,7 +111,10 @@ fn parse(input: &JsString) -> IvyResult<Reference> {
         .copied()
         .filter(|c| !matches!(c, 9 | 10 | 13))
         .collect();
-    if stripped.len() >= 2 && (!stripped.starts_with(&[47, 47]) || stripped.len() != region.len()) {
+    if strict
+        && stripped.len() >= 2
+        && (!stripped.starts_with(&[47, 47]) || stripped.len() != region.len())
+    {
         return Err(invalid());
     }
     if units[i..].starts_with(&[47, 47]) {
@@ -120,7 +123,7 @@ fn parse(input: &JsString) -> IvyResult<Reference> {
             .iter()
             .position(|c| matches!(c, 35 | 47 | 63))
             .unwrap_or(units.len() - i);
-        if units[i..end].contains(&92) {
+        if strict && units[i..end].contains(&92) {
             return Err(invalid());
         }
         if let Some(at) = units[i..end].iter().position(|c| *c == 64) {
@@ -152,14 +155,11 @@ fn parse(input: &JsString) -> IvyResult<Reference> {
             out.port = Some(if digits.is_empty() {
                 JsString::default()
             } else {
-                let mut number = 0u32;
-                for digit in digits {
-                    number = number * 10 + (*digit - 48) as u32;
-                    if number > 65535 {
-                        return Err(invalid());
-                    }
+                let number = crate::json::number_from_string(&part(digits));
+                if strict && number > 65535.0 {
+                    return Err(invalid());
                 }
-                number.to_string().into()
+                crate::json::js_string(&crate::IvyJson::Number(number))
             });
         }
     }
@@ -169,7 +169,7 @@ fn parse(input: &JsString) -> IvyResult<Reference> {
         .unwrap_or(units.len() - i);
     out.path = part(&units[i..path_end]);
     i = path_end;
-    if out.authority() && !out.path.0.is_empty() && out.path.0[0] != 47 {
+    if strict && out.authority() && !out.path.0.is_empty() && out.path.0[0] != 47 {
         return Err(invalid());
     }
     if units.get(i) == Some(&63) {
@@ -195,16 +195,24 @@ fn parse(input: &JsString) -> IvyResult<Reference> {
         .into_iter()
         .flatten()
     {
-        check_percent(component)?;
+        if strict {
+            check_percent(component)?;
+        }
     }
-    check_percent(&out.path)?;
+    if strict {
+        check_percent(&out.path)?;
+    }
+    let urn = !strict && out.scheme.as_ref() == Some(&JsString::from("urn"));
+    let domain = !strict && domain_scheme(&out);
     if let Some(value) = &mut out.host {
         let bracketed = value.0.first() == Some(&91) && value.0.last() == Some(&93);
-        if !bracketed {
+        if strict && !bracketed {
             check_percent(value)?;
         }
         let ip = host::ip_literal(value);
-        if (value.0.contains(&91) || value.0.contains(&93)) && (!bracketed || ip.is_none()) {
+        let malformed =
+            (value.0.contains(&91) || value.0.contains(&93)) && (!bracketed || ip.is_none());
+        if strict && malformed {
             return Err(invalid());
         }
         if let Some(ip) = ip {
@@ -212,7 +220,10 @@ fn parse(input: &JsString) -> IvyResult<Reference> {
         } else {
             *value = lower(value);
         }
-        if units.contains(&37) {
+        if domain && !malformed {
+            let _ = canonicalize_domain(value);
+        }
+        if !urn && !malformed && units.contains(&37) {
             let ip = host::ip_literal(value).is_some() || host::ipv4(value);
             if !ip {
                 *value = normalize_percent(value, true);
@@ -220,13 +231,15 @@ fn parse(input: &JsString) -> IvyResult<Reference> {
             *value = host::escape_delimiters(value, ip);
         }
     }
-    out.path = normalize_component(&out.path, Component::Path);
-    out.query = out
-        .query
-        .map(|v| normalize_component(&v, Component::QueryOrFragment));
-    out.fragment = out
-        .fragment
-        .map(|v| normalize_component(&v, Component::QueryOrFragment));
+    if !urn {
+        out.path = normalize_component(&out.path, Component::Path);
+        out.query = out
+            .query
+            .map(|v| normalize_component(&v, Component::QueryOrFragment));
+        out.fragment = out
+            .fragment
+            .map(|v| normalize_component(&v, Component::QueryOrFragment));
+    }
     Ok(out)
 }
 
@@ -234,8 +247,8 @@ fn parse(input: &JsString) -> IvyResult<Reference> {
 /// Invalid URIs become the compiler's registry_invalid error. Resource indexing
 /// and duplicate-ID checks are separate; this does not compile a schema.
 pub fn resolve(base: &JsString, relative: &JsString) -> IvyResult<JsString> {
-    let base = parse(base)?;
-    let relative = parse(relative)?;
+    let base = parse(base, true)?;
+    let relative = parse(relative, true)?;
     let mut target = relative.clone();
     if relative.scheme.is_some() {
         target.path = remove_dot_segments(&relative.path);
@@ -271,34 +284,119 @@ pub fn resolve(base: &JsString, relative: &JsString) -> IvyResult<JsString> {
             }
         }
     }
-    if target.scheme.as_ref().is_some_and(|v| {
-        ["http", "https", "ws", "wss"]
-            .iter()
-            .any(|s| v == &JsString::from(*s))
-    }) {
+    if domain_scheme(&target) {
         if let Some(value) = &mut target.host {
-            if !value.0.is_empty()
-                && !host::ipv4(value)
-                && host::ip_literal(value).is_none()
-                && value
-                    .0
-                    .iter()
-                    .any(|c| !matches!(c, 33|34|36|38..=46|59|61|95|96|97..=122|123|125|126))
+            if canonicalize_domain(value).is_err()
+                && !(value.0.contains(&37) && value.0.iter().all(|c| *c < 128))
             {
-                let mut url = JsString::from("http://");
-                url.0.extend(&value.0);
-                match crate::whatwg_url::parse_url(&url) {
-                    Ok(parsed) => *value = parsed.hostname.into(),
-                    Err(_) if value.0.contains(&37) && value.0.iter().all(|c| *c < 128) => {}
-                    Err(_) => return Err(invalid()),
-                }
+                return Err(invalid());
             }
         }
     }
-    serialize(&target)
+    serialize(&target, true)
 }
 
-fn serialize(value: &Reference) -> IvyResult<JsString> {
+fn domain_scheme(value: &Reference) -> bool {
+    value.scheme.as_ref().is_some_and(|v| {
+        ["http", "https", "ws", "wss"]
+            .iter()
+            .any(|s| v == &JsString::from(*s))
+    })
+}
+fn canonicalize_domain(value: &mut JsString) -> IvyResult<()> {
+    if !value.0.is_empty()
+        && !host::ipv4(value)
+        && host::ip_literal(value).is_none()
+        && value
+            .0
+            .iter()
+            .any(|c| !matches!(c, 33|34|36|38..=46|59|61|95|96|97..=122|123|125|126))
+    {
+        let mut url = JsString::from("http://");
+        url.0.extend(&value.0);
+        *value = crate::whatwg_url::parse_url(&url)
+            .map_err(|_| invalid())?
+            .hostname
+            .into();
+    }
+    Ok(())
+}
+
+/// Normalize a compiler resource ID with the scheme handlers enabled and return
+/// its document prefix, ending in `#`. Unlike resolve, parser diagnostics alone
+/// do not reject the ID; serialization still enforces scheme/port/URN syntax.
+pub fn full_path(id: &JsString) -> IvyResult<JsString> {
+    let mut value = parse(id, false)?;
+    let scheme = value.scheme.clone().unwrap_or_default();
+    let mut skip_escape = false;
+    if ["http", "https", "ws", "wss"]
+        .iter()
+        .any(|s| scheme == JsString::from(*s))
+    {
+        let secure = scheme == JsString::from("https") || scheme == JsString::from("wss");
+        if value.port.as_ref().is_some_and(|p| {
+            p.0.is_empty() || *p == JsString::from(if secure { "443" } else { "80" })
+        }) {
+            value.port = None;
+        }
+        if scheme == JsString::from("http") || scheme == JsString::from("https") {
+            if value.path.0.is_empty() {
+                value.path = "/".into();
+            }
+        } else {
+            if value.path == JsString::from("/") {
+                value.path = JsString::default();
+            }
+            if value.query.as_ref().is_some_and(|q| q.0.is_empty()) {
+                value.query = None;
+            }
+            value.fragment = None;
+        }
+    } else if scheme == JsString::from("urn") {
+        let Some(colon) = value.path.0.iter().position(|c| *c == 58) else {
+            return Err(invalid());
+        };
+        let nid = &value.path.0[..colon];
+        let nss = &value.path.0[colon + 1..];
+        let letter = |c: u16| matches!(c,65..=90|97..=122|48..=57|0x17f|0x212a);
+        if nid.is_empty()
+            || nid.len() > 32
+            || !letter(nid[0])
+            || !nid.iter().all(|c| letter(*c) || *c == 45)
+            || nss.is_empty()
+        {
+            return Err(invalid());
+        }
+        let mut i = 0;
+        while i < nss.len() {
+            if letter(nss[i]) || matches!(nss[i], 95 | 33 | 36 | 39..=47 | 58 | 59 | 61 | 64) {
+                i += 1;
+            } else if escaped_byte(&nss[i..]).is_some() {
+                i += 3;
+            } else {
+                return Err(invalid());
+            }
+        }
+        let mut path = lower(&part(nid));
+        let nss = if path == JsString::from("uuid") {
+            lower(&part(nss))
+        } else {
+            part(nss)
+        };
+        path.0.push(58);
+        path.0.extend(nss.0);
+        value.path = path;
+        skip_escape = true;
+    }
+    let mut result = serialize(&value, skip_escape)?;
+    if let Some(hash) = result.0.iter().position(|c| *c == 35) {
+        result.0.truncate(hash);
+    }
+    result.0.push(35);
+    Ok(result)
+}
+
+fn serialize(value: &Reference, skip_escape: bool) -> IvyResult<JsString> {
     let mut out = Vec::new();
     if let Some(scheme) = &value.scheme {
         out.extend(&scheme.0);
@@ -324,6 +422,9 @@ fn serialize(value: &Reference) -> IvyResult<JsString> {
             out.extend(normalized.0);
         }
         if let Some(port) = &value.port {
+            if !port.0.iter().all(|c| matches!(c, 48..=57)) {
+                return Err(invalid());
+            }
             out.push(58);
             out.extend(&port.0);
         }
@@ -331,7 +432,16 @@ fn serialize(value: &Reference) -> IvyResult<JsString> {
             out.push(47);
         }
     }
-    let path = remove_dot_segments(&normalize_percent(&value.path, false));
+    let no_scheme = value.scheme.is_none() && !value.authority() && !skip_escape;
+    let path = if skip_escape {
+        normalize_percent(&value.path, false)
+    } else {
+        serialize_component(&value.path, Component::Path, no_scheme)
+    };
+    let mut path = remove_dot_segments(&path);
+    if no_scheme {
+        path = serialize_component(&path, Component::Path, true);
+    }
     if !value.authority() && path.0.starts_with(&[47, 47]) {
         out.extend("/%2F".encode_utf16());
         out.extend(&path.0[2..]);
