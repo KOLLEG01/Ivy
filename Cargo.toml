@@ -17,6 +17,7 @@ ivy-host-runtime = { path = "packages/host-runtime/rust" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order", "raw_value"] }
 sha2 = "=0.11.1"
+hmac = "=0.13.0"
 getrandom = "=0.4.3"
 subtle = "=2.6.1"
 ryu-js = "=1.0.3"
