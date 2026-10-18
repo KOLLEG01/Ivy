@@ -5,6 +5,8 @@ use rusqlite::{Connection, types::Value};
 mod chat_store;
 #[path = "chat-store-hive-cases.rs"]
 mod chat_store_hive;
+#[path = "chat-store-integration-cases.rs"]
+mod chat_store_integration;
 fn text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }
