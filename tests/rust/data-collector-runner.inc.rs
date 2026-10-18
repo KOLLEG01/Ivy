@@ -66,7 +66,7 @@ async fn runner(
     .unwrap()
 }
 fn task(script: &str) -> IvyJson {
-    let mut value=parse(r#"{"id":"fixture","name":"Fixture","script":"","intervalSeconds":60,"timeoutSeconds":10,"memoryMb":64}"#,10000).unwrap();
+    let mut value=parse(r#"{"id":"fixture","name":"Fixture","enabled":false,"script":"","intervalSeconds":60,"timeoutSeconds":10,"memoryMb":64,"dependencies":{},"config":{},"secretNames":[],"retention":{"maximumCount":1000,"maximumAgeDays":7,"maximumBytes":104857600}}"#,10000).unwrap();
     value.insert("script", script.into());
     schema::parse_schema("taskSchema", &value).unwrap()
 }
