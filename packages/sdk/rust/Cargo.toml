@@ -46,3 +46,7 @@ path = "../../../tests/rust/sdk-native-project.rs"
 [[test]]
 name = "sdk-date-parse"
 path = "../../../tests/rust/sdk-date-parse.rs"
+
+[[test]]
+name = "sdk-native-observations"
+path = "../../../tests/rust/sdk-native-observations.rs"
