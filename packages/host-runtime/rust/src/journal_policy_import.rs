@@ -73,7 +73,7 @@ impl State {
             part(query.as_bytes())?;let mut statement=internal(self.db.prepare(query))?;
             for row in internal(statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))))?{let(key,value)=internal(row)?;part(key.as_bytes())?;part(value.as_bytes())?;}
         }
-        drop(part);Ok(format!("sha256:{:x}",hash.finalize()))
+        drop(part);Ok(format!("sha256:{}",hash.finalize().iter().map(|byte|format!("{byte:02x}")).collect::<String>()))
     }
     fn import_plan(&self)->IvyResult<IvyJson>{
         let mut entries=Vec::new();let mut missing=0;
