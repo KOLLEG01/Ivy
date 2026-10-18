@@ -1,6 +1,8 @@
 import {IvyError} from '../../packages/contracts/src/errors.ts';
+import {resolve} from 'node:path';
+import {pathToFileURL} from 'node:url';
 
-const inputs = new Set([
+export const inputs = new Set([
   '', '/', '/mcp', '//localhost/mcp', 'https:', 'https://', 'http://[::1',
   'http://[::1%25lo0]/', 'https://example.invalid:65536/', 'https://exa mple.invalid/',
   'https://%FF/', 'https://%/', 'http://1.2.3.999/', 'http://09/',
@@ -34,6 +36,7 @@ for (const value of [' ', '\t', '\r', '\n', '\0', 'é', '😀', '\ud800', '\udc0
   inputs.add(`https://u${value}:p${value}@example.invalid/mcp`);
   inputs.add(`${value}https://example.invalid/mcp${value}`);
 }
+if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){
 const rows = [...inputs].map(input => {
   let result;
   try {
@@ -44,3 +47,4 @@ const rows = [...inputs].map(input => {
   return {input: JSON.stringify(input), result: JSON.stringify(result)};
 });
 process.stdout.write(JSON.stringify(rows));
+}

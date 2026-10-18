@@ -106,7 +106,7 @@ impl Default for ClientOptions {
 
 pub fn base_url(value: &str) -> IvyResult<reqwest::Url> {
     let mut url = reqwest::Url::parse(value)
-        .map_err(|_| IvyError::new("invalid_arguments", "Expected the canonical Hive base URL."))?;
+        .map_err(|_| IvyError::internal())?;
     if !["http", "https"].contains(&url.scheme())
         || !url.username().is_empty()
         || url.password().is_some()
