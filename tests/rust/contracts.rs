@@ -38,17 +38,7 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
                     ]),
                 ),
             ]),
-            Err(error) => IvyJson::object([
-                ("ok", false.into()),
-                (
-                    "error",
-                    IvyJson::object([
-                        ("code", IvyJson::String(error.code_js())),
-                        ("message", IvyJson::String(error.message_js())),
-                        ("outcome", error.outcome.as_str().into()),
-                    ]),
-                ),
-            ]),
+            Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
         };
         assert_eq!(actual, expected, "URL input: {}", row["input"]);
     }
