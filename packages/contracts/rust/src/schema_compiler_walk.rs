@@ -1,6 +1,6 @@
 //! Compiler branch selection before reference targets are added to the worklist.
 use super::{entries, resources, uri, validate_compiler_keyword_values};
-use crate::{IvyJson, IvyResult, JsString};
+use crate::{IvyError, IvyJson, IvyResult, JsString};
 
 pub struct CompilerNode<'a> {
     pub schema: &'a IvyJson,
@@ -142,6 +142,14 @@ pub(super) fn walk<'a>(schema: &'a IvyJson) -> IvyResult<CompilerWalk<'a>> {
         if let Some(properties) = node.get("properties") {
             for (key, child) in entries(properties) {
                 if !always_valid(child) {
+                    // getSubschema builds an encoded error path only for an
+                    // active property; encodeURIComponent rejects lone units.
+                    if String::from_utf16(&key.0).is_err() {
+                        return Err(IvyError::new(
+                            "registry_invalid",
+                            "Invalid or unsupported JSON schema.",
+                        ));
+                    }
                     add("properties", child, Some(key.clone()));
                 }
             }
