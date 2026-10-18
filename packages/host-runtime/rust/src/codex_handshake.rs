@@ -3,7 +3,7 @@ use super::codex_rpc::{NativeRpc, RequestOptions};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use std::path::Path;
 
-fn whitespace(unit: u16) -> bool {
+pub(crate) fn whitespace(unit: u16) -> bool {
     matches!(unit,0x9..=0xd|0x20|0xa0|0x1680|0x2000..=0x200a|0x2028|0x2029|0x202f|0x205f|0x3000|0xfeff)
 }
 
