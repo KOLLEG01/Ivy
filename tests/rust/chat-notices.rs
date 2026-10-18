@@ -763,8 +763,9 @@ async fn publish(
             )
             .await
             .map_err(|e| e.into_ivy())?;
+        let current = input(ops.store, name).await?;
         client.patch_input(
-            &original.pin.object_id,
+            &current.pin.object_id,
             &Json::object([
                 ("state", "completed".into()),
                 ("result", result.json()),
