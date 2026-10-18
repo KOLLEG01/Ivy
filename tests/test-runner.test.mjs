@@ -198,7 +198,7 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     return { result, commands: readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) };
   };
   const expected = [
-    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--bin", "ivy-job"]] : []),
+    ...(process.platform === "win32" ? ['ivy-job', 'ivy-health'].map(bin => ["build", "--locked", "--package", "ivy-host-runtime", "--bin", bin]) : []),
     ["test", "--locked", "--package", "ivy-agent-manager", "--test", "agent-interactions"],
     ["test", "--locked", "--package", "ivy-service-manager", "--test", "service-manager-stop", "--test", "service-manager-policy"],
     ["test", "--locked", "--package", "ivy-phone-bridge", "--test", "phone_media"],
@@ -210,7 +210,7 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   assert.deepEqual(success.commands, expected);
   const agentOnly = run("", ["tests/rust/agent-interactions.rs"]);
   assert.equal(agentOnly.result.status, 0, agentOnly.result.stderr);
-  assert.deepEqual(agentOnly.commands, expected.slice(0, process.platform === "win32" ? 2 : 1));
+  assert.deepEqual(agentOnly.commands, expected.filter(args => args.includes('ivy-agent-manager') || (args[0] === 'build' && args.at(-1) === 'ivy-job')));
   const secretaryOnly = run("", ["tests/secretary-rust/delivery.rs"]);
   assert.equal(secretaryOnly.result.status, 0, secretaryOnly.result.stderr);
   assert.deepEqual(secretaryOnly.commands, [

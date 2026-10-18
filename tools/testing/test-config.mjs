@@ -181,7 +181,7 @@ export const rustTests = {
   'tests/rust/service-manager-shutdown.rs': { package: 'ivy-service-manager', test: 'service-manager-shutdown' },
   'tests/rust/service-manager-stop.rs': {
     package: 'ivy-service-manager', test: 'service-manager-stop',
-    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }, { platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-health' }],
   },
   'tests/rust/chat-queue.rs': { package: 'ivy-chat-bridge', test: 'chat-queue' },
   'tests/rust/chat-main-context.rs': { package: 'ivy-chat-bridge', test: 'chat-main-context' },
