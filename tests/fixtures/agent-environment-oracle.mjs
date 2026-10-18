@@ -29,7 +29,7 @@ for(const kind of ['mcp','skills']){
     const statError=mode==='missing'?{code:'not_found',outcome:'not_executed'}:mode==='stat-error'?{code:'unavailable',outcome:'unknown'}:null;
     const readError=mode==='read-missing'?{code:'not_found',outcome:'not_executed'}:mode==='read-unknown'?{code:'outcome_unknown',outcome:'unknown'}:null;
     const input={kind,hostId,mode,stat:mode==='null-stat'?null:stat,value,statError,readError},calls=[];
-    const connection={async request(method,params){calls.push({method,params});const error=method==='objects.stat'?statError:readError;if(error)throw new IvyError(error.code,'fixture failure',{outcome:error.outcome});return method==='objects.stat'?input.stat:value;}};
+    const connection={async request(method,params){calls.push({method,params});const error=method==='objects.stat'?statError:readError;if(error)throw new IvyError(error.code,'fixture failure',error.outcome);return method==='objects.stat'?input.stat:value;}};
     let expected;
     try{expected={result:await readEnvironmentDocument(connection,kind,hostId,kind==='mcp'?'McpDocument':'SkillsDocument')};}
     catch(error){expected={error:IvyError.from(error).toWire()};}
