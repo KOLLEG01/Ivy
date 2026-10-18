@@ -154,13 +154,20 @@ async fn source_capture_rejects_preconditions_links_and_limits_before_publicatio
                 // Track a path, then replace its containing directory. ls-files
                 // retains it even though Git will not enumerate the new link.
                 f.write("packages/linked/file",b"original");f.git(&["add","packages/linked/file"]);fs::remove_dir_all(f.source.join("packages/linked")).unwrap();
+                // Exclude the untracked link itself: this case isolates the
+                // tracked child's escaping parent, not a race between errors.
+                writeln!(fs::OpenOptions::new().append(true).open(f.source.join(".git/info/exclude")).unwrap(),"\n/packages/linked").unwrap();
                 #[cfg(windows)] std::os::windows::fs::symlink_dir(target,f.source.join("packages/linked")).unwrap();
-                #[cfg(unix)] std::os::unix::fs::symlink(target,f.source.join("packages/linked")).unwrap();},
+                #[cfg(unix)] std::os::unix::fs::symlink(target,f.source.join("packages/linked")).unwrap();
+                let mut listing=Command::new(&f.git);listing.args(["ls-files","--cached","--others","--exclude-standard","-z"]).current_dir(&f.source);
+                #[cfg(windows)] {use std::os::windows::process::CommandExt;listing.creation_flags(0x08000000);}
+                let listing=listing.output().unwrap();assert!(listing.status.success());let entries=listing.stdout.split(|byte|*byte==0).collect::<Vec<_>>();
+                assert!(entries.contains(&b"packages/linked/file".as_slice()));assert!(!entries.contains(&b"packages/linked".as_slice()));},
             "large-file"=>fs::File::create(f.source.join("packages/large")).unwrap().set_len(64*1024*1024+1).unwrap(),
             _=>unreachable!(),
         }
         let result=source::capture_source(original.clone(),f.config.clone(),f.root.0.clone()).await.map(|s|view(&s));
-        assert!(result.is_err(),"{mode}");let mut input=f.input();input.insert("source",IvyJson::String(original));compare(input,result);f.no_incoming();
+        assert!(result.is_err(),"{mode}");let mut input=f.input();input.insert("source",IvyJson::String(original));input.insert("case",mode.into());compare(input,result);f.no_incoming();
     }
 }
 

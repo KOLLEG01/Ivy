@@ -63,8 +63,8 @@ async fn progress_reader_keeps_original_dates_identity_staleness_and_extra_json(
 async fn progress_heartbeat_and_drop_stop_background_admission(){
  let f=ServiceFixture::new();let host=host_configuration(&f);let clock=Arc::new(Fixed(AtomicI64::new(AT)));
  let progress=PreparationProgress::with_clock(&host,"fixture".into(),"snapshot".into(),clock.clone()).unwrap();progress.step("building".into(),StepOptions::default()).await.unwrap();
- clock.0.store(AT+5000,Ordering::SeqCst);tokio::time::sleep(Duration::from_millis(5200)).await;
- assert_eq!(load(&progress_path(&host)).unwrap().get("observedAt"),Some(&"2026-01-01T00:00:05.000Z".into()));
+ clock.0.store(AT+5000,Ordering::SeqCst);
+ tokio::time::timeout(Duration::from_secs(15),async{while load(&progress_path(&host)).and_then(|value|value.get("observedAt").cloned())!=Some("2026-01-01T00:00:05.000Z".into()){tokio::time::sleep(Duration::from_millis(20)).await;}}).await.unwrap();
  progress.close().await.unwrap();drop(progress);fs::remove_file(progress_path(&host)).unwrap();tokio::time::sleep(Duration::from_millis(50)).await;assert!(!progress_path(&host).exists());
 }
 

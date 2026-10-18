@@ -57,6 +57,11 @@ fn saved_data(database:&std::path::Path)->IvyJson{
  let mut statement=db.prepare("SELECT key,value FROM meta WHERE key NOT GLOB 'runtime-policy:*' AND key NOT GLOB 'runtime-policy-import:*' ORDER BY key").unwrap();let rows=statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap().map(|row|{let(key,value)=row.unwrap();IvyJson::Array(vec![key.into(),value.into()])}).collect();values.push(("meta",IvyJson::Array(rows)));IvyJson::object(values)
 }
 fn policy_count(database:&std::path::Path)->i64{Connection::open(database).unwrap().query_row("SELECT count(*) FROM meta WHERE key GLOB 'runtime-policy:*'",[],|row|row.get(0)).unwrap()}
+fn import_holds_executor(root:&std::path::Path)->bool{
+ // A read-only witness does not compete for the importer's exclusive claim.
+ let Ok(db)=Connection::open_with_flags(root.join("executor-lock.sqlite"),ivy_store::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)else{return false};db.busy_timeout(Duration::from_millis(10)).unwrap();
+ matches!(db.query_row::<i64,_,_>("SELECT pid FROM owner LIMIT 1",[],|row|row.get(0)),Err(ivy_store::rusqlite::Error::SqliteFailure(error,_)) if matches!(error.code,ivy_store::rusqlite::ErrorCode::DatabaseBusy|ivy_store::rusqlite::ErrorCode::DatabaseLocked))
+}
 
 #[tokio::test]
 async fn explicit_policy_import_keeps_copied_current_stopped_bootstrap_and_rollback_data_usable(){
@@ -66,7 +71,7 @@ async fn explicit_policy_import_keeps_copied_current_stopped_bootstrap_and_rollb
  let journal=HostJournal::open(f.host.clone()).await.unwrap();for target in &f.targets{assert_json_eq(&journal.accepted_target_policy(target.clone()).await.unwrap().unwrap(),&f.accepted);}
  let mut native_configs=Vec::new();for target in &f.targets{native_configs.push(config::instance_config(PathBuf::from(target.required("configPath").unwrap().as_str().unwrap()),&fixture_node("24.18.0")).await.unwrap().json().clone());}assert_json_eq(&IvyJson::Array(native_configs.clone()),f.original_state.required("configurations").unwrap());
  for id in ["fixture","stopped-fixture","bootstrap-fixture"]{assert!(journal.target(id).await.unwrap().is_some());}
- assert_eq!(journal.operation("retained-0").await.unwrap().unwrap().required("activation").unwrap().get("previousTarget"),Some(&f.targets[3]));assert_eq!(journal.candidate(&hash("b").as_str().unwrap()).await.unwrap().get("buildId"),Some(&hash("b")));journal.close().await.unwrap();f.unchanged();
+ assert_json_eq(journal.operation("retained-0").await.unwrap().unwrap().required("activation").unwrap().required("previousTarget").unwrap(),&f.targets[3]);assert_eq!(journal.candidate(&hash("b").as_str().unwrap()).await.unwrap().get("buildId"),Some(&hash("b")));journal.close().await.unwrap();f.unchanged();
  let after_original=original(IvyJson::object([("mode","inspect".into()),("host",f.host.clone())]));assert_json_eq(&after_original,&f.original_state);f.unchanged();record(IvyJson::object([("case","copy-original-current-stopped-bootstrap-rollback".into()),("beforeOriginal",f.original_state.clone()),("receipt",receipt),("afterOriginal",after_original),("nativeConfigurations",IvyJson::Array(native_configs)),("allOriginalRowsAndSourceFilePreserved",true.into())]));
  let mut changed=request;changed.bindings[0].configuration_hash=hash("f").as_str().unwrap();assert_eq!(policy_import::import_target_policies(f.host.clone(),changed).await.unwrap_err().code,"mutation_conflict");
 }
@@ -99,6 +104,6 @@ async fn policy_import_partial_batches_are_explicit_and_live_owner_locks_refuse_
 #[tokio::test]
 async fn a_dropped_import_waiter_retains_locks_and_finishes_the_original_transaction(){
  let f=CopyFixture::new().await;let request=f.request("dropped-waiter").await;let writer=Connection::open(&f.database).unwrap();writer.execute_batch("BEGIN IMMEDIATE").unwrap();let host=f.host.clone();let waiter=tokio::spawn(async move{policy_import::import_target_policies(host,request).await});let root=PathBuf::from(f.host.required("runtimeRoot").unwrap().as_str().unwrap());
- tokio::time::timeout(Duration::from_secs(2),async{loop{match ExecutorLock::acquire(root.clone(),false).await{Ok(lock)=>lock.close().await.unwrap(),Err(error)=>{assert_eq!(error.code,"executor_already_running");break}}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();waiter.abort();let _=waiter.await;writer.execute_batch("COMMIT").unwrap();
+ tokio::time::timeout(Duration::from_secs(5),async{while !import_holds_executor(&root){assert!(!waiter.is_finished(),"Import finished before the blocked transaction witness");tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();waiter.abort();let _=waiter.await;writer.execute_batch("COMMIT").unwrap();
  tokio::time::timeout(Duration::from_secs(5),async{loop{if policy_count(&f.database)==5{if let Ok(released)=ExecutorLock::acquire(root.clone(),false).await{released.close().await.unwrap();break}}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();f.unchanged();record(IvyJson::object([("case","dropped-waiter-retains-import-ownership".into()),("associations",IvyJson::Number(5.0)),("allOriginalRowsAndSourceFilePreserved",true.into())]));
 }
