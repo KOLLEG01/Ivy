@@ -1,4 +1,4 @@
-use ivy_host_runtime::codex_rpc;
+use ivy_host_runtime::{codex_rpc, node_path, paths};
 #[path = "../../packages/host-runtime/rust/src/codex_handshake.rs"]
 mod handshake;
 use ivy_contracts::{
@@ -103,7 +103,7 @@ fn handshake_version_matches_original_grammar_including_utf16_and_ecmascript_whi
 async fn handshake_checks_identity_before_initialized_notification() {
     let root = std::env::temp_dir().join(format!("ivy-agent-handshake-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
-    let expected = std::fs::canonicalize(&root).unwrap();
+    let expected = paths::realpath(&root).unwrap();
     let home = IvyJson::from(root.to_str().unwrap());
     let catalog = parse(
         include_str!("../../specs/native/codex-0.154.0/catalog.json"),

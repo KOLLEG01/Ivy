@@ -113,6 +113,7 @@ impl Drop for Tasks {
 pub struct NativeRpc {
     commands: mpsc::Sender<Command>,
     state: watch::Receiver<Option<String>>,
+    catalog: Arc<IvyJson>,
 }
 impl NativeRpc {
     pub fn start<W, R>(catalog: &IvyJson, input: W, output: R, events: Events) -> IvyResult<Self>
@@ -171,7 +172,14 @@ impl NativeRpc {
             let _tasks = tasks;
             actor.run(receiver, incoming).await;
         });
-        Ok(Self { commands, state })
+        Ok(Self {
+            commands,
+            state,
+            catalog: Arc::new(catalog.clone()),
+        })
+    }
+    pub fn catalog(&self) -> &IvyJson {
+        self.catalog.as_ref()
     }
     pub fn connected(&self) -> bool {
         self.state.borrow().is_none() && !self.commands.is_closed()

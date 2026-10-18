@@ -1,4 +1,6 @@
-use ivy_host_runtime::process;
+use ivy_host_runtime::{node_path, paths, process};
+#[path = "../../packages/host-runtime/rust/src/codex_daemon.rs"]
+mod codex_daemon;
 #[path = "../../packages/host-runtime/rust/src/codex_windows_shell.rs"]
 mod shell;
 use ivy_contracts::{IvyJson, json::parse};

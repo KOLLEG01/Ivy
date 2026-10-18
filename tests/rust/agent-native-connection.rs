@@ -1,4 +1,4 @@
-use ivy_host_runtime::{codex_rpc, process, process_fence};
+use ivy_host_runtime::{codex_rpc, node_path, paths, process, process_fence};
 #[path = "../../packages/host-runtime/rust/src/codex_handshake.rs"]
 mod codex_handshake;
 #[path = "../../packages/host-runtime/rust/src/codex_proxy_transport.rs"]
@@ -23,7 +23,7 @@ impl Root {
         let root =
             std::env::temp_dir().join(format!("ivy-native-connection-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
-        Self(std::fs::canonicalize(root).unwrap())
+        Self(paths::realpath(&root).unwrap())
     }
 }
 impl Drop for Root {
@@ -253,7 +253,9 @@ async fn closing_proxy_retires_only_tunnel_and_leaves_external_listener_availabl
             match message {
                 Message::Text(text) => {
                     let request = parse(text.as_str(), 65536).unwrap();
-                    if request.get("method").and_then(IvyJson::as_js_string) == Some(&"initialize".into()) {
+                    if request.get("method").and_then(IvyJson::as_js_string)
+                        == Some(&"initialize".into())
+                    {
                         let reply = IvyJson::object([
                             ("id", request.get("id").unwrap().clone()),
                             (

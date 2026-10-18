@@ -1,7 +1,13 @@
 //! Unpackaged PowerShell probe; path identity is checked by the launch owner.
-use super::process::{self, Command, LaunchContext, ProcessResult};
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
-use std::{collections::BTreeMap, path::Path};
+use super::{
+    codex_daemon::file_hash,
+    node_path, paths,
+    process::{self, Command, LaunchContext, ProcessResult},
+};
+use ivy_contracts::{
+    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent, json::parse,
+};
+use std::{collections::BTreeMap, ffi::OsString, path::Path};
 
 const PROBE: &str = r#"
 $ErrorActionPreference='Stop'
@@ -117,4 +123,102 @@ pub(crate) async fn probe_shell(
     )
     .await?;
     probe_observation(&result)
+}
+
+/// Validate the explicit unpackaged shell before any native owner is launched.
+pub async fn verify_windows_shell(
+    settings: Option<&IvyJson>,
+    cwd: &Path,
+    job_launcher: &Path,
+    context: &node_path::Context,
+) -> IvyResult<IvyJson> {
+    let require = |test, code, message| {
+        if test {
+            Ok(())
+        } else {
+            Err(IvyError::new(code, message))
+        }
+    };
+    require(
+        cfg!(windows)
+            && settings.is_some_and(|value| match value {
+                IvyJson::Null | IvyJson::Bool(false) => false,
+                IvyJson::Number(number) => *number != 0.0 && !number.is_nan(),
+                IvyJson::String(value) => !value.0.is_empty(),
+                _ => true,
+            }),
+        "native_shell_required",
+        "Windows native execution requires an explicitly configured unpackaged PowerShell.",
+    )?;
+    let settings = settings.unwrap();
+    validate_agent("WindowsShell", settings)?;
+    let configured = settings.required("executable")?.as_js_string().unwrap();
+    require(
+        node_path::is_absolute(context.style, configured),
+        "native_shell_mismatch",
+        "The native shell executable must be absolute.",
+    )?;
+    let path = node_path::to_native(configured);
+    let executable = tokio::task::spawn_blocking(move || paths::realpath(&path))
+        .await
+        .map_err(|_| IvyError::internal())?
+        .map_err(|_| IvyError::internal())?;
+    let text = node_path::from_native(&executable);
+    require(
+        node_path::basename(context.style, &text).to_english_lowercase()
+            == JsString::from("pwsh.exe")
+            && tokio::fs::metadata(&executable)
+                .await
+                .map_err(|_| IvyError::internal())?
+                .is_file(),
+        "native_shell_mismatch",
+        "The configured native shell must be a direct pwsh.exe executable.",
+    )?;
+    require(
+        settings.get("executableHash") == Some(&IvyJson::from(file_hash(&executable).await?)),
+        "native_shell_mismatch",
+        "Native shell bytes differ from the configured digest.",
+    )?;
+    let observed = probe_shell(&executable, cwd, job_launcher).await?;
+    let folded = |value: &JsString| context.resolve(&[value.clone()]).to_english_lowercase();
+    require(
+        folded(&observed.executable) == folded(&text),
+        "native_shell_mismatch",
+        "The launched shell does not match its configured identity.",
+    )?;
+    let status = IvyJson::object([
+        ("executable", IvyJson::String(text)),
+        (
+            "executableHash",
+            settings.required("executableHash")?.clone(),
+        ),
+        ("version", IvyJson::String(observed.version)),
+        ("packageIdentity", "unpackaged".into()),
+    ]);
+    validate_agent("WindowsShellStatus", &status)?;
+    Ok(status)
+}
+
+pub fn windows_shell_environment(
+    shell: &IvyJson,
+    environment: &BTreeMap<JsString, JsString>,
+) -> IvyResult<BTreeMap<OsString, OsString>> {
+    let inherited = environment
+        .iter()
+        .find(|(key, _)| key.to_english_lowercase() == JsString::from("path"))
+        .map(|(_, value)| value.0.as_slice())
+        .unwrap_or(&[]);
+    let executable = shell
+        .required("executable")?
+        .as_js_string()
+        .ok_or_else(IvyError::internal)?;
+    let mut path = node_path::dirname(node_path::Style::Windows, executable).0;
+    if !inherited.is_empty() {
+        path.push(59);
+        path.extend_from_slice(inherited);
+    }
+    Ok(BTreeMap::from([(
+        "PATH".into(),
+        node_path::to_native(&JsString(path)).into_os_string(),
+    )]))
 }

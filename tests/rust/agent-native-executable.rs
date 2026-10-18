@@ -1,8 +1,12 @@
-use ivy_host_runtime::{codex_rpc, process};
+use ivy_host_runtime::{
+    codex_connection, codex_home, codex_rpc, config, node_path, paths, process, process_fence,
+};
 #[path = "../../packages/host-runtime/rust/src/codex_daemon.rs"]
 mod codex_daemon;
 #[path = "../../packages/host-runtime/rust/src/codex_handshake.rs"]
 mod codex_handshake;
+#[path = "../../packages/host-runtime/rust/src/codex_windows_shell.rs"]
+mod codex_windows_shell;
 #[path = "../../packages/host-runtime/rust/src/codex_process.rs"]
 mod native_process;
 use ivy_contracts::{
@@ -80,7 +84,7 @@ async fn executable_and_cli_version_match_original_boundaries_without_native_lau
         .await
         {
             Ok(path) => {
-                assert_eq!(path, std::fs::canonicalize(&configured).unwrap());
+                assert_eq!(path, paths::realpath(&configured).unwrap());
                 IvyJson::object([("ok", true.into())])
             }
             Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
