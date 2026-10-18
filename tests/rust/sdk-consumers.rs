@@ -153,10 +153,12 @@ impl RpcClient for Scripted {
                     "completed" => Outcome::Completed,
                     _ => Outcome::NotExecuted,
                 };
-                return Err(
-                    IvyError::new_js(text(error, "code"), text(error, "message"))
-                        .with_outcome(outcome),
-                );
+                let mut result = IvyError::new_js(text(error, "code"), text(error, "message"))
+                    .with_outcome(outcome);
+                if let Some(details) = error.get("details") {
+                    result = result.with_details(details.clone());
+                }
+                return Err(result);
             }
             Ok(field(&step, "value").clone())
         })
@@ -196,6 +198,25 @@ async fn shared_consumer_helpers_match_typescript() {
             ..Default::default()
         });
         let result = match field(&input, "kind").as_str().unwrap().as_str() {
+            "main-checked" => match main_chat_checked(client.as_ref()).await {
+                Ok(value) => success(value.to_json()),
+                Err(error) => {
+                    let origin = match &error {
+                        MainChatFailure::Ivy(_) => "ivy",
+                        MainChatFailure::Boundary => "boundary",
+                    };
+                    let error = error.into_error();
+                    let mut normalized = field(&failure(error.clone()), "error").clone();
+                    if let Some(details) = error.details {
+                        normalized.insert("details", details);
+                    }
+                    IvyJson::object([
+                        ("ok", false.into()),
+                        ("origin", origin.into()),
+                        ("error", normalized),
+                    ])
+                }
+            },
             "main" => match main_chat(client.as_ref()).await {
                 Ok(value) => success(value.to_json()),
                 Err(error) => failure(error),
