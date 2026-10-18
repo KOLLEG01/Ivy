@@ -301,6 +301,12 @@ mod tests {
     async fn saved_ack_fences_foreign_dialogs_and_preserves_original_route_credentials_and_utf8() {
         let endpoint = EndpointBuilder::new().build();
         let mut request = original("");
+        request
+            .headers
+            .push(WwwAuthenticate::new("Digest realm=\"fixture\", nonce=\"fixture\"").into());
+        request
+            .headers
+            .push(ProxyAuthenticate::new("Digest realm=\"fixture\", nonce=\"fixture\"").into());
         request.headers.push(Authorization::new("Digest username=\"fixture\", realm=\"fixture\", nonce=\"fixture\", uri=\"sip:peer@127.0.0.1:5060\", response=\"fixture\"").into());
         request
             .headers
@@ -358,7 +364,11 @@ mod tests {
         assert!(cancel.body.is_empty());
         assert!(!cancel.headers.iter().any(|h| matches!(
             h,
-            Header::Authorization(_) | Header::ProxyAuthorization(_) | Header::ContentType(_)
+            Header::Authorization(_)
+                | Header::ProxyAuthorization(_)
+                | Header::WwwAuthenticate(_)
+                | Header::ProxyAuthenticate(_)
+                | Header::ContentType(_)
         )));
     }
 

@@ -226,6 +226,8 @@ impl InviteExchange {
                 h,
                 Header::Authorization(_)
                     | Header::ProxyAuthorization(_)
+                    | Header::WwwAuthenticate(_)
+                    | Header::ProxyAuthenticate(_)
                     | Header::ContentType(_)
                     | Header::ContentLength(_)
             )
