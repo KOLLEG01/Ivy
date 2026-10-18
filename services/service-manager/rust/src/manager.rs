@@ -120,8 +120,10 @@ impl Manager {
             })],
             stop_service: Box::pin({
                 let service = service.clone();
+                let admission = admission.clone();
                 async move {
                     service.stop().await;
+                    admission.drain().await;
                     Ok(())
                 }
             }),
