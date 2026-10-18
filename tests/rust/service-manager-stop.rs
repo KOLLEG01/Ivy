@@ -6,7 +6,7 @@ mod owner_cases;
 #[path = "../../packages/host-runtime/rust/src/runtime_owner/stop.rs"]
 mod stop;
 
-use ivy_contracts::{IvyError, json::parse, limits::MANAGEMENT_FRAME_BYTES};
+use ivy_contracts::{IvyError, IvyJson, json::parse, limits::MANAGEMENT_FRAME_BYTES};
 use process::{Command, LaunchContext, OwnedProcess};
 use std::{
     collections::BTreeMap,
