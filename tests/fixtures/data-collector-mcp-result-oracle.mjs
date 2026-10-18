@@ -5,7 +5,7 @@ const client=stripTypeScriptTypes(readFileSync(new URL('../../packages/sdk/src/c
 const responseSource=client.slice(client.indexOf('export function responseValue('),client.indexOf('export function baseUrl(')).replace('export function','function');
 const responseValue=new Function('IvyError',responseSource+';return responseValue;')(IvyError);
 const native=stripTypeScriptTypes(readFileSync(new URL('../../services/data-collector/src/native-mcp.ts',import.meta.url),'utf8'),{mode:'transform'});
-const resultSource=native.slice(native.indexOf('export function mcpToolResult('),native.indexOf('/** A technical, ephemeral MCP context.')).replace('export function','function');
+const resultSource=native.slice(native.indexOf('export function mcpToolResult('),native.indexOf('export class NativeMcpSession')).replace('export function','function');
 const mcpToolResult=new Function('IvyError','responseValue',resultSource+';return mcpToolResult;')(IvyError,responseValue);
 const cases=[{}, {structuredContent:false},{structuredContent:0},{structuredContent:[]},{structuredContent:{value:1},content:[{type:'text',text:'2'}]},
  {structuredContent:null,content:[{type:'image',text:'4'},{type:'text',text:'not JSON'},{type:'text',text:'null'},{type:'text',text:'9'}]},
