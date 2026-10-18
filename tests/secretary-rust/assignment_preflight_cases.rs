@@ -24,11 +24,32 @@ impl Clock for PreflightClock {
 }
 #[tokio::test]
 async fn original_preflight_admission_outputs_cancellation_and_timestamps() {
+    compare_preflight(false).await;
+}
+#[tokio::test]
+async fn original_preflight_with_the_paired_host_process_adapter() {
+    compare_preflight(true).await;
+}
+struct ProcessRoot(std::path::PathBuf);
+impl Drop for ProcessRoot {
+    fn drop(&mut self) {
+        assert_eq!(self.0.parent(), Some(std::env::temp_dir().as_path()));
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+async fn compare_preflight(real_process: bool) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let process_root = ProcessRoot(
+        std::env::temp_dir().join(format!("secretary-preflight-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir(&process_root.0).unwrap();
     let mut command = std::process::Command::new("node");
     command
         .arg("tests/secretary-rust/assignment-preflight-oracle.mjs")
         .current_dir(&root);
+    if real_process {
+        command.arg("--process").arg(&process_root.0);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -46,7 +67,7 @@ async fn original_preflight_admission_outputs_cancellation_and_timestamps() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 45);
+    assert_eq!(rows.len(), if real_process { 21 } else { 45 });
     for (index, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();
@@ -109,55 +130,107 @@ async fn original_preflight_admission_outputs_cancellation_and_timestamps() {
         };
         let current = input.required("current").unwrap();
         let mut ran = false;
-        let outcome = match preflight.prepare(current).await {
-            Err(error) => Err(error),
-            Ok(None) => Ok(current.clone()),
-            Ok(Some(prepared)) => {
-                ran = true;
-                clock.0.store(
-                    input.required("finishedAt").unwrap().as_f64().unwrap() as i64,
-                    Ordering::Relaxed,
+        let outcome = if real_process {
+            let pid_file = input
+                .get("pidFile")
+                .and_then(IvyJson::as_js_string)
+                .map(ivy_host_runtime::node_path::to_native);
+            if let Some(file) = &pid_file {
+                assert!(file.starts_with(&process_root.0));
+                std::fs::remove_file(file).unwrap();
+            }
+            let abort = if input.get("cancelProcess") == Some(&IvyJson::Bool(true)) {
+                let file = pid_file.clone().unwrap();
+                let token = cancellation.cancellation.clone();
+                Some(tokio::spawn(async move {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while !file.is_file() {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("Child readiness before cancellation");
+                    token.cancel();
+                }))
+            } else {
+                None
+            };
+            #[cfg(windows)]
+            let helper = Some(
+                std::env::var_os("CARGO_TARGET_DIR")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| root.join("target"))
+                    .join("debug/ivy-job.exe"),
+            );
+            #[cfg(not(windows))]
+            let helper = None;
+            let result = preflight.execute(current, &root, helper).await;
+            if let Some(abort) = abort {
+                abort.await.unwrap();
+            }
+            if let Some(file) = pid_file {
+                let pid = std::fs::read_to_string(file).unwrap();
+                let output = std::process::Command::new("node")
+                    .args(["-e", "try{process.kill(Number(process.argv[1]),0);process.exitCode=1}catch(e){if(e.code!=='ESRCH')throw e}", &pid])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "Process still observed after return"
                 );
-                if input.get("cancelProcess") == Some(&IvyJson::Bool(true)) {
-                    cancellation.cancellation.cancel();
+            }
+            result
+        } else {
+            match preflight.prepare(current).await {
+                Err(error) => Err(error),
+                Ok(None) => Ok(current.clone()),
+                Ok(Some(prepared)) => {
+                    ran = true;
+                    clock.0.store(
+                        input.required("finishedAt").unwrap().as_f64().unwrap() as i64,
+                        Ordering::Relaxed,
+                    );
+                    if input.get("cancelProcess") == Some(&IvyJson::Bool(true)) {
+                        cancellation.cancellation.cancel();
+                    }
+                    let result = if input.get("failed") == Some(&IvyJson::Bool(true)) {
+                        let error = input.required("error").unwrap();
+                        let outcome = match error
+                            .required("outcome")
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .as_str()
+                        {
+                            "unknown" => Outcome::Unknown,
+                            "completed" => Outcome::Completed,
+                            _ => Outcome::NotExecuted,
+                        };
+                        PreflightResult::Failed {
+                            error: IvyError::new(
+                                error.required("code").unwrap().as_str().unwrap(),
+                                error.required("message").unwrap().as_str().unwrap(),
+                            )
+                            .with_outcome(outcome),
+                            is_ivy_error: input.get("ivyError") == Some(&IvyJson::Bool(true)),
+                            stdout: input.required("stdout").unwrap().clone(),
+                            stderr: input.required("stderr").unwrap().clone(),
+                        }
+                    } else {
+                        let string = |key| {
+                            input
+                                .get(key)
+                                .and_then(IvyJson::as_js_string)
+                                .cloned()
+                                .unwrap_or_else(|| "".into())
+                        };
+                        PreflightResult::Completed {
+                            stdout: string("stdout"),
+                            stderr: string("stderr"),
+                        }
+                    };
+                    preflight.complete(&prepared, result).await
                 }
-                let result = if input.get("failed") == Some(&IvyJson::Bool(true)) {
-                    let error = input.required("error").unwrap();
-                    let outcome = match error
-                        .required("outcome")
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                        .as_str()
-                    {
-                        "unknown" => Outcome::Unknown,
-                        "completed" => Outcome::Completed,
-                        _ => Outcome::NotExecuted,
-                    };
-                    PreflightResult::Failed {
-                        error: IvyError::new(
-                            error.required("code").unwrap().as_str().unwrap(),
-                            error.required("message").unwrap().as_str().unwrap(),
-                        )
-                        .with_outcome(outcome),
-                        is_ivy_error: input.get("ivyError") == Some(&IvyJson::Bool(true)),
-                        stdout: input.required("stdout").unwrap().clone(),
-                        stderr: input.required("stderr").unwrap().clone(),
-                    }
-                } else {
-                    let string = |key| {
-                        input
-                            .get(key)
-                            .and_then(IvyJson::as_js_string)
-                            .cloned()
-                            .unwrap_or_else(|| "".into())
-                    };
-                    PreflightResult::Completed {
-                        stdout: string("stdout"),
-                        stderr: string("stderr"),
-                    }
-                };
-                preflight.complete(&prepared, result).await
             }
         };
         let result = match outcome {
@@ -189,14 +262,19 @@ async fn original_preflight_admission_outputs_cancellation_and_timestamps() {
             "Case {index}: {:?}",
             input.get("label")
         );
-        let actual = IvyJson::object([
+        let mut actual = IvyJson::object([
             ("result", result),
             ("trace", IvyJson::Array(trace)),
             ("ran", IvyJson::Bool(ran)),
         ]);
+        let mut expected = row.required("expected").unwrap().clone();
+        if real_process {
+            actual.remove("ran");
+            expected.remove("ran");
+        }
         assert_eq!(
             canonical(&actual, 32 * 1024 * 1024).unwrap(),
-            canonical(row.required("expected").unwrap(), 32 * 1024 * 1024).unwrap(),
+            canonical(&expected, 32 * 1024 * 1024).unwrap(),
             "Case {index}: {:?}",
             input.get("label")
         );

@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createRequire,syncBuiltinESMExports} from 'node:module';
 import {promisify} from 'node:util';
+import {existsSync,mkdirSync} from 'node:fs';
+import {resolve} from 'node:path';
 import {schemaSamples} from '../fixtures/schema-samples.mjs';
 const require=createRequire(import.meta.url),child=require('node:child_process');
 const originalExec=child.execFile;let processHandler;
+const realProcess=process.argv[2]==='--process',runOriginal=promisify(originalExec);
+const processRoot=process.argv[3];
 const fakeExec=()=>assert.fail('Only the promised execFile boundary is expected');
 fakeExec[promisify.custom]=(...args)=>processHandler(...args);
 child.execFile=fakeExec;syncBuiltinESMExports();
@@ -23,8 +27,8 @@ const target={serviceNodeId:'fixture.agent',hostId:'fixture-host',nativeVersion:
 const rows=[];
 async function add(label,c={}){
  const initial={...structuredClone(seed),phase:'preflight',serviceNodeId:target.serviceNodeId,nativeTarget:c.noTarget?null:{...target,...c.target},preflightOutput:'',...c.execution};
- initial.assignmentSnapshot.preflight=c.noCommand?null:{executable:'fixture-executable',args:['original','\ud800'],timeoutMs:1234};
- initial.executionTarget.threadCwd='/workspace';
+ initial.assignmentSnapshot.preflight=c.noCommand?null:c.command??{executable:'fixture-executable',args:['original','\ud800'],timeoutMs:1234};
+ initial.executionTarget.threadCwd=c.cwd??'/workspace';
  const current={pin:{objectId:itemId,revision:1},value:initial,writtenAt:at};
  let value=structuredClone(initial),revision=1,store,owners=0,clock=c.time??at,ran=false,processRequest=null;
  const trace=[],steps=[],controller=new AbortController();if(c.cancelBefore)controller.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
@@ -34,6 +38,15 @@ async function add(label,c={}){
  processHandler=async(executable,args,options)=>{
   ran=true;processRequest={executable,args,cwd:options.cwd,timeout:options.timeout,maxBuffer:options.maxBuffer,windowsHide:options.windowsHide,encoding:options.encoding,signalAborted:options.signal.aborted};
   clock=c.finishedAt??'2026-01-02T03:04:05.006Z';
+  if(realProcess){
+   const pending=runOriginal(executable,args,options);void pending.catch(()=>{});
+   if(c.cancelProcess){
+    const until=Date.now()+5000;
+    while(!existsSync(c.pidFile)){assert.ok(Date.now()<until,'Child did not become ready');await new Promise(r=>setTimeout(r,10));}
+    controller.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
+   }
+   return pending;
+  }
   if(c.cancelProcess)controller.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
   if(c.failed)throw failure;
   return {stdout:c.stdout??'',stderr:c.stderr??''};
@@ -57,8 +70,25 @@ async function add(label,c={}){
  const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings,owner:{serviceNodeId:'fixture.secretary'},signal:controller.signal,now:()=>new Date(clock)});
  let result;try{result={value:await new AssignmentRunner(engine).preflight(current)};}catch(cause){const e=IvyError.from(cause);result={code:e.code,message:e.message,outcome:e.outcome};}
  store.close();const e=IvyError.from(failure);
- rows.push({input:{label,current,steps,time:Date.parse(c.time??at),finishedAt:Date.parse(c.finishedAt??'2026-01-02T03:04:05.006Z'),cancelBefore:c.cancelBefore??false,cancelProcess:c.cancelProcess??false,failed:c.failed??false,ivyError:c.ivyError??false,stdout:c.stdout??null,stderr:c.stderr??null,error:{code:e.code,message:e.message,outcome:e.outcome}},expected:{result,trace,ran},processRequest});
+ rows.push({input:{label,current,steps,time:Date.parse(c.time??at),finishedAt:Date.parse(c.finishedAt??'2026-01-02T03:04:05.006Z'),cancelBefore:c.cancelBefore??false,cancelProcess:c.cancelProcess??false,realProcess,pidFile:c.pidFile??null,failed:c.failed??false,ivyError:c.ivyError??false,stdout:c.stdout??null,stderr:c.stderr??null,error:{code:e.code,message:e.message,outcome:e.outcome}},expected:{result,trace,ran},processRequest});
 }
+if(realProcess){
+ assert.ok(processRoot,'Isolated process fixture root required');
+ const command=(mode,...args)=>({executable:process.execPath,args:[resolve('tests/secretary-rust/assignment-preflight-child.mjs'),mode,...args],timeoutMs:5000});
+ for(const mode of ['empty','text','env','exit','whitespace','stdout','stderr','combined'])await add('process-'+mode,{command:command(mode),cwd:processRoot});
+ const cwd=resolve(processRoot,'cwd €😀');mkdirSync(cwd);
+ await add('process-cwd',{command:command('cwd'),cwd});
+ await add('process-bare-executable',{command:{...command('args','bare-path'),executable:'node'},cwd:processRoot});
+ await add('process-args',{command:command('args','','spaces and "quotes"','trailing\\','é😀','\ud800'),cwd:processRoot});
+ await add('process-missing',{command:{...command('empty'),executable:resolve(processRoot,'missing-executable')},cwd:processRoot});
+ await add('process-missing-cwd',{command:command('empty'),cwd:resolve(processRoot,'missing-directory')});
+ await add('process-nul-argument',{command:command('args','\0'),cwd:processRoot});
+ await add('process-nul-executable',{command:{...command('empty'),executable:'invalid\0executable'},cwd:processRoot});
+ for(const cancelProcess of [false,true]){const pidFile=resolve(processRoot,'pid-'+cancelProcess);await add('process-'+(cancelProcess?'cancel':'timeout'),{command:{...command('sleep',pidFile),timeoutMs:cancelProcess?5000:1500},cwd:processRoot,cancelProcess,pidFile});}
+ await add('process-host-mismatch',{command:command('empty'),cwd:processRoot,target:{hostId:'other'}});
+ for(const ownerAt of [1,2])await add('process-owner-'+ownerAt,{command:command('empty'),cwd:processRoot,ownerAt,owner:{principalId:'other'}});
+ await add('process-no-command',{noCommand:true,noTarget:true,cancelBefore:true});
+}else{
 await add('success-empty');await add('success-both',{stdout:'standard output',stderr:'standard error'});
 await add('success-stderr',{stdout:'',stderr:'diagnostics'});
 await add('success-whitespace',{stdout:' \n ',stderr:'\ufeff'});
@@ -86,5 +116,6 @@ await add('success-cancelled',{cancelProcess:true,stdout:'must not save'});
 await add('cancel-before',{cancelBefore:true});
 for(const ownerAt of [1,2])await add('owner-changed-'+ownerAt,{ownerAt,owner:{principalId:'other'},stdout:'output'});
 for(const fail of ['objects.write','objects.read','serviceNodes.get','system.status'])await add('rpc-'+fail,{fail,stdout:'output'});
+}
 child.execFile=originalExec;syncBuiltinESMExports();
 process.stdout.write(JSON.stringify({settings,rootId,notificationPolicy:secretaryNotificationPolicy,rows}));
