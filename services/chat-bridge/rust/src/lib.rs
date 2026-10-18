@@ -1,4 +1,5 @@
 pub mod admission;
+pub mod diagnostic_notifications;
 pub mod diagnostics;
 pub mod input_media;
 pub mod main_context;

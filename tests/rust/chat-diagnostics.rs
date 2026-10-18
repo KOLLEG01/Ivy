@@ -8,6 +8,9 @@ use std::{
     process::{Command, Stdio},
 };
 
+#[path = "fixtures/chat-diagnostic-runtime.rs"]
+mod runtime;
+
 fn entry(id: &str, active: bool, time: f64) -> Json {
     Json::object([
         ("code", "unavailable".into()),
