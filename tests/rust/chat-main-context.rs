@@ -41,6 +41,9 @@ fn oracle() -> &'static Json {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        if let Some(path) = std::env::var_os("IVY_CHAT_MAIN_CONTEXT_ORACLE_CAPTURE") {
+            std::fs::write(path, &output.stdout).unwrap();
+        }
         parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
     })
 }
