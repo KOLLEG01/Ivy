@@ -164,6 +164,45 @@ async fn stop(fixture: &Fixture, child: &OwnedProcess) {
     assert_eq!(result.error_code, None, "{result:?}");
     assert_eq!(result.stderr, "", "{result:?}");
 }
+async fn online(
+    fixture: &Fixture,
+    child: &OwnedProcess,
+    previous_boot: Option<&IvyJson>,
+    client: &Arc<dyn RpcClient>,
+    node: &str,
+) -> IvyJson {
+    let health = ready(fixture, child, previous_boot).await;
+    // Health is written by reconciliation before the following heartbeat can
+    // admit routed tools. Observe Hive's actual fence instead of racing it.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            assert!(
+                child.completion.current().is_none(),
+                "provider exited: {:?}",
+                child.completion.current()
+            );
+            let value = client
+                .request(
+                    "serviceNodes.get",
+                    IvyJson::object([("serviceNodeId", node.into())]),
+                    RequestOptions::default(),
+                )
+                .await
+                .unwrap();
+            if ["connected", "synced", "ready"]
+                .iter()
+                .all(|k| value.get(k) == Some(&true.into()))
+                && value.get("stale") == Some(&false.into())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .unwrap();
+    health
+}
 async fn launch_service(fixture: &Fixture, original: bool) -> OwnedProcess {
     if !original {
         return launch_bounded(fixture, false, false, 150_000).await;
@@ -265,8 +304,8 @@ async fn scenario(original: bool) -> IvyJson {
     }
     let mut source_process = launch_service(&source, original).await;
     let mut target_process = launch_service(&target, original).await;
-    let source_health = ready(&source, &source_process, None).await;
-    let target_health = ready(&target, &target_process, None).await;
+    let source_health = online(&source, &source_process, None, &client, SOURCE).await;
+    let target_health = online(&target, &target_process, None, &client, TARGET).await;
     assert_ne!(source_health.get("pid"), target_health.get("pid"));
     assert_ne!(source_health.get("bootId"), target_health.get("bootId"));
     let source_root = invoke(&client, SOURCE, IvyJson::object([("view", "tasks".into())]))
@@ -486,7 +525,14 @@ async fn scenario(original: bool) -> IvyJson {
         &disabled_revision
     );
     source_process = launch_service(&source, original).await;
-    ready(&source, &source_process, source_health.get("bootId")).await;
+    online(
+        &source,
+        &source_process,
+        source_health.get("bootId"),
+        &client,
+        SOURCE,
+    )
+    .await;
     let target_auth = target.root.join("work/tasks/transfer/.auth");
     std::fs::create_dir_all(&target_auth).unwrap();
     std::fs::copy(auth.join("token"), target_auth.join("token")).unwrap();
@@ -579,7 +625,14 @@ async fn scenario(original: bool) -> IvyJson {
     stop(&target, &target_process).await;
     let stopped_row = snapshot(&target);
     target_process = launch_service(&target, original).await;
-    let restarted_health = ready(&target, &target_process, target_health.get("bootId")).await;
+    let restarted_health = online(
+        &target,
+        &target_process,
+        target_health.get("bootId"),
+        &client,
+        TARGET,
+    )
+    .await;
     assert_eq!(snapshot(&target).get("state"), stopped_row.get("state"));
     assert_eq!(snapshot(&target).get("nextAt"), stopped_row.get("nextAt"));
     assert_eq!(
@@ -604,7 +657,14 @@ async fn scenario(original: bool) -> IvyJson {
     db.execute("DELETE FROM tasks WHERE id=?", [TASK]).unwrap();
     drop(db);
     target_process = launch_service(&target, original).await;
-    ready(&target, &target_process, restarted_health.get("bootId")).await;
+    online(
+        &target,
+        &target_process,
+        restarted_health.get("bootId"),
+        &client,
+        TARGET,
+    )
+    .await;
     assert!(snapshot(&target).is_null());
     let visible = invoke(
         &client,
