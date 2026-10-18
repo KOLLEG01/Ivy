@@ -113,7 +113,7 @@ fn convert(state: &IvyJson, authority: &str) -> IvyResult<(IvyJson, Vec<Mapping>
         }
         let hash = value
             .as_str()
-            .ok_or_else(|| conflict("Skills import requires recorded tree hashes."))?;
+            .map_err(|_| conflict("Skills import requires recorded tree hashes."))?;
         mappings.push(Mapping {
             source: source.clone(),
             name,

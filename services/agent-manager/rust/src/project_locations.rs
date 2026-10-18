@@ -472,11 +472,11 @@ impl ProjectLocations {
                 if let Some(source) = &source_path {
                     let root = task_root.clone();
                     let intended = intended_path.clone();
-                    let policy = policy.clone();
+                    let prepare_policy = policy.clone();
                     blocking(move || {
                         internal(mkdir(&root, true))?;
                         require(
-                            policy
+                            prepare_policy
                                 .paths
                                 .inside(&realpath(&root)?, &paths::future_path(&intended)?),
                             "target_conflict",
