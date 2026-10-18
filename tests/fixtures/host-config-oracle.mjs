@@ -14,6 +14,11 @@ const input = JSON.parse(readFileSync(0, 'utf8'));
 try {
   let value;
   if (input.kind === 'file') value = await jsonFile(input.path, input.limit);
+  else if (input.kind === 'fence') {
+    const fence = await import('../../packages/host-runtime/src/process-fence.ts');
+    value = await fence[input.operation](input.path, input.fence);
+    if (value === undefined) value = null;
+  }
   else if (input.kind === 'instance') value = await instanceConfig(input.path);
   else if (input.kind === 'path') {
     process.argv = [process.execPath, 'fixture', ...input.args];

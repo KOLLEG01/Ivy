@@ -93,6 +93,64 @@ fn compare_config_oracle(input: IvyJson, result: ivy_contracts::IvyResult<IvyJso
     assert_eq!(ivy_contracts::json::canonical(&actual, usize::MAX).unwrap(), ivy_contracts::json::canonical(&expected, usize::MAX).unwrap(), "{input:?}");
 }
 
+fn stop_fence() -> IvyJson {
+    IvyJson::object([
+        ("schemaVersion", 1.0.into()), ("owner", "native".into()),
+        ("ownerId", "native-owner".into()), ("processId", 123.0.into()),
+        ("observedAt", "2026-01-01T00:00:00.000Z".into()), ("code", "outcome_unknown".into()),
+    ])
+}
+
+#[tokio::test]
+async fn stop_fence_matches_node_observation_creation_and_exact_clear() {
+    use ivy_host_runtime::process_fence::*;
+    let fixture = ServiceFixture::new();
+    let canonical = ivy_contracts::json::canonical(&stop_fence(), usize::MAX).unwrap();
+    let states = [None, Some(canonical.clone()), Some(format!("\u{feff}\t{canonical}\r\n")),
+        Some(format!("\u{85}{canonical}")), Some("null".into()), Some("{".into()),
+        Some(" ".repeat(4097)), Some(canonical.replace("native-owner", "different-owner"))];
+    for state in states {
+        for operation in ["processStopFence", "requireClearProcessStopFence", "recordProcessStopFence", "clearProcessStopFence"] {
+            let rust = fixture.0.join("rust"); let node = fixture.0.join("node");
+            for root in [&rust, &node] {
+                fs::create_dir_all(root).unwrap();
+                let path = root.join("process-stop-fence.json");
+                if path.exists() { fs::remove_file(&path).unwrap(); }
+                if let Some(content) = &state { fs::write(path, content).unwrap(); }
+            }
+            let result = match operation {
+                "processStopFence" => process_stop_fence(&rust).await.map(|v| v.unwrap_or(IvyJson::Null)),
+                "requireClearProcessStopFence" => require_clear_process_stop_fence(&rust).await.map(|_| IvyJson::Null),
+                "recordProcessStopFence" => record_process_stop_fence(&rust, stop_fence()).await.map(Into::into),
+                _ => clear_process_stop_fence(&rust, stop_fence()).await.map(Into::into),
+            };
+            compare_config_oracle(IvyJson::object([("kind", "fence".into()), ("operation", operation.into()),
+                ("path", node.to_string_lossy().to_string().into()), ("fence", stop_fence())]), result);
+            assert_eq!(fs::read(rust.join("process-stop-fence.json")).ok(), fs::read(node.join("process-stop-fence.json")).ok());
+        }
+    }
+}
+
+#[tokio::test]
+async fn stop_fence_exclusive_writer_and_invalid_marker_fail_closed() {
+    use ivy_host_runtime::process_fence::*;
+    let fixture = ServiceFixture::new(); let root = fixture.0.join("fenced");
+    let mut writers = Vec::new();
+    for _ in 0..16 { let root = root.clone(); writers.push(tokio::spawn(async move { record_process_stop_fence(root, stop_fence()).await.unwrap() })); }
+    let mut winners = 0; for writer in writers { if writer.await.unwrap() { winners += 1; } }
+    assert_eq!(winners, 1);
+    let error = require_clear_process_stop_fence(&root).await.unwrap_err();
+    assert_eq!(error.code, "outcome_unknown"); assert_eq!(error.outcome, ivy_contracts::Outcome::Unknown);
+    assert!(clear_process_stop_fence(&root, stop_fence()).await.unwrap());
+    let path = root.join("process-stop-fence.json"); fs::create_dir(&path).unwrap();
+    assert_eq!(process_stop_fence(&root).await.unwrap_err().code, "outcome_unknown");
+    assert!(!record_process_stop_fence(&root, stop_fence()).await.unwrap());
+    assert!(clear_process_stop_fence(&root, stop_fence()).await.is_err());
+    fs::remove_dir(&path).unwrap();
+    assert!(record_process_stop_fence(&root, IvyJson::Null).await.is_err());
+    assert!(!path.exists());
+}
+
 #[tokio::test]
 async fn service_configuration_matches_original_node_file_and_identity_boundaries() {
     let fixture = ServiceFixture::new();
