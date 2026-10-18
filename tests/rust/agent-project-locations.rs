@@ -2,6 +2,7 @@ use super::{FRAME, Root, compare, field, git_oracle, job, oracle, text, value};
 use ivy_agent_manager::{
     local_state::{Limits, LocalAgentState},
     project_locations::{ProjectLocations, RegisterProject},
+    project_management::ProjectManagement,
     project_policy::ProjectPolicy,
     project_repository::WorkspaceGit,
 };
@@ -52,6 +53,150 @@ fn close_state(state: Option<Arc<Mutex<LocalAgentState>>>) {
             Ok(state) => state.into_inner().unwrap().close().unwrap(),
             Err(_) => panic!("Project fixture retained its SQLite owner"),
         }
+    }
+}
+
+#[tokio::test]
+async fn project_handlers_match_original_validation_availability_refresh_and_outer_identity_order()
+{
+    let root = Root::new();
+    let catalog = fixture(IvyJson::object([("action", "handlerCatalog".into())]));
+    let rows = catalog.as_array().unwrap();
+    assert_eq!(rows.len(), 24);
+    for (index, template) in rows.iter().enumerate() {
+        let original_root = root.path.join(format!("original-handler-{index}"));
+        let expected = fixture(IvyJson::object([
+            ("action", "handlers".into()),
+            ("root", value(&original_root)),
+            ("case", template.clone()),
+        ]));
+        let rust_root = root.path.join(format!("rust-handler-{index}"));
+        fixture(IvyJson::object([
+            ("action", "prepare".into()),
+            ("root", value(&rust_root)),
+            ("case", template.clone()),
+        ]));
+        let row = expand(template, &node_path::from_native(&rust_root));
+        let step = field(&row, "steps").as_array().unwrap()[0].clone();
+        let state = open_state(&rust_root);
+        let policy = ProjectPolicy::new(
+            node_path::from_native(&rust_root.join("data")),
+            &IvyJson::object([
+                ("projectRoot", value(&rust_root.join("projects"))),
+                ("internalProjectRoot", value(&rust_root.join("internal"))),
+            ]),
+            &[],
+            Context::current().unwrap(),
+            &node_path::from_native(&rust_root),
+        )
+        .unwrap();
+        let locations = ProjectLocations::new(
+            policy,
+            None,
+            Some(state.clone()),
+            Arc::new(WorkspaceGit {
+                bootstrap_root: rust_root.clone(),
+                job_launcher: job(),
+                redact_origin: Arc::new(|_| Err(IvyError::internal())),
+                clock: Arc::new(|| "2026-10-18T00:00:00.000Z".into()),
+            }),
+        );
+        locations
+            .set_native_projects(&[IvyJson::object([
+                ("nativeId", "internal".into()),
+                ("name", "internal".into()),
+                (
+                    "paths",
+                    IvyJson::Array(vec![value(&rust_root.join("internal"))]),
+                ),
+                ("source", "native".into()),
+            ])])
+            .unwrap();
+        let effects = Arc::new(Mutex::new(Vec::<IvyJson>::new()));
+        let owner = Arc::new(ProjectManagement {
+            locations: locations.clone(),
+            host_id: "host".into(),
+            service_node_id: "agent".into(),
+            available: Arc::new({
+                let effects = effects.clone();
+                let step = step.clone();
+                move || {
+                    effects.lock().unwrap().push("available".into());
+                    if step.get("available") == Some(&IvyJson::Bool(false)) {
+                        Err(IvyError::new(
+                            "native_unavailable",
+                            "The current native owner is unavailable.",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                }
+            }),
+            fresh_projects: Arc::new({
+                let effects = effects.clone();
+                let step = step.clone();
+                move || {
+                    effects.lock().unwrap().push("fresh".into());
+                    let fail = step.get("freshError") == Some(&IvyJson::Bool(true));
+                    Box::pin(async move {
+                        if fail {
+                            Err(IvyError::new(
+                                "fixture_fresh_failed",
+                                "Fixture project refresh failed.",
+                            ))
+                        } else {
+                            Ok(())
+                        }
+                    })
+                }
+            }),
+            compare_directories: Arc::new(|_, _| {
+                panic!("These wrapper cases do not enumerate a valid directory")
+            }),
+        });
+        let handlers = owner.handlers();
+        let context = field(&step, "context");
+        let context_value = ivy_sdk::service::InvocationContext::detached(
+            text(context, "callerPrincipalId"),
+            context
+                .get("operationId")
+                .and_then(IvyJson::as_js_string)
+                .cloned(),
+            1,
+            Default::default(),
+            IvyError::new("fixture_cancelled", "Fixture caller cancelled."),
+        );
+        if context.get("cancelled") == Some(&IvyJson::Bool(true)) {
+            context_value.signal.cancel();
+        }
+        let name = format!("agent.{}", text(&step, "name").to_utf8().unwrap());
+        let result = (handlers.get(&JsString::from(name)).unwrap())(
+            field(&step, "args").clone(),
+            context_value,
+        )
+        .await;
+        let trace = match result {
+            Ok(value) => IvyJson::object([("result", value)]),
+            Err(error) => IvyJson::object([("error", error.to_wire())]),
+        };
+        let actual = fixture(IvyJson::object([
+            ("action", "normalize".into()),
+            ("root", value(&rust_root)),
+            (
+                "value",
+                IvyJson::object([
+                    ("trace", IvyJson::Array(vec![trace])),
+                    ("calls", IvyJson::Array(Vec::new())),
+                    ("effects", IvyJson::Array(effects.lock().unwrap().clone())),
+                ]),
+            ),
+        ]));
+        compare(&actual, &expected, &text(&row, "name").to_utf8().unwrap());
+        drop(handlers);
+        drop(owner);
+        locations.close().unwrap();
+        drop(locations);
+        close_state(Some(state));
     }
 }
 
