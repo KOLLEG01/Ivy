@@ -124,6 +124,7 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  'tests/rust/chat-notices.rs': { package: 'ivy-chat-bridge', test: 'chat-notices' },
   'tests/rust/chat-native-driver.rs': { package: 'ivy-chat-bridge', test: 'chat-native-driver' },
   'tests/rust/chat-registry.rs': { package: 'ivy-chat-bridge', test: 'chat-registry' },
   'tests/rust/chat-input-media.rs': { package: 'ivy-chat-bridge', test: 'chat-input-media' },
