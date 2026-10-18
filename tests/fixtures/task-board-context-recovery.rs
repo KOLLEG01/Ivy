@@ -512,6 +512,8 @@ async fn recovery_uses_rust_saved_receipt_and_refuses_actual_retained_snapshot_l
         )
         .unwrap();
     let before = database.total_changes();
-    assert!(!subject.unstarted_archived_context(&task).await.unwrap());
+    let error = subject.unstarted_archived_context(&task).await.unwrap_err();
+    assert_eq!(error.code, "task_board_evidence_mismatch");
+    assert_eq!(error.message, "The local workflow revision is unavailable.");
     assert_eq!(database.total_changes(), before);
 }
