@@ -21,8 +21,11 @@ mod resources;
 pub use resources::{
     SchemaResourceGraph, SchemaResourceIndex, SchemaResourceNode, SchemaResourceReference,
 };
+#[path = "schema_runtime.rs"]
+mod runtime;
 #[path = "schema_uri.rs"]
 pub mod uri;
+pub use runtime::{CompiledSchema, SchemaValidators};
 
 /// An admitted finite schema graph. Compilation separately checks keyword values.
 pub struct AdmittedSchema {

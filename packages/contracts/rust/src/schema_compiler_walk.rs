@@ -28,6 +28,13 @@ pub(super) fn has_rules_but_ref(schema: &IvyJson) -> bool {
 
 fn has_rules_except_ref(schema: &IvyJson, without_ref: bool) -> bool {
     const RULES: &[&str] = &[
+        "$dynamicAnchor",
+        "$dynamicRef",
+        "$recursiveAnchor",
+        "$recursiveRef",
+        "$comment",
+        "id",
+        "nullable",
         "$ref",
         "type",
         "const",
@@ -57,6 +64,17 @@ fn has_rules_except_ref(schema: &IvyJson, without_ref: bool) -> bool {
         "additionalProperties",
         "properties",
         "items",
+        "prefixItems",
+        "contains",
+        "minContains",
+        "maxContains",
+        "propertyNames",
+        "patternProperties",
+        "dependencies",
+        "dependentRequired",
+        "dependentSchemas",
+        "unevaluatedProperties",
+        "unevaluatedItems",
     ];
     entries(schema).iter().any(|(key, _)| {
         (!without_ref || *key != &JsString::from("$ref"))
@@ -67,6 +85,7 @@ fn has_rules_except_ref(schema: &IvyJson, without_ref: bool) -> bool {
 fn always_valid(schema: &IvyJson) -> bool {
     match schema {
         IvyJson::Bool(value) => *value,
+        IvyJson::Null => false,
         _ => !has_rules(schema),
     }
 }
@@ -122,7 +141,7 @@ pub(super) fn walk_scoped<'a>(
         if let Some(child) = node.get("not").filter(|child| !always_valid(child)) {
             add("not", child, None);
         }
-        for keyword in ["anyOf", "oneOf", "allOf"] {
+        for keyword in ["anyOf", "oneOf", "allOf", "prefixItems"] {
             if let Some(items) = node.get(keyword).and_then(IvyJson::as_array) {
                 for (index, child) in items.iter().enumerate() {
                     // Draft 2020 tracks evaluated properties/items, so anyOf
@@ -150,24 +169,52 @@ pub(super) fn walk_scoped<'a>(
         if let Some(child) = node.get("items").filter(|child| !always_valid(child)) {
             add("items", child, None);
         }
+        if let Some(child) = node.get("contains").filter(|child| !always_valid(child)) {
+            let min = node
+                .get("minContains")
+                .and_then(IvyJson::as_f64)
+                .unwrap_or(1.0);
+            let max = node.get("maxContains").and_then(IvyJson::as_f64);
+            if !(max.is_none() && min == 0.0 || max.is_some_and(|max| min > max)) {
+                add("contains", child, None);
+            }
+        }
+        for keyword in ["propertyNames", "unevaluatedProperties", "unevaluatedItems"] {
+            if let Some(child) = node.get(keyword).filter(|child| !always_valid(child)) {
+                add(keyword, child, None);
+            }
+        }
         if let Some(child) = node
             .get("additionalProperties")
             .filter(|child| !always_valid(child))
         {
             add("additionalProperties", child, None);
         }
-        if let Some(properties) = node.get("properties") {
-            for (key, child) in entries(properties) {
-                if !always_valid(child) {
-                    // getSubschema builds an encoded error path only for an
-                    // active property; encodeURIComponent rejects lone units.
-                    if String::from_utf16(&key.0).is_err() {
-                        return Err(IvyError::new(
-                            "registry_invalid",
-                            "Invalid or unsupported JSON schema.",
-                        ));
+        for keyword in [
+            "properties",
+            "patternProperties",
+            "dependencies",
+            "dependentSchemas",
+        ] {
+            if let Some(properties) = node.get(keyword) {
+                for (key, child) in entries(properties)
+                    .into_iter()
+                    .filter(|(key, _)| *key != &JsString::from("__proto__"))
+                {
+                    if keyword == "dependencies" && child.as_array().is_some() {
+                        continue;
                     }
-                    add("properties", child, Some(key.clone()));
+                    if !always_valid(child) {
+                        // getSubschema builds an encoded error path only for an
+                        // active property; encodeURIComponent rejects lone units.
+                        if String::from_utf16(&key.0).is_err() {
+                            return Err(IvyError::new(
+                                "registry_invalid",
+                                "Invalid or unsupported JSON schema.",
+                            ));
+                        }
+                        add(keyword, child, Some(key.clone()));
+                    }
                 }
             }
         }

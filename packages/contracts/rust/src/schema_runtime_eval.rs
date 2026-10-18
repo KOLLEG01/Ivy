@@ -1,0 +1,867 @@
+//! Explicit continuations evaluate consuming references without native recursion.
+use super::*;
+use std::collections::HashSet;
+
+#[derive(Clone, Copy)]
+enum Input<'a> {
+    Value(&'a IvyJson, usize),
+    Key(&'a JsString, usize),
+}
+impl Input<'_> {
+    fn with<T>(self, f: impl FnOnce(&IvyJson) -> T) -> T {
+        match self {
+            Self::Value(value, _) => f(value),
+            Self::Key(key, _) => f(&IvyJson::String(key.clone())),
+        }
+    }
+    fn identity(self) -> (u8, usize) {
+        match self {
+            Self::Value(v, _) => (0, v as *const _ as usize),
+            Self::Key(v, _) => (1, v as *const _ as usize),
+        }
+    }
+    fn root(self) -> usize {
+        match self {
+            Self::Value(_, root) | Self::Key(_, root) => root,
+        }
+    }
+    fn with_root(self, root: usize) -> Self {
+        match self {
+            Self::Value(value, _) => Self::Value(value, root),
+            Self::Key(key, _) => Self::Key(key, root),
+        }
+    }
+}
+#[derive(Clone, Default)]
+struct Marks {
+    properties: HashSet<JsString>,
+    all_properties: bool,
+    dynamic_properties: bool,
+    items: usize,
+    all_items: bool,
+}
+impl Marks {
+    fn merge(&mut self, other: &Self) {
+        self.all_properties |= other.all_properties;
+        self.dynamic_properties |= other.dynamic_properties;
+        self.all_items |= other.all_items;
+        self.items = self.items.max(other.items);
+        self.properties.extend(other.properties.iter().cloned());
+    }
+}
+#[derive(Default)]
+struct ResultValue {
+    valid: bool,
+    marks: Marks,
+}
+impl ResultValue {
+    fn new(valid: bool) -> Self {
+        Self {
+            valid,
+            marks: Marks::default(),
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum Group {
+    All,
+    Any(bool),
+    One,
+}
+enum Check<'a> {
+    InternalError,
+    Eval(usize, Input<'a>),
+    Type(usize, Input<'a>),
+    Literal(usize, Input<'a>),
+    Specific(usize, Input<'a>, Marks),
+    Dependencies(usize, &'static str, Input<'a>),
+    Unique(usize, &'a [IvyJson]),
+    Not(usize, Input<'a>),
+    If(usize, Input<'a>),
+    Contains(usize, &'a [IvyJson], usize),
+    Unevaluated(usize, Input<'a>, Marks),
+    Child(usize, Input<'a>),
+    Group(Group, Vec<Check<'a>>, Marks),
+}
+type Identity = (usize, u8, usize, usize);
+enum Step<'a> {
+    Check(Check<'a>),
+    Exit(Identity),
+    Not,
+    Discard,
+    If(usize, Input<'a>),
+    Branch(Marks),
+    Group(Group, std::vec::IntoIter<Check<'a>>, usize, Marks),
+    Contains(usize, std::slice::Iter<'a, IvyJson>, usize, usize),
+}
+fn with_prior<'a>(check: Check<'a>, prior: &Marks) -> Check<'a> {
+    match check {
+        Check::Specific(id, value, _) => Check::Specific(id, value, prior.clone()),
+        Check::Unevaluated(id, value, _) => Check::Unevaluated(id, value, prior.clone()),
+        other => other,
+    }
+}
+impl CompiledSchema {
+    pub(super) fn evaluate(&self, value: &IvyJson) -> IvyResult<bool> {
+        let mut pending = vec![Step::Check(Check::Eval(
+            self.root,
+            Input::Value(value, self.root),
+        ))];
+        let mut result = ResultValue::new(true);
+        let mut active = HashSet::new();
+        let mut anchors = HashMap::<JsString, usize>::new();
+        while let Some(step) = pending.pop() {
+            let check = match step {
+                Step::Exit(key) => {
+                    active.remove(&key);
+                    continue;
+                }
+                Step::Not => {
+                    result = ResultValue::new(!result.valid);
+                    continue;
+                }
+                Step::Discard => {
+                    result.marks = Marks::default();
+                    continue;
+                }
+                Step::Branch(marks) => {
+                    result.marks.merge(&marks);
+                    if result.valid
+                        && (!result.marks.properties.is_empty() || result.marks.dynamic_properties)
+                    {
+                        result.marks.dynamic_properties = true;
+                    }
+                    continue;
+                }
+                Step::If(id, input) => {
+                    let marks = if result.valid {
+                        std::mem::take(&mut result.marks)
+                    } else {
+                        Marks::default()
+                    };
+                    let branch = self.nodes[id].child(if result.valid { "then" } else { "else" });
+                    if let Some(branch) = branch {
+                        pending.push(Step::Branch(marks));
+                        pending.push(Step::Check(Check::Eval(branch, input)));
+                    } else {
+                        result = ResultValue { valid: true, marks };
+                    }
+                    continue;
+                }
+                Step::Group(kind, mut remaining, accepted, mut marks) => {
+                    let accepted = accepted + usize::from(result.valid);
+                    if result.valid || matches!(kind, Group::All) {
+                        marks.merge(&result.marks);
+                        if matches!(kind, Group::Any(_) | Group::One)
+                            && result.valid
+                            && !result.marks.properties.is_empty()
+                        {
+                            marks.dynamic_properties = true;
+                        }
+                    }
+                    if matches!(kind, Group::All) && !result.valid {
+                        result.marks = marks;
+                        continue;
+                    }
+                    if matches!(kind, Group::One) && accepted > 1 {
+                        result = ResultValue {
+                            valid: false,
+                            marks,
+                        };
+                        continue;
+                    }
+                    // Only a prior unconditional reference covering all properties
+                    // and items permits the original union to short-circuit.
+                    if matches!(kind, Group::Any(true)) && accepted > 0 {
+                        result = ResultValue { valid: true, marks };
+                        continue;
+                    }
+                    if let Some(next) = remaining.next() {
+                        let next = with_prior(next, &marks);
+                        pending.push(Step::Group(kind, remaining, accepted, marks));
+                        pending.push(Step::Check(next));
+                    } else {
+                        result = ResultValue {
+                            valid: match kind {
+                                Group::All => true,
+                                Group::Any(_) => accepted > 0,
+                                Group::One => accepted == 1,
+                            },
+                            marks,
+                        };
+                    }
+                    continue;
+                }
+                Step::Contains(id, mut remaining, count, root) => {
+                    let count = count + usize::from(result.valid);
+                    let schema = &self.nodes[id].schema;
+                    let min = schema
+                        .get("minContains")
+                        .and_then(IvyJson::as_f64)
+                        .unwrap_or(1.0);
+                    let max = schema.get("maxContains").and_then(IvyJson::as_f64);
+                    if max.is_some_and(|max| count as f64 > max) {
+                        result = ResultValue::new(false);
+                        continue;
+                    }
+                    if max.is_none() && count as f64 >= min {
+                        result = ResultValue::new(true);
+                        result.marks.all_items = true;
+                        continue;
+                    }
+                    if let Some(value) = remaining.next() {
+                        pending.push(Step::Contains(id, remaining, count, root));
+                        pending.push(Step::Check(Check::Eval(
+                            self.nodes[id].child("contains").unwrap(),
+                            Input::Value(value, root),
+                        )));
+                    } else {
+                        result = ResultValue::new(count as f64 >= min);
+                        result.marks.all_items = true;
+                    }
+                    continue;
+                }
+                Step::Check(check) => check,
+            };
+            match check {
+                Check::InternalError => return Err(IvyError::internal()),
+                Check::Dependencies(id, keyword, input) => {
+                    result = ResultValue::new(
+                        input.with(|value| dependencies(&self.nodes[id].schema, keyword, value))?,
+                    );
+                }
+                Check::Group(kind, children, marks) => {
+                    let mut remaining = children.into_iter();
+                    if let Some(next) = remaining.next() {
+                        pending.push(Step::Group(kind, remaining, 0, marks.clone()));
+                        pending.push(Step::Check(with_prior(next, &marks)));
+                    } else {
+                        result = ResultValue {
+                            valid: matches!(kind, Group::All),
+                            marks,
+                        };
+                    }
+                }
+                Check::Child(id, input) => {
+                    pending.push(Step::Discard);
+                    pending.push(Step::Check(Check::Eval(id, input)));
+                }
+                Check::Not(id, input) => {
+                    pending.push(Step::Not);
+                    pending.push(Step::Check(Check::Eval(id, input)));
+                }
+                Check::If(id, input) => {
+                    pending.push(Step::If(id, input));
+                    pending.push(Step::Check(Check::Eval(
+                        self.nodes[id].child("if").unwrap(),
+                        input,
+                    )));
+                }
+                Check::Type(id, input) => {
+                    result = ResultValue::new(
+                        input.with(|value| type_matches(&self.nodes[id].schema, value)),
+                    )
+                }
+                Check::Literal(id, input) => {
+                    let schema = &self.nodes[id].schema;
+                    result = ResultValue::new(input.with(|value| -> IvyResult<bool> {
+                        if let Some(constant) = schema.get("const") {
+                            if !equal(value, constant)? {
+                                return Ok(false);
+                            }
+                        }
+                        if let Some(choices) = schema.get("enum").and_then(IvyJson::as_array) {
+                            for choice in choices {
+                                if equal(value, choice)? {
+                                    return Ok(true);
+                                }
+                            }
+                            return Ok(false);
+                        }
+                        Ok(true)
+                    })?);
+                }
+                Check::Unique(id, values) => result = ResultValue::new(self.unique(id, values)?),
+                Check::Contains(id, values, root) => {
+                    let schema = &self.nodes[id].schema;
+                    let min = schema
+                        .get("minContains")
+                        .and_then(IvyJson::as_f64)
+                        .unwrap_or(1.0);
+                    let max = schema.get("maxContains").and_then(IvyJson::as_f64);
+                    if max.is_none() && min == 0.0 {
+                        result = ResultValue::new(true);
+                        continue;
+                    }
+                    if max.is_some_and(|max| min > max) {
+                        result = ResultValue::new(false);
+                        continue;
+                    }
+                    let child = self.nodes[id].child("contains").unwrap();
+                    if child == 0 {
+                        result = ResultValue::new(
+                            values.len() as f64 >= min
+                                && max.is_none_or(|max| values.len() as f64 <= max),
+                        );
+                        continue;
+                    }
+                    let mut remaining = values.iter();
+                    if let Some(value) = remaining.next() {
+                        pending.push(Step::Contains(id, remaining, 0, root));
+                        pending.push(Step::Check(Check::Eval(child, Input::Value(value, root))));
+                    } else {
+                        result = ResultValue::new(min <= 0.0);
+                        result.marks.all_items = true;
+                    }
+                }
+                Check::Unevaluated(id, input, mut marks) => {
+                    let node = &self.nodes[id];
+                    let mut checks = Vec::new();
+                    if let Input::Value(value, root) = input {
+                        match value {
+                            IvyJson::Object(_) if !marks.all_properties => {
+                                if let Some(child) = node.child("unevaluatedProperties") {
+                                    for (key, value) in entries(value) {
+                                        if !marks.properties.contains(key)
+                                            && !(marks.dynamic_properties && inherited(key))
+                                        {
+                                            checks.push(Check::Child(
+                                                child,
+                                                Input::Value(value, root),
+                                            ));
+                                        }
+                                    }
+                                    marks.all_properties = true;
+                                }
+                            }
+                            IvyJson::Array(values) if !marks.all_items => {
+                                if let Some(child) = node.child("unevaluatedItems") {
+                                    checks.extend(values.iter().skip(marks.items).map(|value| {
+                                        Check::Child(child, Input::Value(value, root))
+                                    }));
+                                    marks.all_items = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    pending.push(Step::Check(Check::Group(Group::All, checks, marks)));
+                }
+                Check::Specific(id, input, prior) => {
+                    let node = &self.nodes[id];
+                    if !input.with(|value| self.scalar(&node.schema, value))? {
+                        result = ResultValue::new(false);
+                        continue;
+                    }
+                    let mut checks = Vec::new();
+                    let mut marks = prior;
+                    if let Input::Value(value, root) = input {
+                        match value {
+                            IvyJson::Array(values) => {
+                                if !length(&node.schema, "minItems", "maxItems", values.len()) {
+                                    result = ResultValue::new(false);
+                                    continue;
+                                }
+                                let prefix = node.children("prefixItems");
+                                marks.items = marks.items.max(prefix.len());
+                                checks.extend(prefix.iter().zip(values).map(|((_, id), value)| {
+                                    Check::Child(*id, Input::Value(value, root))
+                                }));
+                                if let Some(child) = node.child("items") {
+                                    marks.all_items = true;
+                                    checks.extend(values.iter().skip(prefix.len()).map(|value| {
+                                        Check::Child(child, Input::Value(value, root))
+                                    }));
+                                }
+                                if node.child("contains").is_some() {
+                                    checks.push(Check::Contains(id, values, root));
+                                }
+                                if node.schema.get("uniqueItems").and_then(IvyJson::as_bool)
+                                    == Some(true)
+                                {
+                                    checks.push(Check::Unique(id, values));
+                                }
+                            }
+                            IvyJson::Object(properties) => {
+                                if !length(
+                                    &node.schema,
+                                    "minProperties",
+                                    "maxProperties",
+                                    properties.len(),
+                                ) {
+                                    result = ResultValue::new(false);
+                                    continue;
+                                }
+                                if let Some(required) =
+                                    node.schema.get("required").and_then(IvyJson::as_array)
+                                {
+                                    if !required_keys(value, required, required.len() >= 64)? {
+                                        result = ResultValue::new(false);
+                                        continue;
+                                    }
+                                }
+                                if let Some(child) = node.child("propertyNames") {
+                                    checks.extend(entries(value).into_iter().map(|(key, _)| {
+                                        Check::Child(child, Input::Key(key, root))
+                                    }));
+                                }
+                                if let Some(child) = node.child("additionalProperties") {
+                                    marks.all_properties = true;
+                                    for (key, value) in
+                                        entries(value).into_iter().filter(|_| child != 0)
+                                    {
+                                        if !node.additional_names.contains(key)
+                                            && !node.children("patternProperties").iter().any(
+                                                |(pattern, _)| self.patterns[pattern].is_match(key),
+                                            )
+                                        {
+                                            checks.push(Check::Child(
+                                                child,
+                                                Input::Value(value, root),
+                                            ));
+                                        }
+                                    }
+                                }
+                                checks.push(Check::Dependencies(id, "dependencies", input));
+                                checks.extend(
+                                    node.children("dependencies")
+                                        .iter()
+                                        .filter(|(key, _)| value.get_key(key).is_some())
+                                        .map(|(_, child)| Check::Eval(*child, input)),
+                                );
+                                for (key, child) in node.children("properties") {
+                                    marks.properties.insert(key.clone());
+                                    if let Some(value) = value.get_key(key) {
+                                        checks
+                                            .push(Check::Child(*child, Input::Value(value, root)));
+                                    }
+                                }
+                                if !node.children("patternProperties").is_empty() {
+                                    marks.dynamic_properties = true;
+                                }
+                                for (pattern, child) in node.children("patternProperties") {
+                                    for (key, value) in entries(value) {
+                                        if self.patterns[pattern].is_match(key) {
+                                            marks.properties.insert(key.clone());
+                                            checks.push(Check::Child(
+                                                *child,
+                                                Input::Value(value, root),
+                                            ));
+                                        }
+                                    }
+                                }
+                                // These errors occur after properties/patternProperties.
+                                checks.push(Check::Dependencies(id, "dependentRequired", input));
+                                checks.extend(
+                                    node.children("dependentSchemas")
+                                        .iter()
+                                        .filter(|(key, _)| value.get_key(key).is_some())
+                                        .map(|(_, child)| Check::Eval(*child, input)),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    checks.push(Check::Unevaluated(id, input, Marks::default()));
+                    pending.push(Step::Check(Check::Group(Group::All, checks, marks)));
+                }
+                Check::Eval(id, input) => {
+                    let node = &self.nodes[id];
+                    if let IvyJson::Bool(accept) = node.schema {
+                        result = ResultValue::new(accept);
+                        continue;
+                    }
+                    let (kind, address) = input.identity();
+                    let key = (id, kind, address, input.root());
+                    if !active.insert(key) {
+                        return Err(IvyError::internal());
+                    }
+                    pending.push(Step::Exit(key));
+                    for anchor in node
+                        .schema
+                        .get("$dynamicAnchor")
+                        .and_then(IvyJson::as_js_string)
+                        .into_iter()
+                    {
+                        if !inherited(anchor) {
+                            anchors.entry(anchor.clone()).or_insert(id);
+                        }
+                    }
+                    if node
+                        .schema
+                        .get("$recursiveAnchor")
+                        .and_then(IvyJson::as_bool)
+                        == Some(true)
+                    {
+                        anchors.entry(JsString::default()).or_insert(id);
+                    }
+                    let mut checks = Vec::new();
+                    if early_type(node) {
+                        checks.push(Check::Type(id, input));
+                    }
+                    if let Some(reference) = node
+                        .schema
+                        .get("$dynamicRef")
+                        .or_else(|| node.schema.get("$recursiveRef"))
+                        .and_then(IvyJson::as_js_string)
+                    {
+                        let anchor = JsString(reference.0[1..].to_vec());
+                        if self.dynamic_targets.contains(&(id, input.root())) && inherited(&anchor)
+                        {
+                            checks.push(Check::InternalError);
+                        } else {
+                            let reference = if self.dynamic_targets.contains(&(id, input.root())) {
+                                *anchors.get(&anchor).unwrap_or(&input.root())
+                            } else {
+                                input.root()
+                            };
+                            checks.push(Check::Eval(reference, input.with_root(reference)));
+                        }
+                    }
+                    if let Some(reference) = node.reference {
+                        checks.push(Check::Eval(reference, input.with_root(reference)));
+                    }
+                    checks.push(Check::Literal(id, input));
+                    if let Some(child) = node.child("not") {
+                        checks.push(Check::Not(child, input));
+                    }
+                    for (keyword, kind) in [
+                        (
+                            "anyOf",
+                            Group::Any(
+                                node.reference
+                                    .is_some_and(|id| self.nodes[id].static_all == 3),
+                            ),
+                        ),
+                        ("oneOf", Group::One),
+                        ("allOf", Group::All),
+                    ] {
+                        if node.children.contains_key(keyword) {
+                            checks.push(Check::Group(
+                                kind,
+                                node.children(keyword)
+                                    .iter()
+                                    .map(|(_, child)| Check::Eval(*child, input))
+                                    .collect(),
+                                Marks::default(),
+                            ));
+                        }
+                    }
+                    if node.child("if").is_some()
+                        && (node.child("then").is_some_and(|id| id != 0)
+                            || node.child("else").is_some_and(|id| id != 0))
+                    {
+                        checks.push(Check::If(id, input));
+                    }
+                    if !early_type(node) {
+                        checks.push(Check::Type(id, input));
+                    }
+                    checks.push(Check::Specific(id, input, Marks::default()));
+                    pending.push(Step::Check(Check::Group(
+                        Group::All,
+                        checks,
+                        Marks::default(),
+                    )));
+                }
+            }
+        }
+        Ok(result.valid)
+    }
+    fn scalar(&self, schema: &IvyJson, value: &IvyJson) -> IvyResult<bool> {
+        match value {
+            IvyJson::Number(value) => {
+                for (key, kind) in [
+                    ("maximum", 0),
+                    ("minimum", 1),
+                    ("exclusiveMaximum", 2),
+                    ("exclusiveMinimum", 3),
+                ] {
+                    if let Some(bound) = schema.get(key).and_then(IvyJson::as_f64) {
+                        if !match kind {
+                            0 => *value <= bound,
+                            1 => *value >= bound,
+                            2 => *value < bound,
+                            _ => *value > bound,
+                        } {
+                            return Ok(false);
+                        }
+                    }
+                }
+                if let Some(divisor) = schema.get("multipleOf").and_then(IvyJson::as_f64) {
+                    let quotient = value / divisor;
+                    if !quotient.is_finite() || divisor == 0.0 {
+                        return Ok(false);
+                    }
+                    let mut buffer = ryu_js::Buffer::new();
+                    let text = buffer.format(quotient);
+                    let end = text
+                        .as_bytes()
+                        .iter()
+                        .enumerate()
+                        .find(|(i, byte)| !(byte.is_ascii_digit() || (*i == 0 && **byte == b'-')))
+                        .map_or(text.len(), |(i, _)| i);
+                    if text[..end].parse::<f64>().ok() != Some(quotient) {
+                        return Ok(false);
+                    }
+                }
+            }
+            IvyJson::String(value) => {
+                if !length(schema, "minLength", "maxLength", value.code_point_len()) {
+                    return Ok(false);
+                }
+                if let Some(pattern) = schema.get("pattern").and_then(IvyJson::as_js_string) {
+                    if !self.patterns[pattern].is_match(value) {
+                        return Ok(false);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+    fn unique(&self, id: usize, values: &[IvyJson]) -> IvyResult<bool> {
+        let node = &self.nodes[id];
+        let item = node.child("items").map(|id| &self.nodes[id].schema);
+        let types = item.and_then(|schema| schema.get("type"));
+        let list = types
+            .filter(|value| value.as_js_string().is_none_or(|s| !s.0.is_empty()))
+            .map(|value| {
+                value
+                    .as_array()
+                    .map_or_else(|| vec![value], |values| values.iter().collect::<Vec<_>>())
+            });
+        if let Some(types) = list.filter(|types| {
+            !types.is_empty()
+                && types
+                    .iter()
+                    .all(|kind| ![IvyJson::from("object"), IvyJson::from("array")].contains(kind))
+        }) {
+            let mut seen = HashSet::new();
+            for value in values.iter().rev() {
+                if !type_matches(item.unwrap(), value) {
+                    continue;
+                }
+                let mut key = crate::json::js_string(value);
+                if types.len() > 1 && value.as_js_string().is_some() {
+                    key.0.push(95);
+                }
+                if key == JsString::from("__proto__") {
+                    continue;
+                }
+                if !seen.insert(key) {
+                    return Ok(false);
+                }
+            }
+        } else {
+            for i in (0..values.len()).rev() {
+                for j in (0..i).rev() {
+                    if equal(&values[i], &values[j])? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+}
+// Short generated property expressions embed object literals, so their special
+// __proto__ initializer differs from a retained JSON schema array (loopRequired).
+// Arrays at the expression boundary are instead joined by CodeGen itself.
+fn generated_key(value: &IvyJson) -> IvyResult<JsString> {
+    if value.as_array().is_some() {
+        return crate::json::try_js_string(value);
+    }
+    literal_string(value)
+}
+fn literal_lookup<'a>(mut value: &'a IvyJson, name: &JsString) -> Option<&'a IvyJson> {
+    loop {
+        if name != &JsString::from("__proto__") {
+            if let Some(own) = value.get_key(name) {
+                return Some(own);
+            }
+        }
+        value = value.get("__proto__")?;
+        if !matches!(value, IvyJson::Object(_) | IvyJson::Array(_)) {
+            return None;
+        }
+    }
+}
+fn literal_string(value: &IvyJson) -> IvyResult<JsString> {
+    if value.as_object().is_none() && value.as_array().is_none() {
+        return crate::json::try_js_string(value);
+    }
+    let mut prototype = value;
+    loop {
+        if prototype.get("toString").is_some() {
+            return Err(IvyError::internal());
+        }
+        if prototype.as_array().is_some() {
+            if literal_lookup(value, &JsString::from("join")).is_some() {
+                return Ok(JsString::from(if value.as_array().is_some() {
+                    "[object Array]"
+                } else {
+                    "[object Object]"
+                }));
+            }
+            let length = literal_lookup(value, &JsString::from("length"))
+                .map(|length| -> IvyResult<f64> {
+                    Ok(match length {
+                        IvyJson::Null => 0.0,
+                        IvyJson::Bool(value) => f64::from(*value),
+                        IvyJson::Number(value) => *value,
+                        _ => crate::json::number_from_string(&literal_string(length)?),
+                    })
+                })
+                .transpose()?
+                .unwrap_or_else(|| {
+                    if value.as_array().is_some() {
+                        value.as_array().unwrap().len() as f64
+                    } else {
+                        prototype.as_array().unwrap().len() as f64
+                    }
+                });
+            let length = if length.is_nan() || length < 0.0 {
+                0
+            } else {
+                length.trunc().min(9_007_199_254_740_991.0) as usize
+            };
+            let mut units = Vec::new();
+            for index in 0..length {
+                if index > 0 {
+                    units.push(44);
+                }
+                let item = value
+                    .as_array()
+                    .and_then(|items| items.get(index))
+                    .or_else(|| literal_lookup(value, &JsString::from(index.to_string())))
+                    .or_else(|| prototype.as_array().and_then(|items| items.get(index)));
+                if let Some(item) = item.filter(|item| !item.is_null()) {
+                    units.extend(literal_string(item)?.0);
+                }
+            }
+            return Ok(JsString(units));
+        }
+        match prototype.get("__proto__") {
+            Some(IvyJson::Null) => return Err(IvyError::internal()),
+            Some(next @ (IvyJson::Object(_) | IvyJson::Array(_))) => prototype = next,
+            _ => return Ok(JsString::from("[object Object]")),
+        }
+    }
+}
+fn required_keys(value: &IvyJson, keys: &[IvyJson], looped: bool) -> IvyResult<bool> {
+    for key in keys {
+        let property = if looped {
+            crate::json::try_js_string(key)?
+        } else {
+            generated_key(key)?
+        };
+        let present = value.get_key(&property).is_some();
+        // The original short required/dependency expression includes a missing
+        // key assignment as its boolean operand. Preserve falsy literal keys;
+        // the >=64-entry required loop has no such assignment condition.
+        let truthy = match key {
+            IvyJson::Null | IvyJson::Bool(false) => false,
+            IvyJson::Number(n) => *n != 0.0,
+            IvyJson::String(s) => !s.0.is_empty(),
+            IvyJson::Array(_) => !property.0.is_empty(),
+            _ => true,
+        };
+        if !present && (looped || truthy) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+pub(super) fn inherited(key: &JsString) -> bool {
+    [
+        "constructor",
+        "__defineGetter__",
+        "__defineSetter__",
+        "hasOwnProperty",
+        "__lookupGetter__",
+        "__lookupSetter__",
+        "isPrototypeOf",
+        "propertyIsEnumerable",
+        "toString",
+        "valueOf",
+        "__proto__",
+        "toLocaleString",
+    ]
+    .iter()
+    .any(|name| key == &JsString::from(*name))
+}
+fn dependencies(schema: &IvyJson, keyword: &str, value: &IvyJson) -> IvyResult<bool> {
+    if let Some(map) = schema.get(keyword) {
+        for (key, required) in entries(map) {
+            if key == &JsString::from("__proto__") || value.get_key(key).is_none() {
+                continue;
+            }
+            if let Some(required) = required.as_array() {
+                if !required_keys(value, required, false)? {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+fn length(schema: &IvyJson, min: &str, max: &str, size: usize) -> bool {
+    schema
+        .get(min)
+        .and_then(IvyJson::as_f64)
+        .is_none_or(|min| size as f64 >= min)
+        && schema
+            .get(max)
+            .and_then(IvyJson::as_f64)
+            .is_none_or(|max| size as f64 <= max)
+}
+fn early_type(node: &Node) -> bool {
+    let Some(types) = node.schema.get("type") else {
+        return true;
+    };
+    let types = types
+        .as_array()
+        .map_or_else(|| vec![types], |values| values.iter().collect());
+    if types.len() != 1 || node.schema.get("nullable").and_then(IvyJson::as_bool) == Some(true) {
+        return true;
+    }
+    let keywords: &[&str] = match types[0].as_str().ok().as_deref() {
+        Some("number") => &[
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+            "format",
+        ],
+        Some("string") => &["minLength", "maxLength", "pattern", "format"],
+        Some("array") => &[
+            "minItems",
+            "maxItems",
+            "uniqueItems",
+            "minContains",
+            "maxContains",
+            "prefixItems",
+            "items",
+            "contains",
+            "unevaluatedItems",
+        ],
+        Some("object") => &[
+            "minProperties",
+            "maxProperties",
+            "required",
+            "propertyNames",
+            "additionalProperties",
+            "dependencies",
+            "properties",
+            "patternProperties",
+            "dependentRequired",
+            "dependentSchemas",
+            "unevaluatedProperties",
+        ],
+        _ => return true,
+    };
+    !keywords
+        .iter()
+        .any(|keyword| node.schema.get(keyword).is_some() || node.children.contains_key(keyword))
+}
