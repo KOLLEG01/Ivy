@@ -40,7 +40,7 @@ pub struct AssignmentScheduler<'a, 'engine, 'journal> {
     pub fallback_execution: Option<&'a IvyJson>,
 }
 impl AssignmentScheduler<'_, '_, '_> {
-    async fn operation(&self, parts: Vec<IvyJson>) -> IvyResult<JsString> {
+    pub(crate) async fn operation(&self, parts: Vec<IvyJson>) -> IvyResult<JsString> {
         let mut scope = vec![
             "secretary".into(),
             self.evidence

@@ -23,6 +23,8 @@ mod assignment_execution_cases;
 mod assignment_preflight_cases;
 #[path = "assignment_scheduler_cases.rs"]
 mod assignment_scheduler_cases;
+#[path = "assignment_progress_cases.rs"]
+mod assignment_progress_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
