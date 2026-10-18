@@ -98,3 +98,54 @@ fn ordered_chunk_mechanics_match_original_typescript() {
         assert_eq!(json!(*store.reads.borrow()), case["reads"]);
     }
 }
+
+#[test]
+fn canonical_decoding_matches_original_error_boundaries() {
+    for case in oracle("decode", None).as_array().unwrap() {
+        let body: Vec<u8> = case["hex"]
+            .as_str()
+            .unwrap()
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        let store = Memory {
+            mutation: String::new(),
+            saved: RefCell::default(),
+            reads: RefCell::default(),
+            bytes: RefCell::default(),
+        };
+        let key = if case["readKey"] == true {
+            ChunkKey::NativeReadEvidence
+        } else {
+            ChunkKey::NativeEvidence
+        };
+        let owner = "owner".into();
+        let result = save_chunks(&store, &owner, &body, key).and_then(|chunks| {
+            read_evidence(
+                &store,
+                &owner,
+                &Manifest {
+                    byte_length: body.len(),
+                    content_hash: digest(&body),
+                    chunks,
+                },
+                key,
+            )
+        });
+        let actual = match result {
+            Ok(value) => {
+                json!({"canonicalHash":digest(ivy_contracts::json::canonical(&value, MAXIMUM_BYTES).unwrap().as_bytes())})
+            }
+            Err(error) => json!({"code":error.code,"message":error.message}),
+        };
+        assert_eq!(actual, case["result"], "{}", case["name"]);
+        let reads: Vec<Value> = store
+            .reads
+            .borrow()
+            .iter()
+            .map(|entry| entry["index"].clone())
+            .collect();
+        assert_eq!(json!(reads), case["reads"], "{}", case["name"]);
+    }
+}

@@ -1,6 +1,11 @@
 //! Immutable byte mechanics shared by native evidence and native read evidence.
-//! Identity/scope validation and canonical JSON decoding belong to their callers.
-use ivy_contracts::{IvyError, JsString, hash::digest, limits::MANAGEMENT_FRAME_BYTES};
+//! Each evidence type separately verifies the decoded value's identity and scope.
+use ivy_contracts::{
+    IvyError, IvyJson, JsString,
+    hash::digest,
+    json::{canonical, parse},
+    limits::MANAGEMENT_FRAME_BYTES,
+};
 
 pub const CHUNK_BYTES: usize = 1024 * 1024;
 pub const MAXIMUM_BYTES: usize = MANAGEMENT_FRAME_BYTES;
@@ -116,4 +121,30 @@ pub fn read_verified_bytes<S: BlobStore>(
         "The complete native evidence differs from the saved body hash or length.",
     )?;
     Ok(body)
+}
+
+/// Decode only after immutable byte verification. Syntax errors are evidence
+/// errors; canonical validation errors retain their original domain and order.
+pub fn read_evidence<S: BlobStore>(
+    store: &S,
+    parent: &JsString,
+    value: &Manifest<S::Pin>,
+    key: ChunkKey,
+) -> Result<IvyJson, S::Error> {
+    let body = read_verified_bytes(store, parent, value, key)?;
+    let invalid_json = || {
+        IvyError::new(
+            "task_board_evidence_mismatch",
+            "Native evidence is not valid UTF-8 JSON.",
+        )
+    };
+    let decoded = std::str::from_utf8(&body).map_err(|_| invalid_json())?;
+    // TextDecoder strips one leading UTF-8 BOM before JSON.parse and comparison.
+    let decoded = decoded.strip_prefix('\u{feff}').unwrap_or(decoded);
+    let observation = parse(decoded, MAXIMUM_BYTES).map_err(|_| invalid_json())?;
+    require(
+        canonical(&observation, MAXIMUM_BYTES)? == decoded,
+        "Native evidence must retain canonical JSON bytes.",
+    )?;
+    Ok(observation)
 }

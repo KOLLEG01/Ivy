@@ -11,7 +11,7 @@ registerHooks({resolve(specifier, context, next) {
   }
   return next(specifier, context);
 }});
-const {digest} = await import('../../packages/contracts/src/canonical.ts');
+const {digest, canonical} = await import('../../packages/contracts/src/canonical.ts');
 const {IvyError, requireThat} = await import('../../packages/contracts/src/errors.ts');
 const {managementFrameBytes} = await import('../../packages/contracts/src/limits.ts');
 const source = readFileSync(new URL('../../services/task-board/src/runtime/store.ts', import.meta.url), 'utf8');
@@ -35,6 +35,39 @@ if (process.argv[2] === 'create') {
   const usage = db.prepare("SELECT rows,bytes FROM storage_usage WHERE kind='blobs'").get();
   process.stdout.write(JSON.stringify({pin, text: bytes.toString(), usage}));
   db.close();
+} else if (process.argv[2] === 'decode') {
+  const evidence = readFileSync(new URL('../../services/task-board/src/runtime/evidence-bytes.ts', import.meta.url), 'utf8')
+    .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
+  const {saveEvidenceChunks, readEvidenceChunks} = new Function('digest', 'requireThat', 'managementFrameBytes', 'canonical', 'IvyError',
+    stripTypeScriptTypes(evidence) + '\nreturn {saveEvidenceChunks,readEvidenceChunks};')(digest, requireThat, managementFrameBytes, canonical, IvyError);
+  const deep = count => '['.repeat(count) + '0' + ']'.repeat(count);
+  const wide = '[' + Array(400001).fill('0').join(',') + ']';
+  const cases = [];
+  const add = async (name, body, readKey = false) => {
+    const values = [], reads = [], key = 'task-board/native-' + (readKey ? 'read-' : '') + 'evidence-chunk';
+    const store = {
+      saveLocalBlob(_key, _name, _parent, bytes) { values.push(Buffer.from(bytes)); return values.length - 1; },
+      localBlob(_key, pin, _parent) { reads.push(pin); return values[pin]; },
+    };
+    let result;
+    try {
+      const chunks = await saveEvidenceChunks(store, 'owner', body, key);
+      const value = await readEvidenceChunks(store, 'owner', {byteLength:body.length, contentHash:digest(body), chunks}, key);
+      result = {canonicalHash:digest(Buffer.from(canonical(value, managementFrameBytes)))};
+    } catch (error) { result = {code:error.code, message:error.message}; }
+    cases.push({name, hex:body.toString('hex'), readKey, reads, result});
+  };
+  for (const text of ['null','true','0','-0','1.5','1e999','9007199254740992','"text"','"💬"','"\\ud800"','{}','[]',
+    '{"a":1,"b":2}','{"b":2,"a":1}','{"a":1,"a":2}','{ "a":1 }','null\n','"\\u0061"','', 'NaN','{"a":}',
+    deep(128), deep(129), deep(256), '['.repeat(256) + '0',
+    '{"a":' + deep(256) + ',"a":0}', wide, wide.slice(0,-1), '{"a":' + wide + ',"a":0}'])
+    await add('text ' + cases.length, Buffer.from(text));
+  await add('leading BOM', Buffer.concat([Buffer.from([0xef,0xbb,0xbf]),Buffer.from('{"a":1}')]));
+  await add('double BOM', Buffer.concat([Buffer.from([0xef,0xbb,0xbf,0xef,0xbb,0xbf]),Buffer.from('null')]));
+  for (const bytes of [[0xff],[0xc0,0xaf],[0x22,0xed,0xa0,0x80,0x22],[0x22,0xf0,0x9f,0x92]])
+    await add('invalid UTF8 ' + cases.length, Buffer.from(bytes));
+  await add('read evidence key', Buffer.from('{"a":1}'), true);
+  process.stdout.write(JSON.stringify(cases));
 } else {
   let evidence = readFileSync(new URL('../../services/task-board/src/runtime/evidence-bytes.ts', import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
