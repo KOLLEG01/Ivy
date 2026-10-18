@@ -79,7 +79,7 @@ async fn candidate_checks_manifest_identity_runtime_and_required_native_payloads
     config::atomic_json(root.join("manifest.json"), manifest.clone()).await.unwrap();
     compare("verifyCandidate", vec![candidate.clone(), host(&root)], verify(&fixture, &candidate).await);
     for file in portable_native_files("host-executor") { let file=root.join(file); fs::create_dir_all(file.parent().unwrap()).unwrap(); fs::write(file,b"payload").unwrap(); }
-    assert_eq!(verify(&fixture, &candidate).await.unwrap(), manifest);
+    super::assert_json_eq(&verify(&fixture, &candidate).await.unwrap(), &manifest);
     compare("verifyCandidate", vec![candidate.clone(), host(&root)], verify(&fixture, &candidate).await);
     for component in ["host-executor", "service-manager", "agent-manager", "phone-bridge", "unknown"] {
         compare_config_oracle(IvyJson::object([("kind", "portableNativeFiles".into()), ("componentId", component.into())]), Ok(IvyJson::Array(portable_native_files(component).iter().map(|v| IvyJson::from(*v)).collect())));

@@ -10,6 +10,8 @@ mod artifact_cases;
 mod source_cases;
 #[path = "host-storage-space-cases.rs"]
 mod storage_space_cases;
+#[path = "host-node-path-cases.rs"]
+mod node_path_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
@@ -47,6 +49,13 @@ fn windows_containment_ignores_case() {
 
 use ivy_contracts::{IvyJson, JsString};
 use ivy_host_runtime::{config, health::HealthFile, node_runtime::NodeRuntime};
+
+fn assert_json_eq(actual: &IvyJson, expected: &IvyJson) {
+    assert_eq!(ivy_contracts::json::canonical(actual, usize::MAX).unwrap(), ivy_contracts::json::canonical(expected, usize::MAX).unwrap());
+}
+fn assert_optional_json_eq(actual: Option<IvyJson>, expected: Option<IvyJson>) {
+    assert_eq!(actual.as_ref().map(|value| ivy_contracts::json::canonical(value, usize::MAX).unwrap()), expected.as_ref().map(|value| ivy_contracts::json::canonical(value, usize::MAX).unwrap()));
+}
 
 struct ServiceFixture(PathBuf);
 impl ServiceFixture {
@@ -282,6 +291,7 @@ fn health_rpc_fixture(result: IvyJson, expected_method: &'static str) -> (String
                     Err(error) => panic!("health fixture accept: {error}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut bytes = Vec::new(); let header_end;
             loop { let mut b = [0]; stream.read_exact(&mut b).unwrap(); bytes.push(b[0]); if bytes.ends_with(b"\r\n\r\n") { header_end = bytes.len(); break; } assert!(bytes.len() < 16384); }

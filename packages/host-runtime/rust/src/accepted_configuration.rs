@@ -9,7 +9,7 @@ fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
 }
 fn directory(config: &IvyJson) -> IvyResult<PathBuf> { Ok(path(config.required("runtimeRoot")?)?.join("accepted-configurations")) }
 fn canonical(value: &IvyJson) -> IvyResult<String> { json::canonical(value, ivy_contracts::limits::MANAGEMENT_FRAME_BYTES) }
-fn nullable(value: Option<&IvyJson>) -> &IvyJson { value.unwrap_or(&IvyJson::Null) }
+fn nullable(value: Option<&IvyJson>) -> &IvyJson { static NULL: IvyJson = IvyJson::Null; value.unwrap_or(&NULL) }
 fn write_snapshot(directory: &Path, target: &Path, value: &IvyJson) -> IvyResult<()> {
     let mut builder = fs::DirBuilder::new(); builder.recursive(true);
     #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }

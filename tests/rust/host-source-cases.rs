@@ -1,4 +1,4 @@
-use super::{ServiceFixture, compare_config_oracle};
+use super::{ServiceFixture, compare_config_oracle, assert_json_eq, assert_optional_json_eq};
 use ivy_contracts::{IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{candidate_identity::candidate_build_id, config, preparations, source};
 use std::{fs, path::Path};
@@ -27,7 +27,7 @@ async fn source_plan_requires_exactly_one_valid_matching_component() {
         compare("source","sourceBuildPlan",vec![path(&fixture.0),id.into()],source::source_build_plan(fixture.0.clone(),id).await);
     }
     config::atomic_json(fixture.0.join("services/fixture/deploy.json"),plan.clone()).await.unwrap();
-    assert_eq!(source::source_build_plan(fixture.0.clone(),"fixture").await.unwrap(),plan);
+    assert_json_eq(&source::source_build_plan(fixture.0.clone(),"fixture").await.unwrap(),&plan);
     compare("source","sourceBuildPlan",vec![path(&fixture.0),"fixture".into()],source::source_build_plan(fixture.0.clone(),"fixture").await);
     config::atomic_json(fixture.0.join("ui/fixture/deploy.json"),plan.clone()).await.unwrap();
     compare("source","sourceBuildPlan",vec![path(&fixture.0),"fixture".into()],source::source_build_plan(fixture.0.clone(),"fixture").await);
@@ -36,7 +36,7 @@ async fn source_plan_requires_exactly_one_valid_matching_component() {
     fs::write(fixture.0.join("services/fixture/deploy.json"),b"{").unwrap();
     compare("source","sourceBuildPlan",vec![path(&fixture.0),"fixture".into()],source::source_build_plan(fixture.0.clone(),"fixture").await);
     fs::remove_file(fixture.0.join("services/fixture/deploy.json")).unwrap();
-    assert_eq!(source::source_build_plan(fixture.0.clone(),"fixture").await.unwrap(),plan);
+    assert_json_eq(&source::source_build_plan(fixture.0.clone(),"fixture").await.unwrap(),&plan);
 }
 
 #[tokio::test]
@@ -80,10 +80,10 @@ async fn preparation_records_are_atomic_owned_and_bound_to_release_identity() {
     let record=IvyJson::object([("schemaVersion",IvyJson::Number(1.0)),("preparationId",id.clone().into()),("componentId","fixture".into()),("buildId",hash("a").into()),("snapshot",snapshot(&fixture)),("phase","building".into()),("candidate",IvyJson::Null),("startedAt","2026-01-01T00:00:00.000Z".into()),("updatedAt","2026-01-01T00:00:00.000Z".into()),("errorCode",IvyJson::Null)]);
     assert_eq!(preparations::preparation_record(staging.clone(),&id).await.unwrap(),None);
     compare("preparations","savePreparation",vec![host(&fixture),record.clone()],preparations::save_preparation(staging.clone(),record.clone()).await.map(|_|IvyJson::Null));
-    assert_eq!(preparations::preparation_record(staging.clone(),&id).await.unwrap(),Some(record.clone()));
+    assert_optional_json_eq(preparations::preparation_record(staging.clone(),&id).await.unwrap(),Some(record.clone()));
     let mut invalid=record.clone();invalid.insert("phase","invalid".into());
     compare("preparations","savePreparation",vec![host(&fixture),invalid.clone()],preparations::save_preparation(staging.clone(),invalid).await.map(|_|IvyJson::Null));
-    assert_eq!(preparations::preparation_record(staging.clone(),&id).await.unwrap(),Some(record.clone()));
+    assert_optional_json_eq(preparations::preparation_record(staging.clone(),&id).await.unwrap(),Some(record.clone()));
     let mut wrong=record.clone();wrong.insert("preparationId",preparations::preparation_id_for_build(&hash("b")).unwrap().into());config::atomic_json(root.join("preparation.json"),wrong).await.unwrap();
     assert_eq!(preparations::preparation_record(staging.clone(),&id).await.unwrap_err().code,"build_mismatch");
     let outside=fixture.0.join("outside");fs::create_dir(&outside).unwrap();fs::remove_file(root.join("preparation.json")).unwrap();fs::remove_dir(&root).unwrap();

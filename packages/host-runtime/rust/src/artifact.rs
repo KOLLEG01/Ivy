@@ -17,7 +17,7 @@ fn hash_file(source: &Path) -> IvyResult<String> {
         if count == 0 { break; }
         hash.update(&buffer[..count]);
     }
-    Ok(format!("sha256:{:x}", hash.finalize()))
+    Ok(format!("sha256:{}", hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>()))
 }
 pub async fn file_hash(source: impl Into<PathBuf>) -> IvyResult<String> {
     let source = source.into();

@@ -28,7 +28,7 @@ fn internal<T>(result: Result<T, impl std::fmt::Debug>) -> IvyResult<T> { result
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> { if ok { Ok(()) } else { Err(IvyError::new(code, message)) } }
 fn decoded(text: &str) -> IvyResult<IvyJson> { internal(json::parse(text, usize::MAX)) }
 fn encoded(value: &IvyJson) -> IvyResult<String> { json::canonical(value, ivy_contracts::limits::MANAGEMENT_FRAME_BYTES) }
-fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson { value.get(key).unwrap_or(&IvyJson::Null) }
+fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson { static NULL: IvyJson = IvyJson::Null; value.get(key).unwrap_or(&NULL) }
 fn non_null(value: &IvyJson) -> Option<&IvyJson> { (!value.is_null()).then_some(value) }
 fn truthy(value: &IvyJson) -> bool { match value { IvyJson::Null => false, IvyJson::Bool(v) => *v, IvyJson::Number(v) => *v != 0.0 && !v.is_nan(), IvyJson::String(v) => !v.0.is_empty(), _ => true } }
 fn fallback(value: &IvyJson, other: &IvyJson) -> IvyJson { non_null(value).unwrap_or(other).clone() }
