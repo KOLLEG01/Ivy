@@ -23,19 +23,35 @@ impl JsString {
     /// English locale lowercase, retaining unpaired UTF-16 units as non-cased
     /// boundaries and preserving context within each well-formed segment.
     pub fn to_english_lowercase(&self) -> Self {
+        self.map_case(str::to_lowercase)
+    }
+    /// ECMAScript's locale-independent full Unicode uppercase mapping.
+    pub fn to_uppercase(&self) -> Self {
+        self.map_case(str::to_uppercase)
+    }
+    /// ECMAScript trimStart whitespace, retaining all remaining UTF-16 units.
+    pub fn trim_start(&self) -> Self {
+        let start = self
+            .0
+            .iter()
+            .position(|unit| !number::space(*unit))
+            .unwrap_or(self.0.len());
+        Self(self.0[start..].to_vec())
+    }
+    fn map_case(&self, mapping: fn(&str) -> String) -> Self {
         let mut output = Vec::new();
         let mut segment = String::new();
         for c in char::decode_utf16(self.0.iter().copied()) {
             match c {
                 Ok(c) => segment.push(c),
                 Err(error) => {
-                    output.extend(segment.to_lowercase().encode_utf16());
+                    output.extend(mapping(&segment).encode_utf16());
                     segment.clear();
                     output.push(error.unpaired_surrogate());
                 }
             }
         }
-        output.extend(segment.to_lowercase().encode_utf16());
+        output.extend(mapping(&segment).encode_utf16());
         Self(output)
     }
     pub fn contains_ascii(&self, needle: &str) -> bool {
