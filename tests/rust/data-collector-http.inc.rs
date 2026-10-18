@@ -171,7 +171,7 @@ fn body(c: &IvyJson) -> Vec<u8> {
         _ => model::text(c, "body").unwrap().into_bytes(),
     }
 }
-async fn read_reply(stream: TcpStream) -> IvyJson {
+pub(super) async fn read_reply(stream: TcpStream) -> IvyJson {
     read_replies(stream, false).await
 }
 async fn read_replies(mut stream: TcpStream, pipeline: bool) -> IvyJson {

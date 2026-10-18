@@ -1,6 +1,5 @@
 //! Durable HTTP receipts and ordered publication across real process/epoch changes.
 use super::*;
-use tokio::io::AsyncReadExt;
 
 fn runs(fixture: &Fixture) -> Vec<IvyJson> {
     let db = sqlite::open(
@@ -35,11 +34,9 @@ async fn push(fixture: &Fixture, value: u32, key: &str) -> IvyJson {
             )
             .await
             .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await.unwrap();
-        let (head, body) = response.split_once("\r\n\r\n").unwrap();
-        assert!(head.starts_with("HTTP/1.1 202 "), "{response}");
-        parse(body, usize::MAX).unwrap()
+        let response = crate::http::read_reply(stream).await;
+        assert_eq!(response.get("status"), Some(&IvyJson::Number(202.0)), "{response:?}");
+        response.required("body").unwrap().clone()
     })
     .await
     .unwrap()
