@@ -7,6 +7,7 @@ mod dialog;
 mod endpoint;
 mod invite;
 mod registration;
+mod tls;
 
 pub use binding::{BindError, BoundSipTransport};
 pub use call::{

@@ -1,6 +1,6 @@
 //! Native SIP sockets stay bound from preparation through confirmed shutdown.
 //! The host supplies already parsed literal endpoints and owns call admission.
-use super::{PreparedInvite, SipEndpoint, SipIoError};
+use super::{PreparedInvite, SipEndpoint, SipIoError, tls::TlsClient};
 use rsipstack::{
     sip::{Request, Transport},
     transaction::endpoint::EndpointOption,
@@ -18,10 +18,11 @@ use tokio::{
     sync::{Mutex, watch},
     task::JoinHandle,
 };
+use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_util::sync::CancellationToken;
 
-const TCP_CONNECTIONS: usize = 1000;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const TCP_CONNECTIONS: usize = 1000;
+pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindError {
@@ -29,6 +30,8 @@ pub enum BindError {
     BindFailed,
     ConnectFailed,
     ConnectTimedOut,
+    TlsConfiguration,
+    TlsRejected,
     Capacity,
     Stopped,
     Endpoint(SipIoError),
@@ -40,7 +43,9 @@ impl std::fmt::Display for BindError {
 }
 impl std::error::Error for BindError {}
 
-type Connections = Arc<Mutex<HashMap<SocketAddr, SipConnection>>>;
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FlowKey(SocketAddr, Option<ServerName<'static>>);
+type Connections = Arc<Mutex<HashMap<FlowKey, SipConnection>>>;
 type SocketOwners = Arc<Mutex<Vec<Weak<dyn Any + Send + Sync>>>>;
 fn observed_owner<T: Any + Send + Sync>(owner: Arc<T>) -> Weak<dyn Any + Send + Sync> {
     let owner: Arc<dyn Any + Send + Sync> = owner;
@@ -53,7 +58,7 @@ fn live(connection: &SipConnection) -> bool {
 }
 // Zero linger preserves the original abortive close, without a positive wait.
 #[allow(deprecated)]
-fn tcp_socket(address: SocketAddr) -> Result<TcpSocket, BindError> {
+pub(super) fn tcp_socket(address: SocketAddr) -> Result<TcpSocket, BindError> {
     let socket = if address.is_ipv4() {
         TcpSocket::new_v4()
     } else {
@@ -78,6 +83,8 @@ pub struct BoundSipTransport {
     endpoint: Option<Arc<SipEndpoint>>,
     local: SocketAddr,
     protocol: Transport,
+    reserved: Option<TcpSocket>,
+    tls: Option<TlsClient>,
     datagram: Option<SipConnection>,
     connections: Connections,
     sockets: SocketOwners,
@@ -111,6 +118,8 @@ impl BoundSipTransport {
             ))),
             local,
             protocol: Transport::Udp,
+            reserved: None,
+            tls: None,
             datagram: Some(connection),
             connections: Arc::new(Mutex::new(HashMap::new())),
             accepting: None,
@@ -152,7 +161,8 @@ impl BoundSipTransport {
                     break;
                 }
                 cache.retain(|_, connection| live(connection));
-                if cache.len() >= TCP_CONNECTIONS && !cache.contains_key(&remote) {
+                let key = FlowKey(remote, None);
+                if cache.len() >= TCP_CONNECTIONS && !cache.contains_key(&key) {
                     continue;
                 }
                 let local_connection = match stream.local_addr() {
@@ -171,7 +181,7 @@ impl BoundSipTransport {
                 sockets.retain(|owner| owner.strong_count() > 0);
                 sockets.push(observed_owner(connection.inner.clone()));
                 let connection = SipConnection::Tcp(connection);
-                cache.insert(remote, connection.clone());
+                cache.insert(key, connection.clone());
                 inner.transport_layer.add_connection(connection);
             }
         });
@@ -179,10 +189,41 @@ impl BoundSipTransport {
             endpoint: Some(endpoint),
             local,
             protocol: Transport::Tcp,
+            reserved: None,
+            tls: None,
             datagram: None,
             connections,
             sockets,
             accepting: Some(accepting),
+            listener_failure,
+            stop,
+            closed: false,
+        })
+    }
+
+    /// Like the original TLS channel, reserve the actual local endpoint and
+    /// initiate client flows; no certificate or TLS server is configured.
+    pub fn tls(address: SocketAddr, options: EndpointOption) -> Result<Self, BindError> {
+        let client = TlsClient::platform()?;
+        let socket = tcp_socket(address)?;
+        let local = socket.local_addr().map_err(|_| BindError::BindFailed)?;
+        let stop = CancellationToken::new();
+        let transport = TransportLayer::new(stop.child_token());
+        let (_, listener_failure) = watch::channel(None);
+        Ok(Self {
+            endpoint: Some(Arc::new(SipEndpoint::start(
+                transport,
+                stop.clone(),
+                options,
+            ))),
+            local,
+            protocol: Transport::Tls,
+            reserved: Some(socket),
+            tls: Some(client),
+            datagram: None,
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            sockets: Arc::new(Mutex::new(Vec::new())),
+            accepting: None,
             listener_failure,
             stop,
             closed: false,
@@ -221,6 +262,47 @@ impl BoundSipTransport {
         destination: SipAddr,
         proxy: Option<SipAddr>,
     ) -> Result<PreparedInvite, BindError> {
+        // TLS must carry the pre-resolution next-hop authority explicitly.
+        if self.protocol == Transport::Tls {
+            return Err(BindError::InvalidDestination);
+        }
+        self.prepare(request, destination, proxy, None).await
+    }
+
+    /// `next_hop` is the configured/routed authority selected BEFORE DNS.
+    /// A proxy uses its own authority, independently of the request/digest URI.
+    pub async fn prepare_tls_invite(
+        &self,
+        request: Request,
+        resolved: SocketAddr,
+        next_hop: SipAddr,
+        via_proxy: bool,
+    ) -> Result<PreparedInvite, BindError> {
+        if self.protocol != Transport::Tls
+            || next_hop.r#type != Some(Transport::Tls)
+            || next_hop
+                .addr
+                .port
+                .as_ref()
+                .is_some_and(|port| port.value() != resolved.port())
+            || matches!(&next_hop.addr.host, rsipstack::sip::Host::IpAddr(ip) if *ip != resolved.ip())
+        {
+            return Err(BindError::InvalidDestination);
+        }
+        let name = ServerName::try_from(next_hop.addr.host.to_string())
+            .map_err(|_| BindError::InvalidDestination)?;
+        let destination = sip_address(resolved, Transport::Tls);
+        let proxy = via_proxy.then(|| destination.clone());
+        self.prepare(request, destination, proxy, Some(name)).await
+    }
+
+    async fn prepare(
+        &self,
+        request: Request,
+        destination: SipAddr,
+        proxy: Option<SipAddr>,
+        name: Option<ServerName<'static>>,
+    ) -> Result<PreparedInvite, BindError> {
         if self.closed || self.stop.is_cancelled() {
             return Err(BindError::Stopped);
         }
@@ -246,42 +328,54 @@ impl BoundSipTransport {
         let connection = if let Some(connection) = &self.datagram {
             connection.clone()
         } else {
+            let key = FlowKey(remote, name.clone());
             let mut cache = self.connections.lock().await;
             if self.stop.is_cancelled() {
                 return Err(BindError::Stopped);
             }
             cache.retain(|_, connection| live(connection));
-            if let Some(connection) = cache.get(&remote) {
+            if let Some(connection) = cache.get(&key) {
                 connection.clone()
             } else {
                 if cache.len() >= TCP_CONNECTIONS {
                     return Err(BindError::Capacity);
                 }
-                let socket = tcp_socket(self.local)?;
-                let stream = tokio::select! {
-                    biased;
-                    _ = self.stop.cancelled() => return Err(BindError::Stopped),
-                    result = tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(remote)) =>
-                        result.map_err(|_| BindError::ConnectTimedOut)?.map_err(|_| BindError::ConnectFailed)?
+                let connection = if let Some(tls) = &self.tls {
+                    tls.connect(
+                        self.local,
+                        destination.clone(),
+                        name.ok_or(BindError::InvalidDestination)?,
+                        &self.stop,
+                    )
+                    .await?
+                } else {
+                    let socket = tcp_socket(self.local)?;
+                    let stream = tokio::select! {
+                        biased;
+                        _ = self.stop.cancelled() => return Err(BindError::Stopped),
+                        result = tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(remote)) =>
+                            result.map_err(|_| BindError::ConnectTimedOut)?.map_err(|_| BindError::ConnectFailed)?
+                    };
+                    let local_connection =
+                        stream.local_addr().map_err(|_| BindError::ConnectFailed)?;
+                    let connection = TcpConnection::from_stream(
+                        stream,
+                        sip_address(local_connection, Transport::Tcp),
+                        Some(self.stop.child_token()),
+                    )
+                    .map_err(|_| BindError::ConnectFailed)?;
+                    let mut sockets = self.sockets.lock().await;
+                    sockets.retain(|owner| owner.strong_count() > 0);
+                    sockets.push(observed_owner(connection.inner.clone()));
+                    SipConnection::Tcp(connection)
                 };
-                let local_connection = stream.local_addr().map_err(|_| BindError::ConnectFailed)?;
-                let connection = TcpConnection::from_stream(
-                    stream,
-                    sip_address(local_connection, Transport::Tcp),
-                    Some(self.stop.child_token()),
-                )
-                .map_err(|_| BindError::ConnectFailed)?;
-                let mut sockets = self.sockets.lock().await;
-                sockets.retain(|owner| owner.strong_count() > 0);
-                sockets.push(observed_owner(connection.inner.clone()));
-                let connection = SipConnection::Tcp(connection);
                 self.endpoint
                     .as_ref()
                     .ok_or(BindError::Stopped)?
                     .inner()
                     .transport_layer
                     .add_connection(connection.clone());
-                cache.insert(remote, connection.clone());
+                cache.insert(key, connection.clone());
                 connection
             }
         };
@@ -304,6 +398,11 @@ impl BoundSipTransport {
             self.accepting.take();
             result.map_err(|_| BindError::Endpoint(SipIoError::DriverFailed))?;
         }
+        if let Some(tls) = &self.tls {
+            // OS shutdown covers every TLS stream clone, including stack
+            // retirement work; retain the fence for unfinished setup workers.
+            tls.stop().await?;
+        }
         // Retain originals until every close succeeds, including across a
         // dropped close observer. Never abort a stack send/receive task.
         let connections = self
@@ -314,6 +413,9 @@ impl BoundSipTransport {
             .cloned()
             .collect::<Vec<_>>();
         for connection in connections {
+            if matches!(connection, SipConnection::Tls(_)) {
+                continue; // TLS was shut down at the actual socket above.
+            }
             connection
                 .close()
                 .await
@@ -321,6 +423,7 @@ impl BoundSipTransport {
         }
         self.connections.lock().await.clear();
         self.datagram.take();
+        self.reserved.take();
         self.endpoint.take();
         // The library retires transport loops asynchronously. Observe their
         // final references before acknowledging socket release. A timeout
@@ -346,6 +449,9 @@ impl BoundSipTransport {
         Ok(())
     }
 }
+#[cfg(test)]
+#[path = "../../../../../tests/rust/phone_sip_tls.rs"]
+mod tests;
 impl Drop for BoundSipTransport {
     fn drop(&mut self) {
         self.stop.cancel();

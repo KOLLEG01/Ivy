@@ -10,6 +10,8 @@ ivy-host-runtime = { workspace = true }
 tokio = { workspace = true }
 rsipstack = { workspace = true }
 tokio-util = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 
 [lib]
 path = "src/lib.rs"
