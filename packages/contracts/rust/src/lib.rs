@@ -32,3 +32,4 @@ pub mod wire_schema;
 pub use error::{IvyError, IvyResult, Outcome};
 pub use json::{IvyJson, JsString};
 pub mod whatwg_url;
+pub mod js_path;
