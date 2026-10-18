@@ -1,8 +1,10 @@
 //! AgentManager's local receipts and native connection ownership.
 pub mod agent_health;
 pub mod capabilities;
+pub mod claude_mcp;
 pub mod directories;
 pub mod environment;
+pub mod environment_manager;
 pub mod environment_text;
 pub mod instructions;
 pub mod instructions_files;

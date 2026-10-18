@@ -31,7 +31,7 @@ pub struct EnvironmentSynchronizers {
     pub skills: Arc<EnvironmentRefresh>,
 }
 impl EnvironmentSynchronizers {
-    fn synchronize(&self, connection: Arc<dyn RpcClient>) -> EnvironmentWait {
+    pub(crate) fn synchronize(&self, connection: Arc<dyn RpcClient>) -> EnvironmentWait {
         let instructions = (self.instructions)(connection.clone());
         let mcp = (self.mcp)(connection.clone());
         let skills = (self.skills)(connection);

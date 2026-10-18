@@ -1,10 +1,14 @@
 use ivy_agent_manager::instructions::compose_instructions;
+#[path = "agent-claude-mcp.rs"]
+mod claude_mcp_cases;
 #[path = "agent-instructions-files.rs"]
 mod instruction_file_cases;
 #[path = "agent-instructions-source.rs"]
 mod instruction_source_cases;
 #[path = "agent-environment.rs"]
 mod environment_cases;
+#[path = "agent-environment-manager.rs"]
+mod environment_manager_cases;
 #[path = "agent-environment-conflicts.rs"]
 mod environment_conflict_cases;
 #[path = "agent-environment-text.rs"]
