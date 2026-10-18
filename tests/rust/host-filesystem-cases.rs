@@ -12,7 +12,10 @@ fn oracle(input:IvyJson)->IvyJson{
 }
 fn compare(input:IvyJson,result:std::io::Result<IvyJson>){
     let actual=match result{Ok(value)=>IvyJson::object([("ok",true.into()),("value",value)]),Err(error)=>IvyJson::object([("ok",false.into()),("code",filesystem::node_error_code(&error).map_or(IvyJson::Null,IvyJson::from))])};
-    let expected=oracle(input.clone());assert_json_eq(&actual,&expected);
+    let expected=oracle(input.clone());compared(input,actual,expected);
+}
+fn compared(input:IvyJson,actual:IvyJson,expected:IvyJson){
+    assert_json_eq(&actual,&expected);
     if let Some(file)=std::env::var_os("IVY_HOST_FILESYSTEM_CORPUS"){
         let _guard=CORPUS.lock().unwrap();writeln!(fs::OpenOptions::new().create(true).append(true).open(file).unwrap(),"{}",ivy_contracts::json::stringify(&IvyJson::object([("input",input),("actual",actual),("expected",expected)]),usize::MAX).unwrap()).unwrap();
     }
@@ -83,4 +86,54 @@ fn directory_browsing_errno_matches_node_for_missing_file_and_intermediate_file(
         compare(IvyJson::object([("operation","directory".into()),("path",path(&selected))]),result);
     }
     assert_eq!(filesystem::node_error_code(&std::io::Error::other("unclassified")),None);
+}
+
+async fn remove_pair(rust:&Path,node:&Path){
+    let input=IvyJson::object([("operation","removeForce".into()),("path",path(node)),("rustPath",path(rust))]);
+    let expected=oracle(input.clone());
+    let actual=filesystem::remove_force(rust.to_owned()).await;
+    assert!(actual.is_ok(),"{actual:?}");
+    compared(input,IvyJson::object([("ok",true.into()),("value",IvyJson::Null)]),expected);
+    assert!(fs::symlink_metadata(rust).is_err());assert!(fs::symlink_metadata(node).is_err());
+}
+fn readonly(path:&Path,restore:&mut Vec<RestorePermissions>){let mut permissions=fs::metadata(path).unwrap().permissions();restore.push(RestorePermissions(path.to_owned(),permissions.clone()));permissions.set_readonly(true);fs::set_permissions(path,permissions).unwrap();}
+fn directory_link(target:&Path,link:&Path){
+    #[cfg(windows)]std::os::windows::fs::symlink_dir(target,link).unwrap();
+    #[cfg(unix)]std::os::unix::fs::symlink(target,link).unwrap();
+}
+fn file_link(target:&Path,link:&Path){
+    #[cfg(windows)]std::os::windows::fs::symlink_file(target,link).unwrap();
+    #[cfg(unix)]std::os::unix::fs::symlink(target,link).unwrap();
+}
+
+#[tokio::test]
+async fn force_removal_matches_node_for_readonly_trees_links_and_disappearing_expiry_roots(){
+    let fixture=ServiceFixture::new();let outside=fixture.0.join("retained");fs::create_dir(&outside).unwrap();
+    let mut restore=Vec::new();
+    let retained=outside.join("bytes");fs::write(&retained,b"unchanged outside bytes").unwrap();
+    let rust=fixture.0.join("rust ü 空 😀");let node=fixture.0.join("node ü 空 😀");
+    for root in [&rust,&node]{
+        fs::create_dir_all(root.join("nested")).unwrap();fs::write(root.join("nested/frozen"),b"delete readonly").unwrap();
+        readonly(&root.join("nested/frozen"),&mut restore);
+        directory_link(&outside,&root.join("directory-link"));file_link(&retained,&root.join("file-link"));
+        #[cfg(windows)]{readonly(&root.join("nested"),&mut restore);readonly(root,&mut restore);}
+    }
+    remove_pair(&rust,&node).await;
+    remove_pair(&rust,&node).await;
+    assert_eq!(fs::read(&retained).unwrap(),b"unchanged outside bytes");
+    for kind in ["file","directory-link","file-link","dangling-link"]{
+        let first=fixture.0.join(format!("rust-{kind}"));let second=fixture.0.join(format!("node-{kind}"));
+        for selected in [&first,&second]{match kind{
+            "file"=>{fs::write(selected,b"readonly file").unwrap();readonly(selected,&mut restore);},
+            "directory-link"=>directory_link(&outside,selected),"file-link"=>file_link(&retained,selected),
+            _=>file_link(&outside.join("missing"),selected),
+        }}
+        remove_pair(&first,&second).await;assert_eq!(fs::read(&retained).unwrap(),b"unchanged outside bytes");
+    }
+    let first=fixture.0.join("rust-expiry");let second=fixture.0.join("node-expiry");
+    for p in [&first,&second]{fs::create_dir(p).unwrap();}
+    assert!(fs::read_dir(&fixture.0).unwrap().flatten().any(|e|e.path()==first));
+    // Another expiry owner wins after enumeration and before removal.
+    fs::remove_dir(&first).unwrap();fs::remove_dir(&second).unwrap();remove_pair(&first,&second).await;
+    assert_eq!(fs::read(retained).unwrap(),b"unchanged outside bytes");
 }
