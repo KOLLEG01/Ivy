@@ -15,7 +15,10 @@ fn unresolved_guards_preserve_array_coercion_and_unpaired_surrogates() {
     archive.retain("op", "wide", &wide).unwrap();
     assert_eq!(archive.release("op", "wide").unwrap_err().code, "receipt_archive_unresolved");
     assert_eq!(archive.read("op", "wide").unwrap().as_deref(), Some(wide.as_str()));
-    assert_eq!(archive.status().unwrap().records,5);
+    let deep = format!(r#"{}{{"phase":"unknown"}}{}"#, "[".repeat(20_000), "]".repeat(20_000));
+    archive.retain("op", "deep", &deep).unwrap();
+    assert_eq!(archive.release("op", "deep").unwrap_err().code, "receipt_archive_unresolved");
+    assert_eq!(archive.status().unwrap().records,6);
 }
 #[test]
 fn original_receipts_eviction_and_unknown_are_durable() {
