@@ -7,7 +7,16 @@ license.workspace = true
 
 [dependencies]
 ivy-contracts.workspace = true
+ivy-sdk.workspace = true
+base64.workspace = true
 rusqlite.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[[test]]
+name = "chat-input-media"
+path = "../../../tests/rust/chat-input-media.rs"
 
 [[test]]
 name = "chat-admission"

@@ -4,7 +4,7 @@ import {registerHooks, stripTypeScriptTypes} from 'node:module';
 import {fileURLToPath} from 'node:url';
 const contracts = new URL('../../../packages/contracts/src/', import.meta.url);
 const sdk = 'data:text/javascript;base64,' + Buffer.from([
-  `export {canonical,hashJson} from '${new URL('canonical.ts',contracts)}';`,
+  `export {canonical,hashJson,digest} from '${new URL('canonical.ts',contracts)}';`,
   `export {requireThat} from '${new URL('errors.ts',contracts)}';`,
   `export {validateChat} from '${new URL('chat-validation.ts',contracts)}';`,
 ].join('\n')).toString('base64');
@@ -30,6 +30,42 @@ const admission=new ChatAdmission(definition);
 const request={action:'send',operationId:'original-operation',expectedBridge:admission.expected('alice'),channel,
   messageId:'message-one',expectedBinding:{objectId:'binding-one',revision:1},payload:{text:'Original input',images:[]}};
 const image={object:{objectId:'image-one',revision:1},contentHash:'sha256:'+'a'.repeat(64),byteLength:1,mediaType:'image/png',label:'original image'};
+if(process.argv[2]==='media'){
+  const {admittedNativeInput}=await import('../../../services/chat-bridge/src/input-media.ts');
+  const {digest}=await import('../../../packages/contracts/src/canonical.ts');
+  const cases=[];
+  function media(bytes,type){
+    const item={...image,mediaType:type,byteLength:bytes.length,contentHash:digest(bytes)};
+    return {request:{...request,payload:{text:'caption',images:[item]}},response:{object:{id:'image-one',contractKey:'chat-bridge/'+type.replace('/','-')},
+      revision:{revision:1,contractVersion:'1.0.0',mediaType:type,byteLength:bytes.length,contentHash:item.contentHash},content:{encoding:'base64',value:bytes.toString('base64')}}};
+  }
+  const png=Buffer.from([137,80,78,71,13,10,26,10]);
+  const webp=(chunk='VP8 ',size=0,padding=0)=>{const b=Buffer.alloc(20+size+padding);b.write('RIFF');b.writeUInt32LE(b.length-8,4);b.write('WEBP',8);b.write(chunk,12);b.writeUInt32LE(size,16);return b;};
+  for(const [bytes,type] of [[png,'image/png'],[Buffer.from([255,216,255]),'image/jpeg'],[webp(),'image/webp'],[webp('VP8L',1,1),'image/webp'],
+    [webp('VP8X',2),'image/webp'],[webp('JUNK'),'image/webp'],[webp('VP8 ',1),'image/webp'],[png.subarray(0,7),'image/png'],
+    [Buffer.from([255,216]),'image/jpeg'],[Buffer.alloc(20),'image/webp']])cases.push(media(bytes,type));
+  const valid=media(png,'image/png');
+  for(const [path,values] of [[['object','id'],['other']], [['object','contractKey'],['chat-bridge/image-webp']],
+    [['revision','revision'],[2]], [['revision','contractVersion'],['1.3.0']], [['revision','mediaType'],['image/jpeg']],
+    [['revision','contentHash'],['sha256:'+'b'.repeat(64)]], [['revision','byteLength'],[7]], [['content','encoding'],['json']],
+    [['content','value'],['!'+png.toString('base64'),png.toString('base64').replace(/=+$/,''),png.toString('base64')+'\n',Buffer.alloc(8).toString('base64')]]]){
+    for(const value of values){const c=structuredClone(valid);c.response[path[0]][path[1]]=value;cases.push(c);}
+  }
+  cases.push({...structuredClone(valid),caller:'mallory'});
+  const textOnly=structuredClone(valid);textOnly.request.payload.images=[];cases.push(textOnly);
+  const multiple=structuredClone(valid);multiple.request.payload.images.push(structuredClone(multiple.request.payload.images[0]));cases.push(multiple);
+  const outage=structuredClone(valid);outage.failure=true;cases.push(outage);
+  const rows=[];
+  for(const c of cases){
+    const calls=[],caller=c.caller??'alice';let result;
+    const client={async request(method,params){calls.push({method,params});if(c.failure)throw new IvyError('service_unavailable','Synthetic read outage.','unknown');return structuredClone(c.response);}};
+    try{result={value:await admittedNativeInput(admission,client,caller,c.request)};}
+    catch(cause){const e=IvyError.from(cause);result={error:{code:e.code,message:e.message,outcome:e.outcome}};}
+    rows.push({...c,definition,caller,calls,result});
+  }
+  process.stdout.write(JSON.stringify(rows));
+  process.exit(0);
+}
 const rows=[];
 function add(kind,def=definition,req=request,caller='alice'){
   const row={kind,definition:def,request:req,caller};
