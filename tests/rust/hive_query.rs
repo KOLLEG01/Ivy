@@ -303,7 +303,7 @@ fn quote(v: &str) -> String {
 fn sql(text: impl Into<String>) -> Value {
     json!({"op":"sql","sql":text.into()})
 }
-fn seed(large: bool) -> String {
+pub(super) fn seed(large: bool) -> String {
     let mut sql = String::from("BEGIN IMMEDIATE;");
     for (key, media, schema) in [
         (
@@ -425,7 +425,7 @@ fn seed(large: bool) -> String {
     sql.push_str("COMMIT;");
     sql
 }
-fn insert(
+pub(super) fn insert(
     sql: &mut String,
     id: &str,
     key: &str,

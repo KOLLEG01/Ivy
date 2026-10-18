@@ -18,6 +18,15 @@ struct State {
 }
 #[derive(Clone, Default)]
 pub(super) struct QueryState(Arc<Mutex<State>>);
+struct BudgetReset(QueryState);
+impl Drop for BudgetReset {
+    fn drop(&mut self) {
+        let mut state = self.0.0.lock().unwrap();
+        state.deadline = None;
+        state.cache.clear();
+        state.error = None;
+    }
+}
 
 impl State {
     fn check(&self) -> IvyResult<()> {
@@ -131,27 +140,29 @@ impl Store {
             .unwrap_or_else(IvyError::internal)
     }
 
-    pub fn with_budget<T>(
-        &self,
-        duration: Duration,
-        work: impl FnOnce(&Store) -> IvyResult<T>,
-    ) -> IvyResult<T> {
-        struct Reset(QueryState);
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                let mut state = self.0.0.lock().unwrap();
-                state.deadline = None;
-                state.cache.clear();
-                state.error = None;
-            }
-        }
+    fn start_budget(&self, duration: Duration) -> BudgetReset {
         {
             let mut state = self.query_state.0.lock().unwrap();
             state.deadline = Instant::now().checked_add(duration);
             state.cache.clear();
             state.error = None;
         }
-        let _reset = Reset(self.query_state.clone());
+        BudgetReset(self.query_state.clone())
+    }
+    pub fn with_budget<T>(
+        &self,
+        duration: Duration,
+        work: impl FnOnce(&Store) -> IvyResult<T>,
+    ) -> IvyResult<T> {
+        let _reset = self.start_budget(duration);
+        work(self)
+    }
+    pub fn with_budget_mut<T>(
+        &mut self,
+        duration: Duration,
+        work: impl FnOnce(&mut Store) -> IvyResult<T>,
+    ) -> IvyResult<T> {
+        let _reset = self.start_budget(duration);
         work(self)
     }
 }

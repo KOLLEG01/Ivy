@@ -4,6 +4,8 @@ use ivy_hive::store::{
 };
 #[path = "hive_ledger.rs"]
 mod ledger;
+#[path = "hive_object_mutations.rs"]
+mod object_mutations;
 #[path = "hive_query.rs"]
 mod query;
 use rusqlite::types::ValueRef;
@@ -68,7 +70,7 @@ fn snapshot(store: &Store) -> Value {
         let encoded:String=store.connection().query_row(&format!("SELECT json_group_array(json_array({columns})) FROM (SELECT rowid AS record_id,* FROM {table} ORDER BY rowid)"),[],|r|r.get(0)).unwrap();
         ivy_contracts::hash::digest(encoded)
     };
-    json!({"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events","sequence,topic,topic_version,source,occurred_at,mutation_id,payload"),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key")})
+    json!({"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events","sequence,topic,topic_version,source,occurred_at,mutation_id,payload"),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key")})
 }
 fn context(value: &Value) -> AuthenticatedContext {
     AuthenticatedContext {
@@ -125,6 +127,51 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                 drop(store);
                 store = Store::open(path).unwrap();
                 Ok(Value::Null)
+            }
+            "reorder" | "archive" => {
+                let c = &step["context"];
+                store
+                    .authenticate(&AuthContext {
+                        credential_digest: c["credentialDigest"].as_str().unwrap().into(),
+                        session_digest: c["sessionDigest"].as_str().map(JsString::from),
+                    })
+                    .and_then(|principal| {
+                        let context = AuthenticatedContext {
+                            principal_id: principal.principal_id,
+                            credential_digest: principal.credential_digest,
+                        };
+                        let node = c["serviceNodeId"].as_str().map(JsString::from);
+                        let params = IvyJson::from_serde(&step["params"]).unwrap();
+                        let now: JsString = step["nowText"].as_str().unwrap().into();
+                        store.with_budget_mut(
+                            if step["overdue"] == true {
+                                std::time::Duration::ZERO
+                            } else {
+                                std::time::Duration::from_secs(10)
+                            },
+                            |store| {
+                                if step["op"] == "reorder" {
+                                    ivy_hive::objects::reorder(
+                                        store,
+                                        &context,
+                                        &params,
+                                        step["now"].as_u64().unwrap(),
+                                        &now,
+                                    )
+                                } else {
+                                    ivy_hive::objects::archive(
+                                        store,
+                                        &context,
+                                        node.as_ref(),
+                                        &params,
+                                        step["now"].as_u64().unwrap(),
+                                        &now,
+                                    )
+                                }
+                            },
+                        )
+                    })
+                    .map(wire)
             }
             "mutate" => {
                 let kind = match step["kind"].as_str() {

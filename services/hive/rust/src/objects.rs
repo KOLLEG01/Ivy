@@ -11,6 +11,9 @@ pub enum Location<'a> {
 #[path = "object_pages.rs"]
 mod pages;
 pub use pages::{history, list, tree};
+#[path = "object_mutations.rs"]
+mod mutations;
+pub use mutations::{archive, reorder};
 fn value(row: &Row<'_>, name: &str) -> rusqlite::Result<IvyJson> {
     Ok(match row.get_ref(name)? {
         ValueRef::Null => IvyJson::Null,
@@ -88,7 +91,7 @@ fn complete_revision(store: &Store, key: &str, mut revision: IvyJson) -> IvyResu
     }
     Ok(revision)
 }
-pub fn stat(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
+fn raw_object(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
     let (column, selected) = match location {
         Location::Id(v) => ("id", v),
         Location::Path(v) => ("path", v),
@@ -101,7 +104,10 @@ pub fn stat(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
         .optional()
         .map_err(|e| store.query_error(e))?
         .ok_or_else(|| IvyError::new("not_found", "Object not found."))?;
-    complete_object(store, object)
+    Ok(object)
+}
+pub fn stat(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
+    complete_object(store, raw_object(store, location)?)
 }
 pub fn read(store: &Store, location: Location<'_>, revision: Option<u64>) -> IvyResult<IvyJson> {
     let object = stat(store, location)?;
