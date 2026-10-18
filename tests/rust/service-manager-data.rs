@@ -416,10 +416,10 @@ async fn health_queue_survives_cancelled_waiters_and_rejects_stale_executor() {
         message: None,
         phase: None,
     });
-    reporter
-        .write(false, None, "ServiceManager stopped.".into())
-        .await
-        .unwrap();
+    let late_ready = async { reporter.write(true, Some(7), "late readiness".into()).await };
+    reporter.finalize().await.unwrap();
+    assert_eq!(late_ready.await.unwrap_err().code, "service_unavailable");
+    reporter.flush().await.unwrap();
     let health = json(&std::fs::read_to_string(root.0.join("health.json")).unwrap());
     assert_eq!(health.required("ready").unwrap(), &IvyJson::Bool(false));
     assert_eq!(health.required("generation").unwrap(), &IvyJson::Null);

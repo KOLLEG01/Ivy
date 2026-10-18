@@ -50,6 +50,26 @@ impl Drop for Control {
 #[derive(Clone)]
 pub struct RuntimeOwner(Arc<Control>);
 impl RuntimeOwner {
+    /// Production policy composition: only an unassociated legacy target uses
+    /// this owner's frozen startup configuration. Invalid evidence propagates.
+    pub async fn for_host(
+        host: IvyJson,
+        instance_id: String,
+        bootstrap_root: PathBuf,
+        node: NodeRuntime,
+    ) -> IvyResult<Self> {
+        let startup = host.clone();
+        let resolver: TargetPolicyResolver = Arc::new(move |journal, target| {
+            let startup = startup.clone();
+            Box::pin(async move {
+                Ok(journal
+                    .accepted_target_policy(target)
+                    .await?
+                    .unwrap_or(startup))
+            })
+        });
+        Self::open(host, instance_id, bootstrap_root, node, resolver).await
+    }
     pub async fn open(
         host: IvyJson,
         instance_id: String,

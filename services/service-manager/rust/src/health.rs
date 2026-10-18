@@ -4,7 +4,10 @@ use ivy_host_runtime::{
     health::HealthFile,
 };
 use ivy_sdk::{clock::parse_date, service::ServiceState};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::{mpsc, oneshot};
 
 pub fn current_executor(value: IvyJson, host_id: &IvyJson, now_ms: i64) -> Option<IvyJson> {
@@ -26,29 +29,48 @@ pub async fn refresh(runtime_root: &Path, host_id: &IvyJson, now_ms: i64) -> Opt
     current_executor(value, host_id, now_ms)
 }
 
-type Write = (
-    bool,
-    Option<u64>,
-    ivy_contracts::JsString,
-    oneshot::Sender<IvyResult<()>>,
-);
+enum Write {
+    Health(
+        bool,
+        Option<u64>,
+        ivy_contracts::JsString,
+        oneshot::Sender<IvyResult<()>>,
+    ),
+    Barrier(oneshot::Sender<IvyResult<()>>),
+}
+struct Writes {
+    sender: mpsc::UnboundedSender<Write>,
+    sealed: bool,
+}
 
 /// Queue at callback invocation, before any future is polled. A dropped waiter
 /// cannot cancel or reorder an accepted health write. Errors do not poison later writes.
 #[derive(Clone)]
 pub struct HealthReporter {
-    writes: mpsc::UnboundedSender<Write>,
+    writes: Arc<Mutex<Writes>>,
 }
 impl HealthReporter {
     pub fn new(health: Arc<HealthFile>) -> Self {
         let (writes, mut receiver) = mpsc::unbounded_channel::<Write>();
         tokio::spawn(async move {
-            while let Some((ready, generation, message, done)) = receiver.recv().await {
-                let result = health.write(ready, message, generation).await;
-                let _ = done.send(result);
+            while let Some(write) = receiver.recv().await {
+                match write {
+                    Write::Health(ready, generation, message, done) => {
+                        let result = health.write(ready, message, generation).await;
+                        let _ = done.send(result);
+                    }
+                    Write::Barrier(done) => {
+                        let _ = done.send(Ok(()));
+                    }
+                }
             }
         });
-        Self { writes }
+        Self {
+            writes: Arc::new(Mutex::new(Writes {
+                sender: writes,
+                sealed: false,
+            })),
+        }
     }
 
     pub fn write(
@@ -57,8 +79,55 @@ impl HealthReporter {
         generation: Option<u64>,
         message: ivy_contracts::JsString,
     ) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
+        self.enqueue(ready, generation, message, false)
+    }
+    fn enqueue(
+        &self,
+        ready: bool,
+        generation: Option<u64>,
+        message: ivy_contracts::JsString,
+        final_write: bool,
+    ) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
         let (done, result) = oneshot::channel();
-        let sent = self.writes.send((ready, generation, message, done)).is_ok();
+        let mut writes = self
+            .writes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if final_write {
+            writes.sealed = true;
+        }
+        let sent = (final_write || !writes.sealed)
+            && writes
+                .sender
+                .send(Write::Health(ready, generation, message, done))
+                .is_ok();
+        async move {
+            if !sent {
+                return Err(ivy_contracts::IvyError::new(
+                    "service_unavailable",
+                    "ServiceManager health publication is stopped.",
+                ));
+            }
+            result
+                .await
+                .map_err(|_| ivy_contracts::IvyError::internal())?
+        }
+    }
+    pub fn seal(&self) {
+        self.writes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .sealed = true;
+    }
+    pub fn flush(&self) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
+        let (done, result) = oneshot::channel();
+        let sent = self
+            .writes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .sender
+            .send(Write::Barrier(done))
+            .is_ok();
         async move {
             if !sent {
                 return Err(ivy_contracts::IvyError::internal());
@@ -67,6 +136,11 @@ impl HealthReporter {
                 .await
                 .map_err(|_| ivy_contracts::IvyError::internal())?
         }
+    }
+    /// Seal and enqueue the final unready write under the same lock, so even a
+    /// readiness callback accepted before shutdown cannot publish ready afterward.
+    pub fn finalize(&self) -> impl std::future::Future<Output = IvyResult<()>> + Send + 'static {
+        self.enqueue(false, None, "ServiceManager stopped.".into(), true)
     }
 
     pub fn state(&self, state: ServiceState) {

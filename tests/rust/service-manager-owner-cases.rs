@@ -77,7 +77,7 @@ fn node() -> NodeRuntime {
         version: "24.18.0".into(),
     }
 }
-async fn owner(root: &Fixture, host: &IvyJson) -> RuntimeOwner {
+fn bootstrap(root: &Fixture) -> PathBuf {
     let bootstrap = root.0.join("bootstrap");
     std::fs::create_dir_all(bootstrap.join("dist/native")).unwrap();
     let exe = std::env::current_exe().unwrap();
@@ -86,15 +86,322 @@ async fn owner(root: &Fixture, host: &IvyJson) -> RuntimeOwner {
         bootstrap.join("dist/native/ivy-job.exe"),
     )
     .unwrap();
-    RuntimeOwner::open(
-        host.clone(),
-        "fixture".into(),
-        bootstrap,
-        node(),
-        resolver(host),
+    bootstrap
+}
+async fn owner(root: &Fixture, host: &IvyJson) -> RuntimeOwner {
+    RuntimeOwner::for_host(host.clone(), "fixture".into(), bootstrap(root), node())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn production_policy_resolver_uses_association_instead_of_latest_desired_mapping() {
+    let root = Fixture::new();
+    let accepted = host(&root);
+    let journal = HostJournal::open(accepted.clone()).await.unwrap();
+    let mut selected = target(&root, &journal, "associated-launch").await;
+    let request = IvyJson::object([
+        ("action", "deploy".into()),
+        ("operationId", "associated-deploy".into()),
+        ("instanceId", "fixture".into()),
+        ("candidateId", hash()),
+    ]);
+    let entry = journal.accept(request, None).await.unwrap();
+    let id = entry
+        .required("record")
+        .unwrap()
+        .required("deploymentId")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    journal
+        .advance(&id, "prepared", "checking", json("{}"))
+        .await
+        .unwrap();
+    journal
+        .advance(&id, "checking", "draining", json("{}"))
+        .await
+        .unwrap();
+    selected.insert("revision", "associated-policy".into());
+    journal
+        .advance(
+            &id,
+            "draining",
+            "activating",
+            IvyJson::object([("target", selected)]),
+        )
+        .await
+        .unwrap();
+    let mut desired = accepted.clone();
+    desired.insert(
+        "executables",
+        IvyJson::object([(
+            "fixture",
+            root.0
+                .join("missing-executable.exe")
+                .to_string_lossy()
+                .to_string()
+                .into(),
+        )]),
+    );
+    journal.use_configuration(desired.clone()).await.unwrap();
+    let owner = owner(&root, &desired).await;
+    owner.start().unwrap();
+    let ready = observation(&journal, "ready").await;
+    assert_eq!(
+        ready.required("targetRevision").unwrap(),
+        &IvyJson::from("associated-policy")
+    );
+    owner.close().await.unwrap();
+    journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_topology_preserves_existing_owners_and_adds_disabled_instances() {
+    use ivy_service_manager::topology::Owners;
+    let root = Fixture::new();
+    let initial = host(&root);
+    let journal = HostJournal::open(initial.clone()).await.unwrap();
+    let mut owners = Owners::new(root.0.clone(), node());
+    owners.reconcile("win32", &initial).await.unwrap();
+    let original = observation(&journal, "idle").await;
+    let mut updated = initial.clone();
+    let mut instances = initial
+        .required("instances")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec();
+    instances.push(json(r#"{"instanceId":"disabled","serviceNodeId":"owner.disabled","componentId":"fixture","engine":"process","enabled":false,"settings":{}}"#));
+    updated.insert("instances", IvyJson::Array(instances.clone()));
+    journal.use_configuration(updated.clone()).await.unwrap();
+    owners.reconcile("win32", &updated).await.unwrap();
+    assert_eq!(owners.ids(), vec!["fixture".into(), "disabled".into()]);
+    assert_eq!(
+        journal
+            .observations()
+            .await
+            .unwrap()
+            .required("fixture")
+            .unwrap()
+            .required("ownerBootId")
+            .unwrap(),
+        original.required("ownerBootId").unwrap()
+    );
+    instances.remove(0);
+    updated.insert("instances", IvyJson::Array(instances));
+    journal.use_configuration(updated.clone()).await.unwrap();
+    owners.reconcile("win32", &updated).await.unwrap();
+    assert_eq!(owners.ids(), vec!["disabled".into()]);
+    let retired = ivy_host_runtime::executor_lock::ExecutorLock::acquire(
+        root.0.join("state/owners/fixture"),
+        false,
     )
     .await
+    .unwrap();
+    retired.close().await.unwrap();
+    owners.close().await.unwrap();
+    assert_eq!(
+        owners.reconcile("win32", &updated).await.unwrap_err().code,
+        "service_unavailable"
+    );
+    journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn partial_topology_startup_releases_new_locks_and_preserves_existing_owner() {
+    use ivy_host_runtime::executor_lock::ExecutorLock;
+    use ivy_service_manager::topology::Owners;
+    let root = Fixture::new();
+    let initial = host(&root);
+    let journal = HostJournal::open(initial.clone()).await.unwrap();
+    let mut owners = Owners::new(root.0.clone(), node());
+    owners.reconcile("win32", &initial).await.unwrap();
+    let mut updated = initial.clone();
+    let mut instances = initial
+        .required("instances")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec();
+    for id in ["added", "locked"] {
+        let mut instance = instances[0].clone();
+        instance.insert("instanceId", id.into());
+        instance.insert("serviceNodeId", format!("owner.{id}").into());
+        instances.push(instance);
+    }
+    updated.insert("instances", IvyJson::Array(instances));
+    journal.use_configuration(updated.clone()).await.unwrap();
+    let locked = ExecutorLock::acquire(root.0.join("state/owners/locked"), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        owners.reconcile("win32", &updated).await.unwrap_err().code,
+        "executor_already_running"
+    );
+    assert_eq!(owners.ids(), vec!["fixture".into()]);
+    let released = ExecutorLock::acquire(root.0.join("state/owners/added"), false)
+        .await
+        .unwrap();
+    released.close().await.unwrap();
+    locked.close().await.unwrap();
+    owners.close().await.unwrap();
+    journal.close().await.unwrap();
+}
+
+fn manager_config(root: &Fixture, host: &IvyJson) -> ivy_host_runtime::config::InstanceConfig {
+    ivy_host_runtime::config::InstanceConfig::from_json(IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)),
+        ("hostId", "owner-host".into()),
+        ("instanceId", "manager".into()),
+        ("serviceNodeId", "owner.manager".into()),
+        ("componentId", "service-manager".into()),
+        ("version", "1.0.0".into()),
+        ("buildId", hash()),
+        (
+            "publicBaseUrl",
+            host.required("publicBaseUrl").unwrap().clone(),
+        ),
+        ("credential", "fixture".into()),
+        (
+            "dataRoot",
+            root.0
+                .join("manager-data")
+                .to_string_lossy()
+                .to_string()
+                .into(),
+        ),
+        (
+            "artifactRoot",
+            root.0
+                .join("artifacts")
+                .join("release")
+                .to_string_lossy()
+                .to_string()
+                .into(),
+        ),
+        (
+            "settings",
+            IvyJson::object([(
+                "hostConfigPath",
+                root.0
+                    .join("state")
+                    .join("host.json")
+                    .to_string_lossy()
+                    .to_string()
+                    .into(),
+            )]),
+        ),
+    ]))
     .unwrap()
+}
+fn mutation_fixtures()
+-> std::collections::HashMap<ivy_contracts::JsString, ivy_sdk::service::ToolHandler> {
+    [
+        "host.deploy",
+        "host.rollback",
+        "host.restart",
+        "host.enable",
+        "host.disable",
+    ]
+    .into_iter()
+    .map(|name| {
+        let handler: ivy_sdk::service::ToolHandler = Arc::new(|_, _| {
+            Box::pin(async {
+                Err(ivy_contracts::IvyError::new(
+                    "fixture_unavailable",
+                    "Mutation fixture must not be invoked.",
+                ))
+            })
+        });
+        (name.into(), handler)
+    })
+    .collect()
+}
+#[tokio::test]
+async fn manager_keeps_local_child_alive_offline_and_finishes_with_unready_health() {
+    use ivy_service_manager::manager::Manager;
+    let root = Fixture::new();
+    let mut accepted = host(&root);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); // Own the unavailable Hive endpoint.
+    accepted.insert(
+        "publicBaseUrl",
+        format!("http://{}/ivy", listener.local_addr().unwrap()).into(),
+    );
+    let config = manager_config(&root, &accepted);
+    let mut instances = accepted
+        .required("instances")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec();
+    instances.push(IvyJson::object([
+        ("instanceId", "manager".into()),
+        ("serviceNodeId", "owner.manager".into()),
+        ("componentId", "service-manager".into()),
+        ("engine", "process".into()),
+        ("enabled", true.into()),
+        (
+            "settings",
+            config.json().required("settings").unwrap().clone(),
+        ),
+    ]));
+    accepted.insert("instances", IvyJson::Array(instances));
+    let journal = HostJournal::open(accepted.clone()).await.unwrap();
+    target(&root, &journal, "offline-child").await;
+    let manager = Manager::start(
+        config,
+        accepted,
+        false,
+        node(),
+        bootstrap(&root),
+        mutation_fixtures(),
+    )
+    .await
+    .unwrap();
+    observation(&journal, "ready").await;
+    assert!(!manager.service.ready());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (first, second) = tokio::join!(manager.close(), manager.close());
+        first.unwrap();
+        second.unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(
+        root.0
+            .join("state/instances/fixture/data/cooperatively-stopped")
+            .exists()
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let health = json(&std::fs::read_to_string(root.0.join("manager-data/health.json")).unwrap());
+    assert_eq!(health.required("ready").unwrap(), &IvyJson::Bool(false));
+    assert_eq!(
+        health.required("details").unwrap(),
+        &IvyJson::from("ServiceManager stopped.")
+    );
+    journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn manager_maintenance_refusal_precedes_journal_or_owner_effects() {
+    use ivy_service_manager::manager::Manager;
+    let root = Fixture::new();
+    let accepted = host(&root);
+    let config = manager_config(&root, &accepted);
+    let error = Manager::start(
+        config,
+        accepted,
+        true,
+        node(),
+        root.0.clone(),
+        mutation_fixtures(),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(error.code, "maintenance_active");
+    assert!(!root.0.join("state").exists());
 }
 async fn observation(journal: &HostJournal, expected: &str) -> IvyJson {
     let last = std::sync::Mutex::new(IvyJson::Null);

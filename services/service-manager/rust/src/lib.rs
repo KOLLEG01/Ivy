@@ -1,5 +1,7 @@
 pub mod hints;
+pub mod connection;
 pub mod journal;
+pub mod manager;
 pub mod health;
 pub mod policy;
 pub mod registry;
