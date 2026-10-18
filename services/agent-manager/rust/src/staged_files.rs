@@ -4,7 +4,7 @@ use ivy_contracts::JsString;
 pub const MAXIMUM_BYTES: usize = 8 * 1024 * 1024;
 pub const RETENTION_MS: f64 = 30.0 * 24.0 * 60.0 * 60.0 * 1000.0;
 
-/// One path segment, including the original UTF-16 slice and reserved-name rule.
+/// One path segment, keeping reserved names within the published UTF-16 cap.
 pub fn staged_name(name: &JsString) -> JsString {
     let last = name
         .0
@@ -60,6 +60,7 @@ pub fn staged_name(name: &JsString) -> JsString {
             && (48..=57).contains(&first[3]);
     if reserved {
         units.insert(0, 95);
+        units.truncate(128);
     }
     JsString(units)
 }

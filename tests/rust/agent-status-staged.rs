@@ -43,7 +43,7 @@ fn optional(value: &IvyJson, key: &str) -> Option<IvyJson> {
 }
 
 #[tokio::test]
-async fn status_handler_and_staged_names_match_original_runtime_observations() {
+async fn status_handler_and_staged_names_preserve_original_observations_and_approved_cap() {
     let output = Command::new("node")
         .arg("tests/fixtures/agent-status-staged-oracle.mjs")
         .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
@@ -60,7 +60,13 @@ async fn status_handler_and_staged_names_match_original_runtime_observations() {
     )
     .unwrap();
     for row in get(&data, "names").as_array().unwrap() {
-        assert_eq!(staged_name(&text(row, "name")), text(row, "result"));
+        let mut expected = text(row, "result");
+        // The agreed exception fixes the original reserved-prefix overflow.
+        // Existing stored names and paths are never rewritten.
+        if expected.0.len() == 129 {
+            expected.0.truncate(128);
+        }
+        assert_eq!(staged_name(&text(row, "name")), expected);
     }
     for row in get(&data, "cases").as_array().unwrap() {
         let input = get(row, "input");
