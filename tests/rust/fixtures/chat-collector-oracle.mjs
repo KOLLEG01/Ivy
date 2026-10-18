@@ -97,6 +97,7 @@ add('native-error-exhausts-third-attempt',[step,{action:'advance',millis:2000},s
 add('transport-loss-keeps-checkpoint',[control({readError:'fixture_unavailable'}),step,reopen,control({readError:null}),...rounds(4)]);
 add('read-identity-refusal-is-not-semantic-failure',[step,...rounds(2)],{script:[{...page(),patch:{callerPrincipalId:'foreign'}},...success]});
 add('epoch-restart-retains-predecessor',[step,control({epoch:'replacement-epoch'}),step,reopen,terminal,...rounds(3)],{script:[page(),...success]});
+add('epoch-restart-terminal-only-in-predecessor',[step,control({epoch:'replacement-epoch'}),step,reopen,terminal,...rounds(4)],{script:[page(),page('inProgress'),...success]});
 add('operator-retry-is-exact-and-idempotent',[step,{action:'retry',remember:true},{action:'retry',remember:false},reopen,{action:'retry',remember:false},...rounds(4)],{script:[{reply:{result:{data:[],nextCursor:null}}},...success]});
 add('operator-stale-retry-refused',[step,{action:'retry',revision:999}],{script:[{reply:{result:{data:[],nextCursor:null}}}]});
 add('operator-caller-scope-before-owner',[{action:'retry',caller:'foreign'}]);
@@ -113,10 +114,17 @@ for(const kind of ['before','after','contention'])for(const key of ['chat-bridge
 add('recreate-client-does-not-invent-mutation-receipts',[...rounds(3),{action:'fault',value:{kind:'after',key:'chat-bridge/result-text'}},step,{action:'new-client'},step]);
 add('local-evidence-commit-before-collection-crash',[step,{action:'crash-collection'},step,reopen,step,...rounds(4)],{script:[page(),item(),item(),page()]});
 add('local-complete-commit-crash',[...rounds(3),{action:'crash-complete'},step,reopen,step]);
+const recovery={
+ 'local-evidence-commit-before-collection-crash':[terminal,...rounds(4),reopen,step],
+ 'local-complete-commit-crash':[terminal,step,reopen,step],
+ 'actual-scalar-safe-result-parts':[terminal,step,reopen,step],
+ 'durable-native-error-and-bounded-retry':[step,{action:'advance',millis:6000},...rounds(4),reopen,step],
+ 'epoch-restart-terminal-only-in-predecessor':[terminal,...rounds(4),reopen,step],
+};
 for(const c of cases){
- const seed=definitions[c.version],root=mkdtempSync(join(tmpdir(),'ivy-collector-')),file=join(root,'chat-bridge.sqlite');writeFileSync(file,Buffer.from(seed.database,'base64'));clock=now;
- let client=new Client(seed.records),store,admission,operations,queue,evidence,main,collector,publisher,readIndex=0,last=0,retryRequest=null;
- const controls={epoch:'original-epoch'},events=[],gates=[],aliases=new Map(),mutations=new Map();c.expected=[];c.observations=[];
+ const seed=definitions[c.seed??c.version],root=mkdtempSync(join(tmpdir(),'ivy-collector-')),file=join(root,'chat-bridge.sqlite');writeFileSync(file,Buffer.from(seed.database,'base64'));clock=seed.initialNow??now;
+ let client=new Client(seed.records),store,admission,operations,queue,evidence,main,collector,publisher,readIndex=seed.initialReadIndex??0,last=0,retryRequest=null;
+ const controls=clone(seed.initialControls??{epoch:'original-epoch'}),events=[],gates=[],aliases=new Map(),mutations=new Map();c.expected=[];c.observations=[];
  globalThis[probe]=(kind,input,fn)=>{const call={kind,input:(()=>{const v=clone(input);if(v.value)v.value=summary(v.value);if(v.params)v.params=summary(v.params);if(v.observation)v.observation=summary(v.observation);return v;})()};gates.push(call);try{const output=fn();if(output?.then)return output.then(value=>{call.output={value:value??null};return value;},e=>{call.output={error:error(e)};throw e;});call.output={value:output??null};return output;}catch(e){call.output={error:error(e)};throw e;}};
  function open(){
   store=new ChatStore(client,null,root);admission=new ChatAdmission(seed.definition);operations=new ChatOperations(store,admission);queue=new ChatQueue(operations);evidence=new ChatNativeEvidence(store,seed.definition);
@@ -161,9 +169,24 @@ for(const c of cases){
     }
     default:throw Error('Unknown action '+s.action);
    }
-  });c.expected.push(snapshot(output));if(s.action==='reopen'){const db=new DatabaseSync(file);db.exec('DROP TRIGGER IF EXISTS collector_commit_crash;DROP TABLE IF EXISTS collector_crash_arm;');db.close();}}
+  });c.expected.push(snapshot(output));if(s.action==='reopen'){
+   const db=new DatabaseSync(file);db.exec('DROP TRIGGER IF EXISTS collector_commit_crash;DROP TABLE IF EXISTS collector_crash_arm;');db.close();
+   if(recovery[c.label]&&!c.recoverySeed){
+    // Close SQLite to checkpoint the exact original database, then cross-open
+    // the published copy with a fresh RPC client and no inherited receipts.
+    store.close();const key='original-checkpoint-'+c.label;c.recoverySeed=key;
+    definitions[key]={...clone(seed),database:readFileSync(file).toString('base64'),records:clone(client.records),initialNow:clock,initialControls:clone(controls),initialReadIndex:readIndex,snapshot:{sourceCase:c.label,afterStep:c.expected.length-1,contentHash:digest(readFileSync(file))}};
+    cases.push({label:'cross-open-'+c.label,version:c.version,seed:key,script:clone(c.script??success),steps:recovery[c.label]});open();
+   }
+  }}
   if(c.label==='collect-reopen-publish-and-release'&&(c.expected.some(s=>s.output.error)||c.expected.at(-1).records[0].content.value.state!=='completed'))throw Error('Original full integration did not succeed: '+JSON.stringify(c.expected.map(s=>s.output)));
   if(c.label==='actual-scalar-safe-result-parts'){const parts=client.records.filter(r=>r.object.contractKey==='chat-bridge/result-text');if(parts.length!==2||Buffer.byteLength(parts[0].content.value)!==1048575||parts.some(r=>r.content.value.includes('\ufffd')))throw Error('Real scalar-safe split not exercised');}
+  if(c.label.startsWith('cross-open-')){
+   if(c.expected.some(s=>s.output.error))throw Error('Original cross-open failed '+c.label+': '+JSON.stringify(c.expected.map(s=>s.output)));
+   const current=c.expected.at(-1).documents.find(d=>d.key==='chat-bridge/collection');
+   if(current.value.state!==(c.label==='cross-open-local-complete-commit-crash'?'ready':'complete'))throw Error('Original cross-open checkpoint differs '+c.label);
+   if(c.expected[0].output.value!==true&&c.label!=='cross-open-durable-native-error-and-bounded-retry')throw Error('Original terminal history was not reconstructed '+c.label);
+  }
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
 }
 process.stdout.write(JSON.stringify({now,instructions,seeds:definitions,cases}));

@@ -660,12 +660,31 @@ async fn original_collector_replay_retry_results_and_publication() {
     let mut steps = 0;
     let mut gates = 0;
     for case in array(corpus, "cases") {
-        let seed = field(field(corpus, "seeds"), &text(case, "version"));
+        let seed_key = case
+            .get("seed")
+            .unwrap_or_else(|| field(case, "version"))
+            .as_str()
+            .unwrap();
+        let seed = field(field(corpus, "seeds"), &seed_key);
+        if let Some(snapshot) = seed.get("snapshot") {
+            assert_eq!(
+                digest(STANDARD.decode(text(seed, "database")).unwrap()),
+                text(snapshot, "contentHash"),
+                "Original SQLite snapshot bytes differ"
+            );
+        }
         let path = Fixture::new(field(seed, "database"));
         let mut client = Arc::new(Client::new(array(seed, "records").to_vec()));
-        let clock = Arc::new(Time(AtomicI64::new(number(corpus, "now") as i64)));
+        let clock = Arc::new(Time(AtomicI64::new(
+            seed.get("initialNow")
+                .and_then(Json::as_f64)
+                .unwrap_or(number(corpus, "now") as f64) as i64,
+        )));
         let live = Mutex::new(Live {
-            controls: Json::object([("epoch", "original-epoch".into())]),
+            controls: seed
+                .get("initialControls")
+                .cloned()
+                .unwrap_or_else(|| Json::object([("epoch", "original-epoch".into())])),
             events: vec![],
             observations: array(case, "observations").iter().cloned().collect(),
         });
