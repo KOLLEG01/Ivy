@@ -118,12 +118,12 @@ pub fn record_references(key: Record, value: &IvyJson) -> IvyResult<IvyJson> {
                 .enumerate()
             {
                 if let Some(pin) = entry.get("pin").filter(|v| truthy(v)) {
-                    refs.insert(format!("media-{i}").into(), pin.clone());
+                    refs.insert(format!("media-{i}"), pin.clone());
                 }
             }
         }
         Record::Execution => {
-            refs.insert("assignment".into(), value.required("assignment")?.clone());
+            refs.insert("assignment", value.required("assignment")?.clone());
             let p = value.required("trigger")?.required("payload")?;
             if p.get("kind") == Some(&IvyJson::from("secretary.object.batch"))
                 && p.get("objectId").and_then(IvyJson::as_js_string).is_some()
@@ -132,7 +132,7 @@ pub fn record_references(key: Record, value: &IvyJson) -> IvyResult<IvyJson> {
             {
                 for (name, revision) in [("before", "beforeRevision"), ("input", "revision")] {
                     refs.insert(
-                        name.into(),
+                        name,
                         IvyJson::object([
                             ("objectId", p.required("objectId")?.clone()),
                             ("revision", p.required(revision)?.clone()),
@@ -142,7 +142,7 @@ pub fn record_references(key: Record, value: &IvyJson) -> IvyResult<IvyJson> {
             }
         }
         Record::ScheduleProgress | Record::EventProgress => {
-            refs.insert("assignment".into(), value.required("assignment")?.clone());
+            refs.insert("assignment", value.required("assignment")?.clone());
         }
         _ => (),
     }
@@ -346,7 +346,7 @@ impl Store<'_> {
         ]);
         if let Some(name) = destination.get("createName") {
             request.insert(
-                "create".into(),
+                "create",
                 IvyJson::object([
                     ("contractKey", key.key().into()),
                     ("parentId", IvyJson::String(self.root.clone())),
@@ -356,8 +356,8 @@ impl Store<'_> {
             );
         } else {
             let p = destination.required("object")?;
-            request.insert("objectId".into(), p.required("objectId")?.clone());
-            request.insert("expectedRevision".into(), p.required("revision")?.clone());
+            request.insert("objectId", p.required("objectId")?.clone());
+            request.insert("expectedRevision", p.required("revision")?.clone());
         }
         Ok(request)
     }

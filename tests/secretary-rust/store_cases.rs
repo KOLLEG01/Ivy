@@ -168,8 +168,8 @@ async fn original_store_records_and_rpc_recovery() {
                             .unwrap(),
                     )
                     .unwrap();
-                    params.insert("mutationId".into(), "<scoped-operation>".into());
-                    call.insert("params".into(), params);
+                    params.insert("mutationId", "<scoped-operation>".into());
+                    call.insert("params", params);
                 }
             }
         }
