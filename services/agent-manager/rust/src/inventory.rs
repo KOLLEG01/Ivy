@@ -15,7 +15,6 @@ use ivy_sdk::{
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 const SNAPSHOT_BYTES: usize = 9 * 1024 * 1024;
@@ -162,12 +161,7 @@ impl NativeInventory {
                 let rpc = rpc.clone();
                 Box::pin(async move { rpc.request(method, params, options).await })
             }),
-            Arc::new(|| {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as f64
-            }),
+            Arc::new(|| chrono::Utc::now().timestamp_millis() as f64),
             Arc::new(|| {
                 chrono::Utc::now()
                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
