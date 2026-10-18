@@ -4,6 +4,7 @@ pub mod assignment_native;
 pub mod assignment_execution;
 pub mod assignment_advance;
 pub mod assignment_scan;
+pub mod assignment_preflight;
 pub mod assignment_prompt;
 pub mod assignment_result;
 pub mod assignment_decision;
