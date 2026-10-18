@@ -63,3 +63,7 @@ path = "../../../tests/rust/sdk-operation-ids.rs"
 [[test]]
 name = "sdk-native-owner"
 path = "../../../tests/rust/sdk-native-owner.rs"
+
+[[test]]
+name = "sdk-native-plan"
+path = "../../../tests/rust/sdk-native-plan.rs"

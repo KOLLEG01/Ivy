@@ -540,3 +540,13 @@ impl BoundToolClient {
         .await
     }
 }
+
+pub(crate) fn truthy(value: Option<&IvyJson>) -> bool {
+    match value {
+        None | Some(IvyJson::Null) => false,
+        Some(IvyJson::Bool(value)) => *value,
+        Some(IvyJson::Number(value)) => *value != 0.0 && !value.is_nan(),
+        Some(IvyJson::String(value)) => !value.0.is_empty(),
+        _ => true,
+    }
+}

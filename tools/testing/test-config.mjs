@@ -124,6 +124,8 @@ export const privateRepo = false;
 
 // Explicit Cargo targets keep --files narrow and do not infer service ownership.
 export const rustTests = {
+  'tests/rust/sdk-native-plan.rs': { package: 'ivy-sdk', test: 'sdk-native-plan' },
+  'tests/rust/schema-runtime.rs': { package: 'ivy-contracts', test: 'schema-runtime' },
   'tests/rust/chat-notices.rs': { package: 'ivy-chat-bridge', test: 'chat-notices' },
   'tests/rust/chat-result-text.rs': { package: 'ivy-chat-bridge', test: 'chat-result-text' },
   'tests/rust/chat-collection-reads.rs': { package: 'ivy-chat-bridge', test: 'chat-collection-reads' },

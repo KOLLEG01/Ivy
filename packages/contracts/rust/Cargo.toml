@@ -61,3 +61,7 @@ path = "../../../tests/rust/number-string.rs"
 [[test]]
 name = "ui-route"
 path = "../../../tests/rust/ui-route.rs"
+
+[[test]]
+name = "schema-runtime"
+path = "../../../tests/rust/schema-runtime.rs"

@@ -2,6 +2,8 @@ use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
 #[path = "json_number.rs"]
 mod number;
+#[path = "json_trim.rs"]
+mod trim;
 #[path = "json_value.rs"]
 mod value_traits;
 pub use number::number_from_string;
@@ -20,10 +22,14 @@ impl From<String> for JsString {
     }
 }
 impl JsString {
+    /// ECMAScript's locale-independent full Unicode lowercase mapping.
+    pub fn to_lowercase(&self) -> Self {
+        self.map_case(str::to_lowercase)
+    }
     /// English locale lowercase, retaining unpaired UTF-16 units as non-cased
     /// boundaries and preserving context within each well-formed segment.
     pub fn to_english_lowercase(&self) -> Self {
-        self.map_case(str::to_lowercase)
+        self.to_lowercase()
     }
     /// ECMAScript's locale-independent full Unicode uppercase mapping.
     pub fn to_uppercase(&self) -> Self {
@@ -34,7 +40,7 @@ impl JsString {
         let start = self
             .0
             .iter()
-            .position(|unit| !number::space(*unit))
+            .position(|unit| !trim::space(*unit))
             .unwrap_or(self.0.len());
         Self(self.0[start..].to_vec())
     }
@@ -572,6 +578,26 @@ impl Parser<'_> {
 pub fn canonical(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, true, true)
 }
+/// Canonicalize projected own fields while retaining missing values as JS
+/// undefined. Such values fail at their canonical visit position, rather than
+/// being omitted or converted to null. Repeated keys keep their last value.
+pub fn canonical_fields<'a, K: Into<JsString>>(
+    fields: impl IntoIterator<Item = (K, Option<&'a IvyJson>)>,
+    maximum_bytes: usize,
+) -> IvyResult<String> {
+    let mut pairs: Vec<(JsString, Option<&IvyJson>)> = Vec::new();
+    for (key, value) in fields {
+        let key = key.into();
+        if let Some(pair) = pairs.iter_mut().find(|pair| pair.0 == key) {
+            pair.1 = value;
+        } else {
+            pairs.push((key, value));
+        }
+    }
+    let mut encoder = Encoder::new(maximum_bytes, true, true);
+    encoder.parts(EncodingPart::Fields(&pairs))?;
+    Ok(encoder.out)
+}
 pub fn stringify(value: &IvyJson, maximum_bytes: usize) -> IvyResult<String> {
     encode(value, maximum_bytes, false, false)
 }
@@ -595,14 +621,7 @@ fn encode(
     sorted: bool,
     validate: bool,
 ) -> IvyResult<String> {
-    let mut encoder = Encoder {
-        out: String::new(),
-        maximum_bytes,
-        nodes: 0,
-        sorted,
-        validate,
-        accounted: 0,
-    };
+    let mut encoder = Encoder::new(maximum_bytes, sorted, validate);
     encoder.value(value)?;
     Ok(encoder.out)
 }
@@ -614,7 +633,25 @@ struct Encoder {
     validate: bool,
     accounted: usize,
 }
+enum EncodingPart<'a> {
+    Value(Option<&'a IvyJson>, usize),
+    Fields(&'a [(JsString, Option<&'a IvyJson>)]),
+    Key(&'a JsString),
+    Punctuation(&'static str),
+    Colon,
+    Account(usize),
+}
 impl Encoder {
+    fn new(maximum_bytes: usize, sorted: bool, validate: bool) -> Self {
+        Self {
+            out: String::new(),
+            maximum_bytes,
+            nodes: 0,
+            sorted,
+            validate,
+            accounted: 0,
+        }
+    }
     fn emit(&mut self, text: &str) -> IvyResult<()> {
         self.account(text.len())?;
         self.out.push_str(text);
@@ -659,16 +696,31 @@ impl Encoder {
         self.emit("\"")
     }
     fn value(&mut self, value: &IvyJson) -> IvyResult<()> {
-        enum Part<'a> {
-            Value(&'a IvyJson, usize),
-            Key(&'a JsString),
-            Punctuation(&'static str),
-            Colon,
-            Account(usize),
-        }
-        let mut pending = vec![Part::Value(value, 0)];
+        self.parts(EncodingPart::Value(Some(value), 0))
+    }
+    fn parts(&mut self, initial: EncodingPart<'_>) -> IvyResult<()> {
+        use EncodingPart as Part;
+        let mut pending = vec![initial];
         while let Some(part) = pending.pop() {
             let (value, depth) = match part {
+                Part::Fields(pairs) => {
+                    self.nodes += 1;
+                    let mut indices: Vec<_> = (0..pairs.len()).collect();
+                    indices.sort_by(|a, b| pairs[*a].0.cmp(&pairs[*b].0));
+                    self.punctuation("{")?;
+                    pending.push(Part::Account(2 + pairs.len().saturating_sub(1)));
+                    pending.push(Part::Punctuation("}"));
+                    for (index, pair_index) in indices.into_iter().enumerate().rev() {
+                        let (key, value) = &pairs[pair_index];
+                        pending.push(Part::Value(*value, 1));
+                        pending.push(Part::Colon);
+                        pending.push(Part::Key(key));
+                        if index > 0 {
+                            pending.push(Part::Punctuation(","));
+                        }
+                    }
+                    continue;
+                }
                 Part::Punctuation(text) => {
                     self.punctuation(text)?;
                     continue;
@@ -691,6 +743,7 @@ impl Encoder {
             if self.validate && (self.nodes > 400_000 || depth > 128) {
                 return Err(complexity());
             }
+            let value = value.ok_or_else(|| invalid("Value is outside the JSON domain."))?;
             match value {
                 IvyJson::Null => self.emit("null")?,
                 IvyJson::Bool(value) => self.emit(if *value { "true" } else { "false" })?,
@@ -717,7 +770,7 @@ impl Encoder {
                     }
                     pending.push(Part::Punctuation("]"));
                     for (index, value) in values.iter().enumerate().rev() {
-                        pending.push(Part::Value(value, depth + 1));
+                        pending.push(Part::Value(Some(value), depth + 1));
                         if index > 0 {
                             pending.push(Part::Punctuation(","));
                         }
@@ -738,7 +791,7 @@ impl Encoder {
                     pending.push(Part::Punctuation("}"));
                     for (index, pair_index) in indices.into_iter().enumerate().rev() {
                         let (key, value) = &pairs[pair_index];
-                        pending.push(Part::Value(value, depth + 1));
+                        pending.push(Part::Value(Some(value), depth + 1));
                         pending.push(Part::Colon);
                         pending.push(Part::Key(key));
                         if index > 0 {
