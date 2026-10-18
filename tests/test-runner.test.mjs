@@ -181,11 +181,12 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     fs.appendFileSync(process.env.IVY_CARGO_TEST_LOG,JSON.stringify(args)+'\\n');
     if(args[0]===process.env.IVY_CARGO_TEST_FAIL)process.exit(7);`;
   for (const command of ["build", "test"]) writeFileSync(join(root, command), stub);
-  const run = (fail = "") => {
+  const run = (fail = "", files = [
+    "tests/rust/service-manager-stop.rs", "tests/rust/service-manager-policy.rs",
+    "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs"]) => {
     writeFileSync(log, "");
     const result = spawnSync(process.execPath, [resolve("tools/testing/test-rust.mjs"),
-      "tests/rust/service-manager-stop.rs", "tests/rust/service-manager-policy.rs",
-      "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs"], {
+      ...files], {
       cwd: root, windowsHide: true, encoding: "utf8", timeout: 15000,
       env: { ...process.env, IVY_CARGO: process.execPath, IVY_CARGO_TEST_LOG: log, IVY_CARGO_TEST_FAIL: fail },
     });
@@ -199,6 +200,16 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   const success = run();
   assert.equal(success.result.status, 0, success.result.stderr);
   assert.deepEqual(success.commands, expected);
+  const phoneLibraryOnly = run("", ["tests/rust/phone_sip_tls.rs"]);
+  assert.equal(phoneLibraryOnly.result.status, 0, phoneLibraryOnly.result.stderr);
+  assert.deepEqual(phoneLibraryOnly.commands, [
+    ["test", "--locked", "--package", "ivy-phone-bridge", "--lib"],
+  ]);
+  const phoneMixed = run("", ["tests/rust/phone_media.rs", "tests/rust/phone_sip_tls.rs", "tests/rust/phone_diagnostics.rs", "tests/rust/phone_sip_tls.rs"]);
+  assert.equal(phoneMixed.result.status, 0, phoneMixed.result.stderr);
+  assert.deepEqual(phoneMixed.commands, [
+    ["test", "--locked", "--package", "ivy-phone-bridge", "--lib", "--test", "phone_media", "--test", "phone_diagnostics"],
+  ]);
   const failure = run(expected[0][0]);
   assert.equal(failure.result.status, 7, failure.result.stderr);
   assert.deepEqual(failure.commands, expected.slice(0, 1));
