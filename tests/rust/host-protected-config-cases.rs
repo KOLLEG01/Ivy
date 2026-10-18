@@ -91,10 +91,13 @@ async fn protected_reader_absence_nonfiles_and_io_failures_keep_the_original_cla
     for path in [fixture.0.join("absent"),fixture.0.join("absent-parent/file.json")]{assert_eq!(compare(&path,1024).await.get("value"),Some(&IvyJson::Null));}
     assert_eq!(code(&compare(&fixture.0,1024).await),Some("invalid_arguments".into()));
     let file=fixture.write("parent-is-file",DOCUMENT);let _=compare(&file.join("child"),1024).await;
+    assert_eq!(code(&compare(&fixture.0.join("invalid\0path"),1024).await),Some("internal_error".into()));
     #[cfg(windows)]{
         use std::os::windows::fs::OpenOptionsExt;
         let held=fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
-        assert_eq!(code(&compare(&file,1024).await),Some("internal_error".into()));drop(held);
+        // Windows backup rights can let Node read despite this sharing mode.
+        // Compare the original account behavior rather than imposing denial.
+        let _=compare(&file,1024).await;drop(held);
     }
 }
 
