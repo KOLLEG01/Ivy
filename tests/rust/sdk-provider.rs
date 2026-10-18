@@ -162,6 +162,44 @@ fn abort_reason(result: ivy_sdk::IvyResult<()>) -> IvyJson {
     }
 }
 #[tokio::test]
+async fn public_context_constructor_supports_independent_handler_fixtures() {
+    let handler: ToolHandler = Arc::new(|args, context| {
+        Box::pin(async move {
+            context.throw_if_aborted()?;
+            Ok(args)
+        })
+    });
+    for operation_id in [None, Some(JsString::from("operation"))] {
+        let signal = CancellationToken::new();
+        let reason = IvyError::new_js(JsString(vec![0xd800]), JsString(vec![0xdfff]))
+            .with_outcome(Outcome::Unknown)
+            .with_details(json(r#"{"source":"independent handler"}"#));
+        let context = InvocationContext::detached(
+            "caller".into(),
+            operation_id.clone(),
+            1,
+            signal.clone(),
+            reason.clone(),
+        );
+        assert_eq!(context.caller_principal_id, JsString::from("caller"));
+        assert_eq!(context.operation_id, operation_id);
+        assert_eq!(context.generation, 1);
+        assert_eq!(
+            handler(true.into(), context.clone()).await.unwrap(),
+            true.into()
+        );
+        signal.cancel();
+        assert_eq!(context.throw_if_aborted().unwrap_err(), reason);
+        assert_eq!(
+            handler(true.into(), context.clone()).await.unwrap_err(),
+            reason
+        );
+        let retained = context.clone();
+        drop(context);
+        assert_eq!(retained.throw_if_aborted().unwrap_err(), reason);
+    }
+}
+#[tokio::test]
 async fn invocation_and_connection_abort_checks_retain_original_error_after_close() {
     let expected = tokio::time::timeout(
         Duration::from_secs(15),
