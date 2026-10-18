@@ -3,6 +3,8 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_sdk::native_project_membership::{is_internal_project, native_project_for_thread};
 use std::collections::{HashMap, HashSet};
 
+static NULL: IvyJson = IvyJson::Null;
+
 struct Thread {
     value: IvyJson,
     revision: f64,
@@ -67,8 +69,8 @@ impl NativeNoticePolicy {
         Ok(())
     }
     pub fn observe(&mut self, event: &IvyJson) {
-        let params = event.get("params").unwrap_or(&IvyJson::Null);
-        let thread = params.get("thread").unwrap_or(&IvyJson::Null);
+        let params = event.get("params").unwrap_or(&NULL);
+        let thread = params.get("thread").unwrap_or(&NULL);
         let id = params.get("threadId").and_then(IvyJson::as_js_string);
         if event.get("method") == Some(&"thread/started".into()) {
             if let Some(id) = thread.get("id").and_then(IvyJson::as_js_string) {
