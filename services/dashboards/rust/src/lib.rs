@@ -5,6 +5,7 @@ pub mod document;
 pub mod png;
 pub mod raster;
 pub mod sources;
+pub mod validation;
 
 pub fn registry() -> ivy_contracts::IvyJson {
     ivy_contracts::json::parse(
