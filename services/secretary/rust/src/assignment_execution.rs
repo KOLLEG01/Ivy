@@ -4,6 +4,8 @@ use crate::{
     assignment_prompt::assignment_prompt,
     assignment_result::{assignment_completion, assignment_turn},
     assignment_runner::{AssignmentRunner, release_lease},
+    schema::{Schema, validate},
+    store::Record,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
@@ -13,6 +15,7 @@ use ivy_sdk::{
     clock::{Clock, date_to_iso},
     native_turn_contents::{read_native_turn_contents, verify_native_turn_contents},
     operation_ids::new_operation_id,
+    tools::{InterfaceRequirement, ToolCallOptions},
 };
 
 fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
@@ -34,6 +37,239 @@ pub struct AssignmentExecution<'a, 'engine, 'journal> {
     pub notification_policy: &'a JsString,
 }
 impl AssignmentExecution<'_, '_, '_> {
+    pub async fn target(&self, execution: &IvyJson) -> IvyResult<IvyJson> {
+        if let Some(target) = execution.get("nativeTarget").filter(|v| !v.is_null()) {
+            return Ok(target.clone());
+        }
+        let selected = self.native.tools.service_tools(
+            text(execution, "serviceNodeId")?,
+            &[InterfaceRequirement {
+                namespace: "agent".into(),
+                interface_version: "1.0.0".into(),
+            }],
+        )?;
+        let status = selected
+            .call(
+                &"agent.status".into(),
+                IvyJson::object(Vec::<(String, IvyJson)>::new()),
+                None,
+                ToolCallOptions::default(),
+            )
+            .await?;
+        let target = IvyJson::object(
+            [
+                "serviceNodeId",
+                "hostId",
+                "nativeVersion",
+                "nativeExecutableHash",
+                "catalogHash",
+            ]
+            .map(|key| (key, status.get(key).cloned().unwrap_or(IvyJson::Null))),
+        );
+        validate(Schema::NativeTarget, &target)?;
+        if status.get("serviceNodeId") != execution.get("serviceNodeId")
+            || !nonempty(status.get("epoch"))
+        {
+            return Err(IvyError::new(
+                "secretary_execution_target_unavailable",
+                "The configured AgentManager is not ready for a Secretary task.",
+            ));
+        }
+        Ok(target)
+    }
+    pub async fn start(&self, current: &IvyJson) -> IvyResult<IvyJson> {
+        let execution = current.required("value")?;
+        if execution.get("nativeTarget").is_none_or(IvyJson::is_null) {
+            let target = self.target(execution).await?;
+            let now = self.now()?;
+            let mut next = execution.clone();
+            next.insert("nativeTarget", target);
+            next.insert("phase", "starting".into());
+            next.insert(
+                "startedAt",
+                execution
+                    .get("startedAt")
+                    .filter(|v| !v.is_null())
+                    .cloned()
+                    .unwrap_or(IvyJson::String(now.clone())),
+            );
+            next.insert("updatedAt", IvyJson::String(now));
+            return self.update(current, &next).await;
+        }
+        let assignment = execution.required("assignmentSnapshot")?;
+        let reuse = assignment
+            .get("execution")
+            .and_then(|v| v.get("reuse"))
+            .filter(|v| !v.is_null());
+        let journal = self.native.evidence.store.journal;
+        let lease_key = "secretary/thread-lease";
+        let mut lease = None;
+        if reuse.is_some_and(|v| v != &"new".into()) {
+            let name = if reuse == Some(&"main".into()) {
+                "main".to_owned()
+            } else {
+                format!(
+                    "assignment-{}",
+                    assignment.required("assignmentId")?.as_str()?
+                )
+            };
+            let active_id = current.required("pin")?.required("objectId")?;
+            lease = Some(
+                if let Some(saved) = journal.named(lease_key, &name, true)? {
+                    if saved.value.get("serviceNodeId") != execution.get("serviceNodeId")
+                        || saved.value.get("threadCwd")
+                            != execution.required("executionTarget")?.get("threadCwd")
+                    {
+                        return Err(IvyError::new(
+                            "secretary_reuse_target_changed",
+                            "A reused Secretary thread belongs to a different execution target.",
+                        ));
+                    }
+                    let mut thread_id = saved.value.required("threadId")?.clone();
+                    if nonempty(saved.value.get("activeExecutionObjectId"))
+                        && saved.value.get("activeExecutionObjectId") != Some(active_id)
+                    {
+                        match self
+                            .native
+                            .evidence
+                            .store
+                            .read(
+                                Record::Execution,
+                                saved.value.required("activeExecutionObjectId")?,
+                            )
+                            .await
+                        {
+                            Ok(prior) => {
+                                let value = prior.required("value")?;
+                                if !matches!(
+                                    value.required("phase")?.as_str()?.as_str(),
+                                    "settled" | "deleted" | "failed" | "completed" | "archived"
+                                ) {
+                                    return Err(IvyError::new(
+                                        "secretary_execution_native_pending",
+                                        "The reused Secretary thread is busy.",
+                                    ));
+                                }
+                                if thread_id.is_null() {
+                                    thread_id = value.required("threadId")?.clone();
+                                }
+                            }
+                            Err(error) if error.code == "not_found" => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    let mut next = saved.value.clone();
+                    if !nonempty(Some(&thread_id)) {
+                        next.insert(
+                            "createdByExecutionId",
+                            execution.required("executionId")?.clone(),
+                        );
+                    }
+                    next.insert("threadId", thread_id);
+                    next.insert("activeExecutionObjectId", active_id.clone());
+                    journal.amend_technical(lease_key, &saved.pin, &next)?
+                } else {
+                    journal.create_technical(
+                        lease_key,
+                        &name,
+                        &IvyJson::object([
+                            (
+                                "serviceNodeId",
+                                execution.required("serviceNodeId")?.clone(),
+                            ),
+                            (
+                                "threadCwd",
+                                execution
+                                    .required("executionTarget")?
+                                    .required("threadCwd")?
+                                    .clone(),
+                            ),
+                            (
+                                "createdByExecutionId",
+                                execution.required("executionId")?.clone(),
+                            ),
+                            ("activeExecutionObjectId", active_id.clone()),
+                            ("threadId", IvyJson::Null),
+                        ]),
+                    )?
+                },
+            );
+        }
+        let current = self.with_operation(current, "threadStart").await?;
+        let execution = current.required("value")?;
+        let prompt = assignment_prompt(execution, self.notification_policy)?;
+        let creating = lease.as_ref().is_none_or(|lease| {
+            lease.value.get("createdByExecutionId") == execution.get("executionId")
+                && !nonempty(execution.get("threadId"))
+        });
+        let target = execution.required("executionTarget")?;
+        let owner = self.native.owner(execution)?;
+        let mut params = IvyJson::object([
+            ("cwd", target.required("threadCwd")?.clone()),
+            ("permissions", target.required("permissions")?.clone()),
+            ("approvalPolicy", "never".into()),
+            (
+                "developerInstructions",
+                prompt.required("developerInstructions")?.clone(),
+            ),
+        ]);
+        let method = if creating {
+            params.insert("ephemeral", IvyJson::Bool(false));
+            params.insert("serviceName", "secretary".into());
+            params.insert("threadSource", "ivy-secretary".into());
+            if nonempty(target.get("model")) {
+                params.insert("model", target.required("model")?.clone());
+            }
+            "thread/start"
+        } else {
+            params.insert(
+                "threadId",
+                lease.as_ref().unwrap().value.required("threadId")?.clone(),
+            );
+            params.insert("excludeTurns", IvyJson::Bool(true));
+            "thread/resume"
+        };
+        let result = self
+            .native
+            .completed(
+                &owner,
+                &text(execution.required("nativeOperations")?, "threadStart")?,
+                &method.into(),
+                &params,
+            )
+            .await?;
+        let thread_id = if creating {
+            match result
+                .get("reply")
+                .and_then(|v| v.get("result"))
+                .and_then(|v| v.get("thread"))
+                .and_then(|v| v.get("id"))
+                .filter(|v| !v.is_null())
+            {
+                Some(id) => IvyJson::String(try_js_string(id)?),
+                None => "".into(),
+            }
+        } else {
+            lease.as_ref().unwrap().value.required("threadId")?.clone()
+        };
+        if !nonempty(Some(&thread_id)) {
+            return Err(IvyError::new(
+                "secretary_execution_thread_missing",
+                "The Secretary task start has no thread identity.",
+            ));
+        }
+        let mut next = execution.clone();
+        next.insert("threadId", thread_id.clone());
+        next.insert("phase", "running".into());
+        next.insert("updatedAt", IvyJson::String(self.now()?));
+        let current = self.update(&current, &next).await?;
+        if let Some(lease) = lease.filter(|l| !nonempty(l.value.get("threadId"))) {
+            let mut next = lease.value;
+            next.insert("threadId", thread_id);
+            journal.amend_technical(lease_key, &lease.pin, &next)?;
+        }
+        Ok(current)
+    }
     async fn update(&self, current: &IvyJson, value: &IvyJson) -> IvyResult<IvyJson> {
         AssignmentRunner {
             evidence: self.native.evidence,

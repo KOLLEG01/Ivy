@@ -46,7 +46,7 @@ async fn original_assignment_execution_transitions_and_traces() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 62);
+    assert!(rows.len() >= 110);
     for (index, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();
@@ -124,6 +124,7 @@ async fn original_assignment_execution_transitions_and_traces() {
         };
         let current = input.required("current").unwrap();
         let outcome = match input.required("kind").unwrap().as_str().unwrap().as_str() {
+            "start" => runner.start(current).await,
             "run" => runner.run(current).await,
             "archive" => runner.archive(current).await,
             "remove" => runner.remove(current).await,

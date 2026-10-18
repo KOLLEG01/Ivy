@@ -15,6 +15,7 @@ pub enum Schema {
     AssignmentTrigger,
     Assignment,
     ExecutionTarget,
+    NativeTarget,
     SecretaryConfiguration,
 }
 impl Schema {
@@ -31,6 +32,7 @@ impl Schema {
             Self::AssignmentTrigger => "AssignmentTrigger",
             Self::Assignment => "Assignment",
             Self::ExecutionTarget => "ExecutionTarget",
+            Self::NativeTarget => "NativeTarget",
             Self::SecretaryConfiguration => "SecretaryConfiguration",
         }
     }
