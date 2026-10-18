@@ -267,5 +267,6 @@ if (
       native: !process.argv.includes("--no-native"),
       component,
     }),
+    component,
   );
 }

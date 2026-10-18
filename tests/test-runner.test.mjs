@@ -259,6 +259,65 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   assert.deepEqual(failure.commands, expected.slice(0, 1));
 });
 
+test("Rust-only original oracles build and stage their component before Cargo in a fresh tree", (t) => {
+  const root = temporary(t), log = join(root, "commands.jsonl");
+  const put = (path, text) => {
+    mkdirSync(resolve(root, path, ".."), { recursive: true });
+    writeFileSync(join(root, path), text);
+  };
+  for (const file of [
+    "tools/testing/test.mjs", "tools/testing/test-config.mjs", "tools/testing/test-selection.mjs",
+    "tools/testing/test-rust.mjs", "tools/testing/test-reporter.mjs", "tools/build/build-backend.mjs",
+    "tools/build/build-cache.mjs", "tools/build/build-native.mjs", "tools/build/build-instructions.mjs",
+    "tools/build/rust-root-inputs.mjs", "tools/build/rust-root-inputs.json",
+    "packages/host-runtime/src/build-identity.mjs",
+  ]) put(file, readFileSync(resolve(file)));
+  put("package.json", JSON.stringify({ version: "1.0.0" }));
+  for (const name of ["agent-instructions", "agent-state"]) put("tests/rust/" + name + ".rs", "// selected Rust fixture\n");
+  for (const name of ["hive-mcp-instructions", "hive-mcp-agent-summary", "hive-mcp-examples", "ivy-dev-mcp-instructions"])
+    put("instructions/" + name + ".md", "original fixture resource\n");
+  mkdirSync(join(root, "specs/native"), { recursive: true });
+  // Substitute only the compilers; the real CLI, component staging and runner
+  // must place the original module at the path consumed by the Cargo stand-in.
+  put("node_modules/typescript/bin/tsc", `const fs=require('node:fs'),path=require('node:path');
+    const args=process.argv.slice(2),config=JSON.parse(fs.readFileSync(args[args.indexOf('-p')+1]));
+    fs.appendFileSync(process.env.IVY_ORACLE_COMMAND_LOG,JSON.stringify(['tsc',...args])+'\\n');
+    if(process.env.IVY_ORACLE_BUILD_FAIL==='1')process.exit(9);
+    const out=config.compilerOptions.outDir;
+    for(const dir of ['packages/contracts/src','services/agent-manager/src','instructions'])fs.mkdirSync(path.join(out,dir),{recursive:true});
+    fs.writeFileSync(path.join(out,'packages/contracts/src/original.cjs'),'module.exports=42;');
+    fs.writeFileSync(path.join(out,'services/agent-manager/src/main.js'),'// original backend fixture');`);
+  put("test", `const fs=require('node:fs'),assert=require('node:assert/strict');
+    assert.equal(require('./dist/packages/contracts/src/original.cjs'),42);
+    assert.ok(fs.existsSync('./dist/services/agent-manager/src/main.js'));
+    assert.ok(fs.existsSync('./dist/specs/native'));
+    assert.equal(fs.existsSync('./dist/native'),false);
+    fs.appendFileSync(process.env.IVY_ORACLE_COMMAND_LOG,JSON.stringify(['cargo-test',...process.argv.slice(2)])+'\\n');`);
+  const run = extra => spawnSync(process.execPath, ["tools/testing/test.mjs", "--files", "tests/rust/agent-instructions.rs",
+    "--files", "tests/rust/agent-instructions.rs", "--files", "tests/rust/agent-state.rs", ...extra], {
+    cwd: root, windowsHide: true, encoding: "utf8", timeout: 15000,
+    env: { ...process.env, IVY_CARGO: process.execPath, IVY_ORACLE_COMMAND_LOG: log },
+  });
+  const listed = run(["--list"]);
+  assert.equal(listed.status, 0, listed.stdout + listed.stderr);
+  assert.match(listed.stdout, /tests\/rust\/agent-instructions.rs/);
+  assert.equal(existsSync(log), false);
+  const success = run([]);
+  assert.equal(success.status, 0, success.stdout + success.stderr);
+  const commands = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(commands.length, 2);
+  assert.equal(commands[0][0], "tsc");
+  assert.match(commands[0][commands[0].indexOf("-p") + 1], /agent-manager\.tsconfig\.json$/);
+  assert.deepEqual(commands[1], ["cargo-test", "--locked", "--package", "ivy-agent-manager", "--test", "agent-instructions", "--test", "agent-state"]);
+  writeFileSync(log, "");
+  const failed = spawnSync(process.execPath, ["tools/testing/test.mjs", "--files", "tests/rust/agent-instructions.rs"], {
+    cwd: root, windowsHide: true, encoding: "utf8", timeout: 15000,
+    env: { ...process.env, IVY_CARGO: process.execPath, IVY_ORACLE_COMMAND_LOG: log, IVY_ORACLE_BUILD_FAIL: "1" },
+  });
+  assert.notEqual(failed.status, 0);
+  assert.deepEqual(readFileSync(log, "utf8").trim().split("\n").map(JSON.parse).map(command => command[0]), ["tsc"]);
+});
+
 test("reporter suppresses successful output and prints useful failures without writing reports", (t) => {
   const root = temporary(t),
     file = join(root, "sample.test.mjs"),
