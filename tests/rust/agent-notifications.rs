@@ -1,4 +1,6 @@
 use ivy_agent_manager::notifications::NativeNotifications;
+#[path = "agent-notifications-handler.rs"]
+mod handler_cases;
 #[path = "agent-registry.rs"]
 mod registry_cases;
 use ivy_contracts::IvyJson;

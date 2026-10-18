@@ -148,6 +148,8 @@ if (nativeJson) {
   add('native-mutation-reserved-principal', [raw('account/logout', null, {context: context('one', nativeClockPrincipal)}), snapshot]);
   add('native-mutation-result-is-unwrapped-and-replay-is-local', [startRaw('account/logout', null), sent, reply({unchanged: '\ud800'}), wait('one'), drain,
     raw('account/logout', null), manage('operation', {operationId: 'one'}), snapshot]);
+  add('native-mutation-replay-survives-owner-close-and-caller-cancellation', [startRaw('account/logout', null), sent, reply({original: true}), wait('one'), drain,
+    c('close', {code: 'fixture_lost'}), raw('account/logout', null, {cancelled: true}), snapshot]);
   add('native-mutation-null-result', [startRaw('account/logout', null), sent, reply(null), wait('one'), drain, snapshot]);
   add('native-mutation-error-points-to-original-operation', [startRaw('account/logout', null), sent,
     c('reply', {reply: {error: {code: 19, message: 'original\ud800', data: null}}}), wait('one'), drain, manage('operation', {operationId: 'one'}), snapshot]);
