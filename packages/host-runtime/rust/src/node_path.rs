@@ -208,3 +208,7 @@ pub fn to_native(path: &JsString) -> PathBuf {
     #[cfg(windows)] { use std::os::windows::ffi::OsStringExt; std::ffi::OsString::from_wide(&path.0).into() }
     #[cfg(not(windows))] { String::from_utf16_lossy(&path.0).into() }
 }
+
+/// Node fs string arguments cross a UTF-8 boundary before native filesystem I/O.
+/// Lexical paths, JSON and direct native arguments still use lossless to_native.
+pub fn filesystem_path(path: &JsString) -> PathBuf { String::from_utf16_lossy(&path.0).into() }

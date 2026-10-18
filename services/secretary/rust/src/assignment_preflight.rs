@@ -3,7 +3,7 @@ use crate::{assignment_decision::trimmed, assignment_execution::AssignmentExecut
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{
     exec_file::{FileCommand, FileOptions, exec_file},
-    node_path::to_native,
+    node_path::{filesystem_path, to_native},
 };
 use std::path::{Path, PathBuf};
 
@@ -60,8 +60,13 @@ impl AssignmentPreflight<'_, '_, '_, '_> {
                 .map(|text| to_native(text).into_os_string())
                 .ok_or_else(IvyError::internal)
         };
+        let executable = command
+            .required("executable")?
+            .as_js_string()
+            .ok_or_else(IvyError::internal)?;
         let command = FileCommand {
-            executable: native(command.required("executable")?)?,
+            // Node's JS executable string crosses UTF-8 before native spawn.
+            executable: filesystem_path(executable).into_os_string(),
             args: command
                 .required("args")?
                 .as_array()
