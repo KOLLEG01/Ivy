@@ -1,4 +1,4 @@
-//! Limits from packages/contracts/src/limits.ts.
+//! Limits from the shared TypeScript limits and Agent FrameLimits contract.
 pub const MANAGEMENT_FRAME_BYTES: usize = 33_554_432;
 pub const MANAGEMENT_SOCKET_BUFFER_BYTES: usize = 2 * MANAGEMENT_FRAME_BYTES;
 pub const JSON_OBJECT_CONTENT_BYTES: usize = 1_048_576;
@@ -12,3 +12,7 @@ pub const MUTATION_RECEIPT_COUNT: usize = 100_000;
 pub const MUTATION_RECEIPT_JOURNAL_BYTES: usize = 256 * 1024 * 1024;
 pub const MUTATION_RECEIPT_RESULT_BYTES: usize = 65_536;
 pub const MCP_DISCOVERY_RESULT_BYTES: usize = 512 * 1024;
+/// Native JSONL byte bounds exclude the trailing newline.
+pub const NATIVE_REQUEST_FRAME_BYTES: usize = 6_291_456;
+pub const NATIVE_FRAME_BYTES: usize = 25_165_824;
+pub const NATIVE_ANSWER_FRAME_BYTES: usize = 4_194_304;
