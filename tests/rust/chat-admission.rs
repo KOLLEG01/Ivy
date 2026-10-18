@@ -21,7 +21,7 @@ fn admission_order_limits_and_original_request_hashes_match_typescript() {
             let admission = ChatAdmission::new(definition)?;
             let caller = row.required("caller")?.as_js_string().unwrap();
             let request = row.required("request")?;
-            match row.required("kind")?.as_str().unwrap() {
+            match row.required("kind")?.as_str().as_deref().unwrap() {
                 "send" => {
                     let result = admission.send(caller, request)?;
                     Ok(Json::object([
