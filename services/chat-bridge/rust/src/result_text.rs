@@ -1,13 +1,14 @@
 //! Complete immutable reply text and its separate, bounded presentation parts.
-use crate::store::ChatStore;
+use crate::{
+    limits::{COLLECTION_BYTES, EVIDENCE_CHUNK_BYTES},
+    store::ChatStore,
+};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat, hash::digest,
-    json::try_js_string, limits::TEXT_OBJECT_CONTENT_BYTES,
+    json::try_js_string,
 };
 use ivy_sdk::rpc::RequestOptions;
 use std::collections::HashSet;
-
-pub const COLLECTION_BYTES: usize = 64 * 1024 * 1024;
 
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
@@ -59,7 +60,7 @@ pub async fn read_chat_result_text(
         total += number(artifact, "byteLength")?;
         require(
             total <= COLLECTION_BYTES as f64
-                && number(artifact, "byteLength")? <= TEXT_OBJECT_CONTENT_BYTES as f64,
+                && number(artifact, "byteLength")? <= EVIDENCE_CHUNK_BYTES as f64,
             "chat_collection_limit",
             "Complete result text must fit its retained part and total byte bounds.",
         )?;
