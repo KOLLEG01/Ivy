@@ -1,4 +1,5 @@
 //! Offline retained catalogs. Live admission must use the native owner's snapshot.
+pub use crate::native_catalog_path::native_catalog_path;
 use crate::{
     IvyError, IvyJson, IvyResult, JsString,
     json::{parse, stringify},
