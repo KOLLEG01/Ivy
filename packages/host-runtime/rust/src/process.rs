@@ -160,8 +160,8 @@ pub fn resolve_command(
     root: &Path,
     executables: &BTreeMap<String, PathBuf>,
 ) -> IvyResult<ResolvedCommand> {
-    let base = std::fs::canonicalize(root).map_err(io_error)?;
-    let cwd = std::fs::canonicalize(base.join(command.cwd.as_deref().unwrap_or(Path::new("."))))
+    let base = paths::realpath(root).map_err(io_error)?;
+    let cwd = paths::realpath(&base.join(command.cwd.as_deref().unwrap_or(Path::new("."))))
         .map_err(io_error)?;
     if !paths::inside(&base, &cwd).map_err(io_error)? {
         return Err(invalid(
@@ -169,8 +169,8 @@ pub fn resolve_command(
         ));
     }
     let configured = executables.get(&command.executable);
-    let executable = std::fs::canonicalize(
-        configured
+    let executable = paths::realpath(
+        &configured
             .cloned()
             .unwrap_or_else(|| base.join(&command.executable)),
     )
@@ -336,7 +336,7 @@ pub(crate) async fn spawn_resolved(
         None
     };
     let mut process = if use_job {
-        let launcher = std::fs::canonicalize(
+        let launcher = paths::realpath(
             context
                 .job_launcher
                 .as_deref()
@@ -375,7 +375,7 @@ pub(crate) async fn spawn_resolved(
             context
                 .execution_cwd
                 .as_ref()
-                .map(std::fs::canonicalize)
+                .map(|path| paths::realpath(path))
                 .transpose()
                 .map_err(io_error)?
                 .unwrap_or(resolved.cwd),
