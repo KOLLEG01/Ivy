@@ -20,6 +20,9 @@ fn lexical_paths_match_node_for_roots_devices_dot_segments_case_and_utf16() {
         let actual=match case.required("operation").unwrap().as_str().unwrap().as_str() {
             "normalize"=>IvyJson::String(node_path::normalize(style,&args[0])),
             "isAbsolute"=>node_path::is_absolute(style,&args[0]).into(),
+            "dirname"=>IvyJson::String(node_path::dirname(style,&args[0])),
+            "basename"=>IvyJson::String(node_path::basename(style,&args[0])),
+            "inside"=>context.inside(&args[0],&args[1]).into(),
             "join"=>IvyJson::String(node_path::join(style,&args)),
             "resolve"=>IvyJson::String(context.resolve(&args)),
             "relative"=>IvyJson::String(context.relative(&args[0],&args[1])),

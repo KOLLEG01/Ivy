@@ -1,5 +1,4 @@
-#[path = "../../packages/host-runtime/rust/src/paths.rs"]
-mod paths;
+use ivy_host_runtime::paths;
 use std::{fs, path::PathBuf};
 
 #[path = "host-journal-cases.rs"]
@@ -14,6 +13,8 @@ mod storage_space_cases;
 mod node_path_cases;
 #[path = "host-layout-cases.rs"]
 mod layout_cases;
+#[path = "host-startup-cases.rs"]
+mod host_startup_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
@@ -28,7 +29,7 @@ fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
 fn future_path_uses_the_existing_ancestor_without_creating_directories() {
     let root = std::env::temp_dir().join(format!("ivy-future-{}", std::process::id()));
     fs::create_dir(&root).unwrap();
-    let expected = fs::canonicalize(&root).unwrap().join("missing/leaf");
+    let expected = paths::realpath(&root).unwrap().join("missing/leaf");
     assert_eq!(
         paths::resolved_future_path(&root.join("missing/leaf")).unwrap(),
         expected

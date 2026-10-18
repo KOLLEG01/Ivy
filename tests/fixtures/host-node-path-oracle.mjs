@@ -16,10 +16,12 @@ try {
     process.cwd = () => cwd;
     process.env = new Proxy({}, {get: (_, key) => typeof key === 'string' && key[0] === '=' ? drives[key.slice(1).toUpperCase()] : originalEnv[key]});
     const add = (operation, args) => cases.push({style,cwd,drives,operation,args,expected:path[style][operation](...args)});
-    for (const value of values) {add('normalize',[value]);add('isAbsolute',[value]);add('resolve',[value]);}
+    for (const value of values) {add('normalize',[value]);add('isAbsolute',[value]);add('resolve',[value]);add('dirname',[value]);add('basename',[value]);}
     add('join',[]);add('resolve',[]);
     for (const a of values) for (const b of values) {
       add('join',[a,b]);add('resolve',[a,b]);add('relative',[a,b]);
+      const local=path[style].relative(path[style].resolve(a),path[style].resolve(b));
+      cases.push({style,cwd,drives,operation:'inside',args:[a,b],expected:local!=='..'&&!local.startsWith('..\\')&&!local.startsWith('../')&&!path[style].isAbsolute(local)});
     }
     for (const value of values) {add('join',['',value,'..','leaf/']);add('resolve',[value,'','..','leaf/']);}
   }
