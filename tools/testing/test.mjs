@@ -112,6 +112,12 @@ else if (selected.length === 0) {
         if (selected.some(t => /phone-.*\.integration/.test(t.file)) && process.platform === 'win32') await run(['tools/testing/build-phone-tests.mjs'], root, false, 300000);
       mkdirSync(resolve(root, 'dist'), { recursive: true });
       writeFileSync(testBuildStamp, JSON.stringify({ fingerprint: fingerprint(testBuildInputs, { selected: pathsForFingerprint(selected) }) }));
+    } else if (!values['no-build']) {
+      const originals = [...new Set(rustTests.map(t => config.rustTests[t.file].originalBackend).filter(Boolean))];
+      // Rust differential tests can import emitted originals without selecting a
+      // JS test. Multiple components share one staging tree, so build them once.
+      if (originals.length) await run(['tools/build/build-backend.mjs', '--incremental', '--no-native',
+        ...(originals.length === 1 ? ['--component', originals[0]] : [])]);
     }
     if (rustTests.length) await run(['tools/testing/test-rust.mjs', ...rustTests.map(t => t.file)], root, values.progress, testTimeout);
     const paths = javascriptTests.map(t => t.file.endsWith('.ts') ? 'dist/' + t.file.replace(/\.ts$/, '.js') : t.file);
