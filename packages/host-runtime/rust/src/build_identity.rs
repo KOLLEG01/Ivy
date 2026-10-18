@@ -1,7 +1,7 @@
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult,
     hash::digest,
-    json::{js_string, parse},
+    json::{parse, try_js_string},
 };
 use std::{
     path::Path,
@@ -66,17 +66,5 @@ fn version_text(version: Option<&IvyJson>) -> IvyResult<String> {
     let Some(version) = version else {
         return Ok("undefined".into());
     };
-    // String-hint conversion uses an object's own toString before valueOf.
-    // JSON cannot contain callable overrides; an own toString prevents conversion.
-    let mut pending = vec![version];
-    while let Some(value) = pending.pop() {
-        match value {
-            IvyJson::Array(values) => pending.extend(values.iter()),
-            IvyJson::Object(_) if value.get("toString").is_some() => {
-                return Err(IvyError::internal());
-            }
-            _ => {}
-        }
-    }
-    Ok(String::from_utf16_lossy(&js_string(version).0))
+    Ok(String::from_utf16_lossy(&try_js_string(version)?.0))
 }
