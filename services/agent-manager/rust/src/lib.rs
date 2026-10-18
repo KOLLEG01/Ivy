@@ -11,3 +11,5 @@ pub mod mcp_prepare;
 pub mod mcp_render;
 pub mod notifications;
 pub mod skills;
+pub mod skills_output;
+pub mod skills_prepare;
