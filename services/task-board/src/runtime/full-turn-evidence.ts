@@ -6,7 +6,7 @@ import { same } from './checks.js';
 import { evidenceMaximumBytes } from './evidence-bytes.js';
 import { nativeArray, nativeRecord, nativeString } from './native-intent.js';
 import type { TaskBoardStore } from './store.js';
-import { TaskBoardTurnEvidence } from './turn-evidence.js';
+import { missingOutputSummary, TaskBoardTurnEvidence } from './turn-evidence.js';
 
 export const fullTurnParams = (threadId: string, cursor: string | null, full: boolean) => ({ threadId, cursor, limit: 1, itemsView: full ? 'full' : 'notLoaded', sortDirection: 'desc' });
 export const firstItemsParams = (threadId: string, turnId: string) => ({ threadId, turnId, cursor: null, limit: 100, sortDirection: 'asc' });
@@ -52,7 +52,7 @@ export class TaskBoardFullTurnEvidence {
       requireThat(id && !ids.has(id), 'task_board_evidence_mismatch', 'Complete native items must retain unique nonempty identities.'); ids.add(id);
       if (item['type'] === 'agentMessage') { lastText = nativeString(item['text']); if (item['phase'] === 'final_answer') texts.push(lastText); }
     }
-    let summary = texts.join('\n\n') || lastText || 'Native turn ' + initial.status + '.';
+    let summary = texts.join('\n\n') || lastText || missingOutputSummary(initial.status);
     if (Buffer.byteLength(summary) > 262144) {
       summary = summary.slice(0, 65536); if (/[\uD800-\uDBFF]$/.test(summary)) summary = summary.slice(0, -1);
       summary += '\n\nThe complete native output is retained in the transcript artifact.';

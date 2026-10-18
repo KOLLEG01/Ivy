@@ -74,28 +74,41 @@ index 0000000..3eefec9
 +  }
 +}
 diff --git a/src/native-runtime.mts b/src/native-runtime.mts
-index 8fd8c36..7c11577 100644
+index 8fd8c36a..69e932d8 100644
 --- a/src/native-runtime.mts
 +++ b/src/native-runtime.mts
-@@ -1,4 +1,4 @@
+@@ -1,4 +1,11 @@
 -import { copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync } from 'node:fs'
-+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
++import {
++  copyFileSync,
++  existsSync,
++  mkdirSync,
++  readFileSync,
++  readdirSync,
++  realpathSync,
++} from 'node:fs'
  import { homedir } from 'node:os'
  import { join } from 'node:path'
  
-@@ -52,6 +52,33 @@ import {
+@@ -52,8 +59,48 @@ import {
    type WorkflowLaunchInfo,
  } from './workflow-subagents.mjs'
  
 +const paidConfigurationKeys = [
-+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
-+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
++  'ANTHROPIC_API_KEY',
++  'ANTHROPIC_AUTH_TOKEN',
++  'ANTHROPIC_BASE_URL',
++  'CLAUDE_CODE_USE_BEDROCK',
++  'CLAUDE_CODE_USE_VERTEX',
++  'CLAUDE_CODE_USE_FOUNDRY',
 +]
 +
 +function assertSubscriptionBilling(cwd: string): void {
 +  if (process.env.CLAUDE_CODEX_SUBSCRIPTION_ONLY !== '1') return
 +  if (!process.env.CLAUDE_CONFIG_DIR || paidConfigurationKeys.some((key) => process.env[key]))
-+    throw new Error('Claude subscription mode conflicts with API or cloud gateway environment settings')
++    throw new Error(
++      'Claude subscription mode conflicts with API or cloud gateway environment settings',
++    )
 +  for (const path of [
 +    join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'),
 +    join(process.env.CLAUDE_CONFIG_DIR, 'settings.local.json'),
@@ -106,25 +119,43 @@ index 8fd8c36..7c11577 100644
 +    const settings = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
 +    if (!settings || typeof settings !== 'object' || Array.isArray(settings))
 +      throw new Error('Claude settings must contain an object')
-+    const env = settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env)
-+      ? settings.env as Record<string, unknown> : {}
-+    if (paidConfigurationKeys.some((key) => Object.hasOwn(env, key)) ||
-+      Object.hasOwn(settings, 'apiKeyHelper') || settings.forceLoginMethod === 'console')
++    const env =
++      settings.env && typeof settings.env === 'object' && !Array.isArray(settings.env)
++        ? (settings.env as Record<string, unknown>)
++        : {}
++    if (
++      paidConfigurationKeys.some((key) => Object.hasOwn(env, key)) ||
++      Object.hasOwn(settings, 'apiKeyHelper') ||
++      settings.forceLoginMethod === 'console'
++    )
 +      throw new Error('Claude subscription mode conflicts with API or cloud gateway settings')
 +  }
 +}
 +
  type ClaudeSdk = typeof import('@anthropic-ai/claude-agent-sdk')
  
++class EmptyTurnError extends Error {}
++
  interface PendingTurn {
-@@ -121,6 +148,64 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+   context: RuntimeTurnContext
+   handlers: RuntimeHandlers
+@@ -89,6 +136,7 @@ interface PendingTurn {
+   pendingUserMessage: null | { resolve: (v: { message: unknown }) => void }
+   deferredResult: PendingTurnResult | null
+   workflowFailure: string | null
++  sawWork: boolean
+ }
+ 
+ interface PendingTurnResult {
+@@ -121,9 +169,100 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
    private turns = new Map<string, PendingTurn>()
    private permissions = new Map<string, PendingPermission>()
  
+-  async runTurn(context: RuntimeTurnContext, handlers: RuntimeHandlers): Promise<void> {
 +  async supportedModels() {
 +    assertSubscriptionBilling(process.cwd())
-+    const sdk = await this.loadSdk()
-+    const abort = new AbortController()
+     const sdk = await this.loadSdk()
+     const abort = new AbortController()
 +    const query = sdk.query({
 +      // An empty input stream initializes the CLI without submitting an inference turn.
 +      prompt: (async function* () {})(),
@@ -171,18 +202,62 @@ index 8fd8c36..7c11577 100644
 +    })
 +    const timer = setTimeout(() => abort.abort(), 15_000)
 +    try {
-+      const usage = await query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true })
-+      return usage.rate_limits_available ? (usage.rate_limits as Record<string, unknown> | null) : null
++      const usage = await query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
++        skipBehaviors: true,
++      })
++      return usage.rate_limits_available
++        ? (usage.rate_limits as Record<string, unknown> | null)
++        : null
 +    } finally {
 +      clearTimeout(timer)
 +      query.close()
 +    }
 +  }
 +
-   async runTurn(context: RuntimeTurnContext, handlers: RuntimeHandlers): Promise<void> {
-     const sdk = await this.loadSdk()
-     const abort = new AbortController()
-@@ -267,7 +352,9 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
++  async runTurn(context: RuntimeTurnContext, handlers: RuntimeHandlers): Promise<void> {
++    const abort = new AbortController()
++    try {
++      for (let attempt = 0; ; attempt++) {
++        abort.signal.throwIfAborted()
++        try {
++          await this.runAttempt(context, handlers, abort)
++          return
++        } catch (error) {
++          if (!(error instanceof EmptyTurnError)) throw error
++          if (attempt === 1)
++            throw new Error(
++              'Claude returned no response after one retry. No model work was started; the task remains unfinished.',
++            )
++          await handlers.onEvent({
++            type: 'notice',
++            level: 'warning',
++            message: 'Claude returned an empty result before starting model work. Retrying once.',
++          })
++        }
++      }
++    } finally {
++      this.turns.delete(context.turnId)
++    }
++  }
++
++  private async runAttempt(
++    context: RuntimeTurnContext,
++    handlers: RuntimeHandlers,
++    abort: AbortController,
++  ): Promise<void> {
++    const sdk = await this.loadSdk()
+     return new Promise<void>((resolve, reject) => {
+       // The SDK accepts either a plain string prompt OR an AsyncIterable of
+       // SDKUserMessage envelopes. Always feed the iterable form so we have
+@@ -155,6 +294,7 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+         pendingUserMessage: null,
+         deferredResult: null,
+         workflowFailure: null,
++        sawWork: false,
+       }
+       this.turns.set(context.turnId, pending)
+       // Kick off the receive loop in the background. We don't await it here
+@@ -267,7 +407,9 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
      context: RuntimeTurnContext,
      abort: AbortController,
    ): Record<string, unknown> {
@@ -192,34 +267,125 @@ index 8fd8c36..7c11577 100644
        abortController: abort,
        includePartialMessages: true,
        includeHookEvents: true,
-@@ -324,12 +411,24 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+@@ -324,13 +466,28 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
      // prompt append, preserving Claude Code's built-in preset.
      // Re-render on resume so settings changes (including clearing an append)
      // take effect on the next turn instead of waiting for SDK compaction.
-+    const managedInstructions = process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE && existsSync(process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE)
-+      ? readFileSync(process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE, 'utf8')
-+      : ''
++    const managedInstructions =
++      process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE &&
++      existsSync(process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE)
++        ? readFileSync(process.env.CLAUDE_CODEX_INSTRUCTIONS_FILE, 'utf8')
++        : ''
 +    const includeLocal = /^@AGENTS\.md\s*$/m.test(managedInstructions)
-+    const localInstructions = includeLocal && existsSync(join(context.cwd, 'AGENTS.md'))
-+      ? readFileSync(join(context.cwd, 'AGENTS.md'), 'utf8')
-+      : ''
++    const localInstructions =
++      includeLocal && existsSync(join(context.cwd, 'AGENTS.md'))
++        ? readFileSync(join(context.cwd, 'AGENTS.md'), 'utf8')
++        : ''
 +    const appendedInstructions = [
 +      managedInstructions.replace(/^@AGENTS\.md\s*$/gm, '').trim(),
 +      localInstructions.trim(),
 +      context.systemPromptAddendum?.trim() ?? '',
-+    ].filter(Boolean).join('\n\n')
++    ]
++      .filter(Boolean)
++      .join('\n\n')
      opts.systemPrompt = {
        type: 'preset',
        preset: 'claude_code',
        snapshot: false,
 -      ...(context.systemPromptAddendum?.trim()
 -        ? { append: context.systemPromptAddendum.trim() }
-+      ...(appendedInstructions
-+        ? { append: appendedInstructions }
-         : {}),
+-        : {}),
++      ...(appendedInstructions ? { append: appendedInstructions } : {}),
      }
  
-@@ -1226,6 +1325,7 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+     // CLI binary override (for users pinning a specific claude-code build).
+@@ -435,29 +592,28 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+         await this.finishDeferredResult(pending, true)
+         if (!pending.resolved) return
+       }
+-      // The async iterator finished without a 'result' message — treat as
+-      // successful empty turn (claude-agent-sdk does occasionally end without
+-      // a SDKResultMessage when interrupted cleanly).
+-      if (!pending.resolved) {
+-        await this.stopWorkflowTasks(pending)
+-        pending.resolved = true
+-        this.turns.delete(context.turnId)
+-        try {
+-          await handlers.onEvent({ type: 'completed', success: true, result: null })
+-          pending.resolve()
+-        } catch (err) {
+-          pending.reject(err instanceof Error ? err : new Error(String(err)))
+-        }
+-      }
++      // A closed stream is not evidence of success, and may have executed tools.
++      if (!pending.resolved)
++        throw (
++          pending.abort.signal.reason ??
++          new Error(
++            'Claude stream ended without a completion result. Task completion could not be confirmed.',
++          )
++        )
+     } catch (err) {
+       if (!pending.resolved) {
+         await this.stopWorkflowTasks(pending)
+         pending.resolved = true
+-        this.turns.delete(context.turnId)
+         const error = err instanceof Error ? err : new Error(String(err))
+-        try {
+-          await handlers.onEvent({ type: 'error', message: error.message })
+-        } catch {}
++        if (error instanceof EmptyTurnError) {
++          try {
++            query.close()
++          } catch {}
++        } else
++          try {
++            this.turns.delete(context.turnId)
++            await handlers.onEvent({ type: 'error', message: error.message })
++          } catch {}
+         pending.reject(error)
+       }
+     }
+@@ -473,12 +629,21 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+         await this.handleSystem(pending, message)
+         break
+       case 'stream_event':
++        pending.sawWork = true
+         await this.handleStreamEvent(pending, message)
+         break
+       case 'assistant':
++        pending.sawWork = true
+         await this.handleAssistant(pending, message)
+         break
+       case 'user':
++        if (
++          Array.isArray((message.message as { content?: unknown[] } | undefined)?.content) &&
++          (message.message as { content: { type?: string }[] }).content.some(
++            (block) => block.type === 'tool_result',
++          )
++        )
++          pending.sawWork = true
+         await this.handleUser(pending, message)
+         break
+       case 'result':
+@@ -1196,6 +1361,16 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
+     const success = subtype === 'success' && !message.is_error && pending.workflowFailure == null
+     const resultText =
+       pending.workflowFailure ?? (message.result == null ? null : String(message.result))
++    if (
++      success &&
++      !resultText?.trim() &&
++      !pending.sawWork &&
++      !this.hasPendingWorkflowTasks(pending)
++    ) {
++      if (message.num_turns === 0 && message.duration_api_ms === 0)
++        throw new EmptyTurnError('Claude completed without starting model work.')
++      throw new Error('Claude returned no response. Task completion could not be confirmed.')
++    }
+     const claudeSessionId = message.session_id == null ? null : String(message.session_id)
+     const usage = (message.usage as Record<string, unknown>) || {}
+     // Push usage + metrics before completed so server can roll them into the
+@@ -1226,6 +1401,7 @@ export class NativeClaudeRuntime implements ClaudeRuntime {
    ): Promise<void> {
      if (type === 'rate_limit' || type === 'rate_limit_event') {
        const info = message.rate_limit_info as Record<string, unknown> | undefined

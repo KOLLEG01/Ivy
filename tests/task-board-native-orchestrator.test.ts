@@ -255,7 +255,8 @@ test('missing final text uses confirmed status without walking the full history 
   f.outputs(Array.from({ length: 8 }, (_, index) => ({ id: String(index), type: 'reasoning', summary: [], content: [] })));
   f.status('completed'); await f.first.drain(f.runId);
   const run = await f.current(), result = await f.f.w.f.first.store.read('task-board/result', run.value.result!);
-  assert.equal(run.value.phase, 'completed'); assert.equal(result.value.content.summary, 'Native turn completed.');
+  assert.equal(run.value.phase, 'completed');
+  assert.equal(result.value.content.summary, 'The agent run ended, but no response could be retrieved. Task completion is not confirmed.');
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/items/list').length, 3);
   assert.ok(!f.f.frames.some(frame => nativeRecord(frame['params'])['includeTurns'] === true || nativeRecord(frame['params'])['itemsView'] === 'full'));
 });

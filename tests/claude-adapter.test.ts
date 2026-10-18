@@ -205,6 +205,45 @@ test("Claude model discovery preserves runtime capabilities without submitting a
   assert.equal(helpers.reasoningEffortFromParams({ effort: "max" }, null), "max");
 });
 
+test("empty Claude results retry once only when the SDK confirms no model work", { skip: !process.env.IVY_CLAUDE_ADAPTER_ROOT }, async t => {
+  const native = await import(pathToFileURL(join(process.env.IVY_CLAUDE_ADAPTER_ROOT!, "dist/src/native-runtime.mjs")).href);
+  const root = await mkdtemp(join(tmpdir(), "ivy-claude-empty-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const context = { cwd: root, threadId: "same-thread", turnId: "same-turn", prompt: "Apply the requested correction", runtimeType: "agent-sdk-sidecar",
+    model: null, effort: null, claudeSessionId: null, forkSession: false, mcpServers: {}, allowedTools: null,
+    addDirs: [], enableFileCheckpointing: false, outputFormat: null, approvalPolicy: "on-request",
+    sandboxMode: "workspace-write", systemPromptAddendum: null, planMode: false, imageInputs: [] };
+  const empty = { type: "result", subtype: "success", is_error: false, result: "", num_turns: 0, duration_api_ms: 0 };
+  const answer = { type: "result", subtype: "success", is_error: false, result: "Correction completed.", num_turns: 1, duration_api_ms: 10 };
+  for (const [name, attempts, expectedCalls, failure] of [
+    ["transient empty result", [[empty], [answer]], 2, null],
+    ["repeated empty result", [[empty], [empty]], 2, /no response after one retry/],
+    ["stream closed without a result", [[]], 1, /without a completion result/],
+    ["unconfirmed model work", [[{ ...empty, num_turns: undefined, duration_api_ms: undefined }]], 1, /no response/],
+    ["existing assistant activity", [[{ type: "assistant", message: { id: "work", content: [{ type: "text", text: "Work was performed." }] } }, empty]], 1, null],
+  ] as const) await t.test(name, async () => {
+    const runtime = new native.NativeClaudeRuntime();
+    const events: Array<Record<string, unknown>> = [], prompts: unknown[][] = [];
+    let calls = 0, closed = 0;
+    runtime.sdk = { query: (input: { prompt: AsyncIterable<unknown> }) => {
+      const messages = attempts[calls++];
+      assert.ok(messages, "the retry must be bounded");
+      return { close: () => { closed++; }, async *[Symbol.asyncIterator]() {
+        const prompt = []; for await (const item of input.prompt) prompt.push(item); prompts.push(prompt);
+        for (const message of messages) yield message;
+      } };
+    } };
+    const run = runtime.runTurn(context, { onEvent: (event: Record<string, unknown>) => { events.push(event); },
+      onPermissionRequest: () => ({ decision: "decline" }) });
+    if (failure) {
+      await assert.rejects(run, failure);
+      assert.ok(!events.some(event => event.type === "completed" && event.success === true));
+    } else await run;
+    assert.equal(calls, expectedCalls);
+    if (calls === 2) { assert.deepEqual(prompts[1], prompts[0]); assert.ok(closed >= 1); }
+  });
+});
+
 test(
   "pinned Claude mock speaks the catalog lifecycle without Codex fallback",
   { skip: !process.env.IVY_CLAUDE_ADAPTER_ROOT },
