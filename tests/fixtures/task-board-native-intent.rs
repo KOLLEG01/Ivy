@@ -217,8 +217,8 @@ async fn inline_native_consumers_match_original_catalogs_and_real_journal_admiss
             };
             actual.insert("trace", Json::Array(store.contracts.trace.into_inner()));
             assert_eq!(
-                actual,
-                row.required("expected").unwrap().clone(),
+                canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap(),
+                canonical(row.required("expected").unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
                 "{} / {}",
                 group.required("path").unwrap().as_str().unwrap(),
                 row.required("name").unwrap().as_str().unwrap()
@@ -301,8 +301,12 @@ async fn operation_evidence_replays_and_rejects_corruption_in_its_real_journal()
     };
     let artifact = evidence.save(parent, observation, &identity).await.unwrap();
     assert_eq!(
-        evidence.read(parent, &artifact, &identity).await.unwrap(),
-        *observation
+        canonical(
+            &evidence.read(parent, &artifact, &identity).await.unwrap(),
+            MANAGEMENT_FRAME_BYTES
+        )
+        .unwrap(),
+        canonical(observation, MANAGEMENT_FRAME_BYTES).unwrap()
     );
     assert_eq!(
         evidence.save(parent, observation, &identity).await.unwrap(),
