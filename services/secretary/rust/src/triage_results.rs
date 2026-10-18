@@ -1,9 +1,9 @@
 //! Assessment decoding after the native owner has verified retained turn evidence.
 //! This does not establish native provenance or replace completion verification.
+use crate::schema::{Schema, validate};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
-    json::{canonical, js_string, parse},
-    secretary_schema::validate_secretary,
+    json::{js_string, parse},
 };
 use std::collections::HashSet;
 
@@ -90,8 +90,7 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
     // The original JSON.parse has no separate text-size limit. Its subsequent
     // SchemaValidators admission bounds the decoded canonical value to 1 MiB.
     let result = parse(&text, text.len()).map_err(|_| invalid())?;
-    canonical(&result, 1024 * 1024).map_err(|_| invalid())?;
-    validate_secretary("Assessment", &result).map_err(|_| invalid())?;
+    validate(Schema::Assessment, &result).map_err(|_| invalid())?;
     if result.get("task") != Some(&IvyJson::Null)
         || result.get("disposition") == Some(&IvyJson::from("task"))
     {

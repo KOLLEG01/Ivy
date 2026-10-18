@@ -1,6 +1,67 @@
 use ivy_secretary::{policy::*, schedule::*};
 
 #[test]
+fn original_assignment_rules_triggers_and_names_differential() {
+    use ivy_contracts::{IvyJson, json::parse};
+    use ivy_secretary::assignment_schema::*;
+    use std::process::Command;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut command = Command::new("node");
+    command
+        .arg("tests/secretary-rust/assignment-schema-oracle.mjs")
+        .current_dir(root);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output().expect("Original Node oracle required");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let corpus = parse(
+        std::str::from_utf8(&output.stdout).unwrap(),
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert!(corpus.as_array().unwrap().len() > 200);
+    for (index, row) in corpus.as_array().unwrap().iter().enumerate() {
+        let args = row.required("args").unwrap().as_array().unwrap();
+        let result = match row.required("method").unwrap().as_str().unwrap().as_str() {
+            "validateRules" => validate_rules(&args[0]).map(|_| IvyJson::Null),
+            "validateTrigger" => validate_trigger(&args[0]).map(|_| IvyJson::Null),
+            "validateAssignment" => validate_assignment(&args[0]).map(|_| IvyJson::Null),
+            "unifiedMainRules" => Ok(unified_main_rules(&args[0])),
+            "unifiedRuleOverrides" => Ok(unified_rule_overrides(&args[0])),
+            "effectiveRules" => effective_rules(&args[0], &args[1]),
+            "assignmentName" => assignment_name(args[0].as_js_string().unwrap()).map(IvyJson::from),
+            "executionName" => execution_name(
+                args[0].as_js_string().unwrap(),
+                args[1].as_js_string().unwrap(),
+            )
+            .map(IvyJson::from),
+            method => panic!("Unknown oracle method {method}"),
+        };
+        let actual = match result {
+            Ok(value) => IvyJson::object([("value", value)]),
+            Err(error) => IvyJson::object([
+                ("code", error.code.into()),
+                ("message", error.message.into()),
+                ("outcome", error.outcome.as_str().into()),
+            ]),
+        };
+        assert_eq!(
+            &actual,
+            row.required("expected").unwrap(),
+            "case {index}: {:?}",
+            row.required("method").unwrap()
+        );
+    }
+}
+
+#[test]
 fn interval_is_epoch_aligned_bounded_and_never_rewinds() {
     let local = |_: i64, _: &str| -> Result<LocalMinute, ()> {
         panic!("interval must not consult local time")

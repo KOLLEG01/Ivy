@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 ivy-contracts.workspace = true
+ivy-sdk.workspace = true
 ivy-store.workspace = true
 uuid.workspace = true
 serde.workspace = true
