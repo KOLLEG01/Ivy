@@ -7,6 +7,7 @@ pub mod instructions_manager;
 pub mod instructions_source;
 pub mod instructions_writer;
 pub mod interactions;
+pub mod inventory;
 pub mod local_state;
 pub mod mcp_files;
 pub mod mcp_manager;

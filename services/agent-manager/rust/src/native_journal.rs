@@ -233,6 +233,9 @@ impl NativeJournal {
     pub fn epoch(&self) -> Option<&JsString> {
         self.epoch.as_ref()
     }
+    pub fn owner(&self) -> &Owner {
+        &self.owner
+    }
     pub fn inventory_revision(&mut self, kind: &str, minimum: f64) -> f64 {
         let previous = *self.revisions.get(kind).unwrap_or(&0.0);
         let next = if previous.is_nan() || minimum.is_nan() {
