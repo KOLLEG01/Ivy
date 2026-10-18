@@ -18,6 +18,8 @@ use std::{
 const FRAME: usize = 4 * 1024 * 1024;
 #[path = "agent-project-locations.rs"]
 mod project_locations_cases;
+#[path = "agent-reconciliation.rs"]
+mod reconciliation_cases;
 #[path = "agent-service-work.rs"]
 mod service_work_cases;
 #[path = "agent-staged-files.rs"]
