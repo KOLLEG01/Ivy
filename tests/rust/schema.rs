@@ -5,6 +5,40 @@ use ivy_contracts::{
 };
 
 #[test]
+fn compiler_keyword_values_match_pinned_compiler() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/schema-keywords-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 3000);
+    for row in rows {
+        let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
+        let result = ivy_contracts::schema::validate_compiler_keyword_values(&schema);
+        if let Err(error) = &result {
+            assert_eq!(error.code_js(), "registry_invalid".into());
+        }
+        assert_eq!(
+            result.is_ok(),
+            row["ok"].as_bool().unwrap(),
+            "schema {}",
+            row["schema"]
+        );
+    }
+}
+
+#[test]
 fn resource_registration_matches_compiler_builtins_and_inherited_names() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")

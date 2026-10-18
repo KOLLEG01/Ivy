@@ -2,6 +2,9 @@
 use crate::{IvyError, IvyJson, IvyResult, JsString, json::array_index};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+#[path = "schema_keywords.rs"]
+mod keywords;
+pub use keywords::validate_compiler_keyword_values;
 #[path = "schema_meta.rs"]
 mod meta;
 #[path = "schema_resources.rs"]
