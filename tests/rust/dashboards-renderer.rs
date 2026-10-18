@@ -114,7 +114,7 @@ fn callback_wire_errors_keep_lone_surrogates_and_existing_error_codes() {
 }
 
 #[tokio::test]
-#[ignore = "requires pinned Chromium and installed TypeScript test dependencies"]
+#[ignore = "requires pinned Chromium, Windows job launcher and TypeScript test dependencies"]
 async fn matches_playwright_pixels_for_async_assets_sandbox_animations_and_carets() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut oracle_command = tokio::process::Command::new("node");
@@ -137,8 +137,18 @@ async fn matches_playwright_pixels_for_async_assets_sandbox_animations_and_caret
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();
-    let mut runtime = renderer().await;
-    let renderer = runtime.renderer.clone();
+    let profile_root =
+        std::env::temp_dir().join(format!("ivy-dashboards-pixels-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&profile_root).unwrap();
+    let runtime =
+        ivy_dashboards::browser::BrowserOwner::new(ivy_dashboards::browser::BrowserOptions {
+            executable: std::env::var_os("DASHBOARDS_TEST_BROWSER").unwrap().into(),
+            artifact_root: profile_root.clone(),
+            temporary_root: profile_root.clone(),
+            job_launcher: std::env::var_os("DASHBOARDS_TEST_JOB").map(Into::into),
+        });
+    runtime.start().await.unwrap();
+    let renderer = runtime.clone();
     let cancel = CancellationToken::new();
     for fixture in fixtures.as_array().unwrap() {
         let name = fixture.required("name").unwrap().as_str().unwrap();
@@ -152,7 +162,7 @@ async fn matches_playwright_pixels_for_async_assets_sandbox_animations_and_caret
                 fixture.required("data").unwrap(),
                 mode,
             );
-            let actual = renderer.render(request, &cancel).await.expect(&name);
+            let actual = renderer.render(request, cancel.clone()).await.expect(&name);
             let expected = oracle
                 .as_array()
                 .unwrap()
@@ -170,12 +180,13 @@ async fn matches_playwright_pixels_for_async_assets_sandbox_animations_and_caret
                     .iter()
                     .zip(&expected_pixels.2)
                     .position(|(a, b)| a != b);
-                runtime.close().await;
+                runtime.close().await.unwrap();
                 panic!("pixel mismatch {name}/{text}: first differing byte {first:?}");
             }
         }
     }
-    runtime.close().await;
+    runtime.close().await.unwrap();
+    std::fs::remove_dir(profile_root).unwrap();
 }
 
 #[tokio::test]

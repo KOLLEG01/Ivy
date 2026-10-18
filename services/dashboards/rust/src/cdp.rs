@@ -187,6 +187,11 @@ impl CdpRenderer {
         self.available.load(Ordering::Acquire) && !self.pump.is_finished()
     }
 
+    /// Wait for the retained render lease, including cancellation disposal.
+    pub async fn idle(&self) {
+        let _permit = self.permit.acquire().await;
+    }
+
     pub async fn render(
         &self,
         input: RenderInput,

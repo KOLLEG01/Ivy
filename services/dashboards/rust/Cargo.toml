@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "ivy-dashboards"
+path = "src/main.rs"
+required-features = ["browser"]
+
 [features]
 default = ["browser"]
 browser = ["dep:chromiumoxide"]
@@ -13,6 +18,7 @@ browser = ["dep:chromiumoxide"]
 [dependencies]
 ivy-contracts.workspace = true
 ivy-sdk.workspace = true
+ivy-host-runtime.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -25,6 +31,9 @@ chrono.workspace = true
 subtle = "=2.6.1"
 chromiumoxide = { version = "=0.9.1", optional = true }
 png = "=0.18.1"
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
 
 [[test]]
 name = "dashboards-raster"
@@ -48,6 +57,11 @@ path = "../../../tests/rust/dashboards-renderer.rs"
 required-features = ["browser"]
 
 [[test]]
+name = "dashboards-runtime"
+path = "../../../tests/rust/dashboards-runtime.rs"
+required-features = ["browser"]
+
+[[test]]
 name = "dashboards-sources"
 path = "../../../tests/rust/dashboards-sources.rs"
 
@@ -62,3 +76,8 @@ path = "../../../tests/rust/dashboards-store.rs"
 [[test]]
 name = "dashboards-handlers"
 path = "../../../tests/rust/dashboards-handlers.rs"
+
+[[test]]
+name = "dashboards-browser"
+path = "../../../tests/rust/dashboards-browser.rs"
+required-features = ["browser"]
