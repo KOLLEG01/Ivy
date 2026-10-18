@@ -63,10 +63,16 @@ fn assert_cursor(fixture: &Fixture, values: &[IvyJson]) -> IvyJson {
     for (i, run) in values.iter().enumerate() {
         assert!(ids.insert(model::text(run, "id").unwrap()));
         assert_eq!(run.get("input"), Some(&IvyJson::Null));
-        assert!(json_equal(
-            run.required("output").unwrap().required("data").unwrap(),
-            &expected.as_array().unwrap()[i]
-        ));
+        if run.get("status") == Some(&"succeeded".into()) {
+            // Completed local records discard payloads; Hive history below
+            // verifies their data against the same markers and run identities.
+            assert_eq!(run.get("output"), Some(&IvyJson::Null));
+        } else {
+            assert!(json_equal(
+                run.required("output").unwrap().required("data").unwrap(),
+                &expected.as_array().unwrap()[i]
+            ));
+        }
     }
     let row = snapshot(fixture);
     assert_eq!(
