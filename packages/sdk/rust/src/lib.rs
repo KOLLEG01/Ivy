@@ -5,5 +5,7 @@ pub mod assessment;
 mod batching;
 pub mod clock;
 pub mod operation_ids;
+pub mod native_evidence;
+pub mod native_operation;
 pub mod rpc;
 pub mod tools;
