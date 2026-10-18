@@ -192,62 +192,90 @@ async fn an_unassociated_target_requires_explicit_import_before_launch() {
 }
 
 #[tokio::test]
-async fn missing_or_invalid_replacement_policy_preserves_the_ready_child() {
-    for corrupt in [false, true] {
-        let root = Fixture::new();
-        let accepted = host(&root);
-        let journal = HostJournal::open(accepted.clone()).await.unwrap();
-        let original = target(&root, &journal, "accepted-child").await;
-        let owner = owner(&root, &accepted).await;
-        owner.start().unwrap();
-        let ready = observation(&journal, "ready").await;
-        let original_pid = ready
-            .required("health")
+async fn an_invalid_associated_policy_is_refused_before_launch() {
+    let root = Fixture::new();
+    let accepted = host(&root);
+    let journal = HostJournal::open(accepted.clone()).await.unwrap();
+    let selected = target(&root, &journal, "corrupt-policy").await;
+    let entry = journal
+        .operation("fixture-accept-corrupt-policy")
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot = PathBuf::from(
+        entry
+            .required("configurationPath")
             .unwrap()
-            .required("pid")
+            .as_str()
+            .unwrap(),
+    );
+    assert!(snapshot.starts_with(root.0.join("state/accepted-configurations")));
+    // Fault injection precedes owner startup, so supervision cannot race the
+    // corruption and legitimately load an intact policy first.
+    std::fs::write(snapshot, "not JSON").unwrap();
+    assert_eq!(
+        journal
+            .accepted_target_policy(selected)
+            .await
+            .unwrap_err()
+            .code,
+        "configuration_changed"
+    );
+    let owner = owner(&root, &accepted).await;
+    owner.start().unwrap();
+    let failed = observation(&journal, "failed").await;
+    assert_eq!(failed.get("code"), Some(&"configuration_changed".into()));
+    assert!(
+        !root
+            .0
+            .join("state/instances/fixture/data/launches")
+            .exists()
+    );
+    owner.close().await.unwrap();
+    journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_replacement_policy_preserves_the_ready_child() {
+    let root = Fixture::new();
+    let accepted = host(&root);
+    let journal = HostJournal::open(accepted.clone()).await.unwrap();
+    let original = target(&root, &journal, "accepted-child").await;
+    let owner = owner(&root, &accepted).await;
+    owner.start().unwrap();
+    let ready = observation(&journal, "ready").await;
+    let original_pid = ready
+        .required("health")
+        .unwrap()
+        .required("pid")
+        .unwrap()
+        .clone();
+    let mut replacement = original;
+    replacement.insert("revision", "replacement-policy".into());
+    journal.restore_target(replacement).await.unwrap();
+    let failed = observation(&journal, "failed").await;
+    assert_eq!(failed.get("code"), Some(&"configuration_changed".into()));
+    let data = root.0.join("state/instances/fixture/data");
+    assert!(
+        !data.join("control.json").exists(),
+        "Missing policy drained a healthy child"
+    );
+    let health = json(&std::fs::read_to_string(data.join("health.json")).unwrap());
+    assert_eq!(health.get("pid"), Some(&original_pid));
+    assert_eq!(health.get("launchId"), Some(&"accepted-child".into()));
+    assert_eq!(
+        std::fs::read_to_string(data.join("launches"))
             .unwrap()
-            .clone();
-        let mut replacement = original;
-        replacement.insert("revision", "replacement-policy".into());
-        if corrupt {
-            let entry = publish_accepted_target(&journal, replacement).await;
-            let snapshot = PathBuf::from(
-                entry
-                    .required("configurationPath")
-                    .unwrap()
-                    .as_str()
-                    .unwrap(),
-            );
-            // Corrupt only this fixture's new immutable accepted snapshot.
-            assert!(snapshot.starts_with(root.0.join("state/accepted-configurations")));
-            std::fs::write(snapshot, "not JSON").unwrap();
-        } else {
-            journal.restore_target(replacement).await.unwrap();
-        }
-        let failed = observation(&journal, "failed").await;
-        assert_eq!(failed.get("code"), Some(&"configuration_changed".into()));
-        let data = root.0.join("state/instances/fixture/data");
-        assert!(
-            !data.join("control.json").exists(),
-            "Invalid policy drained a healthy child"
-        );
-        let health = json(&std::fs::read_to_string(data.join("health.json")).unwrap());
-        assert_eq!(health.get("pid"), Some(&original_pid));
-        assert_eq!(health.get("launchId"), Some(&"accepted-child".into()));
-        assert_eq!(
-            std::fs::read_to_string(data.join("launches"))
-                .unwrap()
-                .lines()
-                .count(),
-            1
-        );
-        owner.close().await.unwrap();
-        assert_eq!(
-            std::fs::read_to_string(data.join("cooperatively-stopped")).unwrap(),
-            "accepted-child"
-        );
-        journal.close().await.unwrap();
-    }
+            .lines()
+            .count(),
+        1
+    );
+    owner.close().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(data.join("cooperatively-stopped")).unwrap(),
+        "accepted-child"
+    );
+    journal.close().await.unwrap();
 }
 
 #[tokio::test]

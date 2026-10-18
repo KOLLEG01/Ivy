@@ -3,7 +3,7 @@ use ivy_host_runtime::{node_runtime::NodeRuntime, runtime_owner::RuntimeOwner};
 use std::path::PathBuf;
 
 /// Construction order is retained for reverse cleanup. Existing owners retain
-/// their own startup fallback and never restart for unrelated topology edits.
+/// accepted target policy and never restart for unrelated topology edits.
 pub struct Owners {
     owners: Vec<(JsString, RuntimeOwner)>,
     bootstrap_root: PathBuf,

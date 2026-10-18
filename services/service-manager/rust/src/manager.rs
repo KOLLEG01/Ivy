@@ -196,7 +196,7 @@ impl Manager {
         })
     }
     /// Called after authoritative local configuration adoption; hints never call
-    /// this directly. Unchanged owners retain their frozen legacy fallback.
+    /// this directly. Unchanged owners retain their accepted target policy.
     pub async fn reconcile_accepted(&self, accepted: IvyJson) -> IvyResult<()> {
         self.configuration.adopt(accepted).await
     }
