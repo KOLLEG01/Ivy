@@ -1,5 +1,7 @@
 use super::super::Fixture;
 use super::{Gate, array, equal, field, member, merge, result, text};
+#[path = "chat-cancellation-cases.rs"]
+mod cancellation;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,

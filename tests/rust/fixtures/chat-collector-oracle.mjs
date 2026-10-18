@@ -3,6 +3,7 @@ import {registerHooks} from 'node:module';
 import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
 import {DatabaseSync} from 'node:sqlite';
 // These are the remaining Main/delivery and native transport boundaries. All
 // collector, evidence, reducer, store, Result and publisher code is original.
@@ -121,7 +122,9 @@ const recovery={
  'durable-native-error-and-bounded-retry':[step,{action:'advance',millis:6000},...rounds(4),reopen,step],
  'epoch-restart-terminal-only-in-predecessor':[terminal,...rounds(4),reopen,step],
 };
-for(const c of cases){
+const runDirectly=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
+export {Client,compact};
+if(runDirectly)for(const c of cases){
  const seed=definitions[c.seed??c.version],root=mkdtempSync(join(tmpdir(),'ivy-collector-')),file=join(root,'chat-bridge.sqlite');writeFileSync(file,Buffer.from(seed.database,'base64'));clock=seed.initialNow??now;
  let client=new Client(seed.records),store,admission,operations,queue,evidence,main,collector,publisher,readIndex=seed.initialReadIndex??0,last=0,retryRequest=null;
  const controls=clone(seed.initialControls??{epoch:'original-epoch'}),events=[],gates=[],aliases=new Map(),mutations=new Map();c.expected=[];c.observations=[];
@@ -189,4 +192,4 @@ for(const c of cases){
   }
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
 }
-process.stdout.write(JSON.stringify({now,instructions,seeds:definitions,cases}));
+if(runDirectly)process.stdout.write(JSON.stringify({now,instructions,seeds:definitions,cases}));

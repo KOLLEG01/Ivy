@@ -1,4 +1,5 @@
 pub mod admission;
+pub mod cancellation;
 pub mod collection_reads;
 pub mod collector;
 pub mod diagnostic_notifications;
