@@ -12,6 +12,7 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
 use ivy_sdk::{
     clock::{Clock, TimeZone, date_to_iso},
     main_chat::{MainChatFailure, main_chat_checked},
+    operation_ids::{RuntimeEpochWaiter, start_runtime_epoch},
     rpc::{RequestOptions, query_document},
     tools::ToolClients,
 };
@@ -81,7 +82,7 @@ pub struct SecretaryEngine<'a, 'engine, 'journal> {
     /// Original Date.now operation admission/retention clock, distinct from the
     /// engine's injectable observation clock.
     pub operation_clock: &'a dyn Clock,
-    pub runtime_epoch: &'a JsString,
+    pub runtime_epoch: RuntimeEpochWaiter,
     /// Generation composition supplies real UUIDs; deterministic reference tests
     /// supply the same UUID stream as the original crypto boundary.
     pub new_uuid: fn() -> JsString,
@@ -91,7 +92,28 @@ pub struct SecretaryEngine<'a, 'engine, 'journal> {
 pub fn random_uuid() -> JsString {
     uuid::Uuid::new_v4().to_string().into()
 }
-impl SecretaryEngine<'_, '_, '_> {
+impl<'a, 'engine, 'journal> SecretaryEngine<'a, 'engine, 'journal> {
+    /// Construct inside the active runtime. The fixed waiter starts before any
+    /// later owner/initialization call and retains this generation's first result.
+    pub fn new(
+        evidence: &'a InboxEvidence<'engine, 'journal>,
+        clock: &'a dyn Clock,
+        operation_clock: &'a dyn Clock,
+        new_uuid: fn() -> JsString,
+        tools: &'a ToolClients,
+        issues: &'a RefCell<RecoveryScan>,
+    ) -> Self {
+        let runtime_epoch = start_runtime_epoch(evidence.store.client.clone());
+        Self {
+            evidence,
+            clock,
+            operation_clock,
+            runtime_epoch,
+            new_uuid,
+            tools,
+            issues,
+        }
+    }
     pub(crate) fn now(&self) -> IvyResult<JsString> {
         date_to_iso(self.clock.utc_millis() as f64).map_err(|_| IvyError::internal())
     }
@@ -172,7 +194,7 @@ impl SecretaryEngine<'_, '_, '_> {
             .await
             .map_err(MainChatFailure::into_error)
     }
-    async fn notice_target_checked(&self) -> Result<IvyJson, MainChatFailure> {
+    pub(crate) async fn notice_target_checked(&self) -> Result<IvyJson, MainChatFailure> {
         let target = main_chat_checked(self.evidence.store.client.as_ref()).await?;
         need(
             target.expected_bridge.get("callerPrincipalId")

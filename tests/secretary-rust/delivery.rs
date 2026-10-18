@@ -5,51 +5,78 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+// Object.create-based reference cases inject an already resolved epoch promise.
+// Actual constructor ordering and fixed failed waiters have separate cases.
+fn epoch_fixture(value: &ivy_contracts::JsString) -> ivy_sdk::operation_ids::RuntimeEpochWaiter {
+    struct Fixed(ivy_contracts::JsString);
+    impl RpcClient for Fixed {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            _: IvyJson,
+            _: RequestOptions,
+        ) -> RequestFuture<'a> {
+            assert_eq!(method, "system.status");
+            Box::pin(async move {
+                Ok(IvyJson::object([(
+                    "runtimeEpoch",
+                    IvyJson::String(self.0.clone()),
+                )]))
+            })
+        }
+    }
+    ivy_sdk::operation_ids::start_runtime_epoch(Arc::new(Fixed(value.clone())))
+}
+
+#[path = "assignment_delivery_cases.rs"]
+mod assignment_delivery_cases;
+#[path = "assignment_driver_cases.rs"]
+mod assignment_driver_cases;
+#[path = "assignment_events_cases.rs"]
+mod assignment_events_cases;
+#[path = "assignment_execution_cases.rs"]
+mod assignment_execution_cases;
+#[path = "assignment_native_cases.rs"]
+mod assignment_native_cases;
+#[path = "assignment_preflight_cases.rs"]
+mod assignment_preflight_cases;
+#[path = "assignment_progress_cases.rs"]
+mod assignment_progress_cases;
+#[path = "assignment_result_cases.rs"]
+mod assignment_result_cases;
+#[path = "assignment_runner_cases.rs"]
+mod assignment_runner_cases;
+#[path = "assignment_scheduler_cases.rs"]
+mod assignment_scheduler_cases;
+#[path = "assignment_tick_cases.rs"]
+mod assignment_tick_cases;
 #[path = "assignment_voice_cases.rs"]
 mod assignment_voice_cases;
 #[path = "assignment_voice_engine_cases.rs"]
 mod assignment_voice_engine_cases;
-#[path = "assignment_delivery_cases.rs"]
-mod assignment_delivery_cases;
-#[path = "assignment_runner_cases.rs"]
-mod assignment_runner_cases;
-#[path = "assignment_result_cases.rs"]
-mod assignment_result_cases;
-#[path = "assignment_native_cases.rs"]
-mod assignment_native_cases;
-#[path = "assignment_execution_cases.rs"]
-mod assignment_execution_cases;
-#[path = "assignment_preflight_cases.rs"]
-mod assignment_preflight_cases;
-#[path = "assignment_driver_cases.rs"]
-mod assignment_driver_cases;
-#[path = "assignment_scheduler_cases.rs"]
-mod assignment_scheduler_cases;
-#[path = "assignment_progress_cases.rs"]
-mod assignment_progress_cases;
 #[path = "assignment_windows_cases.rs"]
 mod assignment_windows_cases;
-#[path = "assignment_events_cases.rs"]
-mod assignment_events_cases;
-#[path = "assignment_tick_cases.rs"]
-mod assignment_tick_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
+#[path = "engine_assignments_cases.rs"]
+mod engine_assignments_cases;
+#[path = "engine_cases.rs"]
+mod engine_cases;
+#[path = "engine_epoch_cases.rs"]
+mod engine_epoch_cases;
+#[path = "engine_inbox_cases.rs"]
+mod engine_inbox_cases;
+#[path = "follow_up_cases.rs"]
+mod follow_up_cases;
 #[path = "inbox_evidence_cases.rs"]
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
 mod inbox_recovery_cases;
-#[path = "engine_cases.rs"]
-mod engine_cases;
-#[path = "engine_assignments_cases.rs"]
-mod engine_assignments_cases;
-#[path = "engine_inbox_cases.rs"]
-mod engine_inbox_cases;
-#[path = "notice_scan_cases.rs"]
-mod notice_scan_cases;
 #[path = "notice_evidence_cases.rs"]
 mod notice_evidence_cases;
+#[path = "notice_scan_cases.rs"]
+mod notice_scan_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 #[path = "workflow_cases.rs"]

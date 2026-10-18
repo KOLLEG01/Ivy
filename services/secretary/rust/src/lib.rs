@@ -28,6 +28,8 @@ pub mod inbox_recovery;
 pub mod engine;
 mod engine_assignments;
 mod engine_inbox;
+pub mod follow_up;
+pub mod follow_up_import;
 pub mod journal;
 pub mod media_input;
 pub mod media_schema;

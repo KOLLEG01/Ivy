@@ -33,10 +33,13 @@ fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
 }
 impl SecretaryEngine<'_, '_, '_> {
+    pub async fn validate_operation_id(&self, id: &JsString) -> IvyResult<()> {
+        self.workflow().validate_operation_id(id).await
+    }
     pub(crate) fn workflow(&self) -> AssignmentWorkflow<'_, '_, '_> {
         AssignmentWorkflow {
             evidence: self.evidence,
-            runtime_epoch: self.runtime_epoch,
+            runtime_epoch: &self.runtime_epoch,
             clock: self.operation_clock,
         }
     }
@@ -68,7 +71,9 @@ impl SecretaryEngine<'_, '_, '_> {
                 .save(caller, request, WorkflowAction::ConfigureExecution, None)
                 .await;
         }
-        workflow.validate_operation_id(string(request, "operationId")?)?;
+        workflow
+            .validate_operation_id(string(request, "operationId")?)
+            .await?;
         let store = self.evidence.store;
         let current = store
             .named(Record::Configuration, &"configuration".into())
@@ -121,7 +126,9 @@ impl SecretaryEngine<'_, '_, '_> {
         {
             return workflow.save(caller, request, action, None).await;
         }
-        workflow.validate_operation_id(string(request, "operationId")?)?;
+        workflow
+            .validate_operation_id(string(request, "operationId")?)
+            .await?;
         let name = assignment_name(string(request.required("value")?, "assignmentId")?)?;
         let store = self.evidence.store;
         let current = store

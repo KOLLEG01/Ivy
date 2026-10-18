@@ -170,7 +170,7 @@ async fn original_public_inbox_admission_and_retained_history() {
             evidence: &evidence,
             clock: &clock,
             operation_clock: &wall,
-            runtime_epoch: corpus.required("epoch").unwrap().as_js_string().unwrap(),
+            runtime_epoch: epoch_fixture(corpus.required("epoch").unwrap().as_js_string().unwrap()),
             new_uuid: fixed_uuid,
             tools: &tools,
             issues: &issues,

@@ -18,11 +18,21 @@ fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
         .cloned()
         .ok_or_else(IvyError::internal)
 }
-struct DispatchGuard {
+pub(crate) struct DispatchGuard {
     client: Arc<dyn RpcClient>,
     service_node_id: JsString,
     settings: IvyJson,
     cancellation: RequestOptions,
+}
+impl DispatchGuard {
+    pub(crate) fn new(evidence: &InboxEvidence<'_, '_>) -> Self {
+        Self {
+            client: evidence.store.client.clone(),
+            service_node_id: evidence.service_node_id.clone(),
+            settings: evidence.settings.clone(),
+            cancellation: evidence.cancellation.clone(),
+        }
+    }
 }
 impl NativeDispatchGuard for DispatchGuard {
     fn check(&self) -> GuardFuture<'_> {
@@ -114,12 +124,7 @@ impl AssignmentNative<'_, '_, '_> {
         };
         let mut observed = owner.operation(&call).await?;
         if observed.get("phase").is_none() {
-            let guard = DispatchGuard {
-                client: self.evidence.store.client.clone(),
-                service_node_id: self.evidence.service_node_id.clone(),
-                settings: self.evidence.settings.clone(),
-                cancellation: self.evidence.cancellation.clone(),
-            };
+            let guard = DispatchGuard::new(self.evidence);
             observed = match owner.dispatch(&call, &guard).await? {
                 Some(observed) => observed,
                 None => owner.operation(&call).await?,

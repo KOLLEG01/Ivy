@@ -235,7 +235,7 @@ impl SecretaryEngine<'_, '_, '_> {
         )?;
         need(
             parse_operation_id_js(id.as_js_string().ok_or_else(IvyError::internal)?)?.runtime_epoch
-                == *self.runtime_epoch,
+                == self.runtime_epoch.get().await?,
             "operation_expired",
             "The Secretary operation belongs to another runtime.",
         )?;
@@ -261,7 +261,8 @@ impl SecretaryEngine<'_, '_, '_> {
             return recovery.apply(&prior).await?.required("value").cloned();
         }
         self.workflow()
-            .validate_operation_id(id.as_js_string().ok_or_else(IvyError::internal)?)?;
+            .validate_operation_id(id.as_js_string().ok_or_else(IvyError::internal)?)
+            .await?;
         let at = self.now()?;
         let source_id = match request.get("sourceId") {
             Some(id) => id.clone(),
