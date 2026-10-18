@@ -85,6 +85,14 @@ impl NativeDispatcher {
         self.0.receipts.lock().unwrap().len()
     }
     pub async fn execute(&self, request: NativeRequest) -> NativeReply {
+        self.begin(request).await
+    }
+    /// Admit before the pipe reads its next frame, independently of when its
+    /// response observer is scheduled. Actual invocation still rechecks stop.
+    pub(crate) fn begin(
+        &self,
+        request: NativeRequest,
+    ) -> impl Future<Output = NativeReply> + Send + use<> {
         let request_id = request.request_id();
         let admission = self
             .0
@@ -93,8 +101,8 @@ impl NativeDispatcher {
             .unwrap()
             .admit_with(&request, || self.0.handler.cleanup_slots());
         let receipt = match admission {
-            Admission::Reject(error) => return self.reply(request_id, NativeOutcome::error(error)),
-            Admission::Replay(receipt) => receipt,
+            Admission::Reject(error) => Err(NativeOutcome::error(error)),
+            Admission::Replay(receipt) => Ok(receipt),
             Admission::Dispatch(receipt) => {
                 let receipt = receipt.unwrap_or_else(|| {
                     Arc::new(NativeReceipt {
@@ -129,12 +137,19 @@ impl NativeDispatcher {
                         .unwrap_or_else(|_| NativeOutcome::error("operation_outcome_unknown"));
                     let _ = completed.complete(outcome);
                 });
-                receipt
+                Ok(receipt)
             }
         };
-        self.reply(request_id, receipt.wait().await)
+        let owner = self.clone();
+        async move {
+            let outcome = match receipt {
+                Ok(receipt) => receipt.wait().await,
+                Err(outcome) => outcome,
+            };
+            owner.reply(request_id, outcome)
+        }
     }
-    fn reply(&self, request_id: u64, outcome: NativeOutcome) -> NativeReply {
+    pub(crate) fn reply(&self, request_id: u64, outcome: NativeOutcome) -> NativeReply {
         NativeReply {
             epoch: self.0.epoch.clone(),
             request_id,

@@ -5,6 +5,7 @@ pub mod dtmf_access;
 pub mod dtmf_detector;
 pub mod ipc;
 pub mod media;
+pub mod native_pipe;
 pub mod native_rpc;
 pub mod sip;
 pub mod voice_rpc;

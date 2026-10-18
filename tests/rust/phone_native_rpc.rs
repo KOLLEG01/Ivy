@@ -11,6 +11,8 @@ mod register;
 mod sip_host;
 #[path = "phone_native_dispatch.rs"]
 mod native_dispatch;
+#[path = "phone_native_pipe.rs"]
+mod native_pipe;
 #[path = "phone_sip.rs"]
 mod sip;
 #[path = "phone_sip_stack.rs"]

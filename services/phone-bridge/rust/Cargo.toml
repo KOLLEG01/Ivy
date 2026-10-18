@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 ivy-contracts = { workspace = true }
 ivy-host-runtime = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-std"] }
 rsipstack = { workspace = true }
 tokio-util = { workspace = true }
 tokio-rustls = { workspace = true }
