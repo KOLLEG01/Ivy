@@ -2,9 +2,11 @@ pub mod browser_path;
 #[cfg(feature = "browser")]
 pub mod cdp;
 pub mod document;
+pub mod handlers;
 pub mod png;
 pub mod raster;
 pub mod sources;
+pub mod store;
 pub mod validation;
 
 pub fn registry() -> ivy_contracts::IvyJson {

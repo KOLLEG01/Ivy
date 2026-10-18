@@ -20,6 +20,9 @@ futures-util.workspace = true
 base64.workspace = true
 uuid.workspace = true
 sha2.workspace = true
+reqwest.workspace = true
+chrono.workspace = true
+subtle = "=2.6.1"
 chromiumoxide = { version = "=0.9.1", optional = true }
 png = "=0.18.1"
 
@@ -51,3 +54,11 @@ path = "../../../tests/rust/dashboards-sources.rs"
 [[test]]
 name = "dashboards-validation"
 path = "../../../tests/rust/dashboards-validation.rs"
+
+[[test]]
+name = "dashboards-store"
+path = "../../../tests/rust/dashboards-store.rs"
+
+[[test]]
+name = "dashboards-handlers"
+path = "../../../tests/rust/dashboards-handlers.rs"
