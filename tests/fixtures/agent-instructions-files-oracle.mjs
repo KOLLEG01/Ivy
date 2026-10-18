@@ -36,8 +36,10 @@ async function list(home,inputs=false){
   const result={};
   async function walk(path){
     for(const name of (await readdir(path)).sort()){
-      if(name.startsWith('executor-lock.sqlite'))continue;
       const full=join(path,name),key=relative(home,full).replaceAll('\\','/'),info=await lstat(full);
+      // Omit live SQLite bytes, but retain deliberately hostile directories in
+      // the Rust setup. Expected snapshots omit all owner-lock artifacts.
+      if(name.startsWith('executor-lock.sqlite')&&(!inputs||!info.isDirectory()))continue;
       if(info.isSymbolicLink())result[key]={kind:'link'};
       else if(info.isDirectory()){result[key]={kind:'directory'};await walk(full);}
       else {const bytes=await readFile(full);result[key]=inputs
