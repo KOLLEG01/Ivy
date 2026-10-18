@@ -238,3 +238,55 @@ fn meta_schema_validation_uses_bounded_native_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn resource_walk_matches_compiler_annotation_and_parent_scope_rules() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/schema-resources-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 1000);
+    for row in rows {
+        let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
+        let admitted = ivy_contracts::schema::admit_schema(&schema).unwrap();
+        let graph = admitted.resource_graph();
+        let nodes = graph
+            .nodes
+            .iter()
+            .map(|node| {
+                IvyJson::object([
+                    ("pointer", IvyJson::String(node.pointer.clone())),
+                    (
+                        "parent",
+                        node.parent.map_or(IvyJson::Null, |parent| {
+                            IvyJson::String(graph.nodes[parent].pointer.clone())
+                        }),
+                    ),
+                    ("schema", stringify(node.schema, 1_000_000).unwrap().into()),
+                ])
+            })
+            .collect();
+        let actual = IvyJson::object([
+            ("isolated", graph.isolated.into()),
+            ("nodes", IvyJson::Array(nodes)),
+        ]);
+        assert_eq!(
+            stringify(&actual, 2_000_000).unwrap(),
+            row["result"].as_str().unwrap(),
+            "{}",
+            row["name"]
+        );
+    }
+}
