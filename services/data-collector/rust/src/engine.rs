@@ -97,7 +97,7 @@ struct Inner {
 }
 #[derive(Clone)]
 pub struct Engine(Arc<Inner>);
-fn iso(ms: i64) -> IvyResult<String> {
+pub(crate) fn iso(ms: i64) -> IvyResult<String> {
     let p = TimeZone::local_parts(ms, "UTC")?;
     let year = if (0..=9999).contains(&p.year) {
         format!("{:04}", p.year)
@@ -527,16 +527,19 @@ impl Engine {
         }
         Ok(())
     }
+    pub(crate) fn begin_close(&self) {
+        self.0.closing.cancel();
+        for task in self.0.active.lock().unwrap().values() {
+            task.signal.cancel();
+        }
+    }
     pub async fn close(&self) {
         let Some(_shutdown) = self.0.shutdown.begin() else {
             self.0.shutdown.wait().await;
             return;
         };
-        self.0.closing.cancel();
+        self.begin_close();
         let active = std::mem::take(&mut *self.0.active.lock().unwrap());
-        for task in active.values() {
-            task.signal.cancel();
-        }
         for (_, task) in active {
             let _ = task.work.await;
         }

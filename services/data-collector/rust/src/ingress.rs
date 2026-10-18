@@ -48,8 +48,11 @@ impl Ingress {
     pub fn address(&self) -> SocketAddr {
         self.server.address()
     }
-    pub async fn close(&self) {
+    pub(crate) fn begin_close(&self) {
         self.closed.cancel();
+    }
+    pub async fn close(&self) {
+        self.begin_close();
         self.server.close().await;
     }
 }

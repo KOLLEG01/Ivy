@@ -9,6 +9,7 @@ pub mod mcp_result;
 pub mod mcp_bridge;
 pub mod native_mcp;
 pub mod ingress;
+pub mod lifecycle;
 mod http;
 pub mod policy;
 pub mod provider;

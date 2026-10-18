@@ -21,6 +21,9 @@ pub trait CollectorBackend: Send + Sync + 'static {
     fn reconcile(&self, client: Arc<dyn RpcClient>) -> ServiceFuture<()>;
     fn detach(&self);
     fn state(&self, state: ServiceState);
+    fn ready(&self, _generation: u64) -> ServiceFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 pub fn service_options(
@@ -73,18 +76,18 @@ pub fn service_options(
             })
         }),
     );
-    options.readiness = Some(Arc::new(|connection| {
+    let ready = backend.clone();
+    options.readiness = Some(Arc::new(move |connection| {
+        let ready = ready.clone();
         Box::pin(async move {
+            ready.ready(connection.generation()).await?;
             Ok(IvyJson::object([
                 ("ready", true.into()),
-                (
-                    "generation",
-                    IvyJson::Number(connection.generation() as f64),
-                ),
                 ("diagnostics", IvyJson::Array(Vec::new())),
             ]))
         })
     }));
+    options.heartbeat = std::time::Duration::from_secs(2);
     options.on_state = Some(Arc::new(move |state| {
         if matches!(state.status, "connecting" | "offline" | "stopped") {
             backend.detach();

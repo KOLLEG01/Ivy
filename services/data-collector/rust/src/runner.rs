@@ -97,6 +97,16 @@ impl TaskRunner {
     ) -> IvyResult<Self> {
         let settings = schema::parse_schema("settingsSchema", &settings)?;
         let node = NodeRuntime::discover(node).await?;
+        Self::with_node_runtime(work_root, artifact_root, node, settings, job_launcher, mcp)
+    }
+    pub(crate) fn with_node_runtime(
+        work_root: PathBuf,
+        artifact_root: PathBuf,
+        node: NodeRuntime,
+        settings: IvyJson,
+        job_launcher: Option<PathBuf>,
+        mcp: Option<Arc<dyn McpBridgeFactory>>,
+    ) -> IvyResult<Self> {
         Ok(Self {
             work_root: std::path::absolute(work_root).map_err(io_error)?,
             artifact_root,
@@ -119,6 +129,71 @@ impl TaskRunner {
             ));
         }
         Ok(self.work_root.join(task_id))
+    }
+    /// Preserve the existing cache hash. The caller supplies the shared default-
+    /// locale comparator; byte/ordinal sorting would change transfer admission.
+    pub fn authentication_fingerprint(
+        &self,
+        task_id: &str,
+        compare: &crate::definition_journal::CompareNames,
+    ) -> IvyResult<Option<String>> {
+        fn name(value: &std::ffi::OsStr) -> ivy_contracts::JsString {
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStrExt;
+                ivy_contracts::JsString(value.encode_wide().collect())
+            }
+            #[cfg(not(windows))]
+            {
+                value.to_string_lossy().as_ref().into()
+            }
+        }
+        fn walk(
+            path: &Path,
+            prefix: &str,
+            hash: &mut Sha256,
+            compare: &crate::definition_journal::CompareNames,
+        ) -> IvyResult<()> {
+            let mut entries = std::fs::read_dir(path)
+                .map_err(io_error)?
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(io_error)?;
+            entries.sort_by(|a, b| compare(&name(&a.file_name()), &name(&b.file_name())));
+            for entry in entries {
+                let kind = entry.file_type().map_err(io_error)?;
+                if kind.is_symlink() {
+                    return Err(IvyError::new(
+                        "configuration_invalid",
+                        "Authentication cache cannot contain symbolic links.",
+                    ));
+                }
+                let relative = format!(
+                    "{prefix}{}",
+                    String::from_utf16_lossy(&name(&entry.file_name()).0)
+                );
+                if kind.is_dir() {
+                    walk(&entry.path(), &(relative + "/"), hash, compare)?;
+                } else if kind.is_file() {
+                    hash.update(relative.as_bytes());
+                    hash.update([0]);
+                    hash.update(std::fs::read(entry.path()).map_err(io_error)?);
+                    hash.update([0]);
+                }
+            }
+            Ok(())
+        }
+        let root = self.directory(task_id)?.join(".auth");
+        if !root.exists() {
+            return Ok(None);
+        }
+        let mut hash = Sha256::new();
+        walk(&root, "", &mut hash, compare)?;
+        let hex: String = hash
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok(Some(format!("sha256:{hex}")))
     }
     pub fn job_name(&self, task_id: &str) -> IvyResult<String> {
         let path = self.directory(task_id)?;

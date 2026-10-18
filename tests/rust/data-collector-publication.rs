@@ -27,6 +27,8 @@ mod definitions;
 mod http;
 #[path = "data-collector-native.inc.rs"]
 mod native;
+#[path = "data-collector-lifecycle.inc.rs"]
+mod lifecycle;
 
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()
