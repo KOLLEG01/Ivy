@@ -137,15 +137,7 @@ pub(super) fn register(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
             }
         })
     }
-    static DOCUMENTS: OnceLock<IvyResult<IvyJson>> = OnceLock::new();
-    let data = DOCUMENTS
-        .get_or_init(|| crate::json::parse(include_str!("schema-meta-data.json"), 1024 * 1024))
-        .as_ref()
-        .map_err(Clone::clone)?;
-    let documents = data
-        .get("schemas")
-        .and_then(IvyJson::as_array)
-        .ok_or_else(IvyError::internal)?;
+    let documents = meta_documents()?;
     let mut refs = HashMap::new();
     for document in documents {
         let id = document
@@ -200,6 +192,17 @@ pub(super) fn register(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
         }
     }
     Ok(index)
+}
+
+pub(super) fn meta_documents() -> IvyResult<&'static [IvyJson]> {
+    static DOCUMENTS: OnceLock<IvyResult<IvyJson>> = OnceLock::new();
+    let data = DOCUMENTS
+        .get_or_init(|| crate::json::parse(include_str!("schema-meta-data.json"), 1024 * 1024))
+        .as_ref()
+        .map_err(Clone::clone)?;
+    data.get("schemas")
+        .and_then(IvyJson::as_array)
+        .ok_or_else(IvyError::internal)
 }
 
 fn contains_id(schema: &IvyJson) -> bool {

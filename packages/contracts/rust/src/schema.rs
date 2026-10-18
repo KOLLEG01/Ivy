@@ -8,6 +8,9 @@ pub use keywords::validate_compiler_keyword_values;
 #[path = "schema_compiler_walk.rs"]
 mod compiler_walk;
 pub use compiler_walk::{CompilerNode, CompilerWalk};
+#[path = "schema_resolution.rs"]
+mod resolution;
+pub use resolution::{CompilerResources, CompilerTarget};
 #[path = "schema_meta.rs"]
 mod meta;
 #[path = "schema_resources.rs"]
@@ -50,6 +53,11 @@ impl AdmittedSchema {
     /// compilation, meta-validation and runtime evaluation remain separate.
     pub fn compiler_walk(&self) -> IvyResult<CompilerWalk<'_>> {
         compiler_walk::walk(&self.schema)
+    }
+    /// Resolve registered resource aliases and scoped compiler pointers before
+    /// compiling or caching target validators.
+    pub fn compiler_resources(&self) -> IvyResult<CompilerResources<'_>> {
+        resolution::CompilerResources::new(&self.schema)
     }
 }
 
