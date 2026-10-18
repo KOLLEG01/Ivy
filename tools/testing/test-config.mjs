@@ -175,6 +175,7 @@ export const rustTests = {
   'tests/rust/host-preparation-files.rs': { package: 'ivy-host-runtime', test: 'host-preparation-files' },
   'tests/rust/host-protected-config.rs': { package: 'ivy-host-runtime', test: 'host-protected-config' },
   'tests/rust/host-preparation-links.rs': { package: 'ivy-host-runtime', test: 'host-preparation-links' },
+  'tests/rust/host-portable-dependencies.rs': { package: 'ivy-host-runtime', test: 'host-portable-dependencies' },
   'tests/rust/host-paths.rs': { package: 'ivy-host-runtime', test: 'host-paths' },
   'tests/rust/host-windows-arguments.rs': { package: 'ivy-host-runtime', test: 'host-windows-arguments' },
   'tests/rust/host-process-output.rs': { package: 'ivy-host-runtime', test: 'host-process-output' },

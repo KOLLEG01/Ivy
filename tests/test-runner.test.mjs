@@ -244,6 +244,11 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   assert.deepEqual(preparationLinksOnly.commands, [
     ["test", "--locked", "--package", "ivy-host-runtime", "--test", "host-preparation-links"],
   ]);
+  const portableDependenciesOnly = run("", ["tests/rust/host-portable-dependencies.rs"]);
+  assert.equal(portableDependenciesOnly.result.status, 0, portableDependenciesOnly.result.stderr);
+  assert.deepEqual(portableDependenciesOnly.commands, [
+    ["test", "--locked", "--package", "ivy-host-runtime", "--test", "host-portable-dependencies"],
+  ]);
   const phoneLibraryOnly = run("", ["tests/rust/phone_sip_tls.rs"]);
   assert.equal(phoneLibraryOnly.result.status, 0, phoneLibraryOnly.result.stderr);
   assert.deepEqual(phoneLibraryOnly.commands, [

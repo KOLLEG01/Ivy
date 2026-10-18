@@ -44,3 +44,7 @@ path = "../../../tests/rust/host-protected-config.rs"
 [[test]]
 name = "host-preparation-links"
 path = "../../../tests/rust/host-preparation-links.rs"
+
+[[test]]
+name = "host-portable-dependencies"
+path = "../../../tests/rust/host-portable-dependencies.rs"
