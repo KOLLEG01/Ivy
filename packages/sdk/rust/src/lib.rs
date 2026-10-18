@@ -4,5 +4,6 @@ pub mod admission;
 pub mod assessment;
 mod batching;
 pub mod clock;
+pub mod operation_ids;
 pub mod rpc;
 pub mod tools;
