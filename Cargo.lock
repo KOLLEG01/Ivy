@@ -708,6 +708,7 @@ dependencies = [
 name = "ivy-host-runtime"
 version = "0.2.40"
 dependencies = [
+ "base64",
  "chrono",
  "flate2",
  "futures-util",
@@ -715,6 +716,7 @@ dependencies = [
  "ivy-sdk",
  "ivy-store",
  "libc",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

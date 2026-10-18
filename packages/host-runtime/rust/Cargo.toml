@@ -43,6 +43,8 @@ name = "host-logs"
 path = "../../../tests/rust/host-logs.rs"
 
 [dependencies]
+base64.workspace = true
+reqwest.workspace = true
 flate2.workspace = true
 tar.workspace = true
 ivy-contracts.workspace = true
