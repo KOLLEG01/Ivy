@@ -120,7 +120,12 @@ pub(crate) async fn file_hash(path: &Path) -> IvyResult<String> {
         }
         hash.update(&buffer[..count]);
     }
-    Ok(format!("sha256:{:x}", hash.finalize()))
+    let mut result = String::from("sha256:");
+    for byte in hash.finalize() {
+        use std::fmt::Write;
+        write!(result, "{byte:02x}").unwrap();
+    }
+    Ok(result)
 }
 
 // Equivalent to /\/ivy-next-[^/\n]+\.service(?:\/|$)/m; no cgroup ownership mutation.
