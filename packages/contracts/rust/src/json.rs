@@ -715,6 +715,19 @@ impl Encoder {
     }
 }
 
+/// Own entries of a JSON object in ECMAScript enumeration order: numeric index
+/// keys first, then other keys in insertion order. Other JSON types have no entries.
+pub fn object_entries(value: &IvyJson) -> Vec<(&JsString, &IvyJson)> {
+    let mut entries: Vec<_> = value
+        .as_object()
+        .unwrap_or(&[])
+        .iter()
+        .map(|(k, v)| (k, v))
+        .collect();
+    entries.sort_by_key(|(key, _)| array_index(key).map_or((1, 0), |index| (0, index)));
+    entries
+}
+
 pub(crate) fn array_index(s: &JsString) -> Option<u32> {
     let s = s.to_utf8().ok()?;
     let n = s.parse::<u32>().ok()?;
