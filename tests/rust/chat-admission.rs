@@ -1,6 +1,8 @@
 use ivy_chat_bridge::admission::ChatAdmission;
 use ivy_contracts::{IvyJson as Json, IvyResult, json::parse};
 use std::process::Command;
+#[path = "chat-operations-cases.rs"]
+mod operations;
 
 #[test]
 fn admission_order_limits_and_original_request_hashes_match_typescript() {
