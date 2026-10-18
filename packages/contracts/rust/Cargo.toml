@@ -20,6 +20,10 @@ name = "contracts"
 path = "../../../tests/rust/contracts.rs"
 
 [[test]]
+name = "hash"
+path = "../../../tests/rust/hash.rs"
+
+[[test]]
 name = "builtin_schema"
 path = "../../../tests/rust/builtin_schema.rs"
 
