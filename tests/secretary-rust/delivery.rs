@@ -5,6 +5,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "assignment_voice_cases.rs"]
+mod assignment_voice_cases;
+
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
 #[path = "inbox_evidence_cases.rs"]
