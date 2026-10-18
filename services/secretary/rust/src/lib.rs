@@ -40,6 +40,8 @@ pub mod notice_evidence;
 pub mod notices;
 mod notices_voice;
 pub mod policy;
+pub mod registry;
+pub mod reconcile;
 pub mod schedule;
 pub mod schema;
 pub mod service_handlers;

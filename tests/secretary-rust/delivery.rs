@@ -71,6 +71,8 @@ mod engine_inbox_cases;
 mod follow_up_cases;
 #[path = "generation_cases.rs"]
 mod generation_cases;
+#[path = "reconcile_cases.rs"]
+mod reconcile_cases;
 #[path = "inbox_evidence_cases.rs"]
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
@@ -81,6 +83,8 @@ mod notice_evidence_cases;
 mod notice_scan_cases;
 #[path = "notices_cases.rs"]
 mod notices_cases;
+#[path = "registry_cases.rs"]
+mod registry_cases;
 #[path = "service_handlers_cases.rs"]
 mod service_handlers_cases;
 #[path = "store_cases.rs"]
