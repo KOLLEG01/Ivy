@@ -406,33 +406,6 @@ fn checked(input: IvyJson, configuration_path: &Path, context: &HostContext) -> 
     Ok(config)
 }
 
-#[cfg(unix)]
 fn writable(path: &Path) -> std::io::Result<()> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-    let path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-    if unsafe { libc::access(path.as_ptr(), libc::W_OK) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-#[cfg(windows)]
-fn writable(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY, GetFileAttributesW,
-        INVALID_FILE_ATTRIBUTES,
-    };
-    let path: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
-    let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
-    if attributes == INVALID_FILE_ATTRIBUTES {
-        Err(std::io::Error::last_os_error())
-    } else if attributes & FILE_ATTRIBUTE_READONLY != 0
-        && attributes & FILE_ATTRIBUTE_DIRECTORY == 0
-    {
-        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-    } else {
-        Ok(())
-    }
+    crate::filesystem::access(path, crate::filesystem::WRITE_OK)
 }

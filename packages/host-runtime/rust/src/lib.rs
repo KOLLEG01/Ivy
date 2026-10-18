@@ -21,7 +21,7 @@ pub mod config;
 pub mod default_settings;
 pub mod dependency_cache;
 pub mod executor_lock;
-mod filesystem;
+pub mod filesystem;
 pub mod exec_file;
 pub mod health;
 pub mod host_config;

@@ -9,6 +9,8 @@ mod artifact_cases;
 mod native_dispatch_cases;
 #[path = "host-package-archive-cases.rs"]
 mod package_archive_cases;
+#[path = "host-filesystem-cases.rs"]
+mod filesystem_cases;
 #[path = "host-source-cases.rs"]
 mod source_cases;
 #[path = "host-action-cases.rs"]
