@@ -97,6 +97,18 @@ fn assert_pending(values: &[IvyJson]) {
     );
 }
 
+async fn stop_periodic(fixture: &Fixture, child: &OwnedProcess, original: bool, phase: &str) {
+    let health = fixture.health().unwrap();
+    fixture.control(&health, true).await;
+    let result = complete(child).await;
+    assert!(
+        result.exit_code == Some(0) && result.error_code.is_none() && result.stderr.is_empty(),
+        "periodic original={original} phase={phase} helperPid={} boot={:?} result={result:?}",
+        child.pid,
+        health.get("bootId")
+    );
+}
+
 async fn scenario(original: bool) {
     let Running {
         fixture,
@@ -150,7 +162,7 @@ async fn scenario(original: bool) {
         model::number(&before_restart, "nextAt").unwrap()
             > model::number(&offline_start, "nextAt").unwrap()
     );
-    stop(&fixture, &child).await;
+    stop_periodic(&fixture, &child, original, "offline restart").await;
     assert_eq!(runs(&fixture), first_boot);
     assert_eq!(snapshot(&fixture).get("state"), before_restart.get("state"));
     assert_eq!(
@@ -243,7 +255,7 @@ async fn scenario(original: bool) {
     tokio::time::sleep(Duration::from_millis(until_due + 1200)).await;
     assert_eq!(runs(&fixture), completed);
     assert!(json_equal(&markers(&fixture), &expected));
-    stop(&fixture, &child).await;
+    stop_periodic(&fixture, &child, original, "disabled final stop").await;
     hive.stdin
         .take()
         .unwrap()
