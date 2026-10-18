@@ -15,6 +15,7 @@ pub mod hash;
 pub mod host_bundle;
 pub mod json;
 pub mod limits;
+pub mod native_contract;
 pub mod operation;
 pub mod read_request;
 pub mod re2;
