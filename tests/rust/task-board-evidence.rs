@@ -7,6 +7,9 @@ use std::cell::RefCell;
 mod support;
 use support::oracle;
 
+#[path = "../fixtures/task-board-read-evidence.rs"]
+mod read_evidence;
+
 struct Memory {
     mutation: String,
     saved: RefCell<Vec<Value>>,
