@@ -15,21 +15,28 @@ use tokio::{
     time::Instant,
 };
 use windows_sys::Win32::{
-    Foundation::{DuplicateHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{
+        DuplicateHandle, ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
+    },
     System::{
+        IO::{CreateIoCompletionPort, GetQueuedCompletionStatus},
         JobObjects::{
-            IsProcessInJob, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-            JobObjectBasicAccountingInformation, QueryInformationJobObject, TerminateJobObject,
+            IsProcessInJob, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectAssociateCompletionPortInformation,
+            JobObjectBasicAccountingInformation, QueryInformationJobObject,
+            SetInformationJobObject, TerminateJobObject,
         },
         Threading::{
-            GetCurrentProcess, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+            GetCurrentProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SYNCHRONIZE,
+            WaitForSingleObject,
         },
     },
 };
 
 const PREFIX: &str = r"\\.\pipe\Ivy.Process.";
 const MAGIC: &[u8; 8] = b"IVYJOB01";
-const JOB_QUERY_TERMINATE: u32 = 0x0004 | 0x0008;
+const JOB_QUERY_TERMINATE: u32 = 0x0002 | 0x0004 | 0x0008;
 
 fn checked(value: i32) -> io::Result<()> {
     if value == 0 {
@@ -156,7 +163,20 @@ impl Listener {
                 PROCESS_SYNCHRONIZE | PROCESS_QUERY_INFORMATION,
             )?;
             let job = duplicate(source, decode(&frame[16..])?, JOB_QUERY_TERMINATE)?;
-            let proof = Proof { child, job };
+            let events = ProcessEvents::new()?;
+            let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+                CompletionKey: 1usize as _,
+                CompletionPort: events.port.as_raw_handle(),
+            };
+            checked(unsafe {
+                SetInformationJobObject(
+                    job.as_raw_handle(),
+                    JobObjectAssociateCompletionPortInformation,
+                    (&association as *const JOBOBJECT_ASSOCIATE_COMPLETION_PORT).cast(),
+                    size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+                )
+            })?;
+            let proof = Proof { child, job, events };
             let mut member = 0;
             checked(unsafe {
                 IsProcessInJob(
@@ -180,13 +200,113 @@ impl Listener {
 pub(crate) struct Proof {
     child: OwnedHandle,
     job: OwnedHandle,
+    events: ProcessEvents,
+}
+
+/// Associate before releasing the suspended child, so every descendant birth can
+/// be reconciled with the Job's lifetime process count. Notifications alone are
+/// not guaranteed: a missing event must leave retirement unconfirmed.
+struct ProcessEvents {
+    port: OwnedHandle,
+    observed: u64,
+    pending: Vec<OwnedHandle>,
+}
+impl ProcessEvents {
+    fn new() -> io::Result<Self> {
+        let raw = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) };
+        if raw.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            port: unsafe { OwnedHandle::from_raw_handle(raw) },
+            observed: 0,
+            pending: Vec::new(),
+        })
+    }
+
+    fn drain(&mut self) -> io::Result<bool> {
+        // Bound each synchronous poll; the fixed retirement deadline also bounds
+        // an unusually large notification queue without discarding its evidence.
+        for _ in 0..512 {
+            let mut message = 0;
+            let mut key = 0;
+            let mut value = null_mut();
+            let ok = unsafe {
+                GetQueuedCompletionStatus(
+                    self.port.as_raw_handle(),
+                    &mut message,
+                    &mut key,
+                    &mut value,
+                    0,
+                )
+            };
+            if ok == 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(WAIT_TIMEOUT as i32) {
+                    return Ok(true);
+                }
+                return Err(error);
+            }
+            if key != 1 {
+                return Err(io::Error::other("Unexpected Job notification identity."));
+            }
+            if message != 6
+            /* JOB_OBJECT_MSG_NEW_PROCESS */
+            {
+                continue;
+            }
+            let pid = u32::try_from(value as usize)
+                .ok()
+                .filter(|&pid| pid != 0)
+                .ok_or_else(|| io::Error::other("Invalid Job process identity."))?;
+            let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if raw.is_null() {
+                let error = io::Error::last_os_error();
+                // A nonexistent PID has no remaining process object to wait on.
+                // Access denial is never equivalent to this evidence.
+                if error.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {
+                    return Err(error);
+                }
+            } else {
+                // PID reuse can only make this wait conservative. Never terminate
+                // a process reopened from a notification; terminate the held Job.
+                self.pending
+                    .push(unsafe { OwnedHandle::from_raw_handle(raw) });
+            }
+            self.observed = self
+                .observed
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("Job notification count overflow."))?;
+        }
+        Ok(false)
+    }
+
+    fn signaled(&mut self) -> io::Result<bool> {
+        let mut error = None;
+        self.pending.retain(|process| {
+            match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+                WAIT_OBJECT_0 => false,
+                WAIT_TIMEOUT => true,
+                _ => {
+                    error = Some(io::Error::last_os_error());
+                    true
+                }
+            }
+        });
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(self.pending.is_empty())
+    }
 }
 impl Proof {
     pub fn terminate(&self) -> io::Result<()> {
         checked(unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) })
     }
 
-    fn retired(&self) -> io::Result<bool> {
+    fn retired(&mut self) -> io::Result<bool> {
+        let drained = self.events.drain()?;
+        let descendants = self.events.signaled()?;
         let child = unsafe { WaitForSingleObject(self.child.as_raw_handle(), 0) };
         if child != WAIT_OBJECT_0 && child != WAIT_TIMEOUT {
             return Err(io::Error::last_os_error());
@@ -201,10 +321,14 @@ impl Proof {
                 null_mut(),
             )
         })?;
-        Ok(child == WAIT_OBJECT_0 && accounting.ActiveProcesses == 0)
+        Ok(drained
+            && descendants
+            && child == WAIT_OBJECT_0
+            && accounting.ActiveProcesses == 0
+            && self.events.observed == u64::from(accounting.TotalProcesses))
     }
 
-    pub async fn retire(&self, deadline: Instant) -> io::Result<()> {
+    pub async fn retire(&mut self, deadline: Instant) -> io::Result<()> {
         // Retaining this Job handle disables last-helper-handle cleanup. Always
         // terminate explicitly, including normal helper exit and launcher crash.
         self.terminate()?;
