@@ -27,12 +27,21 @@ async function add(input){
     }
     trace.push({method,params,...(method==='inventory.list'?{timeout:options.timeoutMs}:{})});
     const step=steps.shift();assert.ok(step,'Unexpected request');assert.equal(method,step.method);
-    if(step.error)throw new IvyError(step.error.code,step.error.message,step.error.outcome);
+    if(step.error)throw new IvyError(step.error.code,step.error.message,step.error.outcome,step.error.details);
     return structuredClone(step.value);
   }};
   let result;
   try{
     let value;
+    if(input.kind==='main-checked'){
+      try { result={ok:true,value:await mainChat(client)}; }
+      catch(e) {
+        const normalized=IvyError.from(e);
+        result={ok:false,origin:e instanceof IvyError?'ivy':'boundary',error:{...error(normalized),...(normalized.details===undefined?{}:{details:normalized.details})}};
+      }
+      rows.push({input:JSON.stringify(input),result:JSON.stringify({trace,result})});
+      return;
+    }
     if(input.kind==='main')value=await mainChat(client);
     else if(input.kind==='project')value=await hostProject(client,input.hostId,input.projectId,{timeoutMs:1234});
     else if(input.kind==='notification')value=mainNotification(input.value);
@@ -63,6 +72,34 @@ await add(main(node,workspace,{...page,items:[{...binding,definition:{interfaceV
 await add(main(node,workspace,{...page,items:[]}));
 const paged=main();paged.steps.unshift({method:'tools.list',value:{...page,items:[],nextCursor:'next'}});await add(paged);
 for(let stage=0;stage<3;stage++){const input=main();input.steps[stage]={method:input.steps[stage].method,error:{code:'outcome_unknown',message:'lost response',outcome:'unknown'}};await add(input);}
+// Keep the original instanceof catch observable after normalizing its outer error.
+const checked=input=>add({...input,kind:'main-checked'});
+await checked(main());
+for(const outcome of ['not_executed','unknown','completed'])for(let stage=0;stage<3;stage++){
+  const input=main();
+  input.steps[stage]={method:input.steps[stage].method,error:{code:'internal_error',message:'coded\ud800-'+ 'x'.repeat(2100),outcome,details:{retained:['\udfff',null,{value:1}]}}};
+  await checked(input);
+}
+for(const selectedNode of [null,{},false,3,'node'])await checked(main(selectedNode));
+for(const selectedWorkspace of [null,{},false,3,'workspace'])await checked(main(node,selectedWorkspace));
+for(const expectedBridge of [null,{},false,3,'bridge'])await checked(main(node,{...workspace,expectedBridge}));
+for(const channels of [null,{},false,3,'','x','long',[],[null],[{}],[{channel:null}],[{channel:{}}],{length:0},{length:1},{length:1,0:{channel:{adapter:'whatsapp'}}},[...workspace.channels,...workspace.channels]])await checked(main(node,{...workspace,channels}));
+for(const flag of [null,false,0,'',true,1,'ready',{},[]]){
+  for(const key of ['connected','synced','ready'])await checked(main({...node,[key]:flag}));
+  await checked(main(node,{...workspace,nativeOwnerReady:flag}));
+}
+await checked(main({...node,principalId:null},{...workspace,expectedBridge:{principalId:null}}));
+await checked(main({...node,principalId:{}},{...workspace,expectedBridge:{principalId:{}}}));
+// Later bad fields must stay unread after an earlier false && operand.
+await checked(main({...node,connected:false},null));
+await checked(main(node,{...workspace,expectedBridge:{principalId:'different'},channels:null}));
+await checked(main(node,{...workspace,nativeOwnerReady:false,channels:null}));
+for(const selectedPage of [null,{}, {items:null}, {items:{}}, {...page,items:[null,binding]}, {...page,items:[binding,null]}, {...page,items:[{...binding,definition:null}]}, {...page,items:[{...binding,definition:false}]}, {...page,provider:null}, {...page,provider:{node:null}}])await checked(main(node,workspace,selectedPage));
+for(const nextCursor of [null,false,0,''])await checked(main(node,workspace,{...page,items:[],nextCursor}));
+const checkedPaged=main();checkedPaged.steps.unshift({method:'tools.list',value:{...page,items:[],nextCursor:'next'}});await checked(checkedPaged);
+for(const serviceNodeId of [null,false,7])await checked(main(node,workspace,{...page,provider:{node:{serviceNodeId}}}));
+const noProviderId=main(node,workspace,{...page,provider:{node:{}}});await checked(noProviderId);
+const noHash=main(node,workspace,{...page,items:[{qualifiedName:binding.qualifiedName,definition:binding.definition}]});await checked(noHash);
 const project={nativeId:'project',name:'Name',paths:['/work'],source:'native',extra:{preserved:true}};
 const item=value=>({resourceRef:{nativeId:'project'},summary:value});
 for(const hostId of [undefined,'','host','\ud800']){
