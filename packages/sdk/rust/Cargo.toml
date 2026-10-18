@@ -16,6 +16,7 @@ futures-util.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+iana-time-zone.workspace = true
 jiff-tzdb.workspace = true
 tz-rs.workspace = true
 
@@ -54,6 +55,10 @@ path = "../../../tests/rust/sdk-native-turn-contents.rs"
 [[test]]
 name = "sdk-native-discovery"
 path = "../../../tests/rust/sdk-native-discovery.rs"
+
+[[test]]
+name = "sdk-date-parse"
+path = "../../../tests/rust/sdk-date-parse.rs"
 [[test]]
 name = "sdk-native-owner"
 path = "../../../tests/rust/sdk-native-owner.rs"
