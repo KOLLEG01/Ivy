@@ -131,6 +131,7 @@ export const rustTests = {
   'tests/rust/domain-schemas.rs': { package: 'ivy-contracts', test: 'domain-schemas' },
   'tests/rust/native-contract.rs': { package: 'ivy-contracts', test: 'native-contract' },
   'tests/rust/checked-native-contract.rs': { package: 'ivy-contracts', test: 'checked-native-contract' },
+  'tests/rust/native-catalog-path.rs': { package: 'ivy-contracts', test: 'native-catalog-path' },
   'tests/rust/builtin_schema.rs': { package: 'ivy-contracts', test: 'builtin_schema' },
   'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
   'tests/rust/sdk.rs': { package: 'ivy-sdk', test: 'sdk' },

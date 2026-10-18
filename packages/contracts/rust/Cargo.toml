@@ -45,3 +45,7 @@ path = "../../../tests/rust/native-contract.rs"
 [[test]]
 name = "checked-native-contract"
 path = "../../../tests/rust/checked-native-contract.rs"
+
+[[test]]
+name = "native-catalog-path"
+path = "../../../tests/rust/native-catalog-path.rs"
