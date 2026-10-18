@@ -386,6 +386,9 @@ pub async fn spawn(
         .spawn()
         .map_err(|_| IvyError::new("spawn_failed", "Command could not start."))?;
     let pid = child.id().expect("spawned process has an identity");
+    // The launch handshake races acknowledgement against Child::wait(), which
+    // closes any stdin still held by Child. Retain the caller's pipe first.
+    let stdin = child.stdin.take();
     #[cfg(windows)]
     let launch_proof = if let Some(listener) = launch_listener {
         match tokio::time::timeout(Duration::from_secs(5), listener.accept(&mut child)).await {
@@ -403,7 +406,6 @@ pub async fn spawn(
     } else {
         None
     };
-    let stdin = child.stdin.take();
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let make_capture = || {
