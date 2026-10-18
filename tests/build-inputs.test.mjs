@@ -62,6 +62,7 @@ test("incremental backend staging removes retired contracts and preserves curren
     writeFileSync(join(root, "instructions/secretary-notification-policy.ts"), 'export const secretaryNotificationPolicy = "shared policy";\n');
     mkdirSync(join(root, "services/chat-bridge/src"), { recursive: true });
     writeFileSync(join(root, "services/chat-bridge/src/main-context.ts"), 'export const mainInstructions = "Main policy";\n');
+    writeFileSync(join(root, "services/chat-bridge/src/notice-input.ts"), 'export const noticePrompt=(callerPrincipalId,text)=>`before ${text} between ${noticePrefix(callerPrincipalId)} after`;\n');
     process.chdir(root);
     stageBackend({ buildId: "fixture" });
     assert.equal(existsSync("dist/specs/native/codex-0.149.1"), false);
@@ -74,11 +75,33 @@ test("incremental backend staging removes retired contracts and preserves curren
     assert.equal(readFileSync("dist/instructions/ivy-dev-mcp-instructions.md", "utf8"), "instructions/ivy-dev-mcp-instructions.md");
     assert.equal(JSON.parse(readFileSync("dist/instructions/secretary-notification-policy.json", "utf8")), "shared policy");
     assert.equal(JSON.parse(readFileSync("dist/instructions/chat-main-instructions.json", "utf8")), "Main policy");
+    assert.deepEqual(JSON.parse(readFileSync("dist/instructions/chat-notice-prompt.json", "utf8")), ["before ", " between ", " after"]);
   } finally {
     process.chdir(previous);
     assert.ok(relative(parent, root).startsWith("ivy-build-inputs-"));
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("notice instruction assets cook only the two approved template expressions", () => {
+  const root = mkdtempSync(join(tmpdir(), "ivy-notice-inputs-"));
+  const source = join(root, "services/chat-bridge/src/notice-input.ts");
+  try {
+    mkdirSync(dirname(source), { recursive: true });
+    writeFileSync(join(dirname(source), "main-context.ts"), 'export const mainInstructions="Main";');
+    const template = '`start\\n\\uD800${text}\\r\\n\\u0000${noticePrefix(callerPrincipalId)}end\\uDFFF`';
+    writeFileSync(source, 'export const noticePrompt=(callerPrincipalId:string,text:string):string=>' + template + ';\nthrow new Error("must not execute");');
+    const files = buildInstructions({ root, component: "chat-bridge" });
+    assert.equal(files.length, 2);
+    const parts = JSON.parse(readFileSync(files[1], "utf8"));
+    assert.deepEqual(parts, ["start\n\ud800", "\r\n\u0000", "end\udfff"]);
+    assert.equal(parts[0] + "message\ud800" + parts[1] + "prefix\udfff" + parts[2], runInNewContext(template, { text: "message\ud800", callerPrincipalId: "caller", noticePrefix: () => "prefix\udfff" }));
+    for (const replacement of [template.replace('${text}', '${other}'), template.replace('noticePrefix(callerPrincipalId)', 'noticePrefix(other)'), template.replace('noticePrefix(callerPrincipalId)', 'noticePrefix?.(callerPrincipalId)'), template.replace('${text}', '${text}${extra}')]) {
+      writeFileSync(source, 'export const noticePrompt=(callerPrincipalId,text)=>' + replacement + ';');
+      assert.throws(() => buildInstructions({ root, component: "chat-bridge" }), /Instruction template/);
+      assert.deepEqual(JSON.parse(readFileSync(files[1], "utf8")), parts);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("instruction assets retain cooked UTF-16 text without executing source modules", () => {

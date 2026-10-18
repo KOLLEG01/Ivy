@@ -58,9 +58,10 @@ test('native builds expose shared instruction assets outside target-specific exe
     const path = join(f.root, source), policy = 'shared policy \ud800';
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, 'export const ' + exportName + ' = ' + JSON.stringify(policy) + ';\n');
+    if (component === 'chat-bridge') writeFileSync(join(dirname(path), 'notice-input.ts'), 'export const noticePrompt=(callerPrincipalId,text)=>`before ${text} between ${noticePrefix(callerPrincipalId)} after`;');
     const result = f.build();
     assert.equal(result.files.length, 2);
-    assert.deepEqual(result.instructionFiles, [join(f.root, `.local/build/rust/${component}/instructions/${name}.json`)]);
+    assert.deepEqual(result.instructionFiles, [join(f.root, `.local/build/rust/${component}/instructions/${name}.json`), ...(component === 'chat-bridge' ? [join(f.root, '.local/build/rust/chat-bridge/instructions/chat-notice-prompt.json')] : [])]);
     assert.equal(JSON.parse(readFileSync(result.instructionFiles[0], 'utf8')), policy);
   }, component);
 });
