@@ -8,10 +8,10 @@ publish.workspace = true
 
 [dependencies]
 ivy-contracts.workspace = true
-tokio.workspace = true
-
-[dev-dependencies]
+ivy-sdk.workspace = true
 ivy-host-runtime.workspace = true
+chrono.workspace = true
+tokio.workspace = true
 
 [[test]]
 name = "service-manager-policy"

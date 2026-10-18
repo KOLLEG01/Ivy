@@ -3,6 +3,12 @@ use ivy_contracts::{IvyJson, IvyResult};
 pub const HOST_SCHEMA: &str = "https://ivy.invalid/schemas/host.schema.json";
 pub const WIRE_SCHEMA: &str = "https://ivy.invalid/schemas/hive-wire.schema.json";
 
+pub fn bundled_registry() -> IvyResult<IvyJson> {
+    registry(|reference, document| {
+        ivy_contracts::host_bundle::bundled_schema(&reference.into(), Some(&document.into()))
+    })
+}
+
 /// Schema expansion is supplied by the common host bundler. Keeping the exact
 /// normative graph here avoids a second schema generator or approximated types.
 pub fn registry(mut bundle: impl FnMut(&str, &str) -> IvyResult<IvyJson>) -> IvyResult<IvyJson> {
