@@ -4,3 +4,4 @@ pub mod instructions;
 pub mod interactions;
 pub mod local_state;
 pub mod notifications;
+pub mod skills;
