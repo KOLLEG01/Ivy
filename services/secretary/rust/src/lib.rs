@@ -1,6 +1,7 @@
 pub mod assignment_message;
 pub mod assignment_object;
 pub mod assignment_schema;
+pub mod browser_notice;
 pub mod document;
 pub mod journal;
 pub mod media_input;

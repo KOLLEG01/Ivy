@@ -5,6 +5,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "browser_notice_cases.rs"]
+mod browser_notice_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 
