@@ -88,6 +88,11 @@ if(realProcess){
  await add('process-host-mismatch',{command:command('empty'),cwd:processRoot,target:{hostId:'other'}});
  for(const ownerAt of [1,2])await add('process-owner-'+ownerAt,{command:command('empty'),cwd:processRoot,ownerAt,owner:{principalId:'other'}});
  await add('process-no-command',{noCommand:true,noTarget:true,cancelBefore:true});
+ if(process.platform==='win32'){
+  for(const directory of ['isolated','replacement'])for(const unit of ['\ud800','\udc00'])
+   await add('process-executable-'+directory+'-'+unit.charCodeAt(0).toString(16),{command:{...command('exe'),executable:resolve(processRoot,directory,'exec-'+unit+'.exe')},cwd:processRoot});
+  await add('process-executable-valid-pair',{command:{...command('exe'),executable:resolve(processRoot,'paired','exec-😀.exe')},cwd:processRoot});
+ }
 }else{
 await add('success-empty');await add('success-both',{stdout:'standard output',stderr:'standard error'});
 await add('success-stderr',{stdout:'',stderr:'diagnostics'});

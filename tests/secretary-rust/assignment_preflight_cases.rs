@@ -43,6 +43,39 @@ async fn compare_preflight(real_process: bool) {
         std::env::temp_dir().join(format!("secretary-preflight-{}", uuid::Uuid::new_v4())),
     );
     std::fs::create_dir(&process_root.0).unwrap();
+    #[cfg(windows)]
+    if real_process {
+        use std::os::windows::ffi::OsStringExt;
+        let output = std::process::Command::new("node")
+            .args(["-p", "process.execPath"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let executable =
+            std::path::PathBuf::from(std::str::from_utf8(&output.stdout).unwrap().trim());
+        for directory in ["isolated", "replacement", "paired"] {
+            let path = process_root.0.join(directory);
+            std::fs::create_dir(&path).unwrap();
+            if directory == "paired" {
+                std::fs::copy(&executable, path.join("exec-😀.exe")).unwrap();
+            } else {
+                // Only native Windows I/O can create these exact names. A JS fs
+                // string would already select the replacement-character file.
+                for unit in [0xd800, 0xdc00] {
+                    let name = "exec-"
+                        .encode_utf16()
+                        .chain([unit])
+                        .chain(".exe".encode_utf16())
+                        .collect::<Vec<_>>();
+                    std::fs::copy(&executable, path.join(std::ffi::OsString::from_wide(&name)))
+                        .unwrap();
+                }
+                if directory == "replacement" {
+                    std::fs::copy(&executable, path.join("exec-�.exe")).unwrap();
+                }
+            }
+        }
+    }
     let mut command = std::process::Command::new("node");
     command
         .arg("tests/secretary-rust/assignment-preflight-oracle.mjs")
@@ -67,7 +100,14 @@ async fn compare_preflight(real_process: bool) {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), if real_process { 21 } else { 45 });
+    assert_eq!(
+        rows.len(),
+        if real_process {
+            if cfg!(windows) { 26 } else { 21 }
+        } else {
+            45
+        }
+    );
     for (index, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();

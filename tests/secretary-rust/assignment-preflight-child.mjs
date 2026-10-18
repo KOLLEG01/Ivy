@@ -5,6 +5,7 @@ switch(mode){
  case 'text':process.stdout.write('\ufeffOriginal é😀\n');process.stderr.write(' diagnostics ');break;
  case 'args':process.stdout.write(JSON.stringify(args));break;
  case 'cwd':process.stdout.write(process.cwd());break;
+ case 'exe':process.stdout.write(process.execPath);break;
  case 'env':process.stdout.write(JSON.stringify(process.env.RUST_TEST_THREADS??null));break;
  case 'exit':process.stdout.write(' output ');process.stderr.write(' error ');process.exitCode=7;break;
  case 'whitespace':process.stdout.write(' \t\n');process.stderr.write('\ufeff');process.exitCode=7;break;
