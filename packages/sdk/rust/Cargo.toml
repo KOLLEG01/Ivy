@@ -10,6 +10,7 @@ publish.workspace = true
 ivy-contracts.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tokio-tungstenite.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
@@ -29,3 +30,7 @@ path = "../../../tests/rust/sdk-native.rs"
 [[test]]
 name = "sdk-consumers"
 path = "../../../tests/rust/sdk-consumers.rs"
+
+[[test]]
+name = "sdk-provider"
+path = "../../../tests/rust/sdk-provider.rs"
