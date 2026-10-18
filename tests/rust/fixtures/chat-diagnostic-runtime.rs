@@ -138,7 +138,15 @@ impl Client {
         let mut state = self.0.lock().unwrap();
         let step = state.step.clone();
         match method {
-            "system.status" => Ok(Json::object([("runtimeEpoch", "chat".into())])),
+            "system.status" => {
+                if step.get("failure") == Some(&Json::from("status")) {
+                    return Err(IvyError::new(
+                        "fixture_unavailable",
+                        "Operation identity read failed.",
+                    ));
+                }
+                Ok(Json::object([("runtimeEpoch", "chat".into())]))
+            }
             "settings.get" => {
                 if step.get("failure") == Some(&Json::from("settings")) {
                     return Err(IvyError::new(
@@ -272,6 +280,12 @@ impl DiagnosticMain for Main<'_> {
                     ("query", query.clone()),
                 ]),
             );
+            if flag(&self.client.step(), "noticeError") {
+                return Err(IvyError::new(
+                    "publication_pending",
+                    "Original reply is not published yet.",
+                ));
+            }
             Ok(Json::object([(
                 "data",
                 Json::object([("state", self.notice_state.clone())]),

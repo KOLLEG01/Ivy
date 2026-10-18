@@ -78,18 +78,22 @@ add('retained-receipt-missing-operation-is-not-retried',[tick()],{saved:seed([en
 for(const phase of ['accepted','dispatching','outcome_unknown','succeeded'])add('review-'+phase,[tick(),restart,tick()],
  {saved:seed([entry('phase')]),seedPhase:phase,noticeState:phase==='succeeded'?'confirmed':'pending'});
 add('delivered-reply-still-unconfirmed',[tick(),tick()],{saved:seed([entry('unconfirmed')]),seedPhase:'succeeded',noticeState:'pending'});
+add('notice-publication-failure-keeps-pending-receipt',[tick([base],now,{noticeError:true}),restart,tick()],{saved:seed([entry('publication')]),seedPhase:'succeeded',noticeState:'confirmed'});
 add('receipt-only-confirmation-removes-row',[tick(),restart,tick()],{saved:seed([entry('only',{receiptOnly:true,active:false,resolvedAt:now})]),seedPhase:'succeeded',noticeState:'confirmed'});
 add('proven-unexecuted-failure-retries-with-new-id',[tick(),restart,tick()],{saved:seed([entry('failed')]),seedPhase:'failed',errorOutcome:'not_executed'});
 add('unknown-failure-never-retries',[tick(),restart,tick()],{saved:seed([entry('unknown')]),seedPhase:'failed',errorOutcome:'unknown'});
 add('native-readiness-failure-retains-original-id',[tick([base],now,{readyError:true}),restart,tick()],{saved:seed([entry('ready')]),seedPhase:'failed',errorOutcome:'not_executed'});
 add('missing-main-keeps-incident-before-request',[tick(),tick([base],now+delay,{mainMissing:true}),tick([base],now+delay+1)]);
+add('operation-id-read-failure-keeps-incident',[tick(),tick([base],now+delay,{failure:'status'}),restart,tick([base],now+delay+1)]);
 for(const notifyError of ['before','after','returned-failed'])add('notification-'+notifyError,[tick(),tick([base],now+delay,{notifyError}),restart,tick([base],now+delay+1)]);
 for(const failure of ['first-page','second-page','settings'])add('failed-'+failure+'-preserves-receipts',[tick([],now+delay,{pages:[page([],'next'),page([])],failure}),restart,tick()],{saved:seed([entry('snapshot')])});
 for(const abort of ['before','page-0','page-1','settings','find','notify'])add('abort-'+abort,[tick([base,other],now+delay,{pages:[page([base],'next'),page([other])],abort}),restart,tick([base,other],now+delay+1)],{saved:seed([entry('aborted',{alert:null})])});
 add('quiet-return-after-settings-abort',[tick([],Date.parse('2026-10-13T21:00Z'),{quiet,abort:'settings'})],{saved:seed([entry('quiet')])});
 const completed=entry('completed',{active:false,resolvedAt:now,alert:pending('completed',true,true),recovery:pending('completed-recovery',true,true)});
 add('completed-seven-day-boundary',[tick([],now+7*86400000),restart,tick([],now+7*86400000+1)],{saved:seed([completed])});
-add('bounded-history-keeps-active-and-unconfirmed',[tick([],now)],{saved:seed([completed,{...completed,code:'newer',resolvedAt:now+1},entry('active'),entry('unconfirmed',{active:false,resolvedAt:now})]),historyLimits:{count:3,bytes:16777216}});
+add('bounded-history-keeps-active-and-unconfirmed',[tick([],now)],{saved:seed([{...completed,code:'completed-oldest'},{...completed,code:'completed-newest',resolvedAt:now+1},entry('active',{code:'active'}),entry('unconfirmed',{code:'unconfirmed',active:false,resolvedAt:now})]),historyLimits:{count:3,bytes:16777216}});
+add('confirmation-evicts-completed-row',[tick([]),restart,tick([])],{saved:seed([completed]),historyLimits:{count:0,bytes:1}});
+add('review-confirmation-evicts-newly-completed-row',[tick([])],{saved:seed([{...completed,alert:pending('delivering'),recovery:pending('delivering-recovery')}]),seedPhase:'succeeded',noticeState:'confirmed',historyLimits:{count:0,bytes:1}});
 add('lost-queued-marker-after-admission',[tick(),tick([base],now+delay),{action:'forgetQueued'},restart,tick([base],now+delay+1)]);
 
 const all=[];
@@ -101,7 +105,7 @@ for(const c of cases){
  const client={async request(method,params,options){
   log(method,params);if(options?.signal?.aborted)throw options.signal.reason;
   const s=control.step;
-  if(method==='system.status')return{runtimeEpoch:'chat'};
+  if(method==='system.status'){if(s.failure==='status')throw new IvyError('fixture_unavailable','Operation identity read failed.');return{runtimeEpoch:'chat'};}
   if(method==='settings.get'){
    if(s.failure==='settings')throw new IvyError('fixture_unavailable','Settings read failed.');
    if(s.abort==='settings')control.signal.abort(error());
@@ -140,7 +144,7 @@ for(const c of cases){
    if(s.notifyError==='after')throw new IvyError('outcome_unknown','Notice reply was lost.','unknown');
    return s.notifyError==='returned-failed'?{phase:'failed'}:op.value;
   },
-  async notice(caller,query){log('main.notice',{caller,query});return{data:{state:c.noticeState??'pending'}};}
+  async notice(caller,query){log('main.notice',{caller,query});if(control.step.noticeError)throw new IvyError('publication_pending','Original reply is not published yet.');return{data:{state:c.noticeState??'pending'}};}
  };
  c.expected=[];control.calls=[];let lastWrite=0;
  const snapshots=()=>{const d=new DatabaseSync(join(root,'chat-bridge.sqlite'));try{const rows=d.prepare('SELECT rowid,value_json FROM diagnostic_test_writes WHERE rowid>? ORDER BY rowid').all(lastWrite);lastWrite=rows.at(-1)?.rowid??lastWrite;return rows.map(r=>JSON.parse(r.value_json));}finally{d.close();}};
@@ -158,6 +162,17 @@ for(const c of cases){
    c.expected.push({result,calls:control.calls,writes:snapshots(),state:store.diagnosticNoticeState(scope),operationCount});
   }
  }finally{store.close();rmSync(root,{recursive:true,force:true});}
+ // Explicit expectations guard against an oracle fixture accidentally becoming a
+ // no-op or missing its intended interruption/pressure boundary.
+ const notices=c.expected.flatMap(e=>e.calls).filter(c=>c.method==='main.notify');
+ const final=c.expected.at(-1);
+ if(c.label==='five-minute-alert-and-stable-recovery'&&(notices.length!==2||final.operationCount!==2))throw Error('Five-minute notice/recovery path was not exercised.');
+ if(c.label==='duplicate-group-retains-both-original-ids'&&(notices.length!==3||final.operationCount!==3))throw Error('Grouped original receipts were not exercised.');
+ if(c.label==='lost-queued-marker-after-admission'&&(notices.length!==2||notices[0].params.request.operationId!==notices[1].params.request.operationId||final.operationCount!==1))throw Error('Lost receipt did not reuse the original identity.');
+ if(c.label==='bounded-history-keeps-active-and-unconfirmed'&&(!c.expected[0].writes.length||Object.values(final.state).some(e=>e.code==='completed-oldest')||Object.keys(final.state).length!==3))throw Error('Completed-history pressure was not forced.');
+ if(c.label.includes('evicts-')&&Object.keys(final.state).length!==0)throw Error('Completed row was restored after eviction.');
+ if(c.label==='completed-seven-day-boundary'&&(Object.keys(c.expected[0].state).length!==1||Object.keys(final.state).length!==0))throw Error('Seven-day deduplication boundary was not exercised.');
+ for(const e of c.expected)if(e.result.error&&!['fixture_cancelled','fixture_not_ready','fixture_unavailable','publication_pending','outcome_unknown','chat_main_missing','chat_operational_notice_failed'].includes(e.result.error.code))throw Error('Unexpected fixture failure: '+c.label+' '+e.result.error.code);
  all.push(c);
 }
 process.stdout.write(JSON.stringify({definition,scope,cases:all}));
