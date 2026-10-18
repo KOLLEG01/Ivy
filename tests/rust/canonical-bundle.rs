@@ -1,5 +1,5 @@
 use ivy_contracts::{
-    IvyJson, IvyResult, agent_bundle, core_bundle, host_bundle,
+    IvyJson, IvyResult, agent_bundle, chat_bundle, core_bundle, host_bundle,
     json::{parse, stringify},
 };
 use sha2::{Digest, Sha256};
@@ -38,6 +38,7 @@ fn all_canonical_definitions_and_operation_inputs_match_typescript() {
                     "core" => core_bundle::bundled_schema(reference, document),
                     "host" => host_bundle::bundled_schema(reference, document),
                     "agent" => agent_bundle::bundled_schema(reference, document),
+                    "chat" => chat_bundle::bundled_schema(reference, document),
                     "operation" => {
                         core_bundle::operation_input_schema(&reference.to_utf8().unwrap())
                     }
