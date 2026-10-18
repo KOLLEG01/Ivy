@@ -66,7 +66,27 @@ wss.on('connection',(socket,request)=>{
     else if(method==='events.ack'){acks.push(params);reply(id,{});}
   });
 });
-if(process.argv[2]!=='oracle'){
+if(process.argv[2]==='abort-oracle'){
+  const {ServiceClient,ServiceConnection}=await import('../../packages/sdk/src/service.ts');
+  const {IvyError}=await import('../../packages/contracts/src/errors.ts');
+  let context;
+  const owner=new ServiceClient({publicBaseUrl:url,credential:()=> 'fixture-token',identity,registry:()=>registry,handlers:{'fixture.echo':(_,value)=>{value.signal.throwIfAborted();context=value;return true;}},reconcile:async()=>{}});
+  const observe=signal=>{try{signal.throwIfAborted();return null;}catch(error){return {code:error.code,message:error.message,outcome:error.outcome,details:error.details??null};}};
+  const out=[];
+  for(const outcome of ['not_executed','unknown','completed',null]){
+    const socketUrl=new URL('ws',url);socketUrl.protocol='ws:';
+    const c=new ServiceConnection(socketUrl,'fixture-token',owner);await c.opened;
+    c.generation=(await c.request('service.connect',identity)).generation;c.setRegistry(registry);c.ready=true;
+    await c.request('test.invoke',{});
+    const retained=context.signal;
+    const before=[observe(c.signal),observe(retained)];
+    if(outcome===null)c.close();else c.close(new IvyError('fixture_\ud800','Retained \udfff '+ 'x'.repeat(2050),outcome,{text:'\ud800',nested:[1,null,false]}));
+    c.close(new IvyError('later','Must not replace the first close.'));
+    out.push({before,connection:observe(c.signal),context:observe(retained),clone:observe(retained),aborted:retained.aborted});
+  }
+  for(const socket of wss.clients)socket.terminate();await new Promise(resolve=>wss.close(resolve));
+  console.log(JSON.stringify(out));
+}else if(process.argv[2]!=='oracle'){
   console.log(JSON.stringify({url,identity,registry}));
 }else{
   const {ServiceClient,ServiceConnection}=await import('../../packages/sdk/src/service.ts');

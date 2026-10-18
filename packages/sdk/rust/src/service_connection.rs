@@ -16,7 +16,7 @@ use std::{
     panic::AssertUnwindSafe,
     pin::Pin,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -38,6 +38,14 @@ pub struct InvocationContext {
     pub operation_id: Option<JsString>,
     pub generation: u64,
     pub signal: CancellationToken,
+    close_reason: Arc<OnceLock<IvyError>>,
+}
+impl InvocationContext {
+    /// Match AbortSignal.throwIfAborted while retaining the owning generation's
+    /// first close error, including exact UTF-16 text, outcome and details.
+    pub fn throw_if_aborted(&self) -> IvyResult<()> {
+        throw_if_aborted(&self.signal, &self.close_reason)
+    }
 }
 /// Share this across socket generations. Closing a socket does not free accepted handlers.
 #[derive(Clone)]
@@ -73,7 +81,6 @@ struct Binding {
 }
 type Reply = oneshot::Sender<IvyResult<IvyJson>>;
 struct State {
-    closed: Option<IvyError>,
     pending: HashMap<String, Reply>,
     bindings: HashMap<JsString, Binding>,
     owner: Option<OwnerObservation>,
@@ -87,6 +94,7 @@ struct Inner {
     options: ConnectionOptions,
     state: Mutex<State>,
     signal: CancellationToken,
+    close_reason: Arc<OnceLock<IvyError>>,
     generation: AtomicU64,
     ready: AtomicBool,
     outbound: mpsc::UnboundedSender<String>,
@@ -96,6 +104,7 @@ struct Inner {
 }
 impl Drop for Inner {
     fn drop(&mut self) {
+        self.close_reason.get_or_init(stopping);
         self.signal.cancel();
     }
 }
@@ -116,6 +125,13 @@ fn socket_closed() -> IvyError {
 }
 fn stopping() -> IvyError {
     unknown("service_unavailable", "Service connection is stopping.")
+}
+fn throw_if_aborted(signal: &CancellationToken, reason: &OnceLock<IvyError>) -> IvyResult<()> {
+    if signal.is_cancelled() {
+        Err(reason.get().cloned().unwrap_or_else(stopping))
+    } else {
+        Ok(())
+    }
 }
 
 impl ServiceConnection {
@@ -160,12 +176,12 @@ impl ServiceConnection {
         let connection = Self(Arc::new(Inner {
             options,
             state: Mutex::new(State {
-                closed: None,
                 pending: HashMap::new(),
                 bindings: HashMap::new(),
                 owner: None,
             }),
             signal: CancellationToken::new(),
+            close_reason: Arc::new(OnceLock::new()),
             generation: AtomicU64::new(0),
             ready: AtomicBool::new(false),
             outbound,
@@ -302,7 +318,11 @@ impl ServiceConnection {
         self.0.ready.store(ready, Ordering::Release);
     }
     pub fn close_reason(&self) -> Option<IvyError> {
-        self.0.state.lock().unwrap().closed.clone()
+        self.0.close_reason.get().cloned()
+    }
+    /// Return the original abort reason for this connection generation.
+    pub fn throw_if_aborted(&self) -> IvyResult<()> {
+        throw_if_aborted(&self.0.signal, &self.0.close_reason)
     }
     pub fn check_open(&self) -> IvyResult<()> {
         match self.close_reason() {
@@ -319,10 +339,9 @@ impl ServiceConnection {
     pub fn close_with(&self, error: IvyError) {
         let pending = {
             let mut state = self.0.state.lock().unwrap();
-            if state.closed.is_some() {
+            if self.0.close_reason.set(error.clone()).is_err() {
                 return;
             }
-            state.closed = Some(error.clone());
             self.0.ready.store(false, Ordering::Release);
             std::mem::take(&mut state.pending)
         };
@@ -375,8 +394,8 @@ impl ServiceConnection {
         Ok(registry.clone())
     }
     fn send(&self, value: &IvyJson) -> IvyResult<()> {
-        let state = self.0.state.lock().unwrap();
-        if state.closed.is_some() {
+        let _state = self.0.state.lock().unwrap();
+        if self.0.close_reason.get().is_some() {
             return Err(IvyError::new(
                 "service_unavailable",
                 "Hive connection is unavailable.",
@@ -476,7 +495,10 @@ impl ServiceConnection {
         let generation = params.get("generation").unwrap().as_f64().unwrap() as u64;
         let binding = {
             let state = self.0.state.lock().unwrap();
-            if state.closed.is_some() || !self.ready() || generation != self.generation() {
+            if self.0.close_reason.get().is_some()
+                || !self.ready()
+                || generation != self.generation()
+            {
                 Err(IvyError::new(
                     "stale_generation",
                     "Invocation generation is not ready.",
@@ -528,6 +550,7 @@ impl ServiceConnection {
                 .cloned(),
             generation,
             signal: self.signal(),
+            close_reason: self.0.close_reason.clone(),
         };
         let arguments = params.get("arguments").unwrap().clone();
         let connection = self.clone();
@@ -610,7 +633,7 @@ impl RpcClient for ServiceConnection {
             let (reply, result) = oneshot::channel();
             {
                 let mut state = self.0.state.lock().unwrap();
-                if state.closed.is_some() {
+                if self.0.close_reason.get().is_some() {
                     return Err(IvyError::new(
                         "service_unavailable",
                         "Hive service connection is unavailable.",
