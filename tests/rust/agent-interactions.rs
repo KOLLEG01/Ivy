@@ -11,6 +11,8 @@ use tokio::sync::oneshot;
 
 // The native cache consumes this transport. Keep its stream/hook qualification
 // in the existing affected interaction target while host module wiring is owned upstream.
+#[path = "agent-app-tools-launch.rs"]
+mod app_tools_launch_cases;
 #[path = "agent-native-rpc.rs"]
 mod native_rpc_cases;
 
