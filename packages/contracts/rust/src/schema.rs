@@ -1,7 +1,203 @@
 //! Lossless local-schema references, bundling and conservative query-path inference.
 use crate::{IvyError, IvyJson, IvyResult, JsString, json::array_index};
-use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
+
+/// An admitted finite schema graph. Compilation separately checks keyword values.
+pub struct AdmittedSchema {
+    schema: IvyJson,
+}
+impl AdmittedSchema {
+    pub fn schema(&self) -> &IvyJson {
+        &self.schema
+    }
+}
+
+/// Enforce the submitted-schema language, graph limits and RE2 pattern syntax.
+pub fn admit_schema(schema: &IvyJson) -> IvyResult<AdmittedSchema> {
+    crate::json::canonical(schema, 256 * 1024)?;
+    const KEYWORDS: &[&str] = &[
+        "$schema",
+        "$id",
+        "$defs",
+        "$ref",
+        "title",
+        "description",
+        "default",
+        "examples",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "format",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "minProperties",
+        "maxProperties",
+        "items",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "enum",
+        "const",
+        "anyOf",
+        "oneOf",
+        "allOf",
+        "if",
+        "then",
+        "else",
+        "not",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minLength",
+        "maxLength",
+        "pattern",
+    ];
+    #[derive(Clone)]
+    struct State {
+        depth: usize,
+        consumption: usize,
+        trail: Arc<HashSet<usize>>,
+        refs: Arc<HashMap<usize, usize>>,
+    }
+    enum Work<'a> {
+        Inspect(&'a IvyJson, State),
+        Keyword(&'a IvyJson, &'static str, State),
+    }
+    let identity = |value: &IvyJson| value as *const IvyJson as usize;
+    let state = State {
+        depth: 0,
+        consumption: 0,
+        trail: Arc::new(HashSet::new()),
+        refs: Arc::new(HashMap::from([(identity(schema), 0)])),
+    };
+    let mut work = vec![Work::Inspect(schema, state)];
+    let mut visited = 0;
+    while let Some(step) = work.pop() {
+        match step {
+            Work::Inspect(node, mut state) => {
+                visited += 1;
+                if visited > 8192 || state.depth > 64 {
+                    return Err(IvyError::new(
+                        "limit_exceeded",
+                        "Schema exceeds the validation complexity limit.",
+                    ));
+                }
+                if matches!(node, IvyJson::Bool(_)) {
+                    continue;
+                }
+                if node.as_object().is_none() {
+                    return Err(registry("Expected a JSON schema."));
+                }
+                for (key, _) in entries(node) {
+                    if !KEYWORDS
+                        .iter()
+                        .any(|keyword| key == &JsString::from(*keyword))
+                    {
+                        let mut message = JsString::from("Unsupported schema keyword: ");
+                        message.0.extend(key.0.iter().take(80));
+                        return Err(
+                            registry("Unsupported schema keyword.").with_js_message(message)
+                        );
+                    }
+                }
+                if state.trail.contains(&identity(node)) {
+                    return Err(registry("Schema has a non-consuming recursive reference."));
+                }
+                Arc::make_mut(&mut state.trail).insert(identity(node));
+                for keyword in [
+                    "$ref",
+                    "pattern",
+                    "anyOf",
+                    "oneOf",
+                    "allOf",
+                    "if",
+                    "then",
+                    "else",
+                    "not",
+                    "properties",
+                    "$defs",
+                    "items",
+                    "additionalProperties",
+                ]
+                .into_iter()
+                .rev()
+                {
+                    if let Some(value) = node.get(keyword) {
+                        work.push(Work::Keyword(value, keyword, state.clone()));
+                    }
+                }
+            }
+            Work::Keyword(value, keyword, state) => {
+                let mut child_state = state.clone();
+                child_state.depth += 1;
+                match keyword {
+                    "$ref" => {
+                        let reference = value
+                            .as_js_string()
+                            .ok_or_else(|| registry("Invalid schema reference."))?;
+                        let target = resolve(schema, reference)?;
+                        let id = identity(target);
+                        if let Some(prior) = state.refs.get(&id) {
+                            if state.consumption <= *prior {
+                                return Err(registry(
+                                    "Schema recursion must consume a value level.",
+                                ));
+                            }
+                        } else {
+                            Arc::make_mut(&mut child_state.refs).insert(id, state.consumption);
+                            work.push(Work::Inspect(target, child_state));
+                        }
+                    }
+                    "pattern" => {
+                        let pattern = value
+                            .as_js_string()
+                            .filter(|pattern| pattern.0.len() <= 1024)
+                            .ok_or_else(|| registry("Schema pattern exceeds its limit."))?;
+                        crate::re2::Re2Pattern::compile(pattern)?;
+                    }
+                    "anyOf" | "oneOf" | "allOf" => {
+                        let children = value
+                            .as_array()
+                            .filter(|values| !values.is_empty() && values.len() <= 32)
+                            .ok_or_else(|| registry("Schema alternatives exceed their limit."))?;
+                        for child in children.iter().rev() {
+                            work.push(Work::Inspect(child, child_state.clone()));
+                        }
+                    }
+                    "properties" | "$defs" => {
+                        let children = value
+                            .as_object()
+                            .ok_or_else(|| registry("Invalid schema property map."))?;
+                        if children.len() > 1024 || value.get("__proto__").is_some() {
+                            return Err(registry("Unsupported schema property map."));
+                        }
+                        child_state.trail = Arc::new(HashSet::new());
+                        if keyword == "properties" {
+                            child_state.consumption += 1;
+                        }
+                        for (_, child) in entries(value).into_iter().rev() {
+                            work.push(Work::Inspect(child, child_state.clone()));
+                        }
+                    }
+                    "items" | "additionalProperties" => {
+                        child_state.trail = Arc::new(HashSet::new());
+                        child_state.consumption += 1;
+                        work.push(Work::Inspect(value, child_state));
+                    }
+                    _ => work.push(Work::Inspect(value, child_state)),
+                }
+            }
+        }
+    }
+    Ok(AdmittedSchema {
+        schema: schema.clone(),
+    })
+}
 
 pub fn pointer_parts(pointer: &JsString) -> IvyResult<Vec<JsString>> {
     if pointer.0.first() != Some(&47) {
