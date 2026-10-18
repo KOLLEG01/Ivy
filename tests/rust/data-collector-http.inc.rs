@@ -421,25 +421,50 @@ async fn observe_http(c: &IvyJson) -> (IvyJson, IvyJson, usize, f64) {
 }
 async fn http_trace(mode: &str) {
     let oracle = Database::new();
-    let output = std::process::Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/data-collector-http-oracle.mjs",
-            "runtime",
-        ])
-        .arg(oracle.0.join("node"))
-        .arg(mode)
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let cases = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
-    let cases = cases.as_array().unwrap();
+    let path = oracle.0.join("node");
+    let original_mode = mode.to_owned();
+    let mut original = Some(tokio::spawn(async move {
+        tokio::process::Command::new("node")
+            .args([
+                "--experimental-transform-types",
+                "--disable-warning=ExperimentalWarning",
+                "tests/fixtures/data-collector-http-oracle.mjs",
+                "runtime",
+            ])
+            .arg(path)
+            .arg(original_mode)
+            .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap()
+    }));
+    fn oracle_result(output: std::process::Output) -> IvyJson {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
+    }
+    let specs = if mode == "timeouts" {
+        // Obtain only the shared input definitions while both real socket peers
+        // observe their unchanged 30-second scans concurrently.
+        let input=oracle_result(std::process::Command::new("node").args(["--input-type=module","-e","import {boundaryCases} from './tests/fixtures/data-collector-http-boundaries.mjs'; console.log(JSON.stringify(boundaryCases('timeouts')));"])
+            .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")).output().unwrap());
+        IvyJson::Array(
+            input
+                .as_array()
+                .unwrap()
+                .iter()
+                .cloned()
+                .map(|c| IvyJson::object([("case", c)]))
+                .collect(),
+        )
+    } else {
+        oracle_result(original.take().unwrap().await.unwrap())
+    };
+    let cases = specs.as_array().unwrap();
     let mut observed = Vec::new();
     if mode == "timeouts" {
         let mut pending = tokio::task::JoinSet::new();
@@ -459,6 +484,12 @@ async fn http_trace(mode: &str) {
             ));
         }
     }
+    let expected = if let Some(original) = original {
+        oracle_result(original.await.unwrap())
+    } else {
+        specs
+    };
+    let cases = expected.as_array().unwrap();
     let mut gaps = Vec::new();
     for ((_, (mut response, mut queued, calls, elapsed)), expected) in
         observed.into_iter().zip(cases)
