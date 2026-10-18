@@ -4,6 +4,8 @@ use ivy_hive::store::{
 };
 #[path = "hive_ledger.rs"]
 mod ledger;
+#[path = "hive_query.rs"]
+mod query;
 use rusqlite::types::ValueRef;
 use serde_json::{Value, json};
 use std::{

@@ -15,6 +15,10 @@ pub use ledger::{AuthenticatedContext, LedgerResult, ReceiptKind};
 #[path = "store_events.rs"]
 mod events;
 pub use events::EVENT_MAX_COUNT;
+#[path = "store_cursor.rs"]
+mod cursor;
+#[path = "store_query.rs"]
+mod query;
 
 const SCHEMA: &str = include_str!("schema.sql");
 const IMMUTABLE: &[&str] = &[
@@ -57,6 +61,8 @@ pub struct Principal {
 pub struct Store {
     db: Connection,
     changes: Vec<JsString>,
+    cursor_secret: String,
+    query_state: query::QueryState,
 }
 impl Store {
     pub fn open(path: &Path) -> IvyResult<Self> {
@@ -77,8 +83,11 @@ impl Store {
         let mut store = Self {
             db,
             changes: vec![],
+            cursor_secret: String::new(),
+            query_state: Default::default(),
         };
         store.initialize()?;
+        store.install_query_functions()?;
         Ok(store)
     }
     fn initialize(&mut self) -> IvyResult<()> {
@@ -121,7 +130,7 @@ impl Store {
         self.db
             .execute_batch("DROP INDEX IF EXISTS mutations_expiry")
             .map_err(sql_error)?;
-        self.metadata("cursor_secret")?
+        self.cursor_secret = self.metadata("cursor_secret")?
             .ok_or_else(IvyError::internal)?;
         self.transaction(|store| {
             let nodes = store
