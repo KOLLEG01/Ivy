@@ -1,6 +1,9 @@
 //! Storage-owner feasibility checks. These qualify the native SQLite boundary,
 //! not the unfinished server. See worker-backup-online.test.ts for the wire cases.
 
+#[path = "hive_storage_read.rs"]
+mod storage_read;
+
 use rusqlite::{
     Connection, ErrorCode, OpenFlags,
     backup::{Backup, StepResult},
