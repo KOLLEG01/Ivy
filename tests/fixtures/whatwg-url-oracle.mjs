@@ -1,0 +1,43 @@
+import {IvyError} from '../../packages/contracts/src/errors.ts';
+
+const inputs = new Set([
+  '', '/', '/mcp', '//localhost/mcp', 'https:', 'https://', 'http://[::1',
+  'http://[::1%25lo0]/', 'https://example.invalid:65536/', 'https://exa mple.invalid/',
+  'https://%FF/', 'https://%/', 'http://1.2.3.999/', 'http://09/',
+  'https://EXAMPLE.invalid:443/a/../mcp', 'http://localhost:80/mcp',
+  'https://user:pass@example.invalid/mcp', 'https://u@v:p:a@example.invalid/mcp',
+  'https://:@example.invalid/mcp', 'https://example.invalid:/mcp',
+  'file:///C:/a/../b', 'file://localhost/C|/mcp', 'file://server/share',
+  'mailto:user@example.invalid', 'data:text/plain,hello world', 'custom:opaque  ',
+  'custom:opaque  ?q', 'custom:opaque  #h', 'custom://EXAMPLE.invalid:443/a',
+  'custom:/a', 'custom:///a', 'https:\\example.invalid\\mcp',
+]);
+for (const scheme of ['http', 'https', 'ws', 'wss', 'ftp', 'custom']) {
+  for (const host of ['localhost', 'LOCALHOST', '127.0.0.1', '127.1', '2130706433',
+    '0x7f000001', '0177.0.0.1', '[::1]', '[0:0:0:0:0:0:0:1]',
+    '[::ffff:127.0.0.1]', 'example.invalid.', 'bücher.invalid', 'faß.invalid',
+    '例子.invalid', 'ｅｘａｍｐｌｅ.invalid', '%65xample.invalid', 'a_b.invalid']) {
+    for (const suffix of ['', ':80', ':443', ':000443', ':0', ':65535'])
+      inputs.add(`${scheme}://${host}${suffix}/mcp`);
+  }
+}
+for (const part of ['', '#', '#a', '?', '?#', '?q=é#', '/.', '/..', '/%2e',
+  '/a/%2E%2e/mcp', '/%2F', '/%zz', '/a b', '/😀', '/\ud800', '/\udc00', '/a\\b'])
+  inputs.add(`https://example.invalid/mcp${part}`);
+for (const value of [' ', '\t', '\r', '\n', '\0', 'é', '😀', '\ud800', '\udc00',
+  '\ud800x\udc00', '%', '%zz', '%20', '@', ':', '/', '?', '#', '[', ']', '\\', "'", '`']) {
+  inputs.add(`https://${value}example.invalid/mcp`);
+  inputs.add(`https://example.invalid/a${value}b?q=${value}#${value}`);
+  inputs.add(`https://u${value}:p${value}@example.invalid/mcp`);
+  inputs.add(`${value}https://example.invalid/mcp${value}`);
+}
+const rows = [...inputs].map(input => {
+  let result;
+  try {
+    const u = new URL(input);
+    result = {ok: true, value: Object.fromEntries(
+      ['href', 'protocol', 'hostname', 'username', 'password', 'hash'].map(k => [k, u[k]]))};
+  } catch (error) { result = {ok: false, error: IvyError.from(error).toWire()}; }
+  return {input: JSON.stringify(input), result: JSON.stringify(result)};
+});
+process.stdout.write(JSON.stringify(rows));
