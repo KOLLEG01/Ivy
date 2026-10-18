@@ -25,6 +25,8 @@ mod definition_journal;
 mod definitions;
 #[path = "data-collector-http.inc.rs"]
 mod http;
+#[path = "data-collector-native.inc.rs"]
+mod native;
 
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()

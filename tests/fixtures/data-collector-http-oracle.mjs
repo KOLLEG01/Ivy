@@ -40,7 +40,7 @@ mcp('mcp-provider-error',{body:'{"tool":"fail"}'});mcp('mcp-large-result',{body:
 mcp('mcp-exact-limit',{bodyKind:'large-mcp',size:1048576});mcp('mcp-over-limit',{bodyKind:'large-mcp',size:1048577});
 mcp('mcp-cancelled',{cancelled:true});
 function bytes(c){if(c.bodyKind==='invalid')return Buffer.from([34,0xed,0xa0,0x80,34]);if(c.bodyKind==='invalid-mcp')return Buffer.concat([Buffer.from('{"tool":"'),Buffer.from([0xed,0xa0,0x80]),Buffer.from('"}')]);if(c.bodyKind==='large')return Buffer.from('"'+'x'.repeat(c.size-2)+'"');if(c.bodyKind==='large-mcp'){const start='{"tool":"echo","arguments":"',end='"}';return Buffer.from(start+'x'.repeat(c.size-start.length-end.length)+end);}return Buffer.from(c.body);}
-async function send(port,c,token){const body=bytes(c),headers=c.headers.map(v=>v.replace('TOKEN',token??'TOKEN'));headers.push('Connection','close');if(!c.chunked)headers.push('Content-Length',String(body.length));return new Promise((resolve,reject)=>{const req=request({host:'127.0.0.1',port,method:c.method,path:c.path,headers},res=>{const parts=[];res.on('data',d=>parts.push(d));res.on('end',()=>{const text=Buffer.concat(parts).toString('utf8');resolve({status:res.statusCode,body:text?JSON.parse(text):null});});});req.on('error',reject);if(c.chunked){req.write(body.subarray(0,3));req.end(body.subarray(3));}else req.end(body);});}
+async function send(port,c,token){const body=bytes(c),headers=c.headers.map(v=>v.replace('TOKEN',token??'TOKEN'));headers.push('Host','localhost','Connection','close');if(!c.chunked)headers.push('Content-Length',String(body.length));return new Promise((resolve,reject)=>{const req=request({host:'127.0.0.1',port,method:c.method,path:c.path,headers},res=>{const parts=[];res.on('data',d=>parts.push(d));res.on('end',()=>{const text=Buffer.concat(parts).toString('utf8');resolve({status:res.statusCode,body:text?JSON.parse(text):null});});});req.on('error',reject);if(c.chunked){req.write(body.subarray(0,3));req.end(body.subarray(3));}else req.end(body);});}
 const results=[];
 for(const [index,c]of cases.entries()){
  let server,store,engine,token,port,calls=0,closed=0;
@@ -49,6 +49,7 @@ for(const [index,c]of cases.entries()){
   const settings=schemas.settingsSchema.parse({secrets:{INPUT:'synthetic'},ingress:{host:'127.0.0.1',port:1,routes:{'/webhook':'task'}}});settings.ingress.port=0;
   engine=new CollectorEngine(store,{clearAuthentication(){}},settings);
   const task={id:'task',name:'Task',enabled:!c.disabled,intervalSeconds:60,timeoutSeconds:5,memoryMb:64,script:'export default()=>({data:1})',dependencies:{},config:{},secretNames:[],inputSecretName:'INPUT',allowUnauthenticatedInput:!!c.public,retention:schemas.defaultRetention};
+  if(c.public)task.inputSecretName=null;
   engine.update({action:'save',operationId:'save',expectedRevision:0,task});
   if(c.busy)engine.update({action:'run',operationId:'prior',id:'task'});
   server=await openIngress(createServer,timingSafeEqual,randomUUID,IvyError,settings,store,engine);port=server.server.address().port;
@@ -60,4 +61,5 @@ for(const [index,c]of cases.entries()){
  try{let response=await send(port,c,token);if(c.repeat)response=await send(port,c,token);const queued=store?store.runs('queued').map(r=>({id:r.id,input:r.input})):null;results.push({case:c,response,queued,calls});}
  finally{await server.close();store?.close();}
 }
+if(results.find(r=>r.case.name==='normal').response.status!==202||results.find(r=>r.case.name==='mcp-normal').response.status!==200)throw Error('Oracle did not reach the original application handlers');
 process.stdout.write(JSON.stringify(results));

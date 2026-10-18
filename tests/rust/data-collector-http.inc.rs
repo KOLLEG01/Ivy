@@ -123,6 +123,9 @@ async fn fixture(c: &IvyJson) -> (Database, Engine, Ingress) {
         "allowUnauthenticatedInput",
         model::truth(c, "public").into(),
     );
+    if model::truth(c, "public") {
+        task.insert("inputSecretName", IvyJson::Null);
+    }
     engine
         .update(
             IvyJson::object([
@@ -255,7 +258,7 @@ async fn raw_http_matches_original_ingress_and_mcp_status_auth_headers_and_limit
             "--experimental-transform-types",
             "--disable-warning=ExperimentalWarning",
             "tests/fixtures/data-collector-http-oracle.mjs",
-            "http",
+            "runtime",
         ])
         .arg(oracle.0.join("node"))
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))

@@ -7,6 +7,7 @@ pub mod definitions;
 pub mod model;
 pub mod mcp_result;
 pub mod mcp_bridge;
+pub mod native_mcp;
 pub mod ingress;
 mod http;
 pub mod policy;
