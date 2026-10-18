@@ -2,6 +2,7 @@ pub mod admission;
 pub mod collection_reads;
 pub mod diagnostic_notifications;
 pub mod diagnostics;
+pub mod evidence_bytes;
 pub mod input_media;
 pub mod limits;
 pub mod main_context;
