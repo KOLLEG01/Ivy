@@ -18,11 +18,14 @@ pub fn validate_automation(name: &str, value: &IvyJson) -> IvyResult<()> {
         })
         .as_ref()
         .map_err(Clone::clone)?;
-    if bundle.matches_named(
-        "https://ivy.invalid/schemas/automation.schema.json",
-        name,
-        value,
-    )? {
+    if bundle
+        .matches_named(
+            "https://ivy.invalid/schemas/automation.schema.json",
+            name,
+            value,
+        )?
+        .unwrap_or(false)
+    {
         Ok(())
     } else {
         Err(IvyError::new(
