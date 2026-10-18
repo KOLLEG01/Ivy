@@ -97,7 +97,8 @@ impl Fixture {
             let settings =
                 schema::parse_schema("settingsSchema", config.required("settings").unwrap())
                     .unwrap();
-            let task=parse(r#"{"id":"fixture","name":"Fixture","enabled":true,"intervalSeconds":3600,"timeoutSeconds":10,"memoryMb":64,"dependencies":{},"config":{},"secretNames":[],"allowUnauthenticatedInput":true,"script":"import {appendFileSync} from 'node:fs'; export default()=>{appendFileSync('marker','once\\n');return {data:{offline:true},state:7};}"}"#,usize::MAX).unwrap();
+            let mut task=parse(r#"{"id":"fixture","name":"Fixture","enabled":true,"intervalSeconds":3600,"timeoutSeconds":10,"memoryMb":64,"dependencies":{},"config":{},"secretNames":[],"allowUnauthenticatedInput":true,"script":"import {appendFileSync} from 'node:fs'; export default()=>{appendFileSync('marker','once\\n');return {data:{offline:true},state:7};}"}"#,usize::MAX).unwrap();
+            task.insert("retention", settings.required("retention").unwrap().clone());
             Runtime {
                 store: &store,
                 settings: &settings,
@@ -226,6 +227,28 @@ async fn check_lifetime(fixture: &Fixture) -> IvyJson {
 }
 #[tokio::test]
 async fn lifecycle_matches_original_offline_cache_worker_health_control_and_restart() {
+    // Control files require the launch identity normally supplied by the host.
+    // Isolate that environment from the other concurrently running test cases.
+    if std::env::var_os("IVY_TEST_COLLECTOR_LIFETIME_CHILD").is_none() {
+        let status = tokio::time::timeout(
+            Duration::from_secs(60),
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "lifecycle::lifecycle_matches_original_offline_cache_worker_health_control_and_restart",
+                    "--nocapture",
+                ])
+                .env("IVY_TEST_COLLECTOR_LIFETIME_CHILD", "1")
+                .env("IVY_LAUNCH_ID", uuid::Uuid::new_v4().to_string())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(status.success());
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(45), async {
         let mut outcomes = Vec::new();
         for original in [true, false] {
