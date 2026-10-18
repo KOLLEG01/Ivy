@@ -1,4 +1,4 @@
-use super::{Fixed, Fixture, array, equal, error, field, normalize, number, result, summary, text};
+use super::{Fixed, Fixture, array, equal, field, normalize, number, result, summary, text};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     evidence_bytes::save_chat_evidence,
@@ -6,6 +6,7 @@ use ivy_chat_bridge::{
         ChatNativeEvidence, EvidenceFuture, NativeEvidenceValidation, verify_chat_native_operation,
         verify_chat_native_read, verify_chat_native_request,
     },
+    native_plan::ChatNativeValidation,
     store::{ChatStore, Pin},
 };
 use ivy_contracts::{
@@ -62,8 +63,8 @@ fn oracle() -> &'static Json {
         parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
     })
 }
-// Only the missing shared compiler/plan boundaries replay observed original
-// outcomes. Chat authority, SDK identities/clocks, byte mechanics and SQLite run.
+// Observe the actual production plan/compiler adapter. Original outcomes are
+// comparison evidence only; they never supply a Rust validation result.
 struct Gate {
     expected: Mutex<VecDeque<Json>>,
     calls: Mutex<Vec<Json>>,
@@ -80,7 +81,24 @@ impl Gate {
         *self.expected.lock().unwrap() = expected.iter().cloned().collect();
         self.calls.lock().unwrap().clear();
     }
-    fn take(&self, kind: &str, input: Json) -> IvyResult<Json> {
+    fn actual() -> ChatNativeValidation<'static> {
+        static CATALOGS: OnceLock<ivy_contracts::checked_native_contract::CheckedNativeContracts> =
+            OnceLock::new();
+        static INSTRUCTIONS: OnceLock<JsString> = OnceLock::new();
+        ChatNativeValidation::new(
+            CATALOGS.get_or_init(|| {
+                ivy_contracts::checked_native_contract::CheckedNativeContracts::new(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."),
+                )
+            }),
+            INSTRUCTIONS.get_or_init(|| {
+                String::from_utf8(STANDARD.decode(text(oracle(), "instructions")).unwrap())
+                    .unwrap()
+                    .into()
+            }),
+        )
+    }
+    fn observe(&self, kind: &str, input: Json, actual: IvyResult<Json>) -> IvyResult<Json> {
         let expected = self
             .expected
             .lock()
@@ -89,16 +107,18 @@ impl Gate {
             .unwrap_or_else(|| panic!("Unexpected {kind} gate"));
         assert_eq!(text(&expected, "kind"), kind);
         equal(&input, field(&expected, "input"), kind);
-        let output = field(&expected, "output").clone();
+        let output = result(actual.clone());
+        equal(
+            &output,
+            field(&expected, "output"),
+            &format!("actual {kind} validation"),
+        );
         self.calls.lock().unwrap().push(Json::object([
             ("kind", kind.into()),
             ("input", input),
             ("output", output.clone()),
         ]));
-        match output.get("error") {
-            Some(e) => Err(error(e)),
-            None => Ok(field(&output, "value").clone()),
-        }
+        actual
     }
     fn contract(contract: &NativeContract) -> Json {
         Json::object([
@@ -113,11 +133,25 @@ impl Gate {
 }
 impl NativeEvidenceValidation for Gate {
     fn validate_draft(&self, value: &Json) -> IvyResult<()> {
-        self.take("draft", Json::object([("value", summary(value))]))
-            .map(|_| ())
+        self.observe(
+            "draft",
+            Json::object([("value", summary(value))]),
+            Self::actual().validate_draft(value).map(|_| Json::Null),
+        )
+        .map(|_| ())
     }
-    fn resolve_plan<'a>(&'a self, _: &'a ChatStore, plan: &'a Json) -> EvidenceFuture<'a, Json> {
-        Box::pin(async move { self.take("plan", Json::object([("plan", plan.clone())])) })
+    fn resolve_plan<'a>(
+        &'a self,
+        store: &'a ChatStore,
+        plan: &'a Json,
+    ) -> EvidenceFuture<'a, Json> {
+        Box::pin(async move {
+            self.observe(
+                "plan",
+                Json::object([("plan", plan.clone())]),
+                Self::actual().resolve_plan(store, plan).await,
+            )
+        })
     }
     fn validate_input(
         &self,
@@ -126,7 +160,7 @@ impl NativeEvidenceValidation for Gate {
         params: &Json,
         maximum_bytes: usize,
     ) -> IvyResult<()> {
-        self.take(
+        self.observe(
             "input",
             Json::object([
                 ("contract", Self::contract(contract)),
@@ -134,6 +168,9 @@ impl NativeEvidenceValidation for Gate {
                 ("params", summary(params)),
                 ("maximumBytes", Json::Number(maximum_bytes as f64)),
             ]),
+            Self::actual()
+                .validate_input(contract, method, params, maximum_bytes)
+                .map(|_| Json::Null),
         )
         .map(|_| ())
     }
@@ -144,7 +181,7 @@ impl NativeEvidenceValidation for Gate {
         request_bytes: usize,
         response_bytes: usize,
     ) -> IvyResult<()> {
-        self.take(
+        self.observe(
             "payload",
             Json::object([
                 ("contract", Self::contract(contract)),
@@ -157,6 +194,9 @@ impl NativeEvidenceValidation for Gate {
                     ]),
                 ),
             ]),
+            Self::actual()
+                .validate_payload(contract, observation, request_bytes, response_bytes)
+                .map(|_| Json::Null),
         )
         .map(|_| ())
     }
