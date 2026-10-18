@@ -1,6 +1,6 @@
 use crate::{
     IvyError, IvyJson, IvyResult, JsString,
-    native_project_path::{lowercase, strip_extended, windows_path},
+    native_project_path::{strip_extended, windows_path},
 };
 
 pub fn normalized_project_path(value: &JsString) -> JsString {
@@ -14,7 +14,7 @@ pub fn normalized_project_path(value: &JsString) -> JsString {
         slash.pop();
     }
     if windows_path(&value.0) || slash.starts_with(&[47, 47]) {
-        lowercase(&slash)
+        JsString(slash).to_english_lowercase()
     } else {
         JsString(slash)
     }
