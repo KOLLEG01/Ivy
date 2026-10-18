@@ -41,6 +41,24 @@ pub struct InvocationContext {
     close_reason: Arc<OnceLock<IvyError>>,
 }
 impl InvocationContext {
+    /// Construct a caller-owned context for independent handlers and tests.
+    /// Cancellation uses the supplied reason. Provider handlers must use their
+    /// delivered context to retain the connection generation's first close error.
+    pub fn detached(
+        caller_principal_id: JsString,
+        operation_id: Option<JsString>,
+        generation: u64,
+        signal: CancellationToken,
+        abort_reason: IvyError,
+    ) -> Self {
+        Self {
+            caller_principal_id,
+            operation_id,
+            generation,
+            signal,
+            close_reason: Arc::new(OnceLock::from(abort_reason)),
+        }
+    }
     /// Match AbortSignal.throwIfAborted while retaining the owning generation's
     /// first close error, including exact UTF-16 text, outcome and details.
     pub fn throw_if_aborted(&self) -> IvyResult<()> {
