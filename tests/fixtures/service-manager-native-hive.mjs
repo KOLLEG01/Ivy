@@ -58,6 +58,7 @@ const candidate = {candidateId, componentId:'fixture', artifactRoot:join(root,'a
   buildId:candidateId, createdAt:new Date().toISOString(), platform:{os:process.platform, arch:process.arch, node:process.versions.node}};
 journal.saveCandidate(candidate, {schemaVersion:1, componentId:'fixture', kind:'native', version:'1.0.0', buildId:candidateId, connectsToHive:false,
   requirements:{node:'>=24.18.0 <25.0.0', hiveProtocol:null, contracts:[]}, entrypoint:{executable:'node',args:['dist/main.mjs'],timeoutMs:1000},
+  readiness:{timeoutMs:1000,command:{executable:'node',args:['-e','process.exit(0)'],timeoutMs:1000}},
   shutdown:{timeoutMs:1000}, restart:{policy:'never',minimumDelayMs:100,maximumDelayMs:1000}, storage:{writeFormat:1,minReadableFormat:1,maxReadableFormat:1}});
 journal.setInstalled({instanceId:'fixture', candidateId, buildId:candidateId, enabled:true, installedAt:new Date().toISOString()});
 const hive = new HiveServer({filename:join(root,'hive.sqlite'), packageRoot:join(root,'packages'), publicBaseUrl, listenHost:'127.0.0.1', listenPort:port,
