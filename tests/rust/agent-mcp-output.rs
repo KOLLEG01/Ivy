@@ -1,4 +1,5 @@
 use ivy_agent_manager::mcp_output::{McpOutputInput, plan_mcp_output};
+use ivy_agent_manager::mcp_render::{hive_mcp_urls, render_mcp_sections};
 use ivy_contracts::{IvyJson, json::parse};
 use std::{path::PathBuf, process::Command};
 fn string(v: &IvyJson) -> String {
@@ -26,11 +27,20 @@ fn ownership_and_output_match_original_manager_filesystem_effects() {
     for (index, row) in rows.iter().enumerate() {
         let source = string(row.get("source").unwrap());
         let authority = string(row.get("authority").unwrap());
-        let sections = row
+        let expected_sections = row
             .get("sections")
             .unwrap()
             .as_array()
             .map(|a| a.iter().map(string).collect::<Vec<_>>());
+        let urls = hive_mcp_urls(row.get("hive").unwrap().as_js_string().unwrap()).unwrap();
+        let sections = render_mcp_sections(
+            row.get("document").unwrap(),
+            &urls,
+            row.get("credential").unwrap().as_js_string().unwrap(),
+            row.get("appId").unwrap().as_js_string(),
+        )
+        .unwrap();
+        assert_eq!(sections, expected_sections, "Rendering case {index}");
         let names = row
             .get("serverNames")
             .unwrap()

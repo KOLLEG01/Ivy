@@ -59,7 +59,7 @@ try {
       assert.equal(manager.status.appliedVersion,desiredVersion);
       expected={result:{text:bytes.toString(),state:after,applied:manager.status.state==='applied',managedBytes:manager.status.bytes}};
     }
-    rows.push({source:new TextDecoder('utf-8',{fatal:true}).decode(Buffer.from(test.source)),state:test.stored??null,authority,sections:rendered,serverNames:defaults.servers.map(s=>s.name),appId:openai.configuration.appId,desiredVersion,expected});
+    rows.push({document:defaults,hive,credential,source:new TextDecoder('utf-8',{fatal:true}).decode(Buffer.from(test.source)),state:test.stored??null,authority,sections:rendered,serverNames:defaults.servers.map(s=>s.name),appId:openai.configuration.appId,desiredVersion,expected});
   }
 } finally {await rm(root,{recursive:true,force:true});}
 assert(rows.some(row=>row.expected.result)&&rows.some(row=>row.expected.error));

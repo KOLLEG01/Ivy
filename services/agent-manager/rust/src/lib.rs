@@ -5,5 +5,6 @@ pub mod instructions;
 pub mod interactions;
 pub mod local_state;
 pub mod mcp_output;
+pub mod mcp_render;
 pub mod notifications;
 pub mod skills;

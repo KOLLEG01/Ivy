@@ -7,6 +7,8 @@ mod environment_conflict_cases;
 mod environment_text_cases;
 #[path = "agent-mcp-output.rs"]
 mod mcp_output_cases;
+#[path = "agent-mcp-render.rs"]
+mod mcp_render_cases;
 #[path = "agent-skills.rs"]
 mod skills_cases;
 use ivy_contracts::{
