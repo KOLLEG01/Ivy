@@ -26,8 +26,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// Must resolve the immutable HostConfig associated with this exact target.
-/// The host authority owns association lookup and the approved legacy fallback.
-/// There is deliberately no default that treats a missing implementation as legacy.
+/// The host authority owns association lookup and explicit one-time import.
+/// Normal supervision never substitutes the current or startup HostConfig.
 pub type TargetPolicyResolver = Arc<
     dyn Fn(HostJournal, IvyJson) -> Pin<Box<dyn Future<Output = IvyResult<IvyJson>> + Send>>
         + Send
@@ -50,22 +50,25 @@ impl Drop for Control {
 #[derive(Clone)]
 pub struct RuntimeOwner(Arc<Control>);
 impl RuntimeOwner {
-    /// Production policy composition: only an unassociated legacy target uses
-    /// this owner's frozen startup configuration. Invalid evidence propagates.
+    /// Production policy composition requires an exact accepted association.
+    /// Existing targets must be imported before native supervision is started.
     pub async fn for_host(
         host: IvyJson,
         instance_id: String,
         bootstrap_root: PathBuf,
         node: NodeRuntime,
     ) -> IvyResult<Self> {
-        let startup = host.clone();
         let resolver: TargetPolicyResolver = Arc::new(move |journal, target| {
-            let startup = startup.clone();
             Box::pin(async move {
-                Ok(journal
+                journal
                     .accepted_target_policy(target)
                     .await?
-                    .unwrap_or(startup))
+                    .ok_or_else(|| {
+                        IvyError::new(
+                            "configuration_changed",
+                            "Runtime target has no accepted host policy; explicit import is required.",
+                        )
+                    })
             })
         });
         Self::open(host, instance_id, bootstrap_root, node, resolver).await

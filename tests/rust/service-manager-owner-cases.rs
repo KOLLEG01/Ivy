@@ -157,6 +157,100 @@ async fn production_policy_resolver_uses_association_instead_of_latest_desired_m
 }
 
 #[tokio::test]
+async fn an_unassociated_target_requires_explicit_import_before_launch() {
+    let root = Fixture::new();
+    let accepted = host(&root);
+    let journal = HostJournal::open(accepted.clone()).await.unwrap();
+    let mut unassociated = target(&root, &journal, "accepted-template").await;
+    unassociated.insert("revision", "unconverted-target".into());
+    journal.restore_target(unassociated.clone()).await.unwrap();
+    assert!(
+        journal
+            .accepted_target_policy(unassociated)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let owner = owner(&root, &accepted).await;
+    owner.start().unwrap();
+    let failed = observation(&journal, "failed").await;
+    assert_eq!(failed.get("code"), Some(&"configuration_changed".into()));
+    assert!(
+        !root
+            .0
+            .join("state/instances/fixture/data/health.json")
+            .exists()
+    );
+    assert!(
+        !root
+            .0
+            .join("state/instances/fixture/data/launches")
+            .exists()
+    );
+    owner.close().await.unwrap();
+    journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_or_invalid_replacement_policy_preserves_the_ready_child() {
+    for corrupt in [false, true] {
+        let root = Fixture::new();
+        let accepted = host(&root);
+        let journal = HostJournal::open(accepted.clone()).await.unwrap();
+        let original = target(&root, &journal, "accepted-child").await;
+        let owner = owner(&root, &accepted).await;
+        owner.start().unwrap();
+        let ready = observation(&journal, "ready").await;
+        let original_pid = ready
+            .required("health")
+            .unwrap()
+            .required("pid")
+            .unwrap()
+            .clone();
+        let mut replacement = original;
+        replacement.insert("revision", "replacement-policy".into());
+        if corrupt {
+            let entry = publish_accepted_target(&journal, replacement).await;
+            let snapshot = PathBuf::from(
+                entry
+                    .required("configurationPath")
+                    .unwrap()
+                    .as_str()
+                    .unwrap(),
+            );
+            // Corrupt only this fixture's new immutable accepted snapshot.
+            assert!(snapshot.starts_with(root.0.join("state/accepted-configurations")));
+            std::fs::write(snapshot, "not JSON").unwrap();
+        } else {
+            journal.restore_target(replacement).await.unwrap();
+        }
+        let failed = observation(&journal, "failed").await;
+        assert_eq!(failed.get("code"), Some(&"configuration_changed".into()));
+        let data = root.0.join("state/instances/fixture/data");
+        assert!(
+            !data.join("control.json").exists(),
+            "Invalid policy drained a healthy child"
+        );
+        let health = json(&std::fs::read_to_string(data.join("health.json")).unwrap());
+        assert_eq!(health.get("pid"), Some(&original_pid));
+        assert_eq!(health.get("launchId"), Some(&"accepted-child".into()));
+        assert_eq!(
+            std::fs::read_to_string(data.join("launches"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        owner.close().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(data.join("cooperatively-stopped")).unwrap(),
+            "accepted-child"
+        );
+        journal.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn owner_topology_preserves_existing_owners_and_adds_disabled_instances() {
     use ivy_service_manager::topology::Owners;
     let root = Fixture::new();
@@ -511,8 +605,67 @@ async fn target_with_policy(
         ),
         ("requestedAt", now().into()),
     ]);
-    journal.restore_target(target.clone()).await.unwrap();
+    publish_accepted_target(journal, target.clone()).await;
     target
+}
+
+// New targets are published through normal operation acceptance/activation so
+// their immutable host policy exists before native supervision sees them.
+async fn publish_accepted_target(journal: &HostJournal, target: IvyJson) -> IvyJson {
+    let entry = journal
+        .accept(
+            IvyJson::object([
+                ("action", "deploy".into()),
+                (
+                    "operationId",
+                    format!(
+                        "fixture-accept-{}",
+                        target.required("revision").unwrap().as_str().unwrap()
+                    )
+                    .into(),
+                ),
+                ("instanceId", "fixture".into()),
+                (
+                    "candidateId",
+                    target.required("candidateId").unwrap().clone(),
+                ),
+            ]),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = entry
+        .required("record")
+        .unwrap()
+        .required("deploymentId")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    journal
+        .advance(&id, "prepared", "checking", json("{}"))
+        .await
+        .unwrap();
+    journal
+        .advance(&id, "checking", "draining", json("{}"))
+        .await
+        .unwrap();
+    journal
+        .advance(
+            &id,
+            "draining",
+            "activating",
+            IvyJson::object([("target", target.clone())]),
+        )
+        .await
+        .unwrap();
+    assert!(
+        journal
+            .accepted_target_policy(target)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    entry
 }
 
 #[test]
@@ -791,7 +944,7 @@ async fn invalid_replacement_does_not_drain_the_ready_child() {
             .to_string()
             .into(),
     );
-    journal.restore_target(target).await.unwrap();
+    publish_accepted_target(&journal, target).await;
     observation(&journal, "failed").await;
     assert!(
         !root
