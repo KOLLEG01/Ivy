@@ -10,10 +10,10 @@ use ivy_sdk::{
     service::ServiceFuture,
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -63,9 +63,106 @@ fn normalized(mut value: IvyJson) -> IvyJson {
     value
 }
 #[derive(Default)]
-struct TraceClient(Mutex<VecDeque<IvyJson>>);
+struct TraceClient {
+    trace: Mutex<VecDeque<IvyJson>>,
+    peers: Mutex<HashMap<String, (Definitions, Arc<AtomicBool>)>>,
+}
+fn peer_params(mut value: IvyJson) -> IvyJson {
+    // Peer mutation IDs are generated independently; preserve their routed/inner
+    // equality while comparing all caller-supplied values exactly.
+    if let Some(operation) = value.get("operation").cloned() {
+        let mut args = value.remove("args").unwrap();
+        assert_eq!(args.get("operationId"), Some(&operation));
+        args.insert("operationId", "<generated-operation>".into());
+        value.insert("args", args);
+        value.insert("operation", "<generated-operation>".into());
+    }
+    value
+}
 impl RpcClient for TraceClient {
     fn request(&self, method: &str, params: IvyJson, _: RequestOptions) -> RequestFuture<'_> {
+        if method == "tools.list" {
+            let name = format!("data-collector.{}", text(&params, "namePrefix"));
+            let node = field(&params, "serviceNodeId").clone();
+            return Box::pin(async move {
+                Ok(IvyJson::object([
+                    (
+                        "provider",
+                        IvyJson::object([("node", IvyJson::object([("serviceNodeId", node)]))]),
+                    ),
+                    ("nextCursor", IvyJson::Null),
+                    (
+                        "items",
+                        IvyJson::Array(vec![IvyJson::object([
+                            ("qualifiedName", name.clone().into()),
+                            (
+                                "definitionHash",
+                                format!("sha256:{}", "a".repeat(64)).into(),
+                            ),
+                            (
+                                "definition",
+                                IvyJson::object([
+                                    ("interfaceVersion", "1.0.0".into()),
+                                    (
+                                        "annotations",
+                                        IvyJson::object([(
+                                            "readOnlyHint",
+                                            (name == "data-collector.read").into(),
+                                        )]),
+                                    ),
+                                ]),
+                            ),
+                        ])]),
+                    ),
+                ]))
+            });
+        }
+        if method == "tools.call" {
+            let mut peer = IvyJson::object([
+                ("node", field(&params, "serviceNodeId").clone()),
+                ("name", field(&params, "qualifiedName").clone()),
+                ("args", field(&params, "arguments").clone()),
+            ]);
+            if let Some(operation) = params.get("operationId") {
+                peer.insert("operation", operation.clone());
+            }
+            let expected = self.trace.lock().unwrap().pop_front().expect("peer trace");
+            assert_eq!(text(&expected, "method"), "fixture.peer");
+            assert!(
+                json_equal(
+                    &peer_params(peer.clone()),
+                    &peer_params(field(&expected, "params").clone())
+                ),
+                "peer request {peer:?}; expected {expected:?}"
+            );
+            let (definitions, online) = self
+                .peers
+                .lock()
+                .unwrap()
+                .get(&text(&peer, "node"))
+                .unwrap()
+                .clone();
+            return Box::pin(async move {
+                let result = if !online.load(Ordering::SeqCst) {
+                    Err(IvyError::new(
+                        "provider_unavailable",
+                        "Fixture source is offline.",
+                    ))
+                } else if text(&peer, "name") == "data-collector.read" {
+                    definitions.read(field(&peer, "args").clone()).await
+                } else {
+                    definitions.update(field(&peer, "args").clone(), None).await
+                };
+                match &result {
+                    Ok(value) => assert!(
+                        json_equal(value, field(&expected, "result")),
+                        "peer result {value:?}; expected {expected:?}"
+                    ),
+                    Err(error) => assert_eq!(error.code, text(field(&expected, "error"), "code")),
+                }
+                result
+            });
+        }
         if method == "system.status" {
             return Box::pin(async { Ok(json(r#"{"runtimeEpoch":"fixture-epoch"}"#)) });
         }
@@ -77,7 +174,7 @@ impl RpcClient for TraceClient {
             });
         }
         let expected = self
-            .0
+            .trace
             .lock()
             .unwrap()
             .pop_front()
@@ -106,6 +203,15 @@ impl RpcClient for TraceClient {
 }
 #[tokio::test]
 async fn central_control_matches_original_drafts_activation_recovery_and_freeze() {
+    control_trace("runtime").await;
+}
+#[tokio::test]
+async fn two_instances_match_original_frozen_handoff_authentication_and_one_time_adoption() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), control_trace("handoff"))
+        .await
+        .unwrap();
+}
+async fn control_trace(mode: &str) {
     let directory = Database::new();
     let output = std::process::Command::new("node")
         .args([
@@ -115,6 +221,7 @@ async fn central_control_matches_original_drafts_activation_recovery_and_freeze(
             "runtime",
         ])
         .arg(directory.0.join("oracle.sqlite"))
+        .arg(mode)
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .output()
         .unwrap();
@@ -124,27 +231,48 @@ async fn central_control_matches_original_drafts_activation_recovery_and_freeze(
         String::from_utf8_lossy(&output.stderr)
     );
     let cases = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
-    let store = directory.open();
     let cleared = Arc::new(AtomicUsize::new(0));
-    let engine = Engine::new(
-        store.clone(),
-        Arc::new(NoWork(cleared.clone())),
-        json(r#"{"rootObjectId":"root","secrets":{"KNOWN":"synthetic-do-not-store"}}"#),
-        Arc::new(FixedClock),
-    )
-    .await
-    .unwrap();
     let client = Arc::new(TraceClient::default());
-    engine.attach(client.clone()).await.unwrap();
-    let definitions = Definitions::new(
-        "fixture-node".into(),
-        engine.clone(),
-        Arc::new(|_| Ok(None)),
-        Arc::new(|a, b| a.cmp(b)),
-    );
+    let mut nodes = HashMap::new();
+    let directories = [Database::new(), Database::new()];
+    for (index, name) in ["fixture-node", "target-node"].iter().enumerate() {
+        let store = directories[index].open();
+        let engine = Engine::new(
+            store.clone(),
+            Arc::new(NoWork(cleared.clone())),
+            json(r#"{"rootObjectId":"root","secrets":{"KNOWN":"synthetic-do-not-store"}}"#),
+            Arc::new(FixedClock),
+        )
+        .await
+        .unwrap();
+        engine.attach(client.clone()).await.unwrap();
+        let fingerprint = Arc::new(Mutex::new(None));
+        let captured = fingerprint.clone();
+        let definitions = Definitions::new(
+            (*name).into(),
+            engine.clone(),
+            Arc::new(move |_| Ok(captured.lock().unwrap().clone())),
+            Arc::new(|a, b| a.cmp(b)),
+        );
+        let online = Arc::new(AtomicBool::new(true));
+        client
+            .peers
+            .lock()
+            .unwrap()
+            .insert((*name).to_string(), (definitions.clone(), online.clone()));
+        nodes.insert(
+            (*name).to_string(),
+            (store, engine, definitions, fingerprint, online),
+        );
+    }
     for (index, case) in cases.as_array().unwrap().iter().enumerate() {
         let step = field(case, "step");
-        *client.0.lock().unwrap() = field(case, "trace")
+        let node = step
+            .get("node")
+            .map(|v| v.as_str().unwrap())
+            .unwrap_or_else(|| "fixture-node".to_string());
+        let (store, engine, definitions, fingerprint, online) = nodes.get(&node).unwrap();
+        *client.trace.lock().unwrap() = field(case, "trace")
             .as_array()
             .unwrap()
             .iter()
@@ -168,11 +296,16 @@ async fn central_control_matches_original_drafts_activation_recovery_and_freeze(
             "read" => definitions.read(input).await,
             "sync" => definitions.sync().await.map(|_| IvyJson::Null),
             "offline" => {
+                online.store(input != true.into(), Ordering::SeqCst);
                 if input == true.into() {
                     engine.detach();
                 } else {
                     engine.attach(client.clone()).await.unwrap();
                 }
+                Ok(IvyJson::Null)
+            }
+            "fingerprint" => {
+                *fingerprint.lock().unwrap() = Some(input.as_str().unwrap());
                 Ok(IvyJson::Null)
             }
             "clearCache" => {
@@ -222,16 +355,19 @@ async fn central_control_matches_original_drafts_activation_recovery_and_freeze(
             field(case, "result")
         );
         assert!(
-            client.0.lock().unwrap().is_empty(),
+            client.trace.lock().unwrap().is_empty(),
             "step {index} omitted calls {:?}",
-            client.0.lock().unwrap()
+            client.trace.lock().unwrap()
         );
         assert_eq!(
             cleared.load(Ordering::SeqCst) as f64,
             field(case, "clears").as_f64().unwrap(),
             "step {index} cleanup"
         );
-        let (tasks, runs) = store
+        let (tasks, runs) = nodes
+            .get("fixture-node")
+            .unwrap()
+            .0
             .call(|s| {
                 let mut runs = Vec::new();
                 for status in ["queued", "running", "publishing", "failed", "cancelled"] {
@@ -249,6 +385,42 @@ async fn central_control_matches_original_drafts_activation_recovery_and_freeze(
             json_equal(&IvyJson::Array(runs), field(case, "runs")),
             "step {index} run cache"
         );
+        if let Some(expected_nodes) = case.get("nodes") {
+            for (name, (store, _, _, _, _)) in &nodes {
+                let snapshot = store
+                    .call(|s| {
+                        let mut runs = Vec::new();
+                        for status in ["queued", "running", "publishing", "failed", "cancelled"] {
+                            runs.extend(s.runs(status)?);
+                        }
+                        let handoff = ["handoff-lock:", "handoff-state:", "handoff-consumed:"]
+                            .into_iter()
+                            .map(|prefix| {
+                                Ok((
+                                    prefix,
+                                    s.metadata(&format!("{prefix}object-2"))?
+                                        .map_or(IvyJson::Null, IvyJson::from),
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, IvyError>>()?;
+                        Ok(IvyJson::object([
+                            ("tasks", IvyJson::Array(s.list(true)?)),
+                            ("runs", IvyJson::Array(runs)),
+                            ("handoff", IvyJson::object(handoff)),
+                        ]))
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    json_equal(&snapshot, field(expected_nodes, name)),
+                    "step {index} node {name}: {snapshot:?}; expected {:?}",
+                    field(expected_nodes, name)
+                );
+            }
+        }
     }
-    engine.close().await;
+    client.peers.lock().unwrap().clear();
+    for (_, (_, engine, _, _, _)) in nodes {
+        engine.close().await;
+    }
 }
