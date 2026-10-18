@@ -173,10 +173,10 @@ fn body(c: &IvyJson) -> Vec<u8> {
 }
 async fn read_reply(mut stream: TcpStream) -> IvyJson {
     let mut bytes = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes))
+    let received = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes))
         .await
-        .unwrap()
         .unwrap();
+    assert!(received.is_ok() || !bytes.is_empty(), "{received:?}");
     let split = bytes.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
     let headers = String::from_utf8(bytes[..split].to_vec()).unwrap();
     let status = headers
@@ -213,6 +213,20 @@ async fn read_reply(mut stream: TcpStream) -> IvyJson {
     IvyJson::object([("status", IvyJson::Number(status)), ("body", body)])
 }
 async fn send(address: SocketAddr, c: &IvyJson, token: &str) -> IvyJson {
+    if let Some(parts) = c.get("raw").and_then(IvyJson::as_array) {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        for part in parts {
+            let delay = model::number(part, "afterMs").unwrap() as u64;
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            let data = model::text(part, "data").unwrap().replace("TOKEN", token);
+            if stream.write_all(data.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+        return read_reply(stream).await;
+    }
     let body = body(c);
     let mut head = format!(
         "{} {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n",
@@ -252,6 +266,13 @@ async fn send(address: SocketAddr, c: &IvyJson, token: &str) -> IvyJson {
 }
 #[tokio::test]
 async fn raw_http_matches_original_ingress_and_mcp_status_auth_headers_and_limits() {
+    http_trace("").await;
+}
+#[tokio::test]
+async fn raw_http_header_parser_boundaries_match_original() {
+    http_trace("boundaries").await;
+}
+async fn http_trace(mode: &str) {
     let oracle = Database::new();
     let output = std::process::Command::new("node")
         .args([
@@ -261,6 +282,7 @@ async fn raw_http_matches_original_ingress_and_mcp_status_auth_headers_and_limit
             "runtime",
         ])
         .arg(oracle.0.join("node"))
+        .arg(mode)
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .output()
         .unwrap();
@@ -270,6 +292,7 @@ async fn raw_http_matches_original_ingress_and_mcp_status_auth_headers_and_limit
         String::from_utf8_lossy(&output.stderr)
     );
     let cases = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let mut gaps = Vec::new();
     for expected in cases.as_array().unwrap() {
         let c = expected.get("case").unwrap();
         let name = model::text(c, "name").unwrap();
@@ -326,22 +349,24 @@ async fn raw_http_matches_original_ingress_and_mcp_status_auth_headers_and_limit
                 session.calls.load(Ordering::SeqCst),
             )
         };
-        assert!(
-            json_equal(&response, expected.get("response").unwrap()),
-            "{name}: actual {} expected {}",
-            stringify(&response, usize::MAX).unwrap(),
-            stringify(expected.get("response").unwrap(), usize::MAX).unwrap()
-        );
-        assert!(
-            json_equal(&queued, expected.get("queued").unwrap()),
-            "{name}: queued input mismatch"
-        );
-        assert_eq!(
-            calls as f64,
-            model::number(expected, "calls").unwrap(),
-            "{name}"
-        );
+        if !json_equal(&response, expected.get("response").unwrap())
+            || !json_equal(&queued, expected.get("queued").unwrap())
+            || calls as f64 != model::number(expected, "calls").unwrap()
+        {
+            gaps.push(format!(
+                "{name}: actual {} expected {}; queuedEqual={}, calls={calls}/{}",
+                stringify(&response, usize::MAX).unwrap(),
+                stringify(expected.get("response").unwrap(), usize::MAX).unwrap(),
+                json_equal(&queued, expected.get("queued").unwrap()),
+                model::number(expected, "calls").unwrap()
+            ));
+        }
     }
+    assert!(
+        gaps.is_empty(),
+        "HTTP differential gaps:\n{}",
+        gaps.join("\n")
+    );
 }
 #[tokio::test]
 async fn ingress_rechecks_revision_after_body_and_bridge_close_retires_sockets_on_session_failure()

@@ -4,6 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {createServer,request} from 'node:http';
 import {timingSafeEqual,randomUUID} from 'node:crypto';
 import {schemas} from './data-collector-schema-oracle.mjs';
+import {boundaryCases,sendBoundary} from './data-collector-http-boundaries.mjs';
 registerHooks({resolve(specifier,context,next){if(specifier.startsWith('.')&&specifier.endsWith('.js')&&context.parentURL){const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(source)))return next(source.href,context);}return next(specifier,context);}});
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
 const {canonical,digest}=await import('../../packages/contracts/src/canonical.ts');
@@ -42,8 +43,9 @@ mcp('mcp-exact-limit',{bodyKind:'large-mcp',size:1048576});mcp('mcp-over-limit',
 mcp('mcp-cancelled',{cancelled:true});
 function bytes(c){if(c.bodyKind==='invalid')return Buffer.from([34,0xed,0xa0,0x80,34]);if(c.bodyKind==='invalid-mcp')return Buffer.concat([Buffer.from('{"tool":"'),Buffer.from([0xed,0xa0,0x80]),Buffer.from('"}')]);if(c.bodyKind==='large')return Buffer.from('"'+'x'.repeat(c.size-2)+'"');if(c.bodyKind==='large-mcp'){const start='{"tool":"echo","arguments":"',end='"}';return Buffer.from(start+'x'.repeat(c.size-start.length-end.length)+end);}return Buffer.from(c.body);}
 async function send(port,c,token){const body=bytes(c),headers=c.headers.map(v=>v.replace('TOKEN',token??'TOKEN'));headers.push('Host','localhost','Connection','close');if(!c.chunked)headers.push('Content-Length',String(body.length));return new Promise((resolve,reject)=>{const req=request({host:'127.0.0.1',port,method:c.method,path:c.path,headers},res=>{const parts=[];res.on('data',d=>parts.push(d));res.on('end',()=>{const text=Buffer.concat(parts).toString('utf8');resolve({status:res.statusCode,body:text?JSON.parse(text):null});});});req.on('error',reject);if(c.chunked){req.write(body.subarray(0,3));req.end(body.subarray(3));}else req.end(body);});}
-const results=[];
-for(const [index,c]of cases.entries()){
+const mode=process.argv[4];
+if(mode==='boundaries'||mode==='timeouts')cases.splice(0,cases.length,...boundaryCases(mode));
+async function observe(c,index){
  let server,store,engine,token,port,calls=0,closed=0;
  if(c.kind==='ingress'){
   store=new CollectorStore(process.argv[3]+'-'+index+'.sqlite');
@@ -59,8 +61,11 @@ for(const [index,c]of cases.entries()){
   server=await openMcpBridge({async call(tool,args){calls++;if(tool==='fail')throw new IvyError('provider_unavailable','private diagnostic','unknown');if(tool==='large')return 'x'.repeat(1048576);return {tool,args};},async close(){closed++;}},controller.signal);
   token=server.context.token;port=new URL(server.context.url).port;
  }
- try{let response=await send(port,c,token);if(c.repeat)response=await send(port,c,token);const queued=store?store.runs('queued').map(r=>({id:r.id,input:r.input})):null;results.push({case:c,response,queued,calls});}
+ try{const measured=c.raw?await sendBoundary(port,c,token):null;let response=measured?measured.response:await send(port,c,token);if(c.repeat)response=await send(port,c,token);const queued=store?store.runs('queued').map(r=>({id:r.id,input:r.input})):null;return {case:c,response,queued,calls,...(measured?{elapsedMs:measured.elapsedMs}:{})};}
  finally{await server.close();store?.close();}
 }
-if(results.find(r=>r.case.name==='normal').response.status!==202||results.find(r=>r.case.name==='mcp-normal').response.status!==200)throw Error('Oracle did not reach the original application handlers');
+const results=[];
+if(mode==='boundaries'||mode==='timeouts')results.push(...await Promise.all(cases.map(observe)));
+else for(const [index,c]of cases.entries())results.push(await observe(c,index));
+if(!mode&&(results.find(r=>r.case.name==='normal').response.status!==202||results.find(r=>r.case.name==='mcp-normal').response.status!==200))throw Error('Oracle did not reach the original application handlers');
 process.stdout.write(JSON.stringify(results));
