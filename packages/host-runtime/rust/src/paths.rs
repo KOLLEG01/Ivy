@@ -6,6 +6,11 @@ use std::{io, path::{Path, PathBuf}};
 /// boundary. Lexical paths and direct native arguments have separate conversion.
 pub fn realpath(path: &Path) -> io::Result<PathBuf> {
     let resolved = std::fs::canonicalize(node_path::filesystem_path(&node_path::from_native(path)))?;
+    Ok(node_filesystem_result(resolved))
+}
+
+/// Decode a returned filesystem path, including Windows DOS/UNC spellings.
+pub(crate) fn node_filesystem_result(resolved: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -15,13 +20,13 @@ pub fn realpath(path: &Path) -> io::Result<PathBuf> {
         if units.starts_with(&unc) {
             let mut ordinary: Vec<u16> = "\\\\".encode_utf16().collect();
             ordinary.extend_from_slice(&units[unc.len()..]);
-            return Ok(node_path::to_native(&node_path::node_utf8(&std::ffi::OsString::from_wide(&ordinary))));
+            return node_path::to_native(&node_path::node_utf8(&std::ffi::OsString::from_wide(&ordinary)));
         }
         if units.starts_with(&extended) && units.get(5) == Some(&(b':' as u16)) {
-            return Ok(node_path::to_native(&node_path::node_utf8(&std::ffi::OsString::from_wide(&units[extended.len()..]))));
+            return node_path::to_native(&node_path::node_utf8(&std::ffi::OsString::from_wide(&units[extended.len()..])));
         }
     }
-    Ok(node_path::to_native(&node_path::node_utf8(resolved.as_os_str())))
+    node_path::to_native(&node_path::node_utf8(resolved.as_os_str()))
 }
 
 pub fn absolute(path: &Path) -> io::Result<PathBuf> {

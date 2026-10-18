@@ -45,6 +45,7 @@ pub mod process_output;
 mod protected_config;
 pub mod preparations;
 pub mod preparation_files;
+pub mod preparation_links;
 pub mod preparation_tools;
 pub mod runtime_dependencies;
 pub mod preparation_progress;

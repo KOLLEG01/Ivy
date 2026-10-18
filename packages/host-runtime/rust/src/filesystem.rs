@@ -1,9 +1,28 @@
 //! Shared filesystem identity, access, timestamps and owned payload removal.
 use crate::{IvyError,IvyResult,node_path};
 use std::{fs,path::{Path,PathBuf}};
+#[cfg(windows)]
+#[path = "filesystem/windows_junction.rs"]
+mod windows_junction;
 fn internal<T,E>(value:Result<T,E>)->IvyResult<T>{value.map_err(|_|IvyError::internal())}
 async fn blocking<T:Send+'static>(work:impl FnOnce()->IvyResult<T>+Send+'static)->IvyResult<T>{internal(tokio::task::spawn_blocking(work).await)?}
 fn fs_path(path:&Path)->PathBuf{node_path::filesystem_path(&node_path::from_native(path))}
+
+/// Preparation directory links: a Windows junction or a relative Unix symlink.
+/// This synchronous primitive preserves OS errors for the owning cache policy.
+pub fn directory_link(source:&Path,destination:&Path)->std::io::Result<()>{
+    let context=node_path::Context::current()?;
+    let source=node_path::from_native(source);let destination_text=node_path::from_native(destination);
+    let parent=node_path::dirname(context.style,&destination_text);
+    #[cfg(windows)] {
+        let target=context.resolve(&[parent,source]);
+        windows_junction::create(&node_path::filesystem_path(&target),&fs_path(destination))
+    }
+    #[cfg(unix)] {
+        let target=context.relative(&parent,&source);
+        std::os::unix::fs::symlink(node_path::filesystem_path(&target),fs_path(destination))
+    }
+}
 
 pub const READ_OK: u32 = 4;
 pub const WRITE_OK: u32 = 2;
@@ -14,25 +33,28 @@ pub struct FileIdentity { pub dev: String, pub ino: String }
 
 /// Node bigint stat identity, serialized as decimal strings for retained rows.
 /// Follows links, like fs.stat; callers separately enforce directory admission.
-pub fn stat_identity(path: &Path) -> std::io::Result<FileIdentity> { identity(&fs_path(path)) }
+pub fn stat_identity(path: &Path) -> std::io::Result<FileIdentity> { identity(&fs_path(path), false) }
+
+pub(crate) fn lstat_identity(path: &Path) -> std::io::Result<FileIdentity> { identity(&fs_path(path), true) }
 
 #[cfg(unix)]
-fn identity(path: &Path) -> std::io::Result<FileIdentity> {
+fn identity(path: &Path, no_follow: bool) -> std::io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    let metadata = fs::metadata(path)?;
+    let metadata = if no_follow { fs::symlink_metadata(path)? } else { fs::metadata(path)? };
     Ok(FileIdentity { dev: metadata.dev().to_string(), ino: metadata.ino().to_string() })
 }
 #[cfg(windows)]
-fn identity(path: &Path) -> std::io::Result<FileIdentity> {
-    let info = information(path)?;
+fn identity(path: &Path, no_follow: bool) -> std::io::Result<FileIdentity> {
+    let info = information(path, no_follow)?;
     Ok(FileIdentity { dev: info.dwVolumeSerialNumber.to_string(), ino: (((info.nFileIndexHigh as u64)<<32)|info.nFileIndexLow as u64).to_string() })
 }
 #[cfg(windows)]
-fn information(path: &Path) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
+fn information(path: &Path, no_follow: bool) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
     use std::os::windows::{fs::OpenOptionsExt,io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION,GetFileInformationByHandle,
-        FILE_READ_ATTRIBUTES,FILE_FLAG_BACKUP_SEMANTICS,FILE_SHARE_READ,FILE_SHARE_WRITE,FILE_SHARE_DELETE};
-    let file = fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        FILE_READ_ATTRIBUTES,FILE_FLAG_BACKUP_SEMANTICS,FILE_FLAG_OPEN_REPARSE_POINT,FILE_SHARE_READ,FILE_SHARE_WRITE,FILE_SHARE_DELETE};
+    let flags = FILE_FLAG_BACKUP_SEMANTICS | if no_follow { FILE_FLAG_OPEN_REPARSE_POINT } else { 0 };
+    let file = fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES).custom_flags(flags)
         .share_mode(FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE).open(path)?;
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 { return Err(std::io::Error::last_os_error()); }
@@ -43,7 +65,7 @@ fn information(path: &Path) -> std::io::Result<windows_sys::Win32::Storage::File
 /// protected-file readers, including the distinction between absent and denied.
 pub fn stat_link_count(path: &Path) -> std::io::Result<u64> {
     let path = fs_path(path);
-    #[cfg(windows)] { Ok(information(&path)?.nNumberOfLinks as u64) }
+    #[cfg(windows)] { Ok(information(&path, false)?.nNumberOfLinks as u64) }
     #[cfg(unix)] { use std::os::unix::fs::MetadataExt; Ok(fs::metadata(path)?.nlink()) }
 }
 
