@@ -52,5 +52,9 @@ name = "sdk-native-observations"
 path = "../../../tests/rust/sdk-native-observations.rs"
 
 [[test]]
+name = "sdk-native-turn-contents"
+path = "../../../tests/rust/sdk-native-turn-contents.rs"
+
+[[test]]
 name = "sdk-native-discovery"
 path = "../../../tests/rust/sdk-native-discovery.rs"

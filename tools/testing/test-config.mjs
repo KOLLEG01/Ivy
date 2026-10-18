@@ -145,6 +145,7 @@ export const rustTests = {
   'tests/rust/sdk-date-parse.rs': { package: 'ivy-sdk', test: 'sdk-date-parse' },
   'tests/rust/sdk-native-discovery.rs': { package: 'ivy-sdk', test: 'sdk-native-discovery' },
   'tests/rust/sdk-native-observations.rs': { package: 'ivy-sdk', test: 'sdk-native-observations' },
+  'tests/rust/sdk-native-turn-contents.rs': { package: 'ivy-sdk', test: 'sdk-native-turn-contents' },
   'tests/rust/host-scheduler.rs': { package: 'ivy-host-runtime', test: 'host-scheduler' },
   'tests/rust/host-paths.rs': { package: 'ivy-host-runtime', test: 'host-paths' },
   'tests/rust/host-windows-arguments.rs': { package: 'ivy-host-runtime', test: 'host-windows-arguments' },
