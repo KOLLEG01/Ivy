@@ -102,8 +102,8 @@ struct Cached {
 }
 pub struct ChatCollector<'a> {
     pub operations: &'a ChatOperations<'a>,
-    evidence: &'a ChatNativeEvidence<'a>,
-    runtime: &'a dyn CollectionRuntime,
+    pub(crate) evidence: &'a ChatNativeEvidence<'a>,
+    pub(crate) runtime: &'a dyn CollectionRuntime,
     catalogs: &'a CheckedNativeContracts,
     cache: Mutex<Option<Cached>>,
 }

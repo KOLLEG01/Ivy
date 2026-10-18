@@ -2,6 +2,8 @@ use super::{
     Client as Records, Fixture, Gate, Live, Time, array, compare, field, flag, member, merge,
     number, snapshot, text,
 };
+#[path = "chat-cancel-worker-cases.rs"]
+mod worker;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,

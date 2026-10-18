@@ -123,7 +123,7 @@ const recovery={
  'epoch-restart-terminal-only-in-predecessor':[terminal,...rounds(4),reopen,step],
 };
 const runDirectly=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
-export {Client,compact};
+export {Client,compact,definitions as collectorSeeds,now,at,instructions,summary,error,result};
 if(runDirectly)for(const c of cases){
  const seed=definitions[c.seed??c.version],root=mkdtempSync(join(tmpdir(),'ivy-collector-')),file=join(root,'chat-bridge.sqlite');writeFileSync(file,Buffer.from(seed.database,'base64'));clock=seed.initialNow??now;
  let client=new Client(seed.records),store,admission,operations,queue,evidence,main,collector,publisher,readIndex=seed.initialReadIndex??0,last=0,retryRequest=null;
