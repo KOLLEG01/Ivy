@@ -12,6 +12,8 @@ mod source_cases;
 mod storage_space_cases;
 #[path = "host-node-path-cases.rs"]
 mod node_path_cases;
+#[path = "host-layout-cases.rs"]
+mod layout_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
@@ -52,6 +54,9 @@ use ivy_host_runtime::{config, health::HealthFile, node_runtime::NodeRuntime};
 
 fn assert_json_eq(actual: &IvyJson, expected: &IvyJson) {
     assert_eq!(ivy_contracts::json::canonical(actual, usize::MAX).unwrap(), ivy_contracts::json::canonical(expected, usize::MAX).unwrap());
+}
+fn assert_json_eq_with_context(actual: &IvyJson, expected: &IvyJson, context: &IvyJson) {
+    assert_eq!(ivy_contracts::json::canonical(actual, usize::MAX).unwrap(), ivy_contracts::json::canonical(expected, usize::MAX).unwrap(), "{context:?}");
 }
 fn assert_optional_json_eq(actual: Option<IvyJson>, expected: Option<IvyJson>) {
     assert_eq!(actual.as_ref().map(|value| ivy_contracts::json::canonical(value, usize::MAX).unwrap()), expected.as_ref().map(|value| ivy_contracts::json::canonical(value, usize::MAX).unwrap()));
