@@ -324,9 +324,23 @@ fn node_to_rust_to_node_to_rust_preserves_journal_and_lossless_documents() {
         );
     };
     invoke("seed");
+    let opaque;
     {
         let s = db.open(Limits::default());
         let mut row = s.get("oracle", false).unwrap().unwrap();
+        opaque = model::field(&row, "future").unwrap().clone();
+        assert_eq!(
+            model::field(&opaque, "wide")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            400001
+        );
+        assert_eq!(
+            stringify(model::field(&opaque, "deep").unwrap(), usize::MAX).unwrap(),
+            format!("{}false{}", "[".repeat(300), "]".repeat(300))
+        );
         assert_eq!(model::number(&row, "revision").unwrap(), 4.0);
         row.insert("state", IvyJson::Null);
         s.save(&row).unwrap();
@@ -339,7 +353,10 @@ fn node_to_rust_to_node_to_rust_preserves_journal_and_lossless_documents() {
             json(r#"{"runId":"pending","value":0}"#)
         );
         s.mutate("rust-receipt", "rust-request", 2, |_| {
-            Ok(json(r#"{"saved":true}"#))
+            Ok(IvyJson::object([
+                ("saved", true.into()),
+                ("future", opaque.clone()),
+            ]))
         })
         .unwrap();
         assert!(s.used_run_id("retired-run").unwrap());
@@ -360,7 +377,7 @@ fn node_to_rust_to_node_to_rust_preserves_journal_and_lossless_documents() {
     let s = db.open(Limits::default());
     assert_eq!(
         s.operation("node-after-rust").unwrap().unwrap(),
-        json(r#"{"saved":true}"#)
+        IvyJson::object([("saved", true.into()), ("future", opaque)])
     );
 }
 
