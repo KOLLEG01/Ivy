@@ -19,6 +19,8 @@ use std::{
 mod task_keys;
 #[path = "../fixtures/task-board-program.rs"]
 mod publication;
+#[path = "../fixtures/task-board-recovery.rs"]
+mod recovery;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()

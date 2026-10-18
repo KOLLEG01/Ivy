@@ -13,5 +13,6 @@ pub mod journal_store;
 pub mod inspection_journal;
 pub mod operations;
 pub mod publication;
+pub mod native_recovery;
 pub mod task_keys;
 pub mod turn_output;
