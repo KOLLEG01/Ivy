@@ -2,6 +2,8 @@ use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
 #[path = "json_number.rs"]
 mod number;
+#[path = "json_trim.rs"]
+mod trim;
 #[path = "json_value.rs"]
 mod value_traits;
 pub use number::number_from_string;
@@ -34,23 +36,9 @@ impl JsString {
         let start = self
             .0
             .iter()
-            .position(|unit| !number::space(*unit))
+            .position(|unit| !trim::space(*unit))
             .unwrap_or(self.0.len());
         Self(self.0[start..].to_vec())
-    }
-    /// ECMAScript trim whitespace at both ends without decoding or replacing units.
-    pub fn trim(&self) -> Self {
-        let start = self
-            .0
-            .iter()
-            .position(|unit| !number::space(*unit))
-            .unwrap_or(self.0.len());
-        let end = self
-            .0
-            .iter()
-            .rposition(|unit| !number::space(*unit))
-            .map_or(start, |index| index + 1);
-        Self(self.0[start..end].to_vec())
     }
     fn map_case(&self, mapping: fn(&str) -> String) -> Self {
         let mut output = Vec::new();
