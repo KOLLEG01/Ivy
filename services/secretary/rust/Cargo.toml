@@ -18,6 +18,9 @@ roxmltree = "=0.21.1"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 pdf-extract = "=0.12.1"
 
+[dev-dependencies]
+tokio.workspace = true
+
 [[test]]
 name = "document"
 path = "../../../tests/secretary-rust/document.rs"
@@ -41,3 +44,7 @@ path = "../../../tests/secretary-rust/spool.rs"
 [[test]]
 name = "media-input"
 path = "../../../tests/secretary-rust/media-input.rs"
+
+[[test]]
+name = "delivery"
+path = "../../../tests/secretary-rust/delivery.rs"

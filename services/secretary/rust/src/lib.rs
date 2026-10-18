@@ -12,3 +12,4 @@ pub mod schema;
 pub mod source_identity;
 pub mod triage_media;
 pub mod triage_results;
+pub mod voice_target;

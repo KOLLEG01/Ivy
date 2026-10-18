@@ -85,3 +85,79 @@ pub fn message_unread_snapshot(
     }
     Ok(unread)
 }
+
+/// Verify unread evidence from the exact batch producer. The ToolClients cache
+/// must belong to this same RPC connection. All failures retain the source's
+/// pending result, without inventing a read or advancing the event window.
+pub async fn message_conversation_unread(
+    client: &dyn ivy_sdk::rpc::RpcClient,
+    tools: &ivy_sdk::tools::ToolClients,
+    root_object_id: &JsString,
+    batch: &IvyJson,
+    parse_date: &impl Fn(&JsString) -> f64,
+) -> IvyResult<bool> {
+    use ivy_sdk::{
+        rpc::RequestOptions,
+        tools::{InterfaceRequirement, ToolCallOptions},
+    };
+    let attempt = async {
+        let service_node_id = batch
+            .required("serviceNodeId")?
+            .as_js_string()
+            .ok_or_else(IvyError::internal)?;
+        let node = client
+            .request(
+                "serviceNodes.get",
+                IvyJson::object([("serviceNodeId", IvyJson::String(service_node_id.clone()))]),
+                RequestOptions::default(),
+            )
+            .await?;
+        if ["connected", "synced", "ready"]
+            .iter()
+            .any(|key| node.get(key).and_then(IvyJson::as_bool) != Some(true))
+            || node.get("stale").and_then(IvyJson::as_bool) == Some(true)
+        {
+            return Err(IvyError::new(
+                "secretary_message_unread_pending",
+                "The message source is unavailable.",
+            ));
+        }
+        let source = tools.service_tools(
+            service_node_id.clone(),
+            &[InterfaceRequirement {
+                namespace: "message-channel".into(),
+                interface_version: "1.0.0".into(),
+            }],
+        )?;
+        let observation = source
+            .call(
+                &"message-channel.unread".into(),
+                IvyJson::object([
+                    ("rootObjectId", IvyJson::String(root_object_id.clone())),
+                    (
+                        "reference",
+                        batch.required("channel")?.required("reference")?.clone(),
+                    ),
+                    ("notBefore", batch.required("dueAt")?.clone()),
+                ]),
+                None,
+                ToolCallOptions::default(),
+            )
+            .await?;
+        message_unread_snapshot(
+            &observation,
+            batch
+                .required("dueAt")?
+                .as_js_string()
+                .ok_or_else(IvyError::internal)?,
+            parse_date,
+        )
+    }
+    .await;
+    attempt.map_err(|_| {
+        IvyError::new(
+            "secretary_message_unread_pending",
+            "The channel unread state cannot be verified.",
+        )
+    })
+}
