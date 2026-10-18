@@ -245,7 +245,7 @@ fn inherited(key: &JsString) -> bool {
     )
 }
 
-fn append(pointer: &JsString, key: &JsString, escape: bool) -> JsString {
+pub(super) fn append(pointer: &JsString, key: &JsString, escape: bool) -> JsString {
     let mut result = pointer.clone();
     result.0.push(47);
     for unit in &key.0 {

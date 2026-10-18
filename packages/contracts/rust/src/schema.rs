@@ -5,6 +5,9 @@ use std::sync::{Arc, OnceLock};
 #[path = "schema_keywords.rs"]
 mod keywords;
 pub use keywords::validate_compiler_keyword_values;
+#[path = "schema_compiler_walk.rs"]
+mod compiler_walk;
+pub use compiler_walk::{CompilerNode, CompilerWalk};
 #[path = "schema_meta.rs"]
 mod meta;
 #[path = "schema_resources.rs"]
@@ -42,6 +45,11 @@ impl AdmittedSchema {
     /// the bundled meta-schemas. Reference compilation remains a separate stage.
     pub fn registered_resources(&self) -> IvyResult<SchemaResourceIndex<'_>> {
         resources::register(&self.schema)
+    }
+    /// Select active inline branches and their compiler scopes. Reference target
+    /// compilation, meta-validation and runtime evaluation remain separate.
+    pub fn compiler_walk(&self) -> IvyResult<CompilerWalk<'_>> {
+        compiler_walk::walk(&self.schema)
     }
 }
 

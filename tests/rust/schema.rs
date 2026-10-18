@@ -5,6 +5,67 @@ use ivy_contracts::{
 };
 
 #[test]
+fn inline_compiler_walk_matches_branch_selection_and_scopes() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/schema-compiler-walk-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 3000);
+    for row in rows {
+        let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
+        let admitted = ivy_contracts::schema::admit_schema(&schema).unwrap();
+        let actual = match admitted.compiler_walk() {
+            Ok(mut walk) => {
+                walk.nodes.sort_by(|a, b| a.pointer.0.cmp(&b.pointer.0));
+                let nodes = walk
+                    .nodes
+                    .into_iter()
+                    .map(|node| {
+                        IvyJson::object([
+                            ("pointer", IvyJson::String(node.pointer)),
+                            ("base", IvyJson::String(node.base_id)),
+                            ("schema", stringify(node.schema, 1_000_000).unwrap().into()),
+                            (
+                                "ref",
+                                node.reference
+                                    .map_or(IvyJson::Null, |r| IvyJson::String(r.clone())),
+                            ),
+                        ])
+                    })
+                    .collect();
+                IvyJson::object([
+                    ("ok", true.into()),
+                    ("base", IvyJson::String(walk.root_base_id)),
+                    ("nodes", IvyJson::Array(nodes)),
+                ])
+            }
+            Err(error) => {
+                assert_eq!(error.code_js(), "registry_invalid".into());
+                IvyJson::object([("ok", false.into())])
+            }
+        };
+        assert_eq!(
+            stringify(&actual, 2_000_000).unwrap(),
+            row["result"].as_str().unwrap(),
+            "schema {}",
+            row["schema"]
+        );
+    }
+}
+
+#[test]
 fn compiler_keyword_values_match_pinned_compiler() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")
