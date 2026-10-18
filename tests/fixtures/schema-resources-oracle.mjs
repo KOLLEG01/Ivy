@@ -21,7 +21,7 @@ function add(name,schema){
   traverse(schema,{allKeys:true},(node,pointer,root,parent)=>{
     nodes.push({pointer,parent:parent??null,schema:JSON.stringify(node)});
   });
-  rows.push({name,schema:JSON.stringify(schema),result:JSON.stringify({isolated:containsId(schema),nodes})});
+  rows.push({name:JSON.stringify(name),schema:JSON.stringify(schema),result:JSON.stringify({isolated:containsId(schema),nodes})});
 }
 add('true',true);add('false',false);add('anonymous',{});
 for(const id of [null,false,0,'','#','#/','a','https://example.invalid/root','\ud800',[],{}])

@@ -3,7 +3,19 @@
 use crate::JsString;
 #[path = "schema_uri_resolve.rs"]
 mod resolution;
-pub use resolution::resolve;
+pub use resolution::{full_path, resolve};
+
+/// Compiler ID normalization strips only a terminal empty fragment or `#/`.
+pub fn normalize_id(input: &JsString) -> JsString {
+    let remove = if input.0.ends_with(&[35, 47]) {
+        2
+    } else if input.0.last() == Some(&35) {
+        1
+    } else {
+        0
+    };
+    JsString(input.0[..input.0.len() - remove].to_vec())
+}
 
 #[derive(Clone, Copy)]
 pub enum Component {
