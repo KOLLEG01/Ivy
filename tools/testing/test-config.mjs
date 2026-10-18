@@ -126,6 +126,7 @@ export const privateRepo = false;
 export const rustTests = {
   'tests/rust/chat-notices.rs': { package: 'ivy-chat-bridge', test: 'chat-notices' },
   'tests/rust/chat-result-text.rs': { package: 'ivy-chat-bridge', test: 'chat-result-text' },
+  'tests/rust/chat-collection-reads.rs': { package: 'ivy-chat-bridge', test: 'chat-collection-reads' },
   'tests/rust/chat-native-driver.rs': { package: 'ivy-chat-bridge', test: 'chat-native-driver' },
   'tests/rust/chat-registry.rs': { package: 'ivy-chat-bridge', test: 'chat-registry' },
   'tests/rust/chat-input-media.rs': { package: 'ivy-chat-bridge', test: 'chat-input-media' },
