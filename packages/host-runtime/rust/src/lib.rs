@@ -2,6 +2,7 @@
 pub use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome};
 pub mod build_identity;
 pub mod codex_admission;
+pub mod codex_app_tools;
 pub mod codex_framing;
 pub mod codex_rpc;
 pub mod concurrency;
@@ -10,6 +11,7 @@ pub mod default_settings;
 pub mod health;
 pub mod logs;
 pub mod node_runtime;
+pub mod native_catalog_compatibility;
 pub mod package_requirements;
 pub mod paths;
 pub mod platform;
