@@ -287,7 +287,7 @@ impl CancellationNative for Runtime<'_> {
             let at = Json::String(date_to_iso(self.collection.clock.utc_millis() as f64)?);
             let definition = self.collection.operations.admission.definition();
             let value = Json::object([
-                ("schemaVersion", 1.into()),
+                ("schemaVersion", Json::Number(1.0)),
                 ("operationId", Json::String(operation_id.clone())),
                 ("serviceNodeId", "owner".into()),
                 ("callerPrincipalId", "chat-service".into()),

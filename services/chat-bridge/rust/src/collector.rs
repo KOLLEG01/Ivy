@@ -208,7 +208,7 @@ impl<'a> ChatCollector<'a> {
                             "objectId",
                             source.selected.input.pin.object_id.clone().into(),
                         ),
-                        ("revision", 1.into()),
+                        ("revision", Json::Number(1.0)),
                     ]),
                 )?
                 && same(
@@ -296,7 +296,7 @@ impl<'a> ChatCollector<'a> {
         let mut pins = HashSet::new();
         for reference in array(&collection.value, "reads")? {
             require(
-                reference.get("revision") == Some(&1.into())
+                reference.get("revision") == Some(&Json::Number(1.0))
                     && pins.insert(field(reference, "objectId")?.as_str()?),
                 "chat_collection_gap",
                 "A collection must pin distinct immutable original evidence.",
@@ -443,7 +443,7 @@ impl<'a> ChatCollector<'a> {
         )?;
         let parent = field(field(&current.value, "input")?, "objectId")?.as_str()?;
         let metadata = Json::object([
-            ("schemaVersion", 1.into()),
+            ("schemaVersion", Json::Number(1.0)),
             ("inputId", parent.clone().into()),
             ("binding", field(&current.value, "binding")?.clone()),
             ("turnId", field(&current.value, "turnId")?.clone()),
@@ -603,7 +603,7 @@ impl<'a> ChatCollector<'a> {
         next.insert("result", Json::Null);
         next.insert("error", Json::Null);
         next.insert("reads", Json::Array(vec![]));
-        next.insert("nativeBytes", 0.into());
+        next.insert("nativeBytes", Json::Number(0.0));
         next.insert(
             "retryAuthorization",
             authorization.cloned().unwrap_or(Json::Null),
@@ -676,10 +676,13 @@ impl<'a> ChatCollector<'a> {
             if current.is_none() {
                 let at = self.store().now_iso()?;
                 let value = Json::object([
-                    ("schemaVersion", 1.into()),
+                    ("schemaVersion", Json::Number(1.0)),
                     (
                         "input",
-                        Json::object([("objectId", input_id.into()), ("revision", 1.into())]),
+                        Json::object([
+                            ("objectId", input_id.into()),
+                            ("revision", Json::Number(1.0)),
+                        ]),
                     ),
                     (
                         "binding",
@@ -691,10 +694,10 @@ impl<'a> ChatCollector<'a> {
                         field(&source.selected.input.value, "turnId")?.clone(),
                     ),
                     ("epoch", field(&status, "epoch")?.clone()),
-                    ("attempt", 1.into()),
+                    ("attempt", Json::Number(1.0)),
                     ("previousAttempt", Json::Null),
                     ("reads", Json::Array(vec![])),
-                    ("nativeBytes", 0.into()),
+                    ("nativeBytes", Json::Number(0.0)),
                     ("state", "collecting".into()),
                     ("result", Json::Null),
                     ("error", Json::Null),
@@ -739,7 +742,7 @@ impl<'a> ChatCollector<'a> {
                 );
                 next.insert("previousAttempt", selected.pin.json());
                 next.insert("reads", Json::Array(vec![]));
-                next.insert("nativeBytes", 0.into());
+                next.insert("nativeBytes", Json::Number(0.0));
                 next.insert("updatedAt", field(&status, "observedAt")?.clone());
                 current = Some(self.update(selected, &next).await?);
                 self.clear();

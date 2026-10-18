@@ -250,7 +250,7 @@ fn request(
                 .iter()
                 .find(|r| field(r, "object").get("id") == Some(&id))
                 .map(|r| field(field(r, "revision"), "revision").clone())
-                .unwrap_or(1.into())
+                .unwrap_or(Json::Number(1.0))
         });
         let bridge = admission.expected(&if flag(action, "badBridge") {
             JsString::from("other")
@@ -379,7 +379,7 @@ async fn action(
                     "pendingAction",
                     Json::object([
                         ("objectId", operation.pin.object_id.into()),
-                        ("revision", 1.into()),
+                        ("revision", Json::Number(1.0)),
                     ]),
                 )]),
             )

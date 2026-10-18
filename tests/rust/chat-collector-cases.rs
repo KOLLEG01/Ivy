@@ -224,7 +224,7 @@ impl RpcClient for Client {
                     metadata.insert("ownerObjectId", owner.clone());
                 }
                 let mut revision = Json::object([
-                    ("revision", 1.into()),
+                    ("revision", Json::Number(1.0)),
                     ("contractVersion", field(&p, "contractVersion").clone()),
                     (
                         "mediaType",
@@ -614,7 +614,7 @@ async fn action(
                 } else {
                     current.map(|c| c.pin.json()).unwrap_or(Json::object([
                         ("objectId", "missing".into()),
-                        ("revision", 1.into()),
+                        ("revision", Json::Number(1.0)),
                     ]))
                 };
                 *retry = Some(Json::object([
