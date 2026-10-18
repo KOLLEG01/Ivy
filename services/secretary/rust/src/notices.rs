@@ -13,7 +13,7 @@ use ivy_sdk::{
         ContactWindow, automatic_notifications_allowed, contact_window_open, date_to_iso,
         parse_date,
     },
-    main_chat::main_notification,
+    main_chat::main_notification_checked,
     operation_ids::new_operation_id,
     rpc::RequestOptions,
 };
@@ -39,6 +39,12 @@ pub(crate) fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
 }
 fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
+}
+fn same_notification(original: &IvyJson, request: &IvyJson) -> IvyResult<bool> {
+    // Hash the original before admitting the requested projection, preserving
+    // the original same() canonical failure order for incomplete notifications.
+    let original = hash_json(&main_notification_checked(original)?)?;
+    Ok(original == hash_json(&main_notification_checked(request)?)?)
 }
 pub(crate) fn is(value: &IvyJson, key: &str, expected: &str) -> bool {
     field(value, key) == &IvyJson::from(expected)
@@ -560,7 +566,7 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
             need(
                 is(original, "action", "notify")
                     && operation.get("callerPrincipalId") == Some(principal)
-                    && same(&main_notification(original), &main_notification(request))?,
+                    && same_notification(original, request)?,
                 "secretary_notice_mismatch",
                 "The original Main handoff identity changed.",
             )?;
@@ -617,7 +623,7 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
                     .call(
                         NoticeMethod::Notify,
                         target,
-                        main_notification(request),
+                        main_notification_checked(request)?,
                         Some(text(request, "operationId")?),
                     )
                     .await?;
@@ -625,7 +631,7 @@ impl<'a, 'engine, 'journal> SecretaryNotices<'a, 'engine, 'journal> {
                 need(
                     result.get("callerPrincipalId") == Some(principal)
                         && is(original, "action", "notify")
-                        && same(&main_notification(original), &main_notification(request))?,
+                        && same_notification(original, request)?,
                     "secretary_notice_unresolved",
                     "The original notification action changed identity.",
                 )?;
