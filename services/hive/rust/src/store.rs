@@ -67,6 +67,7 @@ pub struct Store {
     changes: Vec<JsString>,
     cursor_secret: String,
     query_state: query::QueryState,
+    validators: ivy_contracts::schema::SchemaValidators,
 }
 impl Store {
     pub fn open(path: &Path) -> IvyResult<Self> {
@@ -89,6 +90,7 @@ impl Store {
             changes: vec![],
             cursor_secret: String::new(),
             query_state: Default::default(),
+            validators: ivy_contracts::schema::SchemaValidators::new(),
         };
         store.initialize()?;
         store.install_query_functions()?;
@@ -238,6 +240,9 @@ impl Store {
     }
     pub fn connection(&self) -> &Connection {
         &self.db
+    }
+    pub fn validators(&self) -> &ivy_contracts::schema::SchemaValidators {
+        &self.validators
     }
     pub fn metadata(&self, key: &str) -> IvyResult<Option<String>> {
         self.db

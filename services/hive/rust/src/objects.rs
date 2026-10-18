@@ -17,6 +17,9 @@ pub use mutations::{archive, reorder};
 #[path = "object_delete.rs"]
 mod deletion;
 pub use deletion::delete;
+#[path = "object_contracts.rs"]
+mod contracts;
+pub use contracts::{ContentData, DecodedContent, decode, get_contract, register, register_agent};
 fn value(row: &Row<'_>, name: &str) -> rusqlite::Result<IvyJson> {
     Ok(match row.get_ref(name)? {
         ValueRef::Null => IvyJson::Null,

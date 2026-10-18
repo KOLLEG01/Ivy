@@ -15,7 +15,7 @@ const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const input=JSON.parse(readFileSync(0,'utf8'));
 let store;
 const tableHash=(table,columns)=>'sha256:'+createHash('sha256').update(store.get(`SELECT json_group_array(json_array(${columns})) AS encoded FROM (SELECT rowid AS record_id,* FROM ${table} ORDER BY rowid)`).encoded).digest('hex');
-const snapshot=()=>({objects:store.all('SELECT * FROM objects ORDER BY id'),fts:store.all('SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid'),revisions:tableHash('revisions',"record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),references:store.all('SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name'),principals:store.all('SELECT * FROM principals ORDER BY id'),credentials:store.all('SELECT * FROM credentials ORDER BY digest'),nodes:store.all('SELECT * FROM service_nodes ORDER BY id'),sessions:store.all('SELECT * FROM browser_sessions ORDER BY digest'),subscriptions:store.all('SELECT * FROM subscriptions ORDER BY node_id,name'),durable:store.all('SELECT * FROM durable_subscriptions ORDER BY node_id,name'),changes:[...store.changes],mutations:tableHash('mutations','record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes'),events:tableHash('events','sequence,topic,topic_version,source,occurred_at,mutation_id,payload'),metadata:store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),retention:store.all('SELECT * FROM retention_families ORDER BY contract_key')});
+const snapshot=()=>({contracts:tableHash('contracts','key,version,definition'),families:store.all('SELECT * FROM contract_families ORDER BY key'),objects:store.all('SELECT * FROM objects ORDER BY id'),fts:store.all('SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid'),revisions:tableHash('revisions',"record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),references:store.all('SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name'),principals:store.all('SELECT * FROM principals ORDER BY id'),credentials:store.all('SELECT * FROM credentials ORDER BY digest'),nodes:store.all('SELECT * FROM service_nodes ORDER BY id'),sessions:store.all('SELECT * FROM browser_sessions ORDER BY digest'),subscriptions:store.all('SELECT * FROM subscriptions ORDER BY node_id,name'),durable:store.all('SELECT * FROM durable_subscriptions ORDER BY node_id,name'),changes:[...store.changes],mutations:tableHash('mutations','record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes'),events:tableHash('events','sequence,topic,topic_version,source,occurred_at,mutation_id,payload'),metadata:store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),retention:store.all('SELECT * FROM retention_families ORDER BY contract_key')});
 const rows=[];
 try {
  store=new HiveStore(input.path);
@@ -23,6 +23,23 @@ try {
   let value=null,error=null;
   try {
    switch(step.op){
+    case 'register':{
+      const definition={...step.definition};for(const [field,units]of Object.entries(step.definitionUnits??{}))definition[field]=String.fromCharCode(...units);
+      value=new Objects(store).register(definition,step.owner);if(step.lossless)value={encoded:JSON.stringify(value)};break;
+    }
+    case 'registerAgent':{
+      const realNow=Date.now;Date.now=()=>step.now;
+      try{value=new Objects(store).registerAgent(store.authenticate(step.context),step.params);}finally{Date.now=realNow;}
+      break;
+    }
+    case 'getContract':value=new Objects(store).getContract(step.key,step.version);break;
+    case 'decode':{
+      const content={...step.content};if(step.units)content.value=String.fromCharCode(...step.units);
+      const result=new Objects(store).decode(step.contract,content);
+      const kind=typeof result.data==='string'?'text':'bytes';
+      value={kind,data:result.byteLength<=1024?(kind==='text'?result.data:Buffer.from(result.data).toString('base64')):null,contentHash:result.contentHash,byteLength:result.byteLength};
+      break;
+    }
     case 'configure':store.configureCredentials(step.credentials);break;
     case 'authenticate':value=store.authenticate(step.context);break;
     case 'sql':store.db.exec(step.sql);break;

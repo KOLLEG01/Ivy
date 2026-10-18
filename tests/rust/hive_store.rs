@@ -2,6 +2,8 @@ use ivy_contracts::{IvyError, IvyJson, JsString, json::stringify};
 use ivy_hive::store::{
     AuthContext, AuthenticatedContext, Credential, LedgerResult, Principal, ReceiptKind, Store,
 };
+#[path = "hive_contracts.rs"]
+mod contracts;
 #[path = "hive_ledger.rs"]
 mod ledger;
 #[path = "hive_object_delete.rs"]
@@ -74,7 +76,7 @@ fn snapshot(store: &Store) -> Value {
         let encoded:String=store.connection().query_row(&format!("SELECT json_group_array(json_array({columns})) FROM (SELECT rowid AS record_id,* FROM {table} ORDER BY rowid)"),[],|r|r.get(0)).unwrap();
         ivy_contracts::hash::digest(encoded)
     };
-    json!({"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"fts":rows(store,"SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events","sequence,topic,topic_version,source,occurred_at,mutation_id,payload"),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key")})
+    json!({"contracts":table_hash("contracts","key,version,definition"),"families":rows(store,"SELECT * FROM contract_families ORDER BY key"),"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"fts":rows(store,"SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events","sequence,topic,topic_version,source,occurred_at,mutation_id,payload"),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key")})
 }
 fn context(value: &Value) -> AuthenticatedContext {
     AuthenticatedContext {
@@ -90,6 +92,77 @@ fn native(path: &Path, steps: &[Value]) -> Value {
     let mut result = vec![];
     for step in steps {
         let outcome = match step["op"].as_str().unwrap() {
+            "register" => {
+                let mut definition = IvyJson::from_serde(&step["definition"]).unwrap();
+                if let Some(fields) = step["definitionUnits"].as_object() {
+                    for (field, units) in fields {
+                        definition.insert(
+                            field.as_str(),
+                            IvyJson::String(JsString(
+                                units
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|v| v.as_u64().unwrap() as u16)
+                                    .collect(),
+                            )),
+                        );
+                    }
+                }
+                ivy_hive::objects::register(
+                    &mut store,
+                    &definition,
+                    &IvyJson::from_serde(&step["owner"]).unwrap(),
+                )
+                .map(|value| {
+                    if step["lossless"] == true {
+                        json!({"encoded":stringify(&value,1<<26).unwrap()})
+                    } else {
+                        wire(value)
+                    }
+                })
+            }
+            "registerAgent" => {
+                let credential = &step["context"]["credentialDigest"];
+                store
+                    .authenticate(&AuthContext {
+                        credential_digest: credential.as_str().unwrap().into(),
+                        session_digest: None,
+                    })
+                    .and_then(|p| {
+                        ivy_hive::objects::register_agent(
+                            &mut store,
+                            &AuthenticatedContext {
+                                principal_id: p.principal_id,
+                                credential_digest: p.credential_digest,
+                            },
+                            &IvyJson::from_serde(&step["params"]).unwrap(),
+                            step["now"].as_u64().unwrap(),
+                        )
+                    })
+                    .map(wire)
+            }
+            "getContract" => ivy_hive::objects::get_contract(
+                &store,
+                &step["key"].as_str().unwrap().into(),
+                step["version"].as_str().map(JsString::from).as_ref(),
+            )
+            .map(wire),
+            "decode" => {
+                let mut content = IvyJson::from_serde(&step["content"]).unwrap();
+                if let Some(units) = step["units"].as_array() {
+                    content.insert(
+                        "value",
+                        IvyJson::String(JsString(
+                            units.iter().map(|v| v.as_u64().unwrap() as u16).collect(),
+                        )),
+                    );
+                }
+                ivy_hive::objects::decode(&store,&IvyJson::from_serde(&step["contract"]).unwrap(),&content).map(|result| {
+                    let (kind,data)=match result.data {ivy_hive::objects::ContentData::Text(value)=>("text",if result.byte_length<=1024 {json!(value)} else {Value::Null}),ivy_hive::objects::ContentData::Bytes(value)=>{use base64::Engine;("bytes",if result.byte_length<=1024 {json!(base64::engine::general_purpose::STANDARD.encode(value))} else {Value::Null})}};
+                    json!({"kind":kind,"data":data,"byteLength":result.byte_length,"contentHash":result.content_hash})
+                })
+            }
             "configure" => store
                 .configure_credentials(
                     &step["credentials"]
