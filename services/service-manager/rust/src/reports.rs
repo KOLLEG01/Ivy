@@ -71,6 +71,31 @@ pub struct Reports {
 }
 
 impl Reports {
+    /// Publish journal projections in the original host-before-deployments order.
+    /// Readiness consumes the same executor observation used for the host report.
+    pub async fn publish_journal(
+        &mut self,
+        connection: &dyn RpcClient,
+        journal: &ivy_host_runtime::journal::HostJournal,
+        host_id: &IvyJson,
+    ) -> IvyResult<Option<IvyJson>> {
+        let executor = crate::journal::executor(journal, host_id).await?;
+        let status = journal.status(executor.clone()).await?;
+        self.publish_host(connection, &status, |minimum| {
+            journal.management_snapshot(executor.clone(), minimum as f64, Some(status.clone()))
+        })
+        .await?;
+        let records = journal
+            .list(200.0)
+            .await?
+            .iter()
+            .map(|entry| entry.required("record").cloned())
+            .collect::<IvyResult<Vec<_>>>()?;
+        self.publish_deployments(connection, IvyJson::Array(records))
+            .await?;
+        Ok(executor)
+    }
+
     /// Reconcile against the current connection before publishing on that connection.
     pub async fn reconcile_from(
         &mut self,

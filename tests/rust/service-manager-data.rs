@@ -127,6 +127,183 @@ impl Drop for Temp {
     }
 }
 
+fn manager_host(root: &Temp) -> IvyJson {
+    IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)),
+        ("hostId", "host".into()),
+        (
+            "runtimeRoot",
+            root.0.join("state").to_string_lossy().to_string().into(),
+        ),
+        (
+            "artifactRoot",
+            root.0
+                .join("artifacts")
+                .to_string_lossy()
+                .to_string()
+                .into(),
+        ),
+        (
+            "stagingRoot",
+            root.0.join("staging").to_string_lossy().to_string().into(),
+        ),
+        ("publicBaseUrl", "http://127.0.0.1:39081/ivy".into()),
+        ("executables", json(r#"{"node":"fixture-node"}"#)),
+        (
+            "instances",
+            json(
+                r#"[{"instanceId":"fixture","serviceNodeId":"host.fixture","componentId":"fixture","engine":"process","enabled":true,"settings":{}}]"#,
+            ),
+        ),
+    ])
+}
+
+#[tokio::test]
+async fn journal_handlers_refresh_executor_and_observe_configuration_reload() {
+    use ivy_host_runtime::{config::atomic_json, journal::HostJournal};
+    use ivy_service_manager::journal::read_handlers;
+    let root = Temp::new();
+    let mut config = manager_host(&root);
+    let journal = HostJournal::open(config.clone()).await.unwrap();
+    let handlers = read_handlers(journal.clone(), "host".into());
+    let context = || ivy_sdk::service::InvocationContext {
+        caller_principal_id: "caller".into(),
+        operation_id: None,
+        generation: 1,
+        signal: Default::default(),
+    };
+    let status = &handlers[&"host.status".into()];
+    let first = status(json("{}"), context()).await.unwrap();
+    assert_eq!(first.required("executor").unwrap(), &IvyJson::Null);
+    let mut executor = json(
+        r#"{"schemaVersion":1,"hostId":"host","pid":1,"bootId":"boot","buildId":null,"state":"ready","activeDeploymentId":null,"code":null}"#,
+    );
+    executor.insert(
+        "observedAt",
+        chrono::Utc::now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            .into(),
+    );
+    let executor_path = root.0.join("state/executor.json");
+    atomic_json(executor_path.clone(), executor.clone())
+        .await
+        .unwrap();
+    let fresh = status(json("{}"), context()).await.unwrap();
+    assert_eq!(
+        canonical(fresh.required("executor").unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
+        canonical(&executor, MANAGEMENT_FRAME_BYTES).unwrap()
+    );
+    executor.insert("hostId", "other".into());
+    atomic_json(executor_path, executor).await.unwrap();
+    let mut instances = config
+        .required("instances")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .to_vec();
+    instances[0].insert("enabled", false.into());
+    config.insert("instances", IvyJson::Array(instances));
+    journal.use_configuration(config).await.unwrap();
+    let reloaded = status(json("{}"), context()).await.unwrap();
+    assert_eq!(reloaded.required("executor").unwrap(), &IvyJson::Null);
+    assert_eq!(
+        reloaded.required("instances").unwrap().as_array().unwrap()[0]
+            .required("desiredEnabled")
+            .unwrap(),
+        &IvyJson::Bool(false)
+    );
+    let error =
+        handlers[&"host.deployment".into()](json(r#"{"deploymentId":"missing"}"#), context())
+            .await
+            .unwrap_err();
+    assert_eq!(error.code, "not_found");
+    journal.close().await.unwrap();
+}
+
+#[derive(Default)]
+struct JournalRpc(Mutex<Vec<(String, IvyJson)>>);
+impl RpcClient for JournalRpc {
+    fn request<'a>(
+        &'a self,
+        method: &'a str,
+        params: IvyJson,
+        _: RequestOptions,
+    ) -> RequestFuture<'a> {
+        Box::pin(async move {
+            let mut calls = self.0.lock().unwrap();
+            let first_report =
+                method == "hosts.report" && !calls.iter().any(|(name, _)| name == method);
+            calls.push((method.into(), params));
+            if first_report {
+                return Err(ivy_contracts::IvyError::new(
+                    "outcome_unknown",
+                    "lost acknowledgment",
+                ));
+            }
+            Ok(match method {
+                "hosts.observations" => json(r#"{"items":[]}"#),
+                "hosts.report" | "deployments.report" => IvyJson::Null,
+                _ => panic!("Unexpected RPC {method}"),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn journal_publication_keeps_durable_sequences_across_failed_ack_and_reopen() {
+    use ivy_host_runtime::journal::HostJournal;
+    let root = Temp::new();
+    let config = manager_host(&root);
+    let journal = HostJournal::open(config.clone()).await.unwrap();
+    let rpc = JournalRpc::default();
+    let mut reports = Reports::default();
+    reports.reconcile_from(&rpc, "host".into()).await.unwrap();
+    assert!(
+        reports
+            .publish_journal(&rpc, &journal, &"host".into())
+            .await
+            .is_err()
+    );
+    assert_eq!(reports.minimum_sequence(), 0);
+    assert_eq!(rpc.0.lock().unwrap().len(), 2); // No deployments after failed host report.
+    assert!(
+        reports
+            .publish_journal(&rpc, &journal, &"host".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(reports.minimum_sequence(), 2);
+    reports
+        .publish_journal(&rpc, &journal, &"host".into())
+        .await
+        .unwrap();
+    assert_eq!(rpc.0.lock().unwrap().len(), 4); // Timestamp pulses do not republish.
+    journal.close().await.unwrap();
+    let journal = HostJournal::open(config).await.unwrap();
+    let mut next = Reports::default();
+    next.reconcile_from(&rpc, "host".into()).await.unwrap();
+    next.publish_journal(&rpc, &journal, &"host".into())
+        .await
+        .unwrap();
+    assert_eq!(next.minimum_sequence(), 3);
+    let calls = rpc.0.lock().unwrap();
+    let sequences: Vec<_> = calls
+        .iter()
+        .filter(|(name, _)| name == "hosts.report")
+        .map(|(_, value)| value.required("sequence").unwrap().as_f64().unwrap())
+        .collect();
+    assert_eq!(sequences, vec![1.0, 2.0, 3.0]);
+    for (_, value) in calls
+        .iter()
+        .filter(|(name, _)| name == "deployments.report")
+    {
+        assert_eq!(value, &json(r#"{"records":[]}"#));
+    }
+    drop(calls);
+    journal.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn desired_subscription_keeps_order_and_persistence_failures_propagate() {
     use ivy_service_manager::hints::{desired_subscription, persist_hint};
