@@ -1,7 +1,7 @@
 use super::*;
 use ivy_contracts::{
-    IvyResult,
-    checked_native_contract::CheckedNativeContracts, operation::parse_operation_id_js,
+    IvyResult, checked_native_contract::CheckedNativeContracts, json::canonical,
+    operation::parse_operation_id_js,
 };
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
@@ -106,6 +106,13 @@ impl RpcClient for DriverClient {
                 return Err(IvyError::new(
                     error.required("code")?.as_str()?,
                     error.required("message")?.as_str()?,
+                )
+                .with_outcome(
+                    match error.required("outcome")?.as_str()?.as_str() {
+                        "unknown" => Outcome::Unknown,
+                        "completed" => Outcome::Completed,
+                        _ => Outcome::NotExecuted,
+                    },
                 ));
             }
             Ok(step.required("value")?.clone())
@@ -457,6 +464,10 @@ async fn original_runner_coalescing_background_interleaving_and_drain() {
             client.scripted.steps.lock().unwrap().is_empty(),
             "Unconsumed RPC: {label}"
         );
-        assert_eq!(&actual, row.required("expected").unwrap(), "case {label}");
+        assert_eq!(
+            canonical(&actual, 8 * 1024 * 1024).unwrap(),
+            canonical(row.required("expected").unwrap(), 8 * 1024 * 1024).unwrap(),
+            "case {label}"
+        );
     }
 }
