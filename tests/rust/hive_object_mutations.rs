@@ -10,7 +10,7 @@ fn digest(user: &str) -> String {
         if user == "alpha" { "a" } else { "b" }.repeat(64)
     )
 }
-fn setup() -> Vec<Value> {
+pub(super) fn setup() -> Vec<Value> {
     let mut text = super::query::seed(false);
     text.push_str("BEGIN IMMEDIATE; UPDATE metadata SET value='epoch' WHERE key='runtime_epoch';");
     super::query::insert(
@@ -58,7 +58,7 @@ fn setup() -> Vec<Value> {
         ),
     ]
 }
-fn action(op: &str, nonce: &str, mut parameters: Value) -> Value {
+pub(super) fn action(op: &str, nonce: &str, mut parameters: Value) -> Value {
     parameters["mutationId"] = json!(format!("epoch:1000:{nonce}"));
     let mut value =
         json!({"op":op,"params":parameters,"context":{"credentialDigest":digest("alpha")}});
@@ -87,7 +87,7 @@ fn reorder(nonce: &str, id: &str, before: Option<&str>) -> Value {
         json!({"objectId":id,"beforeObjectId":before}),
     )
 }
-fn compare(steps: &[Value]) -> Value {
+pub(super) fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
     let expected = oracle(&root.0.join("reference.sqlite"), steps);
     let actual = native(&root.0.join("native.sqlite"), steps);

@@ -4,6 +4,8 @@ use ivy_hive::store::{
 };
 #[path = "hive_ledger.rs"]
 mod ledger;
+#[path = "hive_object_delete.rs"]
+mod object_delete;
 #[path = "hive_object_mutations.rs"]
 mod object_mutations;
 #[path = "hive_query.rs"]
@@ -70,7 +72,7 @@ fn snapshot(store: &Store) -> Value {
         let encoded:String=store.connection().query_row(&format!("SELECT json_group_array(json_array({columns})) FROM (SELECT rowid AS record_id,* FROM {table} ORDER BY rowid)"),[],|r|r.get(0)).unwrap();
         ivy_contracts::hash::digest(encoded)
     };
-    json!({"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events","sequence,topic,topic_version,source,occurred_at,mutation_id,payload"),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key")})
+    json!({"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"fts":rows(store,"SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events","sequence,topic,topic_version,source,occurred_at,mutation_id,payload"),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key")})
 }
 fn context(value: &Value) -> AuthenticatedContext {
     AuthenticatedContext {
@@ -128,7 +130,7 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                 store = Store::open(path).unwrap();
                 Ok(Value::Null)
             }
-            "reorder" | "archive" => {
+            "reorder" | "archive" | "delete" => {
                 let c = &step["context"];
                 store
                     .authenticate(&AuthContext {
@@ -158,11 +160,19 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                                         step["now"].as_u64().unwrap(),
                                         &now,
                                     )
-                                } else {
+                                } else if step["op"] == "archive" {
                                     ivy_hive::objects::archive(
                                         store,
                                         &context,
                                         node.as_ref(),
+                                        &params,
+                                        step["now"].as_u64().unwrap(),
+                                        &now,
+                                    )
+                                } else {
+                                    ivy_hive::objects::delete(
+                                        store,
+                                        &context,
                                         &params,
                                         step["now"].as_u64().unwrap(),
                                         &now,

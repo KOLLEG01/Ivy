@@ -140,6 +140,10 @@ impl Store {
             .unwrap_or_else(IvyError::internal)
     }
 
+    pub fn check_budget(&self) -> IvyResult<()> {
+        self.query_state.0.lock().unwrap().check()
+    }
+
     fn start_budget(&self, duration: Duration) -> BudgetReset {
         {
             let mut state = self.query_state.0.lock().unwrap();

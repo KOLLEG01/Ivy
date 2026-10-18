@@ -1,4 +1,4 @@
-//! Immutable object reads and current navigation metadata.
+//! Object reads, navigation metadata and transactional mutations.
 use crate::store::Store;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
@@ -14,6 +14,9 @@ pub use pages::{history, list, tree};
 #[path = "object_mutations.rs"]
 mod mutations;
 pub use mutations::{archive, reorder};
+#[path = "object_delete.rs"]
+mod deletion;
+pub use deletion::delete;
 fn value(row: &Row<'_>, name: &str) -> rusqlite::Result<IvyJson> {
     Ok(match row.get_ref(name)? {
         ValueRef::Null => IvyJson::Null,
