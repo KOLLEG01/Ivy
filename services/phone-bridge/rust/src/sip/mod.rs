@@ -5,6 +5,7 @@ mod delayed_offer;
 mod dialog;
 mod endpoint;
 mod invite;
+mod registration;
 
 pub use call::{
     CallObservation, DelayedInvite, DelayedInviteMedia, DigestCredentials, PreparedInvite,
@@ -13,3 +14,7 @@ pub use delayed_offer::{CallAction, CallError, CallOutcome, DelayedOfferCall, Fi
 pub use dialog::{Dialog, DialogRequest, ReinviteAdmission};
 pub use endpoint::{ClientExchange, SipEndpoint, SipIoError};
 pub use invite::{InviteExchange, SipError};
+pub use registration::{
+    IncomingPeers, RegistrationFlow, RegistrationLease, RegistrationObservation, RegistrationPeer,
+    RegistrationPhase, RegistrationTransport, registration_expiry,
+};
