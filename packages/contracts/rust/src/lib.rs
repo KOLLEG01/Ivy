@@ -1,5 +1,6 @@
 //! Wire-domain primitives. Use IvyJson at protocol and identity boundaries;
 //! serde_json::Value cannot retain JavaScript strings containing lone surrogates.
+pub mod agent_schema;
 pub mod builtin_schema;
 pub mod core_schema;
 pub mod error;
