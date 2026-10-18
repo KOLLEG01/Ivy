@@ -42,3 +42,7 @@ path = "../../../tests/rust/sdk-provider.rs"
 [[test]]
 name = "sdk-native-project"
 path = "../../../tests/rust/sdk-native-project.rs"
+
+[[test]]
+name = "sdk-native-observations"
+path = "../../../tests/rust/sdk-native-observations.rs"
