@@ -129,6 +129,7 @@ export const rustTests = {
   'tests/rust/schema.rs': { package: 'ivy-contracts', test: 'schema' },
   'tests/rust/canonical-bundle.rs': { package: 'ivy-contracts', test: 'canonical-bundle' },
   'tests/rust/domain-schemas.rs': { package: 'ivy-contracts', test: 'domain-schemas' },
+  'tests/rust/native-contract.rs': { package: 'ivy-contracts', test: 'native-contract' },
   'tests/rust/cli-publish-ui.rs': { package: 'ivy-cli', test: 'cli-publish-ui' },
   'tests/rust/builtin_schema.rs': { package: 'ivy-contracts', test: 'builtin_schema' },
   'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
