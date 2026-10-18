@@ -18,7 +18,7 @@ fn core() -> IvyResult<&'static SchemaBundle> {
     .as_ref()
     .map_err(Clone::clone)
 }
-fn operation(method: &str, output: bool) -> Option<String> {
+pub(crate) fn operation(method: &str, output: bool) -> Option<String> {
     static CATALOG: OnceLock<serde_json::Value> = OnceLock::new();
     let catalog = CATALOG.get_or_init(|| {
         serde_json::from_str(include_str!("../../../../specs/schemas/operations.json"))
@@ -55,15 +55,32 @@ pub fn validate_output(method: &str, value: &IvyJson) -> IvyResult<()> {
     ))
 }
 pub fn validate_transport(name: &str, value: &IvyJson) -> IvyResult<()> {
-    if core()?.matches(
-        &format!("https://ivy.invalid/schemas/hive-transport.schema.json#/$defs/{name}"),
-        value,
-    )? {
+    if core()?
+        .matches_named(
+            "https://ivy.invalid/schemas/hive-transport.schema.json",
+            name,
+            value,
+        )?
+        .ok_or_else(IvyError::internal)?
+    {
         Ok(())
     } else {
         Err(IvyError::new(
             "invalid_frame",
             "Invalid provider transport frame.",
+        ))
+    }
+}
+pub fn validate_shared(name: &str, value: &IvyJson) -> IvyResult<()> {
+    if core()?
+        .matches_named(crate::wire_schema::WIRE_ID, name, value)?
+        .ok_or_else(IvyError::internal)?
+    {
+        Ok(())
+    } else {
+        Err(IvyError::new(
+            "invalid_arguments",
+            "Value does not match its shared contract.",
         ))
     }
 }
@@ -79,10 +96,7 @@ pub fn validate_host(name: &str, value: &IvyJson) -> IvyResult<()> {
         .as_ref()
         .map_err(Clone::clone)?;
     if bundle
-        .matches(
-            &format!("https://ivy.invalid/schemas/host.schema.json#/$defs/{name}"),
-            value,
-        )
+        .matches_named("https://ivy.invalid/schemas/host.schema.json", name, value)?
         .unwrap_or(false)
     {
         Ok(())

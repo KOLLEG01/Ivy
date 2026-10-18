@@ -38,6 +38,35 @@ impl SchemaBundle {
         let (document, schema) = self.resolve(0, reference)?;
         self.evaluate(document, schema, value)
     }
+    /// AJV-compatible public name lookup into a trusted repository document.
+    pub(crate) fn matches_named(
+        &self,
+        document: &str,
+        name: &str,
+        value: &IvyJson,
+    ) -> IvyResult<Option<bool>> {
+        let document = *self
+            .identities
+            .get(document)
+            .ok_or_else(IvyError::internal)?;
+        let mut selected = crate::schema_lookup::Value::Json(&self.documents[document]);
+        for part in std::iter::once("$defs").chain(name.split('/')) {
+            let key = crate::schema_lookup::pointer_key(part)?;
+            let Some(child) = selected.property(&key)? else {
+                return Ok(None);
+            };
+            selected = child;
+        }
+        match selected.schema()? {
+            // AJV rejects the legacy keyword even with strict mode disabled.
+            Some(schema) if schema.get("id").is_some() => Err(IvyError::internal()),
+            Some(schema) => self
+                .evaluate(document, schema, value)
+                .map(Some)
+                .map_err(|_| IvyError::internal()),
+            None => Ok(Some(true)),
+        }
+    }
     fn resolve(&self, current: usize, reference: &str) -> IvyResult<(usize, &IvyJson)> {
         let (identity, fragment) = reference.split_once('#').unwrap_or((reference, ""));
         let document = if identity.is_empty() {

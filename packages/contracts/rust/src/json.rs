@@ -1,7 +1,10 @@
 use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
+#[path = "json_number.rs"]
+mod number;
 #[path = "json_value.rs"]
 mod value_traits;
+pub use number::number_from_string;
 
 /// ECMAScript string code units, including unpaired surrogates. Ord is UTF-16 order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -38,8 +41,27 @@ impl JsString {
     }
 }
 
-/// JavaScript String(value) for ordinary JSON values; unlike JSON.stringify,
-/// arrays join recursively and null array elements become empty strings.
+/// JavaScript String(value) for JSON values, including failed object coercion.
+/// JSON objects cannot supply callable overrides; an own toString shadows the
+/// inherited method and makes string-hint conversion fail. Array conversion
+/// applies the same rule recursively, but does not inspect object properties.
+pub fn try_js_string(value: &IvyJson) -> IvyResult<JsString> {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            IvyJson::Array(values) => pending.extend(values.iter()),
+            IvyJson::Object(_) if value.get("toString").is_some() => {
+                return Err(IvyError::internal());
+            }
+            _ => {}
+        }
+    }
+    Ok(js_string(value))
+}
+
+/// Unchecked JSON string rendering. Call try_js_string at a JavaScript String
+/// boundary unless object coercion is already checked or impossible. Arrays join
+/// recursively and null array elements become empty strings.
 pub fn js_string(value: &IvyJson) -> JsString {
     enum Part<'a> {
         Value(&'a IvyJson),
@@ -694,6 +716,19 @@ impl Encoder {
         }
         Ok(())
     }
+}
+
+/// Own entries of a JSON object in ECMAScript enumeration order: numeric index
+/// keys first, then other keys in insertion order. Other JSON types have no entries.
+pub fn object_entries(value: &IvyJson) -> Vec<(&JsString, &IvyJson)> {
+    let mut entries: Vec<_> = value
+        .as_object()
+        .unwrap_or(&[])
+        .iter()
+        .map(|(k, v)| (k, v))
+        .collect();
+    entries.sort_by_key(|(key, _)| array_index(key).map_or((1, 0), |index| (0, index)));
+    entries
 }
 
 pub(crate) fn array_index(s: &JsString) -> Option<u32> {

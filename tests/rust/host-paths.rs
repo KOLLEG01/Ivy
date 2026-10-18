@@ -1,0 +1,240 @@
+#[path = "../../packages/host-runtime/rust/src/paths.rs"]
+mod paths;
+use std::{fs, path::PathBuf};
+
+#[test]
+fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
+    let root = std::env::temp_dir().join("ivy-path-test");
+    assert!(paths::inside(&root, &root.join("a/../b")).unwrap());
+    assert!(paths::inside(&root, &root).unwrap());
+    assert!(!paths::inside(&root, &root.join("../other")).unwrap());
+    assert!(!paths::inside(&root, &PathBuf::from(format!("{}-sibling", root.display()))).unwrap());
+}
+
+#[test]
+fn future_path_uses_the_existing_ancestor_without_creating_directories() {
+    let root = std::env::temp_dir().join(format!("ivy-future-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let expected = fs::canonicalize(&root).unwrap().join("missing/leaf");
+    assert_eq!(
+        paths::resolved_future_path(&root.join("missing/leaf")).unwrap(),
+        expected
+    );
+    assert!(!root.join("missing").exists());
+    fs::remove_dir(&root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_containment_ignores_case() {
+    assert!(
+        paths::inside(
+            std::path::Path::new("C:\\Local\\Owned"),
+            std::path::Path::new("c:\\local\\owned\\child")
+        )
+        .unwrap()
+    );
+}
+
+use ivy_contracts::{IvyJson, JsString};
+use ivy_host_runtime::{config, health::HealthFile, node_runtime::NodeRuntime};
+
+struct ServiceFixture(PathBuf);
+impl ServiceFixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("ivy-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("artifact/dist")).unwrap();
+        Self(root)
+    }
+    fn value(&self) -> IvyJson {
+        IvyJson::object([
+            ("schemaVersion", IvyJson::Number(1.0)),
+            ("hostId", "host".into()), ("instanceId", "renamed-service".into()),
+            ("serviceNodeId", "host.service".into()), ("componentId", "service".into()),
+            ("publicBaseUrl", "https://example.invalid/ivy".into()),
+            ("dataRoot", self.0.join("data").to_string_lossy().to_string().into()),
+            ("artifactRoot", self.0.join("artifact").to_string_lossy().to_string().into()),
+            ("workRoot", self.0.join("work").to_string_lossy().to_string().into()),
+            ("logsRoot", self.0.join("logs").to_string_lossy().to_string().into()),
+            ("buildId", format!("sha256:{}", "a".repeat(64)).into()),
+            ("version", "1.0.0".into()), ("credential", "fixture-credential".into()),
+            ("settings", IvyJson::object([("text", IvyJson::String(JsString(vec![0xd800])))])),
+        ])
+    }
+    async fn save(&self, value: IvyJson) {
+        config::atomic_json(self.0.join("config.json"), value).await.unwrap();
+    }
+    async fn build(&self, value: &IvyJson) {
+        config::atomic_json(self.0.join("artifact/dist/build-info.json"), IvyJson::object([
+            ("buildId", value.required("buildId").unwrap().clone()),
+            ("version", value.required("version").unwrap().clone()),
+        ])).await.unwrap();
+    }
+}
+impl Drop for ServiceFixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+fn fixture_node(version: &str) -> NodeRuntime {
+    NodeRuntime { executable: PathBuf::from("unused-fixture-node"), version: version.into() }
+}
+
+fn compare_config_oracle(input: IvyJson, result: ivy_contracts::IvyResult<IvyJson>) {
+    use std::{io::Write, process::{Command, Stdio}};
+    let mut child = Command::new("node")
+        .args(["--experimental-transform-types", "--disable-warning=ExperimentalWarning", "tests/fixtures/host-config-oracle.mjs"])
+        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(ivy_contracts::json::stringify(&input, usize::MAX).unwrap().as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let expected = ivy_contracts::json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let actual = match result {
+        Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),
+        Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+    };
+    assert_eq!(ivy_contracts::json::canonical(&actual, usize::MAX).unwrap(), ivy_contracts::json::canonical(&expected, usize::MAX).unwrap(), "{input:?}");
+}
+
+#[tokio::test]
+async fn service_configuration_matches_original_node_file_and_identity_boundaries() {
+    let fixture = ServiceFixture::new();
+    let path = fixture.0.join("config.json");
+    let path_json = IvyJson::from(path.to_string_lossy().to_string());
+    for bytes in [b"null".as_slice(), b"[1,true]", b"{bad", &[b'"', 0xff, b'"'], b"\xef\xbb\xbf{}", b"{\"__proto__\":{\"x\":1},\"text\":\"\\ud800\"}"] {
+        fs::write(&path, bytes).unwrap();
+        for limit in [2, 1024] {
+            compare_config_oracle(IvyJson::object([("kind", "file".into()), ("path", path_json.clone()), ("limit", IvyJson::Number(limit as f64))]), config::json_file(&path, limit).await);
+        }
+    }
+    let valid = fixture.value(); fixture.build(&valid).await;
+    for mode in ["valid", "unknown-property", "root-overlap", "build-mismatch", "null-build"] {
+        let mut value = valid.clone();
+        match mode {
+            "unknown-property" => value.insert("extra", true.into()),
+            "root-overlap" => value.insert("dataRoot", value.required("artifactRoot").unwrap().clone()),
+            "build-mismatch" => value.insert("version", "wrong".into()),
+            "null-build" => config::atomic_json(fixture.0.join("artifact/dist/build-info.json"), IvyJson::Null).await.unwrap(),
+            _ => (),
+        }
+        fixture.save(value).await;
+        compare_config_oracle(IvyJson::object([("kind", "instance".into()), ("path", path_json.clone())]), config::instance_config(&path, &fixture_node("24.18.0")).await.map(|value| value.json().clone()));
+    }
+    for args in [vec![], vec!["--config".to_string()], vec!["--config".into(), "relative".into()], vec!["--config".into(), path.to_string_lossy().to_string(), "--config".into(), "relative".into()]] {
+        let native = args.iter().map(Into::into).collect::<Vec<_>>();
+        compare_config_oracle(IvyJson::object([("kind", "path".into()), ("args", IvyJson::Array(args.iter().cloned().map(Into::into).collect())), ("environment", path_json.clone())]), config::configuration_path(&native, Some(path.clone().into_os_string())).map(|p| p.to_string_lossy().to_string().into()));
+    }
+    #[cfg(windows)]
+    for input in ["\\relative-to-drive\\config.json", "/relative-to-drive/config.json", "C:relative.json", "\\\\server\\share\\config.json"] {
+        compare_config_oracle(IvyJson::object([("kind", "path".into()), ("args", IvyJson::Array(vec!["--config".into(), input.into()])), ("environment", IvyJson::Null)]), config::configuration_path(&["--config".into(), input.into()], None).map(|p| p.to_string_lossy().to_string().into()));
+    }
+}
+
+#[tokio::test]
+async fn instance_configuration_checks_build_before_creating_runtime_roots() {
+    let fixture = ServiceFixture::new();
+    let value = fixture.value();
+    fixture.save(value.clone()).await;
+    let mut wrong_build = value.clone(); wrong_build.insert("version", "2.0.0".into());
+    fixture.build(&wrong_build).await;
+    let path = fixture.0.join("config.json");
+    let result = config::instance_config(&path, &fixture_node("24.18.0")).await;
+    assert_eq!(result.err().unwrap().code, "build_mismatch");
+    assert!(!fixture.0.join("data").exists());
+    fixture.build(&value).await;
+    for version in ["22.0.0", "24.17.9", "25.0.0"] {
+        assert_eq!(config::instance_config(&path, &fixture_node(version)).await.err().unwrap().code, "unsupported_runtime");
+        assert!(!fixture.0.join("data").exists());
+    }
+    let actual = config::instance_config(&path, &fixture_node("24.18.0")).await.unwrap();
+    assert_eq!(ivy_contracts::json::canonical(actual.json(), usize::MAX).unwrap(), ivy_contracts::json::canonical(&value, usize::MAX).unwrap());
+    for root in ["data", "work", "logs"] { assert!(fixture.0.join(root).is_dir()); }
+    for root in [fixture.0.join("artifact"), fixture.0.join("artifact/nested"), fixture.0.clone(), PathBuf::from("relative")] {
+        let mut invalid = value.clone(); invalid.insert("dataRoot", root.to_string_lossy().to_string().into());
+        fixture.save(invalid).await;
+        assert_eq!(config::instance_config(&path, &fixture_node("24.18.0")).await.err().unwrap().code, "invalid_arguments");
+    }
+    for key in ["workRoot", "logsRoot"] {
+        let mut invalid = value.clone(); invalid.insert(key, fixture.0.join("artifact/nested").to_string_lossy().to_string().into());
+        fixture.save(invalid).await;
+        assert_eq!(config::instance_config(&path, &fixture_node("24.18.0")).await.err().unwrap().code, "invalid_arguments");
+    }
+}
+
+#[tokio::test]
+async fn configuration_selection_and_file_boundary_preserve_original_rules() {
+    let fixture = ServiceFixture::new(); let path = fixture.0.join("config.json");
+    let env = Some(path.clone().into_os_string());
+    assert_eq!(config::configuration_path(&[], env.clone()).unwrap(), path);
+    assert!(config::configuration_path(&["--config".into()], env.clone()).is_err());
+    assert!(config::configuration_path(&["--config".into(), "relative".into()], env.clone()).is_err());
+    assert_eq!(config::configuration_path(&["--config".into(), path.clone().into_os_string(), "--config".into(), "relative".into()], None).unwrap(), path);
+    fs::write(&path, [b'"', 0xff, b'"']).unwrap();
+    assert_eq!(config::json_file(&path, 3).await.unwrap(), IvyJson::from("\u{fffd}"));
+    assert_eq!(config::json_file(&path, 2).await.unwrap_err().code, "invalid_arguments");
+    fs::write(&path, "{bad").unwrap();
+    assert_eq!(config::json_file(&path, 100).await.unwrap_err().code, "internal_error");
+    assert_eq!(config::json_file(&fixture.0, 100).await.unwrap_err().code, "invalid_arguments");
+    let mut value = fixture.value(); value.insert("unexpected", true.into());
+    assert!(config::InstanceConfig::from_json(value).is_err());
+}
+
+#[tokio::test]
+async fn health_control_requires_all_three_identities_and_preserves_utf16_slice() {
+    let fixture = ServiceFixture::new();
+    let config = config::InstanceConfig::from_json(fixture.value()).unwrap();
+    let health = HealthFile::with_launch_id(config.clone(), Some("launch-1".into()));
+    assert!(health.control().await.unwrap().is_none());
+    let details = JsString(vec![0xd800; 4097]);
+    health.write(true, details, Some(7)).await.unwrap();
+    let value = config::json_file(fixture.0.join("data/health.json"), 1024 * 1024).await.unwrap();
+    assert_eq!(value.required("details").unwrap().as_js_string().unwrap().0, vec![0xd800;4096]);
+    assert_eq!(value.get("generation"), Some(&IvyJson::Number(7.0)));
+    let before = value.clone();
+    health.write(false, "draining".into(), None).await.unwrap();
+    let value = config::json_file(fixture.0.join("data/health.json"), 1024 * 1024).await.unwrap();
+    for key in ["bootId", "launchId", "startedAt", "pid"] { assert_eq!(value.get(key), before.get(key)); }
+    let control = IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)), ("instanceId", "renamed-service".into()),
+        ("launchId", "launch-1".into()), ("bootId", health.boot_id().into()),
+        ("action", "shutdown".into()), ("requestedAt", "2026-10-18T00:00:00.000Z".into()),
+    ]);
+    let path = fixture.0.join("data/control.json");
+    for key in ["instanceId", "launchId", "bootId"] {
+        let mut wrong = control.clone(); wrong.insert(key, "wrong".into());
+        config::atomic_json(&path, wrong).await.unwrap();
+        assert!(health.control().await.unwrap().is_none());
+    }
+    config::atomic_json(&path, control.clone()).await.unwrap();
+    assert_eq!(ivy_contracts::json::canonical(&health.control().await.unwrap().unwrap(), usize::MAX).unwrap(), ivy_contracts::json::canonical(&control, usize::MAX).unwrap());
+    let replacement = HealthFile::with_launch_id(config, Some("launch-1".into()));
+    assert!(replacement.control().await.unwrap().is_none());
+    fs::write(&path, "{}").unwrap();
+    assert!(health.control().await.is_err());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn cancelled_health_waiter_cannot_release_the_active_file_writer() {
+    use std::{os::windows::fs::OpenOptionsExt, sync::Arc, time::Duration};
+    let fixture = ServiceFixture::new();
+    let health = Arc::new(HealthFile::with_launch_id(config::InstanceConfig::from_json(fixture.value()).unwrap(), Some("launch".into())));
+    health.write(false, "initial".into(), None).await.unwrap();
+    let path = fixture.0.join("data/health.json");
+    let held = fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
+    let writer = health.clone();
+    let first = tokio::spawn(async move { writer.write(true, "cancelled waiter".into(), None).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if fs::read_dir(path.parent().unwrap()).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")) { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("first write entered durable replacement");
+    first.abort(); let _ = first.await;
+    let writer = health.clone();
+    let mut second = tokio::spawn(async move { writer.write(false, "last".into(), None).await });
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut second).await.is_err());
+    drop(held);
+    second.await.unwrap().unwrap();
+    let value = config::json_file(&path, config::CONFIGURATION_BYTES).await.unwrap();
+    assert_eq!(value.get("details"), Some(&IvyJson::from("last")));
+    assert_eq!(value.get("ready"), Some(&IvyJson::Bool(false)));
+    assert!(!fs::read_dir(path.parent().unwrap()).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+}

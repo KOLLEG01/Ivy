@@ -12,6 +12,7 @@ serde_json.workspace = true
 sha2.workspace = true
 ryu-js.workspace = true
 regress.workspace = true
+url.workspace = true
 
 [[test]]
 name = "contracts"
@@ -28,3 +29,35 @@ path = "../../../tests/rust/json-depth.rs"
 [[test]]
 name = "schema"
 path = "../../../tests/rust/schema.rs"
+
+[[test]]
+name = "canonical-bundle"
+path = "../../../tests/rust/canonical-bundle.rs"
+
+[[test]]
+name = "domain-schemas"
+path = "../../../tests/rust/domain-schemas.rs"
+
+[[test]]
+name = "native-contract"
+path = "../../../tests/rust/native-contract.rs"
+
+[[test]]
+name = "checked-native-contract"
+path = "../../../tests/rust/checked-native-contract.rs"
+
+[[test]]
+name = "native-catalog-path"
+path = "../../../tests/rust/native-catalog-path.rs"
+
+[[test]]
+name = "json-coercion"
+path = "../../../tests/rust/json-coercion.rs"
+
+[[test]]
+name = "number-string"
+path = "../../../tests/rust/number-string.rs"
+
+[[test]]
+name = "ui-route"
+path = "../../../tests/rust/ui-route.rs"
