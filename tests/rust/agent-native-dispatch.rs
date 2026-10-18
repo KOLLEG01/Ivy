@@ -323,13 +323,30 @@ impl Fixture {
                     .map(|v| v.unwrap_or(IvyJson::Null));
             }
             "clock" => {
-                let mut input = self.trace.lock().unwrap().inputs.last().unwrap().clone();
+                let mut input = self
+                    .trace
+                    .lock()
+                    .unwrap()
+                    .inputs
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| IvyJson::object([] as [(&str, IvyJson); 0]));
                 if let Some(patch) = c.get("patch") {
                     for (key, value) in patch.as_object().unwrap() {
                         input.insert(key.clone(), value.clone());
                     }
                 }
                 answer_native_clock(self.operations.journal(), &self.rpc, &input).await?;
+            }
+            "occupy" => {
+                self.operations.journal().lock().unwrap().accept(
+                    &Identity {
+                        caller_principal_id: "fixture".into(),
+                        operation_id: "occupied".into(),
+                    },
+                    &"turn/interrupt".into(),
+                    &IvyJson::object([] as [(&str, IvyJson); 0]),
+                )?;
             }
             "snapshot" => {
                 tokio::task::yield_now().await;
@@ -405,7 +422,7 @@ impl Fixture {
 #[tokio::test]
 async fn real_rpc_dispatch_answers_clock_and_terminal_hooks_match_original_handlers() {
     let rows = field(data(), "cases").as_array().unwrap();
-    assert_eq!(rows.len(), 29);
+    assert_eq!(rows.len(), 30);
     for row in rows {
         let mut f = Fixture::new(row);
         for (index, command) in field(row, "commands")
@@ -475,7 +492,9 @@ async fn dropping_clock_waiter_preserves_its_original_answer() {
     ]))
     .await;
     let input = f.trace.lock().unwrap().inputs.last().unwrap().clone();
-    drop(answer_native_clock(f.operations.journal(), &f.rpc, &input));
+    // The service work tracker needs an owned future after its callback returns.
+    let waiter = tokio::spawn(answer_native_clock(f.operations.journal(), &f.rpc, &input));
+    waiter.abort();
     let sent = f.peer.sent().await;
     assert_eq!(sent.get("id"), Some(&IvyJson::from("clock")));
     assert_eq!(

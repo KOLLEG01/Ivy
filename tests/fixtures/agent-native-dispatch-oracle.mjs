@@ -50,7 +50,8 @@ add('host-clock-floors-negative-milliseconds',[input(1,{threadId:'thread'},'curr
 add('host-clock-extended-year',[input(1,{threadId:'thread'},'currentTime/read'),c('clock'),sent,snapshot],{time:'+275760-09-13T00:00:00.000Z'});
 add('host-clock-rejects-substituted-observation',[input(1,{threadId:'thread'},'currentTime/read'),c('clock',{patch:{observedAt:'2030-01-01T00:00:00.000Z'}}),snapshot]);
 add('clock-does-not-answer-other-methods',[input(1),c('clock'),snapshot]);
-add('clock-admission-failure-writes-no-bytes',[input(1,{threadId:'thread'},'currentTime/read'),c('clock'),snapshot],{maxOperations:0});
+add('input-admission-failure-writes-no-clock-bytes',[input(1,{threadId:'thread'},'currentTime/read'),c('clock'),snapshot],{maxOperations:0});
+add('clock-admission-failure-writes-no-bytes',[input(1,{threadId:'thread'},'currentTime/read'),c('occupy'),c('clock'),snapshot],{maxOperations:1});
 
 const RealDate=Date,results=[];
 try{
@@ -92,6 +93,7 @@ try{
      case 'noop':break;
      case 'read':return operations.read(step.identity);
      case 'clock':answerNativeClock(memory,rpc,{...inputs.at(-1),...step.patch});break;
+     case 'occupy':memory.accept({callerPrincipalId:'fixture',operationId:'occupied'},'turn/interrupt',{});break;
      case 'snapshot':return{rows:[...rows].sort(([a],[b])=>a<b?-1:a>b?1:0).map(([key,value])=>({key,...value})),inputs:memory.inputs({includeExpired:true}),clockOperations:inputs.filter(value=>value.method==='currentTime/read').map(value=>memory.get({callerPrincipalId:nativeClockPrincipal,operationId:'clock:'+hashJson(value.identity).slice(7)})),frames,notifications,closes,errors,epoch:memory.epoch};
      default:throw Error('Unknown fixture action '+step.action);
     }

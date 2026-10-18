@@ -24,7 +24,7 @@ pub fn answer_native_clock(
     memory: Arc<Mutex<NativeJournal>>,
     rpc: &NativeRpc,
     input: &IvyJson,
-) -> impl std::future::Future<Output = IvyResult<()>> + Send {
+) -> impl std::future::Future<Output = IvyResult<()>> + Send + use<> {
     // Like the original synchronous answer call, dispatch belongs to the native
     // owner once invoked. Dropping the returned waiter cannot cancel that work.
     let worker = tokio::spawn(answer_clock(memory, rpc.clone(), input.clone()));
@@ -35,19 +35,26 @@ async fn answer_clock(
     rpc: NativeRpc,
     input: IvyJson,
 ) -> IvyResult<()> {
+    require(
+        input.get("method") == Some(&IvyJson::from("currentTime/read")),
+        "native_clock_unavailable",
+        "A host clock answer requires its exact live native request.",
+    )?;
     let input_identity = field(&input, "identity")?.clone();
+    if input_identity == IvyJson::Null {
+        return Err(IvyError::internal());
+    }
     let (identity, reply) = {
         let mut journal = memory.lock().unwrap();
         require(
-            input.get("method") == Some(&IvyJson::from("currentTime/read"))
-                && input_identity.get("epoch")
-                    == Some(
-                        &journal
-                            .epoch()
-                            .cloned()
-                            .map(IvyJson::String)
-                            .unwrap_or(IvyJson::Null),
-                    )
+            input_identity.get("epoch")
+                == Some(
+                    &journal
+                        .epoch()
+                        .cloned()
+                        .map(IvyJson::String)
+                        .unwrap_or(IvyJson::Null),
+                )
                 && rpc.connected(),
             "native_clock_unavailable",
             "A host clock answer requires its exact live native request.",
