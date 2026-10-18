@@ -9,6 +9,9 @@ use ivy_sdk::{
 use ivy_store::{rusqlite::OptionalExtension, sqlite};
 use tokio::io::AsyncWriteExt;
 
+#[path = "data-collector-offline.inc.rs"]
+mod offline;
+
 const SOURCE: &str = "source.collector";
 const TARGET: &str = "target.collector";
 const TASK: &str = "transfer";
