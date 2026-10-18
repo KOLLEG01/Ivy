@@ -11,6 +11,8 @@ mod browser_notice_cases;
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
 mod inbox_recovery_cases;
+#[path = "notice_scan_cases.rs"]
+mod notice_scan_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 #[path = "workflow_cases.rs"]
