@@ -35,3 +35,37 @@ pub fn validate_provider_call_frame(value:&IvyJson)->IvyResult<()> {
     object(params,"Provider request params must be an object.")?;
     require(exact_keys(params,&["qualifiedName","arguments","definitionHash","generation","callerPrincipalId","operationId"])&&text(params.get("qualifiedName"),256)&&params.get("arguments").is_some()&&hash(params.get("definitionHash"))&&safe_integer(params.get("generation"),1.0)&&text(params.get("callerPrincipalId"),256)&&(params.get("operationId").is_none()||text(params.get("operationId"),256)),"Provider request routing fields are invalid.")
 }
+
+fn service_name(value:Option<&IvyJson>)->bool {
+    value.and_then(IvyJson::as_js_string).is_some_and(|s| !s.0.is_empty() && s.0.len()<=64 && (97..=122).contains(&s.0[0]) && s.0.iter().all(|c| (97..=122).contains(c)||(48..=57).contains(c)||*c==45))
+}
+fn contract_version(value:Option<&IvyJson>)->bool {
+    value.and_then(IvyJson::as_js_string).is_some_and(|s| {
+        let parts:Vec<_>=s.0.split(|c|*c==46).collect();
+        parts.len()==3 && parts.iter().all(|p|!p.is_empty() && (p.len()==1||p[0]!=48) && p.iter().all(|c|(48..=57).contains(c)))
+    })
+}
+pub fn validate_service_notification_frame(value:&IvyJson)->IvyResult<()> {
+    object(value,"Expected one provider notification envelope.")?;
+    require(equal(value.get("jsonrpc"),"2.0")&&equal(value.get("method"),"service.notification")&&exact_keys(value,&["jsonrpc","method","params"]),"Provider notification envelope is invalid.")?;
+    let missing=IvyJson::Null;
+    let params=value.get("params").unwrap_or(&missing);
+    object(params,"Provider notification params must be an object.")?;
+    require(exact_keys(params,&["namespace","name","version","payload"])&&service_name(params.get("namespace"))&&text(params.get("name"),192)&&contract_version(params.get("version"))&&params.get("payload").is_some(),"Provider notification routing fields are invalid.")
+}
+pub fn validate_provider_notification_frame(value:&IvyJson)->IvyResult<()> {
+    object(value,"Expected one subscribed provider notification envelope.")?;
+    require(equal(value.get("jsonrpc"),"2.0")&&equal(value.get("method"),"notifications.provider")&&exact_keys(value,&["jsonrpc","method","params"]),"Subscribed provider notification envelope is invalid.")?;
+    let missing=IvyJson::Null;
+    let params=value.get("params").unwrap_or(&missing);
+    object(params,"Subscribed provider notification params must be an object.")?;
+    require(exact_keys(params,&["namespace","name","version","payload","serviceNodeId","generation"])&&service_name(params.get("namespace"))&&text(params.get("name"),192)&&contract_version(params.get("version"))&&params.get("payload").is_some()&&text(params.get("serviceNodeId"),256)&&safe_integer(params.get("generation"),1.0),"Subscribed provider notification routing fields are invalid.")
+}
+pub fn validate_event_availability_frame(value:&IvyJson)->IvyResult<()> {
+    object(value,"Expected one event availability envelope.")?;
+    require(equal(value.get("jsonrpc"),"2.0")&&equal(value.get("method"),"events.available")&&exact_keys(value,&["jsonrpc","method","params"]),"Event availability envelope is invalid.")?;
+    let missing=IvyJson::Null;
+    let params=value.get("params").unwrap_or(&missing);
+    object(params,"Event availability params must be an object.")?;
+    require(exact_keys(params,&["throughSequence"])&&safe_integer(params.get("throughSequence"),1.0),"Event availability sequence is invalid.")
+}
