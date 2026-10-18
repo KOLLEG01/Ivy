@@ -93,13 +93,21 @@ fn outcome(value: IvyResult<IvyJson>) -> IvyJson {
     }
 }
 fn sorted(value: IvyJson) -> IvyJson {
-    match value {
-        IvyJson::Object(mut pairs) => {
-            pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            IvyJson::Object(pairs.into_iter().map(|(k, v)| (k, sorted(v))).collect())
-        }
-        IvyJson::Array(values) => IvyJson::Array(values.into_iter().map(sorted).collect()),
-        other => other,
+    if value.as_object().is_some() {
+        let mut pairs = value.into_object().unwrap();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        IvyJson::Object(pairs.into_iter().map(|(k, v)| (k, sorted(v))).collect())
+    } else if value.as_array().is_some() {
+        IvyJson::Array(
+            value
+                .into_array()
+                .unwrap()
+                .into_iter()
+                .map(sorted)
+                .collect(),
+        )
+    } else {
+        value
     }
 }
 fn same(actual: IvyJson, expected: &IvyJson, name: &str, index: usize) {
@@ -220,7 +228,7 @@ impl Fixture {
             .clone()
     }
     async fn gate(&self, step: &IvyJson) {
-        if let Some(name) = step.get("gate").and_then(IvyJson::as_str) {
+        if let Some(name) = step.get("gate").and_then(|value| value.as_str().ok()) {
             let barrier = self.barrier(&name);
             barrier.entered.send_replace(true);
             Barrier::wait(&barrier.opened).await;
