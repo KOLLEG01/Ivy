@@ -15,6 +15,10 @@ rusqlite.workspace = true
 tokio.workspace = true
 
 [[test]]
+name = "chat-registry"
+path = "../../../tests/rust/chat-registry.rs"
+
+[[test]]
 name = "chat-input-media"
 path = "../../../tests/rust/chat-input-media.rs"
 
