@@ -12,6 +12,7 @@ serde_json.workspace = true
 sha2.workspace = true
 ryu-js.workspace = true
 regress.workspace = true
+url.workspace = true
 
 [[test]]
 name = "contracts"
@@ -28,3 +29,7 @@ path = "../../../tests/rust/json-depth.rs"
 [[test]]
 name = "schema"
 path = "../../../tests/rust/schema.rs"
+
+[[test]]
+name = "canonical-bundle"
+path = "../../../tests/rust/canonical-bundle.rs"
