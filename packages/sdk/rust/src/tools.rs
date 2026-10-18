@@ -175,13 +175,18 @@ pub struct InterfaceRequirement {
 pub struct ToolClients {
     client: Arc<dyn RpcClient>,
     providers: Mutex<HashMap<String, BoundToolClient>>,
+    pub(crate) native_contracts: crate::native_owner::ContractCache,
 }
 impl ToolClients {
     pub fn new(client: Arc<dyn RpcClient>) -> Self {
         Self {
             client,
             providers: Mutex::new(HashMap::new()),
+            native_contracts: Default::default(),
         }
+    }
+    pub(crate) fn client(&self) -> &dyn RpcClient {
+        self.client.as_ref()
     }
     pub fn service_tools(
         &self,
