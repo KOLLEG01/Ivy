@@ -91,6 +91,8 @@ for(const [key,value]of [['callerPrincipalId','foreign'],['serviceNodeId','forei
 add('different-native-settings',[{action:'change-settings'},{action:'verify-request'}]);
 add('changed-retained-plan',[{action:'change-plan-identity'},{action:'verify-request'}]);
 add('invalid-call-before-shared-gates',[patch('call',{preparedEpoch:4}),{action:'verify-request'}]);
+add('stat-original-id-selection',[{action:'verify-request'}],{statPatch:{id:'different-input'}});
+add('stat-original-key-precedence',[{action:'verify-request'}],{statPatch:{key:'different-contract'}});
 add('malformed-draft-first',[patch('request',{params:{threadId:4}}),{action:'verify-request'}]);
 add('forged-result-payload',[patch('operation',{reply:{result:{invented:true}}}),{action:'verify-operation'}]);
 add('forged-read-payload',[patch('read',{reply:{result:{fabricated:'thread'}}}),{action:'verify-read'}]);
@@ -109,7 +111,7 @@ async function execute(c){
  const seed=seeds[c.version],root=mkdtempSync(join(tmpdir(),'ivy-native-evidence-')),file=join(root,'chat-bridge.sqlite');writeFileSync(file,Buffer.from(seed.database,'base64'));
  const definition=structuredClone(seed.definition),input=structuredClone(seed.input),calls=[],gates=[],pins=new Map(),aliases=new Map();let remoteError=false,store;
  if(c.inputPatch)Object.assign(input.content.value,structuredClone(c.inputPatch));if(c.spec?.notice){input.content.value.identity.senderPrincipalId='producer';input.content.value.operationId=`chat:${now}:notice`;input.content.value.identity.messageId=input.content.value.operationId;}
- const client={async request(method,p){calls.push({method,params:structuredClone(p)});if(remoteError)throw new IvyError('fixture_owner_unavailable','Original owner read unavailable.','unknown');if(p.objectId!=='original-input')throw new IvyError('object_missing','Original parent is unavailable.');if(method==='objects.read')return structuredClone(input);if(method==='objects.stat')return structuredClone(input.object);throw Error('Unexpected RPC '+method);}};
+ const client={async request(method,p){calls.push({method,params:structuredClone(p)});if(remoteError)throw new IvyError('fixture_owner_unavailable','Original owner read unavailable.','unknown');if(p.objectId!=='original-input')throw new IvyError('object_missing','Original parent is unavailable.');if(method==='objects.read')return structuredClone(input);if(method==='objects.stat')return{...structuredClone(input.object),...c.statPatch};throw Error('Unexpected RPC '+method);}};
  store=new ChatStore(client,null,root);let body=await bodies(store,definition,input,c.spec),evidence=new ChatNativeEvidence(store,definition),lastWrite=0;
  c.body=structuredClone(body);
  if(c.spec?.large){c.body.request.params.input[0].url='';c.body.operation.params.input[0].url='';c.body.operation.reply.result.turn.items[0].text='';}

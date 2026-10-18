@@ -202,8 +202,8 @@ pub async fn verify_chat_native_request(
             .local_info(&request_id)
             .await
             .map_err(|e| e.into_ivy())?;
-        let (key, parent_id) = if let Some((key, parent)) = metadata {
-            (key, parent)
+        let (key, parent_id, object_id) = if let Some((key, parent)) = metadata {
+            (key, parent, request_id.clone())
         } else {
             let metadata = store
                 .client
@@ -214,12 +214,25 @@ pub async fn verify_chat_native_request(
                 )
                 .await?;
             (
-                field(&metadata, "contractKey")?.as_str()?,
+                field(
+                    &metadata,
+                    if metadata.get("key").is_some() {
+                        "key"
+                    } else {
+                        "contractKey"
+                    },
+                )?
+                .as_str()?,
                 metadata
                     .get("parentId")
                     .filter(|v| !v.is_null())
                     .map(Json::as_str)
                     .transpose()?,
+                metadata
+                    .get("id")
+                    .map(Json::as_str)
+                    .transpose()?
+                    .unwrap_or_else(|| request_id.clone()),
             )
         };
         require(
@@ -231,7 +244,7 @@ pub async fn verify_chat_native_request(
             .read(
                 "chat-bridge/input",
                 Reference::Current(if key == "chat-bridge/input" {
-                    &request_id
+                    &object_id
                 } else {
                     parent_id.as_deref().ok_or_else(IvyError::internal)?
                 }),

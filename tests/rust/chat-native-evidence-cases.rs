@@ -163,6 +163,7 @@ struct State {
     input: Json,
     calls: Vec<Json>,
     unavailable: bool,
+    stat_patch: Json,
 }
 struct Client(Mutex<State>);
 impl RpcClient for Client {
@@ -193,7 +194,11 @@ impl RpcClient for Client {
             }
             match method {
                 "objects.read" => Ok(state.input.clone()),
-                "objects.stat" => Ok(field(&state.input, "object").clone()),
+                "objects.stat" => {
+                    let mut metadata = field(&state.input, "object").clone();
+                    merge(&mut metadata, &state.stat_patch);
+                    Ok(metadata)
+                }
                 _ => panic!("Unexpected RPC {method}"),
             }
         })
@@ -516,6 +521,10 @@ async fn native_evidence_scope_identity_template_and_required_gates_match_origin
             input,
             calls: vec![],
             unavailable: false,
+            stat_patch: case
+                .get("statPatch")
+                .cloned()
+                .unwrap_or(Json::Object(vec![])),
         })));
         let gate = Gate::new();
         let mut body = bodies(case);
