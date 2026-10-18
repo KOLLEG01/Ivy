@@ -116,7 +116,7 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
 // Native text is an ECMAScript string. Preserve raw lone surrogates inside JSON
 // string tokens when passing it to the shared UTF-8 parser; an escaped lone unit
 // or one outside a string is invalid JSON, not a replacement character.
-fn final_json_text(text: &JsString) -> Option<String> {
+pub(crate) fn final_json_text(text: &JsString) -> Option<String> {
     use std::fmt::Write;
     let mut output = String::new();
     let (mut quoted, mut escaped) = (false, false);
