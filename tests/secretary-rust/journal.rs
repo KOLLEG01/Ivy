@@ -314,7 +314,8 @@ fn typescript_and_rust_cross_open_the_same_journal() {
     let old = journal.named("fixture", "same", true).unwrap().unwrap();
     assert_eq!(
         old.value,
-        value(r#"{"phase":"running","text":"\ud800","nested":{"x":1}}"#)
+        // Both stores persist canonical JSON, so reopened properties are sorted.
+        value(r#"{"nested":{"x":1},"phase":"running","text":"\ud800"}"#)
     );
     journal
         .amend_technical(
