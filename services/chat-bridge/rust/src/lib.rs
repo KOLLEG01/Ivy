@@ -12,6 +12,7 @@ pub mod outbox;
 pub mod queries;
 pub mod queue;
 pub mod registry;
+pub mod result_text;
 pub mod schema;
 pub mod store;
 pub mod whatsapp;

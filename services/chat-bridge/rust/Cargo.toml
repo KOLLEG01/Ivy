@@ -51,6 +51,10 @@ name = "chat-notices"
 path = "../../../tests/rust/chat-notices.rs"
 
 [[test]]
+name = "chat-result-text"
+path = "../../../tests/rust/chat-result-text.rs"
+
+[[test]]
 name = "chat-storage"
 path = "../../../tests/rust/chat-storage.rs"
 
