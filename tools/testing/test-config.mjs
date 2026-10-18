@@ -177,6 +177,7 @@ export const rustTests = {
     package: 'ivy-service-manager', test: 'service-manager-stop',
     prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
   },
+  'tests/rust/chat-queue.rs': { package: 'ivy-chat-bridge', test: 'chat-queue' },
   'tests/rust/chat-storage.rs': { package: 'ivy-chat-bridge', test: 'chat-storage' },
   'tests/rust/chat-audio.rs': { package: 'ivy-chat-bridge', test: 'chat-audio' },
   'tests/rust/chat-output.rs': { package: 'ivy-chat-bridge', test: 'chat-output' },
