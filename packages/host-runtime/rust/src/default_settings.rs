@@ -1,5 +1,6 @@
 //! Portable service policy. Account identities, credentials and devices stay local.
-use ivy_contracts::{IvyError, IvyJson, IvyResult, json::parse};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
+use crate::node_path::{self, Style};
 use std::path::Path;
 
 /// Omitted fields inherit defaults. Explicit nulls, arrays and values replace them.
@@ -28,17 +29,23 @@ pub fn with_defaults(defaults: &IvyJson, configured: &IvyJson) -> IvyResult<IvyJ
     Ok(result)
 }
 
-fn native_string(path: &Path) -> IvyResult<IvyJson> {
-    path.to_str()
-        .map(IvyJson::from)
-        .ok_or_else(|| IvyError::new("invalid_arguments", "Configured path is not Unicode."))
-}
-
 pub fn default_service_settings(
     component: &str,
     settings: &IvyJson,
     ivy_root: &Path,
     config_path: &Path,
+) -> IvyResult<IvyJson> {
+    default_service_settings_for_paths(component, settings, &node_path::from_native(ivy_root), &node_path::from_native(config_path), Style::native())
+}
+
+/// Resolve lexical defaults in the selected host's path flavor, without a
+/// lossy round trip through this process's filesystem representation.
+pub fn default_service_settings_for_paths(
+    component: &str,
+    settings: &IvyJson,
+    ivy_root: &JsString,
+    config_path: &JsString,
+    style: Style,
 ) -> IvyResult<IvyJson> {
     let source = match component {
         "host-executor" | "service-manager" => "{}",
@@ -65,11 +72,11 @@ pub fn default_service_settings(
     let mut defaults = parse(source, 16384)?;
     match component {
         "host-executor" | "service-manager" => {
-            defaults.insert("hostConfigPath", native_string(config_path)?);
+            defaults.insert("hostConfigPath", IvyJson::String(config_path.clone()));
         }
         "hive" => {
             let mut backup = defaults.required("backup")?.clone();
-            backup.insert("directory", native_string(&ivy_root.join("backups/hive"))?);
+            backup.insert("directory", IvyJson::String(node_path::join(style, &[ivy_root.clone(), "backups".into(), "hive".into()])));
             defaults.insert("backup", backup);
         }
         "agent-manager" => {

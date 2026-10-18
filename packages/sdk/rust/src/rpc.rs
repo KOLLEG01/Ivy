@@ -18,6 +18,43 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 pub type RequestFuture<'a> = Pin<Box<dyn Future<Output = IvyResult<IvyJson>> + Send + 'a>>;
+
+/// Project a validated query row's bundled document, requiring its exact revision.
+/// The returned document is borrowed unchanged, including unknown fields and UTF-16 strings.
+pub fn query_document(item: &IvyJson) -> IvyResult<&IvyJson> {
+    let invalid = || IvyError::new("invalid_frame", "Hive query returned no matching document.");
+    let read = item.get("document").ok_or_else(invalid)?;
+    let object_id = item.get("objectId").and_then(IvyJson::as_js_string);
+    let revision = item.get("revision").and_then(IvyJson::as_f64);
+    let version = item.get("contractVersion").and_then(IvyJson::as_js_string);
+    let metadata = read.get("revision");
+    if object_id.is_some()
+        && revision.is_some()
+        && version.is_some()
+        && read
+            .get("object")
+            .and_then(|v| v.get("id"))
+            .and_then(IvyJson::as_js_string)
+            == object_id
+        && metadata
+            .and_then(|v| v.get("objectId"))
+            .and_then(IvyJson::as_js_string)
+            == object_id
+        && metadata
+            .and_then(|v| v.get("revision"))
+            .and_then(IvyJson::as_f64)
+            == revision
+        && metadata
+            .and_then(|v| v.get("contractVersion"))
+            .and_then(IvyJson::as_js_string)
+            == version
+    {
+        Ok(read)
+    } else {
+        Err(invalid())
+    }
+}
+
 pub trait RpcClient: Send + Sync {
     /// Only an actual provider generation owns a bound-owner cache.
     fn service_connection(&self) -> Option<&crate::service::ServiceConnection> { None }
@@ -69,7 +106,7 @@ impl Default for ClientOptions {
 
 pub fn base_url(value: &str) -> IvyResult<reqwest::Url> {
     let mut url = reqwest::Url::parse(value)
-        .map_err(|_| IvyError::new("invalid_arguments", "Expected the canonical Hive base URL."))?;
+        .map_err(|_| IvyError::internal())?;
     if !["http", "https"].contains(&url.scheme())
         || !url.username().is_empty()
         || url.password().is_some()
