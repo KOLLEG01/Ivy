@@ -233,7 +233,7 @@ impl SecretaryEngine<'_, '_, '_> {
             ("policy", policy),
             ("noticeConfigured", notice_configured.into()),
             ("recoveryIssues", IvyJson::Array(issues)),
-            ("observedAt", self.now()?.into()),
+            ("observedAt", IvyJson::String(self.now()?)),
         ]))
     }
     pub async fn list_assignments(
@@ -313,7 +313,7 @@ impl SecretaryEngine<'_, '_, '_> {
                 "nextCursor",
                 page.get("nextCursor").cloned().unwrap_or(IvyJson::Null),
             ),
-            ("observedAt", self.now()?.into()),
+            ("observedAt", IvyJson::String(self.now()?)),
         ]))
     }
     pub async fn get_assignment(&self, caller: &IvyJson, request: &IvyJson) -> IvyResult<IvyJson> {
@@ -341,7 +341,7 @@ impl SecretaryEngine<'_, '_, '_> {
         Ok(IvyJson::object([
             ("pin", current.required("pin")?.clone()),
             ("assignment", current.required("value")?.clone()),
-            ("observedAt", self.now()?.into()),
+            ("observedAt", IvyJson::String(self.now()?)),
         ]))
     }
 }

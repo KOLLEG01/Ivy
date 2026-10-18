@@ -281,7 +281,7 @@ impl SecretaryEngine<'_, '_, '_> {
             ("requestHash", hash_json(request)?.into()),
             ("request", request.clone()),
             ("sourceId", "".into()),
-            ("createdAt", at.clone().into()),
+            ("createdAt", IvyJson::String(at.clone())),
             ("source", snapshot.required("value")?.clone()),
             ("prepared", IvyJson::Null),
             ("existingEffect", IvyJson::Null),
@@ -324,7 +324,7 @@ impl SecretaryEngine<'_, '_, '_> {
                     } else {
                         Some((
                             "secretary/item",
-                            IvyJson::object([("createName", name.into())]),
+                            IvyJson::object([("createName", IvyJson::String(name))]),
                             item,
                         ))
                     }
@@ -361,7 +361,7 @@ impl SecretaryEngine<'_, '_, '_> {
                 let voice = if assessment.get("notification") == Some(&"voice".into()) {
                     IvyJson::object([
                         ("state", "queued".into()),
-                        ("operationId", (self.new_uuid)().into()),
+                        ("operationId", IvyJson::String((self.new_uuid)())),
                         ("callId", IvyJson::Null),
                         ("errorCode", IvyJson::Null),
                     ])
@@ -382,7 +382,11 @@ impl SecretaryEngine<'_, '_, '_> {
                     ("reason", reason.map(IvyJson::from).unwrap_or(IvyJson::Null)),
                     (
                         "text",
-                        notice_text(assessment, value.required("message")?, source)?.into(),
+                        IvyJson::String(notice_text(
+                            assessment,
+                            value.required("message")?,
+                            source,
+                        )?),
                     ),
                     (
                         "source",
@@ -404,7 +408,7 @@ impl SecretaryEngine<'_, '_, '_> {
                     ("preparedRevision", IvyJson::Null),
                     ("evidence", IvyJson::Null),
                     ("voice", voice),
-                    ("updatedAt", at.clone().into()),
+                    ("updatedAt", IvyJson::String(at.clone())),
                 ]);
                 value.insert(
                     "decision",
@@ -412,7 +416,7 @@ impl SecretaryEngine<'_, '_, '_> {
                         ("assessment", assessment.clone()),
                         ("actor", caller.clone()),
                         ("operationId", id.clone()),
-                        ("decidedAt", at.clone().into()),
+                        ("decidedAt", IvyJson::String(at.clone())),
                         ("policy", policy),
                     ]),
                 );
@@ -511,7 +515,7 @@ impl SecretaryEngine<'_, '_, '_> {
                     "checkpointOperation",
                     IvyJson::object([("principalId", caller.clone()), ("operationId", id.clone())]),
                 );
-                value.insert("updatedAt", at.into());
+                value.insert("updatedAt", IvyJson::String(at));
                 Some((
                     "secretary/source",
                     IvyJson::object([("object", source.required("pin")?.clone())]),

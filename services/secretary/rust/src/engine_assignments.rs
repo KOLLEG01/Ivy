@@ -85,7 +85,7 @@ impl SecretaryEngine<'_, '_, '_> {
         let current = current.ok_or_else(IvyError::internal)?;
         let mut value = request.required("value")?.clone();
         value.insert("rules", unified_main_rules(value.required("rules")?));
-        value.insert("updatedAt", self.now()?.into());
+        value.insert("updatedAt", IvyJson::String(self.now()?));
         let write = store.object_write_request(
             Record::Configuration,
             &value,
@@ -136,7 +136,7 @@ impl SecretaryEngine<'_, '_, '_> {
                 "secretary_identity_conflict",
                 "A new assignment needs a fresh identity.",
             )?;
-            value.insert("createdAt", now.clone().into());
+            value.insert("createdAt", IvyJson::String(now.clone()));
             IvyJson::object([("createName", name.into())])
         } else {
             let matches = match &current {
@@ -158,7 +158,7 @@ impl SecretaryEngine<'_, '_, '_> {
             )?;
             IvyJson::object([("object", current.required("pin")?.clone())])
         };
-        value.insert("updatedAt", now.into());
+        value.insert("updatedAt", IvyJson::String(now));
         let write = store.object_write_request(
             Record::Assignment,
             &value,
@@ -188,7 +188,7 @@ impl SecretaryEngine<'_, '_, '_> {
                 ("phase", value.required("phase")?.clone()),
                 ("effect", value.required("effect")?.clone()),
                 ("errorCode", value.required("errorCode")?.clone()),
-                ("observedAt", at.into()),
+                ("observedAt", IvyJson::String(at)),
             ]));
         }
         let row = self.prior_workflow(caller, id)?;
@@ -226,7 +226,7 @@ impl SecretaryEngine<'_, '_, '_> {
                     row.value.required("errorCode")?.clone()
                 },
             ),
-            ("observedAt", at.into()),
+            ("observedAt", IvyJson::String(at)),
         ]))
     }
 }
