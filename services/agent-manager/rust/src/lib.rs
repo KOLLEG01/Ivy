@@ -30,6 +30,7 @@ pub mod project_repository;
 pub mod project_locations;
 pub mod project_management;
 pub mod registry;
+pub mod service_work;
 pub mod skills;
 pub mod skills_output;
 pub mod skills_prepare;
