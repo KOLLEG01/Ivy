@@ -11,6 +11,7 @@ const {mainChat,mainNotification}=await import('../../packages/sdk/src/main-chat
 const {hostProject}=await import('../../packages/sdk/src/project-inventory.ts');
 const {publishBrowserNotice,browserNoticeTopic}=await import('../../packages/sdk/src/browser-notice.ts');
 const {IvyError}=await import('../../packages/contracts/src/errors.ts');
+const {hashJson}=await import('../../packages/contracts/src/canonical.ts');
 // Moving the existing schema to a shared asset must preserve its exact JSON value/order.
 const schema=JSON.parse(readFileSync(new URL('../../specs/schemas/browser-notice.schema.json',import.meta.url)));
 assert.equal(createHash('sha256').update(JSON.stringify(schema)).digest('hex'),'cd177ce3fe46a04ac915294c1c14cca62acbe9d9a04d1bca58a34a80d32a31d5');
@@ -33,6 +34,12 @@ async function add(input){
   let result;
   try{
     let value;
+    if(input.kind==='notification-checked'){
+      try{const notification=mainNotification(input.value);result={ok:true,value:{notification,hash:hashJson(notification)}};}
+      catch(e){result={ok:false,error:error(IvyError.from(e))};}
+      rows.push({input:JSON.stringify(input),result:JSON.stringify({trace,result})});
+      return;
+    }
     if(input.kind==='main-checked'){
       try { result={ok:true,value:await mainChat(client)}; }
       catch(e) {
@@ -110,6 +117,22 @@ for(const nextCursor of [null,''])await add({kind:'project',projectId:'missing',
 await add({kind:'project',projectId:'project',steps:[{method:'inventory.list',value:{items:[item({...project,name:'',paths:[null,123]})],nextCursor:'unneeded'}}]});
 await add({kind:'project',projectId:'project',steps:[{method:'inventory.list',error:{code:'cancelled',message:'observation cancelled',outcome:'not_executed'}}]});
 for(const value of [{action:'notify',operationId:'original',source:{taskId:'task'},text:'message',channel:{hidden:true},transport:'omit'}, {}, {action:null,operationId:'\ud800',source:['exact'],text:null}])await add({kind:'notification',value});
+for(const original of [
+  {action:'notify',operationId:'original',source:{taskId:'task'},text:'message'},
+  {action:null,operationId:null,source:null,text:null},
+  {action:9007199254740992,operationId:'\ud800',source:['exact'],text:'\udfff'},
+  {action:['notify'],operationId:1,source:{toString:1,'__proto__':null},text:''},
+])for(let mask=0;mask<16;mask++){
+  const value={};Object.keys(original).forEach((key,i)=>{if(mask&(1<<i))value[key]=original[key];});
+  value.omittedTransport={unsafe:9007199254740992};
+  await add({kind:'notification-checked',value});
+}
+for(const value of [null,false,0,'','\ud800',[],[1],{action:'notify',operationId:'other'}])await add({kind:'notification-checked',value});
+for(const depth of [126,127,128]){
+  let value=null;for(let i=0;i<depth;i++)value=[value];
+  await add({kind:'notification-checked',value:{action:value,operationId:'other'}});
+  await add({kind:'notification-checked',value:{action:'notify',operationId:'other',source:null,text:null,omittedTransport:value}});
+}
 for(const namespace of ['agent','chat','task-board','','\ud800','a.b'])await add({kind:'topic',namespace});
 const notice={title:'Title',body:'Body',tag:'tag',target:{uiId:'task-board-ui',fragment:'#/tasks/original'}};
 const notices=[notice,{...notice,title:'a'.repeat(99)+'😀',body:'b'.repeat(299)+'😀',extra:'preserved'}, {...notice,title:'',body:'',tag:'different'}, {...notice,title:'\ud800',body:'\udfff'}, {...notice,title:'é'.repeat(101),body:'😀'.repeat(200)}];

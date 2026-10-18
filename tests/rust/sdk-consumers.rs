@@ -166,6 +166,15 @@ async fn shared_consumer_helpers_match_typescript() {
                 Err(error) => failure(error),
             },
             "notification" => success(main_notification(field(&input, "value"))),
+            "notification-checked" => match main_notification_checked(field(&input, "value"))
+                .and_then(|notification| {
+                    ivy_contracts::hash::hash_json(&notification).map(|hash| {
+                        IvyJson::object([("notification", notification), ("hash", hash.into())])
+                    })
+                }) {
+                Ok(value) => success(value),
+                Err(error) => failure(error),
+            },
             "topic" => success(browser_notice_topic(&text(&input, "namespace"))),
             "publish" => {
                 let mut results = Vec::new();
