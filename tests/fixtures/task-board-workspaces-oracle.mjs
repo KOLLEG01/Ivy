@@ -32,6 +32,7 @@ add('release task',{action:'release',task:'owner'});add('release other task',{ac
 add('release original operation',{action:'releaseOperation',operation:'original'});add('release other operation',{action:'releaseOperation'});
 for(const key of ['project:host:project','directory:host:project'])add('shared '+key,{cwd:key,reservations:[['host',key,'owner','original']],reads:{owner:task('todo')}});
 for(const cwd of ['C:\\Work\\..\\Workspace','C:\\Workspace\\','\\\\server\\share\\folder','\\\\?\\C:\\Workspace','/Case/Sensitive','c:relative','Directory:host:value'])add('key '+cwd,{action:'reserve',cwd,reservations:[]});
+for(const cwd of ['C:/A/../B/','C:\\Straße\\İ\\ΟΣ','C:\\Path\\\ud800\\Σ','\\\\SERVER\\SHARE\\FOLDER\\..\\ΟΣ','\\\\?\\UNC\\SERVER\\SHARE\\Folder','//Server/Share/UPPER','/\\Server/UPPER','\\SingleRoot\\UPPER','/Case/../Sensitive//','c:..\\Relative','K:\\Path',' C:\\UPPER','project:host:C:\\UPPER','directory:host:/Case/../Sensitive'])add('key boundary '+cwd,{action:'reserve',cwd,reservations:[]});
 for(const row of rows){const i=row.input,db=new DatabaseSync(':memory:');db.exec(schema);
  for(const values of i.reservations)db.prepare('INSERT INTO workspace_reservations VALUES(?,?,?,?)').run(...values);
  if(i.gate){db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run('gate','task-board/coordination','TaskBoard publication gate owner',null,1,'time','time');db.prepare('INSERT INTO active_gates VALUES(?,?)').run('gate','operation');}

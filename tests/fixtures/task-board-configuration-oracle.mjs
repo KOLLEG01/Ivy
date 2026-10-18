@@ -8,10 +8,8 @@ registerHooks({resolve(specifier,context,next){
 }});
 const {hashJson}=await import('../../packages/contracts/src/canonical.ts');
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
-const schemaSource=readFileSync('packages/contracts/src/schema.ts','utf8');
-const scalarSource=schemaSource.slice(schemaSource.indexOf('export function pointerParts'),schemaSource.indexOf('/** Admit a finite schema graph'))
-  +schemaSource.slice(schemaSource.indexOf('export function scalarTypes'));
-const {scalarTypes}=new Function('requireThat',stripTypeScriptTypes(scalarSource.replaceAll('export ',''))+'\nreturn {scalarTypes};')(requireThat);
+const {scalarTypes}=await import('../../packages/contracts/src/schema.ts');
+const {validateTaskBoard}=await import('../../packages/contracts/src/task-board-validation.ts');
 const {newOperationId,BoundToolClient}=await import('../../packages/sdk/src/client.ts');
 const recoverySource=readFileSync('services/task-board/src/runtime/native-recovery.ts','utf8');
 const recoveryMethods=recoverySource.slice(recoverySource.indexOf('export const missingNativeThread'),recoverySource.indexOf('async function unstartedAttempt')).replaceAll('export ','');
@@ -21,9 +19,10 @@ const body=source.slice(source.indexOf('export const configurationName')).replac
 const functions=new Function('requireThat','scalarTypes','validateTaskBoard','newOperationId','BoundToolClient','freshContextRecovery',stripTypeScriptTypes(body)+'\nreturn {initialConfiguration,configurationView,executionWithDefaults,effectiveExecution,checkConfiguration,supportsExecutionOptions};')
   (requireThat,scalarTypes,(...args)=>{
     activeTrace.push(['validate',...structuredClone(args)]);
-    // The production TaskBoard validator is an external mandatory binding on
-    // both sides. Admit only this fixture's pinned Configuration, never arbitrary values.
+    // Production Rust admission remains an external mandatory binding. The
+    // original additionally validates each captured Configuration with its AJV schema.
     requireThat(!activeInput.reject&&args[0]==='Configuration'&&hashJson(args[1])===hashJson(activeInput.value),'fixture_admission','Fixture configuration was not admitted.');
+    validateTaskBoard(...args);
   },newOperationId,BoundToolClient,freshContextRecovery);
 const support=readFileSync('tests/fixtures/task-board-operations-oracle.mjs','utf8');
 const Memory=new Function('hashJson','IvyError',support.slice(support.indexOf('class Memory {'),support.indexOf('const begin='))+'\nreturn Memory;')(hashJson,IvyError);

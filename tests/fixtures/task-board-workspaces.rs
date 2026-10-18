@@ -6,9 +6,9 @@ use ivy_contracts::{
 use ivy_store::rusqlite::{Connection, params};
 use ivy_task_board::{
     local_journal,
-    local_workspaces::{LocalWorkspaces, WorkspaceDocument, WorkspaceOwner},
+    local_workspaces::{LocalWorkspaces, WorkspaceDocument, WorkspaceOwner, workspace_key},
 };
-use std::{cell::RefCell, collections::HashMap, path::Path, process::Command};
+use std::{cell::RefCell, path::Path, process::Command};
 fn text(v: &Json, k: &str) -> JsString {
     v.required(k).unwrap().as_js_string().unwrap().clone()
 }
@@ -147,26 +147,15 @@ async fn reservations_and_owner_reclamation_match_original_transactions_and_read
         if let Some(fault) = input.get("fault") {
             db.execute_batch(&fault.as_str().unwrap()).unwrap();
         }
-        let keys: HashMap<JsString, JsString> = values(row.required("keys").unwrap())
-            .iter()
-            .map(|p| {
-                let p = values(p);
-                (
-                    p[0].as_js_string().unwrap().clone(),
-                    p[1].as_js_string().unwrap().clone(),
-                )
-            })
-            .collect();
-        // The required normalizer is supplied by the unchanged Node policy here.
-        // Production construction remains gated on the shared qualified path API.
-        let normalize = |value: &JsString| {
-            keys.get(value).cloned().ok_or_else(|| {
-                IvyError::new(
-                    "fixture_missing_key",
-                    "normalizer input was not observed in original source",
-                )
-            })
-        };
+        for key in values(row.required("keys").unwrap()) {
+            let pair = values(key);
+            assert_eq!(
+                workspace_key(pair[0].as_js_string().unwrap()).unwrap(),
+                *pair[1].as_js_string().unwrap(),
+                "workspace key {:?}",
+                pair[0]
+            );
+        }
         let owner = Owner {
             db: &db,
             input: input.clone(),
@@ -175,7 +164,7 @@ async fn reservations_and_owner_reclamation_match_original_transactions_and_read
         let subject = LocalWorkspaces {
             connection: &db,
             store: &owner,
-            normalize,
+            normalize: workspace_key,
         };
         let (host, cwd, task, operation) = (
             text(input, "host"),
@@ -213,8 +202,8 @@ async fn reservations_and_owner_reclamation_match_original_transactions_and_read
         assert_eq!(
             canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap(),
             canonical(row.required("expected").unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
-            "{}",
-            text(row, "name").to_utf8().unwrap()
+            "case {:?}",
+            text(row, "name")
         );
         assert!(db.is_autocommit());
     }

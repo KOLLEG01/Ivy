@@ -1,6 +1,7 @@
 //! Reservations share the TaskBoard journal. Owner observations are fresh reads;
 //! reclamation is fenced by both the observed revision and publication gate.
 use crate::local_journal::text;
+use ivy_contracts::js_path::normalize_win32;
 use ivy_contracts::{IvyJson as Json, IvyResult, JsString};
 use ivy_store::{
     rusqlite::{Connection, OptionalExtension, params},
@@ -11,6 +12,22 @@ pub struct WorkspaceDocument {
     pub pin: Json,
     pub value: Json,
     pub effectively_archived: bool,
+}
+
+/// Match the original host-independent dispatch: only absolute ASCII drive
+/// paths and backslash UNC paths use Windows normalization and default lowercase.
+/// POSIX, drive-relative and virtual workspace keys retain their exact units.
+pub fn workspace_key(path: &JsString) -> IvyResult<JsString> {
+    let units = &path.0;
+    let drive = units.len() >= 3
+        && ((65..=90).contains(&units[0]) || (97..=122).contains(&units[0]))
+        && units[1] == 58
+        && [47, 92].contains(&units[2]);
+    if drive || units.starts_with(&[92, 92]) {
+        Ok(normalize_win32(path).to_lowercase())
+    } else {
+        Ok(path.clone())
+    }
 }
 
 /// The workflow store enforces its selected exact contract, root and immutable
