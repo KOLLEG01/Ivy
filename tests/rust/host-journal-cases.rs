@@ -32,7 +32,10 @@ async fn journal_executor_lock_excludes_owners_and_allows_shared_readers_after_c
     let first=ExecutorLock::acquire(root.clone(),true).await.unwrap(); let second=ExecutorLock::acquire(root.clone(),true).await.unwrap();
     assert_eq!(ExecutorLock::acquire(root.clone(),false).await.err().unwrap().code,"executor_already_running");
     first.close().await.unwrap(); second.close().await.unwrap();
-    let owner=ExecutorLock::acquire(root,false).await.unwrap(); owner.close().await.unwrap();
+    let owner=ivy_host_runtime::executor_lock::ExecutorLock::acquire(root.clone(),false).await.unwrap();
+    let _: &ExecutorLock = &owner; // The journal path remains the same type.
+    drop(owner);
+    let owner=ExecutorLock::acquire(root,false).await.unwrap(); owner.close().await.unwrap(); owner.close().await.unwrap();
 }
 fn request(action: &str, operation: &str) -> IvyJson { IvyJson::object([("action", action.into()), ("operationId", operation.into()), ("instanceId", "fixture".into())]) }
 
