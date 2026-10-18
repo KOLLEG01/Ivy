@@ -196,7 +196,10 @@ async fn target(root: &Fixture, journal: &HostJournal, revision: &str) -> IvyJso
         (
             "dataRoot",
             root.0
-                .join("state/instances/fixture/data")
+                .join("state")
+                .join("instances")
+                .join("fixture")
+                .join("data")
                 .to_string_lossy()
                 .to_string()
                 .into(),
