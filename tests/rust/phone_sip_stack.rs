@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use ivy_phone_bridge::sip::{
-        CallError, CallObservation, CallOutcome, DelayedInvite, DelayedInviteMedia,
-        DigestCredentials, FinalPhase, InviteExchange, PreparedInvite, SipEndpoint, SipError,
-        SipIoError,
+        BindError, BoundSipTransport, CallError, CallObservation, CallOutcome, DelayedInvite,
+        DelayedInviteMedia, DigestCredentials, FinalPhase, InviteExchange, PreparedInvite,
+        SipEndpoint, SipError, SipIoError,
     };
     use rsipstack::{
         EndpointBuilder,
@@ -499,9 +499,15 @@ mod tests {
     #[tokio::test]
     async fn cancelled_delayed_offer_keeps_original_udp_transaction_and_ack_body() {
         tokio::time::timeout(Duration::from_secs(8), async {
-            let (endpoint, mut peer, local, peer_port, _) =
-                network(false, EndpointOption::default()).await;
-            let endpoint = Arc::new(endpoint);
+            let mut bound =
+                BoundSipTransport::udp("127.0.0.1:0".parse().unwrap(), EndpointOption::default())
+                    .await
+                    .unwrap();
+            let local = bound.local_addr().port();
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let peer_port = socket.local_addr().unwrap().port();
+            let mut peer = Peer::Udp(socket, None);
+            let endpoint = bound.endpoint().unwrap();
             let media = Arc::new(Media::new(0));
             let credentials =
                 DigestCredentials::new("fixture".into(), "fixture-only".into()).unwrap();
@@ -510,7 +516,10 @@ mod tests {
             request.uri = "sip:peer@prepared.invalid".try_into().unwrap();
             let call = DelayedInvite::start(
                 endpoint.clone(),
-                PreparedInvite::new(request, destination, None).unwrap(),
+                bound
+                    .prepare_invite(request, destination, None)
+                    .await
+                    .unwrap(),
                 Some(credentials),
                 5,
                 media.clone(),
@@ -609,11 +618,10 @@ mod tests {
             assert!(!call.observation().active);
             assert_eq!(media.negotiated.load(Ordering::SeqCst), 0);
             assert_eq!(media.starts.load(Ordering::SeqCst), 0);
-            let mut endpoint = Arc::try_unwrap(endpoint)
-                .ok()
-                .expect("call owner stopped before release");
             assert_eq!(endpoint.inner().get_stats().running_transactions, 0);
-            endpoint.shutdown().await.unwrap();
+            drop(endpoint);
+            bound.close().await.unwrap();
+            assert!(bound.is_closed());
         })
         .await
         .expect("owned cancelled call deadline");
@@ -859,6 +867,188 @@ mod tests {
         })
         .await
         .expect("unknown original call deadline");
+    }
+
+    #[tokio::test]
+    async fn bound_udp_and_tcp_report_and_release_the_actual_incoming_socket() {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            for tcp in [false, true] {
+                for ip in ["127.0.0.1", "0.0.0.0"] {
+                    let configured: std::net::SocketAddr = format!("{ip}:0").parse().unwrap();
+                    let mut bound = if tcp {
+                        BoundSipTransport::tcp(configured, EndpointOption::default()).unwrap()
+                    } else {
+                        BoundSipTransport::udp(configured, EndpointOption::default())
+                            .await
+                            .unwrap()
+                    };
+                    let local = bound.local_addr();
+                    assert_eq!(local.ip(), configured.ip());
+                    assert_ne!(local.port(), 0);
+                    assert_eq!(bound.listener_failure(), None);
+                    let endpoint = bound.endpoint().unwrap();
+                    let mut incoming = endpoint.incoming_transactions().unwrap();
+                    let reachable =
+                        std::net::SocketAddr::new("127.0.0.1".parse().unwrap(), local.port());
+                    let (mut peer, peer_port) = if tcp {
+                        let stream = TcpStream::connect(reachable).await.unwrap();
+                        let port = stream.local_addr().unwrap().port();
+                        (Peer::Tcp(BufReader::new(stream)), port)
+                    } else {
+                        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                        let port = socket.local_addr().unwrap().port();
+                        (Peer::Udp(socket, Some(reachable)), port)
+                    };
+                    let mut request = addressed("", peer_port, local.port(), tcp);
+                    request.method = Method::Options;
+                    request.headers.unique_push(CSeq::new("1 OPTIONS").into());
+                    peer.send_message(&SipMessage::Request(request)).await;
+                    let mut original = incoming.recv().await.unwrap();
+                    let connection = original.connection.as_ref().unwrap();
+                    assert_eq!(
+                        connection.get_addr().get_socketaddr().unwrap().port(),
+                        local.port()
+                    );
+                    let replied = tokio::spawn(async move {
+                        original.reply(StatusCode::OK).await.unwrap();
+                    });
+                    assert_eq!(status(&mut peer).await, 200);
+                    replied.await.unwrap();
+                    drop(peer);
+                    drop(incoming);
+                    drop(endpoint);
+                    bound.close().await.unwrap();
+                    bound.close().await.unwrap();
+                    assert!(bound.is_closed());
+                    if tcp {
+                        TcpListener::bind(local).await.unwrap();
+                    } else {
+                        UdpSocket::bind(local).await.unwrap();
+                    }
+                }
+            }
+        })
+        .await
+        .expect("owned incoming bind/release deadline");
+    }
+
+    #[tokio::test]
+    async fn prepared_tcp_invite_and_cancel_use_the_original_bound_port_and_flow() {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut bound =
+                BoundSipTransport::tcp("127.0.0.1:0".parse().unwrap(), EndpointOption::default())
+                    .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let peer_port = listener.local_addr().unwrap().port();
+            let local = bound.local_addr();
+            let mut request = addressed("", local.port(), peer_port, true);
+            let destination = SipAddr::try_from(&request.destination()).unwrap();
+            request.uri = "sip:peer@prepared.invalid;transport=tcp"
+                .try_into()
+                .unwrap();
+            let prepared = bound
+                .prepare_invite(request, destination, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                bound.close().await,
+                Err(BindError::Endpoint(SipIoError::InUse))
+            );
+            assert!(!bound.is_closed());
+            let (stream, remote) = listener.accept().await.unwrap();
+            assert_eq!(remote, local);
+            let mut peer = Peer::Tcp(BufReader::new(stream));
+            let endpoint = bound.endpoint().unwrap();
+            let media = Arc::new(Media::new(0));
+            let call =
+                DelayedInvite::start(endpoint.clone(), prepared, None, 5, media.clone()).unwrap();
+            let original = peer.receive().await;
+            assert_eq!(
+                original.uri.to_string(),
+                "sip:peer@prepared.invalid;transport=tcp"
+            );
+            peer.send(&response(&original, StatusCode::Ringing, peer_port, ""))
+                .await;
+            call.hangup().await.unwrap();
+            let cancel = peer.receive().await;
+            assert_eq!(cancel.method, Method::Cancel);
+            assert_eq!(cancel.uri, original.uri);
+            assert_eq!(branch(&cancel), branch(&original));
+            peer.send(&response(&cancel, StatusCode::OK, peer_port, ""))
+                .await;
+            peer.send(&response(&original, StatusCode::from(487), peer_port, ""))
+                .await;
+            assert_eq!(peer.receive().await.method, Method::Ack);
+            assert_eq!(call.wait_answer().await, CallOutcome::Ended);
+            call.close().await.unwrap();
+            assert_eq!(media.starts.load(Ordering::SeqCst), 0);
+            drop(peer);
+            drop(endpoint);
+            bound.close().await.unwrap();
+            assert!(bound.is_closed());
+        })
+        .await
+        .expect("bound original TCP flow deadline");
+    }
+
+    #[tokio::test]
+    async fn prepared_socket_owner_and_next_hop_validation_precede_invite_dispatch() {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut owner =
+                BoundSipTransport::udp("127.0.0.1:0".parse().unwrap(), EndpointOption::default())
+                    .await
+                    .unwrap();
+            let mut foreign =
+                BoundSipTransport::udp("127.0.0.1:0".parse().unwrap(), EndpointOption::default())
+                    .await
+                    .unwrap();
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let request = addressed(
+                "",
+                owner.local_addr().port(),
+                socket.local_addr().unwrap().port(),
+                false,
+            );
+            let destination = SipAddr::try_from(&request.destination()).unwrap();
+            let wrong_proxy: SipAddr = "127.0.0.1:1"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .into();
+            assert!(matches!(
+                owner
+                    .prepare_invite(request.clone(), destination.clone(), Some(wrong_proxy))
+                    .await,
+                Err(BindError::InvalidDestination)
+            ));
+            let prepared = owner
+                .prepare_invite(request, destination, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                owner.close().await,
+                Err(BindError::Endpoint(SipIoError::InUse))
+            );
+            assert!(matches!(
+                DelayedInvite::start(
+                    foreign.endpoint().unwrap(),
+                    prepared,
+                    None,
+                    5,
+                    Arc::new(Media::new(0))
+                ),
+                Err(SipIoError::InvalidRequest)
+            ));
+            let mut bytes = [0; 1024];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), socket.recv_from(&mut bytes))
+                    .await
+                    .is_err()
+            );
+            owner.close().await.unwrap();
+            foreign.close().await.unwrap();
+        })
+        .await
+        .expect("prepared socket ownership deadline");
     }
 
     fn original(body: &str) -> Request {

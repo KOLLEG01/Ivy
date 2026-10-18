@@ -197,6 +197,13 @@ impl SipEndpoint {
     pub fn inner(&self) -> &EndpointInnerRef {
         &self.endpoint.inner
     }
+    pub(crate) fn is_running(&self) -> bool {
+        !self.routes.0.lock().unwrap().closed
+            && self
+                .serving
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+    }
     pub fn incoming_transactions(&self) -> Result<TransactionReceiver, SipIoError> {
         self.endpoint
             .incoming_transactions()
@@ -254,6 +261,24 @@ impl SipEndpoint {
         if flow.connection.is_some() {
             transaction.destination = flow.destination.clone();
         }
+        Ok(ClientExchange::start(transaction, proxy, channels))
+    }
+    pub(crate) fn connected_client(
+        &self,
+        request: Request,
+        destination: SipAddr,
+        connection: SipConnection,
+        proxy: Option<SipAddr>,
+    ) -> Result<ClientExchange, SipIoError> {
+        if request.method == Method::Ack || destination.get_socketaddr().is_err() {
+            return Err(SipIoError::InvalidRequest);
+        }
+        let key = TransactionKey::from_request(&request, TransactionRole::Client)
+            .map_err(|_| SipIoError::InvalidRequest)?;
+        let channels = self.reserve(key.clone(), request.method == Method::Invite)?;
+        let mut transaction =
+            Transaction::new_client(key, request, self.endpoint.inner.clone(), Some(connection));
+        transaction.destination = Some(destination);
         Ok(ClientExchange::start(transaction, proxy, channels))
     }
     /// Adopt only an unsent authentication continuation produced by the stack.

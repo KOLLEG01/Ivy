@@ -14,7 +14,7 @@ use rsipstack::{
         prelude::HeadersExt,
     },
     transaction::Transaction,
-    transport::SipAddr,
+    transport::{SipAddr, SipConnection},
 };
 use std::{
     future::{Future, pending},
@@ -68,6 +68,7 @@ pub struct PreparedInvite {
     exchange: InviteExchange,
     destination: SipAddr,
     proxy: Option<SipAddr>,
+    connection: Option<(Arc<SipEndpoint>, SipConnection)>,
 }
 impl PreparedInvite {
     pub fn new(
@@ -83,7 +84,15 @@ impl PreparedInvite {
             exchange,
             destination,
             proxy,
+            connection: None,
         })
+    }
+    pub(super) fn bind_connection(
+        &mut self,
+        endpoint: Arc<SipEndpoint>,
+        connection: SipConnection,
+    ) {
+        self.connection = Some((endpoint, connection));
     }
 }
 
@@ -164,17 +173,31 @@ impl DelayedInvite {
             exchange,
             destination,
             proxy,
+            connection,
         } = prepared;
+        let connection = match connection {
+            Some((owner, connection)) if Arc::ptr_eq(&owner, &endpoint) => Some(connection),
+            Some(_) => return Err(SipIoError::InvalidRequest),
+            None => None,
+        };
         let mut lifecycle = DelayedOfferCall::default();
         lifecycle.start().map_err(|_| SipIoError::InvalidRequest)?;
         lifecycle
             .sending(1)
             .map_err(|_| SipIoError::InvalidRequest)?;
-        let current = endpoint.resolved_client(
-            exchange.request().clone(),
-            destination.clone(),
-            proxy.clone(),
-        )?;
+        let current = match &connection {
+            Some(connection) => endpoint.connected_client(
+                exchange.request().clone(),
+                destination.clone(),
+                connection.clone(),
+                proxy.clone(),
+            ),
+            None => endpoint.resolved_client(
+                exchange.request().clone(),
+                destination.clone(),
+                proxy.clone(),
+            ),
+        }?;
         let hangup = CancellationToken::new();
         let (commands, receiver) = mpsc::channel(8);
         let (identity, identity_rx) = watch::channel(None);
@@ -196,6 +219,7 @@ impl DelayedInvite {
             media,
             proxy,
             credentials,
+            prepared_connection: connection,
             exchange,
             lifecycle,
             current: Some(current),
@@ -372,6 +396,7 @@ struct CallActor {
     media: Arc<dyn DelayedInviteMedia>,
     proxy: Option<SipAddr>,
     credentials: Option<DigestCredentials>,
+    prepared_connection: Option<SipConnection>,
     exchange: InviteExchange,
     lifecycle: DelayedOfferCall,
     current: Option<ClientExchange>,
@@ -442,11 +467,19 @@ impl CallActor {
                     .cancel_request()
                     .map_err(|_| SipIoError::InvalidRequest)
                     .and_then(|request| {
-                        let cancelling = self.endpoint.resolved_client(
-                            request,
-                            self.destination.clone(),
-                            self.proxy.clone(),
-                        )?;
+                        let cancelling = match &self.prepared_connection {
+                            Some(connection) => self.endpoint.connected_client(
+                                request,
+                                self.destination.clone(),
+                                connection.clone(),
+                                self.proxy.clone(),
+                            ),
+                            None => self.endpoint.resolved_client(
+                                request,
+                                self.destination.clone(),
+                                self.proxy.clone(),
+                            ),
+                        }?;
                         self.cancelling = Some(cancelling);
                         self.listen_cancel = true;
                         Ok(())

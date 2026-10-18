@@ -1,5 +1,6 @@
 //! Phone-owned call policy. The SIP stack owns wire parsing and transactions;
 //! the native call owner serializes these transitions and awaits their effects.
+mod binding;
 mod call;
 mod delayed_offer;
 mod dialog;
@@ -7,6 +8,7 @@ mod endpoint;
 mod invite;
 mod registration;
 
+pub use binding::{BindError, BoundSipTransport};
 pub use call::{
     CallObservation, DelayedInvite, DelayedInviteMedia, DigestCredentials, PreparedInvite,
 };
