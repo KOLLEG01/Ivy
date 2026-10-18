@@ -3,7 +3,7 @@ use crate::{
     assignment_error::{SchedulerFailure, SchedulerResult},
     assignment_progress::SchedulerAssignments,
     assignment_scheduler::AssignmentScheduler,
-    inbox_recovery::RecoveryScan,
+    inbox_recovery::{RecoveryIssues, RecoveryScan},
     store::Record,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
@@ -11,6 +11,7 @@ use ivy_sdk::{
     clock::{date_to_iso, parse_date},
     rpc::RequestOptions,
 };
+use std::cell::RefCell;
 
 fn text(value: &IvyJson, key: &str) -> SchedulerResult<JsString> {
     value
@@ -25,6 +26,23 @@ impl SchedulerAssignments {
         &mut self,
         scheduler: &AssignmentScheduler<'_, '_, '_>,
         issues: &mut RecoveryScan,
+    ) -> IvyResult<()> {
+        self.tick_with_issues(scheduler, &RefCell::new(issues))
+            .await
+    }
+    /// Share diagnostics with independent generation workers without retaining
+    /// an exclusive RefCell borrow while an RPC is pending.
+    pub async fn tick_shared(
+        &mut self,
+        scheduler: &AssignmentScheduler<'_, '_, '_>,
+        issues: &RefCell<RecoveryScan>,
+    ) -> IvyResult<()> {
+        self.tick_with_issues(scheduler, issues).await
+    }
+    async fn tick_with_issues(
+        &mut self,
+        scheduler: &AssignmentScheduler<'_, '_, '_>,
+        issues: &dyn RecoveryIssues,
     ) -> IvyResult<()> {
         let evidence = scheduler.evidence;
         let store = evidence.store;
@@ -45,7 +63,7 @@ impl SchedulerAssignments {
                     .await?;
             }
         }
-        let assignments = self.assignments(scheduler, issues).await?;
+        let assignments = self.assignments_with_issues(scheduler, issues).await?;
         let budget = (32 / assignments.len().max(1)).max(1);
         for assignment in assignments {
             let assignment_id = text(assignment.required("value")?, "assignmentId")?;
@@ -100,7 +118,7 @@ impl SchedulerAssignments {
                             store
                                 .journal
                                 .delete_technical("secretary/event-gap", &gap.pin.object_id)?;
-                            issues.issues.retain(|(id, _)| id != &gap_issue);
+                            issues.clear(&gap_issue);
                         } else {
                             let mut value = gap.value.clone();
                             value.insert("relevant", true.into());
@@ -130,7 +148,7 @@ impl SchedulerAssignments {
                 scheduler
                     .schedules_inner(&assignment, configuration, now)
                     .await?;
-                issues.issues.retain(|(id, _)| id != &key);
+                issues.clear(&key);
                 Ok(())
             }
             .await;

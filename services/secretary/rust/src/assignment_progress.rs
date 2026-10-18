@@ -3,7 +3,7 @@ use crate::assignment_error::{SchedulerFailure, SchedulerResult, untyped};
 use crate::{
     assignment_scheduler::AssignmentScheduler,
     assignment_schema::{assignment_name, validate_assignment},
-    inbox_recovery::RecoveryScan,
+    inbox_recovery::{RecoveryIssues, RecoveryScan},
     schedule::{self, LocalMinute, Payload, Schedule},
     store::Record,
 };
@@ -12,7 +12,7 @@ use ivy_sdk::{
     clock::{TimeZone, date_to_iso, parse_date},
     rpc::RequestOptions,
 };
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 fn need(ok: bool, code: &str, message: &str) -> SchedulerResult<()> {
     if ok {
@@ -62,6 +62,14 @@ impl SchedulerAssignments {
         &mut self,
         scheduler: &AssignmentScheduler<'_, '_, '_>,
         issues: &mut RecoveryScan,
+    ) -> IvyResult<Vec<IvyJson>> {
+        self.assignments_with_issues(scheduler, &RefCell::new(issues))
+            .await
+    }
+    pub(crate) async fn assignments_with_issues(
+        &mut self,
+        scheduler: &AssignmentScheduler<'_, '_, '_>,
+        issues: &dyn RecoveryIssues,
     ) -> IvyResult<Vec<IvyJson>> {
         let evidence = scheduler.evidence;
         let store = evidence.store;
@@ -196,7 +204,7 @@ impl SchedulerAssignments {
                     self.retired.insert(object_id.clone(), retirement);
                     let assignment_issue =
                         format!("assignment:{}", String::from_utf16_lossy(&key.0));
-                    issues.issues.retain(|(id, _)| id != &assignment_issue);
+                    issues.clear(&assignment_issue);
                     None
                 } else {
                     self.retired.remove(&object_id);
@@ -208,7 +216,7 @@ impl SchedulerAssignments {
                     validate_assignment(assignment.required("value")?)?;
                     Some(assignment)
                 };
-                issues.issues.retain(|(id, _)| id != &issue_key);
+                issues.clear(&issue_key);
                 Ok(assignment)
             }
             .await;

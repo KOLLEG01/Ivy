@@ -10,7 +10,10 @@ use ivy_secretary::{
     store::Store,
 };
 use ivy_store::rusqlite::params;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 struct TickClock {
     times: Vec<i64>,
     next: AtomicUsize,
@@ -37,6 +40,7 @@ struct TickClient {
     scripted: Scripted,
     abort_after: Option<usize>,
     abort: RequestOptions,
+    waiting: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
 }
 impl RpcClient for TickClient {
     fn request<'a>(
@@ -46,6 +50,9 @@ impl RpcClient for TickClient {
         options: RequestOptions,
     ) -> RequestFuture<'a> {
         Box::pin(async move {
+            let (resume, resumed) = tokio::sync::oneshot::channel();
+            self.waiting.send(resume).unwrap();
+            resumed.await.unwrap();
             let result = self.scripted.request(method, params, options).await;
             if self.abort_after == Some(self.scripted.trace.lock().unwrap().len()) {
                 self.abort.cancellation.cancel();
@@ -134,6 +141,7 @@ async fn original_scheduler_tick_composition_and_catch_site_diagnostics() {
         if input.get("cancel") == Some(&IvyJson::Bool(true)) {
             cancellation.cancellation.cancel();
         }
+        let (waiting, mut requests) = tokio::sync::mpsc::unbounded_channel();
         let client = Arc::new(TickClient {
             scripted: Scripted {
                 steps: Mutex::new(
@@ -153,6 +161,7 @@ async fn original_scheduler_tick_composition_and_catch_site_diagnostics() {
                 .and_then(IvyJson::as_f64)
                 .map(|n| n as usize),
             abort: cancellation.clone(),
+            waiting,
         });
         let store = Store {
             client: client.clone(),
@@ -193,7 +202,7 @@ async fn original_scheduler_tick_composition_and_catch_site_diagnostics() {
             cursor: input.get("cursor").and_then(IvyJson::as_js_string).cloned(),
             ..SchedulerAssignments::default()
         };
-        let mut issues = RecoveryScan {
+        let issues = RefCell::new(RecoveryScan {
             cursor: None,
             issues: input
                 .required("issues")
@@ -206,11 +215,26 @@ async fn original_scheduler_tick_composition_and_catch_site_diagnostics() {
                     (p[0].as_str().unwrap(), p[1].as_str().unwrap())
                 })
                 .collect(),
-        };
+        });
         let mut outcomes = Vec::new();
         let mut snapshots = Vec::new();
         for _ in 0..input.required("ticks").unwrap().as_f64().unwrap() as usize {
-            let result: IvyResult<()> = state.tick(&scheduler, &mut issues).await;
+            let mut work = Box::pin(state.tick_shared(&scheduler, &issues));
+            let result: IvyResult<()> = loop {
+                tokio::select! {
+                    result = &mut work => break result,
+                    Some(resume) = requests.recv() => {
+                        // An independent worker can update/read the actual
+                        // shared diagnostics at every suspended scheduler RPC.
+                        // This would panic if a RefMut survived an await.
+                        issues.borrow_mut().issue("independent-worker", "fixture_interleaving");
+                        assert!(issues.borrow().issues.iter().any(|(key, _)| key == "independent-worker"));
+                        issues.borrow_mut().issues.retain(|(key, _)| key != "independent-worker");
+                        resume.send(()).unwrap();
+                    },
+                }
+            };
+            drop(work);
             outcomes.push(match result {
                 Ok(()) => IvyJson::object([("value", IvyJson::Null)]),
                 Err(e) => IvyJson::object([
@@ -248,6 +272,7 @@ async fn original_scheduler_tick_composition_and_catch_site_diagnostics() {
                     "issues",
                     IvyJson::Array(
                         issues
+                            .borrow()
                             .issues
                             .iter()
                             .map(|(id, c)| {

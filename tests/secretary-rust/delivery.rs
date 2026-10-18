@@ -69,6 +69,8 @@ mod engine_epoch_cases;
 mod engine_inbox_cases;
 #[path = "follow_up_cases.rs"]
 mod follow_up_cases;
+#[path = "generation_cases.rs"]
+mod generation_cases;
 #[path = "inbox_evidence_cases.rs"]
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]

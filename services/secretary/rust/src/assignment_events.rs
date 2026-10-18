@@ -1,8 +1,11 @@
 //! Durable event effects, historical snapshots, gap rebasing and ACK ordering.
 use crate::assignment_error::{SchedulerFailure, SchedulerResult, untyped};
 use crate::{
-    assignment_message::message_channel, assignment_scheduler::AssignmentScheduler,
-    assignment_windows::revision_number, inbox_recovery::RecoveryScan, store::Record,
+    assignment_message::message_channel,
+    assignment_scheduler::AssignmentScheduler,
+    assignment_windows::revision_number,
+    inbox_recovery::{RecoveryIssues, RecoveryScan},
+    store::Record,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::try_js_string};
 use ivy_sdk::{
@@ -131,7 +134,7 @@ impl AssignmentScheduler<'_, '_, '_> {
         assignment: &IvyJson,
         configuration: &IvyJson,
         budget: usize,
-        issues: &mut RecoveryScan,
+        issues: &dyn RecoveryIssues,
     ) -> SchedulerResult<bool> {
         let store = self.evidence.store;
         let value = assignment.required("value")?;
@@ -290,7 +293,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                             store
                                 .journal
                                 .delete_technical("secretary/event-gap", &gap.pin.object_id)?;
-                            issues.issues.retain(|(id, _)| id != &gap_issue);
+                            issues.clear(&gap_issue);
                         } else {
                             let mut value = gap.value.clone();
                             value.insert("relevant", true.into());
@@ -485,8 +488,13 @@ impl AssignmentScheduler<'_, '_, '_> {
         budget: usize,
         issues: &mut RecoveryScan,
     ) -> IvyResult<bool> {
-        self.events_inner(assignment, configuration, budget, issues)
-            .await
-            .map_err(IvyError::from)
+        self.events_inner(
+            assignment,
+            configuration,
+            budget,
+            &std::cell::RefCell::new(issues),
+        )
+        .await
+        .map_err(IvyError::from)
     }
 }
