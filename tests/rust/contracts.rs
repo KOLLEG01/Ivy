@@ -169,6 +169,9 @@ fn transport_frame_admission_matches_typescript() {
         let result = match case["kind"].as_str().unwrap() {
             "request" => validate_request(&value),
             "response" => validate_response_frame(&value),
+            "service-notification" => validate_service_notification_frame(&value),
+            "provider-notification" => validate_provider_notification_frame(&value),
+            "event-availability" => validate_event_availability_frame(&value),
             _ => validate_provider_call_frame(&value),
         };
         if case["ok"] == true {
