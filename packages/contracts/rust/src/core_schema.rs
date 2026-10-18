@@ -71,6 +71,19 @@ pub fn validate_transport(name: &str, value: &IvyJson) -> IvyResult<()> {
         ))
     }
 }
+pub fn validate_shared(name: &str, value: &IvyJson) -> IvyResult<()> {
+    if core()?
+        .matches_named(crate::wire_schema::WIRE_ID, name, value)?
+        .ok_or_else(IvyError::internal)?
+    {
+        Ok(())
+    } else {
+        Err(IvyError::new(
+            "invalid_arguments",
+            "Value does not match its shared contract.",
+        ))
+    }
+}
 pub fn validate_host(name: &str, value: &IvyJson) -> IvyResult<()> {
     canonical(value, MANAGEMENT_FRAME_BYTES)?;
     let bundle = HOST
