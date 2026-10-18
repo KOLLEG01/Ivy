@@ -2,6 +2,7 @@
 pub mod adoption;
 pub mod cache;
 pub mod engine;
+pub mod entrypoint;
 pub mod definition_journal;
 pub mod definitions;
 pub mod model;

@@ -16,6 +16,9 @@ use tokio::{
     process::Command,
 };
 
+#[path = "data-collector-entrypoint.inc.rs"]
+mod entrypoint;
+
 struct Fixture {
     root: PathBuf,
     config: IvyJson,
