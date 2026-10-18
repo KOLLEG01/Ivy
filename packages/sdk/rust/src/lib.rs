@@ -15,3 +15,6 @@ pub mod tools;
 mod service_connection;
 pub mod service;
 pub mod connection_owner;
+mod native_project_path;
+pub mod native_project_membership;
+pub mod native_project;
