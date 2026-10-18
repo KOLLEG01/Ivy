@@ -946,6 +946,7 @@ mod tests {
             request.uri = "sip:peer@prepared.invalid;transport=tcp"
                 .try_into()
                 .unwrap();
+            let original_uri = request.uri.clone();
             let prepared = bound
                 .prepare_invite(request, destination, None)
                 .await
@@ -963,10 +964,7 @@ mod tests {
             let call =
                 DelayedInvite::start(endpoint.clone(), prepared, None, 5, media.clone()).unwrap();
             let original = peer.receive().await;
-            assert_eq!(
-                original.uri.to_string(),
-                "sip:peer@prepared.invalid;transport=tcp"
-            );
+            assert_eq!(original.uri, original_uri);
             peer.send(&response(&original, StatusCode::Ringing, peer_port, ""))
                 .await;
             call.hangup().await.unwrap();
