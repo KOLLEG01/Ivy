@@ -32,6 +32,7 @@ pub mod node_runtime;
 mod native_dispatch;
 pub mod native_catalog_compatibility;
 pub mod native_account;
+pub mod package_archive;
 pub mod package_requirements;
 pub mod paths;
 pub mod node_path;

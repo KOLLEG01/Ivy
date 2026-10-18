@@ -31,6 +31,11 @@ try {
     value = await preparations[input.operation](...input.args);
     if (value === undefined) value = null;
   }
+  else if (input.kind === 'packageArchive') {
+    const archive = await import('../../packages/host-runtime/src/package-archive.ts');
+    value = await archive[input.operation](...input.args);
+    if (value === undefined) value = null;
+  }
   else if (input.kind === 'candidateIdentity') value = (await import('../../packages/host-runtime/src/candidate-identity.ts')).candidateBuildId(...input.args);
   else if (input.kind === 'artifact') {
     if (input.node) Object.defineProperty(process, 'version', {value: input.node});

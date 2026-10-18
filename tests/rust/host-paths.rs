@@ -7,6 +7,8 @@ mod journal_cases;
 mod artifact_cases;
 #[path = "host-native-dispatch-cases.rs"]
 mod native_dispatch_cases;
+#[path = "host-package-archive-cases.rs"]
+mod package_archive_cases;
 #[path = "host-source-cases.rs"]
 mod source_cases;
 #[path = "host-action-cases.rs"]
