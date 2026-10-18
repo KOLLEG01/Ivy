@@ -3,8 +3,8 @@
 pub mod agent_bundle;
 pub mod agent_schema;
 pub mod automation_schema;
-pub mod builtin_schema;
 pub mod browser_notice;
+pub mod builtin_schema;
 mod canonical_bundle;
 pub mod chat_schema;
 pub mod checked_native_contract;
@@ -16,14 +16,15 @@ pub mod hash;
 pub mod host_bundle;
 pub mod json;
 pub mod limits;
-pub mod native_contract;
 mod native_catalog_path;
+pub mod native_contract;
 pub mod operation;
-pub mod read_request;
 pub mod re2;
+pub mod read_request;
 pub mod schema;
 mod schema_lookup;
 pub mod secretary_schema;
+pub mod ui_route;
 pub mod validation;
 pub mod wire_schema;
 
