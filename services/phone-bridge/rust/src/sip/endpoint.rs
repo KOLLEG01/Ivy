@@ -348,14 +348,30 @@ impl ClientExchange {
                     if let Some(response) = response { return Ok(response); }
                     self.responses_closed = true;
                 }
+                result = async { self.driver.as_mut().unwrap().await }, if self.driver.is_some() => {
+                    self.retain_completion(result)?;
+                }
             }
         }
     }
+    fn retain_completion(
+        &mut self,
+        result: Result<Finished, tokio::task::JoinError>,
+    ) -> Result<(), SipIoError> {
+        self.driver.take();
+        match result {
+            Ok(finished) => self.finished = Some(finished),
+            Err(_) => {
+                self.registration.route.fail(SipIoError::DriverFailed);
+                return Err(SipIoError::DriverFailed);
+            }
+        }
+        Ok(())
+    }
     async fn join_driver(&mut self) -> Result<(), SipIoError> {
         if let Some(task) = self.driver.as_mut() {
-            let result = task.await.map_err(|_| SipIoError::DriverFailed)?;
-            self.finished = Some(result);
-            self.driver.take();
+            let result = task.await;
+            self.retain_completion(result)?;
         }
         Ok(())
     }

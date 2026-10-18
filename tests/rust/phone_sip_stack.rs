@@ -267,6 +267,13 @@ mod tests {
             );
             let ack = peer.receive().await;
             assert_eq!(ack.method, Method::Ack);
+            // The completed driver can be collected while a later observer
+            // waits; cancelling that observer must retain its original too.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(5), client.next_response())
+                    .await
+                    .is_err()
+            );
             assert_eq!(client.completed().await.unwrap().original, original);
             client.retire().await.unwrap();
             endpoint.shutdown().await.unwrap();
