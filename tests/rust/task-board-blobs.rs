@@ -176,3 +176,139 @@ fn partial_chunk_save_replays_original_pins_and_preserves_usage() {
         read_verified_bytes(&store, &"owner".into(), &manifest, ChunkKey::NativeEvidence).is_err()
     );
 }
+
+#[test]
+fn retained_gate_indexes_preserve_sql_order_and_transaction_boundaries() {
+    use ivy_task_board::local_gates::LocalGates;
+    use std::process::Command;
+    let temp = Temporary::new();
+    let path = temp.0.join("gates.sqlite");
+    let oracle = |action: &str| {
+        let output = Command::new("node")
+            .args([
+                "--disable-warning=ExperimentalWarning",
+                "tests/fixtures/task-board-gates-oracle.mjs",
+                action,
+            ])
+            .arg(&path)
+            .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let expected = oracle("create");
+    let db = Connection::open(&path).unwrap();
+    let gates = LocalGates::new(&db);
+    let operation = JsString("op".encode_utf16().chain([0xdfff]).collect());
+    let caller = JsString("caller".encode_utf16().chain([0xd800]).collect());
+    let strings = |values: Vec<JsString>| {
+        values
+            .into_iter()
+            .map(|v| v.to_utf8().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        gates
+            .pending_coordination()
+            .unwrap()
+            .unwrap()
+            .to_utf8()
+            .unwrap(),
+        expected["pending"]["objectId"]
+    );
+    assert_eq!(expected["pending"]["revision"], 1);
+    for (index, (after, limit)) in [(None, 2), (Some("a".into()), 10), (Some("z".into()), 0)]
+        .iter()
+        .enumerate()
+    {
+        let page = gates.pending_page(after.as_ref(), *limit).unwrap().into_iter().map(|entry| json!({
+            "gateId":entry.gate_id.to_utf8().unwrap(), "operationId":entry.operation_id.to_utf8().unwrap()
+        })).collect::<Vec<_>>();
+        assert_eq!(json!(page), expected["pages"][index]);
+    }
+    assert_eq!(
+        json!(strings(gates.operation_gates(&operation).unwrap())),
+        expected["gates"]
+    );
+    assert_eq!(
+        gates
+            .retired_operation(&caller, &"retired".into())
+            .unwrap()
+            .unwrap()
+            .to_utf8()
+            .unwrap(),
+        expected["retired"][0]
+    );
+    assert!(
+        gates
+            .retired_operation(&"other".into(), &"retired".into())
+            .unwrap()
+            .is_none()
+    );
+    gates
+        .retain_operation_gates(&operation, &["a".into(), "z".into()])
+        .unwrap();
+    assert_eq!(
+        json!(strings(gates.operation_gates(&operation).unwrap())),
+        expected["gates"]
+    );
+    db.execute_batch("CREATE TEMP TRIGGER fail_gate BEFORE INSERT ON operation_gates WHEN NEW.gate_name='fail' BEGIN SELECT RAISE(ABORT,'fixture gate interruption'); END;").unwrap();
+    assert!(
+        gates
+            .retain_operation_gates(&operation, &["temporary".into(), "fail".into()])
+            .is_err()
+    );
+    assert!(db.is_autocommit());
+    assert_eq!(
+        json!(strings(gates.operation_gates(&operation).unwrap())),
+        expected["gates"]
+    );
+    db.execute_batch("DROP TRIGGER fail_gate; BEGIN IMMEDIATE;")
+        .unwrap();
+    db.execute("INSERT INTO markers VALUES('caller-owned','retained')", [])
+        .unwrap();
+    assert!(
+        gates
+            .retain_operation_gates(&operation, &["nested".into()])
+            .is_err()
+    );
+    assert!(!db.is_autocommit());
+    assert_eq!(
+        db.query_row(
+            "SELECT value FROM markers WHERE key='caller-owned'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "retained"
+    );
+    db.execute_batch("ROLLBACK").unwrap();
+    gates
+        .retain_operation_gates(
+            &"rust-operation".into(),
+            &["b".into(), "a".into(), "b".into()],
+        )
+        .unwrap();
+    drop(db);
+    let reopened = oracle("inspect");
+    assert_eq!(reopened["pending"], expected["pending"]);
+    assert_eq!(reopened["gates"], expected["gates"]);
+    let rows = reopened["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["operation_id"] == "rust-operation")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        vec![
+            &json!({"operation_id":"rust-operation","gate_name":"a"}),
+            &json!({"operation_id":"rust-operation","gate_name":"b"})
+        ]
+    );
+}
