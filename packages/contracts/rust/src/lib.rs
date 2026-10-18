@@ -7,6 +7,7 @@ pub mod builtin_schema;
 pub mod browser_notice;
 mod canonical_bundle;
 pub mod chat_schema;
+pub mod checked_native_contract;
 pub mod component_schema;
 pub mod core_bundle;
 pub mod core_schema;
