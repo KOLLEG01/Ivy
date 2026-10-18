@@ -9,6 +9,8 @@ mod artifact_cases;
 mod source_cases;
 #[path = "host-action-cases.rs"]
 mod action_cases;
+#[path = "host-preparation-cases.rs"]
+mod preparation_cases;
 #[path = "host-storage-space-cases.rs"]
 mod storage_space_cases;
 #[path = "host-node-path-cases.rs"]
