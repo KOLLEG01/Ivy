@@ -1,3 +1,4 @@
+pub mod configuration;
 pub mod coordination;
 pub mod evidence_bytes;
 pub mod inspection_journal;

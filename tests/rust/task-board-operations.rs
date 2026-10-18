@@ -15,6 +15,8 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
+#[path = "../fixtures/task-board-configuration.rs"]
+mod configuration;
 #[path = "../fixtures/task-board-program.rs"]
 mod publication;
 #[path = "../fixtures/task-board-recovery.rs"]
