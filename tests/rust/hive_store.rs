@@ -8,6 +8,8 @@ mod ledger;
 mod object_delete;
 #[path = "hive_object_mutations.rs"]
 mod object_mutations;
+#[path = "hive_online_backup.rs"]
+mod online_backup;
 #[path = "hive_query.rs"]
 mod query;
 use rusqlite::types::ValueRef;

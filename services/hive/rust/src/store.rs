@@ -7,7 +7,11 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use rusqlite::{Connection, OptionalExtension, config::DbConfig, params};
-use std::{path::Path, time::Duration};
+use std::{path::Path, rc::Rc, time::Duration};
+
+#[path = "store_backup.rs"]
+mod backup;
+pub use backup::{BackupSnapshot, OnlineBackup};
 
 #[path = "store_ledger.rs"]
 mod ledger;
@@ -59,7 +63,7 @@ pub struct Principal {
 }
 
 pub struct Store {
-    db: Connection,
+    db: Rc<Connection>,
     changes: Vec<JsString>,
     cursor_secret: String,
     query_state: query::QueryState,
@@ -81,7 +85,7 @@ impl Store {
             .map_err(sql_error)?;
         db.set_prepared_statement_cache_capacity(256);
         let mut store = Self {
-            db,
+            db: Rc::new(db),
             changes: vec![],
             cursor_secret: String::new(),
             query_state: Default::default(),
@@ -130,7 +134,8 @@ impl Store {
         self.db
             .execute_batch("DROP INDEX IF EXISTS mutations_expiry")
             .map_err(sql_error)?;
-        self.cursor_secret = self.metadata("cursor_secret")?
+        self.cursor_secret = self
+            .metadata("cursor_secret")?
             .ok_or_else(IvyError::internal)?;
         self.transaction(|store| {
             let nodes = store

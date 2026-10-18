@@ -11,6 +11,7 @@ rusqlite = { workspace = true, features = ["backup", "functions", "hooks"] }
 getrandom.workspace = true
 uuid.workspace = true
 base64.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 
 [dev-dependencies]

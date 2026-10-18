@@ -6,14 +6,10 @@ use ivy_hive::{
     worker_protocol::Notification,
     worker_server::{self, BackupTask, Progress, WorkerService},
 };
-use rusqlite::{
-    Connection,
-    backup::{Backup, StepResult},
-};
-use std::{fs, io::Write, path::PathBuf, rc::Rc, time::Duration};
+use std::{fs, future::poll_fn, io::Write, path::PathBuf, task::Poll, time::Duration};
 
 struct Service {
-    store: Rc<Store>,
+    store: Store,
     root: PathBuf,
     notifications: Vec<Notification>,
 }
@@ -76,32 +72,36 @@ impl WorkerService for Service {
         }
     }
     fn backup(&mut self, payload: IvyJson, progress: Progress) -> IvyResult<BackupTask> {
-        let store = self.store.clone();
-        let destination = PathBuf::from(payload.required("destination")?.as_str()?);
+        let destination = payload
+            .required("destination")?
+            .as_js_string()
+            .cloned()
+            .ok_or_else(IvyError::internal)?;
+        let copying = progress.clone();
+        let mut backup = self.store.backup_to(destination, move || {
+            copying();
+            Ok(())
+        });
         let delay = payload
             .get("delayMs")
             .and_then(IvyJson::as_f64)
             .unwrap_or(0.0) as u64;
         Ok(Box::pin(async move {
-            let mut target = Connection::open(destination).unwrap();
-            let backup = Backup::new(store.connection(), &mut target).unwrap();
+            // The optional heartbeat fixture delay holds the actual copy after
+            // its first yielding batch, while the actor handles other actions.
+            if delay > 0 {
+                if let Poll::Ready(result) =
+                    poll_fn(|cx| Poll::Ready(backup.as_mut().poll(cx))).await
+                {
+                    return result.map(|snapshot| snapshot.to_json());
+                }
+            }
             let until = tokio::time::Instant::now() + Duration::from_millis(delay);
             while tokio::time::Instant::now() < until {
                 progress();
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            loop {
-                let step = backup.step(1).unwrap();
-                progress();
-                match step {
-                    StepResult::Done => break,
-                    StepResult::More => tokio::time::sleep(Duration::from_millis(2)).await,
-                    other => panic!("Unexpected test backup state: {other:?}"),
-                }
-            }
-            let pages = backup.progress().pagecount;
-            drop(backup);
-            Ok(IvyJson::object([("pages", IvyJson::Number(pages as f64))]))
+            backup.await.map(|snapshot| snapshot.to_json())
         }))
     }
     fn notifications(&mut self) -> Vec<Notification> {
@@ -117,10 +117,10 @@ fn main() {
         let root = PathBuf::from(options.required("root")?.as_str()?);
         let store = Store::open(&root.join("hive.sqlite"))?;
         store.set_metadata("calls", &store.metadata("calls")?.unwrap_or_else(|| "0".into()))?;
-        store.connection().execute_batch("CREATE TABLE IF NOT EXISTS fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); INSERT OR IGNORE INTO fixture_payload SELECT value,zeroblob(4096) FROM json_each('[1,2,3,4,5,6,7,8]');").unwrap();
+        store.connection().execute_batch("CREATE TABLE IF NOT EXISTS fixture_payload(id INTEGER PRIMARY KEY, bytes BLOB); WITH RECURSIVE n(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM n WHERE value<256) INSERT OR IGNORE INTO fixture_payload SELECT value,zeroblob(4096) FROM n;").unwrap();
         fs::write(root.join("pid"), std::process::id().to_string()).unwrap();
         if options.get("neverReady") == Some(&IvyJson::Bool(true)) { loop { std::thread::park(); } }
-        Ok(Service { store: Rc::new(store), root, notifications: vec![] })
+        Ok(Service { store, root, notifications: vec![] })
     }));
     // Dropped kernel/backup closes SQLite before exit. Tokio stdin uses a
     // blocking reader; private worker exit must not wait for another input byte.

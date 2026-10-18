@@ -647,6 +647,10 @@ fn real_worker_backup_interleaves_committed_writes_rejects_second_backup_and_clo
             let pages = backup.await.unwrap().unwrap();
             assert!(pages.get("pages").unwrap().as_f64().unwrap() > 0.0);
             close.wait().await.unwrap();
+            assert_eq!(
+                pages.get("bytesHash"),
+                Some(&ivy_contracts::hash::digest(fs::read(&destination).unwrap()).into())
+            );
             let copy = rusqlite::Connection::open(destination).unwrap();
             assert_eq!(
                 copy.query_row("SELECT value FROM metadata WHERE key='calls'", [], |r| {
