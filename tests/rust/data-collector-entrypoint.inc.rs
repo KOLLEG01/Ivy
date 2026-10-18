@@ -5,6 +5,9 @@ use std::{collections::BTreeMap, ffi::OsString, process::ExitCode};
 
 const DRIVER: &str = "lifecycle::entrypoint::entrypoint_fixture_process";
 
+#[path = "data-collector-transfer.inc.rs"]
+mod transfer;
+
 #[tokio::test]
 async fn entrypoint_fixture_process() {
     if std::env::var_os("IVY_TEST_COLLECTOR_ENTRYPOINT").is_none() {
@@ -90,6 +93,14 @@ async fn stage(fixture: &Fixture) {
     }
 }
 async fn launch(fixture: &Fixture, health: bool, environment_config: bool) -> OwnedProcess {
+    launch_bounded(fixture, health, environment_config, 30_000).await
+}
+async fn launch_bounded(
+    fixture: &Fixture,
+    health: bool,
+    environment_config: bool,
+    timeout_ms: u64,
+) -> OwnedProcess {
     let entry = if health {
         "packages/host-runtime/src/health.js"
     } else {
@@ -126,7 +137,7 @@ async fn launch(fixture: &Fixture, health: bool, environment_config: bool) -> Ow
             executable: "node".into(),
             args,
             cwd: None,
-            timeout_ms: 30_000,
+            timeout_ms,
         },
         &fixture.root.join("artifact"),
         &BTreeMap::from([("node".into(), node())]),
