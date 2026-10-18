@@ -12,6 +12,29 @@ registerHooks({resolve(specifier,context,next) {
 const {canonical,hashJson}=await import('../../packages/contracts/src/canonical.ts');
 const {deriveOperationId}=await import('../../packages/contracts/src/operation-id.ts');
 const {validateJson}=await import('../../packages/contracts/src/canonical-json.ts');
+if(process.argv[2]==='deep') {
+  const {createHash}=await import('node:crypto');
+  const cases=[];
+  for(const depth of [128,129,512,4096,20_000]) {
+    for(const kind of ['array','object','mixed']) {
+      const opens=[], closes=[];
+      for(let i=0;i<depth;i++) {
+        const array=kind==='array'||(kind==='mixed'&&i%2===0);
+        opens.push(array?'[':'{"next":');closes.push(array?']':'}');
+      }
+      const input=opens.join('')+'"\\ud800"'+closes.reverse().join('');
+      const value=JSON.parse(input), item={depth,kind};
+      try {item.stringifyHash=createHash('sha256').update(JSON.stringify(value)).digest('hex');}catch(error){item.stringifyError={name:error.name,message:error.message};}
+      try {const text=String(value);item.coercionUnits=Array.from({length:text.length},(_,i)=>text.charCodeAt(i));}catch(error){item.coercionError={name:error.name,message:error.message};}
+      for(const [name,fn] of Object.entries({canonical,validateJson})) {
+        try {fn(value,4_000_000);item[name]=null;}catch(error){item[name]=error.code??error.name;}
+      }
+      cases.push(item);
+    }
+  }
+  process.stdout.write(JSON.stringify({runtime:{node:process.versions.node,v8:process.versions.v8},cases}));
+  process.exit(0);
+}
 if(process.argv[2]==='wide') {
   const {createHash}=await import('node:crypto');
   const cases=[];

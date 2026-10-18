@@ -1,5 +1,7 @@
 use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
+#[path = "json_value.rs"]
+mod value_traits;
 
 /// ECMAScript string code units, including unpaired surrogates. Ord is UTF-16 order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -39,40 +41,57 @@ impl JsString {
 /// JavaScript String(value) for ordinary JSON values; unlike JSON.stringify,
 /// arrays join recursively and null array elements become empty strings.
 pub fn js_string(value: &IvyJson) -> JsString {
-    match value {
-        IvyJson::String(s) => s.clone(),
-        IvyJson::Null => "null".into(),
-        IvyJson::Bool(v) => (if *v { "true" } else { "false" }).into(),
-        IvyJson::Number(v) => {
-            if v.is_nan() {
-                "NaN".into()
-            } else if *v == f64::INFINITY {
-                "Infinity".into()
-            } else if *v == f64::NEG_INFINITY {
-                "-Infinity".into()
-            } else if *v == 0.0 {
-                "0".into()
-            } else {
-                ryu_js::Buffer::new().format(*v).into()
+    enum Part<'a> {
+        Value(&'a IvyJson),
+        Comma,
+    }
+    let mut pending = vec![Part::Value(value)];
+    let mut units = Vec::new();
+    while let Some(part) = pending.pop() {
+        let value = match part {
+            Part::Comma => {
+                units.push(44);
+                continue;
             }
-        }
-        IvyJson::Object(_) => "[object Object]".into(),
-        IvyJson::Array(values) => {
-            let mut units = Vec::new();
-            for (index, value) in values.iter().enumerate() {
-                if index > 0 {
-                    units.push(44);
-                }
-                if !value.is_null() {
-                    units.extend(js_string(value).0);
+            Part::Value(value) => value,
+        };
+        match value {
+            IvyJson::Array(values) => {
+                for (index, value) in values.iter().enumerate().rev() {
+                    if !value.is_null() {
+                        pending.push(Part::Value(value));
+                    }
+                    if index > 0 {
+                        pending.push(Part::Comma);
+                    }
                 }
             }
-            JsString(units)
+            IvyJson::String(s) => units.extend_from_slice(&s.0),
+            IvyJson::Null => units.extend("null".encode_utf16()),
+            IvyJson::Bool(v) => units.extend((if *v { "true" } else { "false" }).encode_utf16()),
+            IvyJson::Object(_) => units.extend("[object Object]".encode_utf16()),
+            IvyJson::Number(v) => {
+                let mut buffer = ryu_js::Buffer::new();
+                let text = if v.is_nan() {
+                    "NaN"
+                } else if *v == f64::INFINITY {
+                    "Infinity"
+                } else if *v == f64::NEG_INFINITY {
+                    "-Infinity"
+                } else if *v == 0.0 {
+                    "0"
+                } else {
+                    buffer.format(*v)
+                };
+                units.extend(text.encode_utf16());
+            }
         }
     }
+    JsString(units)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// A lossless JSON value with stack-independent cloning and destruction.
+/// Use borrowed matches or the `into_*` methods to extract owned fields.
 pub enum IvyJson {
     Null,
     Bool(bool),
@@ -97,6 +116,27 @@ impl From<bool> for IvyJson {
     }
 }
 impl IvyJson {
+    pub fn into_array(mut self) -> Option<Vec<Self>> {
+        if let Self::Array(values) = &mut self {
+            Some(std::mem::take(values))
+        } else {
+            None
+        }
+    }
+    pub fn into_object(mut self) -> Option<Vec<(JsString, Self)>> {
+        if let Self::Object(pairs) = &mut self {
+            Some(std::mem::take(pairs))
+        } else {
+            None
+        }
+    }
+    pub fn into_js_string(mut self) -> Option<JsString> {
+        if let Self::String(value) = &mut self {
+            Some(std::mem::take(value))
+        } else {
+            None
+        }
+    }
     pub fn object<K: Into<JsString>>(pairs: impl IntoIterator<Item = (K, Self)>) -> Self {
         let mut object = Self::Object(Vec::new());
         for (key, value) in pairs {
@@ -225,7 +265,7 @@ pub fn parse_with_options(
         at: 0,
         options,
     };
-    let value = p.value(0)?;
+    let value = p.value()?;
     p.space();
     if p.at != p.bytes.len() {
         return Err(invalid("Unexpected content after JSON value."));
@@ -263,76 +303,106 @@ impl Parser<'_> {
             Err(invalid("Invalid JSON syntax."))
         }
     }
-    fn value(&mut self, depth: usize) -> IvyResult<IvyJson> {
-        // Ordinary JSON.parse has no validator node budget. Keep the recursion
-        // guard until deep values can also be destroyed without recursive drop.
-        if depth > 128 {
-            return Err(complexity());
-        }
+    fn object_key(&mut self) -> IvyResult<JsString> {
         self.space();
-        if matches!(self.bytes.get(self.at), Some(b'[' | b'{'))
-            && self
-                .options
-                .maximum_container_depth
-                .is_some_and(|maximum| depth >= maximum)
-        {
-            return Err(complexity());
+        let key = self.string()?;
+        self.space();
+        self.expect(b':')?;
+        Ok(key)
+    }
+    fn value(&mut self) -> IvyResult<IvyJson> {
+        enum Frame {
+            Array(Vec<IvyJson>),
+            Object { value: IvyJson, key: JsString },
         }
-        match self.bytes.get(self.at).copied() {
-            Some(b'"') => Ok(IvyJson::String(self.string()?)),
-            Some(b'[') => {
-                self.at += 1;
+        let mut frames = Vec::new();
+        loop {
+            self.space();
+            if matches!(self.bytes.get(self.at), Some(b'[' | b'{'))
+                && self
+                    .options
+                    .maximum_container_depth
+                    .is_some_and(|maximum| frames.len() >= maximum)
+            {
+                return Err(complexity());
+            }
+            let mut value = match self.bytes.get(self.at).copied() {
+                Some(b'"') => IvyJson::String(self.string()?),
+                Some(b'[') => {
+                    self.at += 1;
+                    self.space();
+                    if self.take(b']') {
+                        IvyJson::Array(Vec::new())
+                    } else {
+                        frames.push(Frame::Array(Vec::new()));
+                        continue;
+                    }
+                }
+                Some(b'{') => {
+                    self.at += 1;
+                    self.space();
+                    let value = IvyJson::Object(Vec::new());
+                    if self.take(b'}') {
+                        value
+                    } else {
+                        frames.push(Frame::Object {
+                            value,
+                            key: self.object_key()?,
+                        });
+                        continue;
+                    }
+                }
+                Some(b'n') => {
+                    self.literal(b"null")?;
+                    IvyJson::Null
+                }
+                Some(b't') => {
+                    self.literal(b"true")?;
+                    IvyJson::Bool(true)
+                }
+                Some(b'f') => {
+                    self.literal(b"false")?;
+                    IvyJson::Bool(false)
+                }
+                Some(b'-' | b'0'..=b'9') => self.number()?,
+                _ => return Err(invalid("Invalid JSON syntax.")),
+            };
+            loop {
+                let Some(frame) = frames.last_mut() else {
+                    return Ok(value);
+                };
                 self.space();
-                let mut v = Vec::new();
-                if !self.take(b']') {
-                    loop {
-                        v.push(self.value(depth + 1)?);
-                        self.space();
+                match frame {
+                    Frame::Array(values) => {
+                        values.push(value);
                         if self.take(b']') {
+                            let Some(Frame::Array(values)) = frames.pop() else {
+                                unreachable!()
+                            };
+                            value = IvyJson::Array(values);
+                        } else {
+                            self.expect(b',')?;
                             break;
                         }
-                        self.expect(b',')?;
                     }
-                }
-                Ok(IvyJson::Array(v))
-            }
-            Some(b'{') => {
-                self.at += 1;
-                self.space();
-                let mut v = IvyJson::Object(Vec::new());
-                if !self.take(b'}') {
-                    loop {
-                        self.space();
-                        let key = self.string()?;
-                        self.space();
-                        self.expect(b':')?;
-                        if self.options.reject_duplicate_keys && v.get_key(&key).is_some() {
-                            return Err(invalid("Duplicate JSON object property."));
-                        }
-                        v.insert(key, self.value(depth + 1)?);
-                        self.space();
+                    Frame::Object { value: object, key } => {
+                        object.insert(std::mem::take(key), value);
                         if self.take(b'}') {
+                            let Some(Frame::Object { value: object, .. }) = frames.pop() else {
+                                unreachable!()
+                            };
+                            value = object;
+                        } else {
+                            self.expect(b',')?;
+                            *key = self.object_key()?;
+                            if self.options.reject_duplicate_keys && object.get_key(key).is_some() {
+                                return Err(invalid("Duplicate JSON object property."));
+                            }
                             break;
                         }
-                        self.expect(b',')?;
                     }
                 }
-                Ok(v)
             }
-            Some(b'n') => {
-                self.literal(b"null")?;
-                Ok(IvyJson::Null)
-            }
-            Some(b't') => {
-                self.literal(b"true")?;
-                Ok(IvyJson::Bool(true))
-            }
-            Some(b'f') => {
-                self.literal(b"false")?;
-                Ok(IvyJson::Bool(false))
-            }
-            Some(b'-' | b'0'..=b'9') => self.number(),
-            _ => Err(invalid("Invalid JSON syntax.")),
         }
     }
     fn literal(&mut self, s: &[u8]) -> IvyResult<()> {
@@ -477,7 +547,7 @@ fn encode(
         validate,
         accounted: 0,
     };
-    encoder.value(value, 0)?;
+    encoder.value(value)?;
     Ok(encoder.out)
 }
 struct Encoder {
@@ -532,69 +602,100 @@ impl Encoder {
         }
         self.emit("\"")
     }
-    fn value(&mut self, value: &IvyJson, depth: usize) -> IvyResult<()> {
-        self.nodes += 1;
-        if (self.validate && self.nodes > 400_000) || depth > 128 {
-            return Err(complexity());
+    fn value(&mut self, value: &IvyJson) -> IvyResult<()> {
+        enum Part<'a> {
+            Value(&'a IvyJson, usize),
+            Key(&'a JsString),
+            Punctuation(&'static str),
+            Colon,
+            Account(usize),
         }
-        match value {
-            IvyJson::Null => self.emit("null"),
-            IvyJson::Bool(v) => self.emit(if *v { "true" } else { "false" }),
-            IvyJson::String(s) => self.string(s),
-            IvyJson::Number(n) => {
-                if self.validate
-                    && (!n.is_finite() || (n.fract() == 0.0 && n.abs() > 9_007_199_254_740_991.0))
-                {
-                    return Err(invalid("Numbers must be finite and integers must be safe."));
+        let mut pending = vec![Part::Value(value, 0)];
+        while let Some(part) = pending.pop() {
+            let (value, depth) = match part {
+                Part::Punctuation(text) => {
+                    self.punctuation(text)?;
+                    continue;
                 }
-                if !n.is_finite() {
-                    self.emit("null")
-                } else if *n == 0.0 {
-                    self.emit("0")
-                } else {
-                    self.emit(ryu_js::Buffer::new().format(*n))
-                }
-            }
-            IvyJson::Array(values) => {
-                self.punctuation("[")?;
-                for (i, v) in values.iter().enumerate() {
-                    if i > 0 {
-                        self.punctuation(",")?;
-                    }
-                    self.value(v, depth + 1)?;
-                }
-                self.punctuation("]")?;
-                if self.sorted {
-                    self.account(2 + values.len().saturating_sub(1))?;
-                }
-                Ok(())
-            }
-            IvyJson::Object(pairs) => {
-                let mut indices: Vec<usize> = (0..pairs.len()).collect();
-                if self.sorted {
-                    indices.sort_by(|a, b| pairs[*a].0.cmp(&pairs[*b].0));
-                } else {
-                    indices.sort_by_key(|i| array_index(&pairs[*i].0).map_or((1, 0), |n| (0, n)));
-                }
-                self.punctuation("{")?;
-                for (i, index) in indices.into_iter().enumerate() {
-                    if i > 0 {
-                        self.punctuation(",")?;
-                    }
-                    let (k, v) = &pairs[index];
-                    self.string(k)?;
+                Part::Colon => {
                     self.emit(":")?;
-                    self.value(v, depth + 1)?;
+                    continue;
                 }
-                self.punctuation("}")?;
-                if self.sorted {
-                    self.account(2 + pairs.len().saturating_sub(1))?;
+                Part::Account(bytes) => {
+                    self.account(bytes)?;
+                    continue;
                 }
-                Ok(())
+                Part::Key(key) => {
+                    self.string(key)?;
+                    continue;
+                }
+                Part::Value(value, depth) => (value, depth),
+            };
+            self.nodes += 1;
+            if self.validate && (self.nodes > 400_000 || depth > 128) {
+                return Err(complexity());
+            }
+            match value {
+                IvyJson::Null => self.emit("null")?,
+                IvyJson::Bool(value) => self.emit(if *value { "true" } else { "false" })?,
+                IvyJson::String(value) => self.string(value)?,
+                IvyJson::Number(number) => {
+                    if self.validate
+                        && (!number.is_finite()
+                            || (number.fract() == 0.0 && number.abs() > 9_007_199_254_740_991.0))
+                    {
+                        return Err(invalid("Numbers must be finite and integers must be safe."));
+                    }
+                    if !number.is_finite() {
+                        self.emit("null")?;
+                    } else if *number == 0.0 {
+                        self.emit("0")?;
+                    } else {
+                        self.emit(ryu_js::Buffer::new().format(*number))?;
+                    }
+                }
+                IvyJson::Array(values) => {
+                    self.punctuation("[")?;
+                    if self.sorted {
+                        pending.push(Part::Account(2 + values.len().saturating_sub(1)));
+                    }
+                    pending.push(Part::Punctuation("]"));
+                    for (index, value) in values.iter().enumerate().rev() {
+                        pending.push(Part::Value(value, depth + 1));
+                        if index > 0 {
+                            pending.push(Part::Punctuation(","));
+                        }
+                    }
+                }
+                IvyJson::Object(pairs) => {
+                    let mut indices: Vec<_> = (0..pairs.len()).collect();
+                    if self.sorted {
+                        indices.sort_by(|a, b| pairs[*a].0.cmp(&pairs[*b].0));
+                    } else {
+                        indices
+                            .sort_by_key(|i| array_index(&pairs[*i].0).map_or((1, 0), |n| (0, n)));
+                    }
+                    self.punctuation("{")?;
+                    if self.sorted {
+                        pending.push(Part::Account(2 + pairs.len().saturating_sub(1)));
+                    }
+                    pending.push(Part::Punctuation("}"));
+                    for (index, pair_index) in indices.into_iter().enumerate().rev() {
+                        let (key, value) = &pairs[pair_index];
+                        pending.push(Part::Value(value, depth + 1));
+                        pending.push(Part::Colon);
+                        pending.push(Part::Key(key));
+                        if index > 0 {
+                            pending.push(Part::Punctuation(","));
+                        }
+                    }
+                }
             }
         }
+        Ok(())
     }
 }
+
 fn array_index(s: &JsString) -> Option<u32> {
     let s = s.to_utf8().ok()?;
     let n = s.parse::<u32>().ok()?;
