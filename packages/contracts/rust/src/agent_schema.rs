@@ -55,10 +55,7 @@ pub fn validate_agent(name: &str, value: &IvyJson) -> IvyResult<()> {
         .as_ref()
         .map_err(Clone::clone)?;
     if bundle
-        .matches(
-            &format!("https://ivy.invalid/schemas/agent.schema.json#/$defs/{name}"),
-            value,
-        )
+        .matches_named("https://ivy.invalid/schemas/agent.schema.json", name, value)?
         .unwrap_or(false)
     {
         Ok(())
