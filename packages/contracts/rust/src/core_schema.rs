@@ -18,7 +18,7 @@ fn core() -> IvyResult<&'static SchemaBundle> {
     .as_ref()
     .map_err(Clone::clone)
 }
-fn operation(method: &str, output: bool) -> Option<String> {
+pub(crate) fn operation(method: &str, output: bool) -> Option<String> {
     static CATALOG: OnceLock<serde_json::Value> = OnceLock::new();
     let catalog = CATALOG.get_or_init(|| {
         serde_json::from_str(include_str!("../../../../specs/schemas/operations.json"))
