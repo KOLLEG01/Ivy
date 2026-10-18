@@ -12,6 +12,8 @@ mod context_recovery;
 mod journal_store;
 #[path = "../fixtures/task-board-native-intent.rs"]
 mod native_intent;
+#[path = "../fixtures/task-board-native-preparation.rs"]
+mod native_preparation;
 #[path = "../fixtures/task-board-publication.rs"]
 mod publication;
 #[path = "../fixtures/task-board-retention.rs"]

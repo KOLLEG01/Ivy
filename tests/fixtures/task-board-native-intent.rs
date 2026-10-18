@@ -27,7 +27,7 @@ use std::{
 fn text(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()
 }
-fn validate(name: &str, value: &Json) -> IvyResult<()> {
+pub(super) fn validate(name: &str, value: &Json) -> IvyResult<()> {
     // Exact frozen schema composition in this fixture, not production wiring for
     // the owner-finalized current TaskBoard contract/overlay.
     static BUNDLE: OnceLock<SchemaBundle> = OnceLock::new();
