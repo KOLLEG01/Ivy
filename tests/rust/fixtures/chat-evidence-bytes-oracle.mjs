@@ -77,7 +77,7 @@ for(const phase of ['accepted','dispatched','outcome_unknown','failed'])add('ope
 const snapshots=[];
 for(const c of cases){
  const root=mkdtempSync(join(tmpdir(),'ivy-chat-evidence-')),file=join(root,'chat-bridge.sqlite');writeFileSync(file,Buffer.from(c.database??database,'base64'));
- const calls=[],draftCalls=[],pins=new Map(Object.entries(c.initialPins??{}));let remote=structuredClone(publicInput),remoteError=null;
+ const calls=[],draftCalls=[],pins=new Map(Object.entries(c.initialPins??{})),aliases=new Map();let remote=structuredClone(publicInput),remoteError=null;
  globalThis[probe]=(value,validate)=>{const call={input:summary(value)};draftCalls.push(call);try{validate(value);call.outcome={value:null};}catch(e){call.outcome={error:error(e)};throw e;}};
  const client={async request(method,params){calls.push({method,params:structuredClone(params)});if(remoteError)throw new IvyError(remoteError.code,remoteError.message,remoteError.outcome);if(method!=='objects.read')throw Error('Unexpected RPC '+method);if(params.objectId!=='original-input')throw new IvyError('object_missing','Original parent is unavailable.');return structuredClone(remote);}};
  let store=new ChatStore(client,'root',root),last=0;c.expected=[];
@@ -86,7 +86,7 @@ for(const c of cases){
  const patchManifest=value=>{const db=new DatabaseSync(file);db.prepare('UPDATE revisions SET value_json=? WHERE id=? AND revision=(SELECT current_revision FROM documents WHERE id=?)').run(JSON.stringify(value),pins.get('evidence').objectId,pins.get('evidence').objectId);db.close();};
  const snapshot=output=>{
   const db=new DatabaseSync(file),docs=db.prepare("SELECT d.id,d.name,d.parent_id,d.current_revision,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/evidence' ORDER BY d.name").all(),blobs=db.prepare('SELECT id,key,name,parent_id,bytes FROM blobs ORDER BY name,parent_id').all();
-  const aliases=new Map([...docs,...blobs].map(r=>[r.id,'<local:'+r.name+'>']));
+  for(const r of [...docs,...blobs])aliases.set(r.id,'<local:'+r.name+'>');
   const normalize=value=>typeof value==='string'?aliases.get(value)??value:Array.isArray(value)?value.map(normalize):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,normalize(v)])):value;
   const writes=db.prepare('SELECT rowid,value_json FROM evidence_test_writes WHERE rowid>? ORDER BY rowid').all(last);last=writes.at(-1)?.rowid??last;db.close();
   const answer=normalize({output,documents:docs.map(r=>({id:r.id,name:r.name,parent:r.parent_id,revision:r.current_revision,value:JSON.parse(r.value_json)})),blobs:blobs.map(r=>({id:r.id,key:r.key,name:r.name,parent:r.parent_id,byteLength:r.bytes.length,contentHash:digest(r.bytes),...(r.bytes.length<64?{base64:Buffer.from(r.bytes).toString('base64')}:{})})),writes:writes.map(r=>JSON.parse(r.value_json)),calls,draftCalls,changeVersion:store.changeVersion});calls.length=0;draftCalls.length=0;return answer;

@@ -280,9 +280,9 @@ fn snapshot(
     output: Json,
     draft_calls: Vec<Json>,
     last: &mut i64,
+    aliases: &mut HashMap<String, String>,
 ) -> Json {
     let db = fixture.db();
-    let mut aliases = HashMap::new();
     let mut query=db.prepare("SELECT d.id,d.name,d.parent_id,d.current_revision,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/evidence' ORDER BY d.name").unwrap();
     let documents = query
         .query_map([], |r| {
@@ -363,7 +363,7 @@ fn snapshot(
             ("draftCalls", Json::Array(draft_calls)),
             ("changeVersion", Json::Number(store.change_version() as f64)),
         ]),
-        &aliases,
+        aliases,
     )
 }
 async fn compare(group: &str) {
@@ -392,6 +392,7 @@ async fn compare(group: &str) {
         .unwrap();
         let mut pins = HashMap::<String, Pin>::new();
         let mut last = 0;
+        let mut aliases = HashMap::new();
         for (index, step) in array(case, "steps").iter().enumerate() {
             let expected = &array(case, "expected")[index];
             let drafts = Mutex::new(Vec::new());
@@ -619,7 +620,15 @@ async fn compare(group: &str) {
             };
             let draft_calls = drafts.into_inner().unwrap();
             assert_eq!(draft_calls.len(), array(expected, "draftCalls").len());
-            let actual = snapshot(&fixture, &store, &client, output, draft_calls, &mut last);
+            let actual = snapshot(
+                &fixture,
+                &store,
+                &client,
+                output,
+                draft_calls,
+                &mut last,
+                &mut aliases,
+            );
             equal(
                 &actual,
                 expected,
