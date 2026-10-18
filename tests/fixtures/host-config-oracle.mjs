@@ -23,6 +23,7 @@ try {
     Object.defineProperty(process, 'pid', {value: input.pid});
     const journal = new HostJournal(input.config);
     try {
+      for (const seed of input.seed ?? []) journal.db.prepare(seed.sql).run(...seed.params);
       if (Object.hasOwn(input, 'sequence')) journal.db.prepare('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('hostReportSequence', input.sequence);
       value = input.operation === 'config' ? journal.config : journal[input.operation](...input.args);
       if (value === undefined) value = null;

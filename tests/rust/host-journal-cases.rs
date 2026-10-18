@@ -17,6 +17,129 @@ fn input(config: &IvyJson, method: &str, args: Vec<IvyJson>) -> IvyJson {
     IvyJson::object([("kind", "journal".into()), ("config", config.clone()), ("operation", method.into()), ("args", IvyJson::Array(args)), ("now", IvyJson::Number(NOW as f64)), ("pid", IvyJson::Number(std::process::id() as f64))])
 }
 fn compare(config: &IvyJson, method: &str, args: Vec<IvyJson>, result: IvyResult<IvyJson>) { compare_config_oracle(input(config, method, args), result); }
+fn adoption(config: &IvyJson) -> IvyJson {
+    IvyJson::object([("configuration", config.clone()), ("revision", IvyJson::Number(1.0)), ("contentHash", ivy_contracts::hash::hash_json(config).unwrap().into()), ("actions", IvyJson::Array(vec![IvyJson::object([("instanceId", "fixture".into()), ("action", "restart".into()), ("operationId", "config-op".into())])])), ("bootstrapRequired", IvyJson::Array(vec![]))])
+}
+fn candidate() -> IvyJson {
+    IvyJson::object([("candidateId", hash("a")), ("componentId", "fixture".into()), ("artifactRoot", "artifact".into()), ("manifestPath", "manifest.json".into()), ("createdAt", DATE.into()),
+        ("platform", IvyJson::object([("os", "win32".into()), ("arch", "x64".into()), ("node", "24.18.0".into())])), ("buildId", hash("a"))])
+}
+fn manifest() -> IvyJson {
+    let value = IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("componentId", "fixture".into()), ("kind", "app".into()), ("version", "1.0.0".into()), ("buildId", hash("a")), ("connectsToHive", false.into()),
+        ("requirements", IvyJson::object([("node", ">=24.18.0 <25.0.0".into()), ("hiveProtocol", IvyJson::Null), ("contracts", IvyJson::Array(vec![]))])),
+        ("app", IvyJson::object([("appId", "fixture".into()), ("dist", "dist/apps/fixture".into()), ("entryPath", "index.html".into())]))]);
+    validate_host("ReleaseManifest", &value).unwrap(); value
+}
+
+#[tokio::test]
+async fn journal_observation_and_retention_writes_validate_before_replacing_state() {
+    let fixture=ServiceFixture::new(); let mut config=host_configuration(&fixture);
+    let mut instances=config.required("instances").unwrap().as_array().unwrap().to_vec(); instances[0].insert("componentId", "host-executor".into()); config.insert("instances", IvyJson::Array(instances));
+    let journal=open(&config).await;
+    let observation=journal.current_observations(None).await.unwrap().required("fixture").unwrap().clone();
+    journal.record_observation("fixture", observation.clone()).await.unwrap();
+    assert_eq!(journal.observations().await.unwrap().required("fixture").unwrap(), &observation);
+    compare(&config, "recordObservation", vec!["other".into(), observation.clone()], journal.record_observation("other", observation.clone()).await.map(|_| IvyJson::Null));
+    assert_eq!(journal.observations().await.unwrap().required("fixture").unwrap(), &observation);
+    let retention=IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("hostId", "fixture-host".into()), ("state", "succeeded".into()), ("trigger", "manual".into()), ("startedAt", DATE.into()), ("completedAt", DATE.into()), ("lastSuccessAt", DATE.into()),
+        ("removed", IvyJson::object(["candidates", "preparations", "payloads", "snapshots", "maintenance", "bootstrapPlans"].map(|key| (key, IvyJson::Number(0.0))))),
+        ("availableBytes", IvyJson::object(["runtime", "artifacts", "staging"].map(|key| (key, IvyJson::Number(1024.0))))), ("lowSpace", false.into()), ("skipped", IvyJson::Array(vec![])), ("errorCode", IvyJson::Null)]);
+    journal.save_storage_retention_status(retention.clone()).await.unwrap(); assert_eq!(journal.storage_retention_status().await.unwrap(), Some(retention.clone()));
+    compare(&config, "storageRetentionStatus", vec![], journal.storage_retention_status().await.map(|v| v.unwrap()));
+    let mut invalid=retention.clone(); invalid.insert("state", "invalid".into());
+    compare(&config, "saveStorageRetentionStatus", vec![invalid.clone()], journal.save_storage_retention_status(invalid).await.map(|_| IvyJson::Null));
+    assert_eq!(journal.storage_retention_status().await.unwrap(), Some(retention)); journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn journal_adoption_is_idempotent_persistent_and_compare_before_delete() {
+    let fixture=ServiceFixture::new(); let config=host_configuration(&fixture); let journal=open(&config).await; let value=adoption(&config);
+    journal.stage_configuration_adoption(value.clone()).await.unwrap();
+    assert_eq!(journal.configuration_adoption().await.unwrap(), Some(value.clone()));
+    compare(&config, "stageConfigurationAdoption", vec![value.clone()], journal.stage_configuration_adoption(value.clone()).await.map(|_| IvyJson::Null));
+    let mut conflict=value.clone(); conflict.insert("revision", IvyJson::Number(2.0));
+    compare(&config, "stageConfigurationAdoption", vec![conflict.clone()], journal.stage_configuration_adoption(conflict.clone()).await.map(|_| IvyJson::Null));
+    compare(&config, "finishConfigurationAdoption", vec![conflict.clone()], journal.finish_configuration_adoption(conflict).await.map(|_| IvyJson::Null));
+    assert_eq!(journal.configuration_adoption().await.unwrap(), Some(value.clone()));
+    journal.close().await.unwrap(); let journal=open(&config).await;
+    compare(&config, "configurationAdoption", vec![], journal.configuration_adoption().await.map(|v| v.unwrap()));
+    journal.finish_configuration_adoption(value.clone()).await.unwrap(); assert_eq!(journal.configuration_adoption().await.unwrap(), None);
+    let mut oracle=input(&config, "finishConfigurationAdoption", vec![value.clone()]);
+    oracle.insert("seed", IvyJson::Array(vec![IvyJson::object([("sql", "INSERT INTO meta VALUES ('configurationAdoption',?)".into()), ("params", IvyJson::Array(vec![encode(&value).into()]))])]));
+    compare_config_oracle(oracle, Ok(IvyJson::Null));
+    compare(&config, "finishConfigurationAdoption", vec![value.clone()], journal.finish_configuration_adoption(value.clone()).await.map(|_| IvyJson::Null));
+    for revision in [0.0, 1.5, 9_007_199_254_740_992.0] {
+        let mut invalid=value.clone(); invalid.insert("revision", IvyJson::Number(revision));
+        journal.stage_configuration_adoption(invalid.clone()).await.unwrap();
+        assert_eq!(journal.configuration_adoption().await.unwrap_err().code, "configuration_changed");
+        compare(&config, "configurationAdoption", vec![], journal.configuration_adoption().await.map(|v| v.unwrap()));
+        journal.finish_configuration_adoption(invalid).await.unwrap();
+    }
+    let mut wrong=value; wrong.insert("contentHash", hash("f"));
+    compare(&config, "stageConfigurationAdoption", vec![wrong.clone()], journal.stage_configuration_adoption(wrong).await.map(|_| IvyJson::Null));
+    journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn journal_candidate_publication_and_installed_target_writes_enforce_identity() {
+    let fixture=ServiceFixture::new(); let config=host_configuration(&fixture); let journal=open(&config).await; let candidate=candidate(); let manifest=manifest();
+    journal.save_candidate(candidate.clone(), manifest.clone()).await.unwrap();
+    assert_eq!(journal.candidate(&hash("a").as_str().unwrap()).await.unwrap(), candidate);
+    compare(&config, "saveCandidate", vec![candidate.clone(), manifest.clone()], journal.save_candidate(candidate.clone(), manifest.clone()).await.map(|_| IvyJson::Null));
+    let mut changed=manifest.clone(); changed.insert("version", "2.0.0".into());
+    compare(&config, "saveCandidate", vec![candidate.clone(), changed.clone()], journal.save_candidate(candidate.clone(), changed).await.map(|_| IvyJson::Null));
+    let mut wrong=candidate.clone(); wrong.insert("candidateId", hash("b"));
+    compare(&config, "saveCandidate", vec![wrong.clone(), manifest.clone()], journal.save_candidate(wrong, manifest.clone()).await.map(|_| IvyJson::Null));
+    compare(&config, "candidateForBuild", vec!["fixture".into(), hash("a")], journal.candidate_for_build("fixture", &hash("a").as_str().unwrap()).await);
+    let installed=IvyJson::object([("instanceId", "fixture".into()), ("candidateId", hash("a")), ("buildId", hash("a")), ("enabled", true.into()), ("installedAt", DATE.into())]);
+    journal.set_installed(installed.clone()).await.unwrap(); assert_eq!(journal.installed("fixture").await.unwrap(), Some(installed.clone()));
+    for key in ["buildId", "instanceId"] {
+        let mut wrong=installed.clone(); wrong.insert(key, if key=="buildId" { hash("b") } else { "other".into() });
+        compare(&config, "setInstalled", vec![wrong.clone()], journal.set_installed(wrong).await.map(|_| IvyJson::Null));
+        assert_eq!(journal.installed("fixture").await.unwrap(), Some(installed.clone()));
+    }
+    let target=IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("instanceId", "fixture".into()), ("revision", "launch".into()), ("candidateId", hash("a")), ("desired", "running".into()), ("configPath", "instance.json".into()), ("requestedAt", DATE.into())]);
+    journal.restore_target(target.clone()).await.unwrap(); assert_eq!(journal.target("fixture").await.unwrap(), Some(target.clone()));
+    compare(&config, "restoreTarget", vec![target.clone()], journal.restore_target(target.clone()).await.map(|_| IvyJson::Null));
+    let mut missing=target; missing.insert("candidateId", hash("f"));
+    compare(&config, "restoreTarget", vec![missing.clone()], journal.restore_target(missing).await.map(|_| IvyJson::Null));
+    let db=sql(&config);
+    db.execute("DELETE FROM candidates", []).unwrap();
+    db.execute("INSERT INTO candidate_retirements VALUES (?,?)", params![hash("a").as_str().unwrap(), encode(&candidate)]).unwrap();
+    compare(&config, "saveCandidate", vec![candidate.clone(), manifest.clone()], journal.save_candidate(candidate.clone(), manifest.clone()).await.map(|_| IvyJson::Null));
+    assert_eq!(journal.pending_candidate_retirements().await.unwrap(), vec![candidate.clone()]);
+    compare(&config, "pendingCandidateRetirements", vec![], journal.pending_candidate_retirements().await.map(IvyJson::Array));
+    journal.finish_candidate_retirement(&hash("a").as_str().unwrap()).await.unwrap(); assert!(journal.pending_candidate_retirements().await.unwrap().is_empty());
+    journal.save_candidate(candidate, manifest).await.unwrap();
+    compare(&config, "finishCandidateRetirement", vec![hash("a")], journal.finish_candidate_retirement(&hash("a").as_str().unwrap()).await.map(|_| IvyJson::Null));
+    journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn journal_bootstrap_rolls_back_partial_installation_and_binds_configuration() {
+    let fixture=ServiceFixture::new(); let config=host_configuration(&fixture); let journal=open(&config).await;
+    let mut candidate=candidate(); candidate.insert("artifactRoot", fixture.0.join("artifact").to_string_lossy().to_string().into());
+    journal.save_candidate(candidate.clone(), manifest()).await.unwrap();
+    let source=fixture.0.join("state/bootstrap.json");
+    let mut runtime=fixture.value(); runtime.insert("hostId", "fixture-host".into()); runtime.insert("instanceId", "fixture".into()); runtime.insert("componentId", "fixture".into());
+    fs::write(&source, encode(&runtime)).unwrap();
+    let process=IvyJson::object([("instanceId", "fixture".into()), ("componentId", "fixture".into()), ("name", "fixture".into()), ("candidateId", hash("a")), ("configPath", source.to_string_lossy().to_string().into())]);
+    let mut plan=IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("hostId", "fixture-host".into()), ("os", "win32".into()), ("installationId", "fixture-installation".into()), ("candidateId", hash("a")),
+        ("artifactRoot", candidate.required("artifactRoot").unwrap().clone()), ("configPath", "host.json".into()), ("configHash", hash("b")), ("runtimeRoot", config.required("runtimeRoot").unwrap().clone()), ("nodeExecutable", "fixture-node".into()), ("processes", IvyJson::Array(vec![process.clone()]))]);
+    validate_host("BootstrapPlan", &plan).unwrap();
+    let mut wrong=process.clone(); wrong.insert("instanceId", "not-configured".into()); plan.insert("processes", IvyJson::Array(vec![process.clone(), wrong]));
+    let failed=journal.sync_bootstrap(plan.clone(), false).await; assert_eq!(failed.as_ref().unwrap_err().code, "not_found");
+    assert_eq!(journal.installed("fixture").await.unwrap(), None); assert_eq!(journal.target("fixture").await.unwrap(), None);
+    compare(&config, "syncBootstrap", vec![plan.clone(), false.into()], failed.map(|_| IvyJson::Null));
+    plan.insert("processes", IvyJson::Array(vec![process])); journal.sync_bootstrap(plan.clone(), false).await.unwrap();
+    let target=journal.target("fixture").await.unwrap().unwrap();
+    assert_eq!(target.required("revision").unwrap(), &IvyJson::from(ivy_host_runtime::journal::bootstrap_launch_id(&plan, "fixture").unwrap()));
+    compare(&config, "syncBootstrap", vec![plan.clone(), false.into()], journal.sync_bootstrap(plan.clone(), false).await.map(|_| IvyJson::Null));
+    compare(&config, "target", vec!["fixture".into()], journal.target("fixture").await.map(|v| v.unwrap()));
+    journal.sync_bootstrap(plan.clone(), true).await.unwrap(); assert_eq!(journal.target("fixture").await.unwrap(), None);
+    compare(&config, "syncBootstrap", vec![plan, true.into()], Ok(IvyJson::Null));
+    journal.close().await.unwrap();
+}
 fn entry(id: &str, phase: &str, legacy: bool) -> IvyJson {
     let record = IvyJson::object([
         ("deploymentId", id.into()), ("hostId", "fixture-host".into()), ("instanceId", "fixture".into()), ("componentId", "fixture".into()),

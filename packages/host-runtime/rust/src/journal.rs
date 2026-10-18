@@ -80,6 +80,32 @@ impl HostJournal {
     pub async fn use_configuration(&self, config: IvyJson) -> IvyResult<()> {
         self.with(move |s| { same_installation(&s.config, &config)?; s.transaction(|s| s.identities(&config))?; s.config = config; Ok(()) }).await
     }
+    pub async fn configuration_adoption(&self) -> IvyResult<Option<IvyJson>> {
+        self.with(|s| s.configuration_adoption()).await
+    }
+    pub async fn stage_configuration_adoption(&self, value: IvyJson) -> IvyResult<()> {
+        self.with(move |s| {
+            let config = value.required("configuration")?;
+            validate_host("HostConfig", config)?;
+            same_installation(&s.config, config)?;
+            require(value.get("contentHash") == Some(&IvyJson::from(hash_json(config)?)), "configuration_changed", "Configuration adoption hash does not match its exact input.")?;
+            s.transaction(|s| {
+                let prior = s.text("SELECT value FROM meta WHERE key=?", "configurationAdoption")?;
+                let value = encoded(&value)?;
+                require(prior.is_none_or(|prior| prior == value), "service_busy", "Another configuration adoption is still pending.")?;
+                s.save_meta("configurationAdoption", &value)
+            })
+        }).await
+    }
+    pub async fn finish_configuration_adoption(&self, value: IvyJson) -> IvyResult<()> {
+        self.with(move |s| s.transaction(|s| {
+            let prior = s.text("SELECT value FROM meta WHERE key=?", "configurationAdoption")?;
+            // Preserve the original short circuit: absent state is a revision conflict.
+            require(match prior { Some(prior) => prior == encoded(&value)?, None => false }, "revision_conflict", "Configuration adoption changed before completion.")?;
+            internal(s.db.execute("DELETE FROM meta WHERE key=?", ["configurationAdoption"]))?;
+            Ok(())
+        })).await
+    }
     pub async fn instance(&self, instance_id: &str) -> IvyResult<IvyJson> {
         let id = instance_id.to_owned(); self.with(move |s| s.instance(&id).cloned()).await
     }
@@ -98,13 +124,76 @@ impl HostJournal {
     pub async fn installed(&self, instance_id: &str) -> IvyResult<Option<IvyJson>> {
         let id = instance_id.to_owned(); self.with(move |s| s.value("SELECT value FROM installed WHERE instance_id=?", &id)).await
     }
+    pub async fn set_installed(&self, value: IvyJson) -> IvyResult<()> { self.with(move |s| s.set_installed(&value)).await }
     pub async fn target(&self, instance_id: &str) -> IvyResult<Option<IvyJson>> {
         let id = instance_id.to_owned(); self.with(move |s| s.target(&id)).await
+    }
+    pub async fn restore_target(&self, value: IvyJson) -> IvyResult<()> {
+        self.with(move |s| {
+            validate_host("RuntimeTarget", &value)?;
+            s.instance(&value.required("instanceId")?.as_str()?)?;
+            s.candidate(&value.required("candidateId")?.as_str()?)?;
+            s.save_target(&value)
+        }).await
+    }
+    pub async fn sync_bootstrap(&self, plan: IvyJson, clear_targets: bool) -> IvyResult<()> {
+        self.with(move |s| s.sync_bootstrap(&plan, clear_targets)).await
     }
     pub async fn candidate(&self, candidate_id: &str) -> IvyResult<IvyJson> {
         let id = candidate_id.to_owned(); self.with(move |s| s.candidate(&id)).await
     }
+    pub async fn save_candidate(&self, candidate: IvyJson, manifest: IvyJson) -> IvyResult<()> {
+        self.with(move |s| {
+            validate_host("Candidate", &candidate)?;
+            validate_host("ReleaseManifest", &manifest)?;
+            require(manifest.get("buildId") == candidate.get("buildId") && manifest.get("componentId") == candidate.get("componentId") && candidate.get("candidateId") == candidate.get("buildId"), "build_mismatch", "Candidate identity must match its release manifest.")?;
+            s.transaction(|s| {
+                let id = candidate.required("candidateId")?.as_str()?;
+                require(s.text("SELECT candidate_id FROM candidate_retirements WHERE candidate_id=?", &id)?.is_none(), "mutation_conflict", "Candidate deletion is pending; retry publication after storage collection.")?;
+                let prior = s.text("SELECT candidate_json FROM candidates WHERE candidate_id=?", &id)?;
+                if let Some(prior) = prior {
+                    require(prior == encoded(&candidate)? && s.text("SELECT manifest_json FROM candidates WHERE candidate_id=?", &id)?.as_ref() == Some(&encoded(&manifest)?), "mutation_conflict", "Candidate is immutable.")?;
+                } else {
+                    internal(s.db.execute("INSERT INTO candidates VALUES (?,?,?,?,?)", params![id, candidate.required("componentId")?.as_str()?, candidate.required("buildId")?.as_str()?, encoded(&candidate)?, encoded(&manifest)?]))?;
+                }
+                Ok(())
+            })
+        }).await
+    }
+    pub async fn candidate_for_build(&self, component_id: &str, build_id: &str) -> IvyResult<IvyJson> {
+        let component = component_id.to_owned(); let build = build_id.to_owned();
+        self.with(move |s| s.candidate_for_build(&component, &build)).await
+    }
+    pub async fn pending_candidate_retirements(&self) -> IvyResult<Vec<IvyJson>> {
+        self.with(|s| {
+            let mut statement = internal(s.db.prepare("SELECT candidate_json FROM candidate_retirements ORDER BY candidate_id"))?;
+            let rows = internal(statement.query_map([], |r| r.get::<_, String>(0)))?;
+            rows.map(|r| normalize_candidate(&decoded(&internal(r)?)?)).collect()
+        }).await
+    }
+    pub async fn finish_candidate_retirement(&self, candidate_id: &str) -> IvyResult<()> {
+        let id = candidate_id.to_owned();
+        self.with(move |s| s.transaction(|s| {
+            require(s.text("SELECT candidate_id FROM candidates WHERE candidate_id=?", &id)?.is_none(), "mutation_conflict", "A retiring candidate cannot be registered.")?;
+            internal(s.db.execute("DELETE FROM candidate_retirements WHERE candidate_id=?", [id]))?;
+            Ok(())
+        })).await
+    }
     pub async fn observations(&self) -> IvyResult<IvyJson> { self.with(|s| s.observations()).await }
+    pub async fn record_observation(&self, instance_id: &str, value: IvyJson) -> IvyResult<()> {
+        let id = instance_id.to_owned();
+        self.with(move |s| {
+            validate_host("RuntimeObservation", &value)?;
+            require(value.get("instanceId") == Some(&IvyJson::from(id.clone())), "target_conflict", "Observation must belong to its instance.")?;
+            s.instance(&id)?;
+            internal(s.db.execute("INSERT INTO observations VALUES (?,?) ON CONFLICT(instance_id) DO UPDATE SET value=excluded.value", params![id, json::canonical(&value, 65536)?]))?;
+            Ok(())
+        }).await
+    }
+    pub async fn storage_retention_status(&self) -> IvyResult<Option<IvyJson>> { self.with(|s| s.storage_retention_status()).await }
+    pub async fn save_storage_retention_status(&self, value: IvyJson) -> IvyResult<()> {
+        self.with(move |s| { validate_host("StorageRetentionStatus", &value)?; s.save_meta("storage-retention", &encoded(&value)?) }).await
+    }
     pub async fn current_observations(&self, executor: Option<IvyJson>) -> IvyResult<IvyJson> { self.with(move |s| s.current_observations(executor.as_ref())).await }
     pub async fn status(&self, executor: Option<IvyJson>) -> IvyResult<IvyJson> { self.with(move |s| s.status(executor.as_ref())).await }
     pub async fn management_snapshot(&self, executor: Option<IvyJson>, minimum_sequence: f64, status: Option<IvyJson>) -> IvyResult<IvyJson> {
@@ -126,6 +215,79 @@ impl HostJournal {
     }
 }
 impl State {
+    fn now(&self) -> IvyResult<String> {
+        Ok(chrono::DateTime::from_timestamp_millis(self.clock.utc_millis()).ok_or_else(IvyError::internal)?.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    }
+    fn save_meta(&self, key: &str, value: &str) -> IvyResult<()> {
+        internal(self.db.execute("INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value]))?; Ok(())
+    }
+    fn configuration_adoption(&self) -> IvyResult<Option<IvyJson>> {
+        let Some(value) = self.value("SELECT value FROM meta WHERE key=?", "configurationAdoption")? else { return Ok(None) };
+        let config = value.required("configuration")?;
+        validate_host("HostConfig", config)?;
+        same_installation(&self.config, config)?;
+        let revision = field(&value, "revision").as_f64().unwrap_or(f64::NAN);
+        let valid_hash = field(&value, "contentHash").as_js_string().is_some_and(|v| v.0.len() == 71 && v.0[..7] == "sha256:".encode_utf16().collect::<Vec<_>>() && v.0[7..].iter().all(|v| (48..=57).contains(v) || (97..=102).contains(v)));
+        require(revision.fract() == 0.0 && (1.0..=SAFE_INTEGER).contains(&revision) && valid_hash &&
+            field(&value, "actions").as_array().is_some_and(|actions| actions.iter().all(|a|
+                ["restart", "enable", "disable"].iter().any(|v| field(a, "action") == &IvyJson::from(*v)) && field(a, "instanceId").as_js_string().is_some() && field(a, "operationId").as_js_string().is_some())) &&
+            field(&value, "bootstrapRequired").as_array().is_some_and(|v| v.iter().all(|v| v.as_js_string().is_some())),
+            "configuration_changed", "Retained configuration adoption is invalid.")?;
+        Ok(Some(value))
+    }
+    fn storage_retention_status(&self) -> IvyResult<Option<IvyJson>> {
+        let value = self.value("SELECT value FROM meta WHERE key=?", "storage-retention")?;
+        if let Some(v) = &value { validate_host("StorageRetentionStatus", v)?; } Ok(value)
+    }
+    fn set_installed(&self, value: &IvyJson) -> IvyResult<()> {
+        let id = value.required("instanceId")?.as_str()?;
+        self.instance(&id)?;
+        let candidate = self.candidate(&value.required("candidateId")?.as_str()?)?;
+        require(candidate.get("buildId") == value.get("buildId"), "build_mismatch", "Installed pointer must identify its exact candidate build.")?;
+        internal(self.db.execute("INSERT INTO installed VALUES (?,?) ON CONFLICT(instance_id) DO UPDATE SET value=excluded.value", params![id, encoded(value)?]))?;
+        Ok(())
+    }
+    fn save_target(&self, value: &IvyJson) -> IvyResult<()> {
+        internal(self.db.execute("INSERT INTO runtime_targets VALUES (?,?) ON CONFLICT(instance_id) DO UPDATE SET value=excluded.value", params![value.required("instanceId")?.as_str()?, encoded(value)?]))?; Ok(())
+    }
+    fn sync_bootstrap(&self, plan: &IvyJson, clear_targets: bool) -> IvyResult<()> {
+        validate_host("BootstrapPlan", plan)?;
+        self.transaction(|s| {
+            let requested_at = s.now()?;
+            for process in plan.required("processes")?.as_array().ok_or_else(IvyError::internal)? {
+                if !truthy(field(process, "candidateId")) { continue; }
+                let id = process.required("instanceId")?.as_str()?;
+                let instance = s.instance(&id)?;
+                require(instance.get("componentId") == process.get("componentId"), "target_conflict", "Bootstrap process belongs to another configured component.")?;
+                let candidate = s.candidate(&process.required("candidateId")?.as_str()?)?;
+                if let Some(previous) = s.value("SELECT value FROM installed WHERE instance_id=?", &id)? {
+                    if previous.get("candidateId") != candidate.get("candidateId") {
+                        s.save_meta(&format!("bootstrap-rollback:{id}"), &encoded(&IvyJson::object([("candidateId", field(&previous, "candidateId").clone()), ("selectedCandidateId", field(&candidate, "candidateId").clone())]))?)?;
+                    }
+                }
+                s.set_installed(&IvyJson::object([("instanceId", id.clone().into()), ("candidateId", field(&candidate, "candidateId").clone()), ("buildId", field(&candidate, "buildId").clone()), ("enabled", true.into()), ("installedAt", s.now()?.into())]))?;
+                if clear_targets { internal(s.db.execute("DELETE FROM runtime_targets WHERE instance_id=?", [&id]))?; continue; }
+                if !truthy(field(process, "configPath")) || field(process, "componentId") == &IvyJson::from("host-executor") { continue; }
+                let source = path(process.required("configPath")?)?;
+                require(internal(crate::paths::inside(&path(s.config.required("runtimeRoot")?)?, &source))?, "target_conflict", "Bootstrap runtime configuration leaves the host runtime root.")?;
+                let metadata = internal(fs::symlink_metadata(&source))?;
+                require(metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 1024 * 1024, "configuration_changed", "Bootstrap runtime configuration is not a bounded regular file.")?;
+                let config = decoded(&String::from_utf8_lossy(&internal(fs::read(source))?))?;
+                validate_host("InstanceConfig", &config)?;
+                require(config.get("instanceId") == process.get("instanceId") && config.get("componentId") == process.get("componentId") && config.get("hostId") == s.config.get("hostId") && config.get("artifactRoot") == candidate.get("artifactRoot") && config.get("buildId") == candidate.get("buildId"), "build_mismatch", "Bootstrap runtime configuration does not identify the installed candidate.")?;
+                let target = IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("instanceId", id.clone().into()), ("revision", bootstrap_launch_id(plan, &id)?.into()), ("candidateId", field(&candidate, "candidateId").clone()), ("desired", "running".into()), ("configPath", field(process, "configPath").clone()), ("requestedAt", requested_at.clone().into())]);
+                validate_host("RuntimeTarget", &target)?; s.save_target(&target)?;
+            }
+            Ok(())
+        })
+    }
+    fn candidate_for_build(&self, component: &str, build: &str) -> IvyResult<IvyJson> {
+        let mut statement = internal(self.db.prepare("SELECT candidate_json FROM candidates WHERE component_id=? AND build_id=? ORDER BY candidate_id LIMIT 2"))?;
+        let rows = internal(statement.query_map(params![component, build], |r| r.get::<_, String>(0)))?;
+        let values = internal(rows.collect::<Result<Vec<_>, _>>())?;
+        require(values.len() == 1, if values.is_empty() { "not_found" } else { "ambiguous_candidate" }, "The retained build must identify one exact local candidate.")?;
+        normalize_candidate(&decoded(&values[0])?)
+    }
     fn open(config: IvyJson, clock: Arc<dyn Clock>) -> IvyResult<Self> {
         validate_host("HostConfig", &config)?;
         let root = path(config.required("runtimeRoot")?)?;
@@ -220,8 +382,7 @@ impl State {
     }
     fn candidate(&self, id: &str) -> IvyResult<IvyJson> {
         let value = self.value("SELECT candidate_json FROM candidates WHERE candidate_id=?", id)?.ok_or_else(|| IvyError::new("not_found", "Prepared host candidate was not found."))?;
-        let value = project(&value, &["candidateId", "componentId", "artifactRoot", "manifestPath", "createdAt", "platform", "buildId", "archivePath", "archiveHash", "dockerImage"]);
-        validate_host("Candidate", &value)?; Ok(value)
+        normalize_candidate(&value)
     }
     fn observations(&self) -> IvyResult<IvyJson> {
         let mut statement = internal(self.db.prepare("SELECT instance_id,value FROM observations ORDER BY instance_id"))?;
@@ -291,11 +452,10 @@ impl State {
         Ok(result)
     }
     fn status(&self, executor: Option<&IvyJson>) -> IvyResult<IvyJson> {
-        let retention = self.value("SELECT value FROM meta WHERE key=?", "storage-retention")?;
-        if let Some(v) = &retention { validate_host("StorageRetentionStatus", v)?; }
+        let retention = self.storage_retention_status()?;
         let executor = executor.filter(|v| fresh_executor_status(v, self.clock.as_ref()));
         let observed = self.current_observations(executor)?;
-        let now = chrono::DateTime::from_timestamp_millis(self.clock.utc_millis()).ok_or_else(IvyError::internal)?.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let now = self.now()?;
         let mut instances = Vec::new();
         for instance in self.config.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
             let id = instance.required("instanceId")?.as_str()?;
@@ -316,4 +476,8 @@ impl State {
         if let Some(retention) = retention { status.insert("storageRetention", retention); }
         validate_host("HostStatus", &status)?; Ok(status)
     }
+}
+fn normalize_candidate(value: &IvyJson) -> IvyResult<IvyJson> {
+    let value = project(value, &["candidateId", "componentId", "artifactRoot", "manifestPath", "createdAt", "platform", "buildId", "archivePath", "archiveHash", "dockerImage"]);
+    validate_host("Candidate", &value)?; Ok(value)
 }
