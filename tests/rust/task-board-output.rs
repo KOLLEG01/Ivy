@@ -4,6 +4,9 @@ use ivy_contracts::{
 use ivy_task_board::turn_output::*;
 use std::{path::Path, process::Command};
 
+#[path = "../fixtures/task-board-inspector.rs"]
+mod inspector;
+
 #[test]
 fn native_output_helpers_match_original_typescript() {
     let result = Command::new("node")
