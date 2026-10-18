@@ -154,7 +154,7 @@ async fn bounded_stdin_and_exit_outcomes_are_preserved() {
     )
     .await
     .unwrap();
-    assert!(result.stdout.contains("input-bytes=7"));
+    assert!(result.stdout.contains("input-bytes=7"), "{result:?}");
     let error = process::run_command(&command, &root.0, &executables, context("exit"), None)
         .await
         .unwrap_err();
@@ -327,12 +327,21 @@ mod retirement {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    fn assert_retired(handles: &[OwnedHandle]) {
-        for handle in handles {
-            assert_eq!(
-                unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) },
-                WAIT_OBJECT_0,
-                "completion preceded actual process termination"
+    fn assert_retired(handles: &[OwnedHandle], context: &str) {
+        // Snapshot every immediate result before collecting delayed diagnostics;
+        // the later waits must never turn premature completion into a pass.
+        let immediate: Vec<_> = handles
+            .iter()
+            .map(|handle| unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) })
+            .collect();
+        if immediate.iter().any(|&state| state != WAIT_OBJECT_0) {
+            let later: Vec<_> = handles
+                .iter()
+                .map(|handle| unsafe { WaitForSingleObject(handle.as_raw_handle(), 250) })
+                .collect();
+            panic!(
+                "completion preceded actual process termination: {context}; \
+                 [child, grandchild] immediate={immediate:?}, later={later:?}"
             );
         }
     }
@@ -380,8 +389,8 @@ mod retirement {
                             .unwrap()
                     }
                 };
-                assert_eq!(result.error_code, None, "{finish}");
-                assert_retired(&handles);
+                assert_eq!(result.error_code, None, "{launcher}, {finish}: {result:?}");
+                assert_retired(&handles, &format!("{launcher}, {finish}: {result:?}"));
                 assert!(
                     !ivy_host_runtime::platform::windows_job::job_stopped(&name).unwrap(),
                     "a held observer keeps the name alive after definite retirement"
@@ -418,7 +427,7 @@ mod retirement {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_retired(&handles);
+        assert_retired(&handles, "parent death");
         drop(observer);
     }
 }
