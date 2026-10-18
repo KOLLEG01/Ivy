@@ -224,6 +224,53 @@ fn git_oracle(input: IvyJson) -> IvyJson {
     oracle("agent-project-git-oracle.mjs", Some(&input))
 }
 
+#[test]
+fn workspace_origin_redaction_uses_shared_whatwg_credentials_and_exact_raw_on_constructor_failure()
+{
+    let output = Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/whatwg-url-oracle.mjs",
+            "credentials",
+        ])
+        .current_dir(repository())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = parse(std::str::from_utf8(&output.stdout).unwrap(), FRAME).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 965);
+    let git = WorkspaceGit::new(std::env::temp_dir(), None);
+    let mut rejected = 0;
+    for row in rows {
+        let input = parse(&text(row, "input").to_utf8().unwrap(), FRAME).unwrap();
+        let input = input.as_js_string().unwrap();
+        let expected = parse(&text(row, "result").to_utf8().unwrap(), FRAME).unwrap();
+        let result = (git.redact_origin)(input);
+        let actual = match &result {
+            Ok(value) => IvyJson::object([
+                ("ok", true.into()),
+                ("value", IvyJson::String(value.clone())),
+            ]),
+            Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+        };
+        compare(&actual, &expected, "Shared WHATWG credentials");
+        let fallback = result.unwrap_or_else(|_| input.clone());
+        if field(&expected, "ok") == &IvyJson::Bool(false) {
+            rejected += 1;
+            assert_eq!(&fallback, input);
+        } else {
+            assert_eq!(&IvyJson::String(fallback), field(&expected, "value"));
+        }
+    }
+    assert_eq!(rejected, 75);
+}
+
 #[tokio::test]
 async fn directory_browsing_matches_original_filesystem_errors_links_and_stable_locale_ties() {
     let root = Root::new();
@@ -279,10 +326,6 @@ async fn directory_browsing_matches_original_filesystem_errors_links_and_stable_
 async fn workspace_git_matches_real_original_local_repository_observations() {
     let root = Root::new();
     let mut prepared = Vec::new();
-    let mut urls = vec![
-        IvyJson::from(""),
-        IvyJson::from("https://fixture:secret@example.invalid/path.git"),
-    ];
     for variant in [
         "missing",
         "file",
@@ -304,34 +347,10 @@ async fn workspace_git_matches_real_original_local_repository_observations() {
             ("root", value(&root.path.join(variant))),
             ("variant", variant.into()),
         ]));
-        urls.push(value(&root.path.join(variant).join("origin.git")));
-        urls.push(value(&root.path.join(variant).join("missing-origin.git")));
         prepared.push((variant, input));
     }
-    // This synthetic pair table qualifies only our Git consumer. The production
-    // URL operation is supplied by the shared contracts owner, never this table.
-    let pairs = git_oracle(IvyJson::object([
-        ("action", "redactions".into()),
-        ("urls", IvyJson::Array(urls)),
-    ]));
-    let pairs = field(&IvyJson::object([("pairs", pairs)]), "pairs")
-        .as_array()
-        .unwrap()
-        .clone();
-    let git = WorkspaceGit {
-        bootstrap_root: root.path.clone(),
-        job_launcher: job(),
-        redact_origin: Arc::new(move |input| {
-            let row = pairs
-                .iter()
-                .find(|row| optional_text(row, "input") == Some(input))
-                .expect("Unexpected URL in synthetic fixture");
-            optional_text(row, "result")
-                .cloned()
-                .ok_or_else(IvyError::internal)
-        }),
-        clock: Arc::new(|| "2026-10-18T00:00:00.000Z".into()),
-    };
+    let mut git = WorkspaceGit::new(root.path.clone(), job());
+    git.clock = Arc::new(|| "2026-10-18T00:00:00.000Z".into());
     for (variant, input) in &prepared {
         let path = text(input, "path");
         let verify = field(input, "verifyOrigin") == &IvyJson::Bool(true);

@@ -21,7 +21,31 @@ pub fn parse_url(input: &JsString) -> IvyResult<UrlProjection> {
     if url.scheme() == "file" {
         return file_projection(&text);
     }
-    let mut href = quirks::href(&url).to_string();
+    Ok(UrlProjection {
+        href: href(&url),
+        protocol: quirks::protocol(&url).into(),
+        hostname: quirks::hostname(&url).into(),
+        username: quirks::username(&url).into(),
+        password: quirks::password(&url).into(),
+        hash: quirks::hash(&url).into(),
+    })
+}
+
+/// Construct an absolute WHATWG URL, clear its username and password, and
+/// serialize it. Constructor failures are returned to the caller, which decides
+/// whether to retain the original input. Opaque/file setters are no-ops.
+pub fn clear_url_credentials(input: &JsString) -> IvyResult<JsString> {
+    let text = String::from_utf16_lossy(&input.0);
+    let mut url = Url::parse(&text).map_err(|_| IvyError::internal())?;
+    if url.scheme() == "file" {
+        return Ok(JsString::from(file_projection(&text)?.href));
+    }
+    let _ = quirks::set_username(&mut url, "");
+    let _ = quirks::set_password(&mut url, "");
+    Ok(JsString::from(href(&url)))
+}
+fn href(url: &Url) -> String {
+    let mut href = quirks::href(url).to_string();
     if url.cannot_be_a_base()
         && url.path().ends_with(' ')
         && (url.query().is_some() || url.fragment().is_some())
@@ -29,14 +53,7 @@ pub fn parse_url(input: &JsString) -> IvyResult<UrlProjection> {
         let last = url.scheme().len() + url.path().len();
         href.replace_range(last..last + 1, "%20");
     }
-    Ok(UrlProjection {
-        href,
-        protocol: quirks::protocol(&url).into(),
-        hostname: quirks::hostname(&url).into(),
-        username: quirks::username(&url).into(),
-        password: quirks::password(&url).into(),
-        hash: quirks::hash(&url).into(),
-    })
+    href
 }
 
 // The URL crate retains older file-path rules (dropping a host at a drive

@@ -18,6 +18,18 @@ pub struct WorkspaceGit {
     pub clock: Arc<JournalClock>,
 }
 impl WorkspaceGit {
+    pub fn new(bootstrap_root: PathBuf, job_launcher: Option<PathBuf>) -> Self {
+        Self {
+            bootstrap_root,
+            job_launcher,
+            redact_origin: Arc::new(ivy_contracts::whatwg_url::clear_url_credentials),
+            clock: Arc::new(|| {
+                chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                    .into()
+            }),
+        }
+    }
     pub async fn inspect_workspace(
         &self,
         intended: &JsString,
