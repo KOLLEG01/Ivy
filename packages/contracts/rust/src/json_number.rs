@@ -71,7 +71,7 @@ pub fn number_from_string(value: &JsString) -> f64 {
     text.parse().unwrap_or(f64::NAN)
 }
 
-fn space(u: u16) -> bool {
+pub(super) fn space(u: u16) -> bool {
     matches!(u, 0x9..=0xd | 0x20 | 0xa0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff)
 }
 
