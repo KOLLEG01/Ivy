@@ -2,6 +2,7 @@
 //! serde_json::Value cannot retain JavaScript strings containing lone surrogates.
 pub mod agent_schema;
 pub mod builtin_schema;
+pub mod browser_notice;
 pub mod core_schema;
 pub mod error;
 pub mod hash;
