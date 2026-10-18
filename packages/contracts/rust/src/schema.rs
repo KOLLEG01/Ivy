@@ -11,6 +11,9 @@ pub use compiler_walk::{CompilerNode, CompilerWalk};
 #[path = "schema_resolution.rs"]
 mod resolution;
 pub use resolution::{CompilerResources, CompilerTarget};
+#[path = "schema_compiler_plan.rs"]
+mod compiler_plan;
+pub use compiler_plan::{CompilerPlan, CompilerReference, CompilerUnit};
 #[path = "schema_meta.rs"]
 mod meta;
 #[path = "schema_resources.rs"]
@@ -58,6 +61,12 @@ impl AdmittedSchema {
     /// compiling or caching target validators.
     pub fn compiler_resources(&self) -> IvyResult<CompilerResources<'_>> {
         resolution::CompilerResources::new(&self.schema)
+    }
+    /// Plan active branches and reference targets under their own root/scopes,
+    /// checking compiled keyword values once per target context. Meta-validation,
+    /// runtime evaluation and cross-call validator caching remain separate.
+    pub fn compiler_plan(&self) -> IvyResult<CompilerPlan<'_>> {
+        compiler_plan::plan(&self.schema)
     }
 }
 

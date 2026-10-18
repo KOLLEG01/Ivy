@@ -81,6 +81,14 @@ pub(super) fn walk<'a>(schema: &'a IvyJson) -> IvyResult<CompilerWalk<'a>> {
     } else {
         registered.base_id.clone()
     };
+    walk_scoped(schema, registered.base_id, scope)
+}
+
+pub(super) fn walk_scoped<'a>(
+    schema: &'a IvyJson,
+    root_base_id: JsString,
+    scope: JsString,
+) -> IvyResult<CompilerWalk<'a>> {
     let mut pending = vec![(schema, JsString::default(), scope, true)];
     let mut nodes = Vec::new();
     while let Some((node, pointer, mut base_id, root)) = pending.pop() {
@@ -166,7 +174,7 @@ pub(super) fn walk<'a>(schema: &'a IvyJson) -> IvyResult<CompilerWalk<'a>> {
         pending.extend(children.into_iter().rev());
     }
     Ok(CompilerWalk {
-        root_base_id: registered.base_id,
+        root_base_id,
         nodes,
     })
 }

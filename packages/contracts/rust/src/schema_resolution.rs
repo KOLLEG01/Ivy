@@ -19,7 +19,7 @@ pub struct CompilerTarget<'a> {
     pub root_base_id: JsString,
 }
 impl<'a> CompilerTarget<'a> {
-    fn root(&self) -> Self {
+    pub(super) fn root(&self) -> Self {
         Self {
             schema: self.root_schema,
             base_id: self.root_base_id.clone(),
@@ -134,6 +134,19 @@ impl<'a> CompilerResources<'a> {
         base_id: &JsString,
         reference: &JsString,
     ) -> IvyResult<Option<CompilerTarget<'a>>> {
+        self.resolve_from(&self.root, base_id, reference)
+    }
+    pub(super) fn submitted_root(&self) -> CompilerTarget<'a> {
+        self.root.clone()
+    }
+    /// Resolve under a previously returned target's root context. A reference
+    /// from another resource must not silently use the submitted root instead.
+    pub fn resolve_from(
+        &self,
+        context: &CompilerTarget<'a>,
+        base_id: &JsString,
+        reference: &JsString,
+    ) -> IvyResult<Option<CompilerTarget<'a>>> {
         let absolute = uri::resolve(base_id, &uri::normalize_id(reference))?;
         let mut current = absolute.clone();
         let mut seen = HashSet::new();
@@ -145,10 +158,13 @@ impl<'a> CompilerResources<'a> {
                 Some(Entry::Alias(target)) => current = target.clone(),
                 Some(Entry::Schema(target)) => break Some(target.clone()),
                 Some(Entry::Inherited) => return Err(invalid()),
-                None => break self.resolve_schema(self.root.clone(), current)?,
+                None => break self.resolve_schema(context.root(), current)?,
             }
         };
         Ok(resolved.or_else(|| {
+            if !std::ptr::eq(context.root_schema, self.root.schema) {
+                return None;
+            }
             self.locals.get(&absolute).map(|schema| CompilerTarget {
                 schema,
                 base_id: base_id.clone(),
