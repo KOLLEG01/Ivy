@@ -16,6 +16,58 @@ use std::{
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()
 }
+
+#[test]
+fn launch_catalog_checks_match_original_preflight_without_starting_native() {
+    let fixture = Fixture::new();
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut child = Command::new("node")
+        .arg(root.join("tests/fixtures/native-launch-catalog-oracle.mjs"))
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            stringify(
+                &IvyJson::object([("root", fixture.0.to_str().unwrap().into())]),
+                65536,
+            )
+            .unwrap()
+            .as_bytes(),
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = json(std::str::from_utf8(&output.stdout).unwrap());
+    assert_eq!(rows.as_array().unwrap().len(), 17);
+    for row in rows.as_array().unwrap() {
+        let input = row.get("input").unwrap();
+        let actual = match compatibility::verify_launch_catalog(
+            input.get("catalog").unwrap(),
+            input.get("version").unwrap().as_js_string().unwrap(),
+            input.get("hash").unwrap().as_js_string().unwrap(),
+        ) {
+            Ok(()) => IvyJson::object([("ok", true.into())]),
+            Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+        };
+        assert_eq!(
+            &actual,
+            row.get("expected").unwrap(),
+            "{:?}",
+            row.get("label")
+        );
+    }
+}
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {

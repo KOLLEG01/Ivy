@@ -5,8 +5,8 @@ use futures_util::{
     future::{BoxFuture, Shared},
 };
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent, hash::hash_json,
-    json::parse, checked_native_contract::native_catalog_path,
+    IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent,
+    checked_native_contract::native_catalog_path, hash::hash_json, json::parse,
 };
 use ivy_sdk::{
     rpc::{RequestOptions, RpcClient},
@@ -61,6 +61,46 @@ async fn catalog(path: &Path) -> IvyResult<IvyJson> {
         parse(&String::from_utf8_lossy(&bytes), usize::MAX).map_err(|_| IvyError::internal())?;
     validate_agent("Catalog", &value)?;
     Ok(value)
+}
+
+/// Native launch requires the exact pinned build and realtime startup items.
+/// Keep the original structural check: this does not construct a NativeContract
+/// or strengthen the original JSON.stringify(inputSchema) substring predicate.
+pub fn verify_launch_catalog(
+    catalog: &IvyJson,
+    native_version: &JsString,
+    executable_hash: &JsString,
+) -> IvyResult<()> {
+    validate_agent("Catalog", catalog)?;
+    let identity_matches = catalog.get("provider") == Some(&IvyJson::from("codex"))
+        && catalog.get("version").and_then(IvyJson::as_js_string) == Some(native_version)
+        && catalog
+            .get("nativeExecutableHash")
+            .and_then(IvyJson::as_js_string)
+            == Some(executable_hash);
+    let mut realtime = false;
+    if identity_matches {
+        for request in catalog
+            .required("clientRequests")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+        {
+            if request.get("method") == Some(&IvyJson::from("thread/realtime/start"))
+                && ivy_contracts::json::stringify(request.required("inputSchema")?, usize::MAX)?
+                    .contains("initialItems")
+            {
+                realtime = true;
+                break;
+            }
+        }
+    }
+    if !identity_matches || !realtime {
+        return Err(IvyError::new(
+            "native_build_mismatch",
+            "Configured Codex must match its pinned catalog with realtime startup items.",
+        ));
+    }
+    Ok(())
 }
 
 /// Settings have already passed the owning host's settings validator.
