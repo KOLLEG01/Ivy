@@ -93,7 +93,7 @@ pub async fn admitted_native_input(
                 "The image bytes differ from their declared immutable hash or length.",
             )
         };
-        let encoded = content.required("value")?.as_str().ok_or_else(mismatch)?;
+        let encoded = content.required("value")?.as_str().map_err(|_| mismatch())?;
         // Buffer.from is permissive, but the original immediately requires exact
         // canonical re-encoding. Strict decoding rejects the same wire inputs.
         let bytes = STANDARD.decode(&encoded).map_err(|_| mismatch())?;
