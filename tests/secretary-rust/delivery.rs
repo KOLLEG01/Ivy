@@ -13,6 +13,8 @@ mod inbox_evidence_cases;
 mod inbox_recovery_cases;
 #[path = "notice_scan_cases.rs"]
 mod notice_scan_cases;
+#[path = "notice_evidence_cases.rs"]
+mod notice_evidence_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 #[path = "workflow_cases.rs"]

@@ -11,6 +11,7 @@ pub mod media_input;
 pub mod media_schema;
 pub mod media_spool;
 pub mod notice_scan;
+pub mod notice_evidence;
 pub mod policy;
 pub mod schedule;
 pub mod schema;
