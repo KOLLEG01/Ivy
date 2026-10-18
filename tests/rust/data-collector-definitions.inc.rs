@@ -139,7 +139,7 @@ async fn central_control_matches_original_drafts_activation_recovery_and_freeze(
     let definitions = Definitions::new(
         "fixture-node".into(),
         engine.clone(),
-        Arc::new(|_| Box::pin(async { Ok(None) })),
+        Arc::new(|_| Ok(None)),
         Arc::new(|a, b| a.cmp(b)),
     );
     for (index, case) in cases.as_array().unwrap().iter().enumerate() {
@@ -152,6 +152,18 @@ async fn central_control_matches_original_drafts_activation_recovery_and_freeze(
             .collect();
         let input = field(step, "input").clone();
         let result = match text(step, "kind").as_str() {
+            "localSave" => engine.update(input, None).await,
+            "localPatch" => {
+                store
+                    .call(move |s| {
+                        let mut row = s.get(&text(&input, "id"), false)?.unwrap();
+                        row.insert("state", field(&input, "state").clone());
+                        row.insert("nextAt", field(&input, "nextAt").clone());
+                        s.save(&row)?;
+                        Ok(IvyJson::Null)
+                    })
+                    .await
+            }
             "update" => definitions.update(input, None).await,
             "read" => definitions.read(input).await,
             "sync" => definitions.sync().await.map(|_| IvyJson::Null),
@@ -169,6 +181,19 @@ async fn central_control_matches_original_drafts_activation_recovery_and_freeze(
                         s.connection()
                             .execute("DELETE FROM tasks", [])
                             .map_err(|_| IvyError::internal())?;
+                        Ok(IvyJson::Null)
+                    })
+                    .await
+            }
+            "stopQueued" => {
+                store
+                    .call(|s| {
+                        for mut run in s.runs("queued")? {
+                            run.insert("status", "cancelled".into());
+                            run.insert("error", "cancelled".into());
+                            run.insert("finishedAt", "1970-01-01T00:16:40.000Z".into());
+                            s.save_run(&run)?;
+                        }
                         Ok(IvyJson::Null)
                     })
                     .await

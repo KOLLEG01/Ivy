@@ -45,11 +45,16 @@ update({action:'disable',operationId:'cancel-queued',id:'task',expectedRevision:
 read({view:'definitionHistory',jobId:'object-2'});read({view:'definitions'});read({view:'operation',operationId:'manual'});
 add('offline',true);update(save);read({view:'operation',operationId:'save'});add('offline',false);
 update({action:'saveScript',operationId:'script',expectedRevision:0,script:'export default()=>({data:3})'});
-add('clearCache',null);sync();read({view:'task',id:'task'});update({action:'recover',operationId:'recover',jobId:'object-2',expectedRevision:5,confirmedStopped:true});sync();
+add('stopQueued',null);sync();add('clearCache',null);sync();read({view:'task',id:'task'});update({action:'recover',operationId:'recover',jobId:'object-2',expectedRevision:5,confirmedStopped:true});sync();
 update({action:'delete',operationId:'delete',id:'task',expectedRevision:2});sync();read({view:'tasks'});
+add('localSave',{action:'save',operationId:'legacy-local',expectedRevision:0,task:{...task,id:'legacy',enabled:false}});
+add('localPatch',{id:'legacy',state:{page:8},nextAt:424242});
+update({action:'import',operationId:'import'});read({view:'tasks'});update({action:'import',operationId:'import'});update({action:'import',operationId:'import-again'});
+update({action:'save',operationId:'stale',expectedRevision:0,jobId:'object-7',task:{...task,id:'legacy',enabled:false}});
+update({action:'saveScript',operationId:'stale-script',objectId:'object-1',expectedRevision:0,script:'export default()=>({data:4})'});
 const results=[];
 try{for(const step of steps){trace=[];let result=null,error=null;try{
- if(step.kind==='update')result=await definitions.update(step.input);else if(step.kind==='read')result=await definitions.read(step.input);else if(step.kind==='sync')await definitions.sync();else if(step.kind==='offline')engine.client=step.input?null:client;else if(step.kind==='clearCache')store.db.exec('DELETE FROM tasks');
+ if(step.kind==='localSave')result=engine.update(step.input);else if(step.kind==='localPatch'){const row=store.get(step.input.id);store.save({...row,state:step.input.state,nextAt:step.input.nextAt});}else if(step.kind==='update')result=await definitions.update(step.input);else if(step.kind==='read')result=await definitions.read(step.input);else if(step.kind==='sync')await definitions.sync();else if(step.kind==='offline')engine.client=step.input?null:client;else if(step.kind==='clearCache')store.db.exec('DELETE FROM tasks');else if(step.kind==='stopQueued')for(const run of store.runs('queued'))store.saveRun({...run,status:'cancelled',error:'cancelled',finishedAt:new Date().toISOString()});
  }catch(cause){const e=IvyError.from(cause);error={code:e.code,message:e.message,outcome:e.outcome};}
  results.push({step,result,error,trace,clears,tasks:store.list(true),runs:['queued','running','publishing','failed','cancelled'].flatMap(s=>store.runs(s))});}
  process.stdout.write(JSON.stringify(results));

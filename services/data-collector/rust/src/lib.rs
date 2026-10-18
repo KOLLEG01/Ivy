@@ -5,6 +5,7 @@ pub mod engine;
 pub mod definition_journal;
 pub mod definitions;
 pub mod model;
+pub mod mcp_result;
 pub mod policy;
 pub mod provider;
 pub mod runtime;

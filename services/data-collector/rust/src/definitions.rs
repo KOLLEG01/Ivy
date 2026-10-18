@@ -10,17 +10,13 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     json::{canonical, stringify},
 };
-use ivy_sdk::{
-    rpc::RequestOptions,
-    service::{InvocationContext, ServiceFuture},
-    tools,
-};
+use ivy_sdk::{rpc::RequestOptions, service::InvocationContext, tools};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
-pub type Fingerprint = Arc<dyn Fn(String) -> ServiceFuture<Option<String>> + Send + Sync>;
+pub type Fingerprint = Arc<dyn Fn(&str) -> IvyResult<Option<String>> + Send + Sync>;
 #[derive(Clone)]
 pub struct Definitions(Arc<Inner>);
 struct Inner {
@@ -42,6 +38,12 @@ fn js(value: &IvyJson) -> IvyResult<JsString> {
 fn number(value: f64) -> IvyJson {
     IvyJson::Number(value)
 }
+fn defined_assignment(mut value: IvyJson) -> IvyJson {
+    if value.get("assignment").is_some_and(IvyJson::is_null) {
+        value.remove("assignment");
+    }
+    value
+}
 fn nullish(value: Option<&IvyJson>) -> Option<IvyJson> {
     value.filter(|v| !v.is_null()).cloned()
 }
@@ -49,6 +51,43 @@ fn append(operation: &JsString, suffix: &str) -> JsString {
     let mut v = operation.0.clone();
     v.extend(suffix.encode_utf16());
     JsString(v)
+}
+fn handoff_row(
+    store: &crate::store::CollectorStore,
+    engine: &Engine,
+    job: &IvyJson,
+    expected: f64,
+) -> IvyResult<IvyJson> {
+    let row = store
+        .list(true)?
+        .into_iter()
+        .find(|r| r.get("definition").and_then(|d| d.get("jobId")) == Some(job));
+    let valid = if let Some(row) = &row {
+        let task = model::field(row, "task")?;
+        let task_id = model::text(task, "id")?;
+        let unknown = match model::optional_sqlite_key(row, "lastRunId") {
+            Some(id) => store
+                .run(&id)?
+                .is_some_and(|r| r.get("error") == Some(&"outcome_unknown".into())),
+            None => false,
+        };
+        row.get("definition")
+            .and_then(|d| d.get("assignmentRevision"))
+            .and_then(IvyJson::as_f64)
+            == Some(expected)
+            && !model::truth(task, "enabled")
+            && !store.busy(&task_id)?
+            && !engine.active(&task_id)
+            && !unknown
+    } else {
+        false
+    };
+    require(
+        valid,
+        "outcome_unknown",
+        "Handoff requires verified quiescence and a drained publication queue.",
+    )?;
+    Ok(row.unwrap())
 }
 impl Definitions {
     pub fn new(
@@ -225,7 +264,7 @@ impl Definitions {
                     model::object(),
                 )
                 .await?;
-            return Ok(IvyJson::object([
+            return Ok(defined_assignment(IvyJson::object([
                 ("jobId", id(&saved)?.clone()),
                 ("revision", revision(&saved)?.clone()),
                 (
@@ -237,7 +276,7 @@ impl Definitions {
                     "assignment",
                     self.assignment(id(&saved)?).await?.unwrap_or(IvyJson::Null),
                 ),
-            ]));
+            ])));
         }
         let explicit = job.is_some();
         let mut previous = if let Some(job) = job {
@@ -350,7 +389,7 @@ impl Definitions {
                 IvyJson::object([("script", pin(&source)?)]),
             )
             .await?;
-        Ok(IvyJson::object([
+        Ok(defined_assignment(IvyJson::object([
             ("jobId", id(&saved)?.clone()),
             ("revision", revision(&saved)?.clone()),
             ("scriptRef", pin(&source)?),
@@ -359,7 +398,7 @@ impl Definitions {
                 "assignment",
                 self.assignment(id(&saved)?).await?.unwrap_or(IvyJson::Null),
             ),
-        ]))
+        ])))
     }
     async fn unknown(&self, row: &IvyJson) -> IvyResult<bool> {
         let id = model::optional_sqlite_key(row, "lastRunId");
@@ -584,11 +623,20 @@ impl Definitions {
     }
     async fn freeze(&self, job: &IvyJson, expected: f64) -> IvyResult<IvyJson> {
         self.handoff(job, expected).await?;
-        self.journal()?
-            .set_metadata(
-                format!("handoff-lock:{}", model::sqlite_key(job)?),
-                expected.to_string(),
-            )
+        let engine = self.0.engine.clone();
+        let job_copy = job.clone();
+        self.0
+            .engine
+            .store()
+            .call(move |s| {
+                s.transaction(|s| {
+                    handoff_row(s, &engine, &job_copy, expected)?;
+                    s.set_metadata(
+                        &format!("handoff-lock:{}", model::sqlite_key(&job_copy)?),
+                        &expected.to_string(),
+                    )
+                })
+            })
             .await?;
         Ok(IvyJson::object([
             ("frozen", job.clone()),
@@ -627,50 +675,20 @@ impl Definitions {
                 None,
             )
             .await?;
-        let task_id = model::text(&payload, "taskId")?;
-        let local = self.row(&task_id, true).await?;
-        require(
-            local.as_ref().is_none_or(|r| {
-                model::truth(r, "deleted")
-                    || (r.get("definition").and_then(|d| d.get("jobId")) == Some(job)
-                        && r.get("task").is_some_and(|t| !model::truth(t, "enabled")))
-            }),
-            "target_conflict",
-            "Another job owns the handoff task ID.",
-        )?;
-        let this = self.clone();
-        let check = task_id.clone();
-        require(
-            !self
-                .0
-                .engine
-                .store()
-                .call(move |s| Ok(s.executing(&check)? || this.0.engine.active(&check)))
-                .await?,
-            "task_busy",
-            "The target has an active worker.",
-        )?;
-        let fingerprint = (self.0.fingerprint)(task_id)
-            .await?
-            .map_or(IvyJson::Null, IvyJson::from);
-        require(
-            payload.get("authenticationFingerprint") == Some(&fingerprint),
-            "authentication_required",
-            "Private authentication caches must be securely prepared on the target; collector handoff never transfers secret values.",
-        )?;
         payload.insert("assignmentId", id(&assignment)?.clone());
         payload.insert("assignmentRevision", number(expected + 1.0));
-        let journal = self.journal()?;
-        let job_key = model::sqlite_key(job)?;
-        journal
-            .set_metadata(
-                format!("handoff-state:{job_key}"),
-                stringify(&payload, usize::MAX)?,
-            )
-            .await?;
-        journal
-            .set_metadata(format!("handoff-consumed:{job_key}"), "false".into())
-            .await?;
+        let job_copy = job.clone();
+        let this = self.clone();
+        self.0.engine.store().call(move|store|store.transaction(|store|{
+            let task_id=model::text(&payload,"taskId")?;let local=store.get(&task_id,true)?;
+            require(local.as_ref().is_none_or(|r|model::truth(r,"deleted")||(r.get("definition").and_then(|d|d.get("jobId"))==Some(&job_copy)&&r.get("task").is_some_and(|t|!model::truth(t,"enabled")))),"target_conflict","Another job owns the handoff task ID.")?;
+            require(!store.executing(&task_id)?&&!this.0.engine.active(&task_id),"task_busy","The target has an active worker.")?;
+            let fingerprint=(this.0.fingerprint)(&task_id)?.map_or(IvyJson::Null,IvyJson::from);
+            require(payload.get("authenticationFingerprint")==Some(&fingerprint),"authentication_required","Private authentication caches must be securely prepared on the target; collector handoff never transfers secret values.")?;
+            let job_key=model::sqlite_key(&job_copy)?;
+            store.set_metadata(&format!("handoff-state:{job_key}"),&stringify(&payload,usize::MAX)?)?;
+            store.set_metadata(&format!("handoff-consumed:{job_key}"),"false")
+        })).await?;
         Ok(IvyJson::object([("prepared", job.clone())]))
     }
     async fn activate(
@@ -1033,29 +1051,37 @@ impl Definitions {
             "handoff" => {
                 let job = model::field(&input, "jobId")?;
                 let expected = model::number(&input, "expectedRevision")?;
-                let row = self.handoff(job, expected).await?;
-                require(
-                    self.journal()?
-                        .metadata(format!("handoff-lock:{}", model::sqlite_key(job)?))
-                        .await?
-                        .as_deref()
-                        == Some(&expected.to_string()),
-                    "task_busy",
-                    "Freeze manual starts before handoff.",
-                )?;
-                let state = model::field(&row, "state")?;
-                self.no_secrets(state)?;
-                let task_id = model::text(model::field(&row, "task")?, "id")?;
-                let fingerprint = (self.0.fingerprint)(task_id.clone()).await?;
-                Ok(IvyJson::object([
-                    ("taskId", task_id.into()),
-                    ("state", state.clone()),
-                    ("nextAt", model::field(&row, "nextAt")?.clone()),
-                    (
-                        "authenticationFingerprint",
-                        fingerprint.map_or(IvyJson::Null, IvyJson::from),
-                    ),
-                ]))
+                self.handoff(job, expected).await?;
+                let job = job.clone();
+                let this = self.clone();
+                self.0
+                    .engine
+                    .store()
+                    .call(move |store| {
+                        let row = handoff_row(store, &this.0.engine, &job, expected)?;
+                        require(
+                            store
+                                .metadata(&format!("handoff-lock:{}", model::sqlite_key(&job)?))?
+                                .as_deref()
+                                == Some(&expected.to_string()),
+                            "task_busy",
+                            "Freeze manual starts before handoff.",
+                        )?;
+                        let state = model::field(&row, "state")?;
+                        this.no_secrets(state)?;
+                        let task_id = model::text(model::field(&row, "task")?, "id")?;
+                        let fingerprint = (this.0.fingerprint)(&task_id)?;
+                        Ok(IvyJson::object([
+                            ("taskId", task_id.into()),
+                            ("state", state.clone()),
+                            ("nextAt", model::field(&row, "nextAt")?.clone()),
+                            (
+                                "authenticationFingerprint",
+                                fingerprint.map_or(IvyJson::Null, IvyJson::from),
+                            ),
+                        ]))
+                    })
+                    .await
             }
             "script" => {
                 self.journal()?
@@ -1098,13 +1124,13 @@ impl Definitions {
                 } else {
                     None
                 };
-                Ok(IvyJson::object([
+                Ok(defined_assignment(IvyJson::object([
                     ("jobId", job.clone()),
                     ("revision", revision(&document)?.clone()),
                     ("task", self.task(&document).await?),
                     ("assignment", assignment.unwrap_or(IvyJson::Null)),
                     ("observation", observation.unwrap_or(IvyJson::Null)),
-                ]))
+                ])))
             }
             "definitions" => {
                 let journal = self.journal()?;

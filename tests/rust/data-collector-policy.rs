@@ -4,6 +4,8 @@ use ivy_contracts::{
 };
 use ivy_data_collector::{model, policy};
 
+#[path = "data-collector-mcp-result.inc.rs"]
+mod mcp_result;
 #[path = "data-collector-schema.inc.rs"]
 mod schema;
 
@@ -97,5 +99,9 @@ fn dc02_keys_and_values_reject_configured_secrets_without_false_empty_match() {
     assert!(!policy::contains_configured_secret(
         &json(r#"{"anything":0}"#),
         ""
+    ));
+    assert!(policy::contains_configured_secret_json(
+        &json(r#"{"prefix-\ud800-suffix":0}"#),
+        &ivy_contracts::JsString(vec![0xd800])
     ));
 }
