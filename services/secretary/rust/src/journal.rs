@@ -289,7 +289,7 @@ impl Journal {
                 let value = parse(raw, FRAME)?;
                 if !matches!(text(&value, "phase").as_str(), "succeeded" | "failed")
                     || protected_operations.contains(id)
-                    || has_unresolved_outcome(&value)
+                    || has_unresolved_outcome(&value)?
                 {
                     continue;
                 }
@@ -351,19 +351,22 @@ impl Journal {
             }
             if incoming_refs.iter().any(|r| selected.contains(r))
                 || protected.is_some_and(|r| selected.contains(r))
-                || members.iter().any(|(_, _, value)| {
-                    has_unresolved_outcome(value)
-                        || matches!(
-                            text(value, "phase").as_str(),
-                            "accepted"
-                                | "dispatched"
-                                | "prepared"
-                                | "running"
-                                | "pending"
-                                | "archiving"
-                        )
-                })
             {
+                continue;
+            }
+            let mut blocked = false;
+            for (_, _, value) in &members {
+                if has_unresolved_outcome(value)?
+                    || matches!(
+                        text(value, "phase").as_str(),
+                        "accepted" | "dispatched" | "prepared" | "running" | "pending" | "archiving"
+                    )
+                {
+                    blocked = true;
+                    break;
+                }
+            }
+            if blocked {
                 continue;
             }
             if documents.iter().any(|(id, _, v)| {

@@ -283,6 +283,159 @@ fn unknown_and_reachable_technical_work_is_not_evicted_for_space() {
     assert_eq!(journal.usage().unwrap(), Usage { count: 1, bytes: 1 });
 }
 
+#[test]
+fn fallible_receipt_inspection_rolls_back_prior_cleanup_and_fences() {
+    for technical in [false, true] {
+        let mut journal = memory(Limits::default());
+        let good = operation(10, "checkpoint", "succeeded");
+        let mut bad = operation(11, "checkpoint", "succeeded");
+        bad.insert("errorCode", value(r#"{"toString":null}"#));
+        let (first, second) = if technical {
+            let first = journal
+                .create_technical("workflow", "first", &good)
+                .unwrap();
+            let second = journal
+                .create_technical("workflow", "second", &bad)
+                .unwrap();
+            journal
+                .complete_technical_workflow(&first.pin.object_id, 1)
+                .unwrap();
+            journal
+                .complete_technical_workflow(&second.pin.object_id, 2)
+                .unwrap();
+            (first.pin, second.pin)
+        } else {
+            (
+                journal
+                    .create_local("secretary/operation", "first", &good, 1)
+                    .unwrap(),
+                journal
+                    .create_local("secretary/operation", "second", &bad, 2)
+                    .unwrap(),
+            )
+        };
+        let before = journal.usage().unwrap();
+        journal.limits.count = 0;
+        let expected = ivy_store::receipts::has_unresolved_outcome(&bad).unwrap_err();
+        let actual = journal.cleanup(0, 0, None, None).unwrap_err();
+        assert_eq!(
+            (actual.code, actual.message, actual.outcome, actual.details),
+            (
+                expected.code,
+                expected.message,
+                expected.outcome,
+                expected.details
+            )
+        );
+        let key = if technical {
+            "workflow"
+        } else {
+            "secretary/operation"
+        };
+        assert_eq!(
+            journal
+                .read(key, &first.object_id, Some(first.revision), technical)
+                .unwrap()
+                .value,
+            good
+        );
+        assert_eq!(
+            journal
+                .read(key, &second.object_id, Some(second.revision), technical)
+                .unwrap()
+                .value,
+            bad
+        );
+        assert_eq!(journal.usage().unwrap(), before);
+        assert_eq!(journal.expired_before().unwrap(), 0);
+        assert_eq!(
+            journal
+                .db
+                .query_row("SELECT COUNT(*) FROM retired_operations", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        if technical {
+            assert_eq!(
+                journal
+                    .db
+                    .query_row("SELECT COUNT(*) FROM technical_cleanup", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        }
+    }
+}
+
+#[test]
+fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
+    for technical in [false, true] {
+        for incoming in [false, true] {
+            let mut journal = memory(Limits::default());
+            let mut bad = operation(12, "checkpoint", "succeeded");
+            bad.insert("errorCode", value(r#"{"toString":null}"#));
+            let key = if technical {
+                "workflow"
+            } else {
+                "secretary/operation"
+            };
+            let pin = if technical {
+                let saved = journal.create_technical(key, "protected", &bad).unwrap();
+                journal
+                    .complete_technical_workflow(&saved.pin.object_id, 1)
+                    .unwrap();
+                saved.pin
+            } else {
+                journal.create_local(key, "protected", &bad, 1).unwrap()
+            };
+            let reference = IvyJson::String(pin.object_id.clone().into());
+            let before = journal.usage().unwrap();
+            journal.limits.count = 0;
+            journal
+                .cleanup(
+                    0,
+                    0,
+                    if incoming { None } else { Some(&pin.object_id) },
+                    if incoming { Some(&reference) } else { None },
+                )
+                .unwrap();
+            assert_eq!(
+                journal
+                    .read(key, &pin.object_id, None, technical)
+                    .unwrap()
+                    .value,
+                bad
+            );
+            assert_eq!(journal.usage().unwrap(), before);
+            assert_eq!(journal.expired_before().unwrap(), 0);
+        }
+    }
+    let mut journal = memory(Limits::default());
+    let context = value(r#"{"threadId":null,"errorCode":{"toString":null}}"#);
+    let saved = journal
+        .create_technical("secretary/follow-up-context", "pending", &context)
+        .unwrap();
+    journal
+        .complete_technical_workflow(&saved.pin.object_id, 1)
+        .unwrap();
+    journal.limits.count = 0;
+    journal.cleanup(0, 0, None, None).unwrap();
+    assert_eq!(
+        journal
+            .read(
+                "secretary/follow-up-context",
+                &saved.pin.object_id,
+                None,
+                true
+            )
+            .unwrap()
+            .value,
+        context
+    );
+}
+
 struct Scratch(PathBuf);
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -323,11 +476,16 @@ fn typescript_and_rust_cross_open_the_same_journal() {
     for (name, expected) in [("deep", nested(127)), ("wide", wide(399_998))] {
         let saved = journal.named("fixture", name, true).unwrap().unwrap();
         assert_eq!(saved.value, expected);
-        journal.amend_technical("fixture", &saved.pin, &expected).unwrap();
+        journal
+            .amend_technical("fixture", &saved.pin, &expected)
+            .unwrap();
     }
     for (name, rejected) in [("too-deep", nested(128)), ("too-wide", wide(399_999))] {
         assert_eq!(
-            journal.create_technical("fixture", name, &rejected).unwrap_err().code,
+            journal
+                .create_technical("fixture", name, &rejected)
+                .unwrap_err()
+                .code,
             "limit_exceeded"
         );
         assert!(journal.named("fixture", name, true).unwrap().is_none());
