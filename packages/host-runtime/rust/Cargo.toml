@@ -60,3 +60,7 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[[test]]
+name = "host-build-identity"
+path = "../../../tests/rust/host-build-identity.rs"
