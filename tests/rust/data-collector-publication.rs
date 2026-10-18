@@ -23,6 +23,8 @@ mod engine;
 mod definition_journal;
 #[path = "data-collector-definitions.inc.rs"]
 mod definitions;
+#[path = "data-collector-http.inc.rs"]
+mod http;
 
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()
