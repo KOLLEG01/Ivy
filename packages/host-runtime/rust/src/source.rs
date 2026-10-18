@@ -1,7 +1,7 @@
 //! Fixed Git source snapshots and runtime-discovered component build plans.
 use crate::{IvyError, IvyJson, IvyResult, config::{read_json, path_value, FileError, CONFIGURATION_BYTES}, paths::inside};
 use ivy_contracts::{JsString, core_schema::validate_host};
-use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, sync::{Arc, OnceLock}};
 use crate::{concurrency::map_concurrent, exec_file::{source_output, FileCommand}, host_config::HostContext, layout, node_path::{self, Context, Style}, paths};
 
 fn internal<T, E>(result: Result<T, E>) -> IvyResult<T> { result.map_err(|_| IvyError::internal()) }
@@ -36,9 +36,16 @@ pub async fn verify_snapshot_metadata(snapshot: IvyJson, staging_root: impl Into
 const ROOT_FILES: [&str; 11] = ["package.json", "package-lock.json", "tsconfig.json", "tsconfig.web.json", "tsconfig.runtime.json", "tsconfig.test.json", "README.md", "LICENSE", ".npmrc", ".gitattributes", ".gitignore"];
 const TOP_LEVELS: [&str; 9] = ["packages", "services", "ui", "instructions", "tools", "specs", "docs", "tests", "acceptance"];
 fn same(units: &[u16], value: &str) -> bool { units.iter().copied().eq(value.encode_utf16()) }
-fn allowed(path: &JsString) -> bool {
+fn rust_root_inputs() -> IvyResult<&'static Vec<JsString>> {
+    // The build owner supplies the same bounded list to Cargo input/cache and
+    // test selection. Never recursively admit .cargo credentials or downloads.
+    static INPUTS: OnceLock<IvyResult<Vec<JsString>>> = OnceLock::new();
+    INPUTS.get_or_init(|| serde_json::from_str::<Vec<String>>(include_str!("../../../../tools/build/rust-root-inputs.json"))
+        .map(|paths| paths.into_iter().map(JsString::from).collect()).map_err(|_| IvyError::internal())).as_ref().map_err(Clone::clone)
+}
+fn allowed(path: &JsString, rust_inputs: &[JsString]) -> bool {
     let first = path.0.split(|c| *c == 47).next().unwrap_or_default();
-    if !ROOT_FILES.iter().any(|v| same(&path.0, v)) && !TOP_LEVELS.iter().any(|v| same(first, v)) { return false; }
+    if !ROOT_FILES.iter().any(|v| same(&path.0, v)) && !TOP_LEVELS.iter().any(|v| same(first, v)) && !rust_inputs.contains(path) { return false; }
     !path.0.split(|c| *c == 47).any(|part| {
         ["node_modules", "dist", ".local", "config.json", ".env"].iter().any(|v| same(part, v))
             || part.starts_with(&[46,101,110,118,46]) && !part.iter().any(|c| matches!(*c, 10 | 13 | 0x2028 | 0x2029))
@@ -54,7 +61,8 @@ async fn source_paths(source: &JsString, executable: JsString, bootstrap_root: P
     }, bootstrap_root).await?;
     require(git.failure.is_none() && git.exit_code == Some(0), "invalid_arguments", "Source must be an accessible Git checkout.")?;
     // JS Set followed by default sort compares UTF-16 code units, not locale.
-    let paths: BTreeSet<_> = git.stdout.0.split(|c| *c == 0).filter(|v| !v.is_empty()).map(|v| JsString(v.to_vec())).filter(allowed).collect();
+    let rust_inputs = rust_root_inputs()?;
+    let paths: BTreeSet<_> = git.stdout.0.split(|c| *c == 0).filter(|v| !v.is_empty()).map(|v| JsString(v.to_vec())).filter(|path| allowed(path, rust_inputs)).collect();
     require(paths.len() <= 20_000, "limit_exceeded", "Source copy exceeds its file limit.")?;
     Ok(paths.into_iter().collect())
 }

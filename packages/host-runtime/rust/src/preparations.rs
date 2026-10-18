@@ -162,36 +162,6 @@ async fn publication(journal:&HostJournal,record:&IvyJson,verify_release:bool,no
     journal.save_candidate(candidate.clone(),manifest).await?;Ok((candidate.clone(),recovered))
 }
 
-#[cfg(windows)]
-fn remove_windows(path:&Path)->std::io::Result<()>{
-    let metadata=match fs::symlink_metadata(path){Ok(value)=>value,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(e)=>return Err(e)};
-    if metadata.is_dir()&&!metadata.file_type().is_symlink(){
-        for entry in fs::read_dir(path)?{remove_windows(&entry?.path())?;}fs::remove_dir(path)
-    }else{
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_type().is_symlink()&&metadata.file_attributes()&0x10!=0{return fs::remove_dir(path)}
-        match fs::remove_file(path){Err(e) if e.kind()==std::io::ErrorKind::PermissionDenied=>{let mut permissions=metadata.permissions();permissions.set_readonly(false);fs::set_permissions(path,permissions)?;fs::remove_file(path)},result=>result}
-    }
-}
-async fn remove_payload(path:PathBuf,directory:bool)->IvyResult<()>{
-    blocking(move||{
-        let path=fs_path(&path);internal(fs::symlink_metadata(&path))?;
-        for attempt in 0..=3 {
-            let result=if directory{fs::remove_dir_all(&path)}else{fs::remove_file(&path)};
-            #[cfg(windows)] let result=match result{Err(e) if directory&&e.kind()==std::io::ErrorKind::PermissionDenied=>remove_windows(&path),result=>result};
-            match result{
-                Ok(())=>return Ok(()),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
-                Err(e) if attempt<3&&retry_remove(&e)=>std::thread::sleep(std::time::Duration::from_millis((attempt+1)*100)),
-                Err(_)=>return Err(IvyError::internal()),
-            }
-        }
-        Err(IvyError::internal())
-    }).await
-}
-fn retry_remove(error:&std::io::Error)->bool{
-    #[cfg(unix)]{matches!(error.raw_os_error(),Some(libc::EBUSY|libc::EMFILE|libc::ENFILE|libc::ENOTEMPTY|libc::EPERM))}
-    #[cfg(windows)]{matches!(error.kind(),std::io::ErrorKind::PermissionDenied|std::io::ErrorKind::DirectoryNotEmpty|std::io::ErrorKind::ResourceBusy)||error.raw_os_error()==Some(4)}
-}
 /// Internal caller owns the exact build lock for the entire operation. Public
 /// batch/recovery entrypoints retain that ownership after waiter cancellation.
 pub(crate) async fn compact_preparation_locked(journal:&HostJournal,record:IvyJson,trusted:bool,measure:bool,node:&NodeRuntime)->IvyResult<IvyJson>{
@@ -226,7 +196,7 @@ pub(crate) async fn compact_preparation_locked(journal:&HostJournal,record:IvyJs
         checked_boundary(staging.clone(),root.clone()).await?;
         let target=path.clone();let metadata=blocking(move||internal(fs::symlink_metadata(fs_path(&target)))).await?;
         require(!metadata.file_type().is_symlink()&&actual(path.clone()).await?.parent()==Some(boundary.as_path()),"target_conflict","Compaction target changed before removal.")?;
-        remove_payload(path.clone(),*directory).await?;
+        crate::filesystem::remove_payload(path.clone(),*directory,3).await?;
     }
     save_preparation(staging,record_change(&record,"compacted",IvyJson::Null)).await?;
     Ok(IvyJson::object([("preparationId",id.into()),("action",if recovered||phase=="unknown"||phase=="publishing"{"recovered"}else{"compacted"}.into()),("candidateId",candidate.required("candidateId")?.clone()),("reclaimedBytes",IvyJson::Number(payloads.iter().map(|(_,_,bytes)|bytes).sum())),("code",IvyJson::Null)]))

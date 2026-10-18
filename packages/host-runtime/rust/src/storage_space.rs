@@ -3,6 +3,10 @@ use crate::{IvyError, IvyJson, IvyResult, config::path_value, paths::{inside, re
 use std::{fs, io, path::{Path, PathBuf}};
 
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+pub trait RetentionProgress: Send + Sync {
+    fn removed(&self, area: &str);
+    fn skipped(&self, area: &str, reason: &str, requires_attention: bool);
+}
 fn internal<T, E>(result: Result<T, E>) -> IvyResult<T> { result.map_err(|_| IvyError::internal()) }
 
 fn visit(path: &Path, boundary: &Path, depth: usize, files: &mut usize, bytes: &mut f64) -> IvyResult<()> {

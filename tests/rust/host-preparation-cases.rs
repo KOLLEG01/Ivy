@@ -195,3 +195,77 @@ async fn cache_leases_share_builds_exclude_retirement_and_wait_for_original_owne
   let input=IvyJson::object([("kind","touch".into()),("path",text(&target)),("now",IvyJson::Number((AT+123) as f64))]);compare(input.clone(),outcome(result),oracle(&input));
  }
 }
+
+#[derive(Default)]
+struct CacheProgress(Mutex<Vec<IvyJson>>);
+impl ivy_host_runtime::storage_space::RetentionProgress for CacheProgress{
+ fn removed(&self,area:&str){self.0.lock().unwrap().push(IvyJson::object([("kind","removed".into()),("area",area.into())]));}
+ fn skipped(&self,area:&str,reason:&str,attention:bool){self.0.lock().unwrap().push(IvyJson::object([("kind","skipped".into()),("area",area.into()),("reason",reason.into()),("requiresAttention",attention.into())]));}
+}
+fn directory_link(target:&Path,link:&Path){
+ #[cfg(windows)]{let status=Command::new("node").args(["-e","require('node:fs').symlinkSync(process.argv[1],process.argv[2],'junction')"]).arg(target).arg(link).status().unwrap();assert!(status.success());}
+ #[cfg(unix)]std::os::unix::fs::symlink(target,link).unwrap();
+}
+async fn cache_fixture(f:&ServiceFixture,name:&str,mode:&str)->PathBuf{
+ let staging=f.0.join(name).join("staging");let root=staging.join("dependency-cache");
+ if mode=="empty"{return staging}
+ if mode=="root-file"{write(&root,b"root is a file");return staging}
+ if mode=="staging-alias"{let actual=f.0.join(name).join("real-staging");fs::create_dir_all(&actual).unwrap();directory_link(&actual,&staging);}
+ #[cfg(windows)]if mode=="root-case"{fs::create_dir_all(staging.join("DEPENDENCY-CACHE")).unwrap();}
+ for (index,digit) in ['a','b','c'].into_iter().enumerate(){
+  if mode=="single"&&index!=0{continue}
+  let directory=root.join(digit.to_string().repeat(64));write(&directory.join("cache.json"),format!("{{\"key\":\"sha256:{}\"}}\n",digit.to_string().repeat(64)).as_bytes());write(&directory.join("payload"),digit.to_string().as_bytes());
+  if mode=="read-only"&&digit=='a'{let file=directory.join("payload");let mut permissions=fs::metadata(&file).unwrap().permissions();permissions.set_readonly(true);fs::set_permissions(file,permissions).unwrap();}
+  dependency_cache::touch_dependency_cache_at(directory,AT+if mode=="same-time"{0}else{index as i64*1000}).await.unwrap();
+ }
+ let a=root.join("a".repeat(64));let b=root.join("b".repeat(64));
+ match mode{
+  "missing-manifest"=>fs::remove_file(a.join("cache.json")).unwrap(),"wrong-key"=>write(&a.join("cache.json"),b"{\"key\":\"other\"}"),
+  "malformed"=>write(&b.join("cache.json"),b"{"),"oversize"=>write(&b.join("cache.json"),&vec![b' ';65537]),
+  "retired"=>write(&root.join(format!(".retiring-{}","d".repeat(64))).join("payload"),b"interrupted deletion"),
+  "unrecognized"=>{for name in ["not-a-cache","Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",".retiring-bad"]{write(&root.join(name).join("payload"),b"keep unknown");}write(&root.join(format!(".retiring-{}","e".repeat(64))),b"keep regular file");let outside=staging.join("linked-target");write(&outside.join("keep"),b"linked child survives");directory_link(&outside,&root.join("d".repeat(64)));},_=>{},
+ }
+ staging
+}
+fn cache_observation(staging:&Path,result:IvyResult<()>,progress:&CacheProgress)->IvyJson{
+ fn walk(root:&Path,directory:&Path,files:&mut Vec<IvyJson>)->std::io::Result<()>{
+  let mut entries=fs::read_dir(directory)?.collect::<Result<Vec<_>,_>>()?;entries.sort_by_key(|entry|entry.file_name());
+  for entry in entries{let path=entry.path();let metadata=fs::symlink_metadata(&path)?;let local=path.strip_prefix(root).unwrap().to_str().unwrap().replace('\\',"/");if metadata.file_type().is_symlink(){files.push(IvyJson::object([("path",local.into()),("type","link".into())]));}else if metadata.is_dir(){walk(root,&path,files)?;}else{files.push(IvyJson::object([("path",local.into()),("hex",fs::read(&path)?.iter().map(|b|format!("{b:02x}")).collect::<String>().into())]));}}
+  Ok(())
+ }
+ let root=staging.join("dependency-cache");let entries=fs::read_dir(&root).ok().map(|values|{let mut names=values.map(|entry|entry.unwrap().file_name().to_str().unwrap().to_owned()).collect::<Vec<_>>();names.sort();IvyJson::Array(names.into_iter().map(IvyJson::from).collect())}).unwrap_or(IvyJson::Null);
+ let mut files=Vec::new();let files=if walk(&root,&root,&mut files).is_ok(){IvyJson::Array(files)}else{IvyJson::Null};
+ IvyJson::object([("operation",outcome(result.map(|_|IvyJson::Null))),("events",IvyJson::Array(progress.0.lock().unwrap().clone())),("entries",entries),("files",files)])
+}
+
+#[tokio::test]
+async fn cache_collection_preserves_regular_roots_leases_retired_entries_and_diagnostics(){
+ let mut modes=vec!["empty","single","regular","same-time","active-lease","active-newest","missing-manifest","wrong-key","malformed","oversize","retired","read-only","root-file","unrecognized","staging-alias"];
+ #[cfg(windows)]modes.push("root-case");
+ for mode in modes{
+  let f=ServiceFixture::new();let native=cache_fixture(&f,"native",mode).await;let original=cache_fixture(&f,"oracle",mode).await;let mut owners=Vec::new();
+  if mode=="active-lease"||mode=="active-newest"{let key=if mode=="active-lease"{"a"}else{"c"}.repeat(64);for staging in [&native,&original]{owners.push(dependency_cache::use_dependency_cache(staging.clone(),&key).await.unwrap());}}
+  let progress=Arc::new(CacheProgress::default());let result=dependency_cache::collect_dependency_caches(native.clone(),progress.clone()).await;
+  let expected_success=!["malformed","oversize","root-file"].contains(&mode);assert_eq!(result.is_ok(),expected_success,"{mode}: {result:?}");
+  if expected_success&&!["empty","missing-manifest","wrong-key","unrecognized"].contains(&mode){let retained=if mode=="single"||mode=="same-time"{"a"}else{"c"}.repeat(64);assert!(native.join("dependency-cache").join(retained).join("payload").exists(),"{mode}");}
+  if mode=="active-lease"{assert!(native.join("dependency-cache").join("a".repeat(64)).exists());assert!(!native.join("dependency-cache").join("b".repeat(64)).exists());}
+  let actual=cache_observation(&native,result,&progress);let input=IvyJson::object([("kind","cache-collect".into()),("case",mode.into()),("staging",text(&original))]);compare(input.clone(),actual,oracle(&input));
+  for owner in owners{owner.close().await.unwrap();}
+ }
+}
+
+#[tokio::test]
+async fn cache_collection_rejects_linked_roots_without_changing_any_target_bytes(){
+ for mode in ["outside","inside","dangling"]{
+  let f=ServiceFixture::new();let staging=f.0.join("staging");fs::create_dir_all(&staging).unwrap();let target=if mode=="inside"{staging.join("other")}else{f.0.join("outside-staging")};
+  if mode!="dangling"{for digit in ["a","b"]{let cache=target.join(digit.repeat(64));write(&cache.join("cache.json"),format!("{{\"key\":\"sha256:{}\"}}",digit.repeat(64)).as_bytes());write(&cache.join("payload"),format!("preserved {digit}").as_bytes());dependency_cache::touch_dependency_cache_at(cache,AT+if digit=="a"{0}else{1000}).await.unwrap();}}
+  directory_link(&target,&staging.join("dependency-cache"));let progress=Arc::new(CacheProgress::default());let result=dependency_cache::collect_dependency_caches(staging.clone(),progress.clone()).await;
+  let error=result.unwrap_err();assert_eq!(error.code,"target_conflict","{mode}");assert!(fs::symlink_metadata(staging.join("dependency-cache")).unwrap().file_type().is_symlink());assert!(progress.0.lock().unwrap().is_empty());assert!(!staging.join("dependency-cache-locks").exists());
+  if mode=="dangling"{assert!(!target.exists());}else{for digit in ["a","b"]{assert_eq!(fs::read(target.join(digit.repeat(64)).join("payload")).unwrap(),format!("preserved {digit}").as_bytes());assert_eq!(fs::read(target.join(digit.repeat(64)).join("cache.json")).unwrap(),format!("{{\"key\":\"sha256:{}\"}}",digit.repeat(64)).as_bytes());}assert_eq!(fs::read_dir(&target).unwrap().count(),2);}
+  let payloads=if mode=="dangling"{IvyJson::Array(vec![])}else{IvyJson::Array(["a","b"].into_iter().map(|digit|{let directory=target.join(digit.repeat(64));IvyJson::object([("name",digit.repeat(64).into()),("manifest",fs::read_to_string(directory.join("cache.json")).unwrap().into()),("payload",fs::read_to_string(directory.join("payload")).unwrap().into())])}).collect())};
+  let expected_payloads=if mode=="dangling"{IvyJson::Array(vec![])}else{IvyJson::Array(["a","b"].into_iter().map(|digit|IvyJson::object([("name",digit.repeat(64).into()),("manifest",format!("{{\"key\":\"sha256:{}\"}}",digit.repeat(64)).into()),("payload",format!("preserved {digit}").into())])).collect())};
+  let actual=IvyJson::object([("code",error.code.into()),("linkPreserved",fs::symlink_metadata(staging.join("dependency-cache")).unwrap().file_type().is_symlink().into()),("targetExists",target.exists().into()),("payloads",payloads),("events",IvyJson::Array(progress.0.lock().unwrap().clone()))]);
+  let expected=IvyJson::object([("code","target_conflict".into()),("linkPreserved",true.into()),("targetExists",(mode!="dangling").into()),("payloads",expected_payloads),("events",IvyJson::Array(vec![]))]);
+  compare(IvyJson::object([("kind","cache-root-guard".into()),("case",mode.into()),("basis","task0072-cache-root-policy-agreement-138-v1; intentional correction, not original parity".into())]),actual,expected);
+ }
+}

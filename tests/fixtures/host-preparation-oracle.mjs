@@ -36,6 +36,13 @@ if(input.kind==='progress'){
 }else if(input.kind==='lock'){
   const {ExecutorLock}=await import('../../packages/host-runtime/src/journal.ts');
   value=await result(async()=>{const lock=new ExecutorLock(input.path,input.shared);lock.close();return null;});
+}else if(input.kind==='cache-collect'){
+  const {collectDependencyCaches}=await import('../../packages/host-runtime/src/dependency-cache.ts');
+  const events=[];
+  const operation=await result(async()=>{await collectDependencyCaches(input.staging,{removed:area=>events.push({kind:'removed',area}),skipped:(area,reason,requiresAttention=false)=>events.push({kind:'skipped',area,reason,requiresAttention})});return null;});
+  const root=path.join(input.staging,'dependency-cache');
+  const files=optional(()=>{const files=[];const walk=(directory,local)=>{for(const name of readdirSync(directory).sort()){const child=path.join(directory,name),entry=lstatSync(child),childLocal=local?local+'/'+name:name;if(entry.isSymbolicLink())files.push({path:childLocal,type:'link'});else if(entry.isDirectory())walk(child,childLocal);else files.push({path:childLocal,hex:readFileSync(child).toString('hex')});}};walk(root,'');return files;});
+  value={operation,events,entries:optional(()=>readdirSync(root).sort()),files};
 }else if(input.kind==='touch'){
   const OriginalDate=Date;globalThis.Date=class extends OriginalDate{constructor(...args){super(...(args.length?args:[input.now]));}};
   const {touchDependencyCache}=await import('../../packages/host-runtime/src/dependency-cache.ts');

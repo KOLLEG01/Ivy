@@ -101,6 +101,44 @@ async fn source_capture_preserves_fixed_uncommitted_bytes_and_original_allowlist
 }
 
 #[tokio::test]
+async fn source_capture_composes_exact_shared_cargo_inputs_without_private_cache_trees() {
+    let f=Fixture::new().await;
+    let repository=Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let inputs:Vec<String>=serde_json::from_str(&fs::read_to_string(repository.join("tools/build/rust-root-inputs.json")).unwrap()).unwrap();
+    assert_eq!(inputs,["Cargo.toml","Cargo.lock","rust-toolchain.toml",".cargo/config",".cargo/config.toml"]);
+    for name in &inputs{f.write(name,format!("fixed native input {name}\r\n").as_bytes());}
+    for name in [".cargo/credentials",".cargo/credentials.toml",".cargo/registry/secret",".cargo/git/checkout",".cargo/other","target/release/native",".local/build-cache/native"]{f.write(name,b"excluded private/generated input");}
+    let snapshot=f.capture().await.unwrap();let captured=path(snapshot.required("sourceRoot").unwrap());
+    for name in &inputs{assert_eq!(fs::read(captured.join(name)).unwrap(),format!("fixed native input {name}\r\n").as_bytes());}
+    assert!(!captured.join(".cargo/credentials").exists());assert!(!captured.join(".cargo/credentials.toml").exists());assert!(!captured.join(".cargo/registry").exists());assert!(!captured.join(".cargo/git").exists());assert!(!captured.join(".cargo/other").exists());assert!(!captured.join("target").exists());assert!(!captured.join(".local").exists());
+    // HE01 adds these agreed native files. The projection onto the old selection
+    // still compares directly with the unmodified original capture operation.
+    let mut legacy=view(&snapshot);let mut files=legacy.required("files").unwrap().as_array().unwrap().to_vec();
+    files.retain(|file|!inputs.iter().any(|name|file.get("path")==Some(&name.as_str().into())));legacy.insert("files",IvyJson::Array(files));
+    let mut input=f.input();input.insert("projection","original allowlist; native root bytes asserted separately".into());input.insert("nativeRootInputs",IvyJson::Array(inputs.iter().map(|name|IvyJson::object([("path",name.as_str().into()),("bytes",format!("fixed native input {name}\r\n").into())])).collect()));compare(input,Ok(legacy));
+    f.write(".cargo/config.toml",b"changed after capture");assert_eq!(fs::read(captured.join(".cargo/config.toml")).unwrap(),b"fixed native input .cargo/config.toml\r\n");
+    let next=f.capture().await.unwrap();assert_eq!(fs::read(path(next.required("sourceRoot").unwrap()).join(".cargo/config.toml")).unwrap(),b"changed after capture");f.no_incoming();
+    let wrong=Fixture::new().await;for name in ["cargo.toml","cargo.lock","Rust-toolchain.toml",".cargo/Config",".cargo/Config.toml"]{wrong.write(name,b"wrong case is not selected");}compare_capture(&wrong).await;
+}
+
+#[tokio::test]
+async fn selected_cargo_file_and_parent_links_are_rejected_before_copy() {
+    for mode in ["Cargo.toml","Cargo.lock","rust-toolchain.toml",".cargo/config",".cargo/config.toml","parent"]{
+        let f=Fixture::new().await;let outside=f.root.0.join("private");fs::create_dir_all(&outside).unwrap();fs::write(outside.join("config"),b"private").unwrap();
+        if mode=="parent"{
+            f.write(".cargo/config",b"tracked");f.git(&["add",".cargo/config"]);fs::remove_file(f.source.join(".cargo/config")).unwrap();fs::remove_dir(f.source.join(".cargo")).unwrap();
+            #[cfg(windows)] std::os::windows::fs::symlink_dir(&outside,f.source.join(".cargo")).unwrap();
+            #[cfg(unix)] std::os::unix::fs::symlink(&outside,f.source.join(".cargo")).unwrap();
+        }else{
+            fs::create_dir_all(f.source.join(mode).parent().unwrap()).unwrap();
+            #[cfg(windows)] std::os::windows::fs::symlink_file(outside.join("config"),f.source.join(mode)).unwrap();
+            #[cfg(unix)] std::os::unix::fs::symlink(outside.join("config"),f.source.join(mode)).unwrap();
+        }
+        assert_eq!(f.capture().await.unwrap_err().code,"invalid_arguments","{mode}");assert_eq!(fs::read(outside.join("config")).unwrap(),b"private");f.no_incoming();
+    }
+}
+
+#[tokio::test]
 async fn source_capture_rejects_preconditions_links_and_limits_before_publication() {
     for mode in ["missing-git","relative","no-checkout","no-lock","file-link","parent-link","large-file"] {
         let mut f=Fixture::new().await;let mut original=node_path::from_native(&f.source);
