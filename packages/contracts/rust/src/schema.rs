@@ -2,6 +2,8 @@
 use crate::{IvyError, IvyJson, IvyResult, JsString, json::array_index};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+#[path = "schema_meta.rs"]
+mod meta;
 
 /// An admitted finite schema graph. Compilation separately checks keyword values.
 pub struct AdmittedSchema {
@@ -10,6 +12,11 @@ pub struct AdmittedSchema {
 impl AdmittedSchema {
     pub fn schema(&self) -> &IvyJson {
         &self.schema
+    }
+    /// Check keyword values against the selected pinned meta-schema. This is one
+    /// compilation stage; it does not resolve resource IDs or compile validators.
+    pub fn validate_meta_schema(&self) -> IvyResult<()> {
+        meta::validate(&self.schema)
     }
 }
 
