@@ -1,5 +1,9 @@
 use crate::sqlite::error;
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::{parse,js_string}};
+use ivy_contracts::{
+    IvyError, IvyJson, IvyResult, JsString,
+    hash::digest,
+    json::{object_entries, parse, try_js_string},
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 fn count_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<usize> {
@@ -7,29 +11,49 @@ fn count_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<usize
     usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
 }
 
-pub fn has_unresolved_outcome(value: &IvyJson) -> bool {
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        match value {
-            IvyJson::Array(values) => pending.extend(values.iter()),
-            IvyJson::Object(pairs) => {
-                for (key, part) in pairs {
-                    let key = key.to_utf8().unwrap_or_default();
-                    let phase = ["phase", "state", "ownerPhase", "outcome", "execution"].contains(&key.as_str());
-                    let error = ["error", "errorCode", "code"].contains(&key.as_str());
-                    if phase || error {
-                        let text = js_string(part);
-                        if (phase && ["unknown", "outcome_unknown", "needs_attention"].iter().any(|s| text == JsString::from(*s)))
-                            || (error && (text.contains_ascii("outcome_unknown") || ["native_connection_lost", "native_epoch_lost"].iter().any(|s| text == JsString::from(*s))))
-                        { return true; }
+pub fn has_unresolved_outcome(value: &IvyJson) -> IvyResult<bool> {
+    enum Work<'a> {
+        Visit(&'a IvyJson),
+        Property(&'a JsString, &'a IvyJson),
+    }
+    let mut pending = vec![Work::Visit(value)];
+    while let Some(work) = pending.pop() {
+        match work {
+            Work::Visit(IvyJson::Array(values)) => {
+                pending.extend(values.iter().rev().map(Work::Visit))
+            }
+            Work::Visit(value @ IvyJson::Object(_)) => pending.extend(
+                object_entries(value)
+                    .into_iter()
+                    .rev()
+                    .map(|(k, v)| Work::Property(k, v)),
+            ),
+            Work::Property(key, part) => {
+                let key = key.to_utf8().unwrap_or_default();
+                let phase = ["phase", "state", "ownerPhase", "outcome", "execution"]
+                    .contains(&key.as_str());
+                let error = ["error", "errorCode", "code"].contains(&key.as_str());
+                if phase || error {
+                    let text = try_js_string(part)?;
+                    if (phase
+                        && ["unknown", "outcome_unknown", "needs_attention"]
+                            .iter()
+                            .any(|s| text == JsString::from(*s)))
+                        || (error
+                            && (text.contains_ascii("outcome_unknown")
+                                || ["native_connection_lost", "native_epoch_lost"]
+                                    .iter()
+                                    .any(|s| text == JsString::from(*s))))
+                    {
+                        return Ok(true);
                     }
-                    pending.push(part);
                 }
+                pending.push(Work::Visit(part));
             }
             _ => {}
         }
     }
-    false
+    Ok(false)
 }
 #[derive(Clone, Copy)]
 pub struct ReceiptLimits {
@@ -143,11 +167,13 @@ impl<'a> ReceiptArchive<'a> {
         let Some(value) = self.lookup(kind, key)? else {
             return Ok(());
         };
-        if parse(&value, usize::MAX).is_ok_and(|v| has_unresolved_outcome(&v)) {
-            return Err(IvyError::new(
-                "receipt_archive_unresolved",
-                "An unresolved outcome cannot enter the history ring.",
-            ));
+        if let Ok(decoded) = parse(&value, usize::MAX) {
+            if has_unresolved_outcome(&decoded)? {
+                return Err(IvyError::new(
+                    "receipt_archive_unresolved",
+                    "An unresolved outcome cannot enter the history ring.",
+                ));
+            }
         }
         self.db
             .execute(
