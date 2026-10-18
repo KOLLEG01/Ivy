@@ -30,7 +30,8 @@ fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
 }
 fn field<'a>(v: &'a IvyJson, key: &str) -> &'a IvyJson {
-    v.get(key).unwrap_or(&IvyJson::Null)
+    static NULL: IvyJson = IvyJson::Null;
+    v.get(key).unwrap_or(&NULL)
 }
 fn is(v: &IvyJson, key: &str, s: &str) -> bool {
     v.get(key) == Some(&s.into())
