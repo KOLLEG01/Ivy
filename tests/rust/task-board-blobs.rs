@@ -14,6 +14,8 @@ mod workspaces;
 mod artifact;
 #[path = "../fixtures/task-board-journal-store.rs"]
 mod journal_store;
+#[path = "../fixtures/task-board-publication.rs"]
+mod publication;
 use support::oracle;
 
 struct Temporary(PathBuf);

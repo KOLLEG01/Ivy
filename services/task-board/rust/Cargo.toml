@@ -9,6 +9,7 @@ ivy-contracts.workspace = true
 ivy-sdk.workspace = true
 ivy-store.workspace = true
 uuid.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

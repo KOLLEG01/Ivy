@@ -11,6 +11,7 @@ use crate::{
     operations::{Document, Store},
     read_evidence::ReadEvidenceStore,
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_json, json::canonical,
     limits::MANAGEMENT_FRAME_BYTES,
@@ -110,6 +111,134 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             .record(key, address, primary, include_archived)
             .await?
             .document)
+    }
+
+    pub async fn write_attachment(
+        &self,
+        task_id: &JsString,
+        operation_id: &JsString,
+        attachment_id: &JsString,
+        bytes: &[u8],
+    ) -> IvyResult<Json> {
+        require(
+            bytes.len() <= 8 * 1024 * 1024,
+            "limit_exceeded",
+            "Task attachments are limited to 8 MiB.",
+        )?;
+        let mutation = scoped_operation_id(
+            self.client.clone(),
+            &Json::Array(vec![
+                "task-board-attachment".into(),
+                Json::String(operation_id.clone()),
+            ]),
+        )
+        .await?;
+        let mut name = JsString::from("Task attachment ");
+        name.0.extend_from_slice(&attachment_id.0);
+        // Attachments retain binary bytes and task ownership. A failed reply
+        // propagates with the original identity; no create/name recovery applies.
+        let result = self
+            .client
+            .request(
+                "objects.write",
+                Json::object([
+                    ("mutationId", Json::String(mutation)),
+                    (
+                        "contractVersion",
+                        self.contracts.version("task-board/attachment")?.into(),
+                    ),
+                    ("references", Json::object(Vec::<(String, Json)>::new())),
+                    (
+                        "create",
+                        Json::object([
+                            ("parentId", Json::String(task_id.clone())),
+                            ("ownerObjectId", Json::String(task_id.clone())),
+                            ("contractKey", "task-board/attachment".into()),
+                            ("name", Json::String(name)),
+                        ]),
+                    ),
+                    (
+                        "content",
+                        Json::object([
+                            ("encoding", "base64".into()),
+                            ("value", STANDARD.encode(bytes).into()),
+                        ]),
+                    ),
+                ]),
+                RequestOptions::default(),
+            )
+            .await?;
+        pin(&result)
+    }
+
+    /// The owner supplies the exact admitted versions from its contract bundle.
+    /// Local query policy has its own text/property bindings and is not routed
+    /// through Hive as a fallback when those bindings are unavailable.
+    pub async fn remote_page(
+        &self,
+        key: &str,
+        options: &Json,
+        readable_versions: &[JsString],
+    ) -> IvyResult<Json> {
+        let root = match &self.journal.root_object_id {
+            Some(root) => Json::object([
+                ("op", "eq".into()),
+                ("field", "object.parentId".into()),
+                ("value", Json::String(root.clone())),
+            ]),
+            None => Json::object([("op", "isNull".into()), ("field", "object.parentId".into())]),
+        };
+        let provided = |field| options.get(field).filter(|value| !value.is_null());
+        let mut params = Json::object([
+            ("contractKey", key.into()),
+            (
+                "contractVersions",
+                provided("contractVersions").cloned().unwrap_or_else(|| {
+                    Json::Array(
+                        readable_versions
+                            .iter()
+                            .cloned()
+                            .map(Json::String)
+                            .collect(),
+                    )
+                }),
+            ),
+            (
+                "where",
+                if let Some(predicate) = provided("where") {
+                    Json::object([
+                        ("op", "and".into()),
+                        ("args", Json::Array(vec![root, predicate.clone()])),
+                    ])
+                } else {
+                    root
+                },
+            ),
+            (
+                "orderBy",
+                provided("orderBy").cloned().unwrap_or_else(|| {
+                    Json::Array(vec![Json::object([
+                        ("field", "object.id".into()),
+                        ("direction", "asc".into()),
+                    ])])
+                }),
+            ),
+            (
+                "limit",
+                provided("limit").cloned().unwrap_or(Json::Number(50.0)),
+            ),
+        ]);
+        if let Some(select) = provided("select") {
+            params.insert("select", select.clone());
+        }
+        if let Some(cursor) = provided("cursor")
+            .filter(|cursor| cursor.as_js_string().is_some_and(|s| !s.0.is_empty()))
+        {
+            params.insert("cursor", cursor.clone());
+        }
+        self.client
+            .request("objects.query", params, RequestOptions::default())
+            .await
     }
 
     async fn record(

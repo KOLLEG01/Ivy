@@ -11,5 +11,6 @@ pub mod local_retention;
 pub mod local_workspaces;
 pub mod journal_store;
 pub mod operations;
+pub mod publication;
 pub mod task_keys;
 pub mod turn_output;
