@@ -13,7 +13,15 @@ const {IvyError} = await import('../../packages/contracts/src/errors.ts');
 const input = JSON.parse(readFileSync(0, 'utf8'));
 try {
   let value;
-  if (input.kind === 'source') {
+  if (input.kind === 'storage') {
+    const storage = await import('../../packages/host-runtime/src/storage-space.ts');
+    if (input.operation === 'schedule') {
+      const schedule = new storage.RetentionSchedule(input.now);
+      value = input.steps.map(step => { const result = schedule[step.method](...step.args); return result ?? null; });
+    } else value = await storage[input.operation](...input.args);
+    if (value === undefined) value = null;
+  }
+  else if (input.kind === 'source') {
     const source = await import('../../packages/host-runtime/src/source.ts');
     value = await source[input.operation](...input.args);
     if (value === undefined) value = null;

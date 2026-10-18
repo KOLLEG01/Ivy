@@ -8,6 +8,8 @@ mod journal_cases;
 mod artifact_cases;
 #[path = "host-source-cases.rs"]
 mod source_cases;
+#[path = "host-storage-space-cases.rs"]
+mod storage_space_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
