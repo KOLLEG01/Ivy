@@ -7,6 +7,8 @@ mod meta;
 #[path = "schema_resources.rs"]
 mod resources;
 pub use resources::{SchemaResourceGraph, SchemaResourceNode};
+#[path = "schema_uri.rs"]
+pub mod uri;
 
 /// An admitted finite schema graph. Compilation separately checks keyword values.
 pub struct AdmittedSchema {

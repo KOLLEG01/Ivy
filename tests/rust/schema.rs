@@ -5,6 +5,55 @@ use ivy_contracts::{
 };
 
 #[test]
+fn uri_components_match_compiler_encoding_and_dot_segments() {
+    use ivy_contracts::schema::uri::{
+        Component::{Path, QueryOrFragment, Userinfo},
+        normalize_component, normalize_percent, remove_dot_segments, serialize_component,
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .arg("tests/fixtures/schema-uri-oracle.mjs")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 2000);
+    for row in rows {
+        let IvyJson::String(input) = parse(row["input"].as_str().unwrap(), 100_000).unwrap() else {
+            panic!("Expected string input");
+        };
+        let actual = IvyJson::Array(
+            [
+                normalize_percent(&input, false),
+                normalize_percent(&input, true),
+                normalize_component(&input, Path),
+                normalize_component(&input, QueryOrFragment),
+                serialize_component(&input, Path, false),
+                serialize_component(&input, Path, true),
+                serialize_component(&input, QueryOrFragment, false),
+                serialize_component(&input, QueryOrFragment, false),
+                serialize_component(&input, Userinfo, false),
+                remove_dot_segments(&input),
+            ]
+            .into_iter()
+            .map(IvyJson::String)
+            .collect(),
+        );
+        assert_eq!(
+            stringify(&actual, 100_000).unwrap(),
+            row["output"].as_str().unwrap(),
+            "{}",
+            row["input"]
+        );
+    }
+}
+
+#[test]
 fn dynamic_patterns_match_pinned_re2js() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")
