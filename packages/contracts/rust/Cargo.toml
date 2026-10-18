@@ -37,3 +37,7 @@ path = "../../../tests/rust/canonical-bundle.rs"
 [[test]]
 name = "domain-schemas"
 path = "../../../tests/rust/domain-schemas.rs"
+
+[[test]]
+name = "native-contract"
+path = "../../../tests/rust/native-contract.rs"
