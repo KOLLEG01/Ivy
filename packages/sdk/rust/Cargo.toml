@@ -21,3 +21,7 @@ tz-rs.workspace = true
 [[test]]
 name = "sdk"
 path = "../../../tests/rust/sdk.rs"
+
+[[test]]
+name = "sdk-operation-ids"
+path = "../../../tests/rust/sdk-operation-ids.rs"
