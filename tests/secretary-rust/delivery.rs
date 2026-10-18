@@ -7,6 +7,8 @@ use std::{
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
+#[path = "inbox_evidence_cases.rs"]
+mod inbox_evidence_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 

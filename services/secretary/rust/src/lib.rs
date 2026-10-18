@@ -3,6 +3,7 @@ pub mod assignment_object;
 pub mod assignment_schema;
 pub mod browser_notice;
 pub mod document;
+pub mod inbox_evidence;
 pub mod journal;
 pub mod media_input;
 pub mod media_schema;
