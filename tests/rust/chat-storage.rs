@@ -3,6 +3,8 @@ use ivy_chat_bridge::whatsapp::journal_io::{JournalIo, StorageUnavailable};
 use rusqlite::{Connection, types::Value};
 #[path = "chat-store-cases.rs"]
 mod chat_store;
+#[path = "chat-store-hive-cases.rs"]
+mod chat_store_hive;
 fn text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }

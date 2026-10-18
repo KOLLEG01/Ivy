@@ -1,4 +1,5 @@
 //! ChatBridge persistence. Admission and domain transitions belong to the caller.
+pub mod hive;
 pub mod local;
 
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, hash::hash_json};
@@ -71,6 +72,20 @@ pub enum Destination<'a> {
         object_id: &'a str,
         expected_revision: i64,
     },
+}
+
+#[derive(Clone, Copy)]
+pub enum Reference<'a> {
+    Current(&'a str),
+    Pinned(&'a Pin),
+}
+impl Reference<'_> {
+    pub fn json(self) -> Json {
+        match self {
+            Self::Current(id) => Json::object([("objectId", id.into())]),
+            Self::Pinned(pin) => pin.json(),
+        }
+    }
 }
 
 pub fn mutation(scope: &str, step: &str) -> IvyResult<String> {
