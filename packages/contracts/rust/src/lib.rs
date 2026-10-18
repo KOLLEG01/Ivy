@@ -25,6 +25,7 @@ pub mod schema;
 mod schema_lookup;
 pub mod secretary_schema;
 pub mod validation;
+pub mod whatwg_url;
 pub mod wire_schema;
 
 pub use error::{IvyError, IvyResult, Outcome};
