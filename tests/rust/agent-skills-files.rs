@@ -5,7 +5,7 @@ use ivy_agent_manager::{
 };
 use ivy_contracts::{
     IvyError, IvyJson, JsString, Outcome,
-    hash::{digest, hash_json},
+    hash::digest,
     json::{canonical, parse, stringify},
 };
 use ivy_host_runtime::node_path::{self, Context};
@@ -83,7 +83,7 @@ fn comparator() -> Arc<SkillsComparator> {
         let pair = pairs
             .iter()
             .find(|row| text(row, "left") == *left && text(row, "right") == *right)
-            .expect("unexpected synthetic locale pair");
+            .unwrap_or_else(|| panic!("unexpected synthetic locale pair {left:?}/{right:?}"));
         field(pair, "result")
             .as_f64()
             .unwrap()
@@ -220,6 +220,35 @@ fn tree_hash_matches_original_depth_first_locale_ties_and_observed_link_boundari
             Err(error) => IvyJson::object([("error", error.to_wire())]),
         };
         compare(&actual, &expected, &format!("tree {mode:?}"));
+    }
+    #[cfg(windows)]
+    {
+        use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+        let path = root.0.join("raw-native-surrogate");
+        fs::create_dir(&path).unwrap();
+        let mut name = "bad".encode_utf16().collect::<Vec<_>>();
+        name.push(0xd800);
+        name.extend("name".encode_utf16());
+        fs::write(
+            path.join(OsString::from_wide(&name)),
+            "unpaired native name",
+        )
+        .unwrap();
+        let expected = fixture(IvyJson::object([
+            ("action", "treeExisting".into()),
+            ("target", value(&path)),
+        ]));
+        let actual = match tree_hash(&node_path::from_native(&path), compare_names.as_ref()) {
+            Ok(hash) => {
+                IvyJson::object([("result", hash.map(IvyJson::from).unwrap_or(IvyJson::Null))])
+            }
+            Err(error) => IvyJson::object([("error", error.to_wire())]),
+        };
+        compare(
+            &actual,
+            &expected,
+            "raw Windows lone-surrogate directory entry",
+        );
     }
 }
 struct Held {
@@ -386,7 +415,11 @@ async fn explicit_skills_import_retains_source_and_metadata_then_uses_current_ru
         )
         .unwrap();
         assert_eq!(current.get("schemaVersion"), Some(&IvyJson::Number(2.0)));
-        assert_eq!(current.get("extra"), state.get("extra"));
+        compare(
+            field(&current, "extra"),
+            field(state, "extra"),
+            "retained metadata values",
+        );
         assert_eq!(current.get("appliedVersion"), state.get("appliedVersion"));
         for name in ["alpha", "beta"] {
             let path = node_path::from_native(&base.join("skills").join(name));

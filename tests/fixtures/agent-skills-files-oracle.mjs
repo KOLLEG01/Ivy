@@ -1,7 +1,7 @@
 import {registerHooks} from 'node:module';
 import {readFileSync} from 'node:fs';
 import {mkdir,writeFile,readFile,rm,readdir,symlink,lstat} from 'node:fs/promises';
-import {join,dirname,relative} from 'node:path';
+import {join,dirname} from 'node:path';
 import assert from 'node:assert/strict';
 import {IvyError} from '../../dist/packages/contracts/src/errors.js';
 import {digest,hashJson} from '../../dist/packages/contracts/src/canonical.js';
@@ -12,12 +12,12 @@ const hook=registerHooks({load(url,context,next){
 const {SkillsManager,treeHash}=await import('../../dist/services/agent-manager/src/environment.js');hook.deregister();
 let bytes='';for await(const chunk of process.stdin)bytes+=chunk;const input=JSON.parse(bytes);
 const hive='https://fixture.example',hostId='fixture',authority=hashJson({hive,hostId});
-const names=['SKILL.md','nested','notes.txt','é.txt','e\u0301.txt','Å.txt','A\u030A.txt','empty','a.txt','z.txt','link','bad\ufffd\ufffd\ufffdname'];
+const names=['SKILL.md','nested','notes.txt','é.txt','e\u0301.txt','Å.txt','A\u030A.txt','empty','a.txt','z.txt','link','bad\ufffdname','bad\ufffd\ufffd\ufffdname'];
 const pairs=names.flatMap(left=>names.map(right=>({left,right,result:Math.sign(left.localeCompare(right))})));
 const defaults=(enabled=true)=>({schemaVersion:1,hostId:null,enabled,files:[{path:'alpha/SKILL.md',content:'default\né'},{path:'alpha/nested/notes.txt',content:'contents'},{path:'beta/SKILL.md',content:'second'}]});
 const applyModes=['fresh','disabled','empty','owned-same','owned-change','owned-edit','owned-missing','unowned','second-collision','removed-edit','invalid-state','state-directory','root-link','state-root-link','owned-link','oversized-owned','relative','missing-home','read-failure','bad-document'];
 const bootstrapModes=['fresh','disabled','invalid-state','empty-state','null-state','state-directory','oversized-state','missing-home'];
-const treeModes=['ordered','link','oversized','file','missing',...(process.platform==='win32'?['lone-surrogate']:[])];
+const treeModes=['ordered','link','oversized','file','missing',...(process.platform==='win32'?['replacement-character']:[])];
 const missing={async request(method){assert.equal(method,'objects.stat');throw new IvyError('not_found','fixture missing');}};
 const normalize=(value,root)=>typeof value==='string'?value.replaceAll(root,'<root>').replaceAll('\\','/'):Array.isArray(value)?value.map(v=>normalize(v,root)):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,normalize(v,root)])):value;
 function status(manager){assert(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(manager.status.observedAt));const{observedAt,...value}=manager.status;return value;}
@@ -59,13 +59,14 @@ async function treeFixture(root,mode){
   if(mode==='ordered')for(const name of ['é.txt','e\u0301.txt','Å.txt','A\u030A.txt','a.txt','z.txt'])await writeFile(join(target,name),name);
   if(mode==='link'){await mkdir(join(root,'outside'));await symlink(join(root,'outside'),join(target,'link'),process.platform==='win32'?'junction':'dir');}
   if(mode==='oversized')await writeFile(join(target,'SKILL.md'),Buffer.alloc(256*1024+1));
-  if(mode==='lone-surrogate')await writeFile(join(target,'bad\ud800name'),'unpaired native name');
+  if(mode==='replacement-character')await writeFile(join(target,'bad\ufffdname'),'replacement character');
   return target;
 }
 if(input.action==='catalog')console.log(JSON.stringify({applyModes,bootstrapModes,treeModes,pairs,defaults:defaults()}));
 else if(input.action==='prepare')console.log(JSON.stringify(await prepare(input.root,input.mode,input.bootstrap)));
 else if(input.action==='snapshot')console.log(JSON.stringify(await snapshot(input.root,input.provided)));
 else if(input.action==='treePrepare')console.log(JSON.stringify(await treeFixture(input.root,input.mode)));
+else if(input.action==='treeExisting'){try{console.log(JSON.stringify({result:await treeHash(input.target)}));}catch(error){console.log(JSON.stringify({error:IvyError.from(error).toWire()}));}}
 else if(input.action==='treeRun'){const target=await treeFixture(input.root,input.mode);try{console.log(JSON.stringify({result:await treeHash(target)}));}catch(error){console.log(JSON.stringify({error:IvyError.from(error).toWire()}));}}
 else if(input.action==='lifecycle'){
   const prepared=await prepare(input.root,'fresh'),manager=new SkillsManager(prepared.home,prepared.target,hostId,hive,prepared.defaults),states=[status(manager)];
