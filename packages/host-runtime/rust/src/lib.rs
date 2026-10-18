@@ -6,6 +6,7 @@ pub mod codex_app_tools;
 pub mod codex_connection;
 pub mod codex_framing;
 pub mod codex_handshake;
+pub mod codex_home;
 pub mod codex_proxy_transport;
 pub mod codex_rpc;
 pub mod concurrency;
