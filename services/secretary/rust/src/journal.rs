@@ -294,7 +294,9 @@ impl Journal {
                     continue;
                 }
                 if text(&value,"action") == "capture" && text(&value,"phase") == "succeeded" && !self.db.query_row("SELECT EXISTS(SELECT 1 FROM capture_acknowledgements WHERE capture_id=?)",[id],|r|r.get::<_,bool>(0)).map_err(storage)? { continue; }
-                let operation_id = value.get("operationId").unwrap_or(&IvyJson::Null);
+                let Some(operation_id) = value.get("operationId") else {
+                    continue;
+                };
                 if operation_identity(operation_id).is_none() {
                     continue;
                 }

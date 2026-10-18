@@ -311,6 +311,27 @@ fn typescript_and_rust_cross_open_the_same_journal() {
     };
     run("create");
     let journal = Journal::open(&dir.0.join("secretary.sqlite"), Limits::default()).unwrap();
+    // Canonical writes retain their policy even though ordinary parsing is unbounded.
+    let nested = |count| {
+        let mut value = value(r#""\ud800""#);
+        for _ in 0..count {
+            value = IvyJson::Array(vec![value]);
+        }
+        IvyJson::object([("value", value)])
+    };
+    let wide = |count| IvyJson::object([("value", IvyJson::Array(vec![IvyJson::Null; count]))]);
+    for (name, expected) in [("deep", nested(127)), ("wide", wide(399_998))] {
+        let saved = journal.named("fixture", name, true).unwrap().unwrap();
+        assert_eq!(saved.value, expected);
+        journal.amend_technical("fixture", &saved.pin, &expected).unwrap();
+    }
+    for (name, rejected) in [("too-deep", nested(128)), ("too-wide", wide(399_999))] {
+        assert_eq!(
+            journal.create_technical("fixture", name, &rejected).unwrap_err().code,
+            "limit_exceeded"
+        );
+        assert!(journal.named("fixture", name, true).unwrap().is_none());
+    }
     let old = journal.named("fixture", "same", true).unwrap().unwrap();
     assert_eq!(
         old.value,
