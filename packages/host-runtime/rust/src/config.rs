@@ -71,7 +71,7 @@ impl InstanceConfig {
     pub fn data_root(&self) -> &Path { &self.data_root }
     pub fn artifact_root(&self) -> &Path { &self.artifact_root }
 }
-fn path_value(value: &IvyJson) -> IvyResult<PathBuf> {
+pub(crate) fn path_value(value: &IvyJson) -> IvyResult<PathBuf> {
     let text = value.as_js_string().ok_or_else(IvyError::internal)?;
     #[cfg(windows)]
     { use std::os::windows::ffi::OsStringExt; Ok(OsString::from_wide(&text.0).into()) }

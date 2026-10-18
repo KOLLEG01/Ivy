@@ -14,6 +14,15 @@ const input = JSON.parse(readFileSync(0, 'utf8'));
 try {
   let value;
   if (input.kind === 'file') value = await jsonFile(input.path, input.limit);
+  else if (input.kind === 'accepted') {
+    const accepted = await import('../../packages/host-runtime/src/accepted-configuration.ts');
+    value = accepted[input.operation](...input.args);
+    if (value === undefined) value = null;
+  }
+  else if (input.kind === 'layout') {
+    const layout = await import('../../packages/host-runtime/src/layout.ts');
+    value = layout[input.operation](...input.args);
+  }
   else if (input.kind === 'health') {
     const {checkHealth} = await import('../../packages/host-runtime/src/health.ts');
     Date.now = () => input.now;

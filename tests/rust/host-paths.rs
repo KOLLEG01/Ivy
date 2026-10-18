@@ -101,6 +101,99 @@ fn stop_fence() -> IvyJson {
     ])
 }
 
+fn host_configuration(fixture: &ServiceFixture) -> IvyJson {
+    IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)), ("hostId", "fixture-host".into()),
+        ("runtimeRoot", fixture.0.join("state").to_string_lossy().to_string().into()),
+        ("artifactRoot", fixture.0.join("artifacts").to_string_lossy().to_string().into()),
+        ("stagingRoot", fixture.0.join("staging").to_string_lossy().to_string().into()),
+        ("publicBaseUrl", "http://127.0.0.1:39081/ivy".into()),
+        ("executables", IvyJson::object([("node", "fixture-node".into())])),
+        ("instances", IvyJson::Array(vec![IvyJson::object([
+            ("instanceId", "fixture".into()), ("serviceNodeId", "fixture-node".into()), ("componentId", "fixture".into()),
+            ("engine", "process".into()), ("enabled", true.into()), ("settings", IvyJson::object(Vec::<(String, IvyJson)>::new())),
+        ])])),
+    ])
+}
+fn accepted_oracle(operation: &str, args: Vec<IvyJson>, result: ivy_contracts::IvyResult<IvyJson>) {
+    compare_config_oracle(IvyJson::object([("kind", "accepted".into()), ("operation", operation.into()), ("args", IvyJson::Array(args))]), result);
+}
+
+#[test]
+fn accepted_configuration_preserves_installation_and_revision_boundaries() {
+    use ivy_host_runtime::{accepted_configuration::*, layout::*};
+    let fixture = ServiceFixture::new(); let anchor = host_configuration(&fixture);
+    for revision in ["launch-1".to_string(), format!("sha256:{}", "a".repeat(64)), "".into(), "../escape".into(), "a".repeat(129), "é".into(), format!("sha256:{}", "A".repeat(64))] {
+        accepted_oracle("acceptedInstanceConfigurationPath", vec![anchor.clone(), revision.clone().into()],
+            accepted_instance_configuration_path(&anchor, &revision).map(|p| p.to_string_lossy().to_string().into()));
+    }
+    for mode in ["same", "host", "roots", "node", "identity", "component", "storage", "removed", "settings", "restored", "modern"] {
+        let mut next = anchor.clone();
+        let mut instances = next.required("instances").unwrap().as_array().unwrap().to_vec();
+        match mode {
+            "host" => next.insert("hostId", "other".into()),
+            "roots" => next.insert("runtimeRoot", fixture.0.join("other").to_string_lossy().to_string().into()),
+            "node" => next.insert("executables", IvyJson::object([("node", "different-node".into())])),
+            "identity" => instances[0].insert("serviceNodeId", "other".into()),
+            "component" => instances[0].insert("componentId", "other".into()),
+            "storage" => instances[0].insert("paths", IvyJson::object([("data", "other/data".into()), ("work", "other/work".into()), ("logs", "other/logs".into())])),
+            "removed" => instances.clear(),
+            "settings" => instances[0].insert("settings", IvyJson::object([("changed", true.into())])),
+            "restored" => next.insert("restoredFrom", IvyJson::object([("backupId", "changed".into())])),
+            "modern" => next.insert("servicesRoot", fixture.0.join("services").to_string_lossy().to_string().into()),
+            _ => (),
+        }
+        next.insert("instances", IvyJson::Array(instances));
+        accepted_oracle("sameInstallation", vec![anchor.clone(), next.clone()], same_installation(&anchor, &next).map(|_| IvyJson::Null));
+        accepted_oracle("installationRecord", vec![next.clone()], installation_record(&next).map(Into::into));
+    }
+    for modern in [false, true] {
+        let mut source = anchor.clone(); if modern { source.insert("servicesRoot", fixture.0.join("services").to_string_lossy().to_string().into()); }
+        for id in ["fixture", "missing"] {
+            compare_config_oracle(IvyJson::object([("kind", "layout".into()), ("operation", "servicePaths".into()), ("args", IvyJson::Array(vec![source.clone(), id.into()]))]), service_paths(&source, &id.into()));
+        }
+    }
+}
+
+#[test]
+fn accepted_configuration_files_remain_private_immutable_and_direct() {
+    use ivy_host_runtime::accepted_configuration::*;
+    let fixture = ServiceFixture::new(); let anchor = host_configuration(&fixture);
+    let saved = save_accepted_configuration(&anchor).unwrap();
+    let expected = format!("{}\n", ivy_contracts::json::canonical(&anchor, usize::MAX).unwrap());
+    assert_eq!(fs::read_to_string(&saved).unwrap(), expected);
+    accepted_oracle("readAcceptedConfiguration", vec![anchor.clone(), saved.to_string_lossy().to_string().into()], read_accepted_configuration(&anchor, &saved));
+    let source = fixture.0.join("state/launch.json"); fs::write(&source, ivy_contracts::json::stringify(&fixture.value(), usize::MAX).unwrap()).unwrap();
+    let target = save_accepted_instance_configuration(&anchor, &source, "launch-1").unwrap();
+    assert!(save_accepted_instance_configuration(&anchor, &source, "launch-1").is_err());
+    fs::write(&source, "null").unwrap();
+    accepted_oracle("readAcceptedInstanceConfiguration", vec![anchor.clone(), target.to_string_lossy().to_string().into()], read_accepted_instance_configuration(&anchor, &target));
+    for mode in ["missing", "directory", "oversize", "invalid", "outside", "nested", "changed"] {
+        let file = match mode {
+            "outside" => fixture.0.join("outside.json"),
+            "nested" => saved.parent().unwrap().join("nested/test.json"),
+            _ => saved.parent().unwrap().join(format!("{mode}.json")),
+        };
+        if mode == "directory" { fs::create_dir(&file).unwrap(); }
+        else if mode != "missing" {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            let content = if mode == "oversize" { " ".repeat(1024 * 1024 + 1) }
+                else if mode == "invalid" { "{".into() }
+                else if mode == "changed" { let mut value = anchor.clone(); value.insert("hostId", "other".into()); ivy_contracts::json::canonical(&value, usize::MAX).unwrap() }
+                else { expected.clone() };
+            fs::write(&file, content).unwrap();
+        }
+        accepted_oracle("readAcceptedConfiguration", vec![anchor.clone(), file.to_string_lossy().to_string().into()], read_accepted_configuration(&anchor, &file));
+    }
+    #[cfg(unix)] {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        assert_eq!(fs::metadata(&saved).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(saved.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        let link = saved.parent().unwrap().join("link.json"); symlink(&saved, &link).unwrap();
+        assert_eq!(read_accepted_configuration(&anchor, &link).unwrap_err().code, "configuration_changed");
+    }
+}
+
 struct FixedHealthClock(i64);
 impl ivy_sdk::clock::Clock for FixedHealthClock {
     fn utc_millis(&self) -> i64 { self.0 }
