@@ -51,7 +51,7 @@ const accepted = await hostConfig(configPath);
 const journal = new HostJournal(accepted);
 await mkdir(join(artifact,'dist','native'), {recursive:true});
 if (process.platform === 'win32') await copyFile(job, join(artifact,'dist','native','ivy-job.exe'));
-await atomicJson(join(artifact,'dist','build-info.json'), {version:'1.0.0', buildId:hash});
+await atomicJson(join(artifact,'dist','build-info.json'), {schemaVersion:1,componentId:'service-manager',version:'1.0.0', buildId:hash});
 const instance = {schemaVersion:1, hostId:config.hostId, instanceId:'manager', serviceNodeId:'native.manager', componentId:'service-manager',
   publicBaseUrl, credential:token, version:'1.0.0', buildId:hash, dataRoot:managerData, artifactRoot:artifact, settings:{hostConfigPath:configPath}};
 await atomicJson(instancePath, instance);
@@ -86,6 +86,7 @@ async function qualifyDispatcherOwner() {
   await mkdir(payload,{recursive:true});
   await copyFile(binary,join(payload,'ivy-service-manager.exe'));
   await copyFile(healthBinary,join(payload,'ivy-health.exe'));
+  await atomicJson(join(payload,'build-info.json'),{schemaVersion:1,componentId:'service-manager',version:instance.version,buildId:hash});
   const plan = JSON.parse(await readFile('services/service-manager/deploy.json','utf8'));
   const manifest = Object.fromEntries(['schemaVersion','componentId','kind','connectsToHive','requirements','entrypoint','readiness','shutdown','restart','storage','runtimeReset']
     .map(key=>[key,plan[key]]));
@@ -93,10 +94,10 @@ async function qualifyDispatcherOwner() {
   await atomicJson(join(artifact,'manifest.json'),manifest);
   journal.saveCandidate({candidateId:hash,componentId:'service-manager',artifactRoot:artifact,manifestPath:join(artifact,'manifest.json'),
     buildId:hash,createdAt:new Date().toISOString(),platform:{os:process.platform,arch:process.arch,node:process.versions.node}},manifest);
-  const ownerPath = join(root,'dispatcher-owner.json'), closePath = join(root,'dispatcher-owner-close');
+  const ownerPath = join(root,'dispatcher-owner.json'), closePath = join(root,'dispatcher-owner-close'), replacementPath = join(root,'dispatcher-replacement.json');
   const target = {schemaVersion:1,instanceId:'manager',revision:'dispatcher-owner-launch',candidateId:hash,desired:'running',
     configPath:instancePath,requestedAt:new Date().toISOString()};
-  await atomicJson(ownerPath,{hostConfigPath:configPath,nodeExecutable:process.execPath,bootstrapRoot:artifact,closePath,target});
+  await atomicJson(ownerPath,{hostConfigPath:configPath,nodeExecutable:process.execPath,bootstrapRoot:artifact,closePath,replacementPath,target});
   let diagnostics = '';
   const child = spawn(ownerBinary,['--exact','dispatcher_owner_fixture','--nocapture'],{env:{...process.env,IVY_MANAGER_DISPATCH_OWNER:ownerPath},
     windowsHide:true,stdio:['ignore','pipe','pipe']});
@@ -132,6 +133,19 @@ async function qualifyDispatcherOwner() {
   assert.deepEqual(observed,{ok:true,buildId:hash,generation:health.generation});
   assert.equal(await readFile(controlPath,'utf8'),beforeControl);
   results.push('real RuntimeOwner/Job/Node/native Manager chain and direct native health dispatcher');
+
+  await rm(join(payload,'ivy-health.exe'));
+  await atomicJson(replacementPath,{...target,revision:'incomplete-native-replacement',requestedAt:new Date().toISOString()});
+  await until(()=>{
+    assert.equal(child.exitCode,null,diagnostics);
+    const value=journal.observations().manager;
+    return value?.state==='failed' && value.code==='artifact_missing';
+  });
+  const retained=JSON.parse(await readFile(join(managerData,'health.json'),'utf8'));
+  assert.equal(retained.pid,health.pid);assert.equal(retained.bootId,health.bootId);assert.equal(retained.launchId,target.revision);
+  assert.equal(await readFile(controlPath,'utf8'),beforeControl);
+  assert.ok(windowsProcess(health.pid));
+  results.push('frozen-manifest native preflight refuses missing payload before draining the ready Manager');
 
   // A mismatched boot/launch cannot stop the actual native child through its wrapper.
   await atomicJson(controlPath,{schemaVersion:1,instanceId:'manager',launchId:'wrong-launch',bootId:health.bootId,action:'shutdown',requestedAt:new Date().toISOString()});

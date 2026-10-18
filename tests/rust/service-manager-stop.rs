@@ -227,7 +227,7 @@ fn native_executable_interoperates_with_unchanged_hive_and_public_sdk() {
             .as_array()
             .unwrap()
             .len(),
-        if cfg!(windows) { 8 } else { 6 }
+        if cfg!(windows) { 9 } else { 6 }
     );
 }
 
@@ -253,6 +253,43 @@ async fn dispatcher_owner_fixture() {
         .unwrap();
     let journal = HostJournal::open(host.clone()).await.unwrap();
     let target = request.required("target").unwrap().clone();
+    publish_dispatch_target(&journal, target).await;
+    let node_path = path("nodeExecutable");
+    let node = NodeRuntime::discover(Some(&node_path)).await.unwrap();
+    let owner = RuntimeOwner::for_host(host, "manager".into(), path("bootstrapRoot"), node)
+        .await
+        .unwrap();
+    owner.start().unwrap();
+    let close = path("closePath");
+    let replacement = path("replacementPath");
+    let requested = tokio::time::timeout(Duration::from_secs(60), async {
+        let mut published = false;
+        while !close.exists() {
+            if !published && replacement.exists() {
+                publish_dispatch_target(
+                    &journal,
+                    json_file(replacement.clone(), MANAGEMENT_FRAME_BYTES)
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                published = true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let result = owner.close().await;
+    journal.close().await.unwrap();
+    result.unwrap();
+    requested.expect("Dispatcher owner fixture exceeded its deadline");
+}
+
+#[cfg(windows)]
+async fn publish_dispatch_target(
+    journal: &ivy_host_runtime::journal::HostJournal,
+    target: IvyJson,
+) {
     let entry = journal
         .accept(
             IvyJson::object([
@@ -300,23 +337,6 @@ async fn dispatcher_owner_fixture() {
             .unwrap()
             .is_some()
     );
-    let node_path = path("nodeExecutable");
-    let node = NodeRuntime::discover(Some(&node_path)).await.unwrap();
-    let owner = RuntimeOwner::for_host(host, "manager".into(), path("bootstrapRoot"), node)
-        .await
-        .unwrap();
-    owner.start().unwrap();
-    let close = path("closePath");
-    let requested = tokio::time::timeout(Duration::from_secs(60), async {
-        while !close.exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-    let result = owner.close().await;
-    journal.close().await.unwrap();
-    result.unwrap();
-    requested.expect("Dispatcher owner fixture exceeded its deadline");
 }
 
 #[test]

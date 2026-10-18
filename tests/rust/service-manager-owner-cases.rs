@@ -12,6 +12,9 @@ use ivy_host_runtime::{
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+#[path = "service-manager-owner-import-cases.rs"]
+mod import_cases;
+
 fn json(value: &str) -> IvyJson {
     parse(value, MANAGEMENT_FRAME_BYTES).unwrap()
 }
@@ -720,9 +723,12 @@ fn owner_child_fixture() {
     .unwrap();
     let mut health = IvyJson::object([
         ("schemaVersion", IvyJson::Number(1.0)),
-        ("instanceId", "fixture".into()),
-        ("componentId", "fixture".into()),
-        ("buildId", hash()),
+        ("instanceId", config.required("instanceId").unwrap().clone()),
+        (
+            "componentId",
+            config.required("componentId").unwrap().clone(),
+        ),
+        ("buildId", config.required("buildId").unwrap().clone()),
         ("pid", IvyJson::Number(std::process::id() as f64)),
         ("bootId", "child-boot".into()),
         ("launchId", launch.clone().into()),

@@ -406,10 +406,11 @@ impl Owner {
         } else {
             Some(command.executable.clone().into())
         };
-        crate::artifact::verify_launch_candidate(
+        crate::artifact::verify_launch_candidate_with_manifest(
             candidate,
             path(selected.host.required("artifactRoot")?)?,
             selected_entry,
+            selected.manifest.clone(),
         )
         .await?;
         let requirements = selected.manifest.required("requirements")?;
