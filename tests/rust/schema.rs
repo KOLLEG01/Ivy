@@ -180,3 +180,61 @@ fn schema_graph_helpers_match_typescript() {
         );
     }
 }
+#[test]
+fn dynamic_meta_schema_matches_pinned_compiler() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/schema-meta-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 6000);
+    for row in rows {
+        let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
+        let result = match ivy_contracts::schema::admit_schema(&schema)
+            .and_then(|s| s.validate_meta_schema())
+        {
+            Ok(()) => IvyJson::object([("ok", true.into())]),
+            Err(error) => IvyJson::object([
+                ("ok", false.into()),
+                ("code", IvyJson::String(error.code_js())),
+                ("message", IvyJson::String(error.message_js())),
+            ]),
+        };
+        assert_eq!(
+            stringify(&result, 1_000_000).unwrap(),
+            row["result"].as_str().unwrap(),
+            "{}",
+            row["name"]
+        );
+    }
+}
+
+#[test]
+fn meta_schema_validation_uses_bounded_native_stack() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let mut schema = IvyJson::object([("type", "integer".into())]);
+            for _ in 0..64 {
+                schema = IvyJson::object([("items", schema)]);
+            }
+            ivy_contracts::schema::admit_schema(&schema)
+                .unwrap()
+                .validate_meta_schema()
+                .unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
