@@ -219,14 +219,15 @@ impl Barrier {
 }
 struct Handle {
     result: watch::Receiver<Option<IvyJson>>,
+    task: tokio::task::JoinHandle<()>,
 }
 impl Handle {
     fn track(work: impl Future<Output = IvyResult<IvyJson>> + Send + 'static) -> Self {
         let (sender, result) = watch::channel(None);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             sender.send_replace(Some(outcome(work.await)));
         });
-        Self { result }
+        Self { result, task }
     }
     async fn wait(&self) -> IvyJson {
         let mut receiver = self.result.clone();
@@ -430,7 +431,12 @@ impl Fixture {
                 ));
             }
             "drop" => {
-                self.handles.remove(&string(c, "handle"));
+                // Drop the actual NativeRun::wait future, not just its observer.
+                self.handles
+                    .remove(&string(c, "handle"))
+                    .unwrap()
+                    .task
+                    .abort();
             }
             "settle" => {
                 let identity = identity(field(c, "identity"));
@@ -712,17 +718,57 @@ async fn close_state(state: Arc<Mutex<LocalAgentState>>) {
         .unwrap();
 }
 
+// Both owners must observe the absent row before either can claim it. A barrier
+// before run alone can let one connection finish before the other's first read.
+struct ClaimBarrierStore {
+    inner: SqliteOperationStore,
+    first_read: AtomicBool,
+    barrier: Arc<tokio::sync::Barrier>,
+}
+impl NativeOperationStore for ClaimBarrierStore {
+    fn service_node_id(&self) -> &JsString {
+        self.inner.service_node_id()
+    }
+    fn read(&self, key: String) -> StoreFuture<'_, Option<SavedState>> {
+        Box::pin(async move {
+            let saved = self.inner.read(key).await?;
+            if self.first_read.swap(false, Ordering::SeqCst) {
+                assert!(saved.is_none());
+                self.barrier.wait().await;
+            }
+            Ok(saved)
+        })
+    }
+    fn write(
+        &self,
+        key: String,
+        value: IvyJson,
+        previous: Option<Pin>,
+    ) -> StoreFuture<'_, SavedState> {
+        self.inner.write(key, value, previous)
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn separate_sqlite_connections_allow_one_dispatch_and_restart_keeps_uncertainty() {
     let f = super::Fixture::new();
     let first_state = Arc::new(Mutex::new(f.open(10, 128 * 1024 * 1024)));
     let second_state = Arc::new(Mutex::new(f.open(10, 128 * 1024 * 1024)));
+    let claim_reads = Arc::new(tokio::sync::Barrier::new(2));
     let first = Owned::new(
-        Arc::new(SqliteOperationStore::new(first_state.clone()).unwrap()),
+        Arc::new(ClaimBarrierStore {
+            inner: SqliteOperationStore::new(first_state.clone()).unwrap(),
+            first_read: AtomicBool::new(true),
+            barrier: claim_reads.clone(),
+        }),
         Some(&"first".into()),
     );
     let second = Owned::new(
-        Arc::new(SqliteOperationStore::new(second_state.clone()).unwrap()),
+        Arc::new(ClaimBarrierStore {
+            inner: SqliteOperationStore::new(second_state.clone()).unwrap(),
+            first_read: AtomicBool::new(true),
+            barrier: claim_reads,
+        }),
         Some(&"second".into()),
     );
     let identity = id(&format!(
@@ -730,14 +776,11 @@ async fn separate_sqlite_connections_allow_one_dispatch_and_restart_keeps_uncert
         chrono::Utc::now().timestamp_millis()
     ));
     let sends = Arc::new(AtomicUsize::new(0));
-    let race = Arc::new(tokio::sync::Barrier::new(2));
     let mut work = Vec::new();
     for owned in [first, second] {
-        let race = race.clone();
         let sends = sends.clone();
         let identity = identity.clone();
         work.push(tokio::spawn(async move {
-            race.wait().await;
             let manager = owned.manager.clone();
             let request_id = manager.request_id(&identity)?.into();
             let memory = owned.memory.clone();
@@ -757,13 +800,24 @@ async fn separate_sqlite_connections_allow_one_dispatch_and_restart_keeps_uncert
                 },
                 false,
             )?;
-            let _ = run.wait().await;
-            Ok::<_, IvyError>(())
+            Ok::<_, IvyError>(run.wait().await)
         }));
     }
+    let mut failed = 0;
+    let mut recovered = 0;
     for call in work {
-        call.await.unwrap().unwrap();
+        match call.await.unwrap().unwrap() {
+            Err(error) => {
+                assert_eq!(error.code, "internal_error");
+                failed += 1;
+            }
+            Ok(value) => {
+                assert_eq!(value.get("phase"), Some(&IvyJson::from("outcome_unknown")));
+                recovered += 1;
+            }
+        }
     }
+    assert_eq!((failed, recovered), (1, 1));
     assert_eq!(sends.load(Ordering::SeqCst), 1);
     close_state(first_state).await;
     close_state(second_state).await;
