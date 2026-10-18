@@ -132,8 +132,11 @@ impl InventorySignal {
             options,
         }
     }
-    fn check(&self) -> IvyResult<()> {
+    pub(crate) fn check(&self) -> IvyResult<()> {
         (self.check)()
+    }
+    pub(crate) fn is_aborted(&self) -> bool {
+        self.options.cancellation.is_cancelled()
     }
 }
 
