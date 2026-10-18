@@ -270,7 +270,8 @@ pub fn to_native(path: &JsString) -> PathBuf {
 /// Lexical paths, JSON and direct native arguments still use lossless to_native.
 pub fn filesystem_path(path: &JsString) -> PathBuf { String::from_utf16_lossy(&path.0).into() }
 
-pub(crate) fn node_utf8(value: &std::ffi::OsStr) -> JsString {
+/// Decode a native filesystem name using Node's UTF-8 replacement behavior.
+pub fn node_utf8(value: &std::ffi::OsStr) -> JsString {
     let value = from_native(Path::new(value));
     #[cfg(windows)]
     {
