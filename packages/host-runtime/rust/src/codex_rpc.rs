@@ -408,7 +408,10 @@ impl Actor {
                     self.writable()?;
                     self.admission
                         .check_capacity(options.detach_on_timeout, options.priority)
-                        .map_err(|e| IvyError::new(e.code(), "Native request capacity is full."))?;
+                        .map_err(|e| IvyError::new(e.code(),
+                            if self.admission.pending_count() >= if options.priority == Priority::Interaction {64} else {56} {
+                                "Native request capacity is full; foreground slots remain reserved."
+                            } else { "Native observation capacity is full." }))?;
                     require(
                         self.requests.contains_key(&method),
                         "native_method_unavailable",
