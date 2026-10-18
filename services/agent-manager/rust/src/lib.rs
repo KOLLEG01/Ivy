@@ -18,6 +18,7 @@ pub mod native_operations;
 pub mod native_clock;
 pub mod native_dispatch;
 pub mod native_discovery;
+pub mod native_management;
 pub mod notifications;
 pub mod registry;
 pub mod skills;

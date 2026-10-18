@@ -27,6 +27,8 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream},
     sync::{mpsc, watch},
 };
+#[path = "agent-native-management.rs"]
+mod management_cases;
 
 fn catalog() -> IvyJson {
     parse(
