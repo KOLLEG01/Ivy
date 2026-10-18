@@ -121,6 +121,7 @@ fn response(request: &Request, code: StatusCode) -> Response {
     let mut response = Response {
         status_code: code,
         version: request.version,
+        wire_reason: None,
         headers: headers.into(),
         body: Vec::new(),
     };
