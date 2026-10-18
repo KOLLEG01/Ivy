@@ -10,6 +10,7 @@ pub mod operation_ids;
 pub mod main_chat;
 pub mod project_inventory;
 pub mod native_evidence;
+pub mod native;
 pub mod native_operation;
 pub mod native_observations;
 pub mod rpc;
