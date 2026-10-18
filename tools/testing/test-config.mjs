@@ -79,7 +79,7 @@ export function affected(file) {
   if (/^(package(-lock)?\.json|tsconfig.*\.json)$/.test(file))
     return scopes.filter((x) => x !== "tooling");
   if (/^packages\/host-runtime\//.test(file))
-    return ["host", "agent", "phone", "hive"];
+    return ["host", "agent", "phone", "hive", "secretary"];
   if (
     /^(services\/phone-bridge|tests\/native-phone|specs\/schemas\/phone|tools\/(?:build|operations|package|testing)\/.*phone)/.test(
       file,

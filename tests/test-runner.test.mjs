@@ -164,6 +164,8 @@ test("partial Rust checkouts select registered files under their owning scopes",
   mkdirSync(join(root, "tests/rust"), { recursive: true });
   for (const name of ["phone_media.rs", "hive_worker_client.rs", "service-manager-stop.rs"])
     writeFileSync(join(root, "tests/rust", name), "// isolated selector fixture\n");
+  mkdirSync(join(root, "tests/secretary-rust"));
+  writeFileSync(join(root, "tests/secretary-rust/delivery.rs"), "// Host process consumer\n");
   const selected = selectTests(root, config, { files: ["tests/rust/*.rs"] });
   assert.deepEqual(selected.map(({ file, scope }) => [file, scope]), [
     ["tests/rust/hive_worker_client.rs", "hive"],
@@ -171,6 +173,8 @@ test("partial Rust checkouts select registered files under their owning scopes",
     ["tests/rust/service-manager-stop.rs", "host"],
   ]);
   assert.throws(() => selectTests(root, config, { files: ["tests/rust/chat-journal.rs"] }), /Unknown test file/);
+  const hostConsumers = selectTests(root, config, { changed: ["packages/host-runtime/rust/src/process.rs"] });
+  assert.ok(hostConsumers.some(item => item.file === "tests/secretary-rust/delivery.rs"));
 });
 
 test("Cargo dispatch groups selected targets and stops after a failed prerequisite or test", (t) => {
@@ -181,11 +185,13 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     fs.appendFileSync(process.env.IVY_CARGO_TEST_LOG,JSON.stringify(args)+'\\n');
     if(args[0]===process.env.IVY_CARGO_TEST_FAIL)process.exit(7);`;
   for (const command of ["build", "test"]) writeFileSync(join(root, command), stub);
-  const run = (fail = "") => {
+  const run = (fail = "", files = [
+    "tests/rust/service-manager-stop.rs", "tests/rust/service-manager-policy.rs",
+    "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs",
+    "tests/secretary-rust/delivery.rs",
+  ]) => {
     writeFileSync(log, "");
-    const result = spawnSync(process.execPath, [resolve("tools/testing/test-rust.mjs"),
-      "tests/rust/service-manager-stop.rs", "tests/rust/service-manager-policy.rs",
-      "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs"], {
+    const result = spawnSync(process.execPath, [resolve("tools/testing/test-rust.mjs"), ...files], {
       cwd: root, windowsHide: true, encoding: "utf8", timeout: 15000,
       env: { ...process.env, IVY_CARGO: process.execPath, IVY_CARGO_TEST_LOG: log, IVY_CARGO_TEST_FAIL: fail },
     });
@@ -195,10 +201,17 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--bin", "ivy-job"]] : []),
     ["test", "--locked", "--package", "ivy-service-manager", "--test", "service-manager-stop", "--test", "service-manager-policy"],
     ["test", "--locked", "--package", "ivy-phone-bridge", "--test", "phone_media"],
+    ["test", "--locked", "--package", "ivy-secretary", "--test", "delivery"],
   ];
   const success = run();
   assert.equal(success.result.status, 0, success.result.stderr);
   assert.deepEqual(success.commands, expected);
+  const secretaryOnly = run("", ["tests/secretary-rust/delivery.rs"]);
+  assert.equal(secretaryOnly.result.status, 0, secretaryOnly.result.stderr);
+  assert.deepEqual(secretaryOnly.commands, [
+    ...(process.platform === "win32" ? [expected[0]] : []),
+    ["test", "--locked", "--package", "ivy-secretary", "--test", "delivery"],
+  ]);
   const failure = run(expected[0][0]);
   assert.equal(failure.result.status, 7, failure.result.stderr);
   assert.deepEqual(failure.commands, expected.slice(0, 1));
