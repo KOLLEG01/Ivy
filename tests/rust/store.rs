@@ -9,7 +9,13 @@ fn unresolved_guards_preserve_array_coercion_and_unpaired_surrogates() {
         archive.retain("op",&index.to_string(),text).unwrap();
         assert_eq!(archive.release("op",&index.to_string()).unwrap_err().code,"receipt_archive_unresolved");
     }
-    assert_eq!(archive.status().unwrap().records,4);
+    // Opaque receipts use ordinary JSON parsing, not the validator's node budget.
+    // The unresolved marker must still protect a receipt after a wide prefix.
+    let wide = format!(r#"[{}{{"phase":"unknown"}}]"#, "null,".repeat(400_000));
+    archive.retain("op", "wide", &wide).unwrap();
+    assert_eq!(archive.release("op", "wide").unwrap_err().code, "receipt_archive_unresolved");
+    assert_eq!(archive.read("op", "wide").unwrap().as_deref(), Some(wide.as_str()));
+    assert_eq!(archive.status().unwrap().records,5);
 }
 #[test]
 fn original_receipts_eviction_and_unknown_are_durable() {
