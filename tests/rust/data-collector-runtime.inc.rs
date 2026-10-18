@@ -60,7 +60,7 @@ fn runtime_mutations_and_reads_match_original_engine_receipts_and_effects() {
         let step = row.get("step").unwrap();
         let input = step.get("input").unwrap();
         let kind = model::text(step, "kind").unwrap();
-        let actual = (|| {
+        let actual: Result<IvyJson, IvyError> = (|| {
             Ok(match kind.as_str() {
                 "read" => match runtime.read(input)? {
                     Read::Local(value) => value,
