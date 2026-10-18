@@ -671,6 +671,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-util",
+ "url",
  "uuid",
  "windows-sys 0.61.2",
 ]
