@@ -163,7 +163,10 @@ export const rustTests = {
   'tests/rust/host-logs.rs': { package: 'ivy-host-runtime', test: 'host-logs' },
   'tests/rust/agent-state.rs': { package: 'ivy-agent-manager', test: 'agent-state' },
   'tests/rust/agent-notifications.rs': { package: 'ivy-agent-manager', test: 'agent-notifications' },
-  'tests/rust/agent-interactions.rs': { package: 'ivy-agent-manager', test: 'agent-interactions' },
+  'tests/rust/agent-interactions.rs': {
+    package: 'ivy-agent-manager', test: 'agent-interactions',
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+  },
   'tests/rust/agent-instructions.rs': { package: 'ivy-agent-manager', test: 'agent-instructions' },
   'tests/rust/service-manager-policy.rs': { package: 'ivy-service-manager', test: 'service-manager-policy' },
   'tests/rust/service-manager-data.rs': { package: 'ivy-service-manager', test: 'service-manager-data' },

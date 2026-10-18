@@ -181,11 +181,12 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     fs.appendFileSync(process.env.IVY_CARGO_TEST_LOG,JSON.stringify(args)+'\\n');
     if(args[0]===process.env.IVY_CARGO_TEST_FAIL)process.exit(7);`;
   for (const command of ["build", "test"]) writeFileSync(join(root, command), stub);
-  const run = (fail = "") => {
+  const run = (fail = "", files = [
+    "tests/rust/agent-interactions.rs", "tests/rust/service-manager-stop.rs",
+    "tests/rust/service-manager-policy.rs", "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs",
+  ]) => {
     writeFileSync(log, "");
-    const result = spawnSync(process.execPath, [resolve("tools/testing/test-rust.mjs"),
-      "tests/rust/service-manager-stop.rs", "tests/rust/service-manager-policy.rs",
-      "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs"], {
+    const result = spawnSync(process.execPath, [resolve("tools/testing/test-rust.mjs"), ...files], {
       cwd: root, windowsHide: true, encoding: "utf8", timeout: 15000,
       env: { ...process.env, IVY_CARGO: process.execPath, IVY_CARGO_TEST_LOG: log, IVY_CARGO_TEST_FAIL: fail },
     });
@@ -193,12 +194,16 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   };
   const expected = [
     ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--bin", "ivy-job"]] : []),
+    ["test", "--locked", "--package", "ivy-agent-manager", "--test", "agent-interactions"],
     ["test", "--locked", "--package", "ivy-service-manager", "--test", "service-manager-stop", "--test", "service-manager-policy"],
     ["test", "--locked", "--package", "ivy-phone-bridge", "--test", "phone_media"],
   ];
   const success = run();
   assert.equal(success.result.status, 0, success.result.stderr);
   assert.deepEqual(success.commands, expected);
+  const agentOnly = run("", ["tests/rust/agent-interactions.rs"]);
+  assert.equal(agentOnly.result.status, 0, agentOnly.result.stderr);
+  assert.deepEqual(agentOnly.commands, expected.slice(0, process.platform === "win32" ? 2 : 1));
   const failure = run(expected[0][0]);
   assert.equal(failure.result.status, 7, failure.result.stderr);
   assert.deepEqual(failure.commands, expected.slice(0, 1));
