@@ -138,6 +138,7 @@ export const rustTests = {
   'tests/rust/sdk-provider.rs': { package: 'ivy-sdk', test: 'sdk-provider' },
   'tests/rust/sdk-native-project.rs': { package: 'ivy-sdk', test: 'sdk-native-project' },
   'tests/secretary-rust/delivery.rs': { package: 'ivy-secretary', test: 'delivery' },
+  'tests/rust/sdk-date-parse.rs': { package: 'ivy-sdk', test: 'sdk-date-parse' },
   'tests/rust/host-scheduler.rs': { package: 'ivy-host-runtime', test: 'host-scheduler' },
   'tests/rust/host-paths.rs': { package: 'ivy-host-runtime', test: 'host-paths' },
   'tests/rust/host-windows-arguments.rs': { package: 'ivy-host-runtime', test: 'host-windows-arguments' },
