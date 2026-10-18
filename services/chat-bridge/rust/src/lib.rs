@@ -4,4 +4,5 @@ pub mod input_media;
 pub mod native_driver;
 pub mod registry;
 pub mod schema;
+pub mod store;
 pub mod whatsapp;

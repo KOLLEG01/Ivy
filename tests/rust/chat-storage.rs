@@ -1,6 +1,8 @@
 use ivy_chat_bridge::whatsapp::auth::{AuthMutation, AuthStore};
 use ivy_chat_bridge::whatsapp::journal_io::{JournalIo, StorageUnavailable};
 use rusqlite::{Connection, types::Value};
+#[path = "chat-store-cases.rs"]
+mod chat_store;
 fn text(value: &str) -> Value {
     Value::Text(value.to_owned())
 }
