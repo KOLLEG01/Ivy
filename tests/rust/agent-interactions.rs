@@ -27,6 +27,8 @@ mod native_handshake_cases;
 mod native_proxy_cases;
 #[path = "agent-native-rpc.rs"]
 mod native_rpc_cases;
+#[path = "agent-native-shell.rs"]
+mod native_shell_cases;
 
 fn json(s: &str) -> IvyJson {
     parse(s, 1024 * 1024).unwrap()
