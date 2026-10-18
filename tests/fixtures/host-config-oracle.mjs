@@ -88,6 +88,7 @@ try {
     else process.env.IVY_INSTANCE_CONFIG = input.environment;
     value = configurationPath();
   } else throw Error('Unknown fixture operation');
+  if (input.pick) value = Object.fromEntries(input.pick.map(key => [key, value[key]]));
   process.stdout.write(JSON.stringify({ok:true,value}));
 } catch (error) {
   process.stdout.write(JSON.stringify({ok:false,error:IvyError.from(error).toWire()}));

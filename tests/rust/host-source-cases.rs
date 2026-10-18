@@ -92,3 +92,36 @@ async fn preparation_records_are_atomic_owned_and_bound_to_release_identity() {
     compare("preparations","savePreparation",vec![host(&fixture),record.clone()],preparations::save_preparation(staging,record).await.map(|_|IvyJson::Null));
     assert!(!outside.join("preparation.json").exists());
 }
+
+#[tokio::test]
+async fn preparation_inventory_preserves_errors_and_never_follows_linked_build_roots() {
+    let fixture=ServiceFixture::new();let staging=fixture.0.join("staging");
+    let mut host=host(&fixture);host.insert("hostId","fixture-host".into());
+    let names:Vec<_>=["a","b","c","d"].iter().map(|digit| preparations::preparation_id_for_build(&hash(digit)).unwrap()).collect();
+    let roots:Vec<_>=names.iter().map(|id| staging.join(format!("build-{id}"))).collect();
+    for root in &roots[..3] {fs::create_dir_all(root).unwrap();}
+    fs::create_dir_all(staging.join("build-not-an-id")).unwrap();
+    fs::write(staging.join("build-not-an-id/ignored"),b"not inventoried").unwrap();
+    let record=IvyJson::object([("schemaVersion",IvyJson::Number(1.0)),("preparationId",names[0].clone().into()),("componentId","fixture".into()),("buildId",hash("a").into()),("snapshot",snapshot(&fixture)),("phase","building".into()),("candidate",IvyJson::Null),("startedAt","2026-01-01T00:00:00.000Z".into()),("updatedAt","2026-01-01T00:00:00.000Z".into()),("errorCode",IvyJson::Null)]);
+    preparations::save_preparation(staging.clone(),record).await.unwrap();
+    fs::write(roots[0].join("payload"),b"retained").unwrap();
+    fs::write(roots[1].join("payload"),b"unrecognized").unwrap();
+    fs::write(roots[2].join("preparation.json"),b"{").unwrap();
+    let outside=fixture.0.join("outside");fs::create_dir(&outside).unwrap();fs::write(outside.join("payload"),b"private").unwrap();
+    #[cfg(windows)] std::os::windows::fs::symlink_dir(&outside,&roots[3]).unwrap();
+    #[cfg(unix)] std::os::unix::fs::symlink(&outside,&roots[3]).unwrap();
+    let inventory=preparations::preparation_inventory(host.clone()).await.unwrap();
+    let entries=inventory.required("entries").unwrap().as_array().unwrap();assert_eq!(entries.len(),4);
+    assert_eq!(entries[0].required("phase").unwrap(),&IvyJson::from("building"));
+    assert_eq!(entries[1].required("bytes").unwrap(),&IvyJson::Number(12.0));
+    assert_ne!(entries[2].required("code").unwrap(),&IvyJson::Null);
+    assert_eq!(entries[3].required("code").unwrap(),&IvyJson::from("target_conflict"));
+    assert_eq!(entries[3].required("bytes").unwrap(),&IvyJson::Number(0.0));
+    // Clock and live volume availability are independently measured; compare the
+    // stable inventory against the original Node implementation on these files.
+    let keys=["schemaVersion","hostId","entries"];
+    let stable=IvyJson::object(keys.map(|key| (key,inventory.required(key).unwrap().clone())));
+    compare_config_oracle(IvyJson::object([("kind","preparations".into()),("operation","preparationInventory".into()),("args",IvyJson::Array(vec![host])),("pick",IvyJson::Array(keys.map(IvyJson::from).to_vec()))]),Ok(stable));
+    assert_eq!(fs::read(outside.join("payload")).unwrap(),b"private");
+    assert_eq!(fs::read(roots[0].join("payload")).unwrap(),b"retained");
+}

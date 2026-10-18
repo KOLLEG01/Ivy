@@ -60,3 +60,63 @@ pub(crate) fn read_record(staging_root: &Path, root: &Path) -> IvyResult<Option<
     }
     Ok(Some(record))
 }
+
+/// Inventory only directly owned preparation names. Invalid or linked entries
+/// remain visible with their error code, without walking outside staging.
+pub async fn preparation_inventory(host: IvyJson) -> IvyResult<IvyJson> {
+    let staging = crate::config::path_value(host.required("stagingRoot")?)?;
+    let inventory_root = staging.clone();
+    let roots = internal(tokio::task::spawn_blocking(move || {
+        let directory = match fs::read_dir(&inventory_root) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err(IvyError::internal()),
+        };
+        let mut roots = Vec::new();
+        for entry in directory {
+            let entry = internal(entry)?;
+            if entry.file_name().to_str().is_some_and(build_name) { roots.push(entry.path()); }
+        }
+        if roots.len() > 10_000 {
+            return Err(IvyError::new("limit_exceeded", "Preparation directory count exceeds its bounded inventory."));
+        }
+        // All admitted names are fixed-length ASCII UUIDs, so this is the same
+        // ordering as the source's JavaScript string sort.
+        roots.sort();
+        Ok(roots)
+    }).await)??;
+    let mut entries = Vec::with_capacity(roots.len());
+    for root in roots {
+        let id = root.file_name().and_then(|name| name.to_str()).ok_or_else(IvyError::internal)?[6..].to_owned();
+        let mut entry = IvyJson::object([
+            ("preparationId", id.into()), ("path", crate::layout::path_json(&root)),
+            ("phase", "unrecognized".into()), ("buildId", IvyJson::Null),
+            ("candidateId", IvyJson::Null), ("bytes", IvyJson::Number(0.0)), ("code", IvyJson::Null),
+        ]);
+        let record_root = root.clone(); let record_staging = staging.clone();
+        let record = internal(tokio::task::spawn_blocking(move || read_record(&record_staging, &record_root)).await)?;
+        let measured = async {
+            if let Some(record) = record? {
+                entry.insert("phase", record.required("phase")?.clone());
+                entry.insert("buildId", record.required("buildId")?.clone());
+                entry.insert("candidateId", record.get("candidate").and_then(|candidate| candidate.get("candidateId")).cloned().unwrap_or(IvyJson::Null));
+                entry.insert("code", record.required("errorCode")?.clone());
+            }
+            let boundary_root = root.clone(); let boundary_staging = staging.clone();
+            let boundary = internal(tokio::task::spawn_blocking(move || owned_root(&boundary_staging, &boundary_root)).await)??;
+            let bytes = crate::storage_space::tree_bytes(root, Some(boundary)).await?;
+            entry.insert("bytes", IvyJson::Number(bytes));
+            Ok::<(), IvyError>(())
+        }.await;
+        if let Err(error) = measured { entry.insert("code", error.code.into()); }
+        entries.push(entry);
+    }
+    let result = IvyJson::object([
+        ("schemaVersion", IvyJson::Number(1.0)), ("hostId", host.required("hostId")?.clone()),
+        ("observedAt", chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true).into()),
+        ("availableBytes", IvyJson::Number(crate::storage_space::available_storage_bytes(staging).await?)),
+        ("entries", IvyJson::Array(entries)),
+    ]);
+    validate_host("PreparationInventory", &result)?;
+    Ok(result)
+}
