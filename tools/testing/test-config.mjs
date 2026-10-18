@@ -78,8 +78,9 @@ export function affected(file) {
     return scopes.filter((x) => x !== "tooling");
   if (/^(package(-lock)?\.json|tsconfig.*\.json)$/.test(file))
     return scopes.filter((x) => x !== "tooling");
+  if (/^services\/service-manager\//.test(file)) return ["host"];
   if (/^packages\/host-runtime\//.test(file))
-    return ["host", "agent", "phone", "hive"];
+    return ["host", "agent", "phone", "hive", "dashboards"];
   if (
     /^(services\/phone-bridge|tests\/native-phone|specs\/schemas\/phone|tools\/(?:build|operations|package|testing)\/.*phone)/.test(
       file,
@@ -206,6 +207,16 @@ export const rustTests = {
   'tests/rust/task-board-operations.rs': { package: 'ivy-task-board', test: 'task-board-operations' },
   'tests/rust/task-board-blobs.rs': { package: 'ivy-task-board', test: 'task-board-blobs' },
   'tests/rust/task-board-output.rs': { package: 'ivy-task-board', test: 'task-board-output' },
+  'tests/rust/chat-native-driver.rs': { package: 'ivy-chat-bridge', test: 'chat-native-driver' },
+  'tests/rust/chat-registry.rs': { package: 'ivy-chat-bridge', test: 'chat-registry' },
+  'tests/rust/chat-input-media.rs': { package: 'ivy-chat-bridge', test: 'chat-input-media' },
+  'tests/rust/chat-admission.rs': { package: 'ivy-chat-bridge', test: 'chat-admission' },
+  'tests/rust/dashboards-runtime.rs': { package: 'ivy-dashboards', test: 'dashboards-runtime' },
+  'tests/rust/dashboards-sources.rs': { package: 'ivy-dashboards', test: 'dashboards-sources' },
+  'tests/rust/dashboards-validation.rs': { package: 'ivy-dashboards', test: 'dashboards-validation' },
+  'tests/rust/dashboards-store.rs': { package: 'ivy-dashboards', test: 'dashboards-store' },
+  'tests/rust/dashboards-handlers.rs': { package: 'ivy-dashboards', test: 'dashboards-handlers' },
+  'tests/rust/dashboards-browser.rs': { package: 'ivy-dashboards', test: 'dashboards-browser' },
 };
 
 // Only reviewed, isolated tests may reuse a successful result. Integration tests always run.
