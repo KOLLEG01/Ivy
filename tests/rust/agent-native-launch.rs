@@ -1,16 +1,9 @@
-use ivy_host_runtime::{codex_home, codex_rpc, config, node_path, paths, process, process_fence};
+use ivy_host_runtime::{
+    codex_connection, codex_handshake, codex_home, codex_process, codex_proxy_transport, codex_rpc,
+    node_path, paths, process, process_fence,
+};
 #[path = "../../packages/host-runtime/rust/src/codex_connection.rs"]
-mod codex_connection;
-#[path = "../../packages/host-runtime/rust/src/codex_daemon.rs"]
-mod codex_daemon;
-#[path = "../../packages/host-runtime/rust/src/codex_handshake.rs"]
-mod codex_handshake;
-#[path = "../../packages/host-runtime/rust/src/codex_process.rs"]
-mod codex_process;
-#[path = "../../packages/host-runtime/rust/src/codex_proxy_transport.rs"]
-mod codex_proxy_transport;
-#[path = "../../packages/host-runtime/rust/src/codex_windows_shell.rs"]
-mod codex_windows_shell;
+mod stop_evidence;
 use ivy_contracts::{
     IvyJson, JsString, Outcome,
     json::{parse, stringify},
@@ -431,14 +424,10 @@ async fn unknown_stop_evidence_survives_restart_and_blocks_before_catalog_or_lau
         stderr: String::new(),
         truncated: false,
     });
-    let saved = codex_connection::retain_stop_evidence(
-        data.clone(),
-        "fixture-owner",
-        1234,
-        stopped.clone(),
-    )
-    .await
-    .unwrap();
+    let saved =
+        stop_evidence::retain_stop_evidence(data.clone(), "fixture-owner", 1234, stopped.clone())
+            .await
+            .unwrap();
     assert!(Arc::ptr_eq(&saved, &stopped));
     let fence = process_fence::process_stop_fence(data.clone())
         .await
@@ -448,7 +437,7 @@ async fn unknown_stop_evidence_survives_restart_and_blocks_before_catalog_or_lau
     assert_eq!(fence.get("processId"), Some(&IvyJson::Number(1234.0)));
     assert_eq!(oracle(&input(&root.0, &fixture, "owned", "fence")), fence);
     let before = std::fs::read(data.join("process-stop-fence.json")).unwrap();
-    codex_connection::retain_stop_evidence(data.clone(), "another-owner", 5678, stopped)
+    stop_evidence::retain_stop_evidence(data.clone(), "another-owner", 5678, stopped)
         .await
         .unwrap();
     assert_eq!(

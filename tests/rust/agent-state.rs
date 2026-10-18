@@ -1,4 +1,6 @@
 use ivy_agent_manager::local_state::{Limits, LocalAgentState, Pin};
+#[path = "agent-capabilities.rs"]
+mod capability_cases;
 #[path = "agent-inventory.rs"]
 mod inventory_cases;
 #[path = "agent-inventory-manager.rs"]

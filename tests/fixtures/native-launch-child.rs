@@ -35,12 +35,13 @@ fn main() {
         arguments.clone()
     };
     let log = format!(
-        "{{\"args\":[{}],\"cwd\":{},\"home\":{},\"credential\":{},\"shellPath\":{}}}\n",
+        "{{\"args\":[{}],\"executable\":{},\"cwd\":{},\"home\":{},\"credential\":{},\"shellPath\":{}}}\n",
         logged_arguments
             .iter()
             .map(|s| quote(s))
             .collect::<Vec<_>>()
             .join(","),
+        quote(&executable.to_string_lossy()),
         quote(&env::current_dir().unwrap().to_string_lossy()),
         quote(&env::var("CODEX_HOME").unwrap_or_default()),
         env::var("IVY_HIVE_TOKEN").as_deref() == Ok("fixture-credential"),

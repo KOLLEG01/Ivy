@@ -1,4 +1,5 @@
 //! AgentManager's local receipts and native connection ownership.
+pub mod capabilities;
 pub mod environment;
 pub mod environment_text;
 pub mod instructions;
