@@ -1,5 +1,6 @@
 use super::*;
 use ivy_contracts::{
+    IvyResult,
     checked_native_contract::CheckedNativeContracts, operation::parse_operation_id_js,
 };
 use ivy_sdk::clock::Clock;
