@@ -228,7 +228,7 @@ fn request(home: &Path, row: &IvyJson) -> IvyJson {
     IvyJson::object([
         (
             "home",
-            ivy_host_runtime::node_path::from_native(home).into(),
+            IvyJson::String(ivy_host_runtime::node_path::from_native(home)),
         ),
         ("hostId", "fixture".into()),
         ("hiveUrl", field(row, "hive").clone()),

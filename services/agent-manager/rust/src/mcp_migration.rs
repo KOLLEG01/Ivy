@@ -3,7 +3,7 @@ use crate::{
     environment_text::*,
     mcp_output::{McpOutput, McpOutputInput, finish_mcp_output, hash, require, state_present},
 };
-use ivy_contracts::{IvyJson, IvyResult, hash::digest};
+use ivy_contracts::{IvyJson, IvyResult};
 use std::collections::HashSet;
 
 fn legacy_block(begin: &str, sections: Option<&[String]>, end: &str) -> Option<String> {
