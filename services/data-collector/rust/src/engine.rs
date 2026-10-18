@@ -159,6 +159,15 @@ impl Engine {
     pub fn settings(&self) -> &IvyJson {
         &self.0.settings
     }
+    pub(crate) fn now(&self) -> i64 {
+        self.0.clock.utc_millis()
+    }
+    pub(crate) fn now_iso(&self) -> IvyResult<String> {
+        iso(self.now())
+    }
+    pub(crate) fn runner(&self) -> Arc<dyn Runner> {
+        self.0.runner.clone()
+    }
     pub fn root_id(&self) -> String {
         self.0.root.lock().unwrap().clone()
     }
@@ -223,6 +232,21 @@ impl Engine {
         input: IvyJson,
         context: Option<InvocationContext>,
     ) -> IvyResult<IvyJson> {
+        self.update_with_handoff_guard(input, context, false).await
+    }
+    pub(crate) async fn run_definition(
+        &self,
+        input: IvyJson,
+        context: Option<InvocationContext>,
+    ) -> IvyResult<IvyJson> {
+        self.update_with_handoff_guard(input, context, true).await
+    }
+    async fn update_with_handoff_guard(
+        &self,
+        input: IvyJson,
+        context: Option<InvocationContext>,
+        guard_handoff: bool,
+    ) -> IvyResult<IvyJson> {
         let this = self.clone();
         let now = self.0.clock.utc_millis();
         let date = iso(now)?;
@@ -230,6 +254,13 @@ impl Engine {
             .0
             .store
             .call(move |store| {
+                if guard_handoff {
+                    if let Some(definition) = store.get(&model::text(&input, "id")?, false)?.and_then(|r|r.get("definition").cloned()) {
+                        let job = model::text(&definition,"jobId")?;
+                        let frozen = store.metadata(&format!("handoff-lock:{job}"))?.and_then(|v|v.parse::<f64>().ok()).unwrap_or(0.0);
+                        if frozen != 0.0 { return Err(IvyError::new("task_busy","This task is frozen for handoff; activate a new assignment before manual starts.")); }
+                    }
+                }
                 let caller = context.as_ref().map(|c| Context {
                     caller: &c.caller_principal_id,
                     operation_id: c.operation_id.as_ref(),

@@ -126,7 +126,10 @@ pub fn worker_failure(exit_code: Option<i32>) -> (&'static str, &'static str) {
 /// DC02: configured secret values must not appear as either values or object keys
 /// in centrally stored task material. Nothing here logs or returns the secret.
 pub fn contains_configured_secret(value: &IvyJson, secret: &str) -> bool {
-    let secret: Vec<u16> = secret.encode_utf16().collect();
+    contains_configured_secret_json(value, &secret.into())
+}
+pub fn contains_configured_secret_json(value: &IvyJson, secret: &ivy_contracts::JsString) -> bool {
+    let secret = &secret.0;
     if secret.is_empty() {
         return false;
     }
@@ -143,7 +146,7 @@ pub fn contains_configured_secret(value: &IvyJson, secret: &str) -> bool {
             _ => false,
         }
     }
-    visit(value, &secret)
+    visit(value, secret)
 }
 fn invalid() -> IvyError {
     IvyError::new("invalid_arguments", "Invalid Collector output.")

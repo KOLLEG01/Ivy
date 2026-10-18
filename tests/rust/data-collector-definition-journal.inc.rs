@@ -36,7 +36,7 @@ struct Replay {
     key: String,
 }
 impl RpcClient for Replay {
-    fn request(&self, method: &str, params: IvyJson, _: RequestOptions) -> RequestFuture {
+    fn request(&self, method: &str, params: IvyJson, _: RequestOptions) -> RequestFuture<'_> {
         if method == "system.status" {
             return Box::pin(async { Ok(json(r#"{"runtimeEpoch":"new-epoch"}"#)) });
         }
@@ -137,7 +137,7 @@ async fn definition_write_reconciliation_matches_original_pinned_journal() {
             store: store.clone(),
             key: key.clone(),
         });
-        let mut journal =
+        let journal =
             DefinitionJournal::new(store.clone(), client.clone(), Arc::new(|a, b| a.cmp(b)));
         let kind = case
             .get("kind")

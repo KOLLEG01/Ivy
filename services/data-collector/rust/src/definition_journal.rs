@@ -9,13 +9,17 @@ use ivy_sdk::{
     operation_ids::new_operation_id,
     rpc::{RequestOptions, RpcClient},
 };
-use std::{cmp::Ordering, sync::Arc};
+use std::{
+    cmp::Ordering,
+    sync::{Arc, Mutex},
+};
 
 pub type CompareNames = Arc<dyn Fn(&JsString, &JsString) -> Ordering + Send + Sync>;
+#[derive(Clone)]
 pub struct DefinitionJournal {
     pub store: StoreOwner,
     pub client: Arc<dyn RpcClient>,
-    catalog_id: Option<IvyJson>,
+    catalog_id: Arc<Mutex<Option<IvyJson>>>,
     compare_names: CompareNames,
 }
 pub fn content(document: &IvyJson) -> IvyResult<&IvyJson> {
@@ -61,8 +65,14 @@ impl DefinitionJournal {
         Self {
             store,
             client,
-            catalog_id: None,
+            catalog_id: Arc::new(Mutex::new(None)),
             compare_names,
+        }
+    }
+    pub fn with_client(&self, client: Arc<dyn RpcClient>) -> Self {
+        Self {
+            client,
+            ..self.clone()
         }
     }
     pub async fn metadata(&self, key: String) -> IvyResult<Option<String>> {
@@ -144,9 +154,10 @@ impl DefinitionJournal {
         )?;
         Ok(value)
     }
-    pub async fn catalog(&mut self) -> IvyResult<IvyJson> {
-        if let Some(id) = &self.catalog_id {
-            return Ok(id.clone());
+    pub async fn catalog(&self) -> IvyResult<IvyJson> {
+        let cached = self.catalog_id.lock().unwrap().clone();
+        if let Some(id) = cached {
+            return Ok(id);
         }
         let found = self.all("catalog").await?;
         let result = if found.is_empty() {
@@ -196,7 +207,7 @@ impl DefinitionJournal {
             ids.sort_by(|a, b| (self.compare_names)(a, b));
             IvyJson::String(ids.remove(0))
         };
-        self.catalog_id = Some(result.clone());
+        *self.catalog_id.lock().unwrap() = Some(result.clone());
         Ok(result)
     }
     pub async fn retained(&self, operation: &JsString, step: &str) -> IvyResult<bool> {
@@ -206,7 +217,7 @@ impl DefinitionJournal {
             .is_some_and(|s| !s.is_empty()))
     }
     pub async fn write(
-        &mut self,
+        &self,
         kind: &str,
         value: IvyJson,
         operation: &JsString,
@@ -353,9 +364,17 @@ impl DefinitionJournal {
         request: &str,
         now: i64,
     ) -> IvyResult<Option<IvyJson>> {
+        Self::begin_local(self.store.clone(), operation, request, now).await
+    }
+    pub async fn begin_local(
+        store: StoreOwner,
+        operation: &JsString,
+        request: &str,
+        now: i64,
+    ) -> IvyResult<Option<IvyJson>> {
         let operation = operation.clone();
         let request = request.to_owned();
-        self.store
+        store
             .call(move |store| {
                 let id = String::from_utf16_lossy(&operation.0);
                 if store.operation(&id)?.is_some_and(|v| !v.is_null()) {
