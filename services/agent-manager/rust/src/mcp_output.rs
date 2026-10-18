@@ -102,11 +102,12 @@ pub fn plan_mcp_output(input: McpOutputInput<'_>) -> IvyResult<McpOutput> {
             "The Ivy-managed MCP block has local changes.",
         )?;
         let permissions_hash = hash(old_permissions.block.as_deref());
+        let absent_permissions = IvyJson::Null;
         let applied_permissions = input
             .state
             .and_then(|s| s.get("appliedPermissionsBlockHash"))
             .filter(|v| !v.is_null())
-            .unwrap_or(&IvyJson::Null);
+            .unwrap_or(&absent_permissions);
         require(
             &permissions_hash == applied_permissions
                 || permissions_hash == hash(old_permissions_expected.as_deref()),
