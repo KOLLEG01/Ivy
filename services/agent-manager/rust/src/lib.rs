@@ -2,6 +2,8 @@
 pub mod environment;
 pub mod environment_text;
 pub mod instructions;
+pub mod instructions_files;
+pub mod instructions_writer;
 pub mod interactions;
 pub mod local_state;
 pub mod mcp_files;
