@@ -77,7 +77,10 @@ fn original_triage_final_assessment_and_turn_identity_differential() {
     use ivy_secretary::triage_results::{result_items, triage_result, triage_turn};
     let corpus = oracle("tests/secretary-rust/triage-results-oracle.mjs");
     let cases = corpus.as_array().unwrap();
-    assert!(cases.len() > 100);
+    assert!(
+        cases.len() >= 182,
+        "coercion failures and controls are required"
+    );
     for case in cases {
         let observation = case.required("observation").unwrap();
         let turn_id = case.required("turnId").unwrap().as_js_string().unwrap();

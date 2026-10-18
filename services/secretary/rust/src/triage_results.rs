@@ -66,6 +66,20 @@ pub fn result_items(turn: &IvyJson, items: &[IvyJson]) -> IvyResult<IvyJson> {
         if !ids.insert(id) {
             return Err(invalid());
         }
+        // String(item.type) runs outside the final-JSON error mapping. JSON
+        // objects with an own noncallable toString cannot produce a primitive;
+        // array joining recursively encounters those objects, but ordinary
+        // object properties are not themselves coerced.
+        let mut pending: Vec<_> = item.get("type").into_iter().collect();
+        while let Some(value) = pending.pop() {
+            match value {
+                IvyJson::Array(values) => pending.extend(values),
+                IvyJson::Object(_) if value.get("toString").is_some() => {
+                    return Err(IvyError::internal());
+                }
+                _ => {}
+            }
+        }
         let kind = item.get("type").map(js_string);
         if !["userMessage", "agentMessage", "reasoning"]
             .iter()

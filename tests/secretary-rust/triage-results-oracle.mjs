@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 const root = resolve(process.env.IVY_SECRETARY_ORACLE ?? '.local/build/secretary');
 const { triageResult, triageTurn } = await import(pathToFileURL(resolve(root, 'services/secretary/src/triage-results.js')));
+const { IvyError } = await import(pathToFileURL(resolve(root, 'packages/sdk/src/node.js')));
 // Extend the existing secretary-triage-contract fixture across identity, item and
 // JSON boundaries. The oracle is the unchanged TypeScript implementation.
 const assessment = (changes = {}) => ({ urgency: 'normal', disposition: 'notify', notification: 'main',
@@ -15,7 +16,7 @@ const cases = [];
 function add(label, observation = read(), mode = 'result', turnId = 'original-turn', full = true) {
   let expected;
   try { expected = { value: mode === 'turn' ? triageTurn(observation, turnId, full) : triageResult(observation, turnId) }; }
-  catch (error) { expected = { code: error.code, message: error.message, outcome: error.outcome }; }
+  catch (cause) { const error = IvyError.from(cause); expected = { code: error.code, message: error.message, outcome: error.outcome }; }
   cases.push({ label, observation, mode, turnId, full, expected });
 }
 add('original successful final');
@@ -43,6 +44,18 @@ for (const type of ['userMessage', 'reasoning', 'agentMessage', 'commandExecutio
 for (const phase of [null, '', false, 'commentary', 'final_answer', ['final_answer']]) {
   add('agent phase', read({ items: [answer({ phase })] }));
 }
+for (const toString of [null, 0, 'x', false, [], {}]) {
+  for (const type of [{ toString }, [{ toString }], [[{ toString }]]]) {
+    add('noncallable own toString ' + JSON.stringify(type), read({ items: [{ id: 'extra', type }, answer()] }));
+  }
+}
+for (const type of [{}, [{}], [[{}]], { nested: { toString: null } }, [{ nested: [{ toString: 0 }] }],
+  { valueOf: null }, { ToString: null }]) {
+  add('ordinary object coercion control', read({ items: [{ id: 'extra', type }, answer()] }));
+}
+add('invalid id precedes coercion', read({ items: [{ id: '', type: { toString: null } }, answer()] }));
+add('duplicate id precedes coercion', read({ items: [answer(), { id: 'answer', type: { toString: null } }] }));
+add('failed turn precedes coercion', read({ status: 'failed', items: [{ id: 'extra', type: { toString: null } }, answer()] }));
 for (const text of [null, 1, [], {}, false]) add('nonstring text', read({ items: [answer({ text })] }));
 add('invalid non-final text precedes valid final', read({ items: [answer({ id: 'partial', phase: 'commentary', text: null }), answer()] }));
 add('non-final text is not parsed', read({ items: [answer({ id: 'partial', phase: 'commentary', text: '{' }), answer()] }));
