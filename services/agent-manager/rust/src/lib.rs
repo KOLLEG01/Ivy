@@ -1,5 +1,6 @@
 //! AgentManager's local receipts and native connection ownership.
 pub mod capabilities;
+pub mod directories;
 pub mod environment;
 pub mod environment_text;
 pub mod instructions;
@@ -24,6 +25,9 @@ pub mod native_discovery;
 pub mod native_management;
 pub mod notifications;
 pub mod notice_policy;
+pub mod project_policy;
+pub mod project_repository;
+pub mod project_locations;
 pub mod registry;
 pub mod skills;
 pub mod skills_output;

@@ -38,3 +38,7 @@ path = "../../../tests/rust/agent-interactions.rs"
 [[test]]
 name = "agent-instructions"
 path = "../../../tests/rust/agent-instructions.rs"
+
+[[test]]
+name = "agent-projects"
+path = "../../../tests/rust/agent-projects.rs"
