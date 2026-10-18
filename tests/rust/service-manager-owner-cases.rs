@@ -711,6 +711,7 @@ fn owner_child_fixture() {
     let data = PathBuf::from(config.required("dataRoot").unwrap().as_str().unwrap());
     let launch = std::env::var("IVY_LAUNCH_ID").unwrap();
     let settings = config.required("settings").unwrap();
+    std::fs::write(data.join("selected-settings.json"), encoded(settings)).unwrap();
     writeln!(
         std::fs::OpenOptions::new()
             .create(true)

@@ -73,6 +73,21 @@ async fn observed(journal: &HostJournal, id: &str, state: &str, revision: &IvyJs
 async fn explicit_import_of_a_journal_copy_supports_strict_owners_and_retained_rollback() {
     let root = Fixture::new();
     let mut accepted = host(&root);
+    let node_executable = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(node_executable.status.success());
+    let mut executables = accepted.required("executables").unwrap().clone();
+    executables.insert(
+        "node",
+        String::from_utf8(node_executable.stdout)
+            .unwrap()
+            .trim()
+            .to_string()
+            .into(),
+    );
+    accepted.insert("executables", executables);
     let mut instances = accepted
         .required("instances")
         .unwrap()
@@ -277,17 +292,16 @@ async fn explicit_import_of_a_journal_copy_supports_strict_owners_and_retained_r
     let source_bytes = std::fs::read(&source).unwrap();
     std::fs::copy(&source, &database).unwrap();
     let mut desired = accepted.clone();
-    desired.insert(
-        "executables",
-        IvyJson::object([(
-            "fixture",
-            root.0
-                .join("missing-desired.exe")
-                .to_string_lossy()
-                .to_string()
-                .into(),
-        )]),
+    let mut desired_executables = accepted.required("executables").unwrap().clone();
+    desired_executables.insert(
+        "fixture",
+        root.0
+            .join("missing-desired.exe")
+            .to_string_lossy()
+            .to_string()
+            .into(),
     );
+    desired.insert("executables", desired_executables);
     let plan = policy_import::preview_target_policies(desired.clone())
         .await
         .unwrap();
@@ -455,6 +469,28 @@ async fn explicit_import_of_a_journal_copy_supports_strict_owners_and_retained_r
         targets[2].required("revision").unwrap(),
     )
     .await;
+    for (id, revision) in [
+        ("fixture", "current-launch".to_string()),
+        ("bootstrap-fixture", format!("sha256:{}", "c".repeat(64))),
+    ] {
+        let data = path(
+            service_paths(
+                &accepted,
+                instances
+                    .iter()
+                    .find(|v| v.get("instanceId") == Some(&id.into()))
+                    .unwrap(),
+            )
+            .unwrap()
+            .required("data")
+            .unwrap(),
+        );
+        assert_eq!(
+            json(&std::fs::read_to_string(data.join("selected-settings.json")).unwrap())
+                .get("retainedValue"),
+            Some(&revision.into())
+        );
+    }
     assert!(
         !path(
             service_paths(&accepted, &instances[1])
@@ -523,6 +559,11 @@ async fn explicit_import_of_a_journal_copy_supports_strict_owners_and_retained_r
         assert_eq!(
             std::fs::read_to_string(data.join("retained.txt")).unwrap(),
             "retained application values\n"
+        );
+        assert_eq!(
+            json(&std::fs::read_to_string(data.join("selected-settings.json")).unwrap())
+                .get("retainedValue"),
+            Some(&revision.into())
         );
     }
     journal.close().await.unwrap();

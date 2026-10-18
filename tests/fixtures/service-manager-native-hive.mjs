@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFile, mkdir, copyFile, writeFile, rm} from 'node:fs/promises';
-import {join, resolve} from 'node:path';
+import {join, resolve, toNamespacedPath} from 'node:path';
 import {createServer} from 'node:net';
 import {spawn, spawnSync} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -113,7 +113,7 @@ async function qualifyDispatcherOwner() {
   assert.equal(ready.ownerPid,child.pid);
   assert.notEqual(health.pid,child.pid,'Rust service health is distinct from its RuntimeOwner');
   const native = windowsProcess(health.pid), dispatcher = windowsProcess(native.ParentProcessId), helper = windowsProcess(dispatcher.ParentProcessId);
-  const samePath = (left,right)=>assert.equal(resolve(left).toLowerCase(),resolve(right).toLowerCase());
+  const samePath = (left,right)=>assert.equal(toNamespacedPath(resolve(left)).toLowerCase(),toNamespacedPath(resolve(right)).toLowerCase());
   samePath(native.ExecutablePath,join(payload,'ivy-service-manager.exe'));
   samePath(dispatcher.ExecutablePath,process.execPath);
   samePath(helper.ExecutablePath,join(artifact,'dist','native','ivy-job.exe'));
