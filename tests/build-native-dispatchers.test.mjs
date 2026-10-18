@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { buildNativeDispatchers } from '../tools/build/build-native-dispatchers.mjs';
+import { buildNativeDispatchers, nativeDispatcherSources } from '../tools/build/build-native-dispatchers.mjs';
 import { nativeExecutable } from '../tools/build/native-dispatch.mjs';
 
 function fixture(t) {
@@ -24,6 +24,28 @@ function fixture(t) {
   const run = (health, args = [], options = {}) => spawnSync(process.execPath, [result.files[health ? 2 : 1], ...args], { windowsHide: true, timeout: 10000, ...options });
   return { root, plan, save, result, native, executable, install, run };
 }
+
+test('canonical dispatcher rendering preserves retained shim bytes at different relative paths', t => {
+  const f = fixture(t);
+  for (const [entry, health, entryModule, healthModule] of [
+    ['main.js', 'health.js', './native/dispatch.mjs', './native/dispatch.mjs'],
+    ['services/example/src/main.js', 'packages/host-runtime/src/health.js', '../../../native/dispatch.mjs', '../../../native/dispatch.mjs'],
+    ['native/main.js', 'status/check.js', './dispatch.mjs', '../native/dispatch.mjs'],
+    ['a/b/c/main.js', 'health/check.js', '../../../native/dispatch.mjs', '../native/dispatch.mjs'],
+  ]) {
+    f.plan.entrypoint.args[0] = 'dist/' + entry; f.plan.readiness.command.args[0] = 'dist/' + health; f.save();
+    const rendered = nativeDispatcherSources({ root: f.root, component: 'example' });
+    assert.deepEqual(rendered.files, [
+      { path: entry, source: `import(${JSON.stringify(entryModule)}).then(({dispatch,dispatchFailure})=>dispatch("ivy-example",100).catch(error=>dispatchFailure(error,false))).catch(()=>{process.stderr.write("Native dispatcher is unavailable.\\n");process.exitCode=1;});\n` },
+      { path: health, source: `import(${JSON.stringify(healthModule)}).then(({dispatch,dispatchFailure})=>dispatch("ivy-health",100).catch(error=>dispatchFailure(error,true))).catch(()=>{process.stdout.write('{"ok":false,"code":"artifact_missing"}\\n');process.exitCode=1;});\n` },
+    ]);
+    const outputRoot = join(f.root, 'new-output');
+    assert.equal(existsSync(outputRoot), false);
+    const result = buildNativeDispatchers({ root: f.root, component: 'example', outputRoot });
+    for (let index = 0; index < 2; index++) assert.equal(readFileSync(result.files[index + 1], 'utf8'), rendered.files[index].source);
+    renameSync(outputRoot, outputRoot + '-' + entry.replaceAll('/', '-'));
+  }
+});
 
 test('native dispatchers forward actual process streams, arguments, environment and exit codes', t => {
   const f = fixture(t); f.install('ivy-example'); f.install('ivy-health');

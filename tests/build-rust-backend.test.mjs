@@ -91,6 +91,7 @@ test('foreign compiler artifacts and traversal names are rejected before staging
   assert.throws(() => f.build({ cargo: wrongCargo }), /escaped/);
   assert.throws(() => f.build({ component: '../example' }), /component name/);
   assert.throws(() => f.build({ target: 'unsupported' }), /explicit supported Rust target/);
+  for (const target of ['constructor', 'toString', '__proto__']) assert.throws(() => f.build({ target }), /explicit supported Rust target/);
   assert.equal(existsSync(join(f.root, '.local/build')), false);
 }));
 

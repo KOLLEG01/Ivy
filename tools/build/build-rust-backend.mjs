@@ -6,12 +6,12 @@ import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mj
 import { buildInstructions } from './build-instructions.mjs';
 import { rustRootInputFingerprint } from './rust-root-inputs.mjs';
 
-const targets = new Map([
+export const rustBackendTargets = Object.freeze(Object.fromEntries([
   ['x86_64-pc-windows-msvc', 'win32-x64'],
   ['aarch64-pc-windows-msvc', 'win32-arm64'],
   ['x86_64-unknown-linux-gnu', 'linux-x64'],
   ['aarch64-unknown-linux-gnu', 'linux-arm64'],
-]);
+]));
 function within(root, path) {
   const child = relative(root, path);
   return child !== '' && !isAbsolute(child) && child !== '..' && !child.startsWith('..' + (process.platform === 'win32' ? '\\' : '/'));
@@ -30,7 +30,7 @@ function runCargo(args, options) {
  * proof that other advertised targets and host readiness helpers are available. */
 export function compileRustBackend({ component, target, root = process.cwd(), identity, cargo = runCargo } = {}) {
   if (!/^[a-z][a-z0-9-]*$/.test(component ?? '')) throw new Error('A component name is required.');
-  const platform = targets.get(target);
+  const platform = typeof target === 'string' && Object.hasOwn(rustBackendTargets, target) ? rustBackendTargets[target] : undefined;
   if (!platform) throw new Error('An explicit supported Rust target is required.');
   root = realpathSync(root);
   const manifest = resolve(root, component === 'host-executor' ? 'packages/host-runtime/rust/Cargo.toml' : `services/${component}/rust/Cargo.toml`);
