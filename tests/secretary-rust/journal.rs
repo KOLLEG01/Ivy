@@ -314,6 +314,19 @@ fn fallible_receipt_inspection_rolls_back_prior_cleanup_and_fences() {
                     .unwrap(),
             )
         };
+        let key = if technical {
+            "workflow"
+        } else {
+            "secretary/operation"
+        };
+        let persisted_good = journal
+            .read(key, &first.object_id, Some(first.revision), technical)
+            .unwrap()
+            .value;
+        let persisted_bad = journal
+            .read(key, &second.object_id, Some(second.revision), technical)
+            .unwrap()
+            .value;
         let before = journal.usage().unwrap();
         journal.limits.count = 0;
         let expected = ivy_store::receipts::has_unresolved_outcome(&bad).unwrap_err();
@@ -327,24 +340,19 @@ fn fallible_receipt_inspection_rolls_back_prior_cleanup_and_fences() {
                 expected.details
             )
         );
-        let key = if technical {
-            "workflow"
-        } else {
-            "secretary/operation"
-        };
         assert_eq!(
             journal
                 .read(key, &first.object_id, Some(first.revision), technical)
                 .unwrap()
                 .value,
-            good
+            persisted_good
         );
         assert_eq!(
             journal
                 .read(key, &second.object_id, Some(second.revision), technical)
                 .unwrap()
                 .value,
-            bad
+            persisted_bad
         );
         assert_eq!(journal.usage().unwrap(), before);
         assert_eq!(journal.expired_before().unwrap(), 0);
@@ -381,6 +389,10 @@ fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
             } else {
                 "secretary/operation"
             };
+            let persisted = journal
+                .read(key, &pin.object_id, None, technical)
+                .unwrap()
+                .value;
             let pin = if technical {
                 let saved = journal.create_technical(key, "protected", &bad).unwrap();
                 journal
@@ -406,7 +418,7 @@ fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
                     .read(key, &pin.object_id, None, technical)
                     .unwrap()
                     .value,
-                bad
+                persisted
             );
             assert_eq!(journal.usage().unwrap(), before);
             assert_eq!(journal.expired_before().unwrap(), 0);
@@ -417,6 +429,15 @@ fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
     let saved = journal
         .create_technical("secretary/follow-up-context", "pending", &context)
         .unwrap();
+    let persisted = journal
+        .read(
+            "secretary/follow-up-context",
+            &saved.pin.object_id,
+            None,
+            true,
+        )
+        .unwrap()
+        .value;
     journal
         .complete_technical_workflow(&saved.pin.object_id, 1)
         .unwrap();
@@ -432,7 +453,7 @@ fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
             )
             .unwrap()
             .value,
-        context
+        persisted
     );
 }
 
