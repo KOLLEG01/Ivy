@@ -72,3 +72,7 @@ path = "../../../tests/rust/host-build-identity.rs"
 [[test]]
 name = "host-preparation-files"
 path = "../../../tests/rust/host-preparation-files.rs"
+
+[[test]]
+name = "host-protected-config"
+path = "../../../tests/rust/host-protected-config.rs"
