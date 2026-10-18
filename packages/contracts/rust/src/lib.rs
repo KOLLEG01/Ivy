@@ -27,6 +27,7 @@ pub mod secretary_schema;
 pub mod ui_route;
 pub mod validation;
 pub mod wire_schema;
+pub mod whatwg_url;
 
 pub use error::{IvyError, IvyResult, Outcome};
 pub use json::{IvyJson, JsString};

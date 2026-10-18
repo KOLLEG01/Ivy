@@ -96,6 +96,13 @@ fn json_property<'a>(value: &'a IvyJson, key: &str) -> IvyResult<Option<Value<'a
     builtin_property(builtins().roots[inherited], key)
 }
 impl<'a> Value<'a> {
+    pub(crate) fn is_boolean(&self) -> bool {
+        match self {
+            Self::Json(value) => matches!(value, IvyJson::Bool(_)),
+            Self::Owned(value) => matches!(value, IvyJson::Bool(_)),
+            Self::Builtin(index) => builtins().nodes[*index].kind == "boolean",
+        }
+    }
     pub(crate) fn property(self, key: &str) -> IvyResult<Option<Value<'a>>> {
         match self {
             Self::Json(value) => json_property(value, key),
@@ -147,4 +154,41 @@ pub(crate) fn pointer_key(text: &str) -> IvyResult<String> {
         .map_err(|_| IvyError::internal())?
         .replace("~1", "/")
         .replace("~0", "~"))
+}
+
+/// URI fragments are distinct from admission's literal JSON pointers. Both AJV
+/// entry paths replace unpaired UTF-16 surrogates with U+FFFD. Resolving a $ref
+/// rejects malformed percent escapes; direct getSchema lookup escapes them.
+pub(crate) fn compiler_pointer_parts(
+    fragment: &JsString,
+    strict_percent: bool,
+) -> IvyResult<Vec<String>> {
+    if fragment.0.first() != Some(&47) {
+        return Err(IvyError::internal());
+    }
+    fragment.0[1..]
+        .split(|c| *c == 47)
+        .map(|part| compiler_pointer_key(part, strict_percent))
+        .collect()
+}
+
+pub(crate) fn compiler_pointer_key(part: &[u16], strict_percent: bool) -> IvyResult<String> {
+    let text = String::from_utf16_lossy(part);
+    let input = text.as_bytes();
+    let mut index = 0;
+    while strict_percent && index < input.len() {
+        if input[index] == b'%' {
+            let hex = |offset: usize| {
+                input
+                    .get(offset)
+                    .and_then(|byte| (*byte as char).to_digit(16))
+            };
+            hex(index + 1).ok_or_else(IvyError::internal)?;
+            hex(index + 2).ok_or_else(IvyError::internal)?;
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    pointer_key(&text)
 }
