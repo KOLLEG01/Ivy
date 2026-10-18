@@ -16,6 +16,10 @@ regress.workspace = true
 url.workspace = true
 
 [[test]]
+name = "node-buffer"
+path = "../../../tests/rust/node-buffer.rs"
+
+[[test]]
 name = "contracts"
 path = "../../../tests/rust/contracts.rs"
 
