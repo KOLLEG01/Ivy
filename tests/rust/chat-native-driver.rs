@@ -1,4 +1,8 @@
-use ivy_chat_bridge::{admission::ChatAdmission, native_driver::ChatNativeDriver};
+use ivy_chat_bridge::{
+    admission::ChatAdmission, native_driver::ChatNativeDriver, store::ChatStore,
+};
+#[path = "chat-native-driver-cases.rs"]
+mod durable;
 use ivy_contracts::{
     IvyError, IvyJson as Json, Outcome, checked_native_contract::CheckedNativeContracts,
     json::parse,
@@ -100,13 +104,17 @@ async fn configured_owner_readiness_and_rpc_order_match_original_driver() {
         });
         let tools = Arc::new(ToolClients::new(client.clone()));
         let admission = ChatAdmission::new(row.get("definition").unwrap()).unwrap();
+        let store = ChatStore::open(client.clone(), None, None).await.unwrap();
+        let instructions = "".into();
         let driver = ChatNativeDriver::new(
-            client.clone(),
+            &store,
             tools,
             &admission,
             &catalogs,
             "chat-provider".into(),
-        );
+            &instructions,
+        )
+        .unwrap();
         let result = async {
             let value = match row.required("action")?.as_str()?.as_str() {
                 "identity" => {
