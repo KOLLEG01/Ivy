@@ -1,6 +1,12 @@
 use ivy_contracts::{
-    automation_schema::validate_automation, chat_schema::validate_chat,
-    component_schema::validate_component, json::parse, secretary_schema::validate_secretary,
+    agent_schema::validate_agent,
+    automation_schema::validate_automation,
+    chat_schema::validate_chat,
+    component_schema::validate_component,
+    core_schema::{validate_host, validate_transport},
+    json::parse,
+    secretary_schema::validate_secretary,
+    wire_schema::validate_shared,
 };
 
 #[test]
@@ -34,6 +40,10 @@ fn domain_contracts_match_typescript_admission_and_errors() {
         };
         let value = parse(&input, usize::MAX).unwrap();
         let result = match domain {
+            "agent" => validate_agent(name, &value),
+            "host" => validate_host(name, &value),
+            "shared" => validate_shared(name, &value),
+            "transport" => validate_transport(name, &value),
             "automation" => validate_automation(name, &value),
             "chat" => validate_chat(name, &value),
             "secretary" => validate_secretary(name, &value),
@@ -66,7 +76,16 @@ fn domain_contracts_match_typescript_admission_and_errors() {
             *accepted.entry(domain.into()).or_default() += 1;
         }
     }
-    for domain in ["automation", "chat", "secretary", "component"] {
+    for domain in [
+        "automation",
+        "chat",
+        "secretary",
+        "component",
+        "host",
+        "agent",
+        "shared",
+        "transport",
+    ] {
         assert!(
             accepted.get(domain).copied().unwrap_or(0) > 10,
             "Missing valid examples for {domain}"
