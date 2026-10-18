@@ -683,6 +683,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
  "uuid",
  "windows-sys 0.61.2",
