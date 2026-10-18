@@ -1,7 +1,7 @@
 use crate::{
     IvyError, IvyJson, IvyResult, JsString,
     rpc::{RequestOptions, RpcClient},
-    tools::{ToolCallOptions, call_bound, discover},
+    tools::{ToolCallOptions, call_bound_with_boundary, discover_with_boundary, truthy},
 };
 use ivy_contracts::validation::equal;
 
@@ -24,67 +24,130 @@ impl MainChat {
         ])
     }
 }
+/// Preserve the original `instanceof IvyError` catch until the consumer decides
+/// whether to swallow it. The error code alone cannot identify that catch origin.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MainChatFailure {
+    Ivy(IvyError),
+    Boundary,
+}
+impl From<IvyError> for MainChatFailure {
+    fn from(error: IvyError) -> Self {
+        Self::Ivy(error)
+    }
+}
+impl MainChatFailure {
+    /// Normalize an uncoded boundary failure only after the original catch.
+    pub fn into_error(self) -> IvyError {
+        match self {
+            Self::Ivy(error) => error,
+            Self::Boundary => IvyError::internal(),
+        }
+    }
+}
+fn property<'a>(
+    value: Option<&'a IvyJson>,
+    key: &str,
+) -> Result<Option<&'a IvyJson>, MainChatFailure> {
+    Ok(value
+        .filter(|v| !v.is_null())
+        .ok_or(MainChatFailure::Boundary)?
+        .get(key))
+}
+fn same_principal(left: Option<&IvyJson>, right: Option<&IvyJson>) -> bool {
+    // Separate RPC results cannot share a JS object identity.
+    if matches!(left, Some(IvyJson::Object(_) | IvyJson::Array(_)))
+        || matches!(right, Some(IvyJson::Object(_) | IvyJson::Array(_)))
+    {
+        return false;
+    }
+    left == right
+}
 /// Hive selects the unique Main service; consumers do not configure a destination.
 pub async fn main_chat(client: &dyn RpcClient) -> IvyResult<MainChat> {
-    let bound = discover(
+    main_chat_checked(client)
+        .await
+        .map_err(MainChatFailure::into_error)
+}
+/// As `main_chat`, retaining coded-Ivy versus uncoded property-access failures.
+/// `RpcClient` errors are already coded Ivy errors; their exact metadata is retained.
+pub async fn main_chat_checked(client: &dyn RpcClient) -> Result<MainChat, MainChatFailure> {
+    let bound = discover_with_boundary(
         client,
         &"chat.workspace".into(),
         &IvyJson::object([("interfaceVersion", CHAT_INTERFACE_VERSION.into())]),
+        || MainChatFailure::Boundary,
     )
     .await?;
+    let mut target = IvyJson::object(Vec::<(&str, IvyJson)>::new());
+    if let Some(id) = bound.value().get("serviceNodeId") {
+        target.insert("serviceNodeId", id.clone());
+    }
     let node = client
-        .request(
-            "serviceNodes.get",
-            IvyJson::object([("serviceNodeId", IvyJson::String(bound.service_node_id()?))]),
-            RequestOptions::default(),
-        )
+        .request("serviceNodes.get", target, RequestOptions::default())
         .await?;
-    if !equal(node.get("serviceName"), "chat-bridge")
+    if !equal(property(Some(&node), "serviceName")?, "chat-bridge")
         || !["connected", "synced", "ready"]
             .iter()
-            .all(|key| node.get(key).and_then(IvyJson::as_bool) == Some(true))
+            .all(|key| truthy(node.get(key)))
     {
         return Err(IvyError::new(
             "chat_main_unavailable",
             "The Main ChatBridge is unavailable.",
-        ));
+        )
+        .into());
     }
-    let workspace = call_bound(
+    let workspace = call_bound_with_boundary(
         client,
         &bound,
         IvyJson::object(Vec::<(&str, IvyJson)>::new()),
         None,
         ToolCallOptions::default(),
+        || MainChatFailure::Boundary,
     )
     .await?;
-    let expected = workspace.required("expectedBridge")?;
-    let channels = workspace
-        .required("channels")?
-        .as_array()
-        .ok_or_else(IvyError::internal)?;
-    if expected.get("principalId") != node.get("principalId")
-        || workspace.get("nativeOwnerReady").and_then(IvyJson::as_bool) != Some(true)
-        || channels.len() != 1
-        || !equal(
-            channels[0]
-                .get("channel")
-                .and_then(|value| value.get("adapter")),
-            "whatsapp",
-        )
-    {
-        return Err(IvyError::new(
+    let unavailable = || {
+        MainChatFailure::Ivy(IvyError::new(
             "chat_main_unavailable",
             "Main requires its single WhatsApp transport and native owner.",
-        ));
+        ))
+    };
+    let expected = property(Some(&workspace), "expectedBridge")?;
+    if !same_principal(property(expected, "principalId")?, node.get("principalId"))
+        || !truthy(workspace.get("nativeOwnerReady"))
+    {
+        return Err(unavailable());
+    }
+    // Keep the original && short-circuit: channels is not read after an earlier
+    // failed requirement. JSON primitives box in JS; only null/undefined throws.
+    let channels = property(Some(&workspace), "channels")?
+        .filter(|v| !v.is_null())
+        .ok_or(MainChatFailure::Boundary)?;
+    let one = match channels {
+        IvyJson::Array(values) => values.len() == 1,
+        IvyJson::String(value) => value.0.len() == 1,
+        value => value.get("length").and_then(IvyJson::as_f64) == Some(1.0),
+    };
+    if !one {
+        return Err(unavailable());
+    }
+    let entry = match channels {
+        IvyJson::Array(values) => values.first(),
+        IvyJson::Object(_) => channels.get("0"),
+        _ => return Err(MainChatFailure::Boundary),
+    };
+    let channel = property(entry, "channel")?;
+    if !equal(property(channel, "adapter")?, "whatsapp") {
+        return Err(unavailable());
     }
     Ok(MainChat {
         service_node_id: node
-            .required("serviceNodeId")?
-            .as_js_string()
+            .get("serviceNodeId")
+            .and_then(IvyJson::as_js_string)
             .cloned()
-            .ok_or_else(IvyError::internal)?,
-        expected_bridge: expected.clone(),
-        channel: channels[0].required("channel")?.clone(),
+            .ok_or(MainChatFailure::Boundary)?,
+        expected_bridge: expected.ok_or(MainChatFailure::Boundary)?.clone(),
+        channel: channel.ok_or(MainChatFailure::Boundary)?.clone(),
     })
 }
 /// Transport metadata stays in receipts; forward only the original notification content.

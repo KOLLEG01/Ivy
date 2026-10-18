@@ -66,19 +66,38 @@ fn name_parts(name: &JsString) -> IvyResult<(JsString, JsString)> {
         JsString(name.0[separator + 1..].to_vec()),
     ))
 }
+pub(crate) fn truthy(value: Option<&IvyJson>) -> bool {
+    match value {
+        None | Some(IvyJson::Null) => false,
+        Some(IvyJson::Bool(value)) => *value,
+        Some(IvyJson::Number(value)) => *value != 0.0 && !value.is_nan(),
+        Some(IvyJson::String(value)) => !value.0.is_empty(),
+        _ => true,
+    }
+}
 pub async fn discover(
     client: &dyn RpcClient,
     qualified_name: &JsString,
     target: &IvyJson,
 ) -> IvyResult<Arc<BoundTool>> {
+    discover_with_boundary(client, qualified_name, target, IvyError::internal).await
+}
+// Keep local response-access failures distinct from coded RPC/requireThat errors
+// for helpers whose original caller catches only instanceof IvyError.
+pub(crate) async fn discover_with_boundary<E: From<IvyError>>(
+    client: &dyn RpcClient,
+    qualified_name: &JsString,
+    target: &IvyJson,
+    boundary: fn() -> E,
+) -> Result<Arc<BoundTool>, E> {
     let (namespace, name) = name_parts(qualified_name)?;
     let mut selectors = target.clone();
     let interface = selectors.remove("interfaceVersion");
     let mut cursor = None;
     loop {
         let mut params = IvyJson::object([("namespace", IvyJson::String(namespace.clone()))]);
-        for (key,value) in selectors.as_object().ok_or_else(IvyError::internal)? {
-            params.insert(key.clone(),value.clone());
+        for (key, value) in selectors.as_object().ok_or_else(boundary)? {
+            params.insert(key.clone(), value.clone());
         }
         params.insert("namePrefix", IvyJson::String(name.clone()));
         if let Some(cursor) = cursor {
@@ -88,45 +107,59 @@ pub async fn discover(
             .request("tools.list", params, RequestOptions::default())
             .await?;
         let items = page
-            .required("items")?
-            .as_array()
-            .ok_or_else(IvyError::internal)?;
-        if let Some(binding) = items.iter().find(|item| {
-            item.get("qualifiedName").and_then(IvyJson::as_js_string) == Some(qualified_name)
-        }) {
-            if interface.as_ref().is_some_and(|version| {
-                binding
+            .get("items")
+            .and_then(IvyJson::as_array)
+            .ok_or_else(boundary)?;
+        let mut selected = None;
+        for item in items {
+            if item.is_null() {
+                return Err(boundary());
+            }
+            if item.get("qualifiedName").and_then(IvyJson::as_js_string) == Some(qualified_name) {
+                selected = Some(item);
+                break;
+            }
+        }
+        if let Some(binding) = selected {
+            if let Some(version) = &interface {
+                let definition = binding
                     .get("definition")
-                    .and_then(|v| v.get("interfaceVersion"))
-                    != Some(version)
-            }) {
-                return Err(IvyError::new(
-                    "contract_version_conflict",
-                    "The selected provider exposes another namespace interface version.",
-                ));
+                    .filter(|v| !v.is_null())
+                    .ok_or_else(boundary)?;
+                if definition.get("interfaceVersion") != Some(version) {
+                    return Err(IvyError::new(
+                        "contract_version_conflict",
+                        "The selected provider exposes another namespace interface version.",
+                    )
+                    .into());
+                }
             }
             let mut value = binding.clone();
-            value.insert(
-                "serviceNodeId",
-                page.required("provider")?
-                    .required("node")?
-                    .required("serviceNodeId")?
-                    .clone(),
-            );
-            if let Some(reference) = selectors.get("resourceRef").filter(|r| !r.is_null()) {
+            let provider = page
+                .get("provider")
+                .filter(|v| !v.is_null())
+                .ok_or_else(boundary)?;
+            let node = provider
+                .get("node")
+                .filter(|v| !v.is_null())
+                .ok_or_else(boundary)?;
+            if let Some(id) = node.get("serviceNodeId") {
+                value.insert("serviceNodeId", id.clone());
+            } else {
+                value.remove("serviceNodeId");
+            }
+            if let Some(reference) = selectors.get("resourceRef").filter(|r| truthy(Some(r))) {
                 value.insert("resourceRef", reference.clone());
             }
             return Ok(Arc::new(BoundTool { value }));
         }
-        cursor = page
-            .get("nextCursor")
-            .filter(|v| !v.is_null() && v.as_js_string().is_none_or(|s| !s.0.is_empty()))
-            .cloned();
+        cursor = page.get("nextCursor").filter(|v| truthy(Some(v))).cloned();
         if cursor.is_none() {
             return Err(IvyError::new(
                 "not_found",
                 "The exact tool is not in the selected provider catalog.",
-            ));
+            )
+            .into());
         }
     }
 }
@@ -140,31 +173,57 @@ pub async fn call_bound(
     binding: &BoundTool,
     args: IvyJson,
     operation_id: Option<JsString>,
-    mut options: ToolCallOptions,
+    options: ToolCallOptions,
 ) -> IvyResult<IvyJson> {
-    let mut params = IvyJson::object([
-        (
-            "qualifiedName",
-            binding.value.required("qualifiedName")?.clone(),
-        ),
-        (
-            "serviceNodeId",
-            binding.value.required("serviceNodeId")?.clone(),
-        ),
-        ("expectedDefinitionHash", binding.definition_hash()?.clone()),
-        ("arguments", args),
-    ]);
+    call_bound_with_boundary(
+        client,
+        binding,
+        args,
+        operation_id,
+        options,
+        IvyError::internal,
+    )
+    .await
+}
+pub(crate) async fn call_bound_with_boundary<E: From<IvyError>>(
+    client: &dyn RpcClient,
+    binding: &BoundTool,
+    args: IvyJson,
+    operation_id: Option<JsString>,
+    mut options: ToolCallOptions,
+    boundary: fn() -> E,
+) -> Result<IvyJson, E> {
+    let mut params = IvyJson::object(Vec::<(&str, IvyJson)>::new());
+    // A missing JS property is omitted when the request is serialized. Do not
+    // replace the original provider call with an invented local validation error.
+    for (source, target) in [
+        ("qualifiedName", "qualifiedName"),
+        ("serviceNodeId", "serviceNodeId"),
+        ("definitionHash", "expectedDefinitionHash"),
+    ] {
+        if let Some(value) = binding.value.get(source) {
+            params.insert(target, value.clone());
+        }
+    }
+    params.insert("arguments", args);
     if let Some(principal) = options.expected_caller_principal_id {
         params.insert("expectedCallerPrincipalId", IvyJson::String(principal));
     }
-    if let Some(reference) = binding.value.get("resourceRef") {
+    if let Some(reference) = binding.value.get("resourceRef").filter(|r| truthy(Some(r))) {
         params.insert("resourceRef", reference.clone());
     }
     if let Some(operation) = operation_id {
         params.insert("operationId", IvyJson::String(operation));
     }
+    binding
+        .value
+        .get("definition")
+        .filter(|v| !v.is_null())
+        .ok_or_else(boundary)?;
     options.request.bound_read = Some(BoundRead(binding.read_only()));
-    client.request("tools.call", params, options.request).await
+    Ok(client
+        .request("tools.call", params, options.request)
+        .await?)
 }
 #[derive(Clone)]
 pub struct InterfaceRequirement {
