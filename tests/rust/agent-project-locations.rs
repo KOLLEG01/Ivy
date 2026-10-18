@@ -232,7 +232,7 @@ async fn real_project_allocations_workspaces_and_original_sqlite_reader_preserve
         let projects = Arc::new(Mutex::new(
             row.get("projects")
                 .and_then(IvyJson::as_array)
-                .cloned()
+                .map(<[IvyJson]>::to_vec)
                 .unwrap_or_else(|| vec![internal]),
         ));
         let calls = Arc::new(Mutex::new(Vec::<IvyJson>::new()));

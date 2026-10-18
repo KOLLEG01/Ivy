@@ -76,7 +76,7 @@ fn catalog() -> &'static IvyJson {
     DATA.get_or_init(|| fixture(IvyJson::object([("action", "catalog".into())])))
 }
 fn comparator() -> Arc<SkillsComparator> {
-    let pairs = field(catalog(), "pairs").as_array().unwrap().clone();
+    let pairs = field(catalog(), "pairs").as_array().unwrap();
     // These original Node pairs isolate filesystem behavior while the actual
     // Shared locale API is pending. They do not qualify a production comparator.
     Arc::new(move |left, right| {

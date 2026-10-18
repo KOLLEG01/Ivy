@@ -1,6 +1,6 @@
 use ivy_agent_manager::{project_policy::ProjectPolicy, project_repository::WorkspaceGit};
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString,
+    IvyJson, IvyResult, JsString,
     json::{canonical, parse, stringify},
 };
 use ivy_host_runtime::{
@@ -283,7 +283,7 @@ async fn directory_browsing_matches_original_filesystem_errors_links_and_stable_
             ("root", value(&root.path)),
         ])),
     );
-    let pairs = field(&prepared, "pairs").as_array().unwrap().clone();
+    let pairs = field(&prepared, "pairs").as_array().unwrap().to_vec();
     // Explicit synthetic comparator injection until the shared locale operation
     // is available. There is no ordinal fallback in the production module.
     let compare_names: Arc<ivy_agent_manager::directories::DirectoryComparator> =
