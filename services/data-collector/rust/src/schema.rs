@@ -38,11 +38,14 @@ fn normalize(path: &str, input: &IvyJson) -> IvyResult<IvyJson> {
     let s = schema(path)?;
     if let Some(reference) = s.get("$ref") { return normalize(&reference.as_str()?, input); }
     if s.get("x-collector-json") == Some(&IvyJson::Bool(true)) { return json_value(input); }
-    if let Some(IvyJson::Array(branches)) = s.get("anyOf") {
+    // The source's oneOf nodes are discriminated unions with disjoint literals.
+    for union in ["anyOf", "oneOf"] {
+      if let Some(IvyJson::Array(branches)) = s.get(union) {
         for index in 0..branches.len() {
-            if let Ok(value) = normalize(&format!("{path}/anyOf/{index}"), input) { return Ok(value); }
+            if let Ok(value) = normalize(&format!("{path}/{union}/{index}"), input) { return Ok(value); }
         }
         return Err(IvyError::internal());
+      }
     }
     if let Some(text) = input.as_js_string() {
         for (key, too_short) in [("x-utf16-minLength", true), ("x-utf16-maxLength", false)] {
