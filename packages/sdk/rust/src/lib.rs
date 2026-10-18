@@ -13,6 +13,7 @@ pub mod native_evidence;
 pub mod native;
 pub mod native_operation;
 pub mod native_observations;
+pub mod native_turn_contents;
 pub mod rpc;
 pub mod tools;
 mod service_connection;
