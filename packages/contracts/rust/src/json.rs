@@ -1,5 +1,7 @@
 use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
+#[path = "json_trim.rs"]
+mod trim;
 #[path = "json_value.rs"]
 mod value_traits;
 
