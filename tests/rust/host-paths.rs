@@ -93,7 +93,7 @@ async fn instance_configuration_checks_build_before_creating_runtime_roots() {
         assert!(!fixture.0.join("data").exists());
     }
     let actual = config::instance_config(&path, &fixture_node("24.18.0")).await.unwrap();
-    assert_eq!(actual.json(), &value);
+    assert_eq!(ivy_contracts::json::canonical(actual.json(), usize::MAX).unwrap(), ivy_contracts::json::canonical(&value, usize::MAX).unwrap());
     for root in ["data", "work", "logs"] { assert!(fixture.0.join(root).is_dir()); }
     for root in [fixture.0.join("artifact"), fixture.0.join("artifact/nested"), fixture.0.clone(), PathBuf::from("relative")] {
         let mut invalid = value.clone(); invalid.insert("dataRoot", root.to_string_lossy().to_string().into());
@@ -152,9 +152,38 @@ async fn health_control_requires_all_three_identities_and_preserves_utf16_slice(
         assert!(health.control().await.unwrap().is_none());
     }
     config::atomic_json(&path, control.clone()).await.unwrap();
-    assert_eq!(health.control().await.unwrap(), Some(control));
+    assert_eq!(ivy_contracts::json::canonical(&health.control().await.unwrap().unwrap(), usize::MAX).unwrap(), ivy_contracts::json::canonical(&control, usize::MAX).unwrap());
     let replacement = HealthFile::with_launch_id(config, Some("launch-1".into()));
     assert!(replacement.control().await.unwrap().is_none());
     fs::write(&path, "{}").unwrap();
     assert!(health.control().await.is_err());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn cancelled_health_waiter_cannot_release_the_active_file_writer() {
+    use std::{os::windows::fs::OpenOptionsExt, sync::Arc, time::Duration};
+    let fixture = ServiceFixture::new();
+    let health = Arc::new(HealthFile::with_launch_id(config::InstanceConfig::from_json(fixture.value()).unwrap(), Some("launch".into())));
+    health.write(false, "initial".into(), None).await.unwrap();
+    let path = fixture.0.join("data/health.json");
+    let held = fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
+    let writer = health.clone();
+    let first = tokio::spawn(async move { writer.write(true, "cancelled waiter".into(), None).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if fs::read_dir(path.parent().unwrap()).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")) { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("first write entered durable replacement");
+    first.abort(); let _ = first.await;
+    let writer = health.clone();
+    let mut second = tokio::spawn(async move { writer.write(false, "last".into(), None).await });
+    assert!(tokio::time::timeout(Duration::from_millis(50), &mut second).await.is_err());
+    drop(held);
+    second.await.unwrap().unwrap();
+    let value = config::json_file(&path, config::CONFIGURATION_BYTES).await.unwrap();
+    assert_eq!(value.get("details"), Some(&IvyJson::from("last")));
+    assert_eq!(value.get("ready"), Some(&IvyJson::Bool(false)));
+    assert!(!fs::read_dir(path.parent().unwrap()).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
 }
