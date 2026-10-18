@@ -188,7 +188,10 @@ export const rustTests = {
   'tests/rust/dashboards-document.rs': { package: 'ivy-dashboards', test: 'dashboards-document' },
   'tests/rust/dashboards-renderer.rs': { package: 'ivy-dashboards', test: 'dashboards-renderer' },
   'tests/rust/hive_storage_worker.rs': { package: 'ivy-hive', test: 'hive-storage-worker' },
-  'tests/rust/hive_worker_client.rs': { package: 'ivy-hive', test: 'hive-worker-client' },
+  'tests/rust/hive_worker_client.rs': {
+    package: 'ivy-hive', test: 'hive-worker-client',
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+  },
   'tests/rust/phone_media.rs': { package: 'ivy-phone-bridge', test: 'phone_media' },
   'tests/rust/phone_diagnostics.rs': { package: 'ivy-phone-bridge', test: 'phone_diagnostics' },
   'tests/rust/phone_native_rpc.rs': { package: 'ivy-phone-bridge', test: 'phone_native_rpc' },
