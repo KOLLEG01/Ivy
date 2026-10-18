@@ -1319,29 +1319,7 @@
         "inputs": {
           "type": "array",
           "maxItems": 4,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "id",
-              "method",
-              "params",
-              "replySchema"
-            ],
-            "properties": {
-              "id": {
-                "type": [
-                  "string",
-                  "integer"
-                ]
-              },
-              "method": {
-                "type": "string"
-              },
-              "params": {},
-              "replySchema": {}
-            }
-          }
+          "items": { "$ref": "#/$defs/PhoneVoiceInput" }
         }
       }
     },
@@ -1351,9 +1329,11 @@
       "required": [
         "callId",
         "id",
+        "inputToken",
         "reply"
       ],
       "properties": {
+        "inputToken": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "callId": {
           "$ref": "#/$defs/Uuid"
         },

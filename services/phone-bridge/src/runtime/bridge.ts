@@ -313,12 +313,16 @@ export class PhoneBridge {
           inputs: this.flow.voiceInputs(caller, String(args["callId"])),
         };
         break;
+      case 'voiceWork':
+        result = { work: this.flow.voiceWork(caller, String(args['callId'])) };
+        break;
       case "answerVoiceInput":
         this.flow.answerVoiceInput(
           caller,
           String(args["callId"]),
           args["id"] as Agent.RequestId,
           args["reply"] as Agent.Reply,
+          String(args['inputToken']),
         );
         result = { state: "submitted" };
         break;

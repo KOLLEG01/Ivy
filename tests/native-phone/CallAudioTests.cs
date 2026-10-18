@@ -272,6 +272,11 @@ static partial class Program {
         await Until(() => outgoing.Media.ReceivedPackets >= 2 && incoming.Media.ReceivedPackets >= 2, "owned synthetic ports carry real local RTP");
         outgoing.Hangup(); Check(!a!.IsOpen && a.Revocations == 1, "local hangup revokes audio synchronously");
         await Until(() => incoming.Observation.State == "local_ended", "remote BYE ends original call");
+        var endedAt = incoming.Observation.EndedAt;
+        Check(endedAt != null && outgoing.Observation.EndedAt != null && endedAt <= DateTimeOffset.UtcNow,
+            "native local and remote hangup retain their first UTC transport end time");
+        incoming.Hangup(); outgoing.Hangup();
+        Check(incoming.Observation.EndedAt == endedAt, "later polling and repeated cleanup cannot reset the disconnect deadline");
         Check(!b!.IsOpen && b.Revocations == 1, "remote hangup revokes incoming audio");
         await first.ReleaseAsync(outgoing); await second.ReleaseAsync(incoming);
         await outgoing.Media.DisposeAsync(); await incoming.Media.DisposeAsync();

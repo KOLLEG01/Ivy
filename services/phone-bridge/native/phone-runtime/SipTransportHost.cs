@@ -23,7 +23,7 @@ public sealed record SipBinding(string Address, int Port, string Transport, int 
 }
 public sealed record SipIncoming(string SipCallId, string FromUri, string PeerAddress, int PeerPort, string Transport, string[] AssertedNumbers = null, bool RegistrationPeer = false);
 public sealed record SipCallObservation(string Id, string Direction, string State, string SipCallId, string Error, SipIncoming Incoming,
-    CallFeatureObservation Features = null);
+    CallFeatureObservation Features = null, DateTimeOffset? EndedAt = null);
 public sealed class SipCallBusyException() : InvalidOperationException("Previous call must be released before another admission.");
 
 // Ephemeral SIP resources only. The service persists admission and original intent before Dial,
@@ -186,6 +186,7 @@ public sealed class SipCall : IAsyncDisposable {
     private bool attempted, ending, outcomeUnknown, claimed, retiringOffer;
     private readonly Action<SipCall> offerEnded;
     private Timer ringDeadline;
+    private DateTimeOffset? endedAt;
     private Task disposal;
     private CallDesktopSession desktop;
     public SipMediaSession Media { get; }
@@ -255,7 +256,7 @@ public sealed class SipCall : IAsyncDisposable {
         } catch (TimeoutException) { return new { state = "fallback", codec = Media.SendCodec, payload = Media.SendPayload }; }
         finally { Media.OnAudioFormatsNegotiated -= Ready; }
     }
-    public SipCallObservation Observation { get { lock (sync) return new(id, direction, state, sipCallId, error, incomingContext, Features?.Observation); } }
+    public SipCallObservation Observation { get { lock (sync) return new(id, direction, state, sipCallId, error, incomingContext, Features?.Observation, endedAt); } }
     internal bool HandleInfo(SIPRequest request) {
         var dialogue = agent?.Dialogue ?? delayed?.Dialogue;
         if (dialogue == null || request.Header.CallId != sipCallId || request.Header.From.FromTag != dialogue.RemoteTag ||
@@ -358,7 +359,7 @@ public sealed class SipCall : IAsyncDisposable {
                 if (!stopOriginal) {
                     bool connected = answered && (delayed?.IsActive ?? agent.IsCallActive);
                     state = connected ? "connected" : "local_ended"; error = connected ? null : notConnected;
-                    if (!connected) ending = true;
+                    if (!connected) { ending = true; endedAt ??= DateTimeOffset.UtcNow; }
                     else {
                         Features.Connected();
                         if (screeningSettings != null) {
@@ -411,24 +412,24 @@ public sealed class SipCall : IAsyncDisposable {
         }
     }
     private void Ended() {
-        lock (sync) { ending = true; ringDeadline?.Dispose(); if (!outcomeUnknown) state = "local_ended"; }
+        lock (sync) { ending = true; endedAt ??= DateTimeOffset.UtcNow; ringDeadline?.Dispose(); if (!outcomeUnknown) state = "local_ended"; }
         Media.Close("ended");
         offerEnded?.Invoke(this);
     }
     private void ExpireRinging() {
         lock (sync) {
             if (attempted || ending) return;
-            ending = true; state = "local_ended";
+            ending = true; endedAt ??= DateTimeOffset.UtcNow; state = "local_ended";
         }
         Media.Close("ring_expired"); StopOriginal();
         offerEnded?.Invoke(this);
     }
     private void Unknown() {
-        lock (sync) { outcomeUnknown = true; ending = true; state = "outcome_unknown"; error = "sip_operation_outcome_unknown"; ringDeadline?.Dispose(); }
+        lock (sync) { outcomeUnknown = true; ending = true; endedAt ??= DateTimeOffset.UtcNow; state = "outcome_unknown"; error = "sip_operation_outcome_unknown"; ringDeadline?.Dispose(); }
         Media.Close("unknown");
     }
     public SipCallObservation Hangup() {
-        lock (sync) { if (ending) return Observation; ending = true; ringDeadline?.Dispose(); }
+        lock (sync) { if (ending) return Observation; ending = true; endedAt ??= DateTimeOffset.UtcNow; ringDeadline?.Dispose(); }
         Media.Close("hangup");
         StopOriginal();
         lock (sync) if (!outcomeUnknown) state = "local_ended";

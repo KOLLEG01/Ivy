@@ -14,7 +14,7 @@ import type { PhoneCodexVoiceSettings } from "../services/phone-bridge/src/runti
 import { PhoneJournal } from "../services/phone-bridge/src/runtime/journal.js";
 import { PhoneAdmission } from "../services/phone-bridge/src/runtime/admission.js";
 import type { startCodexProcess } from "../packages/host-runtime/src/codex-process.js";
-import type { NativeNotification } from "../packages/host-runtime/src/codex-rpc.js";
+import type { NativeNotification, NativeRequest } from "../packages/host-runtime/src/codex-rpc.js";
 
 const selection = {
   model: "gpt-6-sol" as const,
@@ -48,6 +48,9 @@ function fixture(t: test.TestContext) {
   let notification!: (value: NativeNotification) => void,
     online = true,
     opens = 0;
+  let input!: (value: NativeRequest) => void;
+  const answers: unknown[] = [];
+  let interruptUnknown = false;
   const threads = new Map<string, Record<string, unknown>>();
   const unloaded = new Set<string>();
   const archived = new Set<string>();
@@ -84,6 +87,7 @@ function fixture(t: test.TestContext) {
   });
   const connect: typeof startCodexProcess = async (options) => {
     notification = options.onNotification;
+    input = options.onRequest;
     online = true;
     opens++;
     const rpc = {
@@ -182,11 +186,17 @@ function fixture(t: test.TestContext) {
           losePromptReply = false;
           throw new Error("Prompt acknowledgement lost");
         }
+        if (method === 'turn/interrupt') {
+          if (interruptUnknown) throw new Error('Synthetic lost interrupt outcome');
+          const thread = threads.get(String(params['threadId']))!;
+          const turn = (thread['turns'] as Record<string, unknown>[]).find(turn => turn['id'] === params['turnId']);
+          if (turn) { turn['status'] = 'interrupted'; notification({ method: 'turn/completed', params: { threadId: String(params['threadId']), turn } as Wire.Json }); }
+        }
         const reply = { result };
         hooks.beforeResolve?.(hooks.requestId ?? randomUUID(), reply);
         return reply;
       },
-      answer() {},
+      answer(method: string, id: unknown, reply: unknown, beforeSend: () => void) { beforeSend(); answers.push({ method, id, reply }); },
     };
     return {
       rpc,
@@ -200,11 +210,11 @@ function fixture(t: test.TestContext) {
     } as unknown as Awaited<ReturnType<typeof startCodexProcess>>;
   };
   const voices: PhoneCodexVoice[] = [];
-  const voice = () => {
+  const voice = (runtime: Partial<ConstructorParameters<typeof PhoneCodexVoice>[2]> = {}) => {
     const value = new PhoneCodexVoice(
       settings,
       journal,
-      { artifactRoot: root, dataRoot: root },
+      { artifactRoot: root, dataRoot: root, ...runtime },
       undefined,
       connect,
     );
@@ -222,6 +232,19 @@ function fixture(t: test.TestContext) {
   });
   return {
     voice,
+    input: (request: NativeRequest) => input(request),
+    answers,
+    interruptUnknown: () => { interruptUnknown = true; },
+    started: (threadId: string, turnId = randomUUID()) => {
+      const turn = { id: turnId, status: 'inProgress', items: [] };
+      (threads.get(threadId)!['turns'] as unknown[]).push(turn);
+      notification({ method: 'turn/started', params: { threadId, turn } });
+      return turnId;
+    },
+    completed: (threadId: string, turnId: string) => {
+      const turn = (threads.get(threadId)!['turns'] as Record<string, unknown>[]).find(turn => turn['id'] === turnId)!;
+      turn['status'] = 'completed'; notification({ method: 'turn/completed', params: { threadId, turn } as Wire.Json });
+    },
     journal,
     requests,
     threads,
@@ -974,4 +997,99 @@ test("A call arriving during idle unsubscribe waits and resumes before starting 
     1,
   );
   assert.equal(f.journal.voiceTask(call.callId, 0), threadId);
+});
+
+test('Hangup retains the backing turn and input; authorized redial attaches without another task or turn', async t => {
+  const f = fixture(t);
+  f.settings.resumeIncomingConversation = true;
+  f.settings.keepTaskLoaded = false;
+  let now = Date.now();
+  const notices: Record<string, unknown>[] = [];
+  const voice = f.voice({ now: () => now, notifyInput: async (_work, input) => { notices.push(input); return true; } });
+  const call = f.incoming(), threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(call.callId, async () => {});
+  const turnId = f.started(threadId);
+  f.input({ id: 17, method: 'item/tool/requestUserInput', params: { threadId, turnId, itemId: 'question',
+    questions: [{ id: 'q', header: 'Choice', question: 'Which destination?', isOther: false, isSecret: false, options: null }] } });
+  assert.equal(notices.length, 0, 'no post-hangup notification while caller is connected');
+  const end = now - 20_000;
+  await voice.detach(call.callId, end);
+  f.release(call);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(voice.work(call.callId)!.deadline, end + 300_000);
+  assert.equal(notices.length, 1);
+  assert.equal(f.answers.length, 0, 'notification is not consent');
+  await voice.prewarm('incoming-user', selection);
+  await voice.archive();
+  assert.equal(f.archived.has(threadId), false);
+  assert.equal(f.requests.filter(request => request.method === 'thread/unsubscribe').length, 0);
+  const baseline = f.requests.length;
+  const redial = f.incoming();
+  assert.equal(await voice.prepare(redial, 0, selection), threadId);
+  await voice.start(redial, 0, threadId, 'Hi', 'new offer', () => {});
+  const startup = f.requests.at(-1)!;
+  assert.equal(startup.method, 'thread/realtime/start');
+  assert.equal('realtimeStartInstructions' in startup.params, false);
+  assert.equal(voice.work(redial.callId), null, 'negotiation alone cannot reset the old deadline');
+  await voice.connected(redial.callId, async () => {});
+  assert.equal(voice.work(redial.callId)!.turnId, turnId);
+  assert.equal(voice.work(redial.callId)!.deadline, null);
+  assert.equal(f.requests.slice(baseline).some(request => ['thread/start', 'turn/start', 'thread/settings/update'].includes(request.method)), false);
+  const pending = voice.inputs(redial.callId)[0]!;
+  assert.throws(() => voice.answer(redial.callId, 17, { result: { answers: { q: { answers: ['A'] } } } }, 'stale'), /no longer/);
+  voice.answer(redial.callId, 17, { result: { answers: { q: { answers: ['A'] } } } }, String(pending['inputToken']));
+  assert.equal(f.answers.length, 1);
+  assert.equal(voice.inputs(call.callId).length, 0);
+  now += 400_000;
+  await voice.detach(redial.callId, now);
+  assert.equal(voice.work(redial.callId)!.deadline, now + 300_000, 'second real connection owns a new allowance');
+  f.completed(threadId, turnId);
+  assert.equal(voice.work(redial.callId)!.state, 'completed');
+});
+
+test('Independent deadline interrupts the original waiting turn and rejects a late answer', async t => {
+  const f = fixture(t);
+  let now = Date.now();
+  const voice = f.voice({ now: () => now });
+  const call = f.incoming(), threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(call.callId, async () => {});
+  const turnId = f.started(threadId);
+  f.input({ id: 'approval', method: 'item/commandExecution/requestApproval', params: { threadId, turnId, itemId: 'command', startedAtMs: now } });
+  const pending = voice.inputs(call.callId)[0]!;
+  await voice.detach(call.callId, now);
+  f.release(call);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  // Reschedule once under the test clock without changing the actual stored deadline.
+  const other = f.incoming('other');
+  await voice.prepare(other, 0, selection);
+  await voice.detach(other.callId, now);
+  f.release(other);
+  now += 300_000;
+  t.mock.timers.tick(1000);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.throws(() => voice.answer(call.callId, 'approval', { result: { decision: 'accept' } }, String(pending['inputToken'])), /ended session|no longer/);
+  assert.deepEqual(f.requests.filter(request => request.method === 'turn/interrupt').map(request => request.params), [{ threadId, turnId }]);
+  assert.equal(voice.work(call.callId)!.state, 'paused_deadline');
+  assert.equal(f.answers.length, 0);
+  t.mock.timers.tick(5000);
+  assert.equal(f.requests.filter(request => request.method === 'turn/interrupt').length, 1);
+  t.mock.timers.reset();
+});
+
+test('An uncertain interrupt retains the original work and cannot be auto-resumed', async t => {
+  const f = fixture(t);
+  const voice = f.voice();
+  const call = f.incoming(), threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(call.callId, async () => {});
+  f.started(threadId); f.interruptUnknown();
+  await voice.detach(call.callId, Date.now() - 300_001);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(voice.work(call.callId)!.state, 'outcome_unknown');
+  f.release(call);
+  const next = f.incoming();
+  assert.notEqual(await voice.prepare(next, 0, selection), threadId);
+  assert.equal(f.requests.filter(request => request.method === 'turn/interrupt').length, 1);
 });

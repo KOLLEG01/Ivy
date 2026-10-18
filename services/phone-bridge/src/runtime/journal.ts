@@ -16,6 +16,7 @@ import appToolsContract from '../../../../specs/schemas/codex-app-tools.schema.j
 import type { PhoneVoiceArchivePlan, PhoneVoiceArchiveResult, PhoneVoiceArchiveSettings } from './desktop-voice-archive.js';
 import { ReceiptArchive } from '../../../../packages/sdk/src/receipt-archive.js';
 import type { PhoneVoiceSelection } from './voice-selection.js';
+import type { PhoneVoiceWork } from './voice-work.js';
 
 export type PhoneJournalIntent = PhoneIntent |
   (Omit<PhoneIntent, 'method'> & { method: 'call.archiveVoice'; archivePlan: PhoneVoiceArchivePlan }) |
@@ -155,6 +156,10 @@ export class PhoneJournal {
   }
   private meta(key: string): string | null { const row = this.statement('SELECT value FROM meta WHERE key=?').get(key); return row ? String(row['value']) : null; }
   private setMeta(key: string, value: string): void { this.statement('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value); }
+  voiceWorks(): PhoneVoiceWork[] { return JSON.parse(this.meta('voiceWorks') ?? '[]') as PhoneVoiceWork[]; }
+  saveVoiceWorks(works: PhoneVoiceWork[]): void { this.setMeta('voiceWorks', canonical(works, 256 * 1024)); }
+  voiceNotice(token: string): unknown { return JSON.parse(this.meta('voiceNotice:' + token) ?? 'null'); }
+  saveVoiceNotice(token: string, notice: unknown): void { this.setMeta('voiceNotice:' + token, canonical(notice, 512 * 1024)); }
   rememberedVoiceReasoning(): PhoneVoiceSelection['reasoningEffort'] | null {
     const value = this.meta('voiceReasoning');
     requireThat(value === null || value.length > 0 && value.length <= 64,

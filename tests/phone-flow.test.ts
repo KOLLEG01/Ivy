@@ -140,6 +140,7 @@ function fixture(
   const native = new PhoneNativeClient(epoch, input, output, journal.hooks),
     calls = new PhoneCallCommands(policy, journal, native);
   let activeId: string | null = null,
+    endedAt: string | null = null,
     direction = "outgoing",
     state = "prepared",
     incoming: Record<string, unknown> | null = null;
@@ -171,6 +172,7 @@ function fixture(
     sipCallId: incoming ? "wire" : null,
     error: null,
     incoming,
+    ...(endedAt ? { endedAt } : {}),
     features: {
       access: "trusted",
       disableCodecUpgrade: false,
@@ -644,8 +646,9 @@ function fixture(
     failSelection: (value: boolean) => {
       failSelection = value;
     },
-    ended: () => {
+    ended: (at?: string) => {
       state = "local_ended";
+      endedAt = at ?? null;
     },
     prompts,
     promptSelections,
@@ -1493,4 +1496,19 @@ test("default outgoing Windows route and retained history are visible to every t
     admin.calls.map((c) => c.callId),
     [call.callId],
   );
+});
+
+test('hangup revokes audio before detaching work and forwards the first native end time', async t => {
+  const f = fixture(t), order: string[] = [], detached: { callId: string; endedAt: number | null }[] = [];
+  f.intercept(async request => { if (['call.hangup', 'call.realtime.stop', 'call.release'].includes(request.method)) order.push(request.method); });
+  const flow = f.flow(settings, { ...f.port, async detach(callId, endedAt) { order.push('detach'); detached.push({ callId, endedAt }); } });
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice');
+  await until(() => f.methods().includes('call.realtime.answer'));
+  await tick();
+  const end = new Date(Date.now() - 20_000).toISOString();
+  f.ended(end);
+  await flow.observe();
+  assert.deepEqual(detached, [{ callId: call.callId, endedAt: Date.parse(end) }]);
+  assert.deepEqual(order, ['call.hangup', 'detach', 'call.realtime.stop', 'call.release']);
+  assert.equal(f.journal.currentCall(call.callId), null);
 });

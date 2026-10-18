@@ -145,6 +145,34 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   stop and native peer disposal before releasing the admission. Lost transport
   requires reconnecting to the same runtime for cleanup. Service clients never
   terminate a shared daemon. Uncertain outcomes remain visible in the journal.
+- The native SIP owner records the first transport end time. A running backing
+  turn survives media cleanup for at most five minutes from that time; a missing
+  or uncertain end time grants no background allowance. Completion ends this
+  allowance immediately. Retain work, call and deadline identities separately.
+  An independent timer claims the original turn before requesting interruption;
+  an acknowledgement alone does not confirm a stop. Keep ambiguous external
+  effects as `outcome_unknown`, with no automatic repeat or new work.
+  The service cannot enforce a native time limit while its owner is unavailable,
+  or undo an already dispatched external action. On recovery reconcile the exact
+  turn and original deadline; a crashed connected session grants no new window.
+- A freshly admitted and authenticated incoming call with the same principal,
+  caller identity, policy and native configuration rejoins a still running turn
+  within that window. Reconnect uses a new media session without a readiness turn,
+  model update or assignment replay. Only confirmed media connection invalidates
+  the old deadline. A later disconnect gets its own end time. Expired, completed
+  or ambiguous work is not automatically restarted. Ordinary idle conversation
+  history remains separate from this work guarantee.
+- Retain active, paused and ambiguous work against prewarming, unsubscribe and
+  archive maintenance. Explicit Voice restart and orderly shutdown interrupt
+  outstanding work; SIP-owner maintenance waits for it to finish.
+- Route pending native user questions and approvals through the official
+  ChatBridge Main notification path with a retained `phone-bridge/question`
+  source and one operation per exact input. The five-minute deadline continues
+  during user waits. No timeout or notification implies consent. Read
+  `phone_bridge_work` and `phone_bridge_voice_inputs` before answering with the
+  exact `inputToken` through the owning PhoneBridge connection. Consumed inputs,
+  changed native epochs and elapsed deadlines reject stale replies. Delivery has
+  bounded retries; unavailable Main never causes a new conversation or callback.
 
 Checks: [call flow](../tests/phone-flow.test.ts),
 [task lifecycle](../tests/phone-codex-voice.test.ts),

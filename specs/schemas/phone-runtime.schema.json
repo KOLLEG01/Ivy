@@ -265,6 +265,11 @@
         "incoming"
       ],
       "properties": {
+        "endedAt": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Native UTC time of the first local transport end. Never reset by polling or repeated cleanup."
+        },
         "id": {
           "type": "string",
           "format": "uuid"

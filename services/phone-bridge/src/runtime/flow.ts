@@ -16,6 +16,7 @@ import type { PhoneOperation, PhoneJournalIntent } from "./journal.js";
 import { phoneOutcomeReservation } from "./journal.js";
 import { PhoneNativeClient, validatePhone } from "./native.js";
 import type { PhoneStatus } from "./native.js";
+import { phoneWorkView } from './voice-work.js';
 import { synthesizeAnnouncement } from "./speech.js";
 import type { PhoneSpeechSettings } from "./speech.js";
 import type { PhoneCallLogs } from "./call-logs.js";
@@ -162,16 +163,23 @@ export class PhoneFlow {
     callId: string,
     id: Agent.RequestId,
     reply: Agent.Reply,
+    inputToken: string,
   ): void {
     const call = this.original(principalId, callId, "connect");
-    this.continuing(call);
+    if (!this.voice?.work?.(callId)) this.continuing(call);
     requireThat(
       this.voice?.answer,
       "phone_voice_unavailable",
       "Configured Voice cannot receive task inputs.",
     );
-    this.voice.answer(callId, id, reply);
+    this.voice.answer(callId, id, reply, inputToken);
   }
+  voiceWork(principalId: string, callId: string) {
+    this.original(principalId, callId, 'read');
+    const work = this.voice?.work?.(callId);
+    return work ? phoneWorkView(work) : null;
+  }
+  hasVoiceWork(): boolean { return this.voice?.hasWork?.() ?? false; }
   private windowsAudio(): Record<string, unknown> {
     requireThat(
       this.settings.audio,
@@ -924,7 +932,11 @@ export class PhoneFlow {
             status.media?.audio?.state === "revoked" ||
             status.media?.failed === true ||
             this.voice?.failed(call.callId));
-        if (ended) this.endedCalls.add(call.callId);
+        if (ended) {
+          this.endedCalls.add(call.callId);
+          const endedAt = status.call?.state === 'local_ended' && status.call.endedAt ? Date.parse(status.call.endedAt) : null;
+          this.voice?.disconnected?.(call.callId, endedAt !== null && Number.isFinite(endedAt) ? endedAt : null);
+        }
         if (this.work.has(call.callId)) continue;
         if (ended || this.abandonedCalls.has(call.callId)) {
           await this.cleanupWhenObserved(call, status);
@@ -1089,11 +1101,17 @@ export class PhoneFlow {
       return;
     }
     // Revoke live audio immediately; pending task startup cannot keep the caller connected.
-    this.callResult(call, await this.calls.hangup(principalId, callId), [
+    const hangup = await this.calls.hangup(principalId, callId);
+    this.callResult(call, hangup, [
       "local_ended",
       "outcome_unknown",
     ]);
-    await this.voice?.stop(callId);
+    const ended = result(hangup);
+    const endedAt = ended['state'] === 'local_ended' && typeof ended['endedAt'] === 'string'
+      ? Date.parse(ended['endedAt']) : null;
+    if (!this.closed && this.voice?.detach)
+      await this.voice.detach(callId, endedAt !== null && Number.isFinite(endedAt) ? endedAt : null);
+    else await this.voice?.stop(callId);
     // Even a failed task preparation may already own an SDP/peer. Clean its exact generation.
     for (let generation = 128; generation >= 0; generation--) {
       const prepared = this.calls.journal.callCommand(

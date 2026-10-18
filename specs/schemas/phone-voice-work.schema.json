@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "PhoneVoiceWorkView": {
+      "type": "object", "additionalProperties": false,
+      "required": ["threadId", "turnId", "state", "attachedCallId", "endedAt", "deadline", "revision", "error"],
+      "properties": {
+        "threadId": {"type": "string"}, "turnId": {"type": "string"},
+        "state": {"enum": ["running", "waiting_input", "completed", "failed", "halting", "paused_deadline", "outcome_unknown"]},
+        "attachedCallId": {"type": ["string", "null"], "format": "uuid"},
+        "endedAt": {"type": ["number", "null"]}, "deadline": {"type": ["number", "null"]},
+        "revision": {"type": "integer", "minimum": 0}, "error": {"type": ["string", "null"]}
+      }
+    },
+    "PhoneVoiceWorkResult": {
+      "type": "object", "additionalProperties": false, "required": ["work"],
+      "properties": {"work": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/PhoneVoiceWorkView"}]}}
+    },
+    "PhoneVoiceQuestion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["serviceNodeId", "callId", "work", "input", "reportedAt"],
+      "properties": {
+        "serviceNodeId": {"type": "string"}, "callId": {"type": "string", "format": "uuid"},
+        "work": {"$ref": "#/$defs/PhoneVoiceWorkView"},
+        "input": {"$ref": "#/$defs/PhoneVoiceInput"},
+        "reportedAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "PhoneVoiceInput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "inputToken", "method", "params", "replySchema"],
+      "properties": {
+        "id": {"type": ["string", "integer"]}, "inputToken": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "method": {"type": "string"}, "params": {}, "replySchema": {}
+      }
+    }
+  }
+}

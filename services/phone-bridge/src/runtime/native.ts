@@ -47,7 +47,7 @@ export interface PhoneStatus {
   micro?: { state: string; generation: number | null; errorCode: string | null } | null;
   callIds?: string[];
   configured: boolean; endpoint: string | null; registration: Record<string, unknown> | null;
-  call: { id: string; direction: 'incoming' | 'outgoing'; state: string; sipCallId: string | null; error: string | null; incoming: PhoneIncoming | null;
+  call: { id: string; direction: 'incoming' | 'outgoing'; state: string; sipCallId: string | null; error: string | null; incoming: PhoneIncoming | null; endedAt?: string | null;
     features?: { access: string; disableCodecUpgrade: boolean; screening: string; command: string | null; commandSequence: number;
       commandState?: 'pending' | null; model?: string | null; reasoningEffort?: string | null;
       commands: { command: 'new_voice' | 'select_voice'; sequence: number; model: string | null; reasoningEffort: string | null }[];

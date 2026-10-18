@@ -4,6 +4,7 @@ import {
   IvyError,
   requireThat,
   ServiceClient,
+  HiveClient,
 } from "../../../packages/sdk/src/node.js";
 import type { ToolHandler } from "../../../packages/sdk/src/node.js";
 import {
@@ -30,6 +31,7 @@ import { validatePhone } from "../../../services/phone-bridge/src/runtime/native
 import type { PhoneNativeClient } from "../../../services/phone-bridge/src/runtime/native.js";
 import { PhoneCallLogs } from "../../../services/phone-bridge/src/runtime/call-logs.js";
 import { PhoneCodexVoice } from "./runtime/codex-voice.js";
+import { PhoneVoiceNotices } from './runtime/voice-notices.js';
 
 export async function startPhoneBridge(path: string) {
   const config = await instanceConfig(path),
@@ -59,6 +61,8 @@ export async function startPhoneBridge(path: string) {
     lastVoiceCheck = 0;
   let rotating = false;
   const diagnostics = new PhoneDiagnostics(config.serviceNodeId);
+  const voiceNotices = new PhoneVoiceNotices(new HiveClient(config.publicBaseUrl, { credential: config.credential }),
+    journal, config.serviceNodeId, code => diagnostics.voiceFailed(code));
   let healthWork: Promise<void> = Promise.resolve();
   const writeHealth = (
     ready: boolean,
@@ -204,6 +208,7 @@ export async function startPhoneBridge(path: string) {
               artifactRoot: config.artifactRoot,
               dataRoot: config.dataRoot,
               credential: config.credential!,
+              notifyInput: (work, input, current) => voiceNotices.notify(work, input, current),
             },
             (code) => diagnostics.voiceFailed(code),
           )
@@ -380,6 +385,7 @@ export async function startPhoneBridge(path: string) {
         // Closing the flow first fences admissions that raced with the idle observation.
         if (
           journal.epochOperations >= 4000 &&
+          !flow!.hasVoiceWork() &&
           !journal.currentCall() &&
           !observed.call
         ) {

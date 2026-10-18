@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { phoneVoiceInstructions, phoneVoiceOpeningCue, phoneVoicePreparationPrompt } from "../../../../instructions/phone-voice.js";
+import { phoneVoiceInstructions, phoneVoiceOpeningCue, phoneVoicePreparationPrompt, phoneVoiceWorkInstructions } from "../../../../instructions/phone-voice.js";
 import { isAbsolute, join, resolve } from "node:path";
 import { startCodexProcess } from "../../../../packages/host-runtime/src/codex-process.js";
 import type { CodexProcessSettings } from "../../../../packages/host-runtime/src/codex-process.js";
@@ -20,6 +20,8 @@ import { phoneCallerIdentity } from "./admission.js";
 import type { PhoneJournal, PhoneJournalIntent, PhoneConversation, PhoneVoiceText } from "./journal.js";
 import type { PhoneVoiceModel, PhoneVoiceSelection } from "./voice-selection.js";
 import type { PhoneSpeakerVoiceCatalog } from "./voice-selection.js";
+import { PhoneVoiceWorks, activePhoneWork } from './voice-work.js';
+import type { PhoneVoiceWork } from './voice-work.js';
 
 export interface PhoneCodexVoiceSettings extends CodexProcessSettings {
   cwd: string;
@@ -96,10 +98,14 @@ export interface PhoneVoicePort {
     guard: () => Promise<void>,
   ): Promise<void>;
   stop(callId: string, keepPreparedThreadId?: string): Promise<void>;
+  detach?(callId: string, endedAt: number | null): Promise<void>;
+  disconnected?(callId: string, endedAt: number | null): void;
+  work?(callId: string): PhoneVoiceWork | null;
+  hasWork?(): boolean;
   connected?(callId: string, guard: () => Promise<void>): Promise<void>;
   failed(callId: string): boolean;
   inputs?(callId: string): unknown[];
-  answer?(callId: string, id: Agent.RequestId, reply: Agent.Reply): void;
+  answer?(callId: string, id: Agent.RequestId, reply: Agent.Reply, inputToken: string): void;
   close(): Promise<void>;
 }
 
@@ -133,6 +139,14 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     }
   >();
   private readonly pendingInputs = new Map<string, NativeRequest>();
+  private readonly works: PhoneVoiceWorks;
+  private workTimer: NodeJS.Timeout | null = null;
+  private readonly interrupting = new Map<string, Promise<void>>();
+  private readonly interrupted = new Set<string>();
+  private readonly notified = new Set<string>();
+  private readonly notifying = new Map<string, Promise<void>>();
+  private readonly rejoining = new Set<string>();
+  private recovering: Promise<void> | null = null;
   private readonly schemas = new SchemaValidators();
   private modelCatalog: { models: PhoneVoiceModel[]; expiresAt: number } | null = null;
   private loadingModels: Promise<PhoneVoiceModel[]> | null = null;
@@ -148,6 +162,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       artifactRoot: string;
       dataRoot: string;
       credential?: string;
+      notifyInput?: (work: PhoneVoiceWork, input: Record<string, unknown>, current: () => boolean) => Promise<boolean>;
+      now?: () => number;
     },
     private readonly onError: (code: string) => void = () => undefined,
     private readonly connect: typeof startCodexProcess = startCodexProcess,
@@ -157,6 +173,99 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       "invalid_arguments",
       "Codex Voice requires its explicit local working directory.",
     );
+    const epoch = Date.now(), monotonic = performance.now();
+    this.works = new PhoneVoiceWorks(journal, runtime.now ?? (() => epoch + performance.now() - monotonic));
+    this.scheduleWork();
+  }
+  work(callId: string): PhoneVoiceWork | null {
+    return structuredClone(this.works.forCall(callId) ?? null);
+  }
+  hasWork(): boolean { return this.works.all().some(work => activePhoneWork(work) || ['halting', 'outcome_unknown'].includes(work.state)); }
+  private scheduleWork(): void {
+    if (this.workTimer) clearTimeout(this.workTimer);
+    if (this.closed) return;
+    const deadlines = this.works.all().filter(work => activePhoneWork(work) && !work.attachedCallId && work.deadline !== null)
+      .map(work => Math.max(0, work.deadline! - this.works.now()));
+    this.workTimer = setTimeout(() => {
+      // Claim synchronously, before any await: a reconnect cannot overtake an expired claim.
+      const claims = this.works.claimExpired();
+      for (const claim of claims) void this.interruptWork(claim);
+      if (this.hasWork() && !this.connection?.rpc.connected)
+        void this.recoverWorks().catch(error => this.onError(IvyError.from(error).code));
+      this.notifyInputs();
+      this.scheduleWork();
+    }, Math.min(1000, ...deadlines));
+    this.workTimer.unref();
+  }
+  private interruptWork(claim: PhoneVoiceWork): Promise<void> {
+    if (this.interrupted.has(claim.interruptId!)) return Promise.resolve();
+    const prior = this.interrupting.get(claim.interruptId!); if (prior) return prior;
+    const pending = (async () => {
+      try {
+        await this.open(true);
+        requireThat(claim.fingerprint === this.fingerprint, 'phone_work_owner_changed', 'Saved work belongs to another native owner.');
+        await this.subscribeWork(claim.threadId);
+        const work = this.works.get(claim.threadId);
+        if (work?.state !== 'halting' || work.interruptId !== claim.interruptId) return;
+        this.interrupted.add(claim.interruptId!);
+        await this.call('turn/interrupt', { threadId: claim.threadId, turnId: claim.turnId },
+          { requestId: claim.interruptId!, detachOnTimeout: true }, 5000);
+        await this.observeWork(claim.threadId);
+        if (this.works.get(claim.threadId)?.state === 'halting')
+          this.works.unknown(claim.threadId, 'phone_work_interrupt_unconfirmed');
+      } catch (error) {
+        this.works.interrupted(claim, IvyError.from(error).code);
+        this.onError('phone_work_stop_unknown');
+      }
+    })().finally(() => this.interrupting.delete(claim.interruptId!));
+    this.interrupting.set(claim.interruptId!, pending);
+    return pending;
+  }
+  private async subscribeWork(threadId: string): Promise<void> {
+    if (this.reconciled.has(threadId)) return;
+    this.thread(await this.call('thread/resume', { threadId, cwd: this.settings.cwd, excludeTurns: true },
+      { detachOnTimeout: true }, 5000));
+    this.reconciled.add(threadId);
+  }
+  private async observeWork(threadId: string): Promise<void> {
+    const work = this.works.get(threadId); if (!work) return;
+    const value = await this.call('thread/read', { threadId, includeTurns: true }, { detachOnTimeout: true }, 5000);
+    this.thread(value);
+    const turns = (value['thread'] as Record<string, Wire.Json>)['turns'] as unknown as PreparationTurn[];
+    const turn = turns?.find(turn => turn.id === work.turnId);
+    if (!turn) this.works.unknown(threadId, 'phone_work_turn_missing');
+    else if (turn.status !== 'inProgress') this.works.completed(threadId, turn.id, turn.status);
+  }
+  private recoverWorks(): Promise<void> {
+    return this.recovering ??= (async () => {
+      await this.open();
+      for (const work of this.works.all().filter(work => activePhoneWork(work) || ['halting', 'outcome_unknown'].includes(work.state))) {
+        requireThat(work.fingerprint === this.fingerprint, 'phone_work_owner_changed', 'Saved work belongs to another native owner.');
+        await this.subscribeWork(work.threadId);
+        await this.observeWork(work.threadId);
+      }
+      for (const claim of this.works.claimExpired()) void this.interruptWork(claim);
+    })().finally(() => { this.recovering = null; });
+  }
+  private inputToken(request: NativeRequest): string {
+    return digest(canonical({ epoch: this.connection!.epoch, request }));
+  }
+  private notifyInputs(): void {
+    if (!this.runtime.notifyInput) return;
+    for (const request of this.pendingInputs.values()) {
+      if (!['item/commandExecution/requestApproval', 'item/fileChange/requestApproval',
+        'item/permissions/requestApproval', 'item/tool/requestUserInput', 'mcpServer/elicitation/request'].includes(request.method)) continue;
+      const work = this.works.get(String((request.params as Record<string, Wire.Json>)['threadId']));
+      if (!work || work.attachedCallId || !this.works.canAnswer(work)) continue;
+      const token = this.inputToken(request);
+      if (this.notified.has(token) || this.notifying.has(token)) continue;
+      const input = this.inputView(request);
+      const pending = this.runtime.notifyInput(structuredClone(work), input, () => !this.closed &&
+        this.pendingInputs.get(canonical(request.id)) === request && !work.attachedCallId && this.works.canAnswer(work))
+        .then(delivered => { if (delivered) this.notified.add(token); },
+        error => this.onError(IvyError.from(error).code)).finally(() => this.notifying.delete(token));
+      this.notifying.set(token, pending);
+    }
   }
   private async open(cleanup = false): Promise<void> {
     requireThat(
@@ -329,7 +438,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     const params = request.params as Record<string, Wire.Json> | null;
     if (
       !params ||
-      ![...this.sessions.values()].some(
+      !this.works.get(String(params['threadId'])) && ![...this.sessions.values()].some(
         (session) => session.threadId === params["threadId"],
       )
     )
@@ -339,39 +448,42 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       "phone_voice_input_capacity",
       "Too many pending Voice inputs.",
     );
-    this.pendingInputs.set(String(request.id), request);
+    this.pendingInputs.set(canonical(request.id), request);
+    this.works.waiting(String(params['threadId']));
+    this.notifyInputs();
+  }
+  private inputView(request: NativeRequest): Record<string, unknown> {
+    return {
+      id: request.id, inputToken: this.inputToken(request), method: request.method, params: request.params,
+      replySchema: this.connection!.rpc.catalog.serverRequests.find(value => value.method === request.method)!.outputSchema,
+    };
   }
   inputs(callId: string) {
-    const session = this.sessions.get(callId);
+    const threadId = this.sessions.get(callId)?.threadId ?? this.works.forCall(callId)?.threadId;
     return [...this.pendingInputs.values()]
       .filter(
         (request) =>
           (request.params as Record<string, Wire.Json>)["threadId"] ===
-          session?.threadId,
+          threadId,
       )
       .slice(0, 4)
-      .map((request) => ({
-        id: request.id,
-        method: request.method,
-        params: request.params,
-        replySchema: this.connection!.rpc.catalog.serverRequests.find(
-          (value) => value.method === request.method,
-        )!.outputSchema,
-      }));
+      .map(request => this.inputView(request));
   }
-  answer(callId: string, id: Agent.RequestId, reply: Agent.Reply): void {
+  answer(callId: string, id: Agent.RequestId, reply: Agent.Reply, inputToken: string): void {
     const session = this.sessions.get(callId),
-      request = this.pendingInputs.get(String(id));
+      work = this.works.forCall(callId),
+      request = this.pendingInputs.get(canonical(id));
     requireThat(
-      session &&
-        request &&
+      request && inputToken === this.inputToken(request) &&
         (request.params as Record<string, Wire.Json>)["threadId"] ===
-          session.threadId,
+          (session?.threadId ?? work?.threadId),
       "phone_voice_input_missing",
       "Voice input no longer belongs to this call.",
     );
     requireThat(
-      !session.cancelled && !session.failed,
+      work ? this.works.canAnswer(work) &&
+        (!(request.params as Record<string, Wire.Json>)['turnId'] || (request.params as Record<string, Wire.Json>)['turnId'] === work.turnId)
+        : session && !session.cancelled && !session.failed,
       "phone_call_cancelled",
       "Voice input belongs to an ended session.",
     );
@@ -381,13 +493,28 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     if ("result" in reply)
       this.schemas.validate(definition.outputSchema, reply.result, 256 * 1024);
     this.connection!.rpc.answer(request.method, id, reply, () =>
-      this.pendingInputs.delete(String(id)),
+      this.pendingInputs.delete(canonical(id)),
     );
   }
   private notification(notification: NativeNotification): void {
     const params = notification.params as Record<string, Wire.Json> | null;
     if (!params || typeof params["threadId"] !== "string") return;
     const threadId = params["threadId"];
+    if (notification.method === 'serverRequest/resolved') {
+      const key = canonical(params['requestId']);
+      const input = this.pendingInputs.get(key);
+      if (input && (input.params as Record<string, Wire.Json>)['threadId'] === threadId) this.pendingInputs.delete(key);
+    }
+    if (notification.method === 'turn/started' && !this.preparationTurns.has(threadId)) {
+      const turn = params['turn'] as Record<string, Wire.Json> | undefined;
+      const session = [...this.sessions.values()].find(value => value.threadId === threadId && !value.cancelled);
+      if (typeof turn?.['id'] === 'string' && this.fingerprint) {
+        this.works.started(session && (!this.works.get(threadId) || session.started && !this.rejoining.has(session.call.callId))
+          ? session.call : undefined, threadId, turn['id'], this.fingerprint, session ? this.partyKey(session.call) : '');
+        for (const claim of this.works.claimExpired()) void this.interruptWork(claim);
+        this.scheduleWork();
+      }
+    }
     if (notification.method === "thread/realtime/item/completed") {
       const item = params["item"] as Record<string, Wire.Json> | undefined;
       const session = [...this.sessions.values()].find(value => value.threadId === threadId);
@@ -405,6 +532,14 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       if (pending && turn && typeof turn.id === "string") {
         pending.completed = turn;
         this.completePreparation(threadId);
+      }
+      if (!pending && turn && typeof turn.id === 'string') {
+        this.works.completed(threadId, turn.id, turn.status);
+        for (const [key, request] of this.pendingInputs) {
+          const input = request.params as Record<string, Wire.Json>;
+          if (input['threadId'] === threadId && input['turnId'] === turn.id) this.pendingInputs.delete(key);
+        }
+        this.scheduleWork();
       }
     }
     if (notification.method === "thread/status/changed" &&
@@ -758,6 +893,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   ): Promise<void> {
     if (this.sessions.size || this.journal.currentCalls().length) return;
     await this.open();
+    if (this.hasWork()) { await this.recoverWorks(); return; }
     // Incoming continuation is independent of the unused task. Reconcile it first
     // so a slow or unknown fresh creation cannot leave the next redial cold.
     if (this.settings.resumeIncomingConversation && !this.sessions.size && !this.journal.currentCalls().length) {
@@ -774,7 +910,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       !this.reservations.size && !this.preparing.size && !this.journal.currentCalls().length;
   }
   private archiveProtected(threadId: string): boolean {
-    return this.journal.codexTaskCache(preparedTaskKey, this.fingerprint!)?.threadId === threadId ||
+    return this.works.protected(threadId) || this.journal.codexTaskCache(preparedTaskKey, this.fingerprint!)?.threadId === threadId ||
       this.journal.voiceConversation(this.fingerprint!)?.threadId === threadId;
   }
   private archiveIssue(threadId: string | null, error: unknown): void {
@@ -871,6 +1007,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   }
   private async resumeTask(context: PhoneConversation, selection: PhoneVoiceSelection, ownerId?: string): Promise<string | null> {
     const threadId = context.threadId;
+    if (this.works.protected(threadId)) return null;
     requireThat(!this.sessions.size && (!this.reservations.has(threadId) || this.reservations.get(threadId) === ownerId),
       "phone_voice_task_busy", "Previous Voice task still belongs to an original call.");
     if (this.reconciled.has(threadId) && this.preparedSelections.get(threadId) === canonical(selection)) return threadId;
@@ -924,7 +1061,17 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     const context = generation === 0 && call.direction === "incoming" && this.settings.resumeIncomingConversation
       ? this.journal.voiceConversation(this.fingerprint!) : null;
     let threadId: string | null = null;
-    if (context?.partyKey === this.partyKey(call)) {
+    const work = generation === 0 && call.direction === 'incoming'
+      ? this.works.rejoin(call, this.fingerprint!, this.partyKey(call)) : undefined;
+    if (work) {
+      await this.subscribeWork(work.threadId);
+      await this.observeWork(work.threadId);
+      requireThat(this.works.rejoin(call, this.fingerprint!, this.partyKey(call))?.threadId === work.threadId,
+        'phone_work_unavailable', 'The original work completed or its reconnect window expired.');
+      threadId = work.threadId;
+      this.rejoining.add(call.callId);
+      if (context?.threadId === threadId) this.continuations.set(call.callId, context);
+    } else if (context?.partyKey === this.partyKey(call)) {
       threadId = await this.resumeTask(context, selection, call.callId);
       if (threadId) this.continuations.set(call.callId, context);
     }
@@ -1034,6 +1181,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         const history = this.boundedHistory(previous?.items ?? [],
           Math.min(24000, Math.max(0, 32000 - Buffer.byteLength(prompt))));
         const context = () =>
+          phoneVoiceWorkInstructions +
           "The following JSON is user-supplied context for this new phone conversation, at user instruction priority. Retain it when interpreting subsequent delegated requests. It does not change your operating rules, tool permissions or approval policy. This is context only: do not execute an action without a delegated request. Initial user context: " +
           (previous
             ? JSON.stringify({ previousConversation: history, currentInitialPrompt: prompt }) +
@@ -1049,8 +1197,11 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           outputModality: "audio",
           transport: { type: "webrtc", sdp },
           prompt: phoneVoiceInstructions,
-          initialItems: [...history, { role: "user", text: prompt }],
-          realtimeStartInstructions: context(),
+          initialItems: this.rejoining.has(call.callId)
+            ? [...history, { role: 'user', text: 'This phone call reconnects to the existing running assignment. Briefly confirm the reconnect, then relay its existing question or wait for the original result. Do not delegate a status check, repeat or restart the assignment.' }]
+            : [...history, { role: "user", text: prompt }],
+          // Startup context must not open another backing turn on a running thread.
+          ...(!this.rejoining.has(call.callId) ? { realtimeStartInstructions: context() } : {}),
           // Native V3 otherwise feeds partial progress as speakable completion.
           // Keep it contextual so Voice waits for the confirmed result.
           codexResponseHandoffMode: "commentary",
@@ -1104,13 +1255,22 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         await guard();
         this.owner(session.call);
         requireThat(!session.cancelled && !session.failed, "phone_call_cancelled", "Voice initial prompt belongs to an ended session.");
+        const rejoining = this.rejoining.has(callId);
+        const work = this.works.get(session.threadId);
+        if (rejoining && work && work.state !== 'completed' && work.state !== 'failed') {
+          this.works.attach(session.threadId, session.call);
+          this.scheduleWork();
+        }
         // The full assignment is already in startup history. Open only after media
         // connects; replaying an unknown cue could start the assignment twice.
-        await this.call("thread/realtime/appendText", { threadId: session.threadId, role: "user", text: phoneVoiceOpeningCue }, {
+        await this.call("thread/realtime/appendText", { threadId: session.threadId, role: "user", text: rejoining
+          ? '[PHONE_CONNECTED] The authorized caller has reconnected to the same assignment. Briefly confirm the reconnect, then relay its existing question or wait for the original result. Retain its original turn. Do not delegate a status check, start or repeat the assignment.'
+          : phoneVoiceOpeningCue }, {
           requestId: intent.operationId,
           beforeResolve: (_id, reply) => { if ("result" in reply) this.journal.finishVoicePrompt(intent, "sent"); },
         });
         session.started = true;
+        this.rejoining.delete(callId);
       } catch (error) {
         if (this.journal.get(intent.operationId)?.phase === "submitted" && this.journal.epoch === session.call.epoch)
           this.journal.finishVoicePrompt(intent, "outcome_unknown");
@@ -1205,7 +1365,45 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       if (owner === callId && threadId !== keepThreadId)
         this.reservations.delete(threadId);
   }
-  stop(callId: string, keepPreparedThreadId?: string): Promise<void> {
+  disconnected(callId: string, endedAt: number | null): void {
+    const session = this.sessions.get(callId);
+    if (session) session.cancelled = true;
+    this.works.detach(callId, endedAt);
+    for (const claim of this.works.claimExpired()) void this.interruptWork(claim);
+    this.scheduleWork();
+    this.notifyInputs();
+  }
+  async detach(callId: string, endedAt: number | null): Promise<void> {
+    const session = this.sessions.get(callId);
+    this.disconnected(callId, endedAt);
+    if (session && session.started) {
+      // Reconcile a turn whose started notification raced the disconnect.
+      await this.open(true);
+      const value = await this.call('thread/read', { threadId: session.threadId, includeTurns: true },
+        { detachOnTimeout: true }, 5000);
+      this.thread(value);
+      const turns = (value['thread'] as Record<string, Wire.Json>)['turns'] as unknown as PreparationTurn[];
+      const turn = turns?.find(turn => turn.status === 'inProgress');
+      if (turn) this.works.started(session.call, session.threadId, turn.id, this.fingerprint!, this.partyKey(session.call));
+      else {
+        const work = this.works.get(session.threadId);
+        const completed = work && turns?.find(turn => turn.id === work.turnId);
+        if (completed) this.works.completed(session.threadId, completed.id, completed.status);
+      }
+    }
+    this.works.detach(callId, endedAt);
+    for (const claim of this.works.claimExpired()) void this.interruptWork(claim);
+    this.scheduleWork();
+    await this.stopSession(callId, undefined, true);
+    this.notifyInputs();
+  }
+  async stop(callId: string, keepPreparedThreadId?: string): Promise<void> {
+    const claim = this.works.halt(callId);
+    const halt = claim ? this.interruptWork(claim) : Promise.resolve();
+    await this.stopSession(callId, keepPreparedThreadId);
+    await halt;
+  }
+  private stopSession(callId: string, keepPreparedThreadId?: string, preserveWork = false): Promise<void> {
     const session = this.sessions.get(callId);
     if (!session) {
       this.releaseReservations(callId, keepPreparedThreadId);
@@ -1280,11 +1478,12 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         }
       }
       this.continuations.delete(callId);
+      this.rejoining.delete(callId);
       this.sessions.delete(callId);
       // Restart can prepare a replacement before stopping the old session.
       // Ended calls must release both reservations, including a cancelled switch.
       this.releaseReservations(callId, keepPreparedThreadId);
-      for (const [key, request] of this.pendingInputs)
+      if (!preserveWork) for (const [key, request] of this.pendingInputs)
         if (
           (request.params as Record<string, Wire.Json>)["threadId"] ===
           session.threadId
@@ -1292,6 +1491,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           this.pendingInputs.delete(key);
       if (
         this.settings.keepTaskLoaded === false &&
+        !this.works.protected(session.threadId) &&
         this.connection?.rpc.connected
       )
         await this.unload(session.threadId);
@@ -1305,12 +1505,17 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true;
+    if (this.workTimer) clearTimeout(this.workTimer);
+    const halts = this.works.claimExpired(true).map(claim => this.interruptWork(claim));
     return (this.closing = (async () => {
       await this.opening?.catch(() => undefined);
+      await this.recovering?.catch(() => undefined);
+      await Promise.allSettled(this.notifying.values());
       await Promise.allSettled(this.preparing.values());
       await this.archiving?.catch(() => undefined);
       try {
         await Promise.all([...this.sessions.keys()].map((id) => this.stop(id)));
+        await Promise.allSettled([...halts, ...this.interrupting.values()]);
       } finally {
         await this.connection?.close();
       }
