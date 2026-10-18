@@ -340,6 +340,32 @@ mod tests {
         .expect("overflow/shutdown deadline");
     }
 
+    #[tokio::test]
+    async fn local_transaction_timeouts_are_not_remote_final_responses() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for method in [Method::Invite, Method::Bye] {
+                for remote in [false, true] {
+                    let options = EndpointOption { t1: Duration::from_millis(10), t1x64: Duration::from_millis(80), ..Default::default() };
+                    let (mut endpoint, mut peer, local, peer_port, _) = network(false, options).await;
+                    let mut request = addressed("", local, peer_port, false);
+                    request.method = method;
+                    request.headers.unique_push(CSeq::new(format!("1 {method}")).into());
+                    let mut transaction = endpoint.client(request, None).unwrap();
+                    let original = peer.receive().await;
+                    if remote {
+                        peer.send(&response(&original, StatusCode::RequestTimeout, peer_port, "")).await;
+                        assert_eq!(transaction.next_response().await.unwrap().status_code.code(), 408);
+                        assert!(transaction.completed().await.is_ok());
+                    } else {
+                        assert!(matches!(transaction.next_response().await, Err(SipIoError::TimedOut)));
+                        assert!(matches!(transaction.completed().await, Err(SipIoError::TimedOut)));
+                    }
+                    transaction.retire().await.unwrap(); endpoint.shutdown().await.unwrap();
+                }
+            }
+        }).await.expect("local/remote timeout distinction deadline");
+    }
+
     fn response(request: &Request, status: StatusCode, peer: u16, body: &str) -> Response {
         let mut response = Response {
             version: request.version.clone(),

@@ -32,6 +32,7 @@ pub enum SipIoError {
     EndpointStopped,
     InUse,
     SendFailed,
+    TimedOut,
     Stopped,
     ResponseOverflow,
     DriverFailed,
@@ -102,15 +103,23 @@ impl MessageInspector for FinalResponses {
     fn before_send(&self, message: SipMessage, _: Option<&SipAddr>) -> SipMessage {
         message
     }
-    fn after_received(&self, message: SipMessage, _: Option<&SipAddr>) -> SipMessage {
+    fn after_received(&self, message: SipMessage, from: Option<&SipAddr>) -> SipMessage {
         // auto_ack_2xx=false retires the library transaction on its first 2xx.
         // The public inspector still observes later 2xx before stack routing.
         if let SipMessage::Response(response) = &message {
-            if (200..=299).contains(&response.status_code.code()) {
+            if response.status_code.code() >= 200 {
                 if let Ok(key) = TransactionKey::from_response(response, TransactionRole::Client) {
                     let routes = self.0.lock().unwrap();
-                    if let Some(route) = routes.clients.get(&key).filter(|r| r.invite) {
-                        if route.finals.try_send(response.clone()).is_err() {
+                    if let Some(route) = routes.clients.get(&key) {
+                        // The stack's timer/stream errors call this public
+                        // inspector with no source. They are not remote final
+                        // responses and cannot confirm call cleanup.
+                        if from.is_none() {
+                            route.fail(if response.status_code.code() == 408 {
+                                SipIoError::TimedOut
+                            } else { SipIoError::SendFailed });
+                        } else if route.invite && (200..=299).contains(&response.status_code.code())
+                            && route.finals.try_send(response.clone()).is_err() {
                             route.fail(SipIoError::ResponseOverflow);
                         }
                     }
@@ -297,6 +306,8 @@ impl ClientExchange {
                     let Some(SipMessage::Response(response)) = transaction.receive().await else {
                         break Some(SipIoError::Stopped);
                     };
+                    let failure = *route.failure.borrow();
+                    if let Some(error) = failure { break Some(error); }
                     let final_response = response.status_code.code() >= 200;
                     let routed = route.invite && (200..=299).contains(&response.status_code.code());
                     if !routed && responses.try_send(response).is_err() {
