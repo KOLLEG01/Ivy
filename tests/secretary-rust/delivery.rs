@@ -5,6 +5,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "store_cases.rs"]
+mod store_cases;
+
 struct Scripted {
     steps: Mutex<VecDeque<IvyJson>>,
     trace: Mutex<Vec<IvyJson>>,

@@ -10,6 +10,7 @@ pub mod policy;
 pub mod schedule;
 pub mod schema;
 pub mod source_identity;
+pub mod store;
 pub mod triage_media;
 pub mod triage_results;
 pub mod voice_target;

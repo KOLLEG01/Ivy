@@ -4,6 +4,12 @@ use std::sync::OnceLock;
 
 #[derive(Clone, Copy)]
 pub enum Schema {
+    Item,
+    Source,
+    Accepted,
+    ScheduleProgress,
+    EventProgress,
+    Execution,
     Assessment,
     GlobalRules,
     AssignmentTrigger,
@@ -14,6 +20,12 @@ pub enum Schema {
 impl Schema {
     fn name(self) -> &'static str {
         match self {
+            Self::Item => "Item",
+            Self::Source => "Source",
+            Self::Accepted => "Accepted",
+            Self::ScheduleProgress => "ScheduleProgress",
+            Self::EventProgress => "EventProgress",
+            Self::Execution => "Execution",
             Self::Assessment => "Assessment",
             Self::GlobalRules => "GlobalRules",
             Self::AssignmentTrigger => "AssignmentTrigger",
