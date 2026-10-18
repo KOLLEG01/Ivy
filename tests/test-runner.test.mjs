@@ -223,6 +223,17 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     ...(process.platform === "win32" ? [expected[0]] : []),
     ["test", "--locked", "--package", "ivy-secretary", "--test", "delivery"],
   ]);
+  const hiveOnly = run("", ["tests/rust/hive_worker_client.rs"]);
+  assert.equal(hiveOnly.result.status, 0, hiveOnly.result.stderr);
+  assert.deepEqual(hiveOnly.commands, [
+    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--bin", "ivy-job"]] : []),
+    ["test", "--locked", "--package", "ivy-hive", "--test", "hive-worker-client"],
+  ]);
+  const preparationOnly = run("", ["tests/rust/host-preparation-files.rs"]);
+  assert.equal(preparationOnly.result.status, 0, preparationOnly.result.stderr);
+  assert.deepEqual(preparationOnly.commands, [
+    ["test", "--locked", "--package", "ivy-host-runtime", "--test", "host-preparation-files"],
+  ]);
   const failure = run(expected[0][0]);
   assert.equal(failure.result.status, 7, failure.result.stderr);
   assert.deepEqual(failure.commands, expected.slice(0, 1));
