@@ -1,5 +1,71 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 #[test]
+fn ordinary_json_node_counts_are_independent_of_validation_limits() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/json-oracle.mjs",
+            "wide",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cases.len(), 8);
+    for case in cases {
+        let count = case["count"].as_u64().unwrap() as usize;
+        let array = format!("[{}null]", "null,".repeat(count - 1));
+        let input = if case["envelope"] == true {
+            format!(r#"{{"values":{array}}}"#)
+        } else {
+            array
+        };
+        let value = parse(&input, input.len()).unwrap();
+        let encoded = stringify(&value, input.len()).unwrap();
+        assert_eq!(encoded.len() as u64, case["bytes"].as_u64().unwrap());
+        assert_eq!(
+            digest(&encoded),
+            format!("sha256:{}", case["sha256"].as_str().unwrap())
+        );
+        assert_eq!(
+            stringify(&value, input.len() - 1).unwrap_err().code,
+            "content_too_large"
+        );
+        for (name, result) in [
+            ("canonical", canonical(&value, 4_000_000).map(|_| ())),
+            ("validateJson", validate_json(&value, 4_000_000)),
+        ] {
+            assert_eq!(
+                result.err().map(|e| e.code),
+                case[name].as_str().map(str::to_owned),
+                "{case}"
+            );
+        }
+    }
+    let malformed = format!("[{}]", "null,".repeat(400_001));
+    assert_eq!(
+        parse(&malformed, malformed.len()).unwrap_err().code,
+        "invalid_arguments"
+    );
+    assert_eq!(
+        parse(&malformed, malformed.len() - 1).unwrap_err().code,
+        "content_too_large"
+    );
+    let strict = ParseOptions {
+        reject_duplicate_keys: true,
+        maximum_container_depth: Some(1),
+    };
+    let wide = format!("[{}null]", "null,".repeat(400_000));
+    assert!(parse_with_options(&wide, wide.len(), strict).is_ok());
+}
+#[test]
 fn long_unicode_strings_preserve_utf16_and_parser_boundaries() {
     let text =
         "\u{7f}\u{80}\u{7ff}\u{800}\u{d7ff}\u{e000}\u{ffff}\u{10000}\u{10ffff}".repeat(32_768);
