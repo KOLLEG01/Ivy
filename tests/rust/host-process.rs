@@ -1,5 +1,7 @@
 use ivy_host_runtime::process::{self, Command, LaunchContext};
 use std::{collections::BTreeMap, ffi::OsString, io::Write, path::PathBuf, time::Duration};
+#[path="host-exec-file-cases.rs"]
+mod exec_file_cases;
 
 // Exercise the private retained-handle failure paths through this selected target.
 #[cfg(windows)]

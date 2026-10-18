@@ -16,6 +16,8 @@ impl Default for Utf8Decoder {
 }
 
 impl Utf8Decoder {
+    /// Node StringDecoder retains the initial BOM; diagnostic TextDecoder does not.
+    pub fn preserving_bom() -> Self { Self { incomplete: Vec::new(), at_start: false } }
     pub fn decode(&mut self, bytes: &[u8], final_chunk: bool) -> Vec<u16> {
         self.incomplete.extend_from_slice(bytes);
         let mut result = Vec::new();

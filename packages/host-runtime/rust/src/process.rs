@@ -23,7 +23,7 @@ pub struct Command {
     pub timeout_ms: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputStream {
     Stdout,
     Stderr,
@@ -294,16 +294,31 @@ pub async fn spawn(
     executables: &BTreeMap<String, PathBuf>,
     context: LaunchContext,
 ) -> IvyResult<OwnedProcess> {
+    validate_capture(&context)?;
+    let resolved = resolve_command(command, root, executables)?;
+    spawn_resolved(resolved, root, context, None, None).await
+}
+
+fn validate_capture(context: &LaunchContext) -> IvyResult<()> {
     if context.redact.iter().any(|value| value.0.len() > 65536) {
         return Err(invalid("Redaction values exceed their bounded length."));
     }
-    let maximum = context.maximum_output_bytes.unwrap_or(65536);
-    if !(65536..=16 * 1024 * 1024).contains(&maximum) {
-        return Err(invalid(
-            "Captured command output needs an explicit bounded size.",
-        ));
+    if !(65536..=16 * 1024 * 1024).contains(&context.maximum_output_bytes.unwrap_or(65536)) {
+        return Err(invalid("Captured command output needs an explicit bounded size."));
     }
-    let resolved = resolve_command(command, root, executables)?;
+    Ok(())
+}
+
+/// Shared process-tree owner. Only the exec-file adapter selects unrestricted
+/// executable/environment semantics; artifact commands keep resolve_command.
+pub(crate) async fn spawn_resolved(
+    resolved: ResolvedCommand,
+    root: &Path,
+    context: LaunchContext,
+    exact_environment: Option<BTreeMap<OsString, OsString>>,
+    argv0: Option<OsString>,
+) -> IvyResult<OwnedProcess> {
+    let maximum = context.maximum_output_bytes.unwrap_or(65536);
     let use_job = cfg!(windows) && !context.without_job;
     if context
         .job_name
@@ -343,11 +358,17 @@ pub async fn spawn(
         if let Some(listener) = &launch_listener {
             process.args(["--launch-pipe", &listener.name]);
         }
+        if let Some(argv0) = &argv0 { process.arg("--argv0").arg(argv0); }
         process.arg(&resolved.executable);
         process
     } else {
         TokioCommand::new(&resolved.executable)
     };
+    #[cfg(unix)]
+    if let Some(argv0) = argv0 {
+        use std::os::unix::process::CommandExt;
+        process.as_std_mut().arg0(argv0);
+    }
     process
         .args(resolved.args)
         .current_dir(
@@ -361,7 +382,7 @@ pub async fn spawn(
         )
         .env_clear()
         .kill_on_drop(true)
-        .envs(runtime_environment(&context.environment))
+        .envs(exact_environment.unwrap_or_else(|| runtime_environment(&context.environment)))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
