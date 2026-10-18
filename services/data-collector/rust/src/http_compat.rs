@@ -21,7 +21,7 @@ const HEADER_BYTES: usize = 16_384;
 const HEADER_PAIRS: usize = 1000;
 // Node counts target/name/value bytes, excluding line and field separators.
 // Hyper sees at most the retained prefix plus framing fields below.
-const HEAD_WIRE_BYTES: usize = HEADER_BYTES * 4;
+const HEAD_WIRE_BYTES: usize = HEADER_BYTES * 4 + 128;
 
 #[derive(Clone, Copy)]
 enum BudgetPart {
@@ -258,7 +258,14 @@ impl Capture {
                         });
                         self.response_started = false;
                     }
-                    self.head.push(byte);
+                    // Leading value whitespace is not exposed or counted by Node.
+                    // Discard it while reading, keeping the raw-head buffer bounded
+                    // without rejecting otherwise valid whitespace-heavy fields.
+                    if !(matches!(self.budget.part, BudgetPart::BeforeValue)
+                        && matches!(byte, b' ' | b'\t'))
+                    {
+                        self.head.push(byte);
+                    }
                     if self.budget.push(byte) || self.head.len() > HEAD_WIRE_BYTES {
                         self.reject(431);
                         break;
@@ -396,7 +403,9 @@ impl AsyncWrite for NodeIo {
         let result = Pin::new(&mut this.socket).poll_write(cx, bytes);
         if matches!(result,Poll::Ready(Ok(n)) if n>0)
             && bytes.starts_with(b"HTTP/1.")
-            && bytes.get(9..12).is_some_and(|code| code >= b"200".as_slice())
+            && bytes
+                .get(9..12)
+                .is_some_and(|code| code >= b"200".as_slice())
         {
             this.capture.lock().unwrap().response_started = true;
         }

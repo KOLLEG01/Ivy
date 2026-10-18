@@ -171,7 +171,10 @@ fn body(c: &IvyJson) -> Vec<u8> {
         _ => model::text(c, "body").unwrap().into_bytes(),
     }
 }
-async fn read_reply(mut stream: TcpStream) -> IvyJson {
+async fn read_reply(stream: TcpStream) -> IvyJson {
+    read_replies(stream, false).await
+}
+async fn read_replies(mut stream: TcpStream, pipeline: bool) -> IvyJson {
     let mut bytes = Vec::new();
     let received = tokio::time::timeout(Duration::from_secs(45), stream.read_to_end(&mut bytes))
         .await
@@ -187,43 +190,82 @@ async fn read_reply(mut stream: TcpStream) -> IvyJson {
             )),
         "{received:?}"
     );
-    if bytes.is_empty() {
-        return IvyJson::object([("status", IvyJson::Null), ("body", IvyJson::Null)]);
-    }
-    let split = bytes.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
-    let headers = String::from_utf8(bytes[..split].to_vec()).unwrap();
-    let status = headers
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .parse::<f64>()
-        .unwrap();
-    let mut bytes = bytes[split + 4..].to_vec();
-    if headers
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked")
-    {
-        let mut decoded = Vec::new();
-        let mut at = 0;
-        loop {
-            let end = at + bytes[at..].windows(2).position(|b| b == b"\r\n").unwrap();
-            let count =
-                usize::from_str_radix(std::str::from_utf8(&bytes[at..end]).unwrap(), 16).unwrap();
-            if count == 0 {
-                break;
-            }
-            at = end + 2;
-            decoded.extend_from_slice(&bytes[at..at + count]);
-            at += count + 2;
+    let mut replies = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let split = cursor
+            + bytes[cursor..]
+                .windows(4)
+                .position(|b| b == b"\r\n\r\n")
+                .unwrap();
+        let headers = String::from_utf8(bytes[cursor..split].to_vec()).unwrap();
+        let status = headers
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        cursor = split + 4;
+        if (100.0..200.0).contains(&status) {
+            continue;
         }
-        bytes = decoded;
+        let lower = headers.to_ascii_lowercase();
+        let mut body = Vec::new();
+        if lower.contains("transfer-encoding: chunked") {
+            loop {
+                let end = cursor
+                    + bytes[cursor..]
+                        .windows(2)
+                        .position(|b| b == b"\r\n")
+                        .unwrap();
+                let count =
+                    usize::from_str_radix(std::str::from_utf8(&bytes[cursor..end]).unwrap(), 16)
+                        .unwrap();
+                cursor = end + 2;
+                if count == 0 {
+                    loop {
+                        let end = cursor
+                            + bytes[cursor..]
+                                .windows(2)
+                                .position(|b| b == b"\r\n")
+                                .unwrap();
+                        let empty = end == cursor;
+                        cursor = end + 2;
+                        if empty {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                body.extend_from_slice(&bytes[cursor..cursor + count]);
+                cursor += count + 2;
+            }
+        } else {
+            let length = lower.lines().find_map(|l| {
+                l.strip_prefix("content-length:")
+                    .map(|s| s.trim().parse::<usize>().unwrap())
+            });
+            let end = length.map_or(bytes.len(), |n| cursor + n);
+            body.extend_from_slice(&bytes[cursor..end]);
+            cursor = end;
+        }
+        let body = if body.is_empty() {
+            IvyJson::Null
+        } else {
+            parse(std::str::from_utf8(&body).unwrap(), usize::MAX).unwrap()
+        };
+        replies.push(IvyJson::object([
+            ("status", IvyJson::Number(status)),
+            ("body", body),
+        ]));
     }
-    let body = if bytes.is_empty() {
-        IvyJson::Null
+    if pipeline {
+        IvyJson::object([("responses", IvyJson::Array(replies))])
     } else {
-        parse(std::str::from_utf8(&bytes).unwrap(), usize::MAX).unwrap()
-    };
-    IvyJson::object([("status", IvyJson::Number(status)), ("body", body)])
+        replies.into_iter().next().unwrap_or_else(|| {
+            IvyJson::object([("status", IvyJson::Null), ("body", IvyJson::Null)])
+        })
+    }
 }
 async fn send(address: SocketAddr, c: &IvyJson, token: &str) -> IvyJson {
     if let Some(parts) = c.get("raw").and_then(IvyJson::as_array) {
@@ -238,7 +280,7 @@ async fn send(address: SocketAddr, c: &IvyJson, token: &str) -> IvyJson {
                 break;
             }
         }
-        return read_reply(stream).await;
+        return read_replies(stream, model::truth(c, "pipeline")).await;
     }
     let body = body(c);
     let mut head = format!(
