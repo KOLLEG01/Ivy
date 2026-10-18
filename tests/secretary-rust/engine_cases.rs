@@ -21,7 +21,7 @@ impl Clock for FixedClock {
     }
 }
 #[tokio::test]
-async fn original_engine_initialization_settings_and_assignment_queries() {
+async fn original_engine_initialization_settings_queries_and_status() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut command = std::process::Command::new("node");
     command
@@ -44,7 +44,7 @@ async fn original_engine_initialization_settings_and_assignment_queries() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 65);
+    assert_eq!(rows.len(), 108);
     for row in rows {
         let input = row.required("input").unwrap();
         let label = input.required("label").unwrap().as_str().unwrap();
@@ -114,7 +114,20 @@ async fn original_engine_initialization_settings_and_assignment_queries() {
         };
         let clock = FixedClock(input.required("time").unwrap().as_f64().unwrap() as i64);
         let tools = ToolClients::new(client.clone());
-        let issues = RefCell::new(RecoveryScan::default());
+        let issues = RefCell::new(RecoveryScan {
+            issues: input
+                .required("issues")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|pair| {
+                    let pair = pair.as_array().unwrap();
+                    (pair[0].as_str().unwrap(), pair[1].as_str().unwrap())
+                })
+                .collect(),
+            ..RecoveryScan::default()
+        });
         let runtime_epoch = "fixture-epoch".into();
         let engine = SecretaryEngine {
             evidence: &evidence,
@@ -134,6 +147,7 @@ async fn original_engine_initialization_settings_and_assignment_queries() {
                 "listAssignments" => engine.list_assignments(&args[0], &args[1]).await,
                 "getAssignment" => engine.get_assignment(&args[0], &args[1]).await,
                 "noticeTarget" => engine.notice_target().await,
+                "status" => engine.status(&args[0], &args[1]).await,
                 method => panic!("Unexpected {method}"),
             };
             results.push(match result {

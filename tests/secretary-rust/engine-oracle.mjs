@@ -20,7 +20,7 @@ const channel={adapter:'whatsapp',channelId:'original'};
 const rows=[];
 async function add(label,method,c={}){
  const config=structuredClone(c.settings??admitted),locals=c.locals??[local(source)];
- const input={label,method,args:c.args??[caller,{expectedScope:scope,assignmentId:'assignment'}],settings:config,locals,cancelled:c.cancelled??false,repeats:c.repeats??1,time:c.time??Date.parse(at)};
+ const input={label,method,args:c.args??[caller,{expectedScope:scope,assignmentId:'assignment'}],settings:config,locals,cancelled:c.cancelled??false,repeats:c.repeats??1,time:c.time??Date.parse(at),issues:c.issues??[]};
  const trace=[],epochTrace=[],steps=[];let owners=0,store;
  const raw=()=>{
   const value={...assignment,...c.assignment},revision=2;
@@ -33,7 +33,7 @@ async function add(label,method,c={}){
   // an independently owned generation input, retained separately for inspection.
   if(input.method==='validateSettings'){assert.equal(method,'system.status');epochTrace.push(entry);return {runtimeEpoch:'fixture'};}
   trace.push(entry);let value,error;
-  if(c.fail===method)error={code:c.code??'fixture_failure',message:'Fixture failed.',outcome:'unknown'};
+  if(c.fail===method||c.mainFail===method&&(method!=='serviceNodes.get'||p.serviceNodeId==='fixture.chat'))error={code:c.code??'fixture_failure',message:'Fixture failed.',outcome:c.outcome??'unknown'};
   else if(method==='serviceNodes.get'){
    if(p.serviceNodeId==='fixture.secretary'){owners++;value={...owner,...(owners===(c.ownerAt??1)?c.owner:{})};}
    else value=c.node===undefined?{serviceNodeId:'fixture.chat',principalId:bridge.principalId,serviceName:'chat-bridge',connected:true,synced:true,ready:true}:c.node;
@@ -45,6 +45,7 @@ async function add(label,method,c={}){
    }else assert.fail('Unexpected query');
   }else if(method==='objects.read')value=raw();
   else if(method==='tools.list')value={provider:{node:{serviceNodeId:'fixture.chat'}},items:[{qualifiedName:'chat.workspace',definition:{namespace:'chat',name:'workspace',interfaceVersion:'1.2.0',inputSchema:{},outputSchema:{}},definitionHash:'sha256:'+'a'.repeat(64)}],nextCursor:null};
+  else if(method==='serviceNodes.list')value={items:[],nextCursor:null};
   else if(method==='tools.call')value=c.workspace===undefined?{expectedBridge:bridge,nativeOwnerReady:true,channels:[{channel}]}:c.workspace;
   else assert.fail('Unexpected RPC '+method);
   if(error){steps.push({method,error});throw new IvyError(error.code,error.message,error.outcome);}
@@ -53,7 +54,7 @@ async function add(label,method,c={}){
  store=new SecretaryStore(client,rootId);
  for(const row of locals){const encoded=canonical(row.value);store.db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run(row.id,row.key,row.name,1,0,null,encoded);store.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run(row.id,1,encoded);}
  const abort=new AbortController();if(input.cancelled)abort.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
- const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:config,owner:{serviceNodeId:'fixture.secretary'},signal:abort.signal,now:()=>new Date(input.time),recoveryIssues:new Map()});
+ const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:config,owner:{serviceNodeId:'fixture.secretary'},signal:abort.signal,now:()=>new Date(input.time),recoveryIssues:new Map(input.issues)});
  const results=[];
  for(let n=0;n<input.repeats;n++){
   try{
@@ -102,10 +103,36 @@ for(const time of [-8640000000000001,-8640000000000000,8640000000000000,86400000
 await add('notice target','noticeTarget',{args:[]});
 await add('notice caller mismatch','noticeTarget',{args:[],workspace:{expectedBridge:{...bridge,callerPrincipalId:'other'},nativeOwnerReady:true,channels:[{channel}]}});
 for(const fail of ['tools.list','serviceNodes.get','tools.call'])await add('notice '+fail,'noticeTarget',{args:[],fail});
-// Retained original probes for the separately requested checked Main catch API.
-// They are not yet part of the Rust status qualification.
+// Keep the six previously supplied catch-origin proofs separately accessible;
+// the expanded status rows below now prepare their Rust consumer comparison.
 const statusProbes=[];
 for(const [label,workspace,node,fail,code] of [['valid'],['coded failure',undefined,undefined,'tools.call','internal_error'],['null workspace',null],['null bridge',{expectedBridge:null,nativeOwnerReady:true,channels:[]}],['null channel',{expectedBridge:bridge,nativeOwnerReady:true,channels:[null]}],['null node',undefined,null]]){
  await add('status probe '+label,'status',{args:[caller,scope],settings:{...admitted,policy:{...settings.policy,voiceEscalation:{serviceNodeId:'fixture.phone',recipientId:'original',requestDefinitionHash:'sha256:'+'b'.repeat(64)}}},workspace,node,fail,code});statusProbes.push(rows.pop());
 }
+const statusSettings={...admitted,policy:{...settings.policy,voiceEscalation:{serviceNodeId:'fixture.phone',recipientId:'original',requestDefinitionHash:'sha256:'+'b'.repeat(64)}}};
+const status=(label,c={})=>add('status '+label,'status',{args:[caller,scope],settings:statusSettings,...c});
+for(const row of statusProbes)rows.push(structuredClone(row));
+await status('wrong scope',{args:[caller,{...scope,secretaryId:'other'}]});
+await status('cancelled',{cancelled:true});
+await status('wrong owner',{owner:{principalId:'other'}});
+await status('missing source',{locals:[]});
+await status('corrupt source',{locals:[local({...source,definitionHash:'sha256:'+'0'.repeat(64)})]});
+await status('source identity changed',{settings:{...statusSettings,sources:[{...definition,accountId:'other'}]}});
+await status('retained source policy snapshot',{settings:{...statusSettings,sources:[{...definition,allowedSenderIds:['changed']}]},locals:[local({...source,cursor:'retained',updatedAt:at})]});
+await status('empty sources',{settings:{...statusSettings,sources:[]},locals:[]});
+const second={...definition,sourceId:'second',accountId:'second-account'},secondId='00000000-0000-4000-8000-000000000099';
+const secondSource={...source,definition:second,definitionHash:hashJson(second)};
+await status('configured source order',{settings:{...statusSettings,sources:[second,definition]},locals:[local(source),{id:secondId,key:'secretary/source',name:sourceName('second'),value:secondSource}]});
+await status('recovery issues retained in order',{issues:[['item-1','poison'],['recovery-overflow','secretary_recovery_issues_overflow'],['preflight','failed']]});
+await status('notice caller mismatch swallowed',{workspace:{expectedBridge:{...bridge,callerPrincipalId:'other'},nativeOwnerReady:true,channels:[{channel}]}});
+await status('principal mismatch short-circuits malformed channels',{workspace:{expectedBridge:{...bridge,principalId:'other'},nativeOwnerReady:true,channels:null}});
+await status('truthy provider readiness',{node:{serviceNodeId:'fixture.chat',principalId:bridge.principalId,serviceName:'chat-bridge',connected:1,synced:'yes',ready:[]}});
+for(const mainFail of ['tools.list','serviceNodes.get','tools.call'])for(const code of ['fixture_failure','internal_error'])for(const outcome of ['not_executed','unknown','completed'])await status('coded '+mainFail+'/'+code+'/'+outcome,{mainFail,code,outcome});
+await status('automatic Voice no candidates',{settings:admitted});
+await status('automatic Voice discovery failure propagates',{settings:admitted,fail:'serviceNodes.list',code:'internal_error'});
+for(const time of [-8640000000000001,-8640000000000000,8640000000000000,8640000000000001])await status('timestamp '+time,{time});
+assert.equal(statusProbes.length,6);
+assert.equal(statusProbes[0].expected.results[0].value.noticeConfigured,true);
+assert.equal(statusProbes[1].expected.results[0].value.noticeConfigured,false);
+for(const row of statusProbes.slice(2))assert.equal(row.expected.results[0].code,'internal_error');
 console.log(JSON.stringify({rootId,time:Date.parse(at),rows,statusProbes}));

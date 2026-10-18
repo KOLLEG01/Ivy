@@ -6,11 +6,12 @@ use crate::{
     inbox_recovery::{InboxRecovery, RecoveryScan},
     schema::{Schema, validate},
     store::{Record, mutation},
+    voice_target::discover_voice_target,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json};
 use ivy_sdk::{
     clock::{Clock, TimeZone, date_to_iso},
-    main_chat::main_chat,
+    main_chat::{MainChatFailure, main_chat_checked},
     rpc::{RequestOptions, query_document},
     tools::ToolClients,
 };
@@ -167,7 +168,12 @@ impl SecretaryEngine<'_, '_, '_> {
         .await
     }
     pub async fn notice_target(&self) -> IvyResult<IvyJson> {
-        let target = main_chat(self.evidence.store.client.as_ref()).await?;
+        self.notice_target_checked()
+            .await
+            .map_err(MainChatFailure::into_error)
+    }
+    async fn notice_target_checked(&self) -> Result<IvyJson, MainChatFailure> {
+        let target = main_chat_checked(self.evidence.store.client.as_ref()).await?;
         need(
             target.expected_bridge.get("callerPrincipalId")
                 == self
@@ -179,6 +185,56 @@ impl SecretaryEngine<'_, '_, '_> {
             "Main must identify Secretary as the actual caller.",
         )?;
         Ok(target.to_json())
+    }
+    pub async fn status(&self, caller: &IvyJson, scope: &IvyJson) -> IvyResult<IvyJson> {
+        let evidence = self.evidence;
+        evidence.authorize(caller, scope, "status", None)?;
+        evidence.verify_owner().await?;
+        let mut sources = Vec::new();
+        for definition in evidence
+            .settings
+            .required("sources")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+        {
+            let source = evidence.source(definition.required("sourceId")?).await?;
+            sources.push(IvyJson::object([
+                ("object", source.required("pin")?.clone()),
+                ("data", source.required("value")?.clone()),
+            ]));
+        }
+        let mut policy = evidence.settings.required("policy")?.clone();
+        if policy.get("voiceEscalation").is_none_or(IvyJson::is_null) {
+            let target = discover_voice_target(evidence.store.client.as_ref(), self.tools).await?;
+            policy.insert("voiceEscalation", target.unwrap_or(IvyJson::Null));
+        }
+        let notice_configured = match self.notice_target_checked().await {
+            Ok(_) => true,
+            // This is the original instanceof IvyError catch. A coded
+            // internal_error is swallowed; an uncoded boundary is propagated.
+            Err(MainChatFailure::Ivy(_)) => false,
+            Err(boundary) => return Err(boundary.into_error()),
+        };
+        let issues = self
+            .issues
+            .borrow()
+            .issues
+            .iter()
+            .map(|(id, code)| {
+                IvyJson::object([
+                    ("objectId", id.clone().into()),
+                    ("code", code.clone().into()),
+                ])
+            })
+            .collect();
+        Ok(IvyJson::object([
+            ("identity", evidence.settings.required("identity")?.clone()),
+            ("sources", IvyJson::Array(sources)),
+            ("policy", policy),
+            ("noticeConfigured", notice_configured.into()),
+            ("recoveryIssues", IvyJson::Array(issues)),
+            ("observedAt", self.now()?.into()),
+        ]))
     }
     pub async fn list_assignments(
         &self,
