@@ -1,7 +1,9 @@
 pub mod admission;
 pub mod diagnostics;
 pub mod input_media;
+pub mod main_context;
 pub mod native_driver;
+pub mod native_plan;
 pub mod operations;
 pub mod queue;
 pub mod registry;
