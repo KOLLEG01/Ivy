@@ -1,6 +1,7 @@
 use super::entries;
 use crate::{IvyError, IvyJson, IvyResult, JsString};
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 /// One object visited by the pinned compiler's all-keys schema traversal.
 pub struct SchemaResourceNode<'a> {
@@ -24,13 +25,15 @@ pub struct SchemaResourceIndex<'a> {
     pub scopes: Vec<JsString>,
     /// Declarations in traversal order, including declarations at their own URI.
     pub references: Vec<SchemaResourceReference>,
+    /// Set by compiler registration when the root is retained under base_id.
+    pub registered_root: bool,
 }
 
 pub struct SchemaResourceReference {
     pub id: JsString,
     pub node: usize,
     pub full_path: JsString,
-    /// False when the declared ID already equals its normalized document path.
+    /// Whether this declaration installs an alias, after registration checks.
     pub alias: bool,
 }
 
@@ -107,7 +110,96 @@ pub(super) fn index(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
         path_prefix,
         scopes,
         references,
+        registered_root: false,
     })
+}
+
+/// Register against a fresh compiler's meta-schemas and ordinary-object names.
+/// Explicit IDs select an isolated compiler; anonymous roots stay unregistered.
+pub(super) fn register(schema: &IvyJson) -> IvyResult<SchemaResourceIndex<'_>> {
+    enum Registration<'a> {
+        Schema(&'a IvyJson),
+        Alias(JsString),
+        Prototype,
+        Function,
+    }
+    fn lookup<'a, 'b>(
+        refs: &'b HashMap<JsString, Registration<'a>>,
+        id: &JsString,
+    ) -> Option<&'b Registration<'a>> {
+        refs.get(id).or_else(|| {
+            if id == &JsString::from("__proto__") {
+                Some(&Registration::Prototype)
+            } else if inherited(id) {
+                Some(&Registration::Function)
+            } else {
+                None
+            }
+        })
+    }
+    static DOCUMENTS: OnceLock<IvyResult<IvyJson>> = OnceLock::new();
+    let data = DOCUMENTS
+        .get_or_init(|| crate::json::parse(include_str!("schema-meta-data.json"), 1024 * 1024))
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let documents = data
+        .get("schemas")
+        .and_then(IvyJson::as_array)
+        .ok_or_else(IvyError::internal)?;
+    let mut refs = HashMap::new();
+    for document in documents {
+        let id = document
+            .get("$id")
+            .and_then(IvyJson::as_js_string)
+            .ok_or_else(IvyError::internal)?;
+        refs.insert(id.clone(), Registration::Schema(document));
+    }
+    refs.insert(
+        "http://json-schema.org/schema".into(),
+        Registration::Alias("https://json-schema.org/draft/2020-12/schema".into()),
+    );
+    let invalid = || IvyError::new("registry_invalid", "Invalid or unsupported JSON schema.");
+    let mut index = index(schema)?;
+    for reference in &mut index.references {
+        let existing = match lookup(&refs, &reference.id) {
+            Some(Registration::Alias(target)) => lookup(&refs, target),
+            other => other,
+        };
+        match existing {
+            Some(Registration::Schema(registered)) => {
+                if !crate::builtin_schema::json_equal(
+                    index.graph.nodes[reference.node].schema,
+                    registered,
+                ) {
+                    return Err(invalid());
+                }
+                reference.alias = false;
+            }
+            // Object.prototype has no schema member, so the compiler treats it
+            // as an existing object without a conflicting schema or new alias.
+            Some(Registration::Prototype) => reference.alias = false,
+            _ if reference.alias && reference.id.0.first() != Some(&35) => {
+                refs.insert(
+                    reference.id.clone(),
+                    Registration::Alias(reference.full_path.clone()),
+                );
+            }
+            _ => {}
+        }
+    }
+    if index.graph.isolated && index.base_id.0.first() != Some(&35) {
+        if !index.base_id.0.is_empty() && lookup(&refs, &index.base_id).is_some() {
+            return Err(invalid());
+        }
+        index.registered_root = true;
+        // An empty root ID overwrites an earlier empty-ID child alias.
+        for reference in &mut index.references {
+            if reference.id == index.base_id {
+                reference.alias = false;
+            }
+        }
+    }
+    Ok(index)
 }
 
 fn contains_id(schema: &IvyJson) -> bool {

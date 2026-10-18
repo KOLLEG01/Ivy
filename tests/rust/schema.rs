@@ -5,6 +5,68 @@ use ivy_contracts::{
 };
 
 #[test]
+fn resource_registration_matches_compiler_builtins_and_inherited_names() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/schema-registration-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let corpus: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = corpus["rows"].as_array().unwrap();
+    assert!(rows.len() > 1500);
+    for row in rows {
+        let schema = parse(row["schema"].as_str().unwrap(), 1_000_000).unwrap();
+        let admitted = ivy_contracts::schema::admit_schema(&schema).unwrap();
+        let actual = match admitted.registered_resources() {
+            Ok(index) => {
+                let mut refs = Vec::new();
+                let mut local = Vec::new();
+                for reference in index.references.iter().filter(|r| r.alias) {
+                    if reference.id.0.first() == Some(&35) {
+                        local.push((
+                            reference.id.clone(),
+                            index.graph.nodes[reference.node].schema.clone(),
+                        ));
+                    } else {
+                        refs.push((
+                            reference.id.clone(),
+                            IvyJson::String(reference.full_path.clone()),
+                        ));
+                    }
+                }
+                IvyJson::object([
+                    ("ok", true.into()),
+                    ("base", IvyJson::String(index.base_id)),
+                    ("registered", index.registered_root.into()),
+                    ("refs", IvyJson::Object(refs)),
+                    ("local", IvyJson::Object(local)),
+                ])
+            }
+            Err(error) => {
+                assert_eq!(error.code_js(), "registry_invalid".into());
+                IvyJson::object([("ok", false.into())])
+            }
+        };
+        assert_eq!(
+            stringify(&actual, 2_000_000).unwrap(),
+            row["result"].as_str().unwrap(),
+            "schema {}",
+            row["schema"]
+        );
+    }
+}
+
+#[test]
 fn resource_ids_match_compiler_normalization_and_local_indexing() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")

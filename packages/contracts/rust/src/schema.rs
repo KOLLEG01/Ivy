@@ -35,6 +35,11 @@ impl AdmittedSchema {
     pub fn resource_index(&self) -> IvyResult<SchemaResourceIndex<'_>> {
         resources::index(&self.schema)
     }
+    /// Check compiler-wide resource collisions and root registration against
+    /// the bundled meta-schemas. Reference compilation remains a separate stage.
+    pub fn registered_resources(&self) -> IvyResult<SchemaResourceIndex<'_>> {
+        resources::register(&self.schema)
+    }
 }
 
 /// Enforce the submitted-schema language, graph limits and RE2 pattern syntax.
