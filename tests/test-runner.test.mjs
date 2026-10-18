@@ -184,6 +184,7 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   const run = (fail = "", files = [
     "tests/rust/agent-interactions.rs", "tests/rust/service-manager-stop.rs",
     "tests/rust/service-manager-policy.rs", "tests/rust/service-manager-stop.rs", "tests/rust/phone_media.rs",
+    "tests/secretary-rust/delivery.rs", "tests/rust/chat-outbox.rs",
   ]) => {
     writeFileSync(log, "");
     const result = spawnSync(process.execPath, [resolve("tools/testing/test-rust.mjs"), ...files], {
@@ -197,6 +198,8 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
     ["test", "--locked", "--package", "ivy-agent-manager", "--test", "agent-interactions"],
     ["test", "--locked", "--package", "ivy-service-manager", "--test", "service-manager-stop", "--test", "service-manager-policy"],
     ["test", "--locked", "--package", "ivy-phone-bridge", "--test", "phone_media"],
+    ["test", "--locked", "--package", "ivy-secretary", "--test", "delivery"],
+    ["test", "--locked", "--package", "ivy-chat-bridge", "--test", "chat-outbox"],
   ];
   const success = run();
   assert.equal(success.result.status, 0, success.result.stderr);
@@ -204,6 +207,12 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   const agentOnly = run("", ["tests/rust/agent-interactions.rs"]);
   assert.equal(agentOnly.result.status, 0, agentOnly.result.stderr);
   assert.deepEqual(agentOnly.commands, expected.slice(0, process.platform === "win32" ? 2 : 1));
+  const secretaryOnly = run("", ["tests/secretary-rust/delivery.rs"]);
+  assert.equal(secretaryOnly.result.status, 0, secretaryOnly.result.stderr);
+  assert.deepEqual(secretaryOnly.commands, [
+    ...(process.platform === "win32" ? [expected[0]] : []),
+    ["test", "--locked", "--package", "ivy-secretary", "--test", "delivery"],
+  ]);
   const failure = run(expected[0][0]);
   assert.equal(failure.result.status, 7, failure.result.stderr);
   assert.deepEqual(failure.commands, expected.slice(0, 1));
