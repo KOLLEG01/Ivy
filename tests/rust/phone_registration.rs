@@ -151,6 +151,7 @@ fn local_stop_cannot_claim_remote_removal_or_accept_another_owners_completion() 
     assert_ne!(original, foreign);
     lease.stop();
     lease.stop();
+    assert_eq!(lease.original_flow(), Some(original.clone()));
     lease.removal_confirmed(&foreign, 200);
     lease.removal_confirmed(&original, 408);
     assert_eq!(lease.observation(at(102)).remote_removed, None);

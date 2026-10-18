@@ -3,10 +3,7 @@ use ivy_phone_bridge::sip::{
     RegistrationTransport, SipHost, SipHostBinding, SipHostCallPhase, SipHostConfiguration,
     SipHostError, SipRegistrationPlan, SipRegistrationSettings,
 };
-use rsipstack::{
-    sip::{Method, Request, Response, headers::*, prelude::*},
-    transport::SipAddr,
-};
+use rsipstack::sip::{Method, Request, Response, prelude::*};
 use std::{
     future::Future,
     net::SocketAddr,
@@ -446,9 +443,18 @@ async fn original_delayed_invite_survives_dropped_dial_and_release_observers() {
         assert_eq!(source, local);
         assert_eq!(original.method, Method::Invite);
         assert_eq!(host.observation().calls[0].phase, SipHostCallPhase::Dialing);
+        // CANCEL waits for a provisional response to the original INVITE.
+        send(&peer, source, &response(&original, 100, "", "")).await;
         host.hangup(&call).unwrap();
         cancel_observer(host.release(&call)).await;
-        let (cancel, source) = received(&peer).await;
+        let (cancel, source) = loop {
+            let (request, source) = received(&peer).await;
+            if request.method == Method::Cancel {
+                break (request, source);
+            }
+            assert_eq!(request, original, "only the original INVITE may retransmit");
+            send(&peer, source, &response(&original, 100, "", "")).await;
+        };
         assert_eq!(cancel.method, Method::Cancel);
         assert_eq!(source, local);
         send(&peer, source, &response(&cancel, 200, "", "")).await;
