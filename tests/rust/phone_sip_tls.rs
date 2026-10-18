@@ -52,7 +52,7 @@ fn binding(
 ) -> BoundSipTransport {
     let mut host =
         BoundSipTransport::tls(address.parse().unwrap(), EndpointOption::default()).unwrap();
-    host.tls = Some(TlsClient::with_config(config(verifier)));
+    host.tls = Some(TlsClient::with_config(config(verifier.clone()), verifier));
     host
 }
 fn server(cert: &'static [u8]) -> TlsAcceptor {
@@ -261,19 +261,16 @@ async fn authenticated_flow_cache_includes_pre_resolution_authority() {
     let remote = peer.local_addr().unwrap();
     let acceptor = server(VALID);
     let task = tokio::spawn(async move {
-        let mut streams = Vec::new();
-        for name in ["sip.example.test", "proxy.example.test"] {
-            let (stream, _) = peer.accept().await.unwrap();
-            let stream = acceptor.accept(stream).await.unwrap();
-            assert_eq!(stream.get_ref().1.server_name(), Some(name));
-            streams.push(stream);
-        }
         let (stream, _) = peer.accept().await.unwrap();
-        assert!(acceptor.accept(stream).await.is_err());
-        for mut stream in streams {
-            let mut byte = [0];
-            assert!(matches!(stream.read(&mut byte).await, Ok(0) | Err(_)));
-        }
+        let mut stream = acceptor.accept(stream).await.unwrap();
+        assert_eq!(stream.get_ref().1.server_name(), Some("sip.example.test"));
+        let mut byte = [0];
+        assert!(matches!(stream.read(&mut byte).await, Ok(0) | Err(_)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), peer.accept())
+                .await
+                .is_err()
+        );
     });
     let mut host = binding("127.0.0.1:0", verifier());
     for (name, proxy) in [("sip.example.test", false), ("proxy.example.test", true)] {

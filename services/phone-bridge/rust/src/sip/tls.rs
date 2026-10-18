@@ -2,7 +2,6 @@
 //! its blocking worker, but its socket is shut down and its result is refused.
 use super::binding::{BindError, CONNECT_TIMEOUT, TCP_CONNECTIONS, tcp_socket};
 use rsipstack::transport::{SipAddr, SipConnection, tls::TlsConnection};
-use rustls_platform_verifier::BuilderVerifierExt;
 use std::{
     net::{Shutdown, SocketAddr, TcpStream as Socket},
     sync::{
@@ -14,7 +13,12 @@ use tokio::{net::TcpStream, sync::Mutex, task::JoinHandle, time::Instant};
 use tokio_rustls::{
     TlsConnector,
     client::TlsStream,
-    rustls::{ClientConfig, client::Resumption, crypto::ring, pki_types::ServerName},
+    rustls::{
+        ClientConfig,
+        client::{Resumption, danger::ServerCertVerifier},
+        crypto::ring,
+        pki_types::{CertificateDer, ServerName, UnixTime},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -52,7 +56,7 @@ impl SocketControl {
 struct Attempt {
     stop: CancellationToken,
     socket: Arc<SocketControl>,
-    task: Mutex<Option<JoinHandle<Result<TlsStream<TcpStream>, BindError>>>>,
+    task: Mutex<Option<JoinHandle<Result<Established, BindError>>>>,
     consumed: AtomicBool,
 }
 struct AttemptGuard(Arc<Attempt>, bool);
@@ -65,37 +69,50 @@ impl Drop for AttemptGuard {
     }
 }
 struct Flow {
+    remote: SocketAddr,
     retired: CancellationToken,
     socket: Arc<SocketControl>,
+    certificates: Vec<CertificateDer<'static>>,
+}
+enum Established {
+    Stream(TlsStream<TcpStream>),
+    Authority,
 }
 pub(super) struct TlsClient {
     config: Arc<ClientConfig>,
+    verifier: Arc<dyn ServerCertVerifier>,
     attempts: Mutex<Vec<Arc<Attempt>>>,
     flows: SyncMutex<Vec<Flow>>,
 }
 impl TlsClient {
     pub(super) fn platform() -> Result<Self, BindError> {
-        let config = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        let provider = Arc::new(ring::default_provider());
+        let verifier: Arc<dyn ServerCertVerifier> = Arc::new(
+            rustls_platform_verifier::Verifier::new(provider.clone())
+                .map_err(|_| BindError::TlsConfiguration)?,
+        );
+        let config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .map_err(|_| BindError::TlsConfiguration)?
-            .with_platform_verifier()
-            .map_err(|_| BindError::TlsConfiguration)?
+            .dangerous()
+            .with_custom_certificate_verifier(verifier.clone())
             .with_no_client_auth();
-        Ok(Self::new(config))
+        Ok(Self::new(config, verifier))
     }
-    fn new(mut config: ClientConfig) -> Self {
+    fn new(mut config: ClientConfig, verifier: Arc<dyn ServerCertVerifier>) -> Self {
         // Every new flow authenticates its expected authority before SIP.
         config.enable_early_data = false;
         config.resumption = Resumption::disabled();
         Self {
             config: Arc::new(config),
+            verifier,
             attempts: Mutex::new(Vec::new()),
             flows: SyncMutex::new(Vec::new()),
         }
     }
     #[cfg(test)]
-    pub(super) fn with_config(config: ClientConfig) -> Self {
-        Self::new(config)
+    pub(super) fn with_config(config: ClientConfig, verifier: Arc<dyn ServerCertVerifier>) -> Self {
+        Self::new(config, verifier)
     }
     async fn retire_finished(&self) {
         let mut attempts = self.attempts.lock().await;
@@ -157,7 +174,7 @@ impl TlsClient {
                 let stream = TlsConnector::from(config).connect(name, stream).await.map_err(|_| BindError::TlsRejected)?;
                 if worker_stop.is_cancelled() { return Err(BindError::Stopped); }
                 if Instant::now() >= deadline { return Err(BindError::ConnectTimedOut); }
-                Ok(stream)
+                Ok(Established::Stream(stream))
             };
             tokio::select! {
                 biased;
@@ -183,7 +200,9 @@ impl TlsClient {
         };
         task.take();
         attempt.consumed.store(true, Ordering::Release);
-        let stream = result.map_err(|_| BindError::ConnectFailed)??;
+        let Established::Stream(stream) = result.map_err(|_| BindError::ConnectFailed)?? else {
+            return Err(BindError::ConnectFailed);
+        };
         if host_stop.is_cancelled() {
             return Err(BindError::Stopped);
         }
@@ -191,16 +210,94 @@ impl TlsClient {
             return Err(BindError::ConnectTimedOut);
         }
         let retired = host_stop.child_token();
+        let certificates = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .ok_or(BindError::TlsRejected)?
+            .to_vec();
         let connection =
             TlsConnection::from_client_stream(stream, destination, Some(retired.clone()))
                 .await
                 .map_err(|_| BindError::ConnectFailed)?;
         self.flows.lock().unwrap().push(Flow {
+            remote,
             retired,
             socket: attempt.socket.clone(),
+            certificates,
         });
         guard.1 = false;
         Ok(SipConnection::Tls(connection))
+    }
+
+    /// One bound TCP four-tuple carries one TLS session. When another routed
+    /// authority resolves to it, validate that name against the authenticated
+    /// peer's chain before reusing the original flow and SNI context.
+    pub(super) async fn authenticate_authority(
+        &self,
+        remote: SocketAddr,
+        name: ServerName<'static>,
+        host_stop: &CancellationToken,
+    ) -> Result<(), BindError> {
+        self.retire_finished().await;
+        let (certificates, retired) = {
+            let flows = self.flows.lock().unwrap();
+            let flow = flows
+                .iter()
+                .find(|flow| flow.remote == remote && !flow.retired.is_cancelled())
+                .ok_or(BindError::ConnectFailed)?;
+            (flow.certificates.clone(), flow.retired.clone())
+        };
+        let mut attempts = self.attempts.lock().await;
+        if attempts.len() + self.flows.lock().unwrap().len() >= TCP_CONNECTIONS {
+            return Err(BindError::Capacity);
+        }
+        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        let stop = host_stop.child_token();
+        let worker_stop = stop.clone();
+        let verifier = self.verifier.clone();
+        // This worker owns only public certificate data. Refusing a new name
+        // must never shut down a previously authenticated active call's flow.
+        let task = tokio::task::spawn_blocking(move || {
+            let (end, intermediates) = certificates.split_first().ok_or(BindError::TlsRejected)?;
+            verifier
+                .verify_server_cert(end, intermediates, &name, &[], UnixTime::now())
+                .map_err(|_| BindError::TlsRejected)?;
+            if worker_stop.is_cancelled() {
+                return Err(BindError::Stopped);
+            }
+            if Instant::now() >= deadline {
+                return Err(BindError::ConnectTimedOut);
+            }
+            Ok(Established::Authority)
+        });
+        let attempt = Arc::new(Attempt {
+            stop,
+            socket: Arc::new(SocketControl::default()),
+            task: Mutex::new(Some(task)),
+            consumed: AtomicBool::new(false),
+        });
+        attempts.push(attempt.clone());
+        drop(attempts);
+        let _guard = AttemptGuard(attempt.clone(), true);
+        let mut task = attempt.task.lock().await;
+        let result = tokio::select! {
+            biased;
+            _ = host_stop.cancelled() => return Err(BindError::Stopped),
+            result = tokio::time::timeout_at(deadline, task.as_mut().unwrap()) => result.map_err(|_| BindError::ConnectTimedOut)?,
+        };
+        task.take();
+        attempt.consumed.store(true, Ordering::Release);
+        match result.map_err(|_| BindError::ConnectFailed)?? {
+            Established::Authority
+                if !retired.is_cancelled()
+                    && !host_stop.is_cancelled()
+                    && Instant::now() < deadline =>
+            {
+                Ok(())
+            }
+            _ => Err(BindError::Stopped),
+        }
     }
     pub(super) async fn stop(&self) -> Result<(), BindError> {
         let attempts = self.attempts.lock().await;

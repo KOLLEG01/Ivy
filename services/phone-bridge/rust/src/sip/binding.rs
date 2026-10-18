@@ -289,8 +289,11 @@ impl BoundSipTransport {
         {
             return Err(BindError::InvalidDestination);
         }
-        let name = ServerName::try_from(next_hop.addr.host.to_string())
-            .map_err(|_| BindError::InvalidDestination)?;
+        let name = match &next_hop.addr.host {
+            rsipstack::sip::Host::IpAddr(ip) => ServerName::IpAddress((*ip).into()),
+            rsipstack::sip::Host::Domain(domain) => ServerName::try_from(domain.to_string())
+                .map_err(|_| BindError::InvalidDestination)?,
+        };
         let destination = sip_address(resolved, Transport::Tls);
         let proxy = via_proxy.then(|| destination.clone());
         self.prepare(request, destination, proxy, Some(name)).await
@@ -340,14 +343,21 @@ impl BoundSipTransport {
                 if cache.len() >= TCP_CONNECTIONS {
                     return Err(BindError::Capacity);
                 }
+                let mut register = true;
                 let connection = if let Some(tls) = &self.tls {
-                    tls.connect(
-                        self.local,
-                        destination.clone(),
-                        name.ok_or(BindError::InvalidDestination)?,
-                        &self.stop,
-                    )
-                    .await?
+                    let name = name.ok_or(BindError::InvalidDestination)?;
+                    if let Some(connection) = cache
+                        .iter()
+                        .find(|(key, _)| key.0 == remote)
+                        .map(|(_, connection)| connection.clone())
+                    {
+                        tls.authenticate_authority(remote, name, &self.stop).await?;
+                        register = false;
+                        connection
+                    } else {
+                        tls.connect(self.local, destination.clone(), name, &self.stop)
+                            .await?
+                    }
                 } else {
                     let socket = tcp_socket(self.local)?;
                     let stream = tokio::select! {
@@ -369,12 +379,14 @@ impl BoundSipTransport {
                     sockets.push(observed_owner(connection.inner.clone()));
                     SipConnection::Tcp(connection)
                 };
-                self.endpoint
-                    .as_ref()
-                    .ok_or(BindError::Stopped)?
-                    .inner()
-                    .transport_layer
-                    .add_connection(connection.clone());
+                if register {
+                    self.endpoint
+                        .as_ref()
+                        .ok_or(BindError::Stopped)?
+                        .inner()
+                        .transport_layer
+                        .add_connection(connection.clone());
+                }
                 cache.insert(key, connection.clone());
                 connection
             }
