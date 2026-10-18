@@ -11,6 +11,8 @@ mod assignment_voice_cases;
 mod assignment_voice_engine_cases;
 #[path = "assignment_delivery_cases.rs"]
 mod assignment_delivery_cases;
+#[path = "assignment_runner_cases.rs"]
+mod assignment_runner_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;

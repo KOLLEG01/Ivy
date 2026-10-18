@@ -1,4 +1,5 @@
 pub mod assignment_message;
+pub mod assignment_runner;
 pub mod assignment_decision;
 pub mod assignment_delivery;
 pub mod assignment_object;
