@@ -13,17 +13,19 @@ const {validateSecretary}=await import('../../packages/contracts/src/secretary-v
 const {validateAgent}=await import('../../packages/contracts/src/agent-validation.ts');
 const {validateHost}=await import('../../packages/contracts/src/host-validation.ts');
 const {validateShared,validateTransport}=await import('../../packages/contracts/src/core-validation.ts');
+const {validateShared:validateWireShared,matchesShared}=await import('../../packages/contracts/src/wire-validation.ts');
 const {validateComponent}=await import('../../packages/contracts/src/component-validation.ts');
 const {Ajv2020}=createRequire(import.meta.url)('ajv/dist/2020.js');
 const ajv=new Ajv2020({strict:false,allErrors:false,validateFormats:false,ownProperties:true});
 const names=['hive-wire','hive-operations','host','agent','automation','chat','secretary','component','hive-transport'];
 const documents=names.map(name=>JSON.parse(readFileSync(new URL('../../specs/schemas/'+name+'.schema.json',import.meta.url),'utf8')));
 for(const document of documents)ajv.addSchema(document);
-const domains={agent:validateAgent,host:validateHost,shared:validateShared,transport:validateTransport,automation:validateAutomation,chat:validateChat,secretary:validateSecretary,component:(_,v)=>validateComponent(v)};
+const domains={agent:validateAgent,host:validateHost,shared:validateShared,wire:validateWireShared,matches:matchesShared,transport:validateTransport,automation:validateAutomation,chat:validateChat,secretary:validateSecretary,component:(_,v)=>validateComponent(v)};
 const rows=[];
 function add(domain,name,input){
-  let error=null;try{domains[domain](name,JSON.parse(input));}catch(cause){const e=IvyError.from(cause);error={code:e.code,message:e.message,outcome:e.outcome};}
-  rows.push({domain,name,input,error});
+  let error=null,returned=null;try{returned=domains[domain](name,JSON.parse(input))??null;}catch(cause){const e=IvyError.from(cause);error={code:e.code,message:e.message,outcome:e.outcome};}
+  rows.push({domain,name,input,error,returned});
+  if(domain==='shared'){add('wire',name,input);add('matches',name,input);}
 }
 for(const row of schemaSamples(ajv,documents,documents.filter((_,i)=>![1,7].includes(i)))){
   const [resource,fragment]=row.reference.split('#/$defs/'),source=resource.split('/').at(-1).split('.')[0],domain=({'hive-wire':'shared','hive-transport':'transport'})[source]??source;
