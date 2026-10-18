@@ -212,6 +212,89 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
 }
 
 #[test]
+fn projected_fields_preserve_undefined_and_canonical_error_order() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/json-fields-oracle.mjs",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 300);
+    for row in rows {
+        let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
+        let mut pairs: Vec<(JsString, Option<IvyJson>)> = Vec::new();
+        match input
+            .get("generated")
+            .and_then(|value| value.as_str().ok())
+            .as_deref()
+        {
+            Some("nodes") => pairs.extend([
+                (
+                    "a".into(),
+                    Some(IvyJson::Array(
+                        (0..input.get("count").unwrap().as_f64().unwrap() as usize)
+                            .map(|_| IvyJson::Null)
+                            .collect(),
+                    )),
+                ),
+                ("b".into(), None),
+            ]),
+            Some("depth") => {
+                let mut value = IvyJson::Null;
+                for _ in 0..input.get("depth").unwrap().as_f64().unwrap() as usize {
+                    value = IvyJson::Array(vec![value]);
+                }
+                pairs.extend([("a".into(), Some(value)), ("b".into(), None)]);
+            }
+            Some("number") => {
+                let value = match input.get("number").unwrap().as_str().unwrap().as_str() {
+                    "nan" => f64::NAN,
+                    "infinity" => f64::INFINITY,
+                    _ => f64::NEG_INFINITY,
+                };
+                pairs.extend([
+                    ("a".into(), Some(IvyJson::Number(value))),
+                    ("b".into(), None),
+                ]);
+            }
+            _ => {
+                for field in input.get("fields").unwrap().as_array().unwrap() {
+                    pairs.push((
+                        field.get("key").unwrap().as_js_string().unwrap().clone(),
+                        field.get("value").cloned(),
+                    ));
+                }
+            }
+        }
+        let actual = match canonical_fields(
+            pairs
+                .iter()
+                .map(|(key, value)| (key.clone(), value.as_ref())),
+            input.get("maximumBytes").unwrap().as_f64().unwrap() as usize,
+        ) {
+            Ok(value) => IvyJson::object([("ok", true.into()), ("value", value.into())]),
+            Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+        };
+        assert_eq!(
+            actual,
+            parse(row["result"].as_str().unwrap(), 100_000).unwrap(),
+            "fields input: {}",
+            row["input"]
+        );
+    }
+}
+
+#[test]
 fn ordinary_json_node_counts_are_independent_of_validation_limits() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")

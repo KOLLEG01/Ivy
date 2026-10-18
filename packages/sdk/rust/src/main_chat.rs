@@ -158,3 +158,20 @@ pub fn main_notification(value: &IvyJson) -> IvyJson {
             .filter_map(|key| value.get(key).map(|value| (key, value.clone()))),
     )
 }
+
+/// Project a notification for its original canonical/hash boundary. Missing
+/// fields retain undefined's rejection; complete projections use the caller's
+/// normal encoding/hash operation, without serializing valid content twice.
+pub fn main_notification_checked(value: &IvyJson) -> IvyResult<IvyJson> {
+    if value.is_null() {
+        return Err(IvyError::internal());
+    }
+    let keys = ["action", "operationId", "source", "text"];
+    if keys.iter().any(|key| value.get(key).is_none()) {
+        ivy_contracts::json::canonical_fields(
+            keys.into_iter().map(|key| (key, value.get(key))),
+            ivy_contracts::limits::MANAGEMENT_FRAME_BYTES,
+        )?;
+    }
+    Ok(main_notification(value))
+}
