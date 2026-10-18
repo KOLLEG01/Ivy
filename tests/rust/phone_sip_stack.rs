@@ -25,6 +25,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     const OFFER: &str = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n";
+    const ANSWER: &str = "v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40002 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\n";
     const REJECTED: &str = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=fixture\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 0 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=inactive\r\n";
 
     enum Peer {
@@ -126,6 +127,11 @@ mod tests {
     }
     fn addressed(body: &str, local_port: u16, peer_port: u16, tcp: bool) -> Request {
         let mut request = original(body);
+        if !body.is_empty() {
+            request
+                .headers
+                .unique_push(ContentType::new("application/sdp").into());
+        }
         request.uri = format!(
             "sip:peer@127.0.0.1:{peer_port}{}",
             if tcp { ";transport=tcp" } else { "" }
@@ -143,6 +149,17 @@ mod tests {
             .headers
             .unique_push(Contact::new(format!("<sip:fixture@127.0.0.1:{local_port}>")).into());
         request
+    }
+    fn branch(request: &Request) -> String {
+        request
+            .top_via_header()
+            .unwrap()
+            .typed()
+            .unwrap()
+            .branch()
+            .unwrap()
+            .value()
+            .to_owned()
     }
 
     #[tokio::test]
@@ -164,20 +181,20 @@ mod tests {
                             let challenge_ack = peer.receive().await;
                             assert_eq!(challenge_ack.method, Method::Ack);
                             assert!(challenge_ack.body.is_empty());
-                            assert_eq!(challenge_ack.top_via_header().unwrap().branch().unwrap(), original.top_via_header().unwrap().branch().unwrap());
+                            assert_eq!(branch(&challenge_ack), branch(&original));
                             let continued = peer.receive().await;
                             assert_eq!(continued.method, Method::Invite);
                             assert_eq!(continued.body, original.body);
                             assert_eq!(continued.call_id_header().unwrap(), original.call_id_header().unwrap());
                             assert_eq!(continued.from_header().unwrap(), original.from_header().unwrap());
                             assert_eq!(continued.cseq_header().unwrap().seq().unwrap(), 2);
-                            assert_ne!(continued.top_via_header().unwrap().branch().unwrap(), original.top_via_header().unwrap().branch().unwrap());
+                            assert_ne!(branch(&continued), branch(&original));
                             let authorization = continued.headers.iter().find(|h| if peer_status == StatusCode::Unauthorized { matches!(h, Header::Authorization(_)) } else { matches!(h, Header::ProxyAuthorization(_)) }).unwrap();
                             let raw = match authorization { Header::Authorization(h) => h.value(), Header::ProxyAuthorization(h) => h.value(), _ => unreachable!() };
-                            let parsed = Authorization::new(raw).typed().unwrap();
+                            let parsed = rsipstack::sip::typed::Authorization::parse(raw).unwrap();
                             assert_eq!(parsed.username, "digest-fixture");
                             assert!(rsipstack::dialog::authenticate::verify_digest(&parsed, "fixture-only", &Method::Invite, raw));
-                            let mut accepted = response(&continued, StatusCode::OK, peer_port, OFFER);
+                            let mut accepted = response(&continued, StatusCode::OK, peer_port, if offer.is_empty() { OFFER } else { ANSWER });
                             if tcp {
                                 // An unreachable Contact cannot force a new TCP connection for ACK.
                                 accepted.headers.unique_push(Contact::new("<sip:peer@unreachable.invalid:9;transport=tcp>").into());
@@ -186,7 +203,7 @@ mod tests {
                             let first_ack = peer.receive().await;
                             assert_eq!(first_ack.method, Method::Ack);
                             assert_eq!(first_ack.cseq_header().unwrap().seq().unwrap(), 2);
-                            assert_eq!(first_ack.body, if offer.is_empty() { OFFER.as_bytes() } else { b"" });
+                            assert_eq!(first_ack.body, if offer.is_empty() { ANSWER.as_bytes() } else { b"" });
                             let mut fork = accepted.clone();
                             fork.headers.unique_push(To::new("<sip:peer@example.invalid>;tag=foreign-fork").into());
                             peer.send(&fork).await;
@@ -205,7 +222,7 @@ mod tests {
                         let accepted = current.next_response().await.unwrap();
                         assert_eq!(accepted.status_code.code(), 200);
                         invite.select_final(&accepted).unwrap();
-                        let ack = invite.prepare_ack(&accepted, if offer.is_empty() { Some(OFFER) } else { None }, endpoint.inner()).unwrap();
+                        let ack = invite.prepare_ack(&accepted, if offer.is_empty() { Some(ANSWER) } else { None }, endpoint.inner()).unwrap();
                         current.send_ack(&ack).await.unwrap();
                         let fork = current.next_response().await.unwrap();
                         assert!(invite.ack_for_retransmission(&fork).is_none());

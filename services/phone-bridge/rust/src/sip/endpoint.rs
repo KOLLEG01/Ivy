@@ -279,7 +279,9 @@ pub struct ClientExchange {
 }
 impl ClientExchange {
     fn start(mut transaction: Transaction, proxy: Option<SipAddr>, channels: Channels) -> Self {
-        transaction.destination = proxy.clone();
+        if let Some(proxy) = proxy.as_ref() {
+            transaction.destination = Some(proxy.clone());
+        }
         *channels.registration.route.stop.lock().unwrap() = Some(transaction.tu_sender.clone());
         let (responses, received) = mpsc::channel(RESPONSE_QUEUE);
         let route = channels.registration.route.clone();
