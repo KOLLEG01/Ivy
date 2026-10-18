@@ -20,6 +20,24 @@ impl From<String> for JsString {
     }
 }
 impl JsString {
+    /// English locale lowercase, retaining unpaired UTF-16 units as non-cased
+    /// boundaries and preserving context within each well-formed segment.
+    pub fn to_english_lowercase(&self) -> Self {
+        let mut output = Vec::new();
+        let mut segment = String::new();
+        for c in char::decode_utf16(self.0.iter().copied()) {
+            match c {
+                Ok(c) => segment.push(c),
+                Err(error) => {
+                    output.extend(segment.to_lowercase().encode_utf16());
+                    segment.clear();
+                    output.push(error.unpaired_surrogate());
+                }
+            }
+        }
+        output.extend(segment.to_lowercase().encode_utf16());
+        Self(output)
+    }
     pub fn contains_ascii(&self, needle: &str) -> bool {
         debug_assert!(needle.is_ascii());
         needle.is_empty()

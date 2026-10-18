@@ -102,26 +102,13 @@ impl Owner {
     }
 
     async fn evidence(&self, result: Arc<ProcessResult>) -> Stopped {
-        if result.error_code.as_deref() == Some("outcome_unknown") {
-            record_process_stop_fence(
-                self.identity.data_root.clone(),
-                IvyJson::object([
-                    ("schemaVersion", IvyJson::Number(1.0)),
-                    ("owner", "native".into()),
-                    ("ownerId", self.identity.epoch.clone().into()),
-                    ("processId", IvyJson::Number(self.child.pid as f64)),
-                    (
-                        "observedAt",
-                        chrono::Utc::now()
-                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                            .into(),
-                    ),
-                    ("code", "outcome_unknown".into()),
-                ]),
-            )
-            .await?;
-        }
-        Ok(result)
+        retain_stop_evidence(
+            self.identity.data_root.clone(),
+            &self.identity.epoch,
+            self.child.pid,
+            result,
+        )
+        .await
     }
 
     async fn retire(&self, observed: Option<Stopped>) -> Stopped {
@@ -137,6 +124,34 @@ impl Owner {
             None => self.evidence(result).await,
         }
     }
+}
+
+pub(crate) async fn retain_stop_evidence(
+    data_root: PathBuf,
+    epoch: &str,
+    pid: u32,
+    result: Arc<ProcessResult>,
+) -> Stopped {
+    if result.error_code.as_deref() == Some("outcome_unknown") {
+        record_process_stop_fence(
+            data_root,
+            IvyJson::object([
+                ("schemaVersion", IvyJson::Number(1.0)),
+                ("owner", "native".into()),
+                ("ownerId", epoch.into()),
+                ("processId", IvyJson::Number(pid as f64)),
+                (
+                    "observedAt",
+                    chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                        .into(),
+                ),
+                ("code", "outcome_unknown".into()),
+            ]),
+        )
+        .await?;
+    }
+    Ok(result)
 }
 
 /// The caller must perform all original launch checks (including a clear stop
