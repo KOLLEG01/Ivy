@@ -17,6 +17,9 @@ impl SchemaBundle {
             .iter()
             .map(|document| parse(document, MANAGEMENT_FRAME_BYTES))
             .collect::<IvyResult<Vec<_>>>()?;
+        Self::from_documents(documents)
+    }
+    pub(crate) fn from_documents(documents: Vec<IvyJson>) -> IvyResult<Self> {
         let mut identities = HashMap::new();
         let mut patterns = HashMap::new();
         for (index, document) in documents.iter().enumerate() {
