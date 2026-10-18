@@ -95,7 +95,7 @@ pub fn default_configuration(
     let mut whatsapp = main.clone();
     whatsapp.insert("questionsOnly", false.into());
     let value = IvyJson::object([
-        ("schemaVersion", 1.into()),
+        ("schemaVersion", IvyJson::Number(1.0)),
         ("execution", execution.cloned().unwrap_or(IvyJson::Null)),
         ("browserNotifications", true.into()),
         ("updatedAt", IvyJson::String(now.clone())),
