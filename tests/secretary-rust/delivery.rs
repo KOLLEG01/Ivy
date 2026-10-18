@@ -79,6 +79,8 @@ mod notice_evidence_cases;
 mod notice_scan_cases;
 #[path = "notices_cases.rs"]
 mod notices_cases;
+#[path = "service_handlers_cases.rs"]
+mod service_handlers_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 #[path = "triage_prompt_cases.rs"]

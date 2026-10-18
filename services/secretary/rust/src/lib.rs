@@ -41,6 +41,7 @@ mod notices_voice;
 pub mod policy;
 pub mod schedule;
 pub mod schema;
+pub mod service_handlers;
 pub mod source_identity;
 pub mod store;
 pub mod triage_media;
