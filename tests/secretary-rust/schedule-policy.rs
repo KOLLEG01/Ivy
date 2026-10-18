@@ -33,6 +33,11 @@ fn original_assignment_rules_triggers_and_names_differential() {
             "validateRules" => validate_rules(&args[0]).map(|_| IvyJson::Null),
             "validateTrigger" => validate_trigger(&args[0]).map(|_| IvyJson::Null),
             "validateAssignment" => validate_assignment(&args[0]).map(|_| IvyJson::Null),
+            "validateExecutionTarget" => validate_execution_target(&args[0]).map(|_| IvyJson::Null),
+            "validateConfiguration" => validate_configuration(&args[0]).map(|_| IvyJson::Null),
+            "defaultConfiguration" => {
+                default_configuration(&args[0], args[1].as_js_string().unwrap(), args.get(2))
+            }
             "unifiedMainRules" => Ok(unified_main_rules(&args[0])),
             "unifiedRuleOverrides" => Ok(unified_rule_overrides(&args[0])),
             "effectiveRules" => effective_rules(&args[0], &args[1]),

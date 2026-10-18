@@ -8,6 +8,8 @@ pub enum Schema {
     GlobalRules,
     AssignmentTrigger,
     Assignment,
+    ExecutionTarget,
+    SecretaryConfiguration,
 }
 impl Schema {
     fn name(self) -> &'static str {
@@ -16,6 +18,8 @@ impl Schema {
             Self::GlobalRules => "GlobalRules",
             Self::AssignmentTrigger => "AssignmentTrigger",
             Self::Assignment => "Assignment",
+            Self::ExecutionTarget => "ExecutionTarget",
+            Self::SecretaryConfiguration => "SecretaryConfiguration",
         }
     }
 }

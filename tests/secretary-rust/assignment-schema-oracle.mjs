@@ -23,7 +23,8 @@ const object = { kind: 'object-change', objectIds: ['00000000-0000-4000-8000-000
 const assignment = { schemaVersion: 1, assignmentId: 'example', name: 'Review', description: '', enabled: true,
   prompt: 'Review the retained state.', preflight: null, rules: {}, trigger: schedule,
   createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' };
-const methods = { GlobalRules: 'validateRules', AssignmentTrigger: 'validateTrigger', Assignment: 'validateAssignment' };
+const methods = { GlobalRules: 'validateRules', AssignmentTrigger: 'validateTrigger', Assignment: 'validateAssignment',
+  ExecutionTarget: 'validateExecutionTarget', SecretaryConfiguration: 'validateConfiguration' };
 const { Ajv2020 } = createRequire(import.meta.url)('ajv/dist/2020.js');
 const document = JSON.parse(readFileSync('specs/schemas/secretary.schema.json', 'utf8'));
 const ajv = new Ajv2020({ strict: false, validateFormats: false, ownProperties: true });
@@ -83,4 +84,42 @@ for (const overrides of [{}, { whatsapp: { enabled: false, questionsOnly: true }
   add('unifiedRuleOverrides', overrides);
   add('effectiveRules', rules, overrides);
 }
+const now = '2026-01-01T00:00:00.000Z';
+const target = { serviceNodeId: 'example.agent-manager', threadCwd: '/work', model: null, effort: 'high', permissions: 'read-only' };
+const configuration = { schemaVersion: 1, execution: target, browserNotifications: true, updatedAt: now, rules };
+const settings = { policy: { silentTime: null, minimumMainUrgency: 'normal', researchMaxMinutes: 3,
+  urgentBypass: true, whatsappQuestionsOnly: true, voiceEscalation: null } };
+// Run the unmodified original on the current OS; rooted drive paths intentionally
+// differ from std::path::Path::is_absolute on Windows.
+for (const threadCwd of ['', '.', '..', 'work', '/work', '/', '//server/share', '\\', '\\work',
+  'C:', 'C:work', 'C:/', 'C:\\work', 'z:/work', '1:/work', 'é:/work', '\\\\server\\share',
+  '\\\\?\\C:\\work', '\\\\.\\pipe\\name', '/..', '/\ud800', 'C:\\\udfff', '/a\0b',
+  ' /work', 'file:///work', '/'.repeat(4096), '/'.repeat(4097), '/' + '😀'.repeat(2048)]) {
+  const execution = { ...target, threadCwd };
+  add('validateExecutionTarget', execution);
+  add('validateConfiguration', { ...configuration, execution });
+}
+for (const execution of [null, target, { ...target, threadCwd: 'relative' }]) {
+  for (const silentTime of [null, window, { ...window, start: '22:00', end: '06:00' },
+    { ...window, start: '08:00', end: '08:00' }, { ...window, timeZone: 'Not/AZone' }]) {
+    add('defaultConfiguration', { ...settings, policy: { ...settings.policy, silentTime } }, now, execution);
+  }
+}
+add('defaultConfiguration', settings, now); // Omitted execution defaults to null.
+for (const minimumMainUrgency of ['normal', 'high', 'critical']) {
+  for (const researchMaxMinutes of [0, 5]) {
+    add('defaultConfiguration', { ...settings, policy: { ...settings.policy, minimumMainUrgency, researchMaxMinutes } }, now, target);
+  }
+}
+for (const updatedAt of [now, 'not-a-date', '2026-99-99T99:99:99.999Z', '2026-01-01T00:00:00Z']) {
+  add('validateConfiguration', { ...configuration, updatedAt });
+  add('defaultConfiguration', settings, updatedAt, target);
+}
+for (const browserNotifications of [true, false, null]) add('validateConfiguration', { ...configuration, browserNotifications });
+const withoutBrowser = structuredClone(configuration); delete withoutBrowser.browserNotifications;
+add('validateConfiguration', withoutBrowser);
+// Schema admission precedes rule semantics, which precede execution path checks.
+const badRules = { ...rules, main: { ...rules.main, window: { ...window, timeZone: 'Not/AZone' } } };
+add('validateConfiguration', { ...configuration, rules: badRules, execution: { ...target, threadCwd: 'relative' } });
+add('validateConfiguration', { ...configuration, rules: badRules, execution: { ...target, effort: 'invalid' } });
 process.stdout.write(JSON.stringify(rows));

@@ -40,6 +40,90 @@ pub fn validate_rules(value: &IvyJson) -> IvyResult<()> {
     Ok(())
 }
 
+pub fn validate_execution_target(value: &IvyJson) -> IvyResult<()> {
+    validate(Schema::ExecutionTarget, value)?;
+    let path = &value.required("threadCwd")?.as_js_string().unwrap().0;
+    // This is the original lexical node:path.isAbsolute admission, not an OS
+    // filesystem safety check. Windows also admits a root without a drive (\\x).
+    let absolute = if cfg!(windows) {
+        matches!(path.first(), Some(47 | 92))
+            || (matches!(path.first(), Some(65..=90 | 97..=122))
+                && path.get(1) == Some(&58)
+                && matches!(path.get(2), Some(47 | 92)))
+    } else {
+        path.first() == Some(&47)
+    };
+    need(
+        absolute,
+        "Secretary task working directories must be absolute.",
+    )
+}
+
+pub fn validate_configuration(value: &IvyJson) -> IvyResult<()> {
+    validate(Schema::SecretaryConfiguration, value)?;
+    validate_rules(value.required("rules")?)?;
+    if let Some(execution) = value.get("execution").filter(|v| !v.is_null()) {
+        validate_execution_target(execution)?;
+    }
+    Ok(())
+}
+
+/// Settings have already been admitted by the service. Retain the original
+/// inverted silent window and validate the completed configuration afterward.
+pub fn default_configuration(
+    settings: &IvyJson,
+    now: &JsString,
+    execution: Option<&IvyJson>,
+) -> IvyResult<IvyJson> {
+    let policy = settings.required("policy")?;
+    let window = match policy.get("silentTime").filter(|v| !v.is_null()) {
+        Some(silent) => IvyJson::object([
+            ("timeZone", silent.required("timeZone")?.clone()),
+            ("start", silent.required("end")?.clone()),
+            ("end", silent.required("start")?.clone()),
+        ]),
+        None => IvyJson::Null,
+    };
+    let main = IvyJson::object([
+        ("enabled", true.into()),
+        (
+            "minimumUrgency",
+            policy.required("minimumMainUrgency")?.clone(),
+        ),
+        ("window", window.clone()),
+    ]);
+    let mut whatsapp = main.clone();
+    whatsapp.insert("questionsOnly", false.into());
+    let value = IvyJson::object([
+        ("schemaVersion", 1.into()),
+        ("execution", execution.cloned().unwrap_or(IvyJson::Null)),
+        ("browserNotifications", true.into()),
+        ("updatedAt", IvyJson::String(now.clone())),
+        (
+            "rules",
+            IvyJson::object([
+                ("main", main),
+                ("whatsapp", whatsapp),
+                (
+                    "voice",
+                    IvyJson::object([
+                        ("enabled", true.into()),
+                        ("minimumUrgency", "critical".into()),
+                        ("window", window),
+                        ("immediateOnly", true.into()),
+                    ]),
+                ),
+                (
+                    "researchMaxMinutes",
+                    policy.required("researchMaxMinutes")?.clone(),
+                ),
+            ]),
+        ),
+    ]);
+    validate_configuration(&value)?;
+    Ok(value)
+}
+
 /// Inputs are admitted GlobalRules/RuleOverrides records; merges keep the same
 /// shallow override semantics and detached values as the original structuredClone.
 pub fn unified_main_rules(value: &IvyJson) -> IvyJson {
