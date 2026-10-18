@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { expect } from "@playwright/test";
 import { fixture, fixtureToken } from "./fixtures/fixture.mjs";
+import { nativeDashboards } from "./fixtures/dashboards.mjs";
 import { startDashboards } from "../../dist/services/dashboards/src/main.js";
 import { atomicJson } from "../../dist/packages/host-runtime/src/config.js";
 import { publishUi } from "../../dist/packages/cli/src/publish-ui.js";
@@ -13,7 +14,8 @@ test(
   "dashboard saves retain identity and revision when subsequent reads are unavailable",
   { timeout: 120000 },
   async (t) => {
-    const f = await fixture(t);
+    const browser = process.env.DASHBOARDS_TEST_BROWSER;
+    const f = await fixture(t, false, undefined, {}, browser ? { executablePath: browser } : {});
     const build = JSON.parse(await readFile("dist/build-info.json", "utf8"));
     const config = {
       schemaVersion: 1,
@@ -27,12 +29,14 @@ test(
       buildId: build.buildId,
       version: build.version,
       credential: fixtureToken,
-      settings: {},
+      settings: browser ? { chromiumExecutable: browser } : {},
     };
     await atomicJson(join(config.artifactRoot, "dist/build-info.json"), build);
     const path = join(f.root, "dashboards.json");
     await atomicJson(path, config);
-    const service = await startDashboards(path);
+    const service = process.env.DASHBOARDS_TEST_SERVICE
+      ? await nativeDashboards(path, f.client)
+      : await startDashboards(path);
     t.after(() => service.close());
     await service.service.waitReady();
     const definition = JSON.parse(

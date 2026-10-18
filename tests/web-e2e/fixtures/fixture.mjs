@@ -14,7 +14,7 @@ import { digest } from '../../../dist/packages/contracts/src/canonical.js';
 export const fixtureToken = 'isolated-browser-contract-fixture';
 const roots = [];
 after(async () => { for (const root of roots) await rm(root, { recursive: true, force: true, maxRetries: 3 }); });
-export async function fixture(t, populated = false, viewport = { width: 1440, height: 1000 }, serverOptions = {}) {
+export async function fixture(t, populated = false, viewport = { width: 1440, height: 1000 }, serverOptions = {}, browserOptions = {}) {
   const root = await mkdtemp(resolve(tmpdir(), 'ivy-browser-')); roots.push(root);
   const reservation = createServer(); reservation.listen(0, '127.0.0.1'); await once(reservation, 'listening');
   const port = reservation.address().port; await new Promise((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
@@ -61,7 +61,7 @@ export async function fixture(t, populated = false, viewport = { width: 1440, he
     await server.worker.request({ action: 'diagnostic', value: { code: 'browser_fixture_observation', source: 'browser-fixture', severity: 'info', status: 'resolved',
       message: 'A retained, resolved browser fixture diagnostic.', resource: { serviceNodeId: 'browser-fixture-service' }, firstObservedAt: now, lastObservedAt: now } });
   }
-  browser = await chromium.launch({ ...(process.platform === 'win32' ? { channel: 'msedge' } : {}), headless: true, timeout: 20000 });
+  browser = await chromium.launch({ ...(process.platform === 'win32' && !browserOptions.executablePath ? { channel: 'msedge' } : {}), ...browserOptions, headless: true, timeout: 20000 });
   const context = await browser.newContext({ viewport, acceptDownloads: true, colorScheme: 'light', locale: 'en-US' });
   const page = await context.newPage(), pageErrors = [], externalRequests = [];
   page.on('pageerror', error => pageErrors.push(error.message));
