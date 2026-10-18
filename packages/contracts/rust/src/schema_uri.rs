@@ -1,6 +1,9 @@
 //! URI component encoding used by schema resource resolution. These operations
 //! preserve the compiler's distinction between encoded dots and path segments.
 use crate::JsString;
+#[path = "schema_uri_resolve.rs"]
+mod resolution;
+pub use resolution::resolve;
 
 #[derive(Clone, Copy)]
 pub enum Component {

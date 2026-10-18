@@ -5,6 +5,46 @@ use ivy_contracts::{
 };
 
 #[test]
+fn uri_resolution_matches_compiler_authority_and_scope_rules() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .arg("tests/fixtures/schema-uri-resolve-oracle.mjs")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(rows.len() > 3000);
+    for row in rows {
+        let IvyJson::String(base) = parse(row["base"].as_str().unwrap(), 100_000).unwrap() else {
+            panic!("Expected base string");
+        };
+        let IvyJson::String(relative) = parse(row["relative"].as_str().unwrap(), 100_000).unwrap()
+        else {
+            panic!("Expected relative string");
+        };
+        let actual = match ivy_contracts::schema::uri::resolve(&base, &relative) {
+            Ok(value) => IvyJson::object([("ok", true.into()), ("value", IvyJson::String(value))]),
+            Err(error) => {
+                assert_eq!(error.code_js(), "registry_invalid".into());
+                IvyJson::object([("ok", false.into())])
+            }
+        };
+        assert_eq!(
+            stringify(&actual, 100_000).unwrap(),
+            row["result"].as_str().unwrap(),
+            "base={} relative={}",
+            row["base"],
+            row["relative"]
+        );
+    }
+}
+
+#[test]
 fn uri_components_match_compiler_encoding_and_dot_segments() {
     use ivy_contracts::schema::uri::{
         Component::{Path, QueryOrFragment, Userinfo},
