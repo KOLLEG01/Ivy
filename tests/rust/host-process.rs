@@ -73,6 +73,18 @@ fn child_fixture() {
         "large" => {
             std::io::stdout().write_all(&vec![b'x'; 200000]).unwrap();
         }
+        "short-lived" => {
+            for _ in 0..8 {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--list")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+            println!("descendants-finished=8");
+        }
         "tree" | "tree-exit" => {
             let root = PathBuf::from(std::env::var_os("IVY_PROCESS_TREE_ROOT").unwrap());
             let mut descendant = std::process::Command::new(std::env::current_exe().unwrap())
@@ -171,6 +183,25 @@ async fn bounded_stdin_and_exit_outcomes_are_preserved() {
     .unwrap_err();
     assert_eq!(error.code, "limit_exceeded");
     assert_eq!(error.outcome, ivy_contracts::Outcome::NotExecuted);
+}
+
+#[tokio::test]
+async fn already_finished_descendants_preserve_normal_completion() {
+    let root = Root::new();
+    let (command, executables) = fixture_command();
+    let result = process::run_command(
+        &command,
+        &root.0,
+        &executables,
+        context("short-lived"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        result.stdout.contains("descendants-finished=8"),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]
