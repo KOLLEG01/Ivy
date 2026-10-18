@@ -2,7 +2,9 @@
 pub use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome};
 pub mod build_identity;
 pub mod concurrency;
+pub mod config;
 pub mod default_settings;
+pub mod health;
 pub mod logs;
 pub mod node_runtime;
 pub mod package_requirements;
