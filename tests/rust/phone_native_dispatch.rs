@@ -322,3 +322,24 @@ async fn read_only_requests_have_fresh_replies_and_do_not_reserve_effect_receipt
     assert_eq!(handler.capacity.load(Ordering::Acquire), 0);
     assert_eq!(dispatcher.receipt_count(), 0);
 }
+
+struct DepthHandler(usize);
+impl NativeHandler for DepthHandler {
+    fn cleanup_slots(&self) -> usize {
+        0
+    }
+    fn invoke(&self, _: NativeRequest) -> NativeInvocation {
+        let json = format!("{}0{}", "[".repeat(self.0), "]".repeat(self.0));
+        Box::pin(async move { NativeOutcome::result(json) })
+    }
+}
+#[tokio::test]
+async fn final_response_envelope_preserves_original_native_write_depth_boundary() {
+    for (depth, written) in [(23, true), (24, false)] {
+        let dispatcher =
+            NativeDispatcher::new(EPOCH.into(), 1, Arc::new(DepthHandler(depth))).unwrap();
+        let reply = dispatcher.execute(request("status", None, "{}", 1)).await;
+        assert_eq!(reply.outcome().error_code(), None);
+        assert_eq!(reply.to_json().is_ok(), written);
+    }
+}
