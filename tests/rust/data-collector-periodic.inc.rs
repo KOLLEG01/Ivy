@@ -193,10 +193,17 @@ async fn scenario(original: bool) {
     .await
     .unwrap();
     assert!(disabled.get("assignment").is_some());
-    wait_row(&fixture, "periodic definition disabled", |r| {
+    let disabled_row = wait_row(&fixture, "periodic definition disabled", |r| {
         r.get("task").and_then(|t| t.get("enabled")) == Some(&false.into())
     })
     .await;
+    assert_eq!(disabled_row.get("state"), latest.get("state"));
+    // Adopting a changed enabled flag intentionally resets the next due time.
+    // The older outbox must preserve that new schedule as it finishes publishing.
+    assert!(
+        model::number(&disabled_row, "nextAt").unwrap()
+            >= model::number(&latest, "nextAt").unwrap()
+    );
     let completed = wait_runs(&fixture, settled.len(), "succeeded").await;
     assert_eq!(
         completed
@@ -217,7 +224,7 @@ async fn scenario(original: bool) {
     let published = snapshot(&fixture);
     assert_eq!(published.get("resultObjectId"), Some(&result_id));
     assert_eq!(published.get("state"), latest.get("state"));
-    assert_eq!(published.get("nextAt"), latest.get("nextAt"));
+    assert_eq!(published.get("nextAt"), disabled_row.get("nextAt"));
     let timeline = verify_publication(
         &client,
         published.required("resultObjectId").unwrap(),
@@ -232,7 +239,7 @@ async fn scenario(original: bool) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as f64;
-    let until_due = (model::number(&latest, "nextAt").unwrap() - now).max(0.0) as u64;
+    let until_due = (model::number(&disabled_row, "nextAt").unwrap() - now).max(0.0) as u64;
     tokio::time::sleep(Duration::from_millis(until_due + 1200)).await;
     assert_eq!(runs(&fixture), completed);
     assert!(json_equal(&markers(&fixture), &expected));
