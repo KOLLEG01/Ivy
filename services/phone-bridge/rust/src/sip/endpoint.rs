@@ -1,11 +1,11 @@
 //! Owned transaction drivers and bounded delivery of TU-owned INVITE 2xx ACKs.
 //! The call owner retains these handles until its protocol cleanup is settled.
 use rsipstack::{
-    Endpoint, EndpointBuilder,
+    EndpointBuilder,
     sip::{Method, Request, Response, SipMessage},
     transaction::{
         TransactionReceiver,
-        endpoint::{EndpointInnerRef, EndpointOption, MessageInspector},
+        endpoint::{Endpoint, EndpointInnerRef, EndpointOption, MessageInspector},
         key::{TransactionKey, TransactionRole},
         transaction::{Transaction, TransactionEvent, TransactionEventSender},
     },
