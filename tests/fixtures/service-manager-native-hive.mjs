@@ -103,7 +103,7 @@ async function stop() {
 try {
   await hive.start();
   const client = new HiveClient(publicBaseUrl,{credential:token});
-  await client.request('hostConfigurations.put',{hostId:config.hostId,configuration:config,mutationId:await newOperationId(client)});
+  const originalConfiguration = await client.request('hostConfigurations.put',{hostId:config.hostId,configuration:config,mutationId:await newOperationId(client)});
   const executor = async () => atomicJson(join(root,'state','executor.json'), {schemaVersion:1,hostId:config.hostId,pid:process.pid,bootId:'executor-fixture',buildId:null,
     state:'ready',activeDeploymentId:null,code:null,observedAt:new Date().toISOString()});
   await executor();let executorWork = Promise.resolve();
@@ -153,7 +153,7 @@ try {
   const beforeOwner = journal.observations().fixture?.ownerBootId;
   const next = structuredClone(config);
   next.instances.push({instanceId:'added',serviceNodeId:'native.added',componentId:'fixture',engine:'process',enabled:false,settings:{}});
-  await client.request('hostConfigurations.put',{hostId:config.hostId,configuration:next,mutationId:await newOperationId(client)});
+  await client.request('hostConfigurations.put',{hostId:config.hostId,expectedRevision:originalConfiguration.revision,configuration:next,mutationId:await newOperationId(client)});
   await until(()=>readFile(join(root,'state','desired-state-hint.json'),'utf8').then(JSON.parse).then(h=>h.configuration).catch(()=>false));
   assert.ok(!(await call('status')).instances.some(i=>i.instanceId==='added'),'Hive hint alone is not accepted local state');
   await atomicJson(configPath,next);
