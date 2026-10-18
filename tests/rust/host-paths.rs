@@ -5,6 +5,8 @@ use std::{fs, path::PathBuf};
 mod journal_cases;
 #[path = "host-artifact-cases.rs"]
 mod artifact_cases;
+#[path = "host-native-dispatch-cases.rs"]
+mod native_dispatch_cases;
 #[path = "host-source-cases.rs"]
 mod source_cases;
 #[path = "host-action-cases.rs"]

@@ -26,6 +26,7 @@ pub mod journal;
 pub mod logs;
 pub mod layout;
 pub mod node_runtime;
+mod native_dispatch;
 pub mod native_catalog_compatibility;
 pub mod native_account;
 pub mod package_requirements;

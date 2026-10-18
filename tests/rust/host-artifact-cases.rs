@@ -9,7 +9,7 @@ fn compare(operation: &str, args: Vec<IvyJson>, result: IvyResult<IvyJson>) {
     compare_config_oracle(IvyJson::object([("kind", "artifact".into()), ("operation", operation.into()), ("args", IvyJson::Array(args)), ("node", "v24.18.0".into())]), result);
 }
 fn node() -> NodeRuntime { NodeRuntime { executable: PathBuf::from("unused"), version: "24.18.0".into() } }
-async fn fixture() -> (ServiceFixture, IvyJson, IvyJson) {
+pub(super) async fn fixture() -> (ServiceFixture, IvyJson, IvyJson) {
     let fixture = ServiceFixture::new(); let root = fixture.0.join("artifact");
     let candidate = IvyJson::object([("candidateId", hash("a")), ("componentId", "fixture".into()), ("artifactRoot", path(&root)), ("manifestPath", path(&root.join("manifest.json"))), ("createdAt", "2026-01-01T00:00:00.000Z".into()),
         ("platform", IvyJson::object([("os", "win32".into()), ("arch", "x64".into()), ("node", "24.18.0".into())])), ("buildId", hash("a"))]);
