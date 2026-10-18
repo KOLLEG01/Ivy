@@ -47,14 +47,6 @@ fn normalize(path: &str, input: &IvyJson) -> IvyResult<IvyJson> {
         return Err(IvyError::internal());
       }
     }
-    if let Some(text) = input.as_js_string() {
-        for (key, too_short) in [("x-utf16-minLength", true), ("x-utf16-maxLength", false)] {
-            if let Some(bound) = s.get(key).and_then(IvyJson::as_f64) {
-                let length = text.utf16_len() as f64;
-                if if too_short { length < bound } else { length > bound } { return Err(IvyError::internal()); }
-            }
-        }
-    }
     let result = match input {
         IvyJson::Object(entries) => {
             let mut result = IvyJson::Object(Vec::new());

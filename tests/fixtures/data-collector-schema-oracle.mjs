@@ -18,10 +18,6 @@ function assets() {
         for (const key of Object.keys(jsonSchema)) delete jsonSchema[key];
         jsonSchema['x-collector-json'] = true;
       }
-      for (const key of ['minLength','maxLength']) if (jsonSchema[key] !== undefined) {
-        jsonSchema['x-utf16-' + key] = jsonSchema[key];
-        delete jsonSchema[key];
-      }
       if (zodSchema === schemas.mcpSchema) jsonSchema['x-collector-distinct-tools'] = true;
       if (zodSchema === schemas.taskSchema) jsonSchema['x-collector-input-auth'] = true;
     },
@@ -83,7 +79,7 @@ if (process.argv[2] === 'assets') {
   }
   for (const name of ['settingsSchema','taskSchema','outputSchema','readSchema','updateSchema'])
     for (const value of [null,false,[],0,'']) add(name,value);
-  for (const name of ['x'.repeat(200),'😀'.repeat(100),'😀'.repeat(101),'x'.repeat(201),'\ud800'.repeat(200)]) add('taskSchema',{...task,name});
+  for (const name of ['x'.repeat(200),'😀'.repeat(100),'😀'.repeat(101),'😀'.repeat(200),'😀'.repeat(201),'x'.repeat(201),'\ud800'.repeat(200)]) add('taskSchema',{...task,name});
   for (const dependencies of [{'@scope/package':'1.2.3-pre.1'},{package:'^1.2.3'},{'Bad':'1.2.3'},{'a':'1.2.3+build'},JSON.parse('{"__proto__":"1.2.3"}')]) add('taskSchema',{...task,dependencies});
   for (const config of [JSON.parse('{"__proto__":1,"constructor":2,"x":{"__proto__":3,"k":[null,false]}}'),{'\ud800':'\udfff'}]) add('taskSchema',{...task,config});
   for (const input of [{inputSecretName:'TOKEN',allowUnauthenticatedInput:true},{inputSecretName:'TOKEN',allowUnauthenticatedInput:false},{inputSecretName:null,allowUnauthenticatedInput:true},{secretNames:['TOKEN','TOKEN']},{secretNames:['not-ok']},{mcp:{...mcp,tools:['one','one']}}]) {

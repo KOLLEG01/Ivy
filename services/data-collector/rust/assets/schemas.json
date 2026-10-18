@@ -33,18 +33,18 @@
       "properties": {
         "serviceNodeId": {
           "type": "string",
-          "x-utf16-minLength": 1,
-          "x-utf16-maxLength": 256
+          "minLength": 1,
+          "maxLength": 256
         },
         "cwd": {
           "type": "string",
-          "x-utf16-minLength": 1,
-          "x-utf16-maxLength": 4096
+          "minLength": 1,
+          "maxLength": 4096
         },
         "server": {
           "type": "string",
-          "x-utf16-minLength": 1,
-          "x-utf16-maxLength": 256
+          "minLength": 1,
+          "maxLength": 256
         },
         "tools": {
           "minItems": 1,
@@ -52,8 +52,8 @@
           "type": "array",
           "items": {
             "type": "string",
-            "x-utf16-minLength": 1,
-            "x-utf16-maxLength": 256
+            "minLength": 1,
+            "maxLength": 256
           }
         }
       },
@@ -76,8 +76,8 @@
         },
         "name": {
           "type": "string",
-          "x-utf16-minLength": 1,
-          "x-utf16-maxLength": 200
+          "minLength": 1,
+          "maxLength": 200
         },
         "enabled": {
           "type": "boolean"
@@ -99,8 +99,8 @@
         },
         "script": {
           "type": "string",
-          "x-utf16-minLength": 1,
-          "x-utf16-maxLength": 262144
+          "minLength": 1,
+          "maxLength": 262144
         },
         "dependencies": {
           "type": "object",
@@ -135,18 +135,18 @@
           "properties": {
             "serviceNodeId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "cwd": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 4096
+              "minLength": 1,
+              "maxLength": 4096
             },
             "server": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "tools": {
               "minItems": 1,
@@ -154,8 +154,8 @@
               "type": "array",
               "items": {
                 "type": "string",
-                "x-utf16-minLength": 1,
-                "x-utf16-maxLength": 256
+                "minLength": 1,
+                "maxLength": 256
               }
             }
           },
@@ -237,12 +237,12 @@
         "rootName": {
           "default": "DataCollector",
           "type": "string",
-          "x-utf16-minLength": 1,
-          "x-utf16-maxLength": 200
+          "minLength": 1,
+          "maxLength": 200
         },
         "rootObjectId": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "retention": {
           "default": {
@@ -301,7 +301,7 @@
         },
         "npmCliPath": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "secrets": {
           "default": {},
@@ -477,8 +477,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             }
           },
           "required": [
@@ -500,8 +500,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "expectedRevision": {
               "type": "integer",
@@ -517,8 +517,8 @@
                 },
                 "name": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 200
+                  "minLength": 1,
+                  "maxLength": 200
                 },
                 "enabled": {
                   "type": "boolean"
@@ -540,8 +540,8 @@
                 },
                 "script": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 262144
+                  "minLength": 1,
+                  "maxLength": 262144
                 },
                 "dependencies": {
                   "type": "object",
@@ -576,18 +576,18 @@
                   "properties": {
                     "serviceNodeId": {
                       "type": "string",
-                      "x-utf16-minLength": 1,
-                      "x-utf16-maxLength": 256
+                      "minLength": 1,
+                      "maxLength": 256
                     },
                     "cwd": {
                       "type": "string",
-                      "x-utf16-minLength": 1,
-                      "x-utf16-maxLength": 4096
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "server": {
                       "type": "string",
-                      "x-utf16-minLength": 1,
-                      "x-utf16-maxLength": 256
+                      "minLength": 1,
+                      "maxLength": 256
                     },
                     "tools": {
                       "minItems": 1,
@@ -595,8 +595,8 @@
                       "type": "array",
                       "items": {
                         "type": "string",
-                        "x-utf16-minLength": 1,
-                        "x-utf16-maxLength": 256
+                        "minLength": 1,
+                        "maxLength": 256
                       }
                     }
                   },
@@ -687,8 +687,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "id": {
               "type": "string",
@@ -717,8 +717,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "id": {
               "type": "string",
@@ -731,8 +731,8 @@
             },
             "confirmedStoppedRunId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             }
           },
           "required": [
@@ -752,8 +752,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "id": {
               "type": "string",
@@ -786,7 +786,7 @@
       "properties": {
         "objectId": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "revision": {
           "type": "integer",
@@ -810,8 +810,8 @@
         },
         "script": {
           "type": "string",
-          "x-utf16-minLength": 1,
-          "x-utf16-maxLength": 262144
+          "minLength": 1,
+          "maxLength": 262144
         }
       },
       "required": [
@@ -830,7 +830,7 @@
         },
         "homeServiceNodeId": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "task": {
           "type": "object",
@@ -841,8 +841,8 @@
             },
             "name": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 200
+              "minLength": 1,
+              "maxLength": 200
             },
             "intervalSeconds": {
               "type": "integer",
@@ -892,18 +892,18 @@
               "properties": {
                 "serviceNodeId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 },
                 "cwd": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 4096
+                  "minLength": 1,
+                  "maxLength": 4096
                 },
                 "server": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 },
                 "tools": {
                   "minItems": 1,
@@ -911,8 +911,8 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "x-utf16-minLength": 1,
-                    "x-utf16-maxLength": 256
+                    "minLength": 1,
+                    "maxLength": 256
                   }
                 }
               },
@@ -983,7 +983,7 @@
           "properties": {
             "objectId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "revision": {
               "type": "integer",
@@ -1021,7 +1021,7 @@
         },
         "jobId": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "definitionRevision": {
           "type": "integer",
@@ -1030,7 +1030,7 @@
         },
         "serviceNodeId": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "enabled": {
           "type": "boolean"
@@ -1041,7 +1041,7 @@
         },
         "rootObjectId": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "resultObjectId": {
           "type": [
@@ -1071,11 +1071,11 @@
         },
         "jobId": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "serviceNodeId": {
           "type": "string",
-          "x-utf16-minLength": 1
+          "minLength": 1
         },
         "assignmentRevision": {
           "type": "integer",
@@ -1145,7 +1145,7 @@
             },
             "jobId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "revision": {
               "type": "integer",
@@ -1168,7 +1168,7 @@
             },
             "jobId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "cursor": {
               "type": "string"
@@ -1189,7 +1189,7 @@
             },
             "objectId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "revision": {
               "type": "integer",
@@ -1212,7 +1212,7 @@
             },
             "jobId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "expectedRevision": {
               "type": "integer",
@@ -1241,8 +1241,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "expectedRevision": {
               "type": "integer",
@@ -1258,8 +1258,8 @@
                 },
                 "name": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 200
+                  "minLength": 1,
+                  "maxLength": 200
                 },
                 "enabled": {
                   "type": "boolean"
@@ -1281,8 +1281,8 @@
                 },
                 "script": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 262144
+                  "minLength": 1,
+                  "maxLength": 262144
                 },
                 "dependencies": {
                   "type": "object",
@@ -1317,18 +1317,18 @@
                   "properties": {
                     "serviceNodeId": {
                       "type": "string",
-                      "x-utf16-minLength": 1,
-                      "x-utf16-maxLength": 256
+                      "minLength": 1,
+                      "maxLength": 256
                     },
                     "cwd": {
                       "type": "string",
-                      "x-utf16-minLength": 1,
-                      "x-utf16-maxLength": 4096
+                      "minLength": 1,
+                      "maxLength": 4096
                     },
                     "server": {
                       "type": "string",
-                      "x-utf16-minLength": 1,
-                      "x-utf16-maxLength": 256
+                      "minLength": 1,
+                      "maxLength": 256
                     },
                     "tools": {
                       "minItems": 1,
@@ -1336,8 +1336,8 @@
                       "type": "array",
                       "items": {
                         "type": "string",
-                        "x-utf16-minLength": 1,
-                        "x-utf16-maxLength": 256
+                        "minLength": 1,
+                        "maxLength": 256
                       }
                     }
                   },
@@ -1415,7 +1415,7 @@
               "properties": {
                 "objectId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "revision": {
                   "type": "integer",
@@ -1447,8 +1447,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "objectId": {
               "type": "string"
@@ -1460,8 +1460,8 @@
             },
             "script": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 262144
+              "minLength": 1,
+              "maxLength": 262144
             }
           },
           "required": [
@@ -1481,12 +1481,12 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "jobId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "definitionRevision": {
               "type": "integer",
@@ -1503,7 +1503,7 @@
             },
             "serviceNodeId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             }
           },
           "required": [
@@ -1525,12 +1525,12 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "jobId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "expectedRevision": {
               "type": "integer",
@@ -1560,8 +1560,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             }
           },
           "required": [
@@ -1579,12 +1579,12 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "jobId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "expectedRevision": {
               "type": "integer",
@@ -1609,12 +1609,12 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "jobId": {
               "type": "string",
-              "x-utf16-minLength": 1
+              "minLength": 1
             },
             "expectedRevision": {
               "type": "integer",
@@ -1722,8 +1722,8 @@
                 },
                 "operationId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 }
               },
               "required": [
@@ -1757,7 +1757,7 @@
                 },
                 "jobId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "revision": {
                   "type": "integer",
@@ -1780,7 +1780,7 @@
                 },
                 "jobId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "cursor": {
                   "type": "string"
@@ -1801,7 +1801,7 @@
                 },
                 "objectId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "revision": {
                   "type": "integer",
@@ -1824,7 +1824,7 @@
                 },
                 "jobId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "expectedRevision": {
                   "type": "integer",
@@ -1857,8 +1857,8 @@
                 },
                 "operationId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 },
                 "expectedRevision": {
                   "type": "integer",
@@ -1874,8 +1874,8 @@
                     },
                     "name": {
                       "type": "string",
-                      "x-utf16-minLength": 1,
-                      "x-utf16-maxLength": 200
+                      "minLength": 1,
+                      "maxLength": 200
                     },
                     "enabled": {
                       "type": "boolean"
@@ -1897,8 +1897,8 @@
                     },
                     "script": {
                       "type": "string",
-                      "x-utf16-minLength": 1,
-                      "x-utf16-maxLength": 262144
+                      "minLength": 1,
+                      "maxLength": 262144
                     },
                     "dependencies": {
                       "type": "object",
@@ -1933,18 +1933,18 @@
                       "properties": {
                         "serviceNodeId": {
                           "type": "string",
-                          "x-utf16-minLength": 1,
-                          "x-utf16-maxLength": 256
+                          "minLength": 1,
+                          "maxLength": 256
                         },
                         "cwd": {
                           "type": "string",
-                          "x-utf16-minLength": 1,
-                          "x-utf16-maxLength": 4096
+                          "minLength": 1,
+                          "maxLength": 4096
                         },
                         "server": {
                           "type": "string",
-                          "x-utf16-minLength": 1,
-                          "x-utf16-maxLength": 256
+                          "minLength": 1,
+                          "maxLength": 256
                         },
                         "tools": {
                           "minItems": 1,
@@ -1952,8 +1952,8 @@
                           "type": "array",
                           "items": {
                             "type": "string",
-                            "x-utf16-minLength": 1,
-                            "x-utf16-maxLength": 256
+                            "minLength": 1,
+                            "maxLength": 256
                           }
                         }
                       },
@@ -2031,7 +2031,7 @@
                   "properties": {
                     "objectId": {
                       "type": "string",
-                      "x-utf16-minLength": 1
+                      "minLength": 1
                     },
                     "revision": {
                       "type": "integer",
@@ -2063,8 +2063,8 @@
                 },
                 "operationId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 },
                 "objectId": {
                   "type": "string"
@@ -2076,8 +2076,8 @@
                 },
                 "script": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 262144
+                  "minLength": 1,
+                  "maxLength": 262144
                 }
               },
               "required": [
@@ -2097,12 +2097,12 @@
                 },
                 "operationId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 },
                 "jobId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "definitionRevision": {
                   "type": "integer",
@@ -2119,7 +2119,7 @@
                 },
                 "serviceNodeId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 }
               },
               "required": [
@@ -2141,12 +2141,12 @@
                 },
                 "operationId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 },
                 "jobId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "expectedRevision": {
                   "type": "integer",
@@ -2176,8 +2176,8 @@
                 },
                 "operationId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 }
               },
               "required": [
@@ -2195,12 +2195,12 @@
                 },
                 "operationId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 },
                 "jobId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "expectedRevision": {
                   "type": "integer",
@@ -2225,12 +2225,12 @@
                 },
                 "operationId": {
                   "type": "string",
-                  "x-utf16-minLength": 1,
-                  "x-utf16-maxLength": 256
+                  "minLength": 1,
+                  "maxLength": 256
                 },
                 "jobId": {
                   "type": "string",
-                  "x-utf16-minLength": 1
+                  "minLength": 1
                 },
                 "expectedRevision": {
                   "type": "integer",
@@ -2260,8 +2260,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "id": {
               "type": "string",
@@ -2290,8 +2290,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "id": {
               "type": "string",
@@ -2304,8 +2304,8 @@
             },
             "confirmedStoppedRunId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             }
           },
           "required": [
@@ -2325,8 +2325,8 @@
             },
             "operationId": {
               "type": "string",
-              "x-utf16-minLength": 1,
-              "x-utf16-maxLength": 256
+              "minLength": 1,
+              "maxLength": 256
             },
             "id": {
               "type": "string",
