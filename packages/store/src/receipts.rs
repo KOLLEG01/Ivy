@@ -8,21 +8,28 @@ fn count_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<usize
 }
 
 pub fn has_unresolved_outcome(value: &IvyJson) -> bool {
-    match value {
-        IvyJson::Array(values) => values.iter().any(has_unresolved_outcome),
-        IvyJson::Object(pairs) => pairs.iter().any(|(key, part)| {
-            let key = key.to_utf8().unwrap_or_default();
-            let text = js_string(part);
-            (["phase", "state", "ownerPhase", "outcome", "execution"].contains(&key.as_str())
-                && ["unknown", "outcome_unknown", "needs_attention"].iter().any(|s| text == JsString::from(*s)))
-                || (["error", "errorCode", "code"].contains(&key.as_str())
-                    && (text.contains_ascii("outcome_unknown")
-                        || ["native_connection_lost", "native_epoch_lost"]
-                            .iter().any(|s| text == JsString::from(*s))))
-                || has_unresolved_outcome(part)
-        }),
-        _ => false,
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            IvyJson::Array(values) => pending.extend(values.iter()),
+            IvyJson::Object(pairs) => {
+                for (key, part) in pairs {
+                    let key = key.to_utf8().unwrap_or_default();
+                    let phase = ["phase", "state", "ownerPhase", "outcome", "execution"].contains(&key.as_str());
+                    let error = ["error", "errorCode", "code"].contains(&key.as_str());
+                    if phase || error {
+                        let text = js_string(part);
+                        if (phase && ["unknown", "outcome_unknown", "needs_attention"].iter().any(|s| text == JsString::from(*s)))
+                            || (error && (text.contains_ascii("outcome_unknown") || ["native_connection_lost", "native_epoch_lost"].iter().any(|s| text == JsString::from(*s))))
+                        { return true; }
+                    }
+                    pending.push(part);
+                }
+            }
+            _ => {}
+        }
     }
+    false
 }
 #[derive(Clone, Copy)]
 pub struct ReceiptLimits {
