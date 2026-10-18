@@ -23,7 +23,7 @@ const rows=[];
 async function add(label,c={}){
  const kind=c.kind??'run',key=kind==='start'?'threadStart':kind==='archive'?'archive':kind==='remove'?'delete':'turnStart';
  const initial={...structuredClone(seed),serviceNodeId:target.serviceNodeId,nativeTarget:target,phase:kind==='start'?'starting':kind==='archive'?'archiving':kind==='remove'?'deleting':'running',threadId:kind==='start'?null:'original-thread',turnId:c.poll?'original-turn':null,nativeOperations:{threadStart:'original-threadStart',turnStart:'original-turnStart',archive:'original-archive',delete:'original-delete'},...c.execution};
- if(kind==='start'||kind==='advance')initial.executionTarget.threadCwd='/workspace';
+ if(['start','advance','scan'].includes(kind))initial.executionTarget.threadCwd='/workspace';
  if(c.fresh)initial.nativeOperations[key]=null;
  if(c.model!==undefined)initial.executionTarget.model=c.model;
  if(c.reuse)initial.assignmentSnapshot.execution={model:null,effort:null,...initial.assignmentSnapshot.execution,reuse:c.reuse};
@@ -35,8 +35,9 @@ async function add(label,c={}){
  const priorId='00000000-0000-4000-8000-000000000003';
  if(c.lease)documents.push({id:'lease',key:leaseKey,name:c.reuse==='main'?'main':'assignment-'+initial.assignmentSnapshot.assignmentId,value:{serviceNodeId:target.serviceNodeId,threadCwd:'/workspace',createdByExecutionId:'prior',activeExecutionObjectId:null,threadId:'leased-thread',...c.lease}});
  if(c.retained)documents.push({id:'call',key:callKey,name:initial.nativeOperations.threadStart,value:{operationId:initial.nativeOperations.threadStart,method:'thread/start',params:{cwd:'/retained',projectId:'retained-project',developerInstructions:'Retained original bytes'},definitionHash:digest('b'),...c.retained}});
+ if(c.retry)documents.push({id:'retry',key:'secretary/execution-retry',name:initial.executionId,value:c.retry});
  let revision=1,value=structuredClone(initial),store,reads=0;
- const trace=[],steps=[];const controller=new AbortController();if(c.cancel)controller.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
+ const trace=[],steps=[],counts={};let scanQueries=0;const controller=new AbortController();if(c.cancel)controller.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
  const read=(objectId=itemId,content=value,rev=revision,contractKey='secretary/execution')=>({object:{id:objectId,parentId:rootId,effectivelyArchived:false,contractKey},revision:{revision:rev,contractVersion:contractVersion(contractKey),mediaType:'application/json',contentHash:hashJson(content),byteLength:Buffer.byteLength(canonical(content)),references:store.objectWriteRequest(contractKey,content,{object:{objectId,revision:rev}},'fixture:1800000000000:read').references,createdAt:at},content:{encoding:'json',value:structuredClone(content)}});
  const assignmentId='00000000-0000-4000-8000-000000000005',configurationId='00000000-0000-4000-8000-000000000006';
  const rules={main:{enabled:true,minimumUrgency:'normal',window:null},whatsapp:{enabled:true,minimumUrgency:'normal',window:null,questionsOnly:false},voice:{enabled:false,minimumUrgency:'critical',window:null,immediateOnly:true},researchMaxMinutes:0};
@@ -44,11 +45,19 @@ async function add(label,c={}){
   const copied=structuredClone(p);
   if(method==='objects.write'){parseOperationId(copied.mutationId);copied.mutationId='<scoped-operation>';if(c.fresh)copied.content.value.nativeOperations[key]='<generated-operation>';}
   trace.push({method,params:copied,timeout:options?.timeoutMs??35000});let result,error;
-  if(c.fail===method)error={code:'fixture_failure',message:'Fixture failure.',outcome:'unknown'};
+  counts[method]=(counts[method]??0)+1;
+  const fault=(c.faults??[]).find(f=>f.method===method&&f.n===counts[method]);
+  if(c.fail===method||fault)error={code:fault?.code??'fixture_failure',message:'Fixture failure.',outcome:fault?.outcome??'unknown'};
   else if(method==='serviceNodes.get')result=p.serviceNodeId==='fixture.source'?{connected:true,synced:true,ready:true,stale:false,...c.source}:{...owner,...c.owner};
   else if(method==='system.status')result={runtimeEpoch:'fixture'};
   else if(method==='settings.get')result={settings:{quietHours:c.quiet?{timeZone:'UTC',start:'00:00',end:'23:59'}:null}};
-  else if(method==='objects.query')result={items:c.missingRules?[]:[{objectId:p.contractKey==='secretary/assignment'?assignmentId:configurationId,revision:1}],nextCursor:null};
+  else if(method==='objects.query'){
+   if(kind==='scan'&&p.contractKey==='secretary/execution'){
+    const i=scanQueries++,slot=i%4;
+    if(c.queryFailure===i+1)error={code:'fixture_query_failure',message:'Fixture query failed.',outcome:'unknown'};
+    else result=c.pages?.[i]??{items:slot===0?Array.from({length:c.pageCount??1},()=>({objectId:itemId,revision:1})):slot===3?Array.from({length:c.runningCount??0},()=>({objectId:itemId,revision:1})):[],nextCursor:c.nextCursors?.[slot]??null};
+   }else result={items:c.missingRules?[]:[{objectId:p.contractKey==='secretary/assignment'?assignmentId:configurationId,revision:1}],nextCursor:null};
+  }
   else if(method==='objects.write'){assert.equal(p.expectedRevision,revision);value=structuredClone(p.content.value);revision++;result={object:{id:itemId},revision:{revision}};}
   else if(method==='objects.read'){
    if(p.objectId===priorId){
@@ -75,23 +84,26 @@ async function add(label,c={}){
     result={schemaVersion:1,observationId:'read-'+(++reads),callerPrincipalId:settings.identity.principalId,serviceNodeId:target.serviceNodeId,nativeVersion:target.nativeVersion,nativeExecutableHash:target.nativeExecutableHash,catalogHash:target.catalogHash,epoch:'epoch',requestId:42,observedAt:at,requestHash:hashJson({method,params}),method,params,reply,...c.observation};
    }else assert.fail('Unexpected tool '+p.qualifiedName);
   }else assert.fail('Unexpected RPC '+method);
+  if(c.cancelAfter===trace.length)controller.abort(new IvyError('fixture_cancelled','Fixture cancelled.'));
   if(error){steps.push({method,error});throw new IvyError(error.code,error.message,error.outcome);}
   steps.push({method,value:structuredClone(result)});return result;
  }};
  store=new SecretaryStore(client,rootId);
  for(const d of documents){const encoded=canonical(d.value);store.db.prepare('INSERT INTO technical_documents VALUES(?,?,?,?,?)').run(d.id,d.key,d.name,1,encoded);store.db.prepare('INSERT INTO technical_revisions VALUES(?,?,?)').run(d.id,1,encoded);}
- const issues=new Map();
- const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings,owner:{serviceNodeId:'fixture.secretary'},signal:controller.signal,now:()=>new Date(c.time??at),recoveryIssues:issues});
+ const issues=new Map(c.issues??[]),caseSettings={...settings,...c.settings};
+ const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:caseSettings,owner:{serviceNodeId:'fixture.secretary'},signal:controller.signal,now:()=>new Date(c.time??at),recoveryIssues:issues});
  const runner=new AssignmentRunner(engine);let result;
  let admitted=null;
- if(kind==='advance'){
+ const admittedJobs=[];
+ if(kind==='advance'||kind==='scan'){
   for(const id of c.preflightActive??[])runner.preflightWork.set(id,Promise.resolve());
-  runner.preflight=async doc=>{admitted=structuredClone(doc);return new Promise(()=>{});};
+  runner.preflight=async doc=>{admitted=structuredClone(doc);admittedJobs.push(admitted);return new Promise(()=>{});};
  }
- try{const out=await runner[kind](current);result={value:kind==='advance'?admitted:out};}catch(cause){const e=IvyError.from(cause);result={code:e.code,message:e.message,outcome:e.outcome};}
+ if(kind==='scan')Object.assign(runner,c.scanState);
+ try{let out;if(kind==='scan'){for(let n=0;n<(c.rounds??1);n++)await runner.scan();out=admittedJobs;}else out=await runner[kind](current);result={value:kind==='advance'?admitted:out};}catch(cause){const e=IvyError.from(cause);result={code:e.code,message:e.message,outcome:e.outcome};}
  // Random technical IDs are irrelevant; retained names, revisions and original bytes are not.
  const remaining=store.db.prepare('SELECT key,name,current_revision,value_json FROM technical_documents ORDER BY key,name').all().map(r=>({key:r.key,name:r.name,revision:r.current_revision,value:JSON.parse(r.value_json)}));
- store.close();rows.push({input:{label,kind,key,current,documents,steps,cancel:c.cancel??false,fresh:c.fresh??false,time:Date.parse(c.time??at),...(kind==='advance'?{preflightActive:c.preflightActive??[]}: {})},expected:{result,trace,remaining,...(kind==='advance'?{preflightActive:[...runner.preflightWork.keys()].sort(),issues:[...issues]}:{})}});
+ store.close();rows.push({input:{label,kind,key,current,documents,steps,cancel:c.cancel??false,fresh:c.fresh??false,time:Date.parse(c.time??at),...(['advance','scan'].includes(kind)?{preflightActive:c.preflightActive??[]}: {}),...(kind==='scan'?{scanState:c.scanState??{},rounds:c.rounds??1,caseSettings,issues:c.issues??[],cancelAfter:c.cancelAfter??null}:{})},expected:{result,trace,remaining,...(['advance','scan'].includes(kind)?{preflightActive:[...runner.preflightWork.keys()].sort(),issues:[...issues]}:{}),...(kind==='scan'?{scanState:{cursor:runner.cursor??null,deliveryCursor:runner.deliveryCursor??null,deleteCursor:runner.deleteCursor??null,deleteBefore:runner.deleteBefore??null}}:{})}});
 }
 for(const kind of ['run','archive','remove']){
  await add(kind,{kind});await add(kind+'-fresh',{kind,fresh:true});
@@ -165,4 +177,37 @@ await add('advance-delivery-deferred',advance('completed',{quiet:true,execution:
 await add('advance-delivery-rules-missing',advance('completed',{missingRules:true,execution:{result:none}}));
 for(const phase of ['archived','settled'])await add('advance-late-'+phase,advance(phase,{execution:{result:none,deleteAfter:null},delivery:{terminal:true}}));
 for(const deleteAfter of [null,'2026-01-01T00:00:00.001Z',at,'2025-12-31T23:59:59.999Z'])await add('advance-retention-'+deleteAfter,advance('archived',{execution:{deleteAfter}}));
+const scan=(phase='running',c={})=>({...advance(phase,c),kind:'scan'}),now=Date.parse(at);
+await add('scan-running',scan());
+await add('scan-empty',scan('running',{pageCount:0}));
+await add('scan-preflight',scan('preflight',{command:true,execution:{preflightOutput:null}}));
+await add('scan-queued',scan('queued',{execution:{nativeTarget:null}}));
+for(const runningCount of [0,1,2])await add('scan-capacity-'+runningCount,scan('queued',{settings:{recordsPerTick:1},runningCount,pageCount:2,execution:{nativeTarget:null}}));
+for(const queryFailure of [1,2,3,4])await add('scan-query-failure-'+queryFailure,scan('running',{queryFailure,nextCursors:['next-work','next-delivery','next-delete']}));
+await add('scan-cursors',scan('running',{pageCount:0,scanState:{cursor:'work-cursor',deliveryCursor:'delivery-cursor',deleteCursor:'delete-cursor',deleteBefore:'2025-01-01T00:00:00.000Z'},nextCursors:['next-work','next-delivery','next-delete']}));
+await add('scan-empty-cursors',scan('running',{pageCount:0,scanState:{cursor:'',deliveryCursor:'',deleteCursor:'',deleteBefore:'2025-01-01T00:00:00.000Z'}}));
+await add('scan-two-pages',scan('running',{pageCount:0,rounds:2,nextCursors:['next-work','next-delivery','next-delete']}));
+for(const nextAt of [now-1,now,now+1])await add('scan-retry-due-'+nextAt,scan('running',{retry:{code:'old',attempts:1,nextAt,expiresAt:now+100000}}));
+const pending={phase:'accepted',epoch:null,requestId:null,reply:null};
+for(const age of [0,1799999,1800000])await add('scan-pending-age-'+age,scan('running',{execution:{updatedAt:new Date(now-age).toISOString()},operation:pending,issues:[['execution:'+seed.executionId,'old'],['unrelated','keep']]}));
+for(const attempts of [0,1,3,4])await add('scan-retry-count-'+attempts,scan('running',{failTool:'agent.operation',retry:{code:'fixture_failure',attempts,nextAt:now,expiresAt:now+100000}}));
+await add('scan-retry-code-changed',scan('running',{failTool:'agent.operation',retry:{code:'old',attempts:99,nextAt:now,expiresAt:now+100000}}));
+await add('scan-no-thread',scan('running',{execution:{threadId:null}}));
+await add('scan-bad-preflight',scan('preflight',{command:true,execution:{preflightOutput:''}}));
+await add('scan-owner-mismatch',scan('running',{operation:{callerPrincipalId:'other'}}));
+await add('scan-definition-changed',scan('running',{faults:[{method:'tools.list',n:1,code:'tool_definition_changed'}],retry:{code:'tool_definition_changed',attempts:4,nextAt:now,expiresAt:now+100000}}));
+for(const fail of ['objects.read','serviceNodes.get'])await add('scan-'+fail,scan('running',{fail}));
+await add('scan-first-read-failed',scan('running',{faults:[{method:'objects.read',n:1}]}));
+await add('scan-recovery-read-failed',scan('running',{execution:{threadId:null},faults:[{method:'objects.read',n:2}]}));
+await add('scan-terminal-write-failed',scan('running',{execution:{threadId:null},fail:'objects.write'}));
+await add('scan-terminal-no-rearchive',scan('archiving',{operation:{phase:'failed',reply:{error:{code:1,message:'Failed'}},code:'native_failed'}}));
+await add('scan-terminal-reused',scan('running',{reuse:'main',lease:{activeExecutionObjectId:itemId},operation:{phase:'failed',reply:{error:{code:1,message:'Failed'}},code:'native_failed'}}));
+for(const cancelAfter of [1,5,6])await add('scan-cancel-'+cancelAfter,scan('running',{cancelAfter}));
+await add('scan-cancel-before',scan('running',{cancel:true}));
+await add('scan-clear-issue',scan('settled',{issues:[['execution:'+seed.executionId,'old'],['unrelated','keep']]}));
+const emptyPage={items:[],nextCursor:null},onePage={items:[{objectId:itemId,revision:1}],nextCursor:null};
+await add('scan-delivery-page',scan('completed',{execution:{result:none},reuse:'main',pages:[emptyPage,onePage,emptyPage,emptyPage]}));
+await add('scan-due-page',scan('archived',{execution:{deleteAfter:at},pages:[emptyPage,emptyPage,onePage,emptyPage]}));
+await add('scan-duplicate-pages',scan('settled',{pages:[onePage,onePage,onePage,emptyPage]}));
+await add('scan-issue-cap',scan('running',{execution:{threadId:null},issues:Array.from({length:31},(_,i)=>['existing-'+i,'retained'])}));
 process.stdout.write(JSON.stringify({settings,rootId,notificationPolicy:secretaryNotificationPolicy,rows}));
