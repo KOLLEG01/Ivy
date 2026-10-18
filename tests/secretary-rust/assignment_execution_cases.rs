@@ -159,7 +159,7 @@ async fn original_assignment_execution_transitions_and_traces() {
                         operations.required(&key).unwrap().as_js_string().unwrap(),
                     )
                     .unwrap();
-                    operations.insert(&key, "<generated-operation>".into());
+                    operations.insert(key.as_str(), "<generated-operation>".into());
                     value.insert("nativeOperations", operations);
                     content.insert("value", value);
                     params.insert("content", content);
