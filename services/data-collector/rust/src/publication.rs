@@ -3,14 +3,12 @@
 //! its request cancellation must be signalled before that future is joined.
 use crate::{model, policy, store_owner::StoreOwner};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome, json::canonical};
-use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
+use ivy_sdk::{
+    operation_ids::scoped_operation_id,
+    rpc::{RequestOptions, RpcClient},
+};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-
-/// Supplied by the shared live connection's scoped-operation cache. Collector
-/// only supplies its existing scope labels; it does not own epoch/ID policy.
-pub trait MutationIds: Send + Sync {
-    fn scoped<'a>(&'a self, scope: IvyJson) -> RequestFuture<'a>;
-}
 
 pub struct Publisher {
     pub store: StoreOwner,
@@ -27,10 +25,11 @@ impl Publisher {
         }
     }
 
+    /// Reuse the live connection's Arc across calls so the shared SDK retains
+    /// successful epochs and scoped identities for retries on that connection.
     pub async fn attach(
         &mut self,
-        client: &dyn RpcClient,
-        ids: &dyn MutationIds,
+        client: Arc<dyn RpcClient>,
         configured_root: Option<String>,
         root_name: &str,
         options: RequestOptions,
@@ -75,7 +74,7 @@ impl Publisher {
                 .request(
                     "objects.write",
                     IvyJson::object([
-                        ("mutationId", mutation(ids, "root").await?),
+                        ("mutationId", mutation(client.clone(), "root").await?),
                         (
                             "create",
                             IvyJson::object([
@@ -107,8 +106,7 @@ impl Publisher {
     /// pass may advance to the next row, preserving the legacy order boundary.
     pub async fn flush(
         &mut self,
-        client: &dyn RpcClient,
-        ids: &dyn MutationIds,
+        client: Arc<dyn RpcClient>,
         options: RequestOptions,
         closing: &CancellationToken,
     ) -> IvyResult<()> {
@@ -117,7 +115,10 @@ impl Publisher {
             if closing.is_cancelled() || options.cancellation.is_cancelled() {
                 break;
             }
-            if let Err(error) = self.publish(&mut run, client, ids, options.clone()).await {
+            if let Err(error) = self
+                .publish(&mut run, client.clone(), options.clone())
+                .await
+            {
                 if error.outcome == Outcome::NotExecuted
                     && matches!(
                         error.code.as_str(),
@@ -152,8 +153,7 @@ impl Publisher {
     async fn publish(
         &self,
         run: &mut IvyJson,
-        client: &dyn RpcClient,
-        ids: &dyn MutationIds,
+        client: Arc<dyn RpcClient>,
         options: RequestOptions,
     ) -> IvyResult<()> {
         // Revalidate recovered event envelopes before querying or writing Hive.
@@ -234,7 +234,7 @@ impl Publisher {
                     .iter(),
             );
             let mut params = IvyJson::object([
-                ("mutationId", mutation_js(ids, label).await?),
+                ("mutationId", mutation_js(client.clone(), label).await?),
                 ("contractVersion", "1.0.0".into()),
                 ("references", model::object()),
             ]);
@@ -294,7 +294,7 @@ impl Publisher {
                     IvyJson::object([
                         ("topic", "data-collector.event".into()),
                         ("topicVersion", "1.0.0".into()),
-                        ("mutationId", mutation_js(ids, label).await?),
+                        ("mutationId", mutation_js(client.clone(), label).await?),
                         ("payload", policy::event_content(run, index)?),
                     ]),
                     options.clone(),
@@ -321,7 +321,7 @@ impl Publisher {
                 })
             })
             .await?;
-        self.retain(&task_id, client, ids, options).await
+        self.retain(&task_id, client, options).await
     }
 
     /// Used after publication and by the engine's fifteen-minute maintenance pass,
@@ -329,8 +329,7 @@ impl Publisher {
     pub async fn retain(
         &self,
         task_id: &str,
-        client: &dyn RpcClient,
-        ids: &dyn MutationIds,
+        client: Arc<dyn RpcClient>,
         options: RequestOptions,
     ) -> IvyResult<()> {
         let id = task_id.to_owned();
@@ -361,7 +360,7 @@ impl Publisher {
                 ),
                 (
                     "mutationId",
-                    mutation(ids, &format!("prune:{}", uuid::Uuid::new_v4())).await?,
+                    mutation(client.clone(), &format!("prune:{}", uuid::Uuid::new_v4())).await?,
                 ),
             ]);
             for (key, value) in retention.as_object().ok_or_else(invalid)? {
@@ -431,12 +430,13 @@ fn equals(field: &str, value: IvyJson) -> IvyJson {
 fn content(value: IvyJson) -> IvyJson {
     IvyJson::object([("encoding", "json".into()), ("value", value)])
 }
-async fn mutation(ids: &dyn MutationIds, label: &str) -> IvyResult<IvyJson> {
-    mutation_js(ids, label.encode_utf16().collect()).await
+async fn mutation(client: Arc<dyn RpcClient>, label: &str) -> IvyResult<IvyJson> {
+    mutation_js(client, label.encode_utf16().collect()).await
 }
-async fn mutation_js(ids: &dyn MutationIds, label: Vec<u16>) -> IvyResult<IvyJson> {
+async fn mutation_js(client: Arc<dyn RpcClient>, label: Vec<u16>) -> IvyResult<IvyJson> {
     let mut scope: Vec<u16> = "collector:".encode_utf16().collect();
     scope.extend(label);
-    ids.scoped(IvyJson::String(ivy_contracts::JsString(scope)))
+    scoped_operation_id(client, &IvyJson::String(ivy_contracts::JsString(scope)))
         .await
+        .map(IvyJson::String)
 }

@@ -2,12 +2,16 @@
 use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome, json::parse};
 use ivy_data_collector::{
     model,
-    publication::{MutationIds, Publisher},
+    publication::Publisher,
     store::{CollectorStore, Limits},
     store_owner::StoreOwner,
 };
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
-use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tokio_util::sync::CancellationToken;
 
 fn json(s: &str) -> IvyJson {
@@ -63,12 +67,6 @@ async fn seed(owner: &StoreOwner, count: usize, events: bool) {
         } Ok(())
     }).await.unwrap();
 }
-struct Ids(&'static str);
-impl MutationIds for Ids {
-    fn scoped<'a>(&'a self, scope: IvyJson) -> RequestFuture<'a> {
-        Box::pin(async move { Ok(format!("{}:{}", self.0, scope.as_str()?).into()) })
-    }
-}
 #[derive(Default)]
 struct Hive {
     objects: BTreeMap<String, IvyJson>,
@@ -76,6 +74,7 @@ struct Hive {
     writes: usize,
     events: BTreeMap<String, IvyJson>,
     fail_write: bool,
+    fail_status: bool,
     reject: Option<IvyError>,
     fail_event: Option<usize>,
     protected: f64,
@@ -83,20 +82,37 @@ struct Hive {
     reject_retention: bool,
 }
 struct Client {
-    hive: Mutex<Hive>,
-    change: Mutex<Option<StoreOwner>>,
+    hive: Arc<Mutex<Hive>>,
+    change: Arc<Mutex<Option<StoreOwner>>>,
+    epoch: &'static str,
 }
 impl Client {
-    fn new() -> Self {
-        Self {
-            hive: Mutex::new(Hive::default()),
-            change: Mutex::new(None),
-        }
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            hive: Arc::new(Mutex::new(Hive::default())),
+            change: Arc::new(Mutex::new(None)),
+            epoch: "epoch-one",
+        })
+    }
+    fn reconnect(&self) -> Arc<Self> {
+        Arc::new(Self {
+            hive: self.hive.clone(),
+            change: self.change.clone(),
+            epoch: "epoch-two",
+        })
     }
     fn reply(&self, method: &str, p: IvyJson) -> IvyResult<IvyJson> {
         let mut h = self.hive.lock().unwrap();
         h.calls.push((method.to_owned(), p.clone()));
         match method {
+            "system.status" => {
+                assert_eq!(p, model::object());
+                if h.fail_status {
+                    h.fail_status = false;
+                    return Err(IvyError::new("service_unavailable", "fixture"));
+                }
+                Ok(IvyJson::object([("runtimeEpoch", self.epoch.into())]))
+            }
             "objects.query" => {
                 let contract = text(&p, "contractKey");
                 let items = h
@@ -232,10 +248,14 @@ impl RpcClient for Client {
 fn make_publisher(owner: StoreOwner) -> Publisher {
     Publisher::new(owner, "root".to_owned(), retention())
 }
-async fn flush(p: &mut Publisher, c: &Client, ids: &Ids) {
+async fn flush(p: &mut Publisher, c: &Arc<Client>) {
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        p.flush(c, ids, RequestOptions::default(), &CancellationToken::new()),
+        p.flush(
+            c.clone(),
+            RequestOptions::default(),
+            &CancellationToken::new(),
+        ),
     )
     .await
     .unwrap()
@@ -257,15 +277,16 @@ async fn lost_write_reopens_without_duplicate_revision_and_preserves_order() {
     let c = Client::new();
     c.hive.lock().unwrap().fail_write = true;
     let mut p = make_publisher(owner.clone());
-    flush(&mut p, &c, &Ids("epoch-one")).await;
+    flush(&mut p, &c).await;
     assert_eq!(text(&run(&owner, "run-0").await, "status"), "publishing");
     assert_eq!(text(&run(&owner, "run-1").await, "status"), "publishing");
     assert_eq!(c.hive.lock().unwrap().writes, 1);
     drop(p);
     drop(owner);
+    let c = c.reconnect();
     let owner = db.open();
     let mut p = make_publisher(owner.clone());
-    flush(&mut p, &c, &Ids("epoch-two")).await;
+    flush(&mut p, &c).await;
     assert_eq!(text(&run(&owner, "run-0").await, "status"), "succeeded");
     assert_eq!(text(&run(&owner, "run-1").await, "status"), "succeeded");
     let writes: Vec<_> = c
@@ -290,13 +311,38 @@ async fn events_resume_durable_index_across_restart_and_epoch_change() {
     let c = Client::new();
     c.hive.lock().unwrap().fail_event = Some(1);
     let mut p = make_publisher(owner.clone());
-    flush(&mut p, &c, &Ids("epoch-one")).await;
+    flush(&mut p, &c).await;
     assert_eq!(number(&run(&owner, "run-0").await, "eventIndex"), 1.0);
+    // Retry a lost reply on the same owner before reconnecting. The existing
+    // event scope must retain its identity while the next event uses another.
+    c.hive.lock().unwrap().fail_event = Some(1);
+    flush(&mut p, &c).await;
+    let expected =
+        ivy_sdk::operation_ids::scoped_operation_id(c.clone(), &"collector:event:run-0:1".into())
+            .await
+            .unwrap();
+    {
+        let h = c.hive.lock().unwrap();
+        let events: Vec<_> = h
+            .calls
+            .iter()
+            .filter(|(m, _)| m == "events.publish")
+            .map(|(_, p)| field(p, "mutationId"))
+            .collect();
+        assert_ne!(events[0], events[1]);
+        assert_eq!(events[1], events[2]);
+        assert_eq!(events[1], &IvyJson::String(expected));
+        assert_eq!(
+            h.calls.iter().filter(|(m, _)| m == "system.status").count(),
+            1
+        );
+    }
     drop(p);
     drop(owner);
+    let c = c.reconnect();
     let owner = db.open();
     let mut p = make_publisher(owner.clone());
-    flush(&mut p, &c, &Ids("epoch-two")).await;
+    flush(&mut p, &c).await;
     let r = run(&owner, "run-0").await;
     assert_eq!(text(&r, "status"), "succeeded");
     assert_eq!(number(&r, "eventIndex"), 2.0);
@@ -310,7 +356,20 @@ async fn events_resume_durable_index_across_restart_and_epoch_change() {
         .filter(|(m, _)| m == "events.publish")
         .map(|(_, p)| number(field(p, "payload"), "eventIndex") as usize)
         .collect();
-    assert_eq!(indices, [0, 1, 1]);
+    assert_eq!(indices, [0, 1, 1, 1]);
+    let ids: Vec<_> = h
+        .calls
+        .iter()
+        .filter(|(m, _)| m == "events.publish")
+        .map(|(_, p)| text(p, "mutationId"))
+        .collect();
+    assert!(ids[1].starts_with("epoch-one:"));
+    assert!(ids[3].starts_with("epoch-two:"));
+    assert_ne!(ids[1], ids[3]);
+    assert_eq!(
+        h.calls.iter().filter(|(m, _)| m == "system.status").count(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -322,7 +381,7 @@ async fn latest_disable_survives_and_retention_reports_protection_budget_and_ret
     *c.change.lock().unwrap() = Some(owner.clone());
     c.hive.lock().unwrap().protected = 2.0;
     let mut p = make_publisher(owner.clone());
-    flush(&mut p, &c, &Ids("epoch")).await;
+    flush(&mut p, &c).await;
     let r = row(&owner).await;
     assert!(!model::truth(field(&r, "task"), "enabled"));
     assert_eq!(text(field(&r, "task"), "name"), "New revision");
@@ -338,12 +397,12 @@ async fn latest_disable_survives_and_retention_reports_protection_budget_and_ret
         h.protected = 0.0;
         h.remaining_bytes = 2_000_000.0;
     }
-    p.retain("task", &c, &Ids("epoch"), RequestOptions::default())
+    p.retain("task", c.clone(), RequestOptions::default())
         .await
         .unwrap();
     assert!(text(&row(&owner).await, "retentionWarning").contains("byte budget"));
     c.hive.lock().unwrap().reject_retention = true;
-    p.retain("task", &c, &Ids("epoch"), RequestOptions::default())
+    p.retain("task", c.clone(), RequestOptions::default())
         .await
         .unwrap();
     assert_eq!(
@@ -355,7 +414,7 @@ async fn latest_disable_survives_and_retention_reports_protection_budget_and_ret
         h.reject_retention = false;
         h.remaining_bytes = 0.0;
     }
-    p.retain("task", &c, &Ids("epoch"), RequestOptions::default())
+    p.retain("task", c.clone(), RequestOptions::default())
         .await
         .unwrap();
     assert_eq!(
@@ -383,15 +442,15 @@ async fn uncertain_rejection_stays_pending_definitive_failure_stops_the_pass() {
     c.hive.lock().unwrap().reject =
         Some(IvyError::new("invalid_arguments", "fixture").with_outcome(Outcome::Unknown));
     let mut p = make_publisher(owner.clone());
-    flush(&mut p, &c, &Ids("epoch")).await;
+    flush(&mut p, &c).await;
     assert_eq!(text(&run(&owner, "run-0").await, "status"), "publishing");
     c.hive.lock().unwrap().reject = Some(IvyError::new("invalid_arguments", "fixture"));
-    flush(&mut p, &c, &Ids("epoch")).await;
+    flush(&mut p, &c).await;
     assert_eq!(text(&run(&owner, "run-0").await, "status"), "failed");
     assert_eq!(text(&run(&owner, "run-1").await, "status"), "publishing");
     assert_eq!(number(field(&row(&owner).await, "state"), "cursor"), 99.0);
     c.hive.lock().unwrap().reject = None;
-    flush(&mut p, &c, &Ids("epoch")).await;
+    flush(&mut p, &c).await;
     assert_eq!(text(&run(&owner, "run-1").await, "status"), "succeeded");
 }
 
@@ -418,7 +477,7 @@ async fn malformed_recovered_events_fail_before_remote_effects() {
         .unwrap();
     let c = Client::new();
     let mut p = make_publisher(owner.clone());
-    flush(&mut p, &c, &Ids("epoch")).await;
+    flush(&mut p, &c).await;
     let r = run(&owner, "run-0").await;
     assert_eq!(text(&r, "status"), "failed");
     assert_eq!(text(&r, "error"), "content_too_large");
@@ -448,7 +507,7 @@ async fn foreign_and_archived_bindings_are_rejected() {
             .objects
             .insert("result-task".to_owned(), object);
         let mut p = make_publisher(owner.clone());
-        flush(&mut p, &c, &Ids("epoch")).await;
+        flush(&mut p, &c).await;
         assert_eq!(
             text(&run(&owner, "run-0").await, "error"),
             "target_conflict"
@@ -463,7 +522,16 @@ async fn root_is_cached_and_closing_does_not_start_publications() {
     let owner = db.open();
     let c = Client::new();
     let mut p = make_publisher(owner.clone());
-    p.attach(&c, &Ids("epoch"), None, "Root", RequestOptions::default())
+    c.hive.lock().unwrap().fail_status = true;
+    assert_eq!(
+        p.attach(c.clone(), None, "Root", RequestOptions::default())
+            .await
+            .unwrap_err()
+            .code,
+        "service_unavailable"
+    );
+    assert_eq!(c.hive.lock().unwrap().writes, 0);
+    p.attach(c.clone(), None, "Root", RequestOptions::default())
         .await
         .unwrap();
     assert_eq!(p.root_id, "result-Root");
@@ -475,21 +543,32 @@ async fn root_is_cached_and_closing_does_not_start_publications() {
             .as_deref(),
         Some("result-Root")
     );
-    p.attach(
-        &c,
-        &Ids("epoch"),
-        None,
-        "Ignored",
-        RequestOptions::default(),
-    )
-    .await
-    .unwrap();
+    p.attach(c.clone(), None, "Ignored", RequestOptions::default())
+        .await
+        .unwrap();
     assert_eq!(c.hive.lock().unwrap().writes, 1);
+    let expected = ivy_sdk::operation_ids::scoped_operation_id(c.clone(), &"collector:root".into())
+        .await
+        .unwrap();
+    {
+        let h = c.hive.lock().unwrap();
+        let write = &h
+            .calls
+            .iter()
+            .find(|(m, _)| m == "objects.write")
+            .unwrap()
+            .1;
+        assert_eq!(field(write, "mutationId"), &IvyJson::String(expected));
+        assert_eq!(
+            h.calls.iter().filter(|(m, _)| m == "system.status").count(),
+            2
+        );
+    }
     seed(&owner, 1, false).await;
     let close = CancellationToken::new();
     close.cancel();
     let before = c.hive.lock().unwrap().calls.len();
-    p.flush(&c, &Ids("epoch"), RequestOptions::default(), &close)
+    p.flush(c.clone(), RequestOptions::default(), &close)
         .await
         .unwrap();
     assert_eq!(c.hive.lock().unwrap().calls.len(), before);
