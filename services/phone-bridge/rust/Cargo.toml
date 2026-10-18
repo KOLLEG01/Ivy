@@ -8,6 +8,8 @@ publish = false
 ivy-contracts = { workspace = true }
 ivy-host-runtime = { workspace = true }
 tokio = { workspace = true }
+rsipstack = { workspace = true }
+tokio-util = { workspace = true }
 
 [lib]
 path = "src/lib.rs"
