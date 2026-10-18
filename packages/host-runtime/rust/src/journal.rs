@@ -4,7 +4,7 @@ use crate::{IvyError, IvyJson, IvyResult, accepted_configuration::{installation_
 use ivy_contracts::{JsString, core_schema::{validate_host, validate_shared}, hash::hash_json, json};
 use ivy_sdk::clock::{Clock, SystemClock, parse_date};
 use ivy_store::{rusqlite::{Connection, OptionalExtension, Params, params}, sqlite};
-use std::{fs, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::{BTreeMap, BTreeSet}, fs, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 
 const TERMINAL: [&str; 4] = ["succeeded", "rolled_back", "failed", "needs_attention"];
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -53,7 +53,38 @@ pub fn bootstrap_launch_id(plan: &IvyJson, instance_id: &str) -> IvyResult<Strin
     hash_json(&IvyJson::object([("planHash", hash_json(plan)?.into()), ("instanceId", instance_id.into())]))
 }
 
-struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock> }
+/// Kernel-backed SQLite lock. Exclusive ownership stays with the live connection;
+/// shared readers hold a transaction, so a stale PID file can never grant entry.
+pub struct ExecutorLock { connection: Arc<Mutex<Option<Connection>>> }
+impl ExecutorLock {
+    pub async fn acquire(root: PathBuf, shared: bool) -> IvyResult<Self> {
+        let connection = internal(tokio::task::spawn_blocking(move || -> IvyResult<Connection> {
+            internal(fs::create_dir_all(&root))?;
+            let db = internal(sqlite::open(&root.join("executor-lock.sqlite"), sqlite::OpenOptions { busy_timeout: Duration::from_millis(100), read_only: false }))?;
+            let claim = || -> ivy_store::rusqlite::Result<()> {
+                if shared { db.execute_batch("CREATE TABLE IF NOT EXISTS owner(pid INTEGER); BEGIN; SELECT * FROM owner;")?; }
+                else {
+                    db.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; CREATE TABLE IF NOT EXISTS owner(pid INTEGER); DELETE FROM owner;")?;
+                    db.execute("INSERT INTO owner VALUES (?)", [std::process::id()])?;
+                    db.execute_batch("COMMIT")?;
+                }
+                Ok(())
+            };
+            claim().map_err(|_| IvyError::new("executor_already_running", "Another executor holds the host lock."))?;
+            Ok(db)
+        }).await)??;
+        Ok(Self { connection: Arc::new(Mutex::new(Some(connection))) })
+    }
+    pub async fn close(&self) -> IvyResult<()> {
+        let connection = self.connection.clone();
+        internal(tokio::task::spawn_blocking(move || { internal(connection.lock())?.take(); Ok(()) }).await)?
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct HistoryLimits { pub count: usize, pub bytes: usize }
+impl Default for HistoryLimits { fn default() -> Self { Self { count: 10_000, bytes: 64 * 1024 * 1024 } } }
+struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock>, history_limits: HistoryLimits }
 /// Clones share one connection and configuration. Call `close` before releasing
 /// the final handle when shutdown must wait for all journal work to finish.
 #[derive(Clone)]
@@ -61,7 +92,10 @@ pub struct HostJournal { state: Arc<Mutex<Option<State>>> }
 impl HostJournal {
     pub async fn open(config: IvyJson) -> IvyResult<Self> { Self::open_with_clock(config, Arc::new(SystemClock)).await }
     pub async fn open_with_clock(config: IvyJson, clock: Arc<dyn Clock>) -> IvyResult<Self> {
-        let state = internal(tokio::task::spawn_blocking(move || State::open(config, clock)).await)??;
+        Self::open_with_options(config, HistoryLimits::default(), clock).await
+    }
+    pub async fn open_with_options(config: IvyJson, history_limits: HistoryLimits, clock: Arc<dyn Clock>) -> IvyResult<Self> {
+        let state = internal(tokio::task::spawn_blocking(move || State::open(config, clock, history_limits)).await)??;
         Ok(Self { state: Arc::new(Mutex::new(Some(state))) })
     }
     async fn with<T: Send + 'static>(&self, work: impl FnOnce(&mut State) -> IvyResult<T> + Send + 'static) -> IvyResult<T> {
@@ -141,6 +175,29 @@ impl HostJournal {
     }
     pub async fn candidate(&self, candidate_id: &str) -> IvyResult<IvyJson> {
         let id = candidate_id.to_owned(); self.with(move |s| s.candidate(&id)).await
+    }
+    pub async fn manifest(&self, candidate_id: &str) -> IvyResult<IvyJson> {
+        let id = candidate_id.to_owned(); self.with(move |s| {
+            let value = s.value("SELECT manifest_json FROM candidates WHERE candidate_id=?", &id)?.ok_or_else(|| IvyError::new("not_found", "Prepared candidate manifest was not found."))?;
+            crate::artifact::release_manifest(&value)
+        }).await
+    }
+    pub async fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> { self.with(|s| s.retention_candidate_ids()).await }
+    pub async fn retire_candidate(&self, candidate_id: &str) -> IvyResult<bool> {
+        let id = candidate_id.to_owned(); self.with(move |s| s.transaction(|s| {
+            let Some(value) = s.text("SELECT candidate_json FROM candidates WHERE candidate_id=?", &id)? else { return Ok(false) };
+            if s.retention_candidate_ids()?.contains(&id) { return Ok(false) }
+            internal(s.db.execute("INSERT INTO candidate_retirements VALUES (?,?)", params![id, value]))?;
+            internal(s.db.execute("DELETE FROM candidates WHERE candidate_id=?", [&id]))?;
+            Ok(true)
+        })).await
+    }
+    pub async fn accept(&self, request: IvyJson, source_snapshot: Option<IvyJson>) -> IvyResult<IvyJson> {
+        self.with(move |s| s.accept(&request, source_snapshot.as_ref())).await
+    }
+    pub async fn advance(&self, deployment_id: &str, expected_phase: &str, phase: &str, change: IvyJson) -> IvyResult<IvyJson> {
+        let id = deployment_id.to_owned(); let expected = expected_phase.to_owned(); let phase = phase.to_owned();
+        self.with(move |s| s.advance(&id, &expected, &phase, &change)).await
     }
     pub async fn save_candidate(&self, candidate: IvyJson, manifest: IvyJson) -> IvyResult<()> {
         self.with(move |s| {
@@ -288,7 +345,7 @@ impl State {
         require(values.len() == 1, if values.is_empty() { "not_found" } else { "ambiguous_candidate" }, "The retained build must identify one exact local candidate.")?;
         normalize_candidate(&decoded(&values[0])?)
     }
-    fn open(config: IvyJson, clock: Arc<dyn Clock>) -> IvyResult<Self> {
+    fn open(config: IvyJson, clock: Arc<dyn Clock>, history_limits: HistoryLimits) -> IvyResult<Self> {
         validate_host("HostConfig", &config)?;
         let root = path(config.required("runtimeRoot")?)?;
         internal(fs::create_dir_all(&root))?;
@@ -297,7 +354,7 @@ impl State {
         let format: i64 = internal(db.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
         require(format == 0 || format == 1, "unsupported_storage", "Host journal format is not supported by this executor.")?;
         internal(db.execute_batch(SCHEMA))?;
-        let state = Self { db, config, clock };
+        let state = Self { db, config, clock, history_limits };
         state.transaction(|s| {
             let host = s.config.required("hostId")?.as_str()?;
             require(s.text("SELECT value FROM meta WHERE key=?", "hostId")?.is_none_or(|v| v == host), "target_conflict", "A host journal cannot be reused for another host identity.")?;
@@ -480,4 +537,226 @@ impl State {
 fn normalize_candidate(value: &IvyJson) -> IvyResult<IvyJson> {
     let value = project(value, &["candidateId", "componentId", "artifactRoot", "manifestPath", "createdAt", "platform", "buildId", "archivePath", "archiveHash", "dockerImage"]);
     validate_host("Candidate", &value)?; Ok(value)
+}
+
+fn completed(value: &IvyJson) -> bool { ["succeeded", "rolled_back"].iter().any(|phase| value == &IvyJson::from(*phase)) }
+fn transition_allowed(previous: &str, next: &str) -> bool {
+    if previous == next { return !TERMINAL.contains(&previous); }
+    let allowed: &[&str] = match previous {
+        "preparing" => &["prepared", "failed", "needs_attention"],
+        "prepared" => &["checking", "failed", "needs_attention"],
+        "checking" => &["draining", "failed", "needs_attention"],
+        "draining" => &["activating", "rolling_back", "failed", "needs_attention"],
+        "activating" => &["verifying", "rolling_back", "needs_attention"],
+        "verifying" => &["succeeded", "rolling_back", "needs_attention"],
+        "rolling_back" => &["rolled_back", "needs_attention"], _ => &[],
+    };
+    allowed.contains(&next)
+}
+impl State {
+    fn accept(&self, request: &IvyJson, source_snapshot: Option<&IvyJson>) -> IvyResult<IvyJson> {
+        validate_host("LocalRequest", request)?;
+        let request_hash = hash_json(request)?;
+        self.transaction(|s| {
+            let operation = request.required("operationId")?.as_str()?;
+            let retired = s.text("SELECT request_hash FROM retired_operations WHERE operation_id=?", &operation)?;
+            require(retired.is_none_or(|hash| hash == request_hash), "mutation_conflict", "The evicted deployment had different original arguments.")?;
+            if let Some(previous) = s.lookup(&operation, true)? {
+                require(field(previous.required("record")?, "requestHash") == &IvyJson::from(request_hash.clone()), "mutation_conflict", "Operation ID already identifies different original deployment arguments.")?;
+                return Ok(previous);
+            }
+            let id = request.required("instanceId")?.as_str()?;
+            let instance = s.instance(&id)?;
+            let installed = s.value("SELECT value FROM installed WHERE instance_id=?", &id)?.unwrap_or(IvyJson::Null);
+            require(!requires_bootstrap_replacement(instance) || installed.is_null(), "restart_required", "Bootstrap-owned releases use prepare followed by install-bootstrap.")?;
+            require(request.get("componentId").is_none() || request.get("componentId") == instance.get("componentId"), "target_conflict", "Source component does not match the configured instance.")?;
+            let action = request.required("action")?.as_str()?;
+            if action == "deploy" {
+                require(truthy(field(request, "candidateId")) != truthy(field(request, "source")) && request.get("targetBuild").is_none(), "invalid_arguments", "Deploy requires exactly one candidate or source.")?;
+            } else if action == "rollback" {
+                require(truthy(field(request, "targetBuild")) && !truthy(field(request, "candidateId")) && !truthy(field(request, "source")) && request.get("componentId").is_none(), "invalid_arguments", "Rollback requires one retained target build.")?;
+            } else {
+                require(!truthy(field(request, "targetBuild")) && !truthy(field(request, "candidateId")) && !truthy(field(request, "source")) && request.get("componentId").is_none() && !installed.is_null(), "invalid_arguments", "Lifecycle actions require one installed instance and no candidate arguments.")?;
+            }
+            let snapshot = source_snapshot.filter(|v| truthy(v));
+            if truthy(field(request, "source")) {
+                let snapshot = snapshot.ok_or_else(|| IvyError::new("source_snapshot_required", "Capture source inputs before handing the action to the independent executor."))?;
+                validate_host("SourceSnapshot", snapshot)?;
+                let root = path(s.config.required("stagingRoot")?)?;
+                require(internal(crate::paths::inside(&root, &path(snapshot.required("sourceRoot")?)?))? && internal(crate::paths::inside(&root, &path(snapshot.required("manifestPath")?)?))?, "target_conflict", "Source snapshot belongs to another host staging root.")?;
+            } else {
+                require(snapshot.is_none(), "invalid_arguments", "This action does not accept a source snapshot.")?;
+            }
+            let candidate = if truthy(field(request, "candidateId")) { s.candidate(&request.required("candidateId")?.as_str()?)? }
+                else if truthy(field(request, "targetBuild")) { s.candidate_for_build(&instance.required("componentId")?.as_str()?, &request.required("targetBuild")?.as_str()?)? }
+                else if action != "deploy" && !installed.is_null() { s.candidate(&installed.required("candidateId")?.as_str()?)? } else { IvyJson::Null };
+            require(candidate.is_null() || candidate.get("componentId") == instance.get("componentId"), "target_conflict", "Candidate belongs to another component.")?;
+            let previous_target = s.target(&id)?.unwrap_or(IvyJson::Null);
+            let previous_enabled = fallback(field(&installed, "enabled"), field(instance, "enabled"));
+            let previous_configuration = if previous_target.is_null() { None } else {
+                let source = crate::accepted_configuration::accepted_instance_configuration_path(&s.config, &previous_target.required("revision")?.as_str()?)?;
+                source.exists().then_some(source)
+            };
+            let target_enabled = match action.as_str() { "enable" => true.into(), "disable" => false.into(), _ => previous_enabled.clone() };
+            let configuration_path = crate::accepted_configuration::save_accepted_configuration(&s.config)?;
+            let now = s.now()?;
+            let deployment = uuid::Uuid::new_v4().to_string();
+            let mut activation = IvyJson::object([("previousTarget", previous_target), ("previousEnabled", previous_enabled), ("targetEnabled", target_enabled), ("rollbackTargetRevision", IvyJson::Null)]);
+            if let Some(source) = previous_configuration { activation.insert("previousConfigurationPath", path_json(&source)); }
+            let record = IvyJson::object([
+                ("deploymentId", deployment.clone().into()), ("hostId", s.config.required("hostId")?.clone()), ("instanceId", id.into()), ("componentId", instance.required("componentId")?.clone()),
+                ("requestHash", request_hash.clone().into()), ("previousBuild", field(&installed, "buildId").clone()), ("targetBuild", field(&candidate, "buildId").clone()), ("observedBuild", IvyJson::Null),
+                ("phase", if candidate.is_null() { "preparing".into() } else { "prepared".into() }), ("createdAt", now.clone().into()), ("updatedAt", now.clone().into()),
+                ("readiness", IvyJson::object([("state", "not_run".into()), ("message", "Accepted by the independent host journal.".into())])),
+            ]);
+            let mut entry = IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("request", request.clone()), ("candidateId", field(&candidate, "candidateId").clone()), ("previousCandidateId", field(&installed, "candidateId").clone()), ("configurationPath", path_json(&configuration_path)), ("activation", activation), ("record", record)]);
+            if let Some(snapshot) = snapshot { entry.insert("sourceSnapshot", snapshot.clone()); }
+            validate_host("JournalEntry", &entry)?;
+            internal(s.db.execute("INSERT INTO operations VALUES (?,?,?,?,?,?)", params![operation, deployment, request_hash, entry.required("record")?.required("phase")?.as_str()?, now, encoded(&entry)?]))?;
+            s.collect_history(&operation)?;
+            Ok(entry)
+        })
+    }
+    fn advance(&self, id: &str, expected: &str, phase: &str, change: &IvyJson) -> IvyResult<IvyJson> {
+        self.transaction(|s| {
+            let mut entry = s.lookup(id, false)?.ok_or_else(|| IvyError::new("not_found", "Host-local deployment was not found."))?;
+            let mut record = entry.required("record")?.clone();
+            let mut activation = entry.required("activation")?.clone();
+            require(record.get("phase") == Some(&IvyJson::from(expected)) && transition_allowed(expected, phase), "revision_conflict", "Deployment phase changed or transition is invalid.")?;
+            if let Some(id) = change.get("candidateId") {
+                require(record.get("phase") == Some(&IvyJson::from("preparing")), "revision_conflict", "Candidate can only be fixed during preparation.")?;
+                let candidate = s.candidate(&id.as_str()?)?;
+                require(candidate.get("componentId") == record.get("componentId"), "target_conflict", "Prepared source changed component.")?;
+                entry.insert("candidateId", candidate.required("candidateId")?.clone()); record.insert("targetBuild", candidate.required("buildId")?.clone());
+            }
+            record.insert("phase", phase.into()); record.insert("updatedAt", s.now()?.into());
+            if let Some(value) = change.get("observedBuild") { record.insert("observedBuild", value.clone()); }
+            for key in ["readiness", "errorCode"] { if let Some(value) = change.get(key).filter(|v| truthy(v)) { record.insert(key, value.clone()); } }
+            if let Some(target) = change.get("target").filter(|v| truthy(v)) {
+                validate_host("RuntimeTarget", target)?;
+                require(target.get("instanceId") == record.get("instanceId") && [entry.get("candidateId"), entry.get("previousCandidateId")].contains(&target.get("candidateId")), "target_conflict", "Runtime target must belong to this deployment.")?;
+                require(internal(crate::paths::inside(&path(s.config.required("runtimeRoot")?)?, &path(target.required("configPath")?)?))?, "target_conflict", "Runtime configuration must belong to this host.")?;
+                s.save_target(target)?;
+            }
+            if let Some(revision) = change.get("rollbackTargetRevision") {
+                let target = field(change, "target");
+                require(phase == "rolling_back" && target.get("revision") == Some(revision) && target.get("candidateId") == entry.get("previousCandidateId"), "target_conflict", "Rollback revision must identify the retained previous target.")?;
+                activation.insert("rollbackTargetRevision", revision.clone());
+            }
+            if let Some(installed) = change.get("installed").filter(|v| truthy(v)) {
+                require(installed.get("instanceId") == record.get("instanceId") && [entry.get("candidateId"), entry.get("previousCandidateId")].contains(&installed.get("candidateId")), "target_conflict", "Installed pointer must belong to this deployment.")?;
+                s.set_installed(installed)?;
+            }
+            validate_shared("DeploymentRecord", &record)?;
+            entry.insert("record", record); entry.insert("activation", activation);
+            validate_host("JournalEntry", &entry)?;
+            internal(s.db.execute("UPDATE operations SET phase=?,entry_json=? WHERE deployment_id=?", params![phase, encoded(&entry)?, id]))?;
+            s.collect_history(&entry.required("request")?.required("operationId")?.as_str()?)?;
+            Ok(entry)
+        })
+    }
+    fn collect_history(&self, protected_operation: &str) -> IvyResult<()> {
+        let (mut count, mut bytes): (i64, i64) = internal(self.db.query_row("SELECT COUNT(*),COALESCE(SUM(length(CAST(entry_json AS BLOB))),0) FROM operations", [], |r| Ok((r.get(0)?, r.get(1)?))))?;
+        let fits = |count: i64, bytes: i64| count as usize <= self.history_limits.count && bytes as usize <= self.history_limits.bytes;
+        if fits(count, bytes) { return Ok(()) }
+        let mut protected = BTreeSet::from([protected_operation.to_owned()]);
+        let mut latest = BTreeMap::<String, usize>::new(); let mut rollback = BTreeSet::new();
+        let mut recovered = BTreeSet::new(); let mut resolved = BTreeSet::new();
+        let mut statement = internal(self.db.prepare("SELECT operation_id,entry_json FROM operations ORDER BY rowid DESC"))?;
+        let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+        let rows = internal(rows.collect::<Result<Vec<_>, _>>())?;
+        if let Some(adoption) = self.configuration_adoption()? {
+            for action in adoption.required("actions")?.as_array().ok_or_else(IvyError::internal)? { protected.insert(action.required("operationId")?.as_str()?); }
+        }
+        for (operation, text) in &rows {
+            let entry = self.normalize_entry(decoded(text)?)?; let record = entry.required("record")?;
+            let instance = record.required("instanceId")?.as_str()?; let phase = record.required("phase")?;
+            if phase == &IvyJson::from("failed") && recovered.contains(&instance) { resolved.insert(operation.clone()); continue; }
+            if !completed(phase) {
+                let mut values = vec![&entry];
+                while let Some(value) = values.pop() { match value {
+                    IvyJson::String(value) => { if let Ok(value) = value.to_utf8() { protected.insert(value); } },
+                    IvyJson::Array(value) => values.extend(value), IvyJson::Object(value) => values.extend(value.iter().map(|(_, v)| v)), _ => (),
+                } }
+                continue;
+            }
+            recovered.insert(instance.clone());
+            let retained = latest.entry(instance.clone()).or_default();
+            if *retained < 2 { protected.insert(operation.clone()); *retained += 1; }
+            let installed = self.value("SELECT value FROM installed WHERE instance_id=?", &instance)?.unwrap_or(IvyJson::Null);
+            if phase == &IvyJson::from("succeeded") && !rollback.contains(&instance) && installed.get("candidateId") == entry.get("candidateId") && truthy(field(&entry, "previousCandidateId")) && entry.get("previousCandidateId") != entry.get("candidateId") {
+                protected.insert(operation.clone()); rollback.insert(instance);
+            }
+        }
+        for (operation, text) in rows.iter().rev() {
+            if fits(count, bytes) { break; }
+            let entry = self.normalize_entry(decoded(text)?)?; let record = entry.required("record")?; let id = record.required("deploymentId")?.as_str()?;
+            if !completed(record.required("phase")?) && !resolved.contains(operation) || protected.contains(operation) || protected.contains(&id) { continue; }
+            internal(self.db.execute("INSERT INTO retired_operations VALUES (?,?,?)", params![operation, id, record.required("requestHash")?.as_str()?]))?;
+            internal(self.db.execute("DELETE FROM operations WHERE operation_id=?", [operation]))?;
+            count -= 1; bytes -= text.len() as i64;
+        }
+        Ok(())
+    }
+    fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> {
+        let mut live = BTreeSet::new(); let mut protected = BTreeSet::new();
+        let mut installed = BTreeMap::new(); let mut rollback_found = BTreeSet::new(); let mut rollback_selections = BTreeSet::new();
+        for table in ["installed", "runtime_targets", "observations"] {
+            let mut statement = internal(self.db.prepare(&format!("SELECT instance_id,value FROM {table}")))?;
+            let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
+            for row in rows { let (instance, text) = internal(row)?; let value = decoded(&text)?;
+                if truthy(field(&value, "candidateId")) { let id = value.required("candidateId")?.as_str()?; live.insert(id.clone()); protected.insert(id.clone()); if table == "installed" { installed.insert(instance, id); } }
+            }
+        }
+        for (instance, selected) in &installed {
+            if let Some(previous) = self.value("SELECT value FROM meta WHERE key=?", &format!("bootstrap-rollback:{instance}"))? {
+                if previous.get("selectedCandidateId") == Some(&IvyJson::from(selected.clone())) {
+                    protected.insert(previous.required("candidateId")?.as_str()?); rollback_found.insert(instance.clone()); rollback_selections.insert(selected.clone());
+                }
+            }
+        }
+        let mut statement = internal(self.db.prepare("SELECT entry_json FROM operations ORDER BY created_at DESC,operation_id DESC"))?;
+        let rows = internal(statement.query_map([], |r| r.get::<_, String>(0)))?;
+        for row in rows {
+            let entry = decoded(&internal(row)?)?; let record = entry.required("record")?;
+            if !completed(record.required("phase")?) {
+                let value = self.normalize_entry(entry)?;
+                for id in [field(&value, "candidateId"), field(&value, "previousCandidateId"), field(field(&value, "request"), "candidateId"), field(field(field(&value, "activation"), "previousTarget"), "candidateId")] {
+                    if truthy(id) { protected.insert(id.as_str()?); }
+                }
+            } else {
+                let instance = record.required("instanceId")?.as_str()?;
+                if record.get("phase") == Some(&IvyJson::from("succeeded")) && installed.get(&instance).map(|v| IvyJson::from(v.clone())).as_ref() == entry.get("candidateId") && truthy(field(&entry, "previousCandidateId")) && entry.get("previousCandidateId") != entry.get("candidateId") && !rollback_found.contains(&instance) {
+                    protected.insert(entry.required("previousCandidateId")?.as_str()?); rollback_found.insert(instance); rollback_selections.insert(entry.required("candidateId")?.as_str()?);
+                }
+            }
+        }
+        let mut statement = internal(self.db.prepare("SELECT candidate_id,component_id,manifest_json FROM candidates"))?;
+        let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))))?;
+        let mut releases = Vec::new();
+        for row in rows {
+            let (id, component, text) = internal(row)?; let value = decoded(&text)?;
+            if let Ok(version) = field(&value, "version").as_str() {
+                let parts: Vec<_> = version.split('.').collect();
+                if parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && (part.len() == 1 || !part.starts_with('0'))) { releases.push((id, component, version)); }
+            }
+        }
+        for id in &live {
+            if rollback_selections.contains(id) { continue; }
+            let Some(current) = releases.iter().find(|r| &r.0 == id) else { continue };
+            let mut previous: Option<&(String, String, String)> = None;
+            for candidate in releases.iter().filter(|r| r.1 == current.1) {
+                if json::compare_versions(&candidate.2, &current.2)? != std::cmp::Ordering::Less { continue; }
+                let later = match previous { None => true, Some(prior) => {
+                    let order = json::compare_versions(&candidate.2, &prior.2)?;
+                    // Candidate identities are fixed lowercase SHA-256 strings;
+                    // their ASCII ordering equals the original locale tie-break.
+                    order == std::cmp::Ordering::Greater || order == std::cmp::Ordering::Equal && candidate.0 > prior.0
+                } };
+                if later { previous = Some(candidate); }
+            }
+            if let Some(previous) = previous { protected.insert(previous.0.clone()); }
+        }
+        Ok(protected)
+    }
 }
