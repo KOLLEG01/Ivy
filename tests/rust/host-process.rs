@@ -2,6 +2,8 @@ use ivy_host_runtime::process::{self, Command, LaunchContext};
 use std::{collections::BTreeMap, ffi::OsString, io::Write, path::PathBuf, time::Duration};
 #[path="host-exec-file-cases.rs"]
 mod exec_file_cases;
+#[path="host-process-path-cases.rs"]
+mod process_path_cases;
 
 // Exercise the private retained-handle failure paths through this selected target.
 #[cfg(windows)]
@@ -53,6 +55,13 @@ fn child_fixture() {
         return;
     };
     match fixture.as_str() {
+        "path-spelling" => {
+            let value = ivy_contracts::IvyJson::object([
+                ("executable", std::env::current_exe().unwrap().to_string_lossy().to_string().into()),
+                ("cwd", std::env::current_dir().unwrap().to_string_lossy().to_string().into()),
+            ]);
+            println!("path-spelling={}", ivy_contracts::json::stringify(&value, usize::MAX).unwrap());
+        }
         "redact" => {
             print!("prefix-secr");
             std::io::stdout().flush().unwrap();
