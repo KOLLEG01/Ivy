@@ -62,6 +62,30 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     await expect(f.page.getByRole('button', { name: 'Enlarge First comment', exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Enlarge attached.png', exact: true })).toBeVisible();
     await expect(f.page.getByRole('button', { name: 'Enlarge Foreign', exact: true })).toHaveCount(0);
+    for (const dark of [false, true]) {
+      await f.page.evaluate(dark => document.documentElement.classList.toggle('dark', dark), dark);
+      for (const name of ['First comment', 'attached.png', 'Repeated']) {
+        const bubble = f.page.locator('.ivy-message-bubble').filter({
+          has: f.page.getByRole('button', { name: 'Enlarge ' + name, exact: true }),
+        });
+        const appearance = await bubble.evaluate(element => {
+          const style = getComputedStyle(element), bounds = element.getBoundingClientRect();
+          const canvas = document.createElement('canvas'), context = canvas.getContext('2d');
+          const rgba = color => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data]; };
+          return { background: rgba(style.backgroundColor), foreground: rgba(style.color),
+            padded: parseFloat(style.paddingLeft) > 0 && parseFloat(style.paddingTop) > 0,
+            rounded: parseFloat(style.borderTopLeftRadius) > 0,
+            containsImages: [...element.querySelectorAll('img')].every(image => {
+              const rect = image.getBoundingClientRect();
+              return rect.left >= bounds.left && rect.right <= bounds.right + 1 && rect.top >= bounds.top && rect.bottom <= bounds.bottom + 1;
+            }) };
+        });
+        assert.ok(appearance.background.slice(0, 3).every(value => value < 50) && appearance.background[3] === 255, 'image messages retain an opaque black bubble');
+        assert.ok(appearance.foreground.slice(0, 3).every(value => value > 220), 'message text stays readable');
+        assert.ok(appearance.padded && appearance.rounded && appearance.containsImages, 'the rounded bubble surrounds its images');
+      }
+    }
+    await f.page.evaluate(() => document.documentElement.classList.remove('dark'));
     await f.page.getByRole('tab', { name: 'Details', exact: true }).click();
     await expect(f.page.getByRole('button', { name: 'Enlarge Overview', exact: true })).toBeVisible();
     await f.page.getByRole('tab', { name: 'Chat', exact: true }).click();

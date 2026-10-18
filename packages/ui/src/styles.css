@@ -15,6 +15,8 @@
   --popover-foreground: oklch(0.145 0 0);
   --primary: oklch(0.205 0 0);
   --primary-foreground: oklch(0.985 0 0);
+  --message-background: oklch(0.205 0 0);
+  --message-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
@@ -220,8 +222,8 @@
   margin-left: auto;
   border-radius: 1.125rem;
   border-bottom-right-radius: 0.375rem;
-  background: var(--primary);
-  color: var(--primary-foreground);
+  background: var(--message-background);
+  color: var(--message-foreground);
   padding: 0.5rem 0.875rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -238,8 +240,7 @@
   background: color-mix(in srgb, currentColor 14%, transparent);
   border-color: color-mix(in srgb, currentColor 25%, transparent);
 }
-/* Images in your own messages are compact rounded thumbnails; a message that is only an image
-   shows the picture itself instead of a bubble around it. */
+/* Text and compact image thumbnails share the same message bubble. */
 .ivy-message-bubble .ivy-markdown .ivy-embedded-image {
   display: block;
   width: auto;
@@ -251,13 +252,6 @@
 }
 .ivy-message-bubble .ivy-markdown .ivy-image-button {
   display: block;
-}
-.ivy-message-bubble:has(.ivy-markdown > p:only-child > .ivy-image-button:only-child) {
-  padding: 0;
-  background: transparent;
-}
-.ivy-message-bubble:has(.ivy-markdown > p:only-child > .ivy-image-button:only-child) .ivy-embedded-image {
-  margin: 0;
 }
 .ivy-message-bubble .ivy-markdown blockquote {
   border-color: color-mix(in srgb, currentColor 35%, transparent);
