@@ -76,8 +76,10 @@ pub async fn discover(
     let interface = selectors.remove("interfaceVersion");
     let mut cursor = None;
     loop {
-        let mut params = selectors.clone();
-        params.insert("namespace", IvyJson::String(namespace.clone()));
+        let mut params = IvyJson::object([("namespace", IvyJson::String(namespace.clone()))]);
+        for (key,value) in selectors.as_object().ok_or_else(IvyError::internal)? {
+            params.insert(key.clone(),value.clone());
+        }
         params.insert("namePrefix", IvyJson::String(name.clone()));
         if let Some(cursor) = cursor {
             params.insert("cursor", cursor);
