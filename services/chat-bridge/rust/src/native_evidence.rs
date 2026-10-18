@@ -533,6 +533,18 @@ impl<'a> ChatNativeEvidence<'a> {
             "The native read must use the configured ChatBridge owner.",
         )
     }
+    pub fn verify_read(&self, value: &Json, expected: &Json) -> IvyResult<()> {
+        verify_chat_native_read(
+            value,
+            expected,
+            Some(field(
+                field(&self.definition, "nativePlan")?,
+                "catalogSourceHash",
+            )?),
+            self.catalogs,
+            self.validation,
+        )
+    }
     pub async fn save_read(
         &self,
         parent_id: &str,

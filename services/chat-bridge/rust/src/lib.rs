@@ -1,5 +1,6 @@
 pub mod admission;
 pub mod collection_reads;
+pub mod collector;
 pub mod diagnostic_notifications;
 pub mod diagnostics;
 pub mod evidence_bytes;

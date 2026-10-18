@@ -163,9 +163,12 @@ impl ChatStore {
         self.change_version.load(Ordering::Relaxed)
     }
     pub(crate) fn now_iso(&self) -> IvyResult<String> {
-        date_to_iso(self.clock.utc_millis() as f64)
+        date_to_iso(self.now_millis() as f64)
             .map_err(|_| IvyError::internal())?
             .to_utf8()
+    }
+    pub(crate) fn now_millis(&self) -> i64 {
+        self.clock.utc_millis()
     }
     pub async fn set_limits(&self, limits: local::Limits) -> StoreResult<()> {
         self.local(move |local| {

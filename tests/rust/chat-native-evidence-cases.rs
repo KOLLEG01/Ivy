@@ -22,6 +22,8 @@ use std::{
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
+#[path = "chat-collector-cases.rs"]
+mod collector;
 
 fn member<'a>(value: &'a mut Json, key: &str) -> &'a mut Json {
     let Json::Object(fields) = value else {

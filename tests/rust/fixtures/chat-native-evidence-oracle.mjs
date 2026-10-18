@@ -3,6 +3,7 @@ import {registerHooks} from 'node:module';
 import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,basename} from 'node:path';
+import {pathToFileURL} from 'node:url';
 import {DatabaseSync} from 'node:sqlite';
 import {buildInstructions} from '../../../tools/build/build-instructions.mjs';
 const url=path=>new URL(path,import.meta.url).href,data=source=>'data:text/javascript;base64,'+Buffer.from(source).toString('base64');
@@ -155,6 +156,9 @@ async function execute(c){
  }});c.expected.push(snapshot(output));}}
  finally{store.close();rmSync(root,{recursive:true,force:true});}
 }
-for(const c of cases)await execute(c);
-for(const label of ['complete-authority-and-bytes','large-original-request-operation-reopen','turn-notice-context','turn-input-preferences','local-operation-parent','copied-definition-remains-pinned']){const c=cases.find(c=>c.label===label);if(c.expected.some(e=>e.output.error))throw Error('Successful original path failed '+label+': '+JSON.stringify(c.expected.map(e=>e.output)));}
-process.stdout.write(JSON.stringify({now,instructions,seeds,cases}));
+export {now,RealDate,instructions,seeds,bodies,summary,error,result};
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
+ for(const c of cases)await execute(c);
+ for(const label of ['complete-authority-and-bytes','large-original-request-operation-reopen','turn-notice-context','turn-input-preferences','local-operation-parent','copied-definition-remains-pinned']){const c=cases.find(c=>c.label===label);if(c.expected.some(e=>e.output.error))throw Error('Successful original path failed '+label+': '+JSON.stringify(c.expected.map(e=>e.output)));}
+ process.stdout.write(JSON.stringify({now,instructions,seeds,cases}));
+}

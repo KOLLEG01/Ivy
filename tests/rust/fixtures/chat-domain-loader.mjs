@@ -6,7 +6,7 @@ const exported={
  '../../../packages/contracts/src/chat-validation.ts':['validateChat'],
  '../../../packages/contracts/src/agent-validation.ts':['validateAgent'],
  '../../../packages/contracts/src/checked-native-contract.ts':['checkedNativeContract'],
- '../../../packages/contracts/src/operation-id.ts':['parseOperationId'],
+ '../../../packages/contracts/src/operation-id.ts':['parseOperationId','deriveOperationId'],
  '../../../packages/contracts/src/limits.ts':['managementFrameBytes'],
  '../../../packages/contracts/src/bundle.ts':['bundledSchema'],
  '../../../packages/sdk/src/receipt-archive.ts':['hasUnresolvedOutcome'],
