@@ -113,7 +113,6 @@ async fn configured_owner_readiness_and_rpc_order_match_original_driver() {
                     let owner = driver.native_owner()?;
                     let target = owner.target();
                     Json::object([
-                        ("caller", Json::String(owner.caller().clone())),
                         (
                             "target",
                             Json::object([
@@ -129,6 +128,7 @@ async fn configured_owner_readiness_and_rpc_order_match_original_driver() {
                                 ("catalogHash", Json::String(target.catalog_hash.clone())),
                             ]),
                         ),
+                        ("caller", Json::String(owner.caller().clone())),
                     ])
                 }
                 "verify" => {
