@@ -17,6 +17,8 @@ mod app_tools_launch_cases;
 mod native_compatibility_cases;
 #[path = "agent-native-connection.rs"]
 mod native_connection_cases;
+#[path = "agent-native-daemon.rs"]
+mod native_daemon_cases;
 #[path = "agent-native-handshake.rs"]
 mod native_handshake_cases;
 #[path = "agent-native-proxy.rs"]

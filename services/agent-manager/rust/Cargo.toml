@@ -14,10 +14,14 @@ uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+sha2.workspace = true
 ivy-sdk.workspace = true
 ivy-host-runtime.workspace = true
 futures-util.workspace = true
 tokio-tungstenite.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
 
 [[test]]
 name = "agent-state"
