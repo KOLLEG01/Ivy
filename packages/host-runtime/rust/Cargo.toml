@@ -68,3 +68,7 @@ libc.workspace = true
 [[test]]
 name = "host-build-identity"
 path = "../../../tests/rust/host-build-identity.rs"
+
+[[test]]
+name = "host-preparation-files"
+path = "../../../tests/rust/host-preparation-files.rs"
