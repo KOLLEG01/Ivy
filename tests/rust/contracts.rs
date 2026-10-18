@@ -211,7 +211,7 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
                 "tests/fixtures/whatwg-url-oracle.mjs",
             ])
             .arg(mode)
-            .current_dir(root)
+            .current_dir(&root)
             .output()
             .unwrap();
         assert!(
