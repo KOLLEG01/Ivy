@@ -4,7 +4,8 @@ const {SecretaryStore}=await load('services/secretary/src/store.js');
 const {defaultConfiguration}=await load('services/secretary/src/assignment-schema.js');
 const {contractVersion}=await load('services/secretary/src/schema.js');
 const {canonical,hashJson}=await load('packages/sdk/src/node.js');
-const reconcile=process.argv.includes('--reconcile');
+const service=process.argv.includes('--service');
+const reconcile=process.argv.includes('--reconcile')||service;
 const settings={...base,...(reconcile?{sources:[]}:{}),pollMs:60000,identity:{...base.identity,serviceNodeId:'fixture.secretary'}};
 const id='00000000-0000-4000-8000-000000000099';
 const value=defaultConfiguration(settings,at,{serviceNodeId:'fixture.agent',threadCwd:'/workspace',model:null,effort:'medium',permissions:':read-only'});
@@ -28,11 +29,15 @@ if(reconcile){
  server.on('connection',socket=>socket.on('message',bytes=>{
   const {id,method,params}=JSON.parse(bytes.toString());
   if(method==='fixture.trace'){send(socket,id,trace);return;}
+  if(method==='fixture.reset'){trace.length=0;send(socket,id,{});return;}
   if(method==='fixture.waitStat'){
    if(trace.some(row=>row.method==='objects.stat'))send(socket,id,{});else statWaiters.push({socket,id});return;
   }
   if(method==='fixture.release'){released=true;if(held){send(held.socket,held.id,{effectivelyArchived:false});held=null;}send(socket,id,{});return;}
   trace.push({method,params});
+  if(service&&method==='service.connect'){send(socket,id,{generation:7});return;}
+  if(service&&method==='registry.sync'){send(socket,id,{});return;}
+  if(service&&method==='service.heartbeat'){send(socket,id,{ready:params.ready});return;}
   if(method==='system.status'){send(socket,id,{runtimeEpoch:'fixture-epoch'});return;}
   if(method==='serviceNodes.get'){
    if(remaining-->0){send(socket,id,null,{code:'limit_exceeded',message:'Fixture initialization limit.',outcome:'unknown'});return;}
@@ -50,6 +55,6 @@ if(reconcile){
   send(socket,id,null,{code:'fixture_unexpected',message:'Unexpected lifecycle fixture RPC '+method,outcome:'not_executed'});
  }));
 }
-process.stdout.write(JSON.stringify({port:server.address().port,settings,owner,rootId,document})+'\n');
+process.stdout.write(JSON.stringify({port:server.address().port,settings,owner,rootId,document,node:process.execPath,oracleRoot:(await import('./inbox-fixtures.mjs')).oracleRoot,...(service?{notificationPolicy:(await load('instructions/secretary-notification-policy.js')).secretaryNotificationPolicy}:{})})+'\n');
 process.stdin.resume();
 process.stdin.on('end',()=>{for(const socket of server.clients)socket.terminate();server.close();});

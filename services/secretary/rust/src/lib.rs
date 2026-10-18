@@ -46,6 +46,7 @@ pub mod reconcile;
 pub mod schedule;
 pub mod schema;
 pub mod service_handlers;
+pub mod service;
 pub mod source_identity;
 pub mod store;
 pub mod triage_media;

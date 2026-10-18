@@ -89,6 +89,8 @@ mod notices_cases;
 mod registry_cases;
 #[path = "service_handlers_cases.rs"]
 mod service_handlers_cases;
+#[path = "service_cases.rs"]
+mod service_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 #[path = "triage_prompt_cases.rs"]

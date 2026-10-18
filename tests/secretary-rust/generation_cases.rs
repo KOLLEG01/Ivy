@@ -1,5 +1,5 @@
 use super::*;
-use ivy_contracts::{IvyResult, checked_native_contract::CheckedNativeContracts};
+use ivy_contracts::checked_native_contract::CheckedNativeContracts;
 use ivy_sdk::{
     clock::Clock,
     service::{ConnectionOptions, InvocationContext, ServiceConnection, ServiceState},

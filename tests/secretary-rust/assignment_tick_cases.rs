@@ -227,9 +227,14 @@ async fn original_scheduler_tick_composition_and_catch_site_diagnostics() {
                         // An independent worker can update/read the actual
                         // shared diagnostics at every suspended scheduler RPC.
                         // This would panic if a RefMut survived an await.
-                        issues.borrow_mut().issue("independent-worker", "fixture_interleaving");
-                        assert!(issues.borrow().issues.iter().any(|(key, _)| key == "independent-worker"));
-                        issues.borrow_mut().issues.retain(|(key, _)| key != "independent-worker");
+                        let saved = issues.borrow().issues.clone();
+                        // Full diagnostic sets admit only their overflow marker.
+                        // Update an existing key there rather than assuming an
+                        // unrelated worker can bypass the original size limit.
+                        let key = saved.first().map(|(key, _)| key.as_str()).unwrap_or("independent-worker");
+                        issues.borrow_mut().issue(key, "fixture_interleaving");
+                        assert!(issues.borrow().issues.iter().any(|(id, code)| id == key && code == "fixture_interleaving"));
+                        issues.borrow_mut().issues = saved;
                         resume.send(()).unwrap();
                     },
                 }

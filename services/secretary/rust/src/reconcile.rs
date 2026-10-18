@@ -44,6 +44,25 @@ pub struct Observation {
     pub heartbeat: IvyJson,
 }
 impl Readiness {
+    fn issue_code(&self) -> Option<&JsString> {
+        self.failure
+            .as_ref()
+            .or(self.issue.as_ref())
+            .filter(|code| !code.0.is_empty())
+    }
+    pub fn health_state(&self, generation: u64) -> (bool, &'static str) {
+        let ready = self.generation == Some(generation)
+            && self.failure.as_ref().is_none_or(|code| code.0.is_empty())
+            && !self.recovering;
+        let detail = if self.issue_code().is_some() {
+            "Secretary recovery needs attention; independent inbox actions remain available."
+        } else if ready {
+            "Secretary sources and original operations are reconciled."
+        } else {
+            "Secretary reconciliation is pending."
+        };
+        (ready, detail)
+    }
     /// Health and heartbeat use the same observation. Record warnings leave the
     /// reconciled inbox available, as in the original readiness callback.
     pub fn observe(
@@ -52,22 +71,9 @@ impl Readiness {
         service_node_id: &JsString,
         at: &JsString,
     ) -> Observation {
-        let issue = self
-            .failure
-            .as_ref()
-            .or(self.issue.as_ref())
-            .filter(|code| !code.0.is_empty());
-        let ready = self.generation == Some(generation)
-            && self.failure.as_ref().is_none_or(|code| code.0.is_empty())
-            && !self.recovering;
-        let detail = if issue.is_some() {
-            "Secretary recovery needs attention; independent inbox actions remain available."
-        } else if ready {
-            "Secretary sources and original operations are reconciled."
-        } else {
-            "Secretary reconciliation is pending."
-        };
-        let diagnostics = issue
+        let (ready, detail) = self.health_state(generation);
+        let diagnostics = self
+            .issue_code()
             .map(|code| {
                 IvyJson::object([
                     ("code", IvyJson::String(code.clone())),
