@@ -9,6 +9,8 @@ mod registration;
 mod register;
 #[path = "phone_sip_host.rs"]
 mod sip_host;
+#[path = "phone_native_dispatch.rs"]
+mod native_dispatch;
 #[path = "phone_sip.rs"]
 mod sip;
 #[path = "phone_sip_stack.rs"]

@@ -10,6 +10,9 @@ use std::{
     collections::HashMap,
     sync::{Arc, OnceLock},
 };
+use tokio::sync::Notify;
+mod dispatcher;
+pub use dispatcher::{NativeDispatcher, NativeHandler, NativeInvocation, NativeReply};
 
 /// Fields are private so only a bounded, fully validated envelope can be admitted.
 /// Raw params are retained for the native retry identity, not canonicalized.
@@ -310,13 +313,29 @@ impl NativeOutcome {
 pub struct NativeReceipt {
     hash: String,
     outcome: OnceLock<NativeOutcome>,
+    changed: Notify,
 }
 impl NativeReceipt {
     pub fn outcome(&self) -> Option<&NativeOutcome> {
         self.outcome.get()
     }
     pub fn complete(&self, outcome: NativeOutcome) -> Result<(), NativeOutcome> {
-        self.outcome.set(outcome)
+        let result = self.outcome.set(outcome);
+        if result.is_ok() {
+            self.changed.notify_waiters();
+        }
+        result
+    }
+    pub async fn wait(&self) -> NativeOutcome {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(outcome) = self.outcome.get() {
+                return outcome.clone();
+            }
+            changed.await;
+        }
     }
 }
 pub enum Admission {
@@ -360,6 +379,13 @@ impl NativeReceipts {
         !self.stopping
     }
     pub fn admit(&mut self, request: &NativeRequest, cleanup_slots: usize) -> Admission {
+        self.admit_with(request, || cleanup_slots)
+    }
+    fn admit_with(
+        &mut self,
+        request: &NativeRequest,
+        cleanup_slots: impl FnOnce() -> usize,
+    ) -> Admission {
         if request.epoch != self.epoch {
             return Admission::Reject("epoch_mismatch");
         }
@@ -377,12 +403,13 @@ impl NativeReceipts {
                 Admission::Reject("operation_conflict")
             };
         }
-        if !has_receipt_capacity(&request.method, self.len(), self.capacity, cleanup_slots) {
+        if !has_receipt_capacity(&request.method, self.len(), self.capacity, cleanup_slots()) {
             return Admission::Reject("capacity_exceeded");
         }
         let receipt = Arc::new(NativeReceipt {
             hash,
             outcome: OnceLock::new(),
+            changed: Notify::new(),
         });
         self.receipts.insert(operation_id.clone(), receipt.clone());
         Admission::Dispatch(Some(receipt))
