@@ -164,9 +164,8 @@ async fn provider_reconnect_health_and_identity_bound_shutdown() {
             ]),
         ),
     ]);
-    let runtime = runtime::start(InstanceConfig::from_json(value).unwrap())
-        .await
-        .unwrap();
+    let instance = InstanceConfig::from_json(value).unwrap();
+    let runtime = runtime::start(instance.clone()).await.unwrap();
     for generation in [1, 2] {
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(30), seen.recv())
@@ -180,6 +179,14 @@ async fn provider_reconnect_health_and_identity_bound_shutdown() {
         .unwrap();
     assert_eq!(health.get("ready"), Some(&J::Bool(true)));
     assert_eq!(health.get("generation"), Some(&J::Number(2.0)));
+    // Exercise the production health reader against the real runtime's file.
+    // Registration RPC is covered separately by the Host fixture; this peer
+    // models the provider WebSocket only.
+    let checked = ivy_host_runtime::health::check_health(&instance, None, false)
+        .await
+        .unwrap();
+    assert_eq!(checked.get("generation"), Some(&J::Number(2.0)));
+    assert_eq!(checked.get("bootId"), health.get("bootId"));
     let mut control = J::object([
         ("schemaVersion", J::Number(1.0)),
         ("instanceId", "renamed-dashboard".into()),
@@ -210,6 +217,10 @@ async fn provider_reconnect_health_and_identity_bound_shutdown() {
         .await
         .unwrap();
     assert_eq!(final_health.get("ready"), Some(&J::Bool(false)));
+    let stopped = ivy_host_runtime::health::check_health(&instance, None, false)
+        .await
+        .unwrap_err();
+    assert_eq!(stopped.code_js(), "service_not_ready".into());
     assert_eq!(
         final_health.get("details"),
         Some(&J::from("Dashboards stopped."))
