@@ -241,3 +241,309 @@ mod implementation {
         }
     }
 }
+
+#[cfg(test)]
+mod started_epoch {
+    use futures_util::FutureExt;
+    use ivy_sdk::{
+        IvyError, IvyJson, IvyResult, JsString, Outcome,
+        operation_ids::{RuntimeEpochWaiter, runtime_epoch, start_runtime_epoch},
+        rpc::{RequestFuture, RequestOptions, RpcClient},
+    };
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::sync::oneshot;
+
+    enum Step {
+        Ready(IvyResult<IvyJson>),
+        Pending(oneshot::Receiver<IvyResult<IvyJson>>),
+    }
+    struct Client {
+        steps: Mutex<VecDeque<Step>>,
+        calls: Mutex<Vec<String>>,
+        completed: AtomicUsize,
+    }
+    impl Client {
+        fn new(steps: Vec<Step>) -> Arc<Self> {
+            Arc::new(Self {
+                steps: Mutex::new(steps.into()),
+                calls: Mutex::new(Vec::new()),
+                completed: AtomicUsize::new(0),
+            })
+        }
+        fn trace(&self) -> IvyJson {
+            IvyJson::Array(
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|method| method.clone().into())
+                    .collect(),
+            )
+        }
+    }
+    impl RpcClient for Client {
+        fn request<'a>(
+            &'a self,
+            method: &'a str,
+            _: IvyJson,
+            _: RequestOptions,
+        ) -> RequestFuture<'a> {
+            Box::pin(async move {
+                // Record inside the future: constructing an unpolled request
+                // must not satisfy the eager-start/initialization-order check.
+                self.calls.lock().unwrap().push(method.to_owned());
+                if method == "initialize" {
+                    return Ok(true.into());
+                }
+                assert_eq!(method, "system.status");
+                let step = self
+                    .steps
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected epoch request");
+                let result = match step {
+                    Step::Ready(result) => result,
+                    Step::Pending(receiver) => {
+                        receiver.await.expect("controlled reply was dropped")
+                    }
+                };
+                self.completed.fetch_add(1, Ordering::SeqCst);
+                result
+            })
+        }
+    }
+    fn status(value: JsString) -> IvyResult<IvyJson> {
+        Ok(IvyJson::object([("runtimeEpoch", IvyJson::String(value))]))
+    }
+    fn epoch() -> JsString {
+        let mut value = JsString::from("epoch-");
+        value.0.push(0xd800);
+        value
+    }
+    fn failure(outcome: Outcome) -> IvyError {
+        let mut message = vec![b'x' as u16; 2100];
+        message.push(0xdfff);
+        IvyError::new_js("service_unavailable".into(), JsString(message))
+            .with_outcome(outcome)
+            .with_details(IvyJson::object([
+                ("text", IvyJson::String(JsString(vec![0xd800]))),
+                (
+                    "values",
+                    IvyJson::Array(vec![IvyJson::Null, "e\u{301}".into()]),
+                ),
+            ]))
+    }
+    fn error(value: &IvyError) -> IvyJson {
+        IvyJson::object([
+            ("code", IvyJson::String(value.code_js())),
+            ("message", IvyJson::String(value.message_js())),
+            ("outcome", value.outcome.as_str().into()),
+            ("details", value.details.clone().unwrap()),
+        ])
+    }
+    async fn rejected(waiter: &RuntimeEpochWaiter, expected: &IvyError) -> IvyJson {
+        let actual = waiter.get().await.unwrap_err();
+        assert_eq!(&actual, expected);
+        error(&actual)
+    }
+    fn compare(name: &str, actual: IvyJson) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let output = std::process::Command::new("node")
+            .args([
+                "--experimental-transform-types",
+                "--disable-warning=ExperimentalWarning",
+                "tests/fixtures/runtime-epoch-oracle.mjs",
+                name,
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected =
+            ivy_contracts::json::parse(std::str::from_utf8(&output.stdout).unwrap(), 65_536)
+                .unwrap();
+        assert_eq!(
+            ivy_contracts::json::canonical(&actual, 65_536).unwrap(),
+            ivy_contracts::json::canonical(&expected, 65_536).unwrap(),
+            "{name}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_handle_starts_before_independent_initialize_and_clones_share_it() {
+        let (send, receive) = oneshot::channel();
+        let client = Client::new(vec![Step::Pending(receive)]);
+        let first = start_runtime_epoch(client.clone());
+        let second = first.clone();
+        let same = start_runtime_epoch(client.clone());
+        let after_start = client.trace();
+        assert_eq!(*client.calls.lock().unwrap(), ["system.status"]);
+        client
+            .request("initialize", IvyJson::Null, RequestOptions::default())
+            .await
+            .unwrap();
+        let after_initialize = client.trace();
+        let pending = first.get().now_or_never().is_none();
+        assert!(pending);
+        send.send(status(epoch())).unwrap();
+        let values = vec![
+            IvyJson::String(first.get().await.unwrap()),
+            IvyJson::String(second.get().await.unwrap()),
+        ];
+        assert_eq!(same.get().await.unwrap(), epoch());
+        let cached = start_runtime_epoch(client.clone()).get().await.unwrap();
+        let legacy = runtime_epoch(client.clone()).await.unwrap();
+        compare(
+            "pending-success",
+            IvyJson::object([
+                ("afterStart", after_start),
+                ("afterInitialize", after_initialize),
+                ("pendingBeforeRelease", pending.into()),
+                ("values", IvyJson::Array(values)),
+                ("cached", IvyJson::String(cached)),
+                ("legacy", IvyJson::String(legacy)),
+                ("calls", client.trace()),
+            ]),
+        );
+        let weak = Arc::downgrade(&client);
+        drop(client);
+        assert!(
+            weak.upgrade().is_none(),
+            "completed retained waiters must not keep the client alive"
+        );
+        assert_eq!(first.get().await.unwrap(), epoch());
+    }
+
+    #[tokio::test]
+    async fn failed_handles_keep_full_original_errors_after_a_new_owner_retries() {
+        for outcome in [Outcome::NotExecuted, Outcome::Unknown, Outcome::Completed] {
+            let (send, receive) = oneshot::channel();
+            let client = Client::new(vec![
+                Step::Pending(receive),
+                Step::Ready(status("second".into())),
+            ]);
+            let first = start_runtime_epoch(client.clone());
+            let second = start_runtime_epoch(client.clone());
+            let after_start = client.trace();
+            let original = failure(outcome);
+            send.send(Err(original.clone())).unwrap();
+            let failures = vec![
+                rejected(&first, &original).await,
+                rejected(&second, &original).await,
+            ];
+            let recovered = start_runtime_epoch(client.clone()).get().await.unwrap();
+            let retained = vec![
+                rejected(&first, &original).await,
+                rejected(&second, &original).await,
+            ];
+            compare(
+                &format!("failure-{}", outcome.as_str()),
+                IvyJson::object([
+                    ("afterStart", after_start),
+                    ("failures", IvyJson::Array(failures)),
+                    ("recovered", IvyJson::String(recovered)),
+                    ("retained", IvyJson::Array(retained)),
+                    ("calls", client.trace()),
+                ]),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn immediately_rejected_requests_remain_shared_until_asynchronous_settlement() {
+        let original = failure(Outcome::Unknown);
+        let client = Client::new(vec![
+            Step::Ready(Err(original.clone())),
+            Step::Ready(status("second".into())),
+        ]);
+        let first = start_runtime_epoch(client.clone());
+        let second = start_runtime_epoch(client.clone());
+        let after_start = client.trace();
+        assert_eq!(*client.calls.lock().unwrap(), ["system.status"]);
+        let failures = vec![
+            rejected(&first, &original).await,
+            rejected(&second, &original).await,
+        ];
+        let recovered = start_runtime_epoch(client.clone()).get().await.unwrap();
+        let retained = rejected(&first, &original).await;
+        compare(
+            "ready-failure",
+            IvyJson::object([
+                ("afterStart", after_start),
+                ("failures", IvyJson::Array(failures)),
+                ("recovered", IvyJson::String(recovered)),
+                ("retained", retained),
+                ("calls", client.trace()),
+            ]),
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_all_handles_keeps_the_driver_and_success_or_failure_cache_cleanup() {
+        for failed in [false, true] {
+            let (send, receive) = oneshot::channel();
+            let client = Client::new(vec![
+                Step::Pending(receive),
+                Step::Ready(status("second".into())),
+            ]);
+            let waiter = start_runtime_epoch(client.clone());
+            let after_start = client.trace();
+            let abandoned = tokio::spawn({
+                let waiter = waiter.clone();
+                async move { waiter.get().await }
+            });
+            tokio::task::yield_now().await;
+            abandoned.abort();
+            let _ = abandoned.await;
+            drop(waiter);
+            send.send(if failed {
+                Err(failure(Outcome::Unknown))
+            } else {
+                status(epoch())
+            })
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while Arc::strong_count(&client) != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the independent driver must finish and release the request client");
+            let completed_before = client.completed.load(Ordering::SeqCst);
+            assert_eq!(completed_before, 1);
+            let recovered = start_runtime_epoch(client.clone()).get().await.unwrap();
+            compare(
+                if failed {
+                    "abandoned-failure"
+                } else {
+                    "abandoned-success"
+                },
+                IvyJson::object([
+                    ("afterStart", after_start),
+                    (
+                        "completedBeforeRetry",
+                        IvyJson::Number(completed_before as f64),
+                    ),
+                    ("recovered", IvyJson::String(recovered)),
+                    ("calls", client.trace()),
+                    (
+                        "completed",
+                        IvyJson::Number(client.completed.load(Ordering::SeqCst) as f64),
+                    ),
+                ]),
+            );
+        }
+    }
+}

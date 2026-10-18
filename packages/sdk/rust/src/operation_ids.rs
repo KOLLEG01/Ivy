@@ -61,6 +61,11 @@ fn state(client: &Arc<dyn RpcClient>) -> Arc<State> {
 fn drive(pending: &Pending) {
     // Like a JS Promise, a started shared request survives an individual waiter.
     let future = pending.future.clone();
+    // Enter the request before returning to the caller, rather than waiting for
+    // the background task to be scheduled behind a later initialization call.
+    if future.clone().now_or_never().is_some() {
+        return;
+    }
     tokio::spawn(async move {
         let _ = future.await;
     });
@@ -91,6 +96,10 @@ impl State {
                     })
             }
             .await;
+            // Promise callbacks settle asynchronously even when request() has
+            // an immediately available result. Keep synchronous sibling starts
+            // attached to this same pending lookup until that settlement.
+            tokio::task::yield_now().await;
             if result.is_err() {
                 if let Some(owner) = owner.upgrade() {
                     let mut entries = owner.entries.lock().unwrap();
@@ -188,9 +197,28 @@ impl State {
     }
 }
 
+/// A started lookup whose original success or failure survives cache eviction.
+/// Cloning or waiting never reacquires an epoch from the client cache.
+#[derive(Clone)]
+pub struct RuntimeEpochWaiter {
+    future: IdentityFuture,
+}
+impl RuntimeEpochWaiter {
+    pub async fn get(&self) -> IvyResult<JsString> {
+        self.future.clone().await
+    }
+}
+/// Start inside a Tokio runtime; retain the returned waiter for one workflow
+/// owner, including when a later owner retries after this lookup has failed.
+pub fn start_runtime_epoch(client: Arc<dyn RpcClient>) -> RuntimeEpochWaiter {
+    RuntimeEpochWaiter {
+        future: state(&client).epoch(client),
+    }
+}
+
 /// Cache one successful epoch per live RPC client; concurrent callers share the request.
 pub async fn runtime_epoch(client: Arc<dyn RpcClient>) -> IvyResult<JsString> {
-    state(&client).epoch(client).await
+    start_runtime_epoch(client).get().await
 }
 pub async fn new_operation_id(
     client: Arc<dyn RpcClient>,
