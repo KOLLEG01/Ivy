@@ -1,6 +1,8 @@
 use ivy_agent_manager::local_state::{Limits, LocalAgentState, Pin};
 #[path = "agent-native-journal.rs"]
 mod native_journal_cases;
+#[path = "agent-native-operations.rs"]
+mod native_operations_cases;
 
 fn normalized(
     mut saved: ivy_agent_manager::local_state::SavedState,
