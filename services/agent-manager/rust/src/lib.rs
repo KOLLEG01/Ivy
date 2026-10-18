@@ -3,6 +3,8 @@ pub mod environment;
 pub mod environment_text;
 pub mod instructions;
 pub mod instructions_files;
+pub mod instructions_manager;
+pub mod instructions_source;
 pub mod instructions_writer;
 pub mod interactions;
 pub mod local_state;

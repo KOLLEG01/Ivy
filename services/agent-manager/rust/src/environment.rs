@@ -1,4 +1,4 @@
-//! Managed MCP/skills document retrieval and inheritance. No local output writes.
+//! Managed environment document retrieval and inheritance. No local output writes.
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     agent_schema::validate_agent,
@@ -8,23 +8,27 @@ use ivy_sdk::rpc::{RequestOptions, RpcClient};
 
 pub const MCP_CONTRACT: &str = "agent/mcp-configuration";
 pub const SKILLS_CONTRACT: &str = "agent/skills";
+pub const INSTRUCTIONS_CONTRACT: &str = "agent/instructions";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EnvironmentKind {
     Mcp,
     Skills,
+    Instructions,
 }
 impl EnvironmentKind {
     fn contract(self) -> &'static str {
         match self {
             Self::Mcp => MCP_CONTRACT,
             Self::Skills => SKILLS_CONTRACT,
+            Self::Instructions => INSTRUCTIONS_CONTRACT,
         }
     }
     fn schema(self) -> &'static str {
         match self {
             Self::Mcp => "McpDocument",
             Self::Skills => "SkillsDocument",
+            Self::Instructions => "InstructionsDocument",
         }
     }
 }
@@ -33,6 +37,7 @@ pub fn environment_name(kind: EnvironmentKind, host_id: Option<&JsString>) -> St
     let base = match kind {
         EnvironmentKind::Mcp => "ivy-agent-mcp",
         EnvironmentKind::Skills => "ivy-agent-skills",
+        EnvironmentKind::Instructions => "ivy-agent-instructions",
     };
     match host_id {
         None => base.into(),
@@ -70,7 +75,12 @@ pub async fn read_environment_document(
         Err(error) if error.code == "not_found" => return Ok(None),
         Err(error) => return Err(error),
     };
-    if object == IvyJson::Null || object.get("effectivelyArchived") == Some(&IvyJson::Bool(true)) {
+    let instructions = kind == EnvironmentKind::Instructions;
+    if object == IvyJson::Null
+        || object.get("effectivelyArchived") == Some(&IvyJson::Bool(true))
+        || instructions
+            && (!js_truthy(&object) || object.get("effectivelyArchived").is_some_and(js_truthy))
+    {
         return Ok(None);
     }
     let object_id = field(&object, "id")?;
@@ -94,7 +104,11 @@ pub async fn read_environment_document(
     {
         return Err(IvyError::new(
             "contract_mismatch",
-            "Managed environment path contains a different document contract.",
+            if instructions {
+                "Instructions path contains a different document contract."
+            } else {
+                "Managed environment path contains a different document contract."
+            },
         ));
     }
     let document = field(content, "value")?;
@@ -106,7 +120,11 @@ pub async fn read_environment_document(
     if document.get("hostId") != Some(&scope) {
         return Err(IvyError::new(
             "target_conflict",
-            "Managed environment document belongs to another scope.",
+            if instructions {
+                "Instruction document belongs to another scope."
+            } else {
+                "Managed environment document belongs to another scope."
+            },
         ));
     }
     Ok(Some(IvyJson::object([
@@ -115,6 +133,15 @@ pub async fn read_environment_document(
         ("revision", revision.clone()),
         ("contentHash", field(revision_info, "contentHash")?.clone()),
     ])))
+}
+
+fn js_truthy(value: &IvyJson) -> bool {
+    match value {
+        IvyJson::Null | IvyJson::Bool(false) => false,
+        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
+        IvyJson::String(value) => !value.0.is_empty(),
+        _ => true,
+    }
 }
 
 pub struct SelectedEnvironment {
