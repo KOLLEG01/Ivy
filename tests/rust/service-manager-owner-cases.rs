@@ -295,29 +295,6 @@ fn manager_config(root: &Fixture, host: &IvyJson) -> ivy_host_runtime::config::I
     ]))
     .unwrap()
 }
-fn mutation_fixtures()
--> std::collections::HashMap<ivy_contracts::JsString, ivy_sdk::service::ToolHandler> {
-    [
-        "host.deploy",
-        "host.rollback",
-        "host.restart",
-        "host.enable",
-        "host.disable",
-    ]
-    .into_iter()
-    .map(|name| {
-        let handler: ivy_sdk::service::ToolHandler = Arc::new(|_, _| {
-            Box::pin(async {
-                Err(ivy_contracts::IvyError::new(
-                    "fixture_unavailable",
-                    "Mutation fixture must not be invoked.",
-                ))
-            })
-        });
-        (name.into(), handler)
-    })
-    .collect()
-}
 #[tokio::test]
 async fn manager_keeps_local_child_alive_offline_and_finishes_with_unready_health() {
     use ivy_service_manager::manager::Manager;
@@ -349,16 +326,9 @@ async fn manager_keeps_local_child_alive_offline_and_finishes_with_unready_healt
     accepted.insert("instances", IvyJson::Array(instances));
     let journal = HostJournal::open(accepted.clone()).await.unwrap();
     target(&root, &journal, "offline-child").await;
-    let manager = Manager::start(
-        config,
-        accepted,
-        false,
-        node(),
-        bootstrap(&root),
-        mutation_fixtures(),
-    )
-    .await
-    .unwrap();
+    let manager = Manager::start(config, accepted, false, node(), bootstrap(&root))
+        .await
+        .unwrap();
     observation(&journal, "ready").await;
     assert!(!manager.service.ready());
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -389,17 +359,10 @@ async fn manager_maintenance_refusal_precedes_journal_or_owner_effects() {
     let root = Fixture::new();
     let accepted = host(&root);
     let config = manager_config(&root, &accepted);
-    let error = Manager::start(
-        config,
-        accepted,
-        true,
-        node(),
-        root.0.clone(),
-        mutation_fixtures(),
-    )
-    .await
-    .err()
-    .unwrap();
+    let error = Manager::start(config, accepted, true, node(), root.0.clone())
+        .await
+        .err()
+        .unwrap();
     assert_eq!(error.code, "maintenance_active");
     assert!(!root.0.join("state").exists());
 }

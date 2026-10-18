@@ -54,7 +54,6 @@ impl Shutdown {
     }
 
     pub async fn close(&self) -> IvyResult<()> {
-        let mut receiver = self.result.subscribe();
         {
             let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             if let Some((stop_admission, cleanup)) = pending.take() {
@@ -65,6 +64,12 @@ impl Shutdown {
                 });
             }
         }
+        self.completion().await
+    }
+
+    /// Wait for control-file or signal-initiated cleanup without starting it.
+    pub async fn completion(&self) -> IvyResult<()> {
+        let mut receiver = self.result.subscribe();
         loop {
             if let Some(result) = receiver.borrow_and_update().clone() {
                 return (*result).clone();

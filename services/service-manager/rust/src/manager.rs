@@ -1,25 +1,46 @@
 use crate::{
+    configuration::Configuration,
     connection::{self, Admission},
     health::HealthReporter,
     shutdown::{Cleanup, Shutdown},
     topology::Owners,
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, core_schema::validate_host};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, core_schema::validate_host};
 use ivy_host_runtime::{
-    config::InstanceConfig, health::HealthFile, journal::HostJournal, node_runtime::NodeRuntime,
+    config::{self, InstanceConfig},
+    health::HealthFile,
+    host_config::host_config,
+    journal::HostJournal,
+    node_path::to_native,
+    node_runtime::NodeRuntime,
+    runtime_maintenance::runtime_reset_active,
 };
-use ivy_sdk::service::{ServiceClient, ToolHandler};
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use ivy_sdk::service::ServiceClient;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, watch};
 
 pub struct Manager {
     pub service: ServiceClient,
-    journal: HostJournal,
-    owners: Arc<Mutex<Owners>>,
-    admission: Admission,
+    configuration: Arc<Configuration>,
     shutdown: Arc<Shutdown>,
 }
 impl Manager {
+    pub async fn from_path(path: PathBuf, node: NodeRuntime) -> IvyResult<Self> {
+        let config = config::instance_config(path, &node).await?;
+        connection::validate_config(&config)?;
+        let host_path = to_native(
+            config
+                .json()
+                .required("settings")?
+                .required("hostConfigPath")?
+                .as_js_string()
+                .ok_or_else(IvyError::internal)?,
+        );
+        let accepted = host_config(host_path).await?;
+        let reset_active = runtime_reset_active(&accepted).await?;
+        let bootstrap_root = config.artifact_root().to_path_buf();
+        Self::start(config, accepted, reset_active, node, bootstrap_root).await
+    }
     /// The host loader supplies its normalized accepted HostConfig and actual
     /// runtime-reset observation. InstanceConfig comes from the common loader.
     /// Requiring these inputs keeps host path/default/reset policy in one place.
@@ -29,7 +50,6 @@ impl Manager {
         reset_active: bool,
         node: NodeRuntime,
         bootstrap_root: PathBuf,
-        mutations: HashMap<JsString, ToolHandler>,
     ) -> IvyResult<Self> {
         connection::validate_config(&config)?;
         validate_host("HostConfig", &accepted)?;
@@ -60,12 +80,30 @@ impl Manager {
         let health_file = Arc::new(HealthFile::new(config.clone()));
         let health = HealthReporter::new(health_file.clone());
         let admission = Admission::default();
+        let owners = Arc::new(Mutex::new(Owners::new(bootstrap_root.clone(), node)));
+        let configuration = Arc::new(Configuration {
+            path: to_native(
+                source
+                    .required("settings")?
+                    .required("hostConfigPath")?
+                    .as_js_string()
+                    .ok_or_else(IvyError::internal)?,
+            ),
+            host_id: source.required("hostId")?.clone(),
+            journal: journal.clone(),
+            owners: owners.clone(),
+            admission: admission.clone(),
+            source: Mutex::new(None),
+        });
+        let reload = configuration.callback(true);
+        let refresh = configuration.callback(false);
         let options = connection::options(
             &config,
             journal.clone(),
             health.clone(),
-            mutations,
+            crate::handlers::mutations(reload.clone(), bootstrap_root),
             admission.clone(),
+            refresh.clone(),
         );
         let service = match options.and_then(ServiceClient::new) {
             Ok(value) => value,
@@ -74,7 +112,6 @@ impl Manager {
                 return Err(error);
             }
         };
-        let owners = Arc::new(Mutex::new(Owners::new(bootstrap_root, node)));
         let (control, mut control_signal) = watch::channel(false);
         let cleanup = Cleanup {
             owners: vec![Box::pin({
@@ -132,11 +169,19 @@ impl Manager {
         tokio::spawn({
             let shutdown = shutdown.clone();
             async move {
+                let mut next_refresh = tokio::time::Instant::now() + Duration::from_secs(2);
                 loop {
                     tokio::select! { _ = control_signal.changed() => break, _ = tokio::time::sleep(Duration::from_millis(500)) => () }
                     if health_file.control().await.ok().flatten().is_some() {
                         let _ = shutdown.close().await;
                         break;
+                    }
+                    if tokio::time::Instant::now() >= next_refresh {
+                        // Offline local ownership must follow accepted file edits
+                        // too. Failed input keeps the prior owners and is retried;
+                        // connected report callbacks surface the same error.
+                        let _ = refresh().await;
+                        next_refresh = tokio::time::Instant::now() + Duration::from_secs(2);
                     }
                 }
             }
@@ -144,25 +189,19 @@ impl Manager {
         service.start();
         Ok(Self {
             service,
-            journal,
-            owners,
-            admission,
+            configuration,
             shutdown,
         })
     }
     /// Called after authoritative local configuration adoption; hints never call
     /// this directly. Unchanged owners retain their frozen legacy fallback.
     pub async fn reconcile_accepted(&self, accepted: IvyJson) -> IvyResult<()> {
-        self.admission.check()?;
-        self.journal.use_configuration(accepted.clone()).await?;
-        self.admission.check()?;
-        self.owners
-            .lock()
-            .await
-            .reconcile(if cfg!(windows) { "win32" } else { "linux" }, &accepted)
-            .await
+        self.configuration.adopt(accepted).await
     }
     pub async fn close(&self) -> IvyResult<()> {
         self.shutdown.close().await
+    }
+    pub async fn completion(&self) -> IvyResult<()> {
+        self.shutdown.completion().await
     }
 }

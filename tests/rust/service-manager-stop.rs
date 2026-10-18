@@ -175,3 +175,73 @@ async fn stalled_control_write_cannot_extend_the_stop_deadline() {
     .unwrap();
     assert_ne!(result.error_code.as_deref(), Some("outcome_unknown"));
 }
+
+#[test]
+fn native_executable_interoperates_with_unchanged_hive_and_public_sdk() {
+    let root = Fixture::new();
+    let binary = std::path::PathBuf::from(env!("CARGO_BIN_EXE_ivy-service-manager"));
+    let helper = binary.parent().unwrap().join(if cfg!(windows) {
+        "ivy-job.exe"
+    } else {
+        "ivy-job"
+    });
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "--import",
+            "./tests/fixtures/service-manager-native-loader.mjs",
+            "tests/fixtures/service-manager-native-hive.mjs",
+        ])
+        .arg(binary)
+        .arg(&root.0)
+        .arg(helper)
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = parse(
+        std::str::from_utf8(&output.stdout).unwrap().trim(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    assert_eq!(result.get("ok"), Some(&IvyJson::Bool(true)));
+    assert_eq!(
+        result
+            .required("results")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+}
+
+#[test]
+fn invalid_explicit_configuration_never_falls_back_to_environment() {
+    let root = Fixture::new();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ivy-service-manager"))
+        .args(["--config", "relative.json"])
+        .env("IVY_INSTANCE_CONFIG", root.0.join("private-config.json"))
+        .env_remove("IVY_NODE_EXECUTABLE")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = parse(
+        std::str::from_utf8(&output.stderr).unwrap().trim(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    assert_eq!(error.get("code"), Some(&"invalid_arguments".into()));
+    assert_eq!(
+        error.get("message"),
+        Some(&"ServiceManager failed to start.".into())
+    );
+    assert_eq!(error.as_object().unwrap().len(), 2);
+}

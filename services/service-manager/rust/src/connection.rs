@@ -1,4 +1,4 @@
-use crate::{health::HealthReporter, reports::Reports};
+use crate::{configuration::Reload, health::HealthReporter, reports::Reports};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, core_schema::validate_host};
 use ivy_host_runtime::{
     config::InstanceConfig,
@@ -69,6 +69,7 @@ pub fn options(
     health: HealthReporter,
     mut mutations: HashMap<JsString, ToolHandler>,
     admission: Admission,
+    reload: Reload,
 ) -> IvyResult<ServiceOptions> {
     validate_config(config)?;
     let value = config.json();
@@ -113,13 +114,16 @@ pub fn options(
         let host_id = host_id.clone();
         let reports = reports.clone();
         let admission = admission.clone();
+        let reload = reload.clone();
         Arc::new(move |connection: ivy_sdk::service::ServiceConnection| {
             let journal = journal.clone();
             let host_id = host_id.clone();
             let reports = reports.clone();
             let admission = admission.clone();
+            let reload = reload.clone();
             Box::pin(async move {
                 admission.check()?;
+                reload().await?;
                 {
                     let mut reports = reports.lock().await;
                     reports.reconcile_from(&connection, host_id.clone()).await?;
@@ -184,8 +188,10 @@ pub fn options(
         let health = readiness_health.clone();
         let admission = admission.clone();
         let service_node_id = service_node_id.clone();
+        let reload = reload.clone();
         Box::pin(async move {
             admission.check()?;
+            reload().await?;
             let executor = reports
                 .lock()
                 .await
