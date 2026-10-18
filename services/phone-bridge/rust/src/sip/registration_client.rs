@@ -46,6 +46,7 @@ impl std::fmt::Display for RegistrationError {
 impl std::error::Error for RegistrationError {}
 
 // No Debug: printable configuration must never include protected credentials.
+#[derive(Clone)]
 pub struct SipRegistrationSettings {
     account: Uri,
     registrar: SipAddr,
@@ -57,6 +58,9 @@ pub struct SipRegistrationSettings {
     protocol: Transport,
 }
 impl SipRegistrationSettings {
+    pub(super) fn protocol(&self) -> Transport {
+        self.protocol
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         account_uri: &str,
@@ -162,7 +166,25 @@ pub struct SipRegistration {
     driver: Option<JoinHandle<()>>,
     closed: bool,
 }
+#[derive(Clone)]
+pub struct SipRegistrationObserver(Arc<Shared>);
+impl SipRegistrationObserver {
+    pub fn observation(&self) -> RegistrationObservation {
+        self.0.state.lock().unwrap().lease.observation(self.0.now())
+    }
+    pub fn matches_peer(&self, peer: RegistrationPeer) -> bool {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .lease
+            .matches_peer(self.0.now(), peer)
+    }
+}
 impl SipRegistration {
+    pub fn observer(&self) -> SipRegistrationObserver {
+        SipRegistrationObserver(self.shared.clone())
+    }
     /// Native configure/reconnect owns admission of exactly one registration.
     /// A proxy is a separately validated next-hop authority, never the AOR.
     pub fn start(

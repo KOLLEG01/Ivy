@@ -111,6 +111,15 @@ impl SipBoundFlow {
             self.proxy.clone(),
         )
     }
+    pub fn prepare_invite(&self, request: Request) -> Result<PreparedInvite, SipIoError> {
+        if !live(&self.connection) {
+            return Err(SipIoError::Stopped);
+        }
+        let mut prepared =
+            PreparedInvite::new(request, self.destination.clone(), self.proxy.clone())?;
+        prepared.bind_connection(self.endpoint.clone(), self.connection.clone());
+        Ok(prepared)
+    }
     pub(crate) fn endpoint(&self) -> &Arc<SipEndpoint> {
         &self.endpoint
     }

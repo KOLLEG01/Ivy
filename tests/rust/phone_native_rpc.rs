@@ -7,6 +7,8 @@ use std::sync::Arc;
 mod registration;
 #[path = "phone_register.rs"]
 mod register;
+#[path = "phone_sip_host.rs"]
+mod sip_host;
 #[path = "phone_sip.rs"]
 mod sip;
 #[path = "phone_sip_stack.rs"]

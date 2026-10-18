@@ -146,7 +146,7 @@ fn valid_property_names(value: &IvyJson) -> bool {
 
 /// Guid.TryParseExact("D") accepts surrounding whitespace and either hex case.
 /// Keep the original spelling: epoch/operation comparisons are ordinal strings.
-fn guid_d(value: &str) -> bool {
+pub(crate) fn guid_d(value: &str) -> bool {
     let bytes = value.trim().as_bytes();
     bytes.len() == 36
         && bytes.iter().enumerate().all(|(index, byte)| {
