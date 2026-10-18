@@ -681,6 +681,7 @@ version = "0.2.40"
 dependencies = [
  "chrono",
  "futures-util",
+ "iana-time-zone",
  "ivy-contracts",
  "jiff-tzdb",
  "reqwest",
