@@ -126,6 +126,7 @@ export const privateRepo = false;
 export const rustTests = {
   'tests/rust/contracts.rs': { package: 'ivy-contracts', test: 'contracts' },
   'tests/rust/json-depth.rs': { package: 'ivy-contracts', test: 'json-depth' },
+  'tests/rust/schema.rs': { package: 'ivy-contracts', test: 'schema' },
   'tests/rust/builtin_schema.rs': { package: 'ivy-contracts', test: 'builtin_schema' },
   'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
   'tests/rust/sdk.rs': { package: 'ivy-sdk', test: 'sdk' },
