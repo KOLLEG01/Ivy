@@ -429,7 +429,7 @@ async fn recovery_uses_rust_saved_receipt_and_refuses_actual_retained_snapshot_l
     let docs = records(base, &row);
     let database = Connection::open_in_memory().unwrap();
     seed(&database, &docs, base, &row);
-    let store = JournalStore {
+    let mut store = JournalStore {
         journal: LocalJournal {
             connection: &database,
             root_object_id: Some("root".into()),
