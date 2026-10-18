@@ -1,10 +1,10 @@
 // HostExecutor owns the module index; exercise this owned module until exported.
 pub use ivy_host_runtime::process;
-#[path = "../../packages/host-runtime/rust/src/runtime_owner/stop.rs"]
-mod stop;
 #[cfg(windows)]
 #[path = "service-manager-owner-cases.rs"]
 mod owner_cases;
+#[path = "../../packages/host-runtime/rust/src/runtime_owner/stop.rs"]
+mod stop;
 
 use ivy_contracts::{IvyError, json::parse, limits::MANAGEMENT_FRAME_BYTES};
 use process::{Command, LaunchContext, OwnedProcess};
@@ -80,7 +80,11 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let path = self.0.canonicalize().unwrap();
         assert!(path.starts_with(std::env::temp_dir().canonicalize().unwrap()));
-        std::fs::remove_dir_all(path).unwrap();
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            if !std::thread::panicking() {
+                panic!("Fixture cleanup failed: {error}");
+            }
+        }
     }
 }
 

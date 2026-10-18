@@ -13,7 +13,7 @@ use crate::{
     node_runtime::NodeRuntime,
     process::{self, Command, LaunchContext, OwnedProcess, ProcessResult},
 };
-use ivy_contracts::{JsString, Outcome, core_schema::validate_host, json};
+use ivy_contracts::{JsString, core_schema::validate_host, json};
 use std::{
     collections::BTreeMap,
     future::Future,

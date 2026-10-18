@@ -97,9 +97,11 @@ async fn owner(root: &Fixture, host: &IvyJson) -> RuntimeOwner {
     .unwrap()
 }
 async fn observation(journal: &HostJournal, expected: &str) -> IvyJson {
+    let last = std::sync::Mutex::new(IvyJson::Null);
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let values = journal.observations().await.unwrap();
+            *last.lock().unwrap() = values.clone();
             if let Some(value) = values
                 .get("fixture")
                 .filter(|v| v.get("state") == Some(&IvyJson::from(expected)))
@@ -110,7 +112,12 @@ async fn observation(journal: &HostJournal, expected: &str) -> IvyJson {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("No {expected} observation"))
+    .unwrap_or_else(|_| {
+        panic!(
+            "No {expected} observation; last={}",
+            encoded(&last.into_inner().unwrap())
+        )
+    })
 }
 async fn target(root: &Fixture, journal: &HostJournal, revision: &str) -> IvyJson {
     let artifact = root.0.join("artifacts/release");
@@ -249,6 +256,7 @@ fn owner_child_fixture() {
             if control.get("launchId") == Some(&IvyJson::from(launch.clone()))
                 && control.get("bootId") == Some(&IvyJson::from("child-boot"))
             {
+                std::thread::sleep(Duration::from_millis(200));
                 std::fs::write(data.join("cooperatively-stopped"), launch).unwrap();
                 return;
             }
@@ -355,9 +363,17 @@ async fn invalid_replacement_does_not_drain_the_ready_child() {
     let owner = owner(&root, &host).await;
     owner.start().unwrap();
     observation(&journal, "ready").await;
-    let target = target(&root, &journal, "launch-2").await;
-    let config_path = PathBuf::from(target.required("configPath").unwrap().as_str().unwrap());
-    std::fs::remove_file(config_path).unwrap();
+    let mut target = journal.target("fixture").await.unwrap().unwrap();
+    target.insert("revision", "launch-2".into());
+    target.insert(
+        "configPath",
+        root.0
+            .join("state/missing.json")
+            .to_string_lossy()
+            .to_string()
+            .into(),
+    );
+    journal.restore_target(target).await.unwrap();
     observation(&journal, "failed").await;
     assert!(
         !root
