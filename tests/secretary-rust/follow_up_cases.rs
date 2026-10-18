@@ -50,10 +50,14 @@ impl RpcClient for FollowUpClient {
         })
     }
 }
-struct FixedClock(i64);
+struct FixedClock {
+    time: i64,
+    step: i64,
+    calls: AtomicUsize,
+}
 impl Clock for FixedClock {
     fn utc_millis(&self) -> i64 {
-        self.0
+        self.time + self.calls.fetch_add(1, Ordering::Relaxed) as i64 * self.step
     }
     fn monotonic(&self) -> std::time::Instant {
         std::time::Instant::now()
@@ -97,7 +101,7 @@ async fn original_follow_up_contexts_calls_recovery_and_authorization() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 105);
+    assert_eq!(rows.len(), 106);
     for row in rows {
         let input = row.required("input").unwrap();
         let label = sql_text(input.required("label").unwrap());
@@ -213,8 +217,16 @@ async fn original_follow_up_contexts_calls_recovery_and_authorization() {
             cancellation,
         };
         let tools = Arc::new(ToolClients::new(client.clone()));
-        let clock = FixedClock(input.required("time").unwrap().as_f64().unwrap() as i64);
-        let wall = FixedClock(input.required("wall").unwrap().as_f64().unwrap() as i64);
+        let clock = FixedClock {
+            time: input.required("time").unwrap().as_f64().unwrap() as i64,
+            step: input.required("clockStep").unwrap().as_f64().unwrap() as i64,
+            calls: AtomicUsize::new(0),
+        };
+        let wall = FixedClock {
+            time: input.required("wall").unwrap().as_f64().unwrap() as i64,
+            step: 0,
+            calls: AtomicUsize::new(0),
+        };
         let issues = RefCell::new(RecoveryScan {
             issues: input
                 .required("issues")
@@ -349,6 +361,10 @@ async fn original_follow_up_contexts_calls_recovery_and_authorization() {
             ("cleanup", IvyJson::Array(cleanup)),
             ("issues", IvyJson::Array(diagnostics)),
             ("cursor", worker.cursor().into()),
+            (
+                "clockCalls",
+                IvyJson::Number(clock.calls.load(Ordering::Relaxed) as f64),
+            ),
         ]);
         assert!(
             client.scripted.steps.lock().unwrap().is_empty(),

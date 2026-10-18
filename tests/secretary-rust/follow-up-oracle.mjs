@@ -90,7 +90,8 @@ async function add(label,c={}){
  for(const d of documents){const value=canonical(d.value);store.db.prepare('INSERT INTO technical_documents VALUES(?,?,?,?,?)').run(d.id,d.key,d.name,1,value);store.db.prepare('INSERT INTO technical_revisions VALUES(?,?,?)').run(d.id,1,value);}
  if(c.expiredBefore)store.db.prepare('INSERT INTO journal_state VALUES(?,?)').run('expiredBefore',String(c.expiredBefore));
  const issues=new Map(c.issues??[]);
- const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:config,owner:{serviceNodeId:'fixture.secretary'},signal:control.signal,now:()=>new Date(c.time??time),epoch:Promise.resolve('fixture-epoch'),recoveryIssues:issues});
+ let clockCalls=0;
+ const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:config,owner:{serviceNodeId:'fixture.secretary'},signal:control.signal,now:()=>new Date((c.time??time)+(clockCalls++)*(c.clockStep??0)),epoch:Promise.resolve('fixture-epoch'),recoveryIssues:issues});
  const worker=new SecretaryFollowUp(engine),actions=c.actions??[{method:'run'},{method:c.legacy?'importAndAdvance':'advance'},{method:'read'}];
  const results=[];
  for(const action of actions){
@@ -107,11 +108,12 @@ async function add(label,c={}){
  }
  const remaining=store.db.prepare('SELECT key,name,current_revision,value_json FROM technical_documents ORDER BY key,name').all().map(r=>({key:r.key,name:r.name,revision:r.current_revision,value:JSON.parse(r.value_json)}));
  const cleanup=store.db.prepare('SELECT d.key,d.name FROM technical_cleanup c JOIN technical_documents d ON d.id=c.root_id ORDER BY d.key,d.name').all();
- store.close();rows.push({input:{label,settings:config,caller,request,documents,locals,actions,steps,time:c.time??time,wall,expiredBefore:c.expiredBefore??0,cancel:c.cancel??false,cancelAfter:c.cancelAfter??null,concurrentAt:c.concurrentAt??null,issues:c.issues??[]},expected:{results,trace,remaining,cleanup,issues:[...issues],cursor:worker.cursor}});
+ store.close();rows.push({input:{label,settings:config,caller,request,documents,locals,actions,steps,time:c.time??time,clockStep:c.clockStep??0,wall,expiredBefore:c.expiredBefore??0,cancel:c.cancel??false,cancelAfter:c.cancelAfter??null,concurrentAt:c.concurrentAt??null,issues:c.issues??[]},expected:{results,trace,remaining,cleanup,issues:[...issues],cursor:worker.cursor,clockCalls}});
 }
 await add('retained-context');
 await add('new-item-context',{newContext:true});
 await add('new-execution-context',{newContext:true,contractKey:'secretary/execution'});
+await add('context-uses-one-retention-clock',{newContext:true,clockStep:37});
 await add('prepared-context',{preparedContext:true});
 await add('explicit-legacy-import',{legacy:true});
 await add('named-context',{namedContext:true});

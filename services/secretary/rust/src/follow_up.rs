@@ -11,6 +11,7 @@ use ivy_contracts::{
     operation::derive_operation_id_js,
 };
 use ivy_sdk::{
+    clock::date_to_iso,
     main_chat::MainChatFailure,
     native_evidence::NativeOwnerIdentity,
     native_operation::NativeOperationCall,
@@ -44,6 +45,13 @@ fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
         .as_js_string()
         .cloned()
         .ok_or_else(IvyError::internal)
+}
+fn native_id(value: &IvyJson) -> IvyResult<JsString> {
+    if value.as_object().is_none() || field(value, "id").is_null() {
+        Ok(JsString::default())
+    } else {
+        try_js_string(field(value, "id"))
+    }
 }
 fn active(value: &IvyJson) -> bool {
     !["succeeded", "failed"]
@@ -308,12 +316,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 )?;
                 let item = if field(&source, "contractKey") == &IvyJson::from("secretary/execution")
                 {
-                    store
-                        .read(
-                            Record::Execution,
-                            id.as_js_string().ok_or_else(IvyError::internal)?,
-                        )
-                        .await?
+                    store.read(Record::Execution, id).await?
                 } else {
                     evidence.item(id).await?
                 };
@@ -380,6 +383,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                     params,
                 )
                 .await?;
+                let retained_at = engine.clock.utc_millis();
                 let mut value = IvyJson::object([
                     ("schemaVersion", IvyJson::Number(1.0)),
                     ("itemId", id.clone()),
@@ -392,10 +396,15 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                         "itemSnapshot",
                         canonical(item.required("value")?, 262144)?.into(),
                     ),
-                    ("retainedAt", IvyJson::String(engine.now()?)),
+                    (
+                        "retainedAt",
+                        IvyJson::String(
+                            date_to_iso(retained_at as f64).map_err(|_| IvyError::internal())?,
+                        ),
+                    ),
                     (
                         "expiresAt",
-                        IvyJson::Number((engine.clock.utc_millis() + RETENTION_MS) as f64),
+                        IvyJson::Number((retained_at + RETENTION_MS) as f64),
                     ),
                 ]);
                 for key in ["model", "effort", "threadCwd"] {
@@ -447,13 +456,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             }
         };
         let thread = field(field(field(&started, "reply"), "result"), "thread");
-        let thread_id = try_js_string(
-            if thread.as_object().is_some() && !field(thread, "id").is_null() {
-                field(thread, "id")
-            } else {
-                &IvyJson::from("")
-            },
-        )?;
+        let thread_id = native_id(thread)?;
         need(
             !thread_id.0.is_empty(),
             "secretary_follow_up_thread_missing",
@@ -773,13 +776,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 .completed_call(&owner, &retained_call(calls.required("turn")?)?)
                 .await?;
             let row = field(field(field(&turn, "reply"), "result"), "turn");
-            let turn_id = try_js_string(
-                if row.as_object().is_some() && !field(row, "id").is_null() {
-                    field(row, "id")
-                } else {
-                    &IvyJson::from("")
-                },
-            )?;
+            let turn_id = native_id(row)?;
             need(
                 !turn_id.0.is_empty(),
                 "secretary_follow_up_turn_missing",
