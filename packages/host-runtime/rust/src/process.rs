@@ -390,7 +390,7 @@ pub async fn spawn(
     // closes any stdin still held by Child. Retain the caller's pipe first.
     let stdin = child.stdin.take();
     #[cfg(windows)]
-    let launch_proof = if let Some(listener) = launch_listener {
+    let mut launch_proof = if let Some(listener) = launch_listener {
         match tokio::time::timeout(Duration::from_secs(5), listener.accept(&mut child)).await {
             Ok(Ok(proof)) => Some(proof),
             _ => {
@@ -470,7 +470,7 @@ pub async fn spawn(
         #[cfg(unix)]
         signal_tree(pid, true);
         #[cfg(windows)]
-        if let Some(proof) = &launch_proof {
+        if let Some(proof) = &mut launch_proof {
             if proof.retire(retirement_deadline).await.is_err() {
                 unknown = true;
             }
