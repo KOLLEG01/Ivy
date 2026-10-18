@@ -66,6 +66,8 @@ for (const tool of ['invoke', 'interact', 'prevent']) {
   add(tool + '-reserved-principal', [manage(tool, request(), {context: context('one', nativeClockPrincipal)}), drain, snapshot]);
   add(tool + '-closing-invalid-binding-order', [closing, manage(tool, request('one', 'account/logout', null), {context: context('other')}), snapshot]);
   add(tool + '-epoch-mismatch', [c('replaceEpoch'), manage(tool, request()), drain, snapshot]);
+  for (const method of [null, 7, {}]) add(tool + '-invalid-method-type-' + cases.length,
+    [manage(tool, {...request(), method}), snapshot]);
 }
 add('prevent-returns-original-unexecuted-receipt', [manage('prevent', request()), drain, manage('invoke', request()), manage('operation', {operationId: 'one'}), snapshot]);
 add('prevent-without-outer-operation', [manage('prevent', request(), {context: {callerPrincipalId: 'caller'}}), drain, snapshot]);
@@ -88,6 +90,8 @@ add('read-checks-owner-again-after-reply', [start('read', {nativeVersion: catalo
 add('read-refuses-mutation-before-version', [manage('read', {nativeVersion: 'wrong', method: 'turn/start', params: {}}), snapshot]);
 add('read-version-mismatch', [manage('read', {nativeVersion: 'wrong', method: 'thread/read', params: {threadId: 'thread'}}), snapshot]);
 add('read-closed-before-method-check', [closing, manage('read', {nativeVersion: 'wrong', method: 'turn/start', params: {}}), snapshot]);
+for (const method of [undefined, null, 7, {}]) add('read-invalid-method-type-' + cases.length,
+  [manage('read', {nativeVersion: catalog.version, method, params: {}}), snapshot]);
 add('operation-and-interaction-absence', [manage('operation', {operationId: 'absent'}), manage('interaction', {operationId: 'absent'}), snapshot]);
 add('operation-reserved-principal', [manage('operation', {operationId: 'absent'}, {context: context('x', nativeClockPrincipal)}), snapshot]);
 add('input-definitions-and-typed-answer', [definition(0), input(0), input('0'), definition(0), definition('0'), manage('inputs'),

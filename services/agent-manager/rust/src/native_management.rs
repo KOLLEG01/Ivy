@@ -244,13 +244,12 @@ impl NativeManagement {
                     "native_version_mismatch",
                     "Prevention requires the exact installed native version.",
                 )?;
-                let method = args
-                    .required("method")?
-                    .as_js_string()
-                    .ok_or_else(IvyError::internal)?;
+                let method = args.get("method").and_then(IvyJson::as_js_string);
                 require(
-                    state.definitions.contains_key(method)
-                        && state.definitions.get(method) == args.get("expectedDefinitionHash"),
+                    method.is_some_and(|method| {
+                        state.definitions.contains_key(method)
+                            && state.definitions.get(method) == args.get("expectedDefinitionHash")
+                    }),
                     "native_definition_mismatch",
                     "Prevention requires the installed native method definition.",
                 )?;
@@ -264,7 +263,7 @@ impl NativeManagement {
                     .operations
                     .run(
                         identity,
-                        method.clone(),
+                        method.unwrap().clone(),
                         args.required("params")?.clone(),
                         || async { Err(IvyError::internal()) },
                         true,
@@ -393,17 +392,15 @@ impl NativeManagement {
     async fn read(&self, args: IvyJson, context: &InvocationContext) -> IvyResult<IvyJson> {
         let state = &self.0;
         state.dispatch.available()?;
-        let method = args
-            .required("method")?
-            .as_js_string()
-            .ok_or_else(IvyError::internal)?;
+        let method = args.get("method").and_then(IvyJson::as_js_string);
         require(
             ["thread/read", "thread/turns/list", "thread/items/list"]
                 .iter()
-                .any(|name| method == &JsString::from(*name)),
+                .any(|name| method == Some(&JsString::from(*name))),
             "invalid_arguments",
             "Read-only access cannot dispatch native mutations.",
         )?;
+        let method = method.unwrap();
         require(
             args.get("nativeVersion") == state.owner.catalog.get("version"),
             "native_version_mismatch",
