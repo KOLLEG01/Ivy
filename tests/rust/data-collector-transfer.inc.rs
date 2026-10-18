@@ -123,6 +123,30 @@ async fn assignment(client: &Arc<dyn RpcClient>, job: &IvyJson) -> IvyJson {
         .unwrap()
         .clone()
 }
+async fn published(client: &Arc<dyn RpcClient>, node: &str, operation: &ivy_contracts::JsString) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let value = invoke(
+                client,
+                node,
+                IvyJson::object([
+                    ("view", "operation".into()),
+                    ("operationId", IvyJson::String(operation.clone())),
+                ]),
+            )
+            .await
+            .unwrap();
+            let run = value.required("run").unwrap();
+            if run.get("status") == Some(&"succeeded".into()) {
+                break;
+            }
+            assert_ne!(run.get("status"), Some(&"failed".into()), "{run:?}");
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
 fn activation(job: &IvyJson, expected: &IvyJson, target: &str, enabled: bool) -> IvyJson {
     IvyJson::object([
         ("action", "activate".into()),
@@ -224,6 +248,9 @@ async fn scenario(original: bool) -> IvyJson {
         fixture
             .config
             .insert("hostId", id.split('.').next().unwrap().into());
+        let mut settings = fixture.config.required("settings").unwrap().clone();
+        settings.insert("rootName", format!("{id} results").into());
+        fixture.config.insert("settings", settings);
         atomic_json(fixture.root.join("config.json"), fixture.config.clone())
             .await
             .unwrap();
@@ -242,6 +269,19 @@ async fn scenario(original: bool) -> IvyJson {
     let target_health = ready(&target, &target_process, None).await;
     assert_ne!(source_health.get("pid"), target_health.get("pid"));
     assert_ne!(source_health.get("bootId"), target_health.get("bootId"));
+    let source_root = invoke(&client, SOURCE, IvyJson::object([("view", "tasks".into())]))
+        .await
+        .unwrap()
+        .required("rootObjectId")
+        .unwrap()
+        .clone();
+    let target_root = invoke(&client, TARGET, IvyJson::object([("view", "tasks".into())]))
+        .await
+        .unwrap()
+        .required("rootObjectId")
+        .unwrap()
+        .clone();
+    assert_ne!(source_root, target_root);
 
     let task = parse(r#"{"id":"transfer","name":"Transfer","enabled":false,"intervalSeconds":3600,"timeoutSeconds":10,"memoryMb":64,"dependencies":{},"config":{},"secretNames":[],"script":"import {appendFileSync} from 'node:fs'; export default async ({state,input,signal})=>{if(input?.hold){appendFileSync('marker',JSON.stringify({hold:true})+'\\n');await new Promise(resolve=>signal.addEventListener('abort',resolve,{once:true}));}const cursor=(state?.cursor??0)+1;appendFileSync('marker',JSON.stringify({cursor})+'\\n');return {data:{cursor,previous:state?.cursor??null},state:{cursor}};}"}"#, usize::MAX).unwrap();
     let saved = invoke(
@@ -449,7 +489,9 @@ async fn scenario(original: bool) -> IvyJson {
         "operationId",
         IvyJson::String(new_operation_id(client.clone(), None).await.unwrap()),
     );
-    let moved = invoke(&client, TARGET, movement.clone()).await.unwrap();
+    // Source holds its mutation queue while target preparation calls back into
+    // its read-only handoff route; this must not deadlock across providers.
+    let moved = invoke(&client, SOURCE, movement.clone()).await.unwrap();
     assert_eq!(moved.get("adoptionError"), Some(&IvyJson::Null));
     let moved_revision = moved
         .required("assignment")
@@ -457,9 +499,19 @@ async fn scenario(original: bool) -> IvyJson {
         .required("revision")
         .unwrap()
         .clone();
-    let adopted = snapshot(&target);
+    let adopted = wait_row(&target, "background target adoption", |r| {
+        r.get("definition")
+            .and_then(|d| d.get("assignmentRevision"))
+            == Some(&moved_revision)
+    })
+    .await;
     assert_eq!(adopted.get("state"), handoff.get("state"));
     assert_eq!(adopted.get("nextAt"), handoff.get("nextAt"));
+    assert_eq!(adopted.get("resultRootId"), Some(&source_root));
+    assert_eq!(
+        adopted.get("resultObjectId"),
+        snapshot(&source).get("resultObjectId")
+    );
     assert_eq!(
         metadata(
             &target,
@@ -487,7 +539,7 @@ async fn scenario(original: bool) -> IvyJson {
     let run = IvyJson::object([
         ("action", "run".into()),
         ("id", TASK.into()),
-        ("operationId", IvyJson::String(run_id)),
+        ("operationId", IvyJson::String(run_id.clone())),
     ]);
     invoke(&client, TARGET, run.clone()).await.unwrap();
     invoke(&client, TARGET, run).await.unwrap();
@@ -495,7 +547,26 @@ async fn scenario(original: bool) -> IvyJson {
         r.get("state") == Some(&IvyJson::object([("cursor", IvyJson::Number(2.0))]))
     })
     .await;
-    let replay = invoke(&client, TARGET, movement).await.unwrap();
+    published(&client, TARGET, &run_id).await;
+    let result = invoke(
+        &client,
+        TARGET,
+        IvyJson::object([("view", "result".into()), ("id", TASK.into())]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.required("object").unwrap().get("parentId"),
+        Some(&source_root)
+    );
+    assert_eq!(
+        content(&result).unwrap().get("data"),
+        Some(&IvyJson::object([
+            ("cursor", IvyJson::Number(2.0)),
+            ("previous", IvyJson::Number(1.0))
+        ]))
+    );
+    let replay = invoke(&client, SOURCE, movement).await.unwrap();
     assert!(json_equal(&replay, &moved));
     assert_eq!(snapshot(&target).get("state"), advanced.get("state"));
     assert_eq!(snapshot(&target).get("nextAt"), advanced.get("nextAt"));
