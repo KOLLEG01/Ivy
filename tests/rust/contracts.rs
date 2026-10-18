@@ -1,9 +1,74 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 
 #[test]
+fn english_lowercase_matches_node_scalars_context_and_unpaired_units() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args(["tests/fixtures/english-lowercase-oracle.mjs"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let oracle: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let units = |value: &serde_json::Value| -> Vec<u16> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| u16::try_from(v.as_u64().unwrap()).unwrap())
+            .collect()
+    };
+    let mut mappings: std::collections::HashMap<u32, Vec<u16>> = oracle["mappings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                u32::try_from(row[0].as_u64().unwrap()).unwrap(),
+                units(&row[1]),
+            )
+        })
+        .collect();
+    assert!(mappings.len() > 1300);
+    let mut scalars = 0;
+    for point in 0..=0x10ffff {
+        let Some(c) = char::from_u32(point) else {
+            continue;
+        };
+        scalars += 1;
+        let input = JsString::from(c.to_string());
+        let expected = mappings.remove(&point).unwrap_or_else(|| input.0.clone());
+        assert_eq!(
+            input.to_english_lowercase().0,
+            expected,
+            "U+{point:04X}; Rust Unicode {:?}; Node {} Unicode {}",
+            char::UNICODE_VERSION,
+            oracle["node"],
+            oracle["unicode"]
+        );
+    }
+    assert_eq!(Some(scalars), oracle["scalarCount"].as_u64());
+    assert!(mappings.is_empty());
+    assert!(oracle["contexts"].as_array().unwrap().len() > 12000);
+    for row in oracle["contexts"].as_array().unwrap() {
+        let input = JsString(units(&row["input"]));
+        assert_eq!(
+            input.to_english_lowercase().0,
+            units(&row["output"]),
+            "{input:?}"
+        );
+    }
+}
+
+#[test]
 fn native_frame_bounds_match_the_existing_contract() {
     use ivy_contracts::limits::*;
-    let schema: serde_json::Value = serde_json::from_str(include_str!("../../specs/schemas/agent.schema.json")).unwrap();
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../specs/schemas/agent.schema.json")).unwrap();
     let properties = &schema["$defs"]["FrameLimits"]["properties"];
     for (name, bound) in [
         ("requestFrameBytes", NATIVE_REQUEST_FRAME_BYTES),
@@ -11,7 +76,11 @@ fn native_frame_bounds_match_the_existing_contract() {
         ("answerFrameBytes", NATIVE_ANSWER_FRAME_BYTES),
         ("managementFrameBytes", MANAGEMENT_FRAME_BYTES),
     ] {
-        assert_eq!(properties[name]["const"].as_u64(), Some(bound as u64), "{name}");
+        assert_eq!(
+            properties[name]["const"].as_u64(),
+            Some(bound as u64),
+            "{name}"
+        );
     }
 }
 
