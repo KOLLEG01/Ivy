@@ -6,7 +6,7 @@ use crate::{
         identity_hash, ignored_reason, message_hash, notice_text, operation_name, truthy,
     },
     inbox_recovery::InboxRecovery,
-    policy::{self, Disposition, Notification, Urgency},
+    policy::assessment_suppression,
     schema::{Schema, validate},
     store::{Record, mutation},
     voice_target::discover_voice_target,
@@ -44,37 +44,6 @@ fn member<'a>(value: Option<&'a IvyJson>, key: &str) -> IvyResult<Option<&'a Ivy
         None | Some(IvyJson::Null) => Err(IvyError::internal()),
         Some(value) => Ok(value.get(key)),
     }
-}
-fn urgency(value: &IvyJson) -> IvyResult<Urgency> {
-    match value.as_str()?.as_str() {
-        "low" => Ok(Urgency::Low),
-        "normal" => Ok(Urgency::Normal),
-        "high" => Ok(Urgency::High),
-        "critical" => Ok(Urgency::Critical),
-        _ => Err(IvyError::internal()),
-    }
-}
-fn suppression(assessment: &IvyJson, policy: &IvyJson) -> IvyResult<Option<&'static str>> {
-    let notification = match assessment.required("notification")?.as_str()?.as_str() {
-        "needs_attention" => Notification::NeedsAttention,
-        "none" => Notification::None,
-        "main" => Notification::Main,
-        "voice" => Notification::Voice,
-        _ => return Err(IvyError::internal()),
-    };
-    let disposition = match assessment.required("disposition")?.as_str()?.as_str() {
-        "ignore" => Disposition::Ignore,
-        "record" => Disposition::Record,
-        // For non-none notifications only urgency matters. This enum's Task
-        // represents all other admitted dispositions in that shared policy.
-        _ => Disposition::Task,
-    };
-    Ok(policy::suppression(
-        notification,
-        disposition,
-        urgency(assessment.required("urgency")?)?,
-        urgency(policy.required("minimumMainUrgency")?)?,
-    ))
 }
 fn validate_message(message: &IvyJson, source: &IvyJson) -> IvyResult<()> {
     need(
@@ -358,7 +327,7 @@ impl SecretaryEngine<'_, '_, '_> {
                 let source_id = value.required("sourceId")?.clone();
                 accepted.insert("sourceId", source_id.clone());
                 let source = evidence.source_definition(&source_id)?;
-                let reason = suppression(assessment, &policy)?;
+                let reason = assessment_suppression(assessment, &policy)?;
                 let voice = if assessment.get("notification") == Some(&"voice".into()) {
                     IvyJson::object([
                         ("state", "queued".into()),

@@ -77,6 +77,8 @@ mod inbox_recovery_cases;
 mod notice_evidence_cases;
 #[path = "notice_scan_cases.rs"]
 mod notice_scan_cases;
+#[path = "notices_cases.rs"]
+mod notices_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
 #[path = "workflow_cases.rs"]
