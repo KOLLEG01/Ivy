@@ -55,10 +55,14 @@ pub fn validate_output(method: &str, value: &IvyJson) -> IvyResult<()> {
     ))
 }
 pub fn validate_transport(name: &str, value: &IvyJson) -> IvyResult<()> {
-    if core()?.matches(
-        &format!("https://ivy.invalid/schemas/hive-transport.schema.json#/$defs/{name}"),
-        value,
-    )? {
+    if core()?
+        .matches_named(
+            "https://ivy.invalid/schemas/hive-transport.schema.json",
+            name,
+            value,
+        )?
+        .ok_or_else(IvyError::internal)?
+    {
         Ok(())
     } else {
         Err(IvyError::new(
@@ -79,10 +83,7 @@ pub fn validate_host(name: &str, value: &IvyJson) -> IvyResult<()> {
         .as_ref()
         .map_err(Clone::clone)?;
     if bundle
-        .matches(
-            &format!("https://ivy.invalid/schemas/host.schema.json#/$defs/{name}"),
-            value,
-        )
+        .matches_named("https://ivy.invalid/schemas/host.schema.json", name, value)?
         .unwrap_or(false)
     {
         Ok(())
