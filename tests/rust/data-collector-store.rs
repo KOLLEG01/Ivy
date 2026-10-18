@@ -11,6 +11,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[path = "data-collector-runtime.inc.rs"]
+mod runtime;
+
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()
 }

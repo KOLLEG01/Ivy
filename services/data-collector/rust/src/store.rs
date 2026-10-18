@@ -165,9 +165,9 @@ impl CollectorStore {
             document.insert("output", IvyJson::Null);
         }
         let work = |s: &Self| {
-            sql(s.db.execute("INSERT INTO runs VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document", params![model::text(run,"id")?,model::text(run,"taskId")?,status,encode(&document)?]))?;
+            sql(s.db.execute("INSERT INTO runs VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,document=excluded.document", params![model::sqlite_key(model::field(run,"id")?)?,model::text(run,"taskId")?,status,encode(&document)?]))?;
             if model::completed(run) {
-                s.collect_runs(Some(&model::text(run, "id")?))?;
+                s.collect_runs(Some(&model::sqlite_key(model::field(run, "id")?)?))?;
             }
             Ok(())
         };

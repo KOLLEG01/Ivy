@@ -5,7 +5,7 @@ const { z } = require('zod');
 const source = readFileSync(new URL('../../services/data-collector/src/schema.ts', import.meta.url), 'utf8');
 const js = stripTypeScriptTypes(source, { mode: 'transform' }).replace(/import \{ z \} from "zod";/, 'const z = globalThis.__collectorZod;');
 globalThis.__collectorZod = z;
-const schemas = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'));
+export const schemas = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'));
 delete globalThis.__collectorZod;
 const names = ['retentionSchema','mcpSchema','taskSchema','settingsSchema','outputSchema','runtimeReadSchema','runtimeUpdateSchema','pinSchema','scriptDocument','definitionDocument','assignmentDocument','observationDocument','definitionReadSchema','definitionUpdateSchema','readSchema','updateSchema'];
 function assets() {
@@ -90,7 +90,7 @@ if (process.argv[2] === 'assets') {
   add('outputSchema',{data:JSON.parse('{"__proto__":1,"x":2}')});
   add('definitionDocument',{schemaVersion:1,homeServiceNodeId:'host.collector',script:pin,task:{...definitionTask,enabled:true,script:'extra',other:true}});
   process.stdout.write(JSON.stringify({assets:assets(),rows}));
-} else {
+} else if (process.argv[2] !== 'runtime') {
   const input = JSON.parse(readFileSync(0,'utf8'));
   const rows = input.map(({name,value}) => {
     const result = schemas[name].safeParse(value);

@@ -16,7 +16,7 @@ impl ExecutionCache<'_> {
             .ok_or_else(|| IvyError::new("not_found", "Collector task not found."))
     }
     pub fn unconfirmed(&self, row: &RecordTask) -> IvyResult<bool> {
-        let Some(id) = model::optional_text(row, "lastRunId") else {
+        let Some(id) = model::optional_sqlite_key(row, "lastRunId") else {
             return Ok(false);
         };
         Ok(self.store.run(&id)?.is_some_and(|r| {
@@ -34,18 +34,21 @@ impl ExecutionCache<'_> {
     /// Publishing rows deliberately do not prevent another execution.
     pub fn enqueue(
         &self,
-        mut row: RecordTask,
+        row: RecordTask,
         id: &str,
         input: IvyJson,
         now_ms: f64,
     ) -> IvyResult<()> {
+        self.enqueue_json(row, id.into(), input, now_ms)
+    }
+    pub fn enqueue_json(&self, mut row: RecordTask, id: IvyJson, input: IvyJson, now_ms: f64) -> IvyResult<()> {
         self.require_stopped(&row)?;
         require(
-            !self.store.used_run_id(id)?,
+            !self.store.used_run_id(&model::sqlite_key(&id)?)?,
             "operation_conflict",
             "Run ID was already used for another collection.",
         )?;
-        row.insert("lastRunId", id.into());
+        row.insert("lastRunId", id.clone());
         row.insert(
             "nextAt",
             IvyJson::Number(
@@ -54,7 +57,7 @@ impl ExecutionCache<'_> {
         );
         self.store.save(&row)?;
         let mut run = IvyJson::object([
-            ("id", id.into()),
+            ("id", id),
             (
                 "taskId",
                 model::field(model::field(&row, "task")?, "id")?.clone(),
@@ -205,7 +208,7 @@ impl ExecutionCache<'_> {
         let Some(mut current) = self.store.get(task_id, false)? else {
             return Ok(false);
         };
-        if model::optional_text(&current, "lastRunId").as_deref() != Some(run_id)
+        if model::optional_sqlite_key(&current, "lastRunId").as_deref() != Some(run_id)
             || !self.unconfirmed(&current)?
         {
             return Ok(false);
@@ -251,7 +254,7 @@ impl ExecutionCache<'_> {
                 })
                 .cloned(),
         );
-        let run = if let Some(id) = model::optional_text(row, "lastRunId") {
+        let run = if let Some(id) = model::optional_sqlite_key(row, "lastRunId") {
             self.store.run(&id)?
         } else {
             None

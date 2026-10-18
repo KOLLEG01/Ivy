@@ -34,6 +34,9 @@ pub fn truth(value: &IvyJson, name: &str) -> bool {
 pub fn optional_text(value: &IvyJson, name: &str) -> Option<String> {
     value.get(name).and_then(|v| v.as_str().ok())
 }
+pub fn optional_sqlite_key(value: &IvyJson, name: &str) -> Option<String> {
+    value.get(name).and_then(|v| sqlite_key(v).ok())
+}
 pub fn object() -> IvyJson {
     IvyJson::Object(Vec::new())
 }
