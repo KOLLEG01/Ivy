@@ -1,6 +1,21 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 
 #[test]
+fn native_frame_bounds_match_the_existing_contract() {
+    use ivy_contracts::limits::*;
+    let schema: serde_json::Value = serde_json::from_str(include_str!("../../specs/schemas/agent.schema.json")).unwrap();
+    let properties = &schema["$defs"]["FrameLimits"]["properties"];
+    for (name, bound) in [
+        ("requestFrameBytes", NATIVE_REQUEST_FRAME_BYTES),
+        ("receivedFrameBytes", NATIVE_FRAME_BYTES),
+        ("answerFrameBytes", NATIVE_ANSWER_FRAME_BYTES),
+        ("managementFrameBytes", MANAGEMENT_FRAME_BYTES),
+    ] {
+        assert_eq!(properties[name]["const"].as_u64(), Some(bound as u64), "{name}");
+    }
+}
+
+#[test]
 fn url_projection_matches_node_constructor_fields_and_failures() {
     use ivy_contracts::whatwg_url::parse_url;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
