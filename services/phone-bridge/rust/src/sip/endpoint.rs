@@ -49,6 +49,7 @@ struct Route {
     finals: mpsc::Sender<Response>,
     failure: watch::Sender<Option<SipIoError>>,
     stop: Mutex<Option<TransactionEventSender>>,
+    final_source: Mutex<Option<SipAddr>>,
 }
 impl Route {
     fn fail(&self, error: SipIoError) {
@@ -120,11 +121,20 @@ impl MessageInspector for FinalResponses {
                             } else {
                                 SipIoError::SendFailed
                             });
-                        } else if route.invite
-                            && (200..=299).contains(&response.status_code.code())
-                            && route.finals.try_send(response.clone()).is_err()
-                        {
-                            route.fail(SipIoError::ResponseOverflow);
+                        } else {
+                            // A non-INVITE's first final selects its actual
+                            // response peer, independently of the send target.
+                            route
+                                .final_source
+                                .lock()
+                                .unwrap()
+                                .get_or_insert_with(|| from.unwrap().clone());
+                            if route.invite
+                                && (200..=299).contains(&response.status_code.code())
+                                && route.finals.try_send(response.clone()).is_err()
+                            {
+                                route.fail(SipIoError::ResponseOverflow);
+                            }
                         }
                     }
                 }
@@ -307,6 +317,7 @@ impl SipEndpoint {
             finals,
             failure,
             stop: Mutex::new(None),
+            final_source: Mutex::new(None),
         });
         let registration = self.routes.register(key, route)?;
         Ok(Channels {
@@ -364,6 +375,9 @@ pub struct ClientExchange {
     proxy: Option<SipAddr>,
 }
 impl ClientExchange {
+    pub(crate) fn final_source(&self) -> Option<SipAddr> {
+        self.registration.route.final_source.lock().unwrap().clone()
+    }
     fn start(mut transaction: Transaction, proxy: Option<SipAddr>, channels: Channels) -> Self {
         if transaction.destination.is_none() {
             transaction.destination = proxy.clone();

@@ -114,6 +114,24 @@ impl SipBoundFlow {
     pub(crate) fn endpoint(&self) -> &Arc<SipEndpoint> {
         &self.endpoint
     }
+    pub(crate) fn response_flow(&self, source: SipAddr) -> Result<Self, BindError> {
+        let remote = source
+            .get_socketaddr()
+            .map_err(|_| BindError::InvalidDestination)?;
+        if source.r#type.unwrap_or_default() != self.protocol()
+            || remote.port() == 0
+            || remote.is_ipv4() != self.local.is_ipv4()
+            || self.protocol() != Transport::Udp && remote != self.remote
+        {
+            return Err(BindError::InvalidDestination);
+        }
+        let mut confirmed = self.clone();
+        confirmed.remote = remote;
+        // Only UDP keepalive follows a response's source port/address. Future
+        // REGISTER attempts still resolve the configured registrar/proxy.
+        confirmed.destination = source;
+        Ok(confirmed)
+    }
     pub(crate) async fn keepalive(&self) -> Result<(), BindError> {
         let SipConnection::Udp(connection) = &self.connection else {
             return Err(BindError::InvalidDestination);
@@ -391,7 +409,12 @@ impl BoundSipTransport {
             return Err(BindError::InvalidDestination);
         }
         let resolved = if next_hop.get_socketaddr().is_ok() {
-            next_hop.clone()
+            let mut literal = next_hop.clone();
+            literal
+                .addr
+                .port
+                .get_or_insert(self.protocol.default_port());
+            literal
         } else {
             let endpoint = self.endpoint()?;
             tokio::select! {

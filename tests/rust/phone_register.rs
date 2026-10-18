@@ -545,3 +545,116 @@ async fn non_200_success_does_not_grant_a_registration_or_remote_removal() {
     drop(peer);
     released(host).await;
 }
+
+#[tokio::test]
+async fn matched_response_source_selects_registered_peer_and_keepalive_destination() {
+    tokio::time::timeout(Duration::from_secs(4), async {
+        let registrar = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let source = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let remote = registrar.local_addr().unwrap();
+        let actual = source.local_addr().unwrap();
+        let host = bound(false, false).await;
+        let mut registration = SipRegistration::start(
+            host.clone(),
+            settings(remote, Transport::Udp, 60, 1),
+            "fixture-only".into(),
+            None,
+        )
+        .unwrap();
+        let mut bytes = [0; 8192];
+        let (count, local) = registrar.recv_from(&mut bytes).await.unwrap();
+        let first: Request = std::str::from_utf8(&bytes[..count])
+            .unwrap()
+            .try_into()
+            .unwrap();
+        source
+            .send_to(
+                response(&first, 200, "Expires: 60\r\n")
+                    .to_string()
+                    .as_bytes(),
+                local,
+            )
+            .await
+            .unwrap();
+        observed(&registration, |state| {
+            state.phase == RegistrationPhase::Registered
+        })
+        .await;
+        assert_eq!(registration.observation().remote.unwrap().address, actual);
+        assert!(registration.matches_peer(RegistrationPeer {
+            address: actual,
+            transport: RegistrationTransport::Udp
+        }));
+        assert!(!registration.matches_peer(RegistrationPeer {
+            address: remote,
+            transport: RegistrationTransport::Udp
+        }));
+        let (count, from) = source.recv_from(&mut bytes).await.unwrap();
+        assert_eq!(&bytes[..count], b"\r\n\r\n");
+        assert_eq!(from, local);
+        registration.request_stop();
+        let close = tokio::spawn(async move {
+            registration.close().await.unwrap();
+            registration
+        });
+        // Zero-expiry registration still goes to its configured registrar.
+        let (count, from) = registrar.recv_from(&mut bytes).await.unwrap();
+        assert_eq!(from, local);
+        let remove: Request = std::str::from_utf8(&bytes[..count])
+            .unwrap()
+            .try_into()
+            .unwrap();
+        related(&first, &remove, 2, false);
+        assert_eq!(remove.expires_header().unwrap().value(), "0");
+        registrar
+            .send_to(response(&remove, 200, "").to_string().as_bytes(), local)
+            .await
+            .unwrap();
+        let registration = close.await.unwrap();
+        assert_eq!(registration.observation().remote_removed, Some(true));
+        drop(registration);
+        released(host).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn local_stack_timeout_cannot_confirm_registration_or_trigger_unregister() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let listener = Listener::new(false).await;
+        let remote = listener.address();
+        let options = EndpointOption {
+            t1: Duration::from_millis(10),
+            t1x64: Duration::from_millis(80),
+            ..Default::default()
+        };
+        let host = Arc::new(
+            BoundSipTransport::udp("127.0.0.1:0".parse().unwrap(), options)
+                .await
+                .unwrap(),
+        );
+        let mut registration = SipRegistration::start(
+            host.clone(),
+            settings(remote, Transport::Udp, 60, 0),
+            "fixture-only".into(),
+            None,
+        )
+        .unwrap();
+        let mut peer = listener.accept().await;
+        peer.receive().await;
+        observed(&registration, |state| {
+            state.phase == RegistrationPhase::Failed
+        })
+        .await;
+        assert_eq!(registration.observation().response_code, None);
+        assert_eq!(registration.observation().remote, None);
+        registration.close().await.unwrap();
+        assert_eq!(registration.observation().remote_removed, None);
+        drop(registration);
+        drop(peer);
+        released(host).await;
+    })
+    .await
+    .unwrap();
+}

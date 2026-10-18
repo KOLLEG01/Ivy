@@ -89,13 +89,10 @@ impl SipRegistrationSettings {
             .map_err(|_| RegistrationError::InvalidSettings)?;
         let mut registrar =
             SipAddr::try_from(&registrar_uri).map_err(|_| RegistrationError::InvalidSettings)?;
-        // The stack's generic SipAddr conversion omits the sips scheme and
-        // defaults literal addresses to 5060. Retain the original URI policy.
+        // The stack's generic SipAddr conversion omits the sips scheme.
+        // Leave absent DNS ports absent so resolution can still use SRV.
         if registrar_uri.scheme == Some(Scheme::Sips) {
             registrar.r#type = Some(Transport::Tls);
-        }
-        if registrar.r#type == Some(Transport::Tls) && registrar.addr.port.is_none() {
-            registrar.addr.port = Some(5061.into());
         }
         if account
             .auth
@@ -367,10 +364,16 @@ async fn cycle(
             };
             let code = response.status_code.code();
             if code == 200 {
+                let confirmed = exchange
+                    .final_source()
+                    .and_then(|source| flow.response_flow(source).ok());
                 if exchange.retire().await.is_err() {
                     return Cycle::Failed(None, true);
                 }
-                return Cycle::Success(response, flow, contact);
+                return match confirmed {
+                    Some(flow) => Cycle::Success(response, flow, contact),
+                    None => Cycle::Failed(None, true),
+                };
             }
             if code == 423 && wire.expiry != 0 {
                 let minimum = response.headers.iter().find_map(|h| {
@@ -669,4 +672,71 @@ fn expiry(response: &Response, ours: &Uri, requested: u64, current: u64) -> (u64
             |(_, expires)| expires.unwrap_or(current),
         );
     (observed, refresh.clamp(10, 7200))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_public_and_refresh_lifetimes_remain_distinct() {
+        let ours: Uri = "sip:contact-user@127.0.0.1:1234;transport=tcp"
+            .try_into()
+            .unwrap();
+        for (headers, expected) in [
+            (
+                "Expires: 30\r\nContact: <sip:contact-user@127.0.0.1:1234;transport=udp>, <sip:other@127.0.0.2>;expires=20\r\n",
+                (20, 120),
+            ),
+            (
+                "Expires: 30\r\nContact: <sip:contact-user@127.0.0.1:1234>;expires=10, <sip:contact-user@127.0.0.1:1234>;expires=2\r\n",
+                (2, 10),
+            ),
+            (
+                "Expires: 30\r\nContact: <sip:other@127.0.0.2>;expires=8000000000\r\n",
+                (8_000_000_000, 30),
+            ),
+            ("Expires: 9000000000\r\n", (9_000_000_000, 7200)),
+            (
+                "Expires: -1\r\nContact: <sip:other@127.0.0.2>\r\n",
+                (60, 120),
+            ),
+            (
+                "Expires: 60\r\nContact: \"Other, person\" <sip:other@127.0.0.2>;expires=0\r\n",
+                (0, 60),
+            ),
+        ] {
+            let response: Response =
+                format!("SIP/2.0 200 OK\r\n{headers}Content-Length: 0\r\n\r\n")
+                    .try_into()
+                    .unwrap();
+            assert_eq!(expiry(&response, &ours, 60, 120), expected);
+        }
+    }
+
+    #[test]
+    fn original_sips_transport_takes_precedence_without_bypassing_dns_port_selection() {
+        for (uri, protocol) in [
+            ("sip:registrar.example.test", Transport::Udp),
+            ("sip:registrar.example.test;transport=tcp", Transport::Tcp),
+            ("sips:registrar.example.test", Transport::Tls),
+            ("sips:registrar.example.test;transport=tcp", Transport::Tls),
+            ("sip:registrar.example.test;transport=tls", Transport::Tls),
+        ] {
+            let settings = SipRegistrationSettings::new(
+                "sip:public-user@account.example.test",
+                uri,
+                "contact-user".into(),
+                "digest-user".into(),
+                None,
+                60,
+                10,
+                0,
+                protocol,
+            )
+            .unwrap();
+            assert_eq!(settings.registrar.r#type.unwrap_or_default(), protocol);
+            assert!(settings.registrar.addr.port.is_none());
+        }
+    }
 }
