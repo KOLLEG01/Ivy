@@ -335,8 +335,8 @@ async fn original_assignment_execution_transitions_and_traces() {
             );
         }
         assert_eq!(
-            &actual,
-            row.required("expected").unwrap(),
+            canonical(&actual, 32 * 1024 * 1024).unwrap(),
+            canonical(row.required("expected").unwrap(), 32 * 1024 * 1024).unwrap(),
             "Case {index}: {:?}",
             input.get("label")
         );

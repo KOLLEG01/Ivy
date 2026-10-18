@@ -148,29 +148,25 @@ impl AssignmentScan {
         if !nonempty(self.delete_cursor.as_ref()) {
             self.delete_before = Some(execution.now()?);
         }
+        let mut due_request = request(IvyJson::Null, self.delete_cursor.as_ref(), true);
+        due_request.insert(
+            "where",
+            group(
+                "and",
+                vec![
+                    parent.clone(),
+                    predicate("eq", "data:/phase", "archived".into()),
+                    predicate(
+                        "lte",
+                        "data:/deleteAfter",
+                        IvyJson::String(self.delete_before.clone().ok_or_else(IvyError::internal)?),
+                    ),
+                ],
+            ),
+        );
         let due = store
             .client
-            .request(
-                "objects.query",
-                request(
-                    group(
-                        "and",
-                        vec![
-                            predicate("eq", "data:/phase", "archived".into()),
-                            predicate(
-                                "lte",
-                                "data:/deleteAfter",
-                                IvyJson::String(
-                                    self.delete_before.clone().ok_or_else(IvyError::internal)?,
-                                ),
-                            ),
-                        ],
-                    ),
-                    self.delete_cursor.as_ref(),
-                    true,
-                ),
-                RequestOptions::default(),
-            )
+            .request("objects.query", due_request, RequestOptions::default())
             .await?;
         self.delete_cursor = cursor(&due);
         let running = store
