@@ -1,6 +1,6 @@
 import {existsSync,readFileSync,mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join,basename} from 'node:path';
 import {buildInstructions} from '../../../tools/build/build-instructions.mjs';
 import {registerHooks,stripTypeScriptTypes} from 'node:module';
 import {fileURLToPath} from 'node:url';
@@ -69,8 +69,8 @@ const output=mkdtempSync(join(tmpdir(),'ivy-chat-instructions-'));
 let instructionAsset;
 try{
  const files=buildInstructions({root:process.cwd(),outputRoot:output,component:'chat-bridge'});
- if(files.length!==1)throw Error('Expected the selected Main instruction asset.');
- const bytes=readFileSync(files[0]);
+ if(files.length!==2||!files.some(p=>basename(p)==='chat-main-instructions.json')||!files.some(p=>basename(p)==='chat-notice-prompt.json'))throw Error('Expected the selected Main and notice instruction assets.');
+ const bytes=readFileSync(files.find(p=>basename(p)==='chat-main-instructions.json'));
  if(JSON.parse(bytes.toString('utf8'))!==mainInstructions)throw Error('The built asset differs from the original instruction literal.');
  instructionAsset=bytes.toString('base64');
 }finally{rmSync(output,{recursive:true,force:true});}
