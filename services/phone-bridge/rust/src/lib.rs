@@ -4,3 +4,5 @@ pub mod dtmf;
 pub mod ipc;
 pub mod media;
 pub mod native_rpc;
+pub mod voice_rpc;
+pub mod voice_selection;

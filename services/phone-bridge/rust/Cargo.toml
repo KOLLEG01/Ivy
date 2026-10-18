@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 ivy-contracts = { workspace = true }
+ivy-host-runtime = { workspace = true }
+tokio = { workspace = true }
 
 [lib]
 path = "src/lib.rs"
