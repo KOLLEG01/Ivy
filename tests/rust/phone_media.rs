@@ -1,4 +1,6 @@
 // Native regression cases from tests/native-phone/{Program,RtpTests}.cs.
+#[path = "phone_dtmf_access.rs"]
+mod dtmf_access;
 use ivy_phone_bridge::media::{
     AudioPermit, AudioQueue, MediaError, RtpAudioPacket, RtpReceiveQueue,
 };
