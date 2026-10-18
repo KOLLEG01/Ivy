@@ -7,6 +7,8 @@ publish = false
 [dependencies]
 ivy-contracts.workspace = true
 rusqlite = { workspace = true, features = ["backup", "functions", "hooks"] }
+getrandom.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

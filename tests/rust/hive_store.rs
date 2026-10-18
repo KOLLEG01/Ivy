@@ -1,0 +1,311 @@
+use ivy_contracts::{IvyError, JsString, json::stringify};
+use ivy_hive::store::{AuthContext, Credential, Store};
+use rusqlite::types::ValueRef;
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+struct Root(PathBuf);
+impl Root {
+    fn new() -> Self {
+        let p = std::env::temp_dir().join(format!(
+            "ivy-store-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&p).unwrap();
+        Self(p)
+    }
+}
+impl Drop for Root {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+fn rows(store: &Store, sql: &str) -> Value {
+    let mut statement = store.connection().prepare(sql).unwrap();
+    let names = statement
+        .column_names()
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>();
+    let values = statement
+        .query_map([], |row| {
+            let mut value = serde_json::Map::new();
+            for (i, name) in names.iter().enumerate() {
+                let v = match row.get_ref(i)? {
+                    ValueRef::Null => Value::Null,
+                    ValueRef::Integer(v) => json!(v),
+                    ValueRef::Real(v) => json!(v),
+                    ValueRef::Text(v) => json!(std::str::from_utf8(v).unwrap()),
+                    ValueRef::Blob(_) => panic!("Unexpected blob in observation"),
+                };
+                value.insert(name.clone(), v);
+            }
+            Ok(Value::Object(value))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    json!(values)
+}
+fn snapshot(store: &Store) -> Value {
+    json!({"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>()})
+}
+fn native(path: &Path, steps: &[Value]) -> Value {
+    let mut store = Store::open(path).unwrap();
+    let mut result = vec![];
+    for step in steps {
+        let outcome = match step["op"].as_str().unwrap() {
+            "configure" => store
+                .configure_credentials(
+                    &step["credentials"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| Credential {
+                            principal_id: c["principalId"].as_str().unwrap().into(),
+                            digest: c["digest"].as_str().unwrap().into(),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .map(|_| Value::Null),
+            "authenticate" => {
+                let c = &step["context"];
+                store.authenticate(&AuthContext{credential_digest:c["credentialDigest"].as_str().unwrap().into(),session_digest:c["sessionDigest"].as_str().map(JsString::from)}).map(|p|json!({"principalId":p.principal_id.to_utf8().unwrap(),"credentialDigest":p.credential_digest.to_utf8().unwrap()}))
+            }
+            "sql" => store
+                .connection()
+                .execute_batch(step["sql"].as_str().unwrap())
+                .map_err(|_| IvyError::internal())
+                .map(|_| Value::Null),
+            "invalidate" => {
+                store.invalidate(step["scope"].as_str().unwrap().into());
+                Ok(Value::Null)
+            }
+            "transaction" => store.transaction(|s| {
+                s.connection()
+                    .execute_batch(step["sql"].as_str().unwrap())
+                    .map_err(|_| IvyError::internal())?;
+                s.invalidate(step["scope"].as_str().unwrap().into());
+                if step["fail"] == true {
+                    Err(IvyError::new("fixture_failure", "Rollback requested."))
+                } else {
+                    Ok(Value::Null)
+                }
+            }),
+            "reopen" => {
+                drop(store);
+                store = Store::open(path).unwrap();
+                Ok(Value::Null)
+            }
+            _ => panic!("unknown step"),
+        };
+        let (value, error) = match outcome {
+            Ok(v) => (v, Value::Null),
+            Err(e) => (
+                Value::Null,
+                serde_json::from_str(&stringify(&e.to_wire(), 1 << 20).unwrap()).unwrap(),
+            ),
+        };
+        result.push(json!({"value":value,"error":error,"state":snapshot(&store)}));
+    }
+    json!({"rows":result,"definitions":rows(&store,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name"),"metadata":rows(&store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"topics":rows(&store,"SELECT * FROM topics ORDER BY topic,version")})
+}
+fn oracle(path: &Path, steps: &[Value]) -> Value {
+    let mut child =
+        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../tests/fixtures/hive-store-oracle.mjs"),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(json!({"path":path,"steps":steps}).to_string().as_bytes())
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    serde_json::from_slice(&result.stdout).unwrap()
+}
+
+#[test]
+fn schema_authentication_credential_rotation_and_rollback_match_original_store() {
+    let root = Root::new();
+    let a = format!("sha256:{}", "a".repeat(64));
+    let b = format!("sha256:{}", "b".repeat(64));
+    let c = format!("sha256:{}", "c".repeat(64));
+    let mut steps = vec![
+        json!({"op":"configure","credentials":[{"principalId":"alpha","digest":a},{"principalId":"beta","digest":b}]}),
+        json!({"op":"authenticate","context":{"credentialDigest":a}}),
+        json!({"op":"sql","sql":format!("INSERT INTO service_nodes VALUES('node','beta','host','fixture',1,'{{\"connected\":true,\"synced\":true,\"ready\":true}}'); INSERT INTO subscriptions VALUES('node','sub','{{}}',0,0,1,'{{}}'); INSERT INTO durable_subscriptions VALUES('node','sub'); INSERT INTO browser_sessions VALUES('session','{a}','2026-01-01T00:00:00Z');")}),
+        json!({"op":"authenticate","context":{"credentialDigest":a,"sessionDigest":"session"}}),
+        json!({"op":"authenticate","context":{"credentialDigest":b,"sessionDigest":"session"}}),
+        json!({"op":"authenticate","context":{"credentialDigest":a,"sessionDigest":""}}),
+        json!({"op":"configure","credentials":[{"principalId":"alpha","digest":c}]}),
+        json!({"op":"authenticate","context":{"credentialDigest":a,"sessionDigest":"session"}}),
+        json!({"op":"authenticate","context":{"credentialDigest":c}}),
+        json!({"op":"configure","credentials":[{"principalId":"different","digest":c}]}),
+        json!({"op":"configure","credentials":[{"principalId":"alpha","digest":a},{"principalId":"","digest":b}]}),
+        json!({"op":"configure","credentials":[{"principalId":"🙂".repeat(101),"digest":a}]}),
+        json!({"op":"configure","credentials":[{"principalId":"alpha","digest":"sha256:ABC"}]}),
+        json!({"op":"invalidate","scope":"before"}),
+        json!({"op":"transaction","scope":"discard","sql":"INSERT INTO principals VALUES('rollback');","fail":true}),
+        json!({"op":"transaction","scope":"commit","sql":"INSERT INTO principals VALUES('committed');","fail":false}),
+        json!({"op":"reopen"}),
+    ];
+    for n in 0..66 {
+        steps.push(json!({"op":"invalidate","scope":format!("scope/{n}")}));
+    }
+    steps.extend([
+        json!({"op":"configure","credentials":[]}),
+        json!({"op":"authenticate","context":{"credentialDigest":c}}),
+    ]);
+    let expected = oracle(&root.0.join("reference.sqlite"), &steps);
+    let actual = native(&root.0.join("native.sqlite"), &steps);
+    for (index, (actual, expected)) in actual["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(expected["rows"].as_array().unwrap())
+        .enumerate()
+    {
+        assert_eq!(actual, expected, "step {index}: {}", steps[index]);
+    }
+    assert_eq!(actual["definitions"], expected["definitions"]);
+    assert_eq!(actual["metadata"], expected["metadata"]);
+    assert_eq!(actual["topics"], expected["topics"]);
+}
+
+#[test]
+fn transaction_commit_failure_restores_invalidations_and_exclusive_writer_blocks_second_owner() {
+    let root = Root::new();
+    let path = root.0.join("store.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    store.invalidate("before".into());
+    let error=store.transaction(|s|{s.connection().execute_batch("PRAGMA defer_foreign_keys=ON;INSERT INTO credentials VALUES('bad','missing',0);").map_err(|_|IvyError::internal())?;s.invalidate("after".into());Ok(())}).unwrap_err();
+    assert_eq!(error.code, "internal_error");
+    assert!(store.connection().is_autocommit());
+    assert_eq!(store.changes(), &[JsString::from("before")]);
+    assert_eq!(rows(&store, "SELECT * FROM credentials"), json!([]));
+    assert!(Store::open(&path).is_err());
+    let secret = store.metadata("cursor_secret").unwrap().unwrap();
+    let epoch = store.metadata("runtime_epoch").unwrap().unwrap();
+    assert_eq!(secret.len(), 64);
+    assert!(
+        secret
+            .bytes()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    );
+    assert_eq!(uuid::Uuid::parse_str(&epoch).unwrap().get_version_num(), 4);
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.metadata("cursor_secret").unwrap(), Some(secret));
+    assert_eq!(store.metadata("runtime_epoch").unwrap(), Some(epoch));
+}
+
+#[test]
+fn checked_in_ddl_remains_exactly_the_reference_format_four_schema() {
+    let source = include_str!("../../services/hive/src/storage-schema.ts");
+    assert_eq!(
+        include_str!("../../services/hive/rust/src/schema.sql"),
+        source.split('`').nth(1).unwrap()
+    );
+}
+
+#[test]
+fn unsupported_clean_database_refusal_preserves_bytes_and_sidecars() {
+    let root = Root::new();
+    for format in [-1i64, 1, 3, 5, 99, i32::MAX as i64] {
+        for journal in ["DELETE", "WAL"] {
+            let path = root
+                .0
+                .join(format!("unsupported-{format}-{journal}.sqlite"));
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(&format!("PRAGMA journal_mode={journal}; PRAGMA user_version={format}; CREATE TABLE retained(value TEXT); INSERT INTO retained VALUES('unchanged');")).unwrap();
+            drop(db);
+            let observe = || {
+                ["", "-wal", "-shm", "-journal"].map(|suffix| {
+                    let p = PathBuf::from(format!("{}{suffix}", path.display()));
+                    match fs::read(p) {
+                        Ok(bytes) => Some(bytes),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => panic!("{e}"),
+                    }
+                })
+            };
+            let before = observe();
+            let error = match Store::open(&path) {
+                Ok(_) => panic!("Unsupported format admitted"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_wire(),
+                IvyError::new(
+                    "unsupported_storage_format",
+                    "This binary cannot read the database format."
+                )
+                .to_wire()
+            );
+            assert_eq!(observe(), before, "format {format}, journal {journal}");
+        }
+    }
+}
+
+#[test]
+fn historical_writable_store_matches_original_initialization_and_all_retained_rows() {
+    let root = Root::new();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../tests/fixtures/hive-current.sqlite.gz");
+    for legacy in [false, true] {
+        let reference = root.0.join(format!("reference-{legacy}.sqlite"));
+        let path = root.0.join(format!("native-{legacy}.sqlite"));
+        let status = Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
+            .args(["--input-type=module", "-e", "import {readFileSync,writeFileSync} from 'node:fs';import {gunzipSync} from 'node:zlib';writeFileSync(process.argv[2],gunzipSync(readFileSync(process.argv[1])));"])
+            .arg(&fixture).arg(&reference).status().unwrap();
+        assert!(status.success());
+        if legacy {
+            let db = rusqlite::Connection::open(&reference).unwrap();
+            db.execute_batch("DROP TABLE IF EXISTS durable_subscriptions; CREATE INDEX IF NOT EXISTS mutations_expiry ON mutations(principal_id);").unwrap();
+        }
+        fs::copy(&reference, &path).unwrap();
+        let steps = [json!({"op":"reopen"})];
+        assert_eq!(native(&path, &steps), oracle(&reference, &steps));
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("ATTACH ? AS reference", [reference.to_str().unwrap()])
+            .unwrap();
+        let tables = db
+            .prepare("SELECT name FROM main.sqlite_schema WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(tables.len() > 10);
+        for table in tables {
+            let quoted = table.replace('"', "\"\"");
+            for (left, right) in [("main", "reference"), ("reference", "main")] {
+                let count: i64 = db.query_row(&format!("SELECT count(*) FROM (SELECT * FROM {left}.\"{quoted}\" EXCEPT SELECT * FROM {right}.\"{quoted}\")"), [], |r|r.get(0)).unwrap();
+                assert_eq!(count, 0, "legacy={legacy}: {left}.{table}");
+            }
+        }
+    }
+}

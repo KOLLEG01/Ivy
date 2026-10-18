@@ -3,6 +3,8 @@
 
 #[path = "hive_storage_read.rs"]
 mod storage_read;
+#[path = "hive_store.rs"]
+mod store;
 
 use rusqlite::{
     Connection, ErrorCode, OpenFlags,
