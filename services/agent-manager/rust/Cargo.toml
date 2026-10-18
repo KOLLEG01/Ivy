@@ -13,6 +13,7 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 ivy-sdk.workspace = true
 ivy-host-runtime.workspace = true
 futures-util.workspace = true

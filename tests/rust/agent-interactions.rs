@@ -13,14 +13,16 @@ use tokio::sync::oneshot;
 // in the existing affected interaction target while host module wiring is owned upstream.
 #[path = "agent-app-tools-launch.rs"]
 mod app_tools_launch_cases;
-#[path = "agent-native-rpc.rs"]
-mod native_rpc_cases;
 #[path = "agent-native-compatibility.rs"]
 mod native_compatibility_cases;
-#[path = "agent-native-proxy.rs"]
-mod native_proxy_cases;
+#[path = "agent-native-connection.rs"]
+mod native_connection_cases;
 #[path = "agent-native-handshake.rs"]
 mod native_handshake_cases;
+#[path = "agent-native-proxy.rs"]
+mod native_proxy_cases;
+#[path = "agent-native-rpc.rs"]
+mod native_rpc_cases;
 
 fn json(s: &str) -> IvyJson {
     parse(s, 1024 * 1024).unwrap()
