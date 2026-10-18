@@ -28,3 +28,5 @@ pub mod registry;
 pub mod skills;
 pub mod skills_output;
 pub mod skills_prepare;
+pub mod staged_files;
+pub mod status;

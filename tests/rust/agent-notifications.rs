@@ -3,6 +3,8 @@ use ivy_agent_manager::notifications::NativeNotifications;
 mod handler_cases;
 #[path = "agent-registry.rs"]
 mod registry_cases;
+#[path = "agent-status-staged.rs"]
+mod status_staged_cases;
 use ivy_contracts::IvyJson;
 
 fn fixture(bytes: usize) -> NativeNotifications {
