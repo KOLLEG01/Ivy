@@ -57,3 +57,7 @@ path = "../../../tests/rust/json-coercion.rs"
 [[test]]
 name = "number-string"
 path = "../../../tests/rust/number-string.rs"
+
+[[test]]
+name = "ui-route"
+path = "../../../tests/rust/ui-route.rs"
