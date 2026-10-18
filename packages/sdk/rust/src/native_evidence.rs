@@ -48,6 +48,93 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
         .expect("structurally validated native evidence")
 }
 
+#[derive(Clone, Copy)]
+pub struct NativePayloadLimits {
+    pub request_bytes: usize,
+    pub response_bytes: usize,
+}
+/// Check the original transport envelope before evaluating native parameters,
+/// then the reply envelope before its result. This does not validate authority,
+/// receipt identity or reply-error semantics.
+pub fn validate_native_payload(
+    contract: &ivy_contracts::native_contract::NativeContract,
+    observation: &IvyJson,
+    limits: NativePayloadLimits,
+) -> IvyResult<()> {
+    use ivy_contracts::json::{canonical_fields, object_entries};
+    if observation.is_null() {
+        return Err(IvyError::internal());
+    }
+    let fallback = IvyJson::from("00000000-0000-0000-0000-000000000000");
+    let request_id = observation
+        .get("requestId")
+        .filter(|id| !id.is_null())
+        .unwrap_or(&fallback);
+    canonical_fields(
+        [
+            ("id", Some(request_id)),
+            ("method", observation.get("method")),
+            ("params", observation.get("params")),
+        ],
+        limits.request_bytes,
+    )?;
+    let method = observation
+        .get("method")
+        .and_then(IvyJson::as_js_string)
+        .ok_or_else(|| {
+            IvyError::new(
+                "native_method_unsupported",
+                "The method is absent from the exact selected native catalog.",
+            )
+        })?;
+    contract.validate_input(
+        method,
+        observation.get("params").unwrap(),
+        limits.request_bytes,
+    )?;
+    if crate::tools::truthy(observation.get("reply")) {
+        let reply = observation.get("reply").unwrap();
+        let mut fields = vec![(JsString::from("id"), observation.get("requestId"))];
+        let strings: Vec<_> = if let IvyJson::String(value) = reply {
+            value
+                .0
+                .iter()
+                .map(|unit| IvyJson::String(JsString(vec![*unit])))
+                .collect()
+        } else {
+            vec![]
+        };
+        match reply {
+            IvyJson::Object(_) => fields.extend(
+                object_entries(reply)
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), Some(value))),
+            ),
+            IvyJson::Array(values) => fields.extend(
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (index.to_string().into(), Some(value))),
+            ),
+            IvyJson::String(_) => fields.extend(
+                strings
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (index.to_string().into(), Some(value))),
+            ),
+            _ => {}
+        }
+        canonical_fields(fields, limits.response_bytes)?;
+        if !matches!(reply, IvyJson::Object(_) | IvyJson::Array(_)) {
+            return Err(IvyError::internal());
+        }
+        if let Some(result) = reply.get("result") {
+            contract.validate_result(method, result, limits.response_bytes)?;
+        }
+    }
+    Ok(())
+}
+
 /// Accept exactly Date.parse followed by an identical Date.toISOString result.
 /// Arithmetic covers the entire ECMAScript TimeClip range, including extended years.
 pub fn native_instant(value: &JsString, code: Option<&str>) -> IvyResult<i64> {
