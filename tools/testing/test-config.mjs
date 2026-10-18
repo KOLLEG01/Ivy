@@ -130,6 +130,7 @@ export const rustTests = {
   'tests/rust/chat-notices.rs': { package: 'ivy-chat-bridge', test: 'chat-notices' },
   'tests/rust/chat-result-text.rs': { package: 'ivy-chat-bridge', test: 'chat-result-text' },
   'tests/rust/chat-collection-reads.rs': { package: 'ivy-chat-bridge', test: 'chat-collection-reads' },
+  'tests/rust/chat-evidence-bytes.rs': { package: 'ivy-chat-bridge', test: 'chat-evidence-bytes' },
   'tests/rust/contracts.rs': { package: 'ivy-contracts', test: 'contracts' },
   'tests/rust/hash.rs': { package: 'ivy-contracts', test: 'hash' },
   'tests/rust/json-depth.rs': { package: 'ivy-contracts', test: 'json-depth' },
