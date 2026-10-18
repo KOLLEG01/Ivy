@@ -178,6 +178,7 @@ export const rustTests = {
   },
   'tests/rust/chat-queue.rs': { package: 'ivy-chat-bridge', test: 'chat-queue' },
   'tests/rust/chat-main-context.rs': { package: 'ivy-chat-bridge', test: 'chat-main-context' },
+  'tests/rust/chat-queries.rs': { package: 'ivy-chat-bridge', test: 'chat-queries' },
   'tests/rust/chat-storage.rs': { package: 'ivy-chat-bridge', test: 'chat-storage' },
   'tests/rust/chat-audio.rs': { package: 'ivy-chat-bridge', test: 'chat-audio' },
   'tests/rust/chat-output.rs': { package: 'ivy-chat-bridge', test: 'chat-output' },
