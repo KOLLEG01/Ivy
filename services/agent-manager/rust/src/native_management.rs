@@ -9,13 +9,14 @@ use crate::{
     registry::agent_registry,
 };
 use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString,
+    IvyError, IvyJson, IvyResult, JsString, Outcome,
     hash::{hash_json, tool_definition_hash},
     json::try_js_string,
     limits::{
         MANAGEMENT_FRAME_BYTES, NATIVE_ANSWER_FRAME_BYTES, NATIVE_FRAME_BYTES,
         NATIVE_REQUEST_FRAME_BYTES,
     },
+    native_contract::is_read_only_native_method,
 };
 use ivy_host_runtime::{
     codex_admission::Priority,
@@ -79,6 +80,46 @@ fn property_string(args: &IvyJson, key: &str) -> IvyResult<JsString> {
 }
 fn array<'a>(value: &'a IvyJson, key: &str) -> &'a [IvyJson] {
     value.get(key).and_then(IvyJson::as_array).unwrap()
+}
+
+/// Return the original native result, or direct the caller to its retained
+/// operation. A pending/unknown receipt never authorizes another dispatch.
+pub fn operation_outcome(value: &IvyJson) -> IvyResult<IvyJson> {
+    if let Some(reply) = value.get("reply") {
+        if let Some(result) = reply.get("result") {
+            return Ok(result.clone());
+        }
+        if let Some(error) = reply.get("error") {
+            return Err(IvyError::new(
+                "native_error",
+                "Native method returned its original error; inspect this caller operation.",
+            )
+            .with_outcome(Outcome::Completed)
+            .with_details(IvyJson::object([
+                ("operationId", value.required("operationId")?.clone()),
+                ("nativeError", error.clone()),
+            ])));
+        }
+    }
+    let code = value
+        .get("code")
+        .filter(|code| !code.is_null())
+        .and_then(IvyJson::as_js_string)
+        .cloned()
+        .unwrap_or_else(|| "native_operation_pending".into());
+    Err(IvyError::new_js(
+        code,
+        "Inspect the original native operation; it is never resent under this identity.".into(),
+    )
+    .with_outcome(if value.get("phase") == Some(&"failed".into()) {
+        Outcome::NotExecuted
+    } else {
+        Outcome::Unknown
+    })
+    .with_details(IvyJson::object([
+        ("operationId", value.required("operationId")?.clone()),
+        ("phase", value.required("phase")?.clone()),
+    ])))
 }
 
 impl NativeManagement {
@@ -156,6 +197,80 @@ impl NativeManagement {
                 (format!("agent.{name}").into(), handler)
             })
             .collect()
+    }
+
+    /// Native tools accept unchanged JSON arguments, including null/scalars.
+    /// Definition admission remains with the shared provider connection.
+    pub fn json_handlers(&self) -> HashMap<JsString, ToolHandler> {
+        array(&self.0.owner.catalog, "clientRequests")
+            .iter()
+            .map(|definition| {
+                let method = definition
+                    .required("method")
+                    .unwrap()
+                    .as_js_string()
+                    .unwrap()
+                    .clone();
+                let read_only = is_read_only_native_method(&method);
+                let mut name = JsString::from("codex.");
+                name.0.extend_from_slice(&method.0);
+                let owner = self.clone();
+                let handler: ToolHandler = Arc::new(move |args, context| {
+                    let owner = owner.clone();
+                    let method = method.clone();
+                    Box::pin(async move {
+                        if read_only {
+                            owner.native_read(method, args, &context).await
+                        } else {
+                            let identity =
+                                caller_identity(context.caller_principal_id, context.operation_id)?;
+                            let operation = owner
+                                .0
+                                .dispatch
+                                .invoke(identity, method, args)?
+                                .wait()
+                                .await?;
+                            operation_outcome(&operation)
+                        }
+                    }) as ServiceFuture<IvyJson>
+                });
+                (name, handler)
+            })
+            .collect()
+    }
+
+    async fn native_read(
+        &self,
+        method: JsString,
+        args: IvyJson,
+        context: &InvocationContext,
+    ) -> IvyResult<IvyJson> {
+        context.throw_if_aborted()?;
+        self.0.dispatch.available()?;
+        let reply = self
+            .0
+            .owner
+            .rpc
+            .request(
+                method,
+                args,
+                RequestOptions {
+                    detach_on_timeout: true,
+                    priority: Priority::Interaction,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        context.throw_if_aborted()?;
+        self.0.dispatch.available()?;
+        if let Some(error) = reply.get("error") {
+            return Err(
+                IvyError::new("native_error", "Native read returned its original error.")
+                    .with_outcome(Outcome::Completed)
+                    .with_details(IvyJson::object([("nativeError", error.clone())])),
+            );
+        }
+        Ok(reply.required("result")?.clone())
     }
 
     fn bound(&self, args: &IvyJson, context: &InvocationContext, require_method: bool) -> bool {

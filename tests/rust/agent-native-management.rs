@@ -6,7 +6,7 @@ use ivy_agent_manager::{
     native_operations::{NativeOperationStore, SqliteOperationStore},
 };
 use ivy_contracts::{
-    IvyJson, IvyResult, JsString,
+    IvyError, IvyJson, IvyResult, JsString, Outcome,
     hash::{hash_json, tool_definition_hash},
     json::parse,
 };
@@ -18,6 +18,8 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
+#[path = "agent-native-json.rs"]
+mod native_json_cases;
 
 fn data() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
@@ -64,19 +66,41 @@ fn management_for(fixture: &Fixture, catalog: IvyJson) -> NativeManagement {
 }
 fn context(step: &IvyJson) -> InvocationContext {
     let context = field(step, "context");
-    let context = InvocationContext {
-        caller_principal_id: text(context, "callerPrincipalId").clone(),
-        operation_id: context
+    let context = InvocationContext::detached(
+        text(context, "callerPrincipalId").clone(),
+        context
             .get("operationId")
             .and_then(IvyJson::as_js_string)
             .cloned(),
-        generation: 1,
-        signal: Default::default(),
-    };
+        1,
+        Default::default(),
+        abort_reason(step),
+    );
     if step.get("cancelled") == Some(&true.into()) {
         context.signal.cancel();
     }
     context
+}
+fn abort_reason(step: &IvyJson) -> IvyError {
+    if let Some(reason) = step.get("abortReason") {
+        let mut error = IvyError::new_js(
+            text(reason, "code").clone(),
+            text(reason, "message").clone(),
+        )
+        .with_outcome(match string(reason, "outcome").as_str() {
+            "not_executed" => Outcome::NotExecuted,
+            "completed" => Outcome::Completed,
+            "unknown" => Outcome::Unknown,
+            outcome => panic!("unknown fixture outcome {outcome}"),
+        });
+        if let Some(details) = reason.get("details") {
+            error = error.with_details(details.clone());
+        }
+        error
+    } else {
+        IvyError::new("fixture_cancelled", "Fixture observation was cancelled.")
+            .with_outcome(Outcome::Unknown)
+    }
 }
 fn random_id(id: &JsString) -> bool {
     let Ok(text) = id.to_utf8() else { return false };
@@ -258,12 +282,14 @@ async fn native_management_binding_refuses_before_sqlite_and_persists_before_nat
             tool_definition_hash(definition).unwrap().into(),
         ),
     ]);
-    let context = InvocationContext {
-        caller_principal_id: "caller".into(),
-        operation_id: Some(operation_id.into()),
-        generation: 1,
-        signal: Default::default(),
-    };
+    let context = InvocationContext::detached(
+        "caller".into(),
+        Some(operation_id.into()),
+        1,
+        Default::default(),
+        IvyError::new("fixture_cancelled", "Fixture observation was cancelled.")
+            .with_outcome(Outcome::Unknown),
+    );
     let mut wrong = request.clone();
     wrong.insert(
         "expectedDefinitionHash",
