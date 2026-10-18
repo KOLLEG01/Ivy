@@ -3,12 +3,10 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::object_entries
 
 pub struct SkillsOwnership {
     before: Vec<(JsString, IvyJson)>,
-    legacy: bool,
     authority: String,
 }
 pub struct SkillReplacement {
     pub name: JsString,
-    pub source_name: JsString,
     pub owned: bool,
     pub unchanged: bool,
 }
@@ -28,7 +26,7 @@ fn truthy(value: &IvyJson) -> bool {
         _ => true,
     }
 }
-fn valid_name(name: &JsString) -> bool {
+pub(crate) fn valid_name(name: &JsString) -> bool {
     name.0.len() <= 64
         && name.0.first().is_some_and(|c| (97..=122).contains(c))
         && name.0.iter().all(|c| matches!(c, 45 | 48..=57 | 97..=122))
@@ -45,12 +43,11 @@ pub fn inspect_ownership(
 ) -> IvyResult<SkillsOwnership> {
     let version = state.and_then(|s| s.get("schemaVersion"));
     if state.is_some_and(truthy)
-        && (!matches!(version, Some(IvyJson::Number(v)) if *v == 1.0 || *v == 2.0)
+        && (!matches!(version, Some(IvyJson::Number(v)) if *v == 2.0)
             || state.and_then(|s| s.get("authority")) != Some(&IvyJson::from(authority)))
     {
         return Err(conflict("Another Hive or host owns these managed skills."));
     }
-    let legacy = version == Some(&IvyJson::Number(1.0));
     let applied = state.and_then(|s| s.get("applied"));
     // Object.entries boxes primitives. Nonempty arrays/strings have numeric
     // keys, which fail the exact skill-name rule before any directory read.
@@ -67,23 +64,13 @@ pub fn inspect_ownership(
         .into_iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let prefix = JsString::from("ivy-managed-");
     for (name, hash) in &before {
-        let skill = if legacy {
-            if name.0.starts_with(&prefix.0) {
-                JsString(name.0[prefix.0.len()..].to_vec())
-            } else {
-                JsString::default()
-            }
-        } else {
-            name.clone()
-        };
-        if !valid_name(&skill) {
+        if !valid_name(name) {
             return Err(conflict(
                 "Managed skill state contains an invalid directory name.",
             ));
         }
-        if desired_names.contains(&skill) {
+        if desired_names.contains(name) {
             let actual = tree_hash(name)?.map(IvyJson::from).unwrap_or(IvyJson::Null);
             if &actual != hash {
                 return Err(conflict(&format!(
@@ -95,7 +82,6 @@ pub fn inspect_ownership(
     }
     Ok(SkillsOwnership {
         before,
-        legacy,
         authority: authority.into(),
     })
 }
@@ -112,19 +98,12 @@ impl SkillsOwnership {
     ) -> IvyResult<SkillsOutput> {
         let mut replacements = Vec::new();
         for (name, hash) in after {
-            let source_name = if self.legacy {
-                let mut units = JsString::from("ivy-managed-").0;
-                units.extend_from_slice(&name.0);
-                JsString(units)
-            } else {
-                name.clone()
-            };
             let previous = self
                 .before
                 .iter()
-                .find(|(key, _)| *key == source_name)
+                .find(|(key, _)| key == name)
                 .map(|(_, v)| v);
-            if (source_name != *name || previous.is_none()) && tree_hash(name)?.is_some() {
+            if previous.is_none() && tree_hash(name)?.is_some() {
                 return Err(conflict(&format!(
                     "Skill directory {} already exists outside Ivy management.",
                     name.to_utf8()?
@@ -132,8 +111,7 @@ impl SkillsOwnership {
             }
             replacements.push(SkillReplacement {
                 name: name.clone(),
-                unchanged: source_name == *name && previous == Some(&IvyJson::from(hash.clone())),
-                source_name,
+                unchanged: previous == Some(&IvyJson::from(hash.clone())),
                 owned: previous.is_some(),
             });
         }

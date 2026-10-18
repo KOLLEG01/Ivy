@@ -23,6 +23,8 @@ mod mcp_render_cases;
 mod skills_cases;
 #[path = "agent-skills-output.rs"]
 mod skills_output_cases;
+#[path = "agent-skills-files.rs"]
+mod skills_file_cases;
 use ivy_contracts::{
     IvyJson, JsString,
     hash::hash_json,

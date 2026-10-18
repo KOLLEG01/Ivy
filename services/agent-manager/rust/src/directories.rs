@@ -29,10 +29,16 @@ pub async fn list_directories(
             for entry in std::fs::read_dir(&actual)? {
                 let entry = entry?;
                 if entry.file_type()?.is_dir() {
-                    names.push(node_path::node_utf8(&entry.file_name()));
+                    let name = entry.file_name();
+                    names.push((name.clone(), node_path::node_utf8(&name)));
                 }
             }
-            Ok((node_path::from_native(&actual), names))
+            #[cfg(not(windows))]
+            names.sort_by(|left, right| left.0.as_encoded_bytes().cmp(right.0.as_encoded_bytes()));
+            Ok((
+                node_path::from_native(&actual),
+                names.into_iter().map(|(_, name)| name).collect(),
+            ))
         };
         let (actual, mut names) = read().map_err(|cause| {
             let Some(code) = filesystem::node_error_code(&cause) else {

@@ -136,7 +136,7 @@ async fn authoritative_skills_preparation_matches_original_reads_and_version() {
 }
 
 #[test]
-fn skills_ownership_migration_collisions_and_retention_match_original_effects() {
+fn current_skills_ownership_collisions_and_retention_match_original_effects() {
     let rows = oracle().get("ownership").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 128);
     for (index, row) in rows.iter().enumerate() {
@@ -181,6 +181,19 @@ fn skills_ownership_migration_collisions_and_retention_match_original_effects() 
                 tree,
             )
         });
+        if row
+            .get("state")
+            .and_then(|state| state.get("schemaVersion"))
+            == Some(&IvyJson::Number(1.0))
+        {
+            // Agreed explicit one-time import replaces the original runtime
+            // legacy branch. Copy fixtures exercise that separate operation.
+            assert!(
+                matches!(planned,Err(ref error) if error.code=="target_conflict"),
+                "unmigrated v1 case {index}"
+            );
+            continue;
+        }
         let actual = match planned {
             Err(error) => IvyJson::object([("error", error.code.into())]),
             Ok(planned) => {
@@ -190,7 +203,7 @@ fn skills_ownership_migration_collisions_and_retention_match_original_effects() 
                 for replacement in planned.replacements {
                     if !replacement.unchanged {
                         if replacement.owned {
-                            trees.insert(replacement.source_name, IvyJson::Null);
+                            trees.insert(replacement.name.clone(), IvyJson::Null);
                         }
                         let hash = after
                             .iter()
