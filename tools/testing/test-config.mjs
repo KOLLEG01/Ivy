@@ -130,6 +130,7 @@ export const rustTests = {
   'tests/rust/builtin_schema.rs': { package: 'ivy-contracts', test: 'builtin_schema' },
   'tests/rust/store.rs': { package: 'ivy-store', test: 'store' },
   'tests/rust/sdk.rs': { package: 'ivy-sdk', test: 'sdk' },
+  'tests/rust/sdk-native.rs': { package: 'ivy-sdk', test: 'sdk-native' },
   'tests/rust/host-scheduler.rs': { package: 'ivy-host-runtime', test: 'host-scheduler' },
   'tests/rust/host-paths.rs': { package: 'ivy-host-runtime', test: 'host-paths' },
   'tests/rust/host-windows-arguments.rs': { package: 'ivy-host-runtime', test: 'host-windows-arguments' },
