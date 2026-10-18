@@ -43,6 +43,8 @@ name = "host-logs"
 path = "../../../tests/rust/host-logs.rs"
 
 [dependencies]
+flate2.workspace = true
+tar.workspace = true
 ivy-contracts.workspace = true
 ivy-store.workspace = true
 ivy-sdk.workspace = true
