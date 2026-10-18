@@ -176,7 +176,17 @@ async fn read_reply(mut stream: TcpStream) -> IvyJson {
     let received = tokio::time::timeout(Duration::from_secs(45), stream.read_to_end(&mut bytes))
         .await
         .unwrap();
-    assert!(received.is_ok() || !bytes.is_empty(), "{received:?}");
+    assert!(
+        received.is_ok()
+            || !bytes.is_empty()
+            || received.as_ref().is_err_and(|error| matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::UnexpectedEof
+            )),
+        "{received:?}"
+    );
     if bytes.is_empty() {
         return IvyJson::object([("status", IvyJson::Null), ("body", IvyJson::Null)]);
     }

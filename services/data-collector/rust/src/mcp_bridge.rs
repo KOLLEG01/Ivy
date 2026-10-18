@@ -145,7 +145,6 @@ async fn handle(
             )
             .map(http::close_response);
         }
-        Err(BodyError::Timeout) => return Ok(http::close_response(http::empty(408))),
         Err(BodyError::Failed) => return Err(IvyError::internal()),
     };
     if value.is_null() {

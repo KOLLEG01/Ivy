@@ -143,7 +143,6 @@ async fn handle(
     let input = match http::body(request.into_body(), crate::policy::INPUT_BYTES).await {
         Ok(input) => input,
         Err(BodyError::TooLarge) => return Ok(http::close_response(http::empty(413))),
-        Err(BodyError::Timeout) => return Ok(http::close_response(http::empty(408))),
         Err(BodyError::Failed) => return Err(IvyError::internal()),
     };
     let revision = row.unwrap().get("revision").cloned();

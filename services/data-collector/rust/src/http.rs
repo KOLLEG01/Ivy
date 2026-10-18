@@ -1,20 +1,20 @@
 //! Raw HTTP/1 transport shared only by the Collector's two listeners.
+use crate::http_compat::NodeIo;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, body::Incoming, server::conn::http1, service::service_fn};
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::rt::TokioIo;
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult,
     json::{parse, stringify},
 };
 use ivy_sdk::service::ServiceFuture;
 use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, sync::watch, task::JoinSet};
+use tokio::{io::AsyncWriteExt, net::TcpListener, sync::watch, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 pub type Reply = Response<Full<Bytes>>;
 pub type Handler = Arc<dyn Fn(Request<Incoming>) -> ServiceFuture<Reply> + Send + Sync>;
-pub const BODY_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct Inner {
     stop: CancellationToken,
@@ -39,23 +39,58 @@ impl Server {
         let (finished, done) = watch::channel(false);
         tokio::spawn(async move {
             let mut connections = JoinSet::new();
+            let mut scan = tokio::time::interval_at(
+                tokio::time::Instant::now() + Duration::from_secs(30),
+                Duration::from_secs(30),
+            );
+            scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let (checked, _) = watch::channel(0u64);
+            let mut generation = 0;
             loop {
                 tokio::select! { biased;
                     _=cancellation.cancelled()=>break,
                     Some(_)=connections.join_next()=>{},
+                    _=scan.tick()=>{generation+=1;checked.send_replace(generation);},
                     accepted=listener.accept()=>{
                         let Ok((socket,_))=accepted else { break; };
                         let handler=handler.clone();
+                        let mut checks=checked.subscribe();
                         connections.spawn(async move {
-                            let service=service_fn(move |request| {
+                            let io=NodeIo::new(socket);
+                            let capture=io.capture.clone();
+                            let observed=capture.clone();
+                            let changed=capture.lock().unwrap().changed.clone();
+                            let service=service_fn(move |mut request:Request<Incoming>| {
                                 let handler=handler.clone();
-                                async move { Ok::<_,Infallible>(handler(request).await.unwrap_or_else(|_|empty(400))) }
+                                let headers=observed.lock().unwrap().view();
+                                async move {
+                                    let Some(headers)=headers else {return Ok::<_,Infallible>(close_response(empty(400)));};
+                                    *request.headers_mut()=headers;
+                                    if request.version()==hyper::Version::HTTP_11 && !request.headers().contains_key(hyper::header::HOST) {return Ok(close_response(empty(400)));}
+                                    Ok(handler(request).await.unwrap_or_else(|_|empty(400)))
+                                }
                             });
-                            let _=http1::Builder::new().timer(TokioTimer::new())
-                                .header_read_timeout(Duration::from_secs(10))
-                                .max_headers(2000)
-                                .max_buf_size(16_384)
-                                .serve_connection(TokioIo::new(socket),service).await;
+                            let mut builder=http1::Builder::new();
+                            builder.header_read_timeout(None).max_headers(1004).max_buf_size(32_768);
+                            let mut connection=builder.serve_connection(TokioIo::new(io),service);
+                            let status=loop {
+                                tokio::select! {
+                                    _=&mut connection=>return,
+                                    _=changed.notified()=>{if let Some(status)=capture.lock().unwrap().rejection() {break Some(status);}},
+                                    result=checks.changed()=>{
+                                        if result.is_err() {return;}
+                                        let state=capture.lock().unwrap();
+                                        if state.expired() {break state.can_report_timeout().then_some(408);}
+                                    },
+                                }
+                            };
+                            let mut socket=connection.into_parts().io.into_inner().socket;
+                            if let Some(status)=status {
+                                let reason=match status {408=>"Request Timeout",431=>"Request Header Fields Too Large",_=>"Bad Request"};
+                                let reply=format!("HTTP/1.1 {status} {reason}\r\nConnection: close\r\n\r\n");
+                                let _=tokio::time::timeout(Duration::from_secs(1),socket.write_all(reply.as_bytes())).await;
+                            }
+                            let _=socket.shutdown().await;
                         });
                     }
                 }
@@ -132,37 +167,28 @@ pub fn equal(left: &[u8], right: &[u8]) -> bool {
 }
 pub enum BodyError {
     TooLarge,
-    Timeout,
     Failed,
 }
 pub async fn body(mut incoming: Incoming, limit: usize) -> Result<IvyJson, BodyError> {
-    let bytes = tokio::time::timeout(BODY_TIMEOUT, async {
-        let mut bytes = Vec::new();
-        while let Some(frame) = incoming.frame().await {
-            let frame = frame.map_err(|_| BodyError::Failed)?;
-            if let Ok(chunk) = frame.into_data() {
-                if chunk.len() > limit.saturating_sub(bytes.len()) {
-                    return Err(BodyError::TooLarge);
-                }
-                bytes.extend_from_slice(&chunk);
+    let mut bytes = Vec::new();
+    while let Some(frame) = incoming.frame().await {
+        let frame = frame.map_err(|_| BodyError::Failed)?;
+        if let Ok(chunk) = frame.into_data() {
+            if chunk.len() > limit.saturating_sub(bytes.len()) {
+                return Err(BodyError::TooLarge);
             }
+            bytes.extend_from_slice(&chunk);
         }
-        Ok(bytes)
-    })
-    .await
-    .map_err(|_| BodyError::Timeout)??;
+    }
     // Buffer.toString('utf8') replaces invalid byte sequences before JSON.parse.
     parse(&String::from_utf8_lossy(&bytes), usize::MAX).map_err(|_| BodyError::Failed)
 }
 pub fn drain(mut body: Incoming) {
     tokio::spawn(async move {
-        let _ = tokio::time::timeout(BODY_TIMEOUT, async {
-            while let Some(frame) = body.frame().await {
-                if frame.is_err() {
-                    break;
-                }
+        while let Some(frame) = body.frame().await {
+            if frame.is_err() {
+                break;
             }
-        })
-        .await;
+        }
     });
 }

@@ -12,6 +12,7 @@ pub mod native_mcp;
 pub mod ingress;
 pub mod lifecycle;
 mod http;
+mod http_compat;
 pub mod policy;
 pub mod provider;
 pub mod runtime;
