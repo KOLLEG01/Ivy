@@ -14,11 +14,10 @@ pub(crate) trait RecoveryIssues {
 }
 impl<T: BorrowMut<RecoveryScan>> RecoveryIssues for RefCell<T> {
     fn issue(&self, key: &str, code: &str) {
-        self.borrow_mut().borrow_mut().issue(key, code);
+        T::borrow_mut(&mut *self.borrow_mut()).issue(key, code);
     }
     fn clear(&self, key: &str) {
-        self.borrow_mut()
-            .borrow_mut()
+        T::borrow_mut(&mut *self.borrow_mut())
             .issues
             .retain(|(id, _)| id != key);
     }
