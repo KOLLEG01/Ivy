@@ -10,6 +10,8 @@ mod support;
 mod retention;
 #[path = "../fixtures/task-board-workspaces.rs"]
 mod workspaces;
+#[path = "../fixtures/task-board-artifact.rs"]
+mod artifact;
 use support::oracle;
 
 struct Temporary(PathBuf);

@@ -3,7 +3,7 @@
 use crate::operations::Document;
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    hash::hash_json,
+    hash::{digest, hash_json},
     json::{canonical, parse},
     limits::MANAGEMENT_FRAME_BYTES,
 };
@@ -61,7 +61,83 @@ pub struct LocalJournal<'a> {
     pub root_object_id: Option<JsString>,
 }
 
+pub struct LocalArtifact {
+    pub contract_key: String,
+    pub parent_id: Option<JsString>,
+    pub content_hash: String,
+    pub media_type: &'static str,
+    pub bytes: Vec<u8>,
+}
+
 impl LocalJournal<'_> {
+    pub fn artifact(&self, pin: &Json) -> IvyResult<Option<LocalArtifact>> {
+        let id = pin
+            .required("objectId")?
+            .as_js_string()
+            .ok_or_else(IvyError::internal)?;
+        let revision = pin
+            .required("revision")?
+            .as_f64()
+            .ok_or_else(IvyError::internal)?;
+        let blob: Option<(String, Option<String>, Vec<u8>)> = self
+            .connection
+            .query_row(
+                "SELECT key,parent_id,bytes FROM blobs WHERE id=?",
+                [text(id)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        if let Some((key, parent, bytes)) = blob {
+            require(
+                revision == 1.0,
+                "task_board_evidence_mismatch",
+                "Local evidence blobs have one revision.",
+            )?;
+            return Ok(Some(LocalArtifact {
+                contract_key: key,
+                parent_id: parent.map(Into::into),
+                content_hash: digest(&bytes),
+                media_type: "application/octet-stream",
+                bytes,
+            }));
+        }
+        let head: Option<(String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT key,parent_id FROM documents WHERE id=?",
+                [text(id)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((key, parent)) = head else {
+            return Ok(None);
+        };
+        let encoded: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value_json FROM revisions WHERE id=? AND revision=?",
+                params![text(id), revision],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        require(
+            encoded.is_some(),
+            "task_board_evidence_mismatch",
+            "The local artifact revision is unavailable.",
+        )?;
+        let encoded = encoded.unwrap();
+        let value = parse(&encoded, MANAGEMENT_FRAME_BYTES)?;
+        Ok(Some(LocalArtifact {
+            contract_key: key,
+            parent_id: parent.map(Into::into),
+            content_hash: hash_json(&value)?,
+            media_type: "application/json",
+            bytes: encoded.into_bytes(),
+        }))
+    }
     pub fn key(&self, id: &JsString) -> IvyResult<Option<String>> {
         let id = text(id);
         let document = self
