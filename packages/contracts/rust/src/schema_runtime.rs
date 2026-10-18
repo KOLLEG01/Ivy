@@ -228,7 +228,19 @@ fn compile(schema: &IvyJson) -> IvyResult<CompiledSchema> {
                 .iter()
                 .any(|name| *key == &JsString::from(*name))
             })
-            .map(|(key, value)| (key.clone(), value.clone()));
+            .map(|(key, value)| {
+                let value = if key == &JsString::from("dependencies") {
+                    IvyJson::object(
+                        entries(value)
+                            .into_iter()
+                            .filter(|(_, value)| value.as_array().is_some())
+                            .map(|(key, value)| (key.clone(), value.clone())),
+                    )
+                } else {
+                    value.clone()
+                };
+                (key.clone(), value)
+            });
         let mut static_all = 0;
         if source.get("additionalProperties").is_some()
             || source.get("unevaluatedProperties").is_some()

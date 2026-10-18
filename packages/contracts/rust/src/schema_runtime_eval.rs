@@ -636,13 +636,16 @@ impl CompiledSchema {
                     .iter()
                     .all(|kind| ![IvyJson::from("object"), IvyJson::from("array")].contains(kind))
         }) {
+            let tag_strings = types.len() > 1
+                || (item.unwrap().get("nullable").and_then(IvyJson::as_bool) == Some(true)
+                    && !types.iter().any(|kind| *kind == &IvyJson::from("null")));
             let mut seen = HashSet::new();
             for value in values.iter().rev() {
                 if !type_matches(item.unwrap(), value) {
                     continue;
                 }
                 let mut key = crate::json::js_string(value);
-                if types.len() > 1 && value.as_js_string().is_some() {
+                if tag_strings && value.as_js_string().is_some() {
                     key.0.push(95);
                 }
                 if key == JsString::from("__proto__") {
