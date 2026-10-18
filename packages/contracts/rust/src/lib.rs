@@ -17,6 +17,7 @@ pub mod host_bundle;
 pub mod json;
 pub mod limits;
 pub mod native_contract;
+mod native_catalog_path;
 pub mod operation;
 pub mod read_request;
 pub mod re2;
