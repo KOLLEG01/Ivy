@@ -86,7 +86,7 @@ impl InviteExchange {
         {
             return Err(SipError::InvalidChallenge);
         }
-        if !protected(username, 256) || !protected(password, 4096) {
+        if !protected(username, 256) || !bounded_secret(password, 4096) {
             return Err(SipError::InvalidCredentials);
         }
         let sequence = expected
@@ -241,7 +241,9 @@ impl InviteExchange {
 }
 
 pub(super) fn protected(value: &str, maximum: usize) -> bool {
-    !value.trim().is_empty()
-        && value.encode_utf16().count() <= maximum
-        && !value.chars().any(char::is_control)
+    !value.trim().is_empty() && bounded_secret(value, maximum)
+}
+
+pub(super) fn bounded_secret(value: &str, maximum: usize) -> bool {
+    value.encode_utf16().count() <= maximum && !value.chars().any(char::is_control)
 }

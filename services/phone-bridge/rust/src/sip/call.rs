@@ -2,8 +2,9 @@
 //! The host persists admission/intent and owns the PCM/media implementation.
 use super::{
     CallAction, CallError, CallOutcome, ClientExchange, DelayedOfferCall, Dialog, DialogRequest,
-    FinalPhase, InviteExchange, SipEndpoint, SipError, SipIoError, endpoint::DialogFlow,
-    invite::protected,
+    FinalPhase, InviteExchange, SipEndpoint, SipError, SipIoError,
+    endpoint::DialogFlow,
+    invite::{bounded_secret, protected},
 };
 use rsipstack::{
     dialog::authenticate::{Credential, handle_client_authenticate},
@@ -45,7 +46,7 @@ pub struct DigestCredentials {
 }
 impl DigestCredentials {
     pub fn new(username: String, password: String) -> Result<Self, SipError> {
-        if !protected(&username, 256) || !protected(&password, 4096) {
+        if !protected(&username, 256) || !bounded_secret(&password, 4096) {
             return Err(SipError::InvalidCredentials);
         }
         Ok(Self { username, password })

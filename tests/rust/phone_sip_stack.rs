@@ -899,7 +899,6 @@ mod tests {
                 ));
                 for (username, password) in [
                     ("", "fixture-only"),
-                    ("fixture", ""),
                     ("with\ncontrol", "fixture-only"),
                     ("fixture", "with\u{0080}control"),
                 ] {
@@ -973,6 +972,63 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_empty_or_space_passwords_are_preserved_as_digest_inputs() {
+        let token = CancellationToken::new();
+        let endpoint = EndpointBuilder::new()
+            .with_cancel_token(token.clone())
+            .build();
+        for body in ["", OFFER] {
+            for status in [
+                StatusCode::Unauthorized,
+                StatusCode::ProxyAuthenticationRequired,
+            ] {
+                for password in [String::new(), " ".into(), "\u{1f600}".repeat(2048)] {
+                    DigestCredentials::new("fixture-auth".into(), password.clone()).unwrap();
+                    let request = original(body);
+                    let key =
+                        TransactionKey::from_request(&request, TransactionRole::Client).unwrap();
+                    let transaction =
+                        Transaction::new_client(key, request.clone(), endpoint.inner.clone(), None);
+                    let mut exchange = InviteExchange::new(request.clone()).unwrap();
+                    let mut challenge = response(&request, status.clone(), 5060, "");
+                    let value = "Digest realm=\"fixture\", nonce=\"secret-boundary-fixture\", algorithm=MD5, qop=\"auth\"";
+                    challenge
+                        .headers
+                        .unique_push(if status == StatusCode::Unauthorized {
+                            WwwAuthenticate::new(value).into()
+                        } else {
+                            ProxyAuthenticate::new(value).into()
+                        });
+                    let continued = exchange
+                        .authenticate(&transaction, &challenge, "fixture-auth", &password)
+                        .await
+                        .unwrap();
+                    let raw = continued
+                        .original
+                        .headers
+                        .iter()
+                        .find_map(|header| match header {
+                            Header::Authorization(value) => Some(value.value()),
+                            Header::ProxyAuthorization(value) => Some(value.value()),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let parsed = rsipstack::sip::typed::Authorization::parse(raw).unwrap();
+                    assert!(rsipstack::dialog::authenticate::verify_digest(
+                        &parsed,
+                        &password,
+                        &Method::Invite,
+                        raw
+                    ));
+                    assert_eq!(continued.original.body, request.body);
+                    assert_eq!(continued.original.cseq_header().unwrap().seq().unwrap(), 2);
+                }
+            }
+        }
+        token.cancel();
     }
 
     #[tokio::test]
