@@ -77,7 +77,12 @@ try {
     for(const family of store.all('SELECT key,media_type FROM contract_families ORDER BY key LIMIT 8')){
       steps.push({op:'query',params:{contractKey:family.key,includeArchived:true,limit:2}});
     }
-    for(const object of store.all('SELECT id FROM objects ORDER BY id LIMIT 8'))steps.push({op:'read',params:{objectId:object.id}});
+    steps.push({op:'list',params:{parentId:null,includeArchived:true,limit:5}});
+    steps.push({op:'tree',params:{rootId:null,includeArchived:true,depth:3,limit:200}});
+    for(const object of store.all('SELECT id FROM objects ORDER BY id LIMIT 8')){
+      steps.push({op:'read',params:{objectId:object.id}});
+      steps.push({op:'history',params:{objectId:object.id,limit:2}});
+    }
     process.stdout.write(JSON.stringify(steps));
   }else{
     const rows=[],values=[];
@@ -102,6 +107,12 @@ try {
             const params={...step.params};if(step.from!==undefined)params.cursor=values[step.from].nextCursor;
             if(step.tokenFrom!==undefined)params.cursor=values[step.tokenFrom];
             value=store.withBudget(()=>queryObjects(store,params),10000);break;
+          }
+          case 'list':case 'history':case 'tree':{
+            const params={...field(step,'params')};
+            if(step.from!==undefined)params.cursor=values[step.from].nextCursor;
+            if(step.tokenFrom!==undefined)params.cursor=values[step.tokenFrom];
+            value=store.withBudget(()=>new Objects(store)[step.op](params),step.overdue?-1:10000);break;
           }
           case 'read':value=new Objects(store).read(step.params);break;
           case 'stat':value=new Objects(store).stat(step.params);break;

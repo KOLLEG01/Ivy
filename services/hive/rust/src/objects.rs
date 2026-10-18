@@ -8,6 +8,9 @@ pub enum Location<'a> {
     Id(&'a JsString),
     Path(&'a JsString),
 }
+#[path = "object_pages.rs"]
+mod pages;
+pub use pages::{history, list, tree};
 fn value(row: &Row<'_>, name: &str) -> rusqlite::Result<IvyJson> {
     Ok(match row.get_ref(name)? {
         ValueRef::Null => IvyJson::Null,
@@ -17,48 +20,36 @@ fn value(row: &Row<'_>, name: &str) -> rusqlite::Result<IvyJson> {
         ValueRef::Blob(_) => return Err(rusqlite::Error::InvalidQuery),
     })
 }
-pub fn stat(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
-    let (column, selected) = match location {
-        Location::Id(v) => ("id", v),
-        Location::Path(v) => ("path", v),
-    };
-    let object = store
-        .connection()
-        .query_row(
-            &format!("SELECT * FROM objects WHERE {column}=?"),
-            [String::from_utf16_lossy(&selected.0)],
-            |row| {
-                let mut pairs = vec![];
-                for (name, column) in [
-                    ("id", "id"),
-                    ("parentId", "parent_id"),
-                    ("ownerObjectId", "owner_object_id"),
-                    ("name", "name"),
-                    ("path", "path"),
-                    ("position", "position"),
-                    ("icon", "icon"),
-                    ("contractKey", "contract_key"),
-                    ("currentRevision", "current_revision"),
-                    ("archivedAt", "archived_at"),
-                    ("createdAt", "created_at"),
-                    ("updatedAt", "updated_at"),
-                ] {
-                    pairs.push((name, value(row, column)?));
-                }
-                pairs.push((
-                    "effectivelyArchived",
-                    IvyJson::Bool(row.get::<_, i64>("effective_archive")? != 0),
-                ));
-                Ok(IvyJson::object(pairs))
-            },
-        )
-        .optional()
-        .map_err(|e| store.query_error(e))?
-        .ok_or_else(|| IvyError::new("not_found", "Object not found."))?;
+fn object_row(row: &Row<'_>) -> rusqlite::Result<IvyJson> {
+    let mut pairs = vec![];
+    for (name, column) in [
+        ("id", "id"),
+        ("parentId", "parent_id"),
+        ("ownerObjectId", "owner_object_id"),
+        ("name", "name"),
+        ("path", "path"),
+        ("position", "position"),
+        ("icon", "icon"),
+        ("contractKey", "contract_key"),
+        ("currentRevision", "current_revision"),
+        ("archivedAt", "archived_at"),
+        ("createdAt", "created_at"),
+        ("updatedAt", "updated_at"),
+    ] {
+        pairs.push((name, value(row, column)?));
+    }
+    pairs.push((
+        "effectivelyArchived",
+        IvyJson::Bool(row.get::<_, i64>("effective_archive")? != 0),
+    ));
+    Ok(IvyJson::object(pairs))
+}
+fn complete_object(store: &Store, mut object: IvyJson) -> IvyResult<IvyJson> {
     let version: String = store
         .connection()
+        .prepare_cached("SELECT contract_version FROM revisions WHERE object_id=? AND revision=?")
+        .map_err(|e| store.query_error(e))?
         .query_row(
-            "SELECT contract_version FROM revisions WHERE object_id=? AND revision=?",
             rusqlite::params![
                 object.get("id").unwrap().as_str()?,
                 object.get("currentRevision").unwrap().as_f64().unwrap() as i64
@@ -66,9 +57,51 @@ pub fn stat(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
             |r| r.get(0),
         )
         .map_err(|e| store.query_error(e))?;
-    let mut object = object;
     object.insert("contractVersion", version.into());
     Ok(object)
+}
+fn revision_row(row: &Row<'_>) -> rusqlite::Result<(String, IvyJson)> {
+    let mut revision = IvyJson::object([
+        ("objectId", value(row, "object_id")?),
+        ("revision", value(row, "revision")?),
+        ("contractVersion", value(row, "contract_version")?),
+        ("contentHash", value(row, "content_hash")?),
+        ("byteLength", value(row, "byte_length")?),
+        ("createdAt", value(row, "created_at")?),
+    ]);
+    revision.insert(
+        "references",
+        parse(&row.get::<_, String>("references_json")?, usize::MAX)
+            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?,
+    );
+    Ok((row.get("contract_key")?, revision))
+}
+fn complete_revision(store: &Store, key: &str, mut revision: IvyJson) -> IvyResult<IvyJson> {
+    let version = revision
+        .get("contractVersion")
+        .unwrap()
+        .as_js_string()
+        .unwrap();
+    let definition = store.contract(&key.into(), version)?;
+    if let Some(media) = definition.get("mediaType") {
+        revision.insert("mediaType", media.clone());
+    }
+    Ok(revision)
+}
+pub fn stat(store: &Store, location: Location<'_>) -> IvyResult<IvyJson> {
+    let (column, selected) = match location {
+        Location::Id(v) => ("id", v),
+        Location::Path(v) => ("path", v),
+    };
+    let object = store
+        .connection()
+        .prepare_cached(&format!("SELECT * FROM objects WHERE {column}=?"))
+        .map_err(|e| store.query_error(e))?
+        .query_row([String::from_utf16_lossy(&selected.0)], object_row)
+        .optional()
+        .map_err(|e| store.query_error(e))?
+        .ok_or_else(|| IvyError::new("not_found", "Object not found."))?;
+    complete_object(store, object)
 }
 pub fn read(store: &Store, location: Location<'_>, revision: Option<u64>) -> IvyResult<IvyJson> {
     let object = stat(store, location)?;
@@ -81,20 +114,7 @@ pub fn read(store: &Store, location: Location<'_>, revision: Option<u64>) -> Ivy
             "SELECT * FROM revisions WHERE object_id=? AND revision=?",
             rusqlite::params![id, selected as i64],
             |row| {
-                let mut revision = IvyJson::object([
-                    ("objectId", value(row, "object_id")?),
-                    ("revision", value(row, "revision")?),
-                    ("contractVersion", value(row, "contract_version")?),
-                    ("contentHash", value(row, "content_hash")?),
-                    ("byteLength", value(row, "byte_length")?),
-                    ("createdAt", value(row, "created_at")?),
-                ]);
-                let references: String = row.get("references_json")?;
-                revision.insert(
-                    "references",
-                    parse(&references, usize::MAX)
-                        .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?,
-                );
+                let (key, revision) = revision_row(row)?;
                 let encoding: String = row.get("encoding")?;
                 let content = if encoding == "base64" {
                     STANDARD.encode(row.get::<_, Vec<u8>>("content")?).into()
@@ -104,7 +124,6 @@ pub fn read(store: &Store, location: Location<'_>, revision: Option<u64>) -> Ivy
                 } else {
                     value(row, "content")?
                 };
-                let key: String = row.get("contract_key")?;
                 Ok((
                     key,
                     revision,
@@ -114,7 +133,7 @@ pub fn read(store: &Store, location: Location<'_>, revision: Option<u64>) -> Ivy
         )
         .optional()
         .map_err(|e| store.query_error(e))?;
-    let Some((key, mut revision_metadata, content)) = row else {
+    let Some((key, revision_metadata, content)) = row else {
         return Err(if revision.is_some() && selected <= current {
             IvyError::new(
                 "revision_pruned",
@@ -124,15 +143,7 @@ pub fn read(store: &Store, location: Location<'_>, revision: Option<u64>) -> Ivy
             IvyError::new("not_found", "Object revision not found.")
         });
     };
-    let version = revision_metadata
-        .get("contractVersion")
-        .unwrap()
-        .as_js_string()
-        .unwrap();
-    let definition = store.contract(&key.into(), version)?;
-    if let Some(media) = definition.get("mediaType") {
-        revision_metadata.insert("mediaType", media.clone());
-    }
+    let revision_metadata = complete_revision(store, &key, revision_metadata)?;
     Ok(IvyJson::object([
         ("object", object),
         ("revision", revision_metadata),

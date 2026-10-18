@@ -18,6 +18,8 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
+#[path = "hive_object_pages.rs"]
+mod object_pages;
 
 fn fixture(input: Value) -> Value {
     let mut child =
@@ -102,7 +104,7 @@ fn native(path: &Path, steps: &[Value], retained: bool) -> Value {
                         ("value", value.unwrap_or(IvyJson::Null)),
                     ]))
                 }
-                "catalog" | "query" => {
+                "catalog" | "query" | "list" | "history" | "tree" => {
                     let mut params = field(step, "params");
                     if let Some(index) = step["from"].as_u64() {
                         params.insert(
@@ -118,7 +120,20 @@ fn native(path: &Path, steps: &[Value], retained: bool) -> Value {
                     if let Some(index) = step["tokenFrom"].as_u64() {
                         params.insert("cursor", values[index as usize].as_ref().unwrap().clone());
                     }
-                    if step["op"] == "query" {
+                    if matches!(step["op"].as_str(), Some("list" | "history" | "tree")) {
+                        Some(store.with_budget(
+                            if step["overdue"] == true {
+                                Duration::ZERO
+                            } else {
+                                Duration::from_secs(10)
+                            },
+                            |s| match step["op"].as_str().unwrap() {
+                                "list" => objects::list(s, &params),
+                                "history" => objects::history(s, &params),
+                                _ => objects::tree(s, &params),
+                            },
+                        )?)
+                    } else if step["op"] == "query" {
                         Some(
                             store.with_budget(Duration::from_secs(10), |s| {
                                 query_objects(s, &params)
