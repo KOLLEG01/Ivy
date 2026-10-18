@@ -1,6 +1,6 @@
 use ivy_contracts::{
     IvyJson,
-    json::{parse, stringify},
+    json::{canonical, parse, stringify},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
@@ -165,10 +165,17 @@ async fn desired_subscription_keeps_order_and_persistence_failures_propagate() {
         .await
         .unwrap();
     assert_eq!(
-        json(&std::fs::read_to_string(path).unwrap()),
-        hint(&batch, &configuration, &catalog, "now")
+        std::fs::read_to_string(path).unwrap(),
+        format!(
+            "{}\n",
+            canonical(
+                &hint(&batch, &configuration, &catalog, "now")
+                    .unwrap()
+                    .unwrap(),
+                MANAGEMENT_FRAME_BYTES,
+            )
             .unwrap()
-            .unwrap()
+        )
     );
     assert!(
         persist_hint(root.0.clone(), &batch, &configuration, &catalog, "now")
