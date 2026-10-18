@@ -115,9 +115,12 @@ async fn original_engine_initialization_settings_and_assignment_queries() {
         let clock = FixedClock(input.required("time").unwrap().as_f64().unwrap() as i64);
         let tools = ToolClients::new(client.clone());
         let issues = RefCell::new(RecoveryScan::default());
+        let runtime_epoch = "fixture-epoch".into();
         let engine = SecretaryEngine {
             evidence: &evidence,
             clock: &clock,
+            operation_clock: &clock,
+            runtime_epoch: &runtime_epoch,
             tools: &tools,
             issues: &issues,
         };

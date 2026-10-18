@@ -186,9 +186,12 @@ async fn original_inbox_effect_recovery_and_bounded_scan() {
         });
         let clock = ivy_sdk::clock::SystemClock;
         let tools = ToolClients::new(client.clone());
+        let runtime_epoch = "fixture-epoch".into();
         let engine = SecretaryEngine {
             evidence: &evidence,
             clock: &clock,
+            operation_clock: &clock,
+            runtime_epoch: &runtime_epoch,
             tools: &tools,
             issues: &scan,
         };

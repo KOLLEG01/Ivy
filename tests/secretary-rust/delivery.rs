@@ -42,6 +42,8 @@ mod inbox_evidence_cases;
 mod inbox_recovery_cases;
 #[path = "engine_cases.rs"]
 mod engine_cases;
+#[path = "engine_assignments_cases.rs"]
+mod engine_assignments_cases;
 #[path = "notice_scan_cases.rs"]
 mod notice_scan_cases;
 #[path = "notice_evidence_cases.rs"]

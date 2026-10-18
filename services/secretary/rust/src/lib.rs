@@ -26,6 +26,7 @@ pub mod document;
 pub mod inbox_evidence;
 pub mod inbox_recovery;
 pub mod engine;
+mod engine_assignments;
 pub mod journal;
 pub mod media_input;
 pub mod media_schema;

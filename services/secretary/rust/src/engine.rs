@@ -77,11 +77,15 @@ pub fn validate_settings(settings: &IvyJson) -> IvyResult<()> {
 pub struct SecretaryEngine<'a, 'engine, 'journal> {
     pub evidence: &'a InboxEvidence<'engine, 'journal>,
     pub clock: &'a dyn Clock,
+    /// Original Date.now operation admission/retention clock, distinct from the
+    /// engine's injectable observation clock.
+    pub operation_clock: &'a dyn Clock,
+    pub runtime_epoch: &'a JsString,
     pub tools: &'a ToolClients,
     pub issues: &'a RefCell<RecoveryScan>,
 }
 impl SecretaryEngine<'_, '_, '_> {
-    fn now(&self) -> IvyResult<JsString> {
+    pub(crate) fn now(&self) -> IvyResult<JsString> {
         date_to_iso(self.clock.utc_millis() as f64).map_err(|_| IvyError::internal())
     }
     pub async fn initialize(&self) -> IvyResult<()> {
