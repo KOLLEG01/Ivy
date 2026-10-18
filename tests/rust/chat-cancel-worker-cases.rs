@@ -470,10 +470,12 @@ async fn original_cancellation_prevention_interrupt_and_settlement() {
     let corpus = oracle();
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    let instructions: JsString =
-        String::from_utf8(STANDARD.decode(text(corpus, "instructions")).unwrap())
-            .unwrap()
-            .into();
+    let bytes = STANDARD.decode(text(corpus, "instructions")).unwrap();
+    let instructions = parse(std::str::from_utf8(&bytes).unwrap(), usize::MAX)
+        .unwrap()
+        .as_js_string()
+        .unwrap()
+        .clone();
     let notices = NoticeInstructions::from_json(
         &parse(
             std::str::from_utf8(&STANDARD.decode(text(corpus, "noticeInstructions")).unwrap())

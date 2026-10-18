@@ -517,8 +517,12 @@ fn snapshot(
         let pending = gate.expected.lock().unwrap();
         assert!(
             pending.is_empty(),
-            "Missing original shared gate: next={:?}; actual output={output:?}",
-            pending.front().and_then(|v| v.get("kind")),
+            "Missing original shared gate: next={:?}; actual output={}",
+            pending
+                .front()
+                .and_then(|v| v.get("kind"))
+                .and_then(|v| v.as_str().ok()),
+            canonical(&output, usize::MAX).unwrap(),
         );
     }
     let mut remote = client.0.lock().unwrap();
@@ -659,9 +663,12 @@ async fn original_collector_replay_retry_results_and_publication() {
     let corpus = oracle();
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    let instructions = String::from_utf8(STANDARD.decode(text(corpus, "instructions")).unwrap())
+    let bytes = STANDARD.decode(text(corpus, "instructions")).unwrap();
+    let instructions = parse(std::str::from_utf8(&bytes).unwrap(), usize::MAX)
         .unwrap()
-        .into();
+        .as_js_string()
+        .unwrap()
+        .clone();
     let mut workflows = 0;
     let mut steps = 0;
     let mut gates = 0;
