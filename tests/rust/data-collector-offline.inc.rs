@@ -248,6 +248,26 @@ async fn scenario(original: bool) -> IvyJson {
     );
     let expected_markers = parse(r#"[{"cursor":1,"previous":null,"input":null},{"cursor":2,"previous":1,"input":2},{"cursor":3,"previous":2,"input":3},{"cursor":4,"previous":3,"input":4}]"#, usize::MAX).unwrap();
     assert!(json_equal(&markers(&fixture), &expected_markers));
+    // Ordinary Hive restarts preserve runtime_epoch. Inject the separate epoch
+    // fault only into the stopped synthetic database, retaining objects/events.
+    let changed_epoch = uuid::Uuid::new_v4().to_string();
+    let db = sqlite::open(
+        &fixture.root.join("hive.sqlite"),
+        sqlite::OpenOptions {
+            busy_timeout: Duration::from_secs(1),
+            read_only: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        db.execute(
+            "UPDATE metadata SET value=? WHERE key='runtime_epoch'",
+            [&changed_epoch]
+        )
+        .unwrap(),
+        1
+    );
+    drop(db);
     let reopened = hive_state(&mut hive, &mut output, "online").await;
     assert_eq!(reopened.get("url"), Some(&url.into()));
     online(&fixture, &child, None, &client, SOURCE).await;
@@ -259,6 +279,7 @@ async fn scenario(original: bool) -> IvyJson {
         .unwrap()
         .clone();
     assert_ne!(epoch, initial_epoch);
+    assert_eq!(epoch, changed_epoch.into());
     let completed = wait_runs(&fixture, 4, "succeeded").await;
     assert!(
         completed
