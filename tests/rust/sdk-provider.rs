@@ -150,6 +150,93 @@ fn without_id(value: IvyJson) -> IvyJson {
             .filter(|(key, _)| key != &JsString::from("id")),
     )
 }
+fn abort_reason(result: ivy_sdk::IvyResult<()>) -> IvyJson {
+    match result {
+        Ok(()) => IvyJson::Null,
+        Err(error) => IvyJson::object([
+            ("code", IvyJson::String(error.code_js())),
+            ("message", IvyJson::String(error.message_js())),
+            ("outcome", error.outcome.as_str().into()),
+            ("details", error.details.unwrap_or(IvyJson::Null)),
+        ]),
+    }
+}
+#[tokio::test]
+async fn invocation_and_connection_abort_checks_retain_original_error_after_close() {
+    let expected = tokio::time::timeout(
+        Duration::from_secs(15),
+        peer_command().arg("abort-oracle").output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    let expected = json(std::str::from_utf8(&expected.stdout).unwrap());
+    let peer = Peer::start().await;
+    let retained = Arc::new(Mutex::new(None));
+    let mut config = options();
+    let captured = retained.clone();
+    config.handlers.insert(
+        "fixture.echo".into(),
+        Arc::new(move |_, context| {
+            let captured = captured.clone();
+            Box::pin(async move {
+                context.throw_if_aborted()?;
+                *captured.lock().unwrap() = Some(context);
+                Ok(true.into())
+            })
+        }),
+    );
+    let mut out = vec![];
+    for outcome in [
+        Some(Outcome::NotExecuted),
+        Some(Outcome::Unknown),
+        Some(Outcome::Completed),
+        None,
+    ] {
+        let connection = peer.open(config.clone()).await;
+        call(&connection, "test.invoke", object()).await.unwrap();
+        let context = retained.lock().unwrap().take().unwrap();
+        let cloned = context.clone();
+        let before = IvyJson::Array(vec![
+            abort_reason(connection.throw_if_aborted()),
+            abort_reason(context.throw_if_aborted()),
+        ]);
+        match outcome {
+            Some(outcome) => {
+                let code = JsString(vec![102, 105, 120, 116, 117, 114, 101, 95, 0xd800]);
+                let mut message = JsString::from("Retained ");
+                message.0.push(0xdfff);
+                message
+                    .0
+                    .extend(JsString::from(format!(" {}", "x".repeat(2050))).0);
+                connection.close_with(
+                    IvyError::new_js(code, message)
+                        .with_outcome(outcome)
+                        .with_details(json(r#"{"text":"\ud800","nested":[1,null,false]}"#)),
+                );
+            }
+            None => connection.close(),
+        }
+        connection.close_with(IvyError::new("later", "Must not replace the first close."));
+        let reason = abort_reason(connection.throw_if_aborted());
+        assert_eq!(reason, abort_reason(connection.check_open()));
+        drop(connection);
+        out.push(IvyJson::object([
+            ("before", before),
+            ("connection", reason),
+            ("context", abort_reason(context.throw_if_aborted())),
+            ("clone", abort_reason(cloned.throw_if_aborted())),
+            ("aborted", context.signal.is_cancelled().into()),
+        ]));
+    }
+    assert_eq!(IvyJson::Array(out), expected);
+    peer.finish().await;
+}
 #[tokio::test]
 async fn requests_handlers_and_notifications_match_typescript() {
     let expected = tokio::time::timeout(
@@ -363,9 +450,14 @@ async fn accepted_handlers_retain_capacity_across_connection_generations() {
             let count = count.clone();
             let completed = completed.clone();
             Box::pin(async move {
+                context.throw_if_aborted()?;
                 count.fetch_add(1, Ordering::SeqCst);
                 gate.acquire().await.unwrap().forget();
                 assert!(context.signal.is_cancelled());
+                let error = context.throw_if_aborted().unwrap_err();
+                assert_eq!(error.code, "service_unavailable");
+                assert_eq!(error.outcome, Outcome::Unknown);
+                assert_eq!(error.message, "Service connection is stopping.");
                 completed.fetch_add(1, Ordering::SeqCst);
                 Ok(true.into())
             })
