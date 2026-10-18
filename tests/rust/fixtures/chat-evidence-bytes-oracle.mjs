@@ -62,6 +62,12 @@ add('wrong-format-on-read',[save(),load({format:formats.read})]);
 add('wrong-manifest-pin',[save(),load({revision:7})]);
 for(const [label,patch]of [['format',{format:formats.read}],['count',{byteLength:2*chunkBytes}],['body-hash',{contentHash:digest('wrong')}],['missing-chunks',{chunks:null}]])add('manifest-'+label,[save(),{action:'patch-manifest',patch},load()]);
 for(const [label,patch]of [['media',{mediaType:'text/plain'}],['length',{byteLength:1}],['hash',{contentHash:digest('wrong')}],['revision',{object:{revision:2}}],['missing',{object:{objectId:'missing'}}]])add('chunk-'+label,[save(),{action:'patch-chunk',patch},load()]);
+const originalLength=Buffer.byteLength(canonical(body()));
+for(const [label,value]of [['fraction',originalLength+0.5],['string',String(originalLength)]]){
+ add('manifest-length-'+label,[save(),{action:'patch-manifest',patch:{byteLength:value}},load()]);
+ add('chunk-length-'+label,[save(),{action:'patch-chunk',patch:{byteLength:value}},load()]);
+}
+for(const [label,value]of [['fraction',1.5],['string','1']])add('chunk-revision-'+label,[save(),{action:'patch-chunk',patch:{object:{revision:value}}},load()]);
 add('changed-chunk-bytes',[save(),{action:'blob-edit',mode:'flip'},load()]);
 add('missing-chunk-bytes',[save(),{action:'blob-edit',mode:'delete'},load()]);
 add('foreign-chunk-parent',[save(),{action:'blob-edit',mode:'parent'},load()]);

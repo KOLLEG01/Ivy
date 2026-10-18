@@ -8,7 +8,7 @@ use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult,
     agent_schema::validate_agent,
     hash::digest,
-    json::{canonical, parse},
+    json::{canonical, number_from_string, parse, try_js_string},
 };
 use std::collections::HashSet;
 
@@ -52,19 +52,29 @@ async fn scope(store: &ChatStore, parent_id: &str) -> IvyResult<()> {
     }
 }
 fn pin(value: &Json) -> IvyResult<Pin> {
+    require(
+        value.get("revision") == Some(&Json::Number(1.0)),
+        "Local evidence blobs have one immutable revision.",
+    )?;
     Ok(Pin {
         object_id: value.required("objectId")?.as_str()?,
-        revision: value
-            .required("revision")?
-            .as_f64()
-            .ok_or_else(IvyError::internal)? as i64,
+        revision: 1,
     })
 }
-fn number(value: &Json, key: &str) -> IvyResult<usize> {
-    Ok(value
-        .required(key)?
-        .as_f64()
-        .ok_or_else(IvyError::internal)? as usize)
+fn length_of(value: &Json) -> IvyResult<f64> {
+    Ok(match value.get("byteLength") {
+        None => f64::NAN,
+        Some(Json::Number(number)) => *number,
+        Some(Json::Null) => 0.0,
+        Some(Json::Bool(value)) => {
+            if *value {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Some(value) => number_from_string(&try_js_string(value)?),
+    })
 }
 
 pub async fn save_chat_evidence(
@@ -142,26 +152,36 @@ pub async fn read_chat_evidence(
         .map_err(|error| error.into_ivy())?
         .value;
     let chunks = manifest
-        .required("chunks")?
-        .as_array()
+        .get("chunks")
+        .and_then(Json::as_array)
         .ok_or_else(IvyError::internal)?;
-    let length = number(&manifest, "byteLength")?;
+    let length = length_of(&manifest)?;
     let mut identities = HashSet::new();
     for chunk in chunks {
-        let object = chunk.required("object")?;
-        identities.insert(format!(
-            "{}:{}",
-            object.required("objectId")?.as_str()?,
-            number(object, "revision")?
-        ));
+        let object = chunk.get("object").ok_or_else(IvyError::internal)?;
+        let mut identity = object
+            .get("objectId")
+            .map(try_js_string)
+            .transpose()?
+            .unwrap_or_else(|| "undefined".into());
+        identity.0.push(b':' as u16);
+        identity.0.extend(
+            object
+                .get("revision")
+                .map(try_js_string)
+                .transpose()?
+                .unwrap_or_else(|| "undefined".into())
+                .0,
+        );
+        identities.insert(identity);
     }
     require(
         manifest.get("format") == Some(&format.into())
-            && chunks.len() == length.div_ceil(EVIDENCE_CHUNK_BYTES)
+            && chunks.len() as f64 == (length / EVIDENCE_CHUNK_BYTES as f64).ceil()
             && identities.len() == chunks.len(),
         "Evidence must retain its exact format and distinct ordered chunk pins.",
     )?;
-    let mut body = Vec::with_capacity(length);
+    let mut body = Vec::with_capacity(length as usize);
     for (index, chunk) in chunks.iter().enumerate() {
         require(
             chunk.get("mediaType") == Some(&"application/octet-stream".into()),
@@ -176,15 +196,18 @@ pub async fn read_chat_evidence(
             .await
             .map_err(|error| error.into_ivy())?;
         require(
-            bytes.len() == EVIDENCE_CHUNK_BYTES.min(length - index * EVIDENCE_CHUNK_BYTES)
-                && bytes.len() == number(chunk, "byteLength")?
+            bytes.len() as f64
+                == (EVIDENCE_CHUNK_BYTES as f64)
+                    .min(length - (index * EVIDENCE_CHUNK_BYTES) as f64)
+                && chunk.get("byteLength") == Some(&Json::Number(bytes.len() as f64))
                 && chunk.get("contentHash") == Some(&digest(&bytes).into()),
             "Evidence bytes differ from their exact ordered length and hash.",
         )?;
         body.extend_from_slice(&bytes);
     }
     require(
-        body.len() == length && manifest.get("contentHash") == Some(&digest(&body).into()),
+        manifest.get("byteLength") == Some(&Json::Number(body.len() as f64))
+            && manifest.get("contentHash") == Some(&digest(&body).into()),
         "The complete evidence body has another hash or length.",
     )?;
     let invalid = || {
