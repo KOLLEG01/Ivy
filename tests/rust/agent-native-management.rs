@@ -40,11 +40,14 @@ fn data() -> &'static IvyJson {
     })
 }
 fn management(fixture: &Fixture) -> NativeManagement {
+    management_for(fixture, catalog())
+}
+fn management_for(fixture: &Fixture, catalog: IvyJson) -> NativeManagement {
     NativeManagement::with_clock(
         NativeManagementOwner {
             service_node_id: "agent".into(),
             epoch: "live".into(),
-            catalog: catalog(),
+            catalog,
             rpc: fixture.rpc.clone(),
             closing: fixture.closing.clone(),
             platform: "win32".into(),
@@ -178,8 +181,10 @@ async fn native_management_matches_original_guards_receipts_observations_and_inp
     let rows = field(data(), "cases").as_array().unwrap();
     assert!(rows.len() >= 50);
     for row in rows {
-        let mut fixture = Fixture::new(row);
-        let management = management(&fixture);
+        let catalog = field(data(), "catalog").clone();
+        let store = Arc::new(Store::new());
+        let mut fixture = Fixture::with_catalog(row, store.clone(), store, catalog.clone());
+        let management = management_for(&fixture, catalog);
         let handlers = management.handlers();
         assert_eq!(handlers.len(), 12);
         let mut normalize = Normalize::default();

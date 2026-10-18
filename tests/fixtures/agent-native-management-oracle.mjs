@@ -39,6 +39,12 @@ const evaluated = Object.fromEntries(Object.entries(expressions).map(([name, exp
     {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext}}).outputText + ';return value;}')]));
 const evaluate = (name, env) => evaluated[name](env, ...Object.values(globals));
 const catalog = JSON.parse(readFileSync('specs/native/codex-0.154.0/catalog.json', 'utf8'));
+// Fresh owners qualify guards, not unused catalog compilation. Keep each
+// exercised native schema byte-for-byte; complete catalogs have a separate oracle.
+catalog.clientRequests = catalog.clientRequests.filter(value => ['account/logout', 'thread/read', 'thread/turns/list', 'thread/items/list', 'turn/start'].includes(value.method));
+catalog.serverRequests = catalog.serverRequests.filter(value => ['item/tool/requestUserInput', 'currentTime/read'].includes(value.method));
+catalog.serverNotifications = catalog.serverNotifications.filter(value => value.method === 'serverRequest/resolved');
+catalog.clientNotifications = []; catalog.derivedLegacyTypes = [];
 const registry = agentRegistry(catalog), catalogHash = hashJson(catalog);
 const nativeDefinitions = new Map(registry.namespaces[0].tools.map(definition => [definition.nativeMethod, toolDefinitionHash(definition)]));
 const context = (...values) => ({operationId: values.length ? values[0] : 'one', callerPrincipalId: values[1] ?? 'caller'});
@@ -171,4 +177,4 @@ try {
   }
 } finally {globalThis.Date = RealDate;}
 assert(cases.some(row => row.expected.some(value => value.error?.data.code === 'native_definition_mismatch')));
-process.stdout.write(JSON.stringify({catalogHash, at, limits, extracted: expressions, cases}));
+process.stdout.write(JSON.stringify({catalog, catalogHash, at, limits, extracted: expressions, cases}));

@@ -80,10 +80,14 @@ impl Peer {
             .unwrap();
     }
 }
-fn rpc(events: ivy_host_runtime::codex_rpc::Events, trace: Arc<Mutex<Trace>>) -> (NativeRpc, Peer) {
+fn rpc(
+    catalog: &IvyJson,
+    events: ivy_host_runtime::codex_rpc::Events,
+    trace: Arc<Mutex<Trace>>,
+) -> (NativeRpc, Peer) {
     let (input, sent) = tokio::io::duplex(65536);
     let (emit, output) = tokio::io::duplex(65536);
-    let rpc = NativeRpc::start(&catalog(), input, output, events).unwrap();
+    let rpc = NativeRpc::start(catalog, input, output, events).unwrap();
     let (sender, frames) = mpsc::unbounded_channel();
     let reader = tokio::spawn(async move {
         let mut input = BufReader::new(sent);
@@ -131,7 +135,14 @@ impl Fixture {
         store: Arc<Store>,
         durable: Arc<dyn NativeOperationStore>,
     ) -> Self {
-        let catalog = catalog();
+        Self::with_catalog(row, store, durable, catalog())
+    }
+    fn with_catalog(
+        row: &IvyJson,
+        store: Arc<Store>,
+        durable: Arc<dyn NativeOperationStore>,
+        catalog: IvyJson,
+    ) -> Self {
         let at = row
             .get("time")
             .and_then(IvyJson::as_js_string)
@@ -206,6 +217,7 @@ impl Fixture {
             }),
         };
         let (rpc, peer) = rpc(
+            &catalog,
             journal_events("agent".into(), "live".into(), &operations, observations),
             trace.clone(),
         );
