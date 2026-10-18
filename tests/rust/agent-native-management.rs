@@ -294,8 +294,11 @@ async fn native_management_binding_refuses_before_sqlite_and_persists_before_nat
     assert_eq!(receipt.get("phase"), Some(&"succeeded".into()));
     fixture.receipts.drain().await;
     fixture.finish().await;
-    state.lock().unwrap().close().unwrap();
-    let mut reopened = root.open(10, 128 * 1024 * 1024);
+    drop(handlers);
+    drop(management);
+    drop(durable);
+    super::super::close_state(state).await;
+    let reopened = root.open(10, 128 * 1024 * 1024);
     assert_eq!(
         reopened
             .read("operation", &key)
