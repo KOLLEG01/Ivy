@@ -2,6 +2,7 @@
 use crate::{IvyError, IvyJson, IvyResult, node_runtime::NodeRuntime, paths::inside};
 use ivy_contracts::{JsString, core_schema::validate_host, json};
 use std::{ffi::OsString, fs, path::{Path, PathBuf}};
+pub use crate::protected_config::protected_json_file;
 
 pub const CONFIGURATION_BYTES: usize = 1024 * 1024;
 

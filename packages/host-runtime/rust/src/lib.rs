@@ -42,6 +42,7 @@ pub mod policy_import;
 pub mod process;
 pub mod process_fence;
 pub mod process_output;
+mod protected_config;
 pub mod preparations;
 pub mod preparation_files;
 pub mod preparation_tools;

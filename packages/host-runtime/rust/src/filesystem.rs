@@ -24,6 +24,11 @@ fn identity(path: &Path) -> std::io::Result<FileIdentity> {
 }
 #[cfg(windows)]
 fn identity(path: &Path) -> std::io::Result<FileIdentity> {
+    let info = information(path)?;
+    Ok(FileIdentity { dev: info.dwVolumeSerialNumber.to_string(), ino: (((info.nFileIndexHigh as u64)<<32)|info.nFileIndexLow as u64).to_string() })
+}
+#[cfg(windows)]
+fn information(path: &Path) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
     use std::os::windows::{fs::OpenOptionsExt,io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION,GetFileInformationByHandle,
         FILE_READ_ATTRIBUTES,FILE_FLAG_BACKUP_SEMANTICS,FILE_SHARE_READ,FILE_SHARE_WRITE,FILE_SHARE_DELETE};
@@ -31,7 +36,15 @@ fn identity(path: &Path) -> std::io::Result<FileIdentity> {
         .share_mode(FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE).open(path)?;
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 { return Err(std::io::Error::last_os_error()); }
-    Ok(FileIdentity { dev: info.dwVolumeSerialNumber.to_string(), ino: (((info.nFileIndexHigh as u64)<<32)|info.nFileIndexLow as u64).to_string() })
+    Ok(info)
+}
+
+/// Number of hardlinks reported by stat. Keep the native error available to
+/// protected-file readers, including the distinction between absent and denied.
+pub fn stat_link_count(path: &Path) -> std::io::Result<u64> {
+    let path = fs_path(path);
+    #[cfg(windows)] { Ok(information(&path)?.nNumberOfLinks as u64) }
+    #[cfg(unix)] { use std::os::unix::fs::MetadataExt; Ok(fs::metadata(path)?.nlink()) }
 }
 
 /// fs.access semantics, including Windows' read-only-file check. This does not
