@@ -17,6 +17,7 @@ use std::{
 
 struct NoticeClient {
     scripted: Scripted,
+    label: String,
     cancellation: RequestOptions,
     cancel_after: Option<usize>,
     calls: AtomicUsize,
@@ -29,6 +30,17 @@ impl RpcClient for NoticeClient {
         options: RequestOptions,
     ) -> RequestFuture<'a> {
         Box::pin(async move {
+            assert_eq!(
+                self.scripted
+                    .steps
+                    .lock()
+                    .unwrap()
+                    .front()
+                    .and_then(|s| s.get("method")),
+                Some(&IvyJson::from(method)),
+                "RPC method in {}",
+                self.label,
+            );
             let result = self.scripted.request(method, params, options).await;
             if self.cancel_after == Some(self.calls.fetch_add(1, Ordering::Relaxed) + 1) {
                 self.cancellation.cancellation.cancel();
@@ -109,7 +121,7 @@ fn normalize(value: &IvyJson, generated: Option<&JsString>) -> IvyJson {
         _ => value.clone(),
     }
 }
-fn assert_same(actual: &IvyJson, expected: &IvyJson, label: &str) {
+fn difference(actual: &IvyJson, expected: &IvyJson, label: &str) -> Option<String> {
     let a = canonical(actual, 32 * 1024 * 1024).unwrap();
     let b = canonical(expected, 32 * 1024 * 1024).unwrap();
     if a != b {
@@ -119,12 +131,13 @@ fn assert_same(actual: &IvyJson, expected: &IvyJson, label: &str) {
             .position(|(a, b)| a != b)
             .unwrap_or(a.len().min(b.len()));
         let from = offset.saturating_sub(100);
-        panic!(
+        return Some(format!(
             "{label}: first difference at byte {offset}\nactual: {}\nexpected: {}",
             String::from_utf8_lossy(&a.as_bytes()[from..a.len().min(offset + 1000)]),
             String::from_utf8_lossy(&b.as_bytes()[from..b.len().min(offset + 1000)])
-        );
+        ));
     }
+    None
 }
 #[tokio::test]
 async fn original_notice_main_voice_recovery_and_retry_boundaries() {
@@ -150,6 +163,7 @@ async fn original_notice_main_voice_recovery_and_retry_boundaries() {
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 195);
+    let mut failures = Vec::new();
     for row in rows {
         let input = row.required("input").unwrap();
         let label = sql(input.required("label").unwrap());
@@ -162,6 +176,7 @@ async fn original_notice_main_voice_recovery_and_retry_boundaries() {
             cancellation.cancellation.cancel();
         }
         let client = Arc::new(NoticeClient {
+            label: label.clone(),
             scripted: Scripted {
                 steps: Mutex::new(steps.iter().cloned().collect()),
                 trace: Mutex::default(),
@@ -366,12 +381,20 @@ async fn original_notice_main_voice_recovery_and_retry_boundaries() {
             client.scripted.steps.lock().unwrap().is_empty(),
             "Unconsumed RPC in {label}"
         );
-        assert_same(
+        if let Some(failure) = difference(
             &normalize(&actual, generated.as_ref()),
             row.required("expected").unwrap(),
             &label,
-        );
+        ) {
+            failures.push(failure);
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "{} mismatches:\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }
 fn outcome(result: ivy_contracts::IvyResult<()>) -> IvyJson {
     match result {
