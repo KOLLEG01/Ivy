@@ -34,11 +34,11 @@ function assets() {
       const value = pending.pop();
       if (!value || typeof value !== 'object') continue;
       if (typeof value.$ref === 'string' && value.$ref.startsWith('#'))
-        value.$ref = '#/' + name + value.$ref.slice(1);
+        value.$ref = '#/$defs/' + name + value.$ref.slice(1);
       pending.push(...Object.values(value));
     }
   }
-  return { registry: schemas.registry(), documents };
+  return { registry: schemas.registry(), documents: {$defs:documents} };
 }
 if (process.argv[2] === 'assets') {
   process.stdout.write(JSON.stringify(assets()));

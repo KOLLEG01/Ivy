@@ -14,8 +14,8 @@ pub fn registry() -> IvyJson { REGISTRY_VALUE.clone() }
 /// Zod parser failures cross the original IvyError.from boundary as an internal
 /// error with unknown outcome. Do not expose schema diagnostics or secret values.
 pub fn parse_schema(name: &str, input: &IvyJson) -> IvyResult<IvyJson> {
-    let path = format!("#/{name}");
-    if DOCUMENT.get(name).is_none() { return Err(IvyError::internal()); }
+    let path = format!("#/$defs/{name}");
+    if DOCUMENT.get("$defs").and_then(|v| v.get(name)).is_none() { return Err(IvyError::internal()); }
     normalize(&path, input)
 }
 
@@ -34,6 +34,7 @@ fn child(path: &str, group: &str, key: &JsString) -> IvyResult<String> {
 }
 
 fn normalize(path: &str, input: &IvyJson) -> IvyResult<IvyJson> {
+    if input.as_f64().is_some_and(|n| !n.is_finite()) { return Err(IvyError::internal()); }
     let s = schema(path)?;
     if let Some(reference) = s.get("$ref") { return normalize(&reference.as_str()?, input); }
     if s.get("x-collector-json") == Some(&IvyJson::Bool(true)) { return json_value(input); }
