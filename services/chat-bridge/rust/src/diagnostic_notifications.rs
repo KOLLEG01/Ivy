@@ -50,13 +50,6 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
         Err(IvyError::new(code, message))
     }
 }
-fn check(options: &RequestOptions) -> IvyResult<()> {
-    if options.cancellation.is_cancelled() {
-        Err(options.cancel_error.clone())
-    } else {
-        Ok(())
-    }
-}
 fn pending(request: Json) -> Json {
     Json::object([
         ("request", request),
@@ -98,6 +91,18 @@ impl<'a> DiagnosticNotifications<'a> {
             definition.required("workspaceId")?.clone(),
         ]))
     }
+    fn check(&self, options: &RequestOptions) -> IvyResult<()> {
+        // The live monitor belongs to its store's provider generation. A token
+        // alone cannot retain the original connection close error.
+        if let Some(connection) = self.operations.store.client.service_connection() {
+            connection.throw_if_aborted()?;
+        }
+        if options.cancellation.is_cancelled() {
+            Err(options.cancel_error.clone())
+        } else {
+            Ok(())
+        }
+    }
     async fn save(&self, scope: &str, state: &mut Json) -> IvyResult<()> {
         self.operations
             .store
@@ -119,8 +124,8 @@ impl<'a> DiagnosticNotifications<'a> {
         }
         self.save(scope, state).await
     }
-    /// `cancel_error` is the supplied signal's reason. The connection adapter must
-    /// retain its original close reason when it constructs/checks that signal.
+    /// Use the store's provider generation signal in production. Other callers
+    /// supply the cancellation reason explicitly through `cancel_error`.
     pub async fn tick(&self, options: RequestOptions) -> IvyResult<()> {
         let store = self.operations.store;
         let mut current: Vec<(String, Json)> = Vec::new();
@@ -161,7 +166,7 @@ impl<'a> DiagnosticNotifications<'a> {
             }
         }
         // A failed/incomplete snapshot cannot discard a pending notice or imply recovery.
-        check(&options)?;
+        self.check(&options)?;
         let scope = self.scope()?;
         let mut state = grouped_notice_state(
             &store
@@ -231,7 +236,7 @@ impl<'a> DiagnosticNotifications<'a> {
             return self.save(&scope, &mut state).await;
         }
         for (key, mut entry) in state.clone().into_object().ok_or_else(IvyError::internal)? {
-            check(&options)?;
+            self.check(&options)?;
             let key = key.to_utf8()?;
             if flag(&entry, "receiptOnly") {
                 let kind = if !optional(&entry, "alert").is_null() {
@@ -356,7 +361,7 @@ impl<'a> DiagnosticNotifications<'a> {
         ]))
     }
     async fn queue(&self, original: &mut Json, options: &RequestOptions) -> IvyResult<()> {
-        check(options)?;
+        self.check(options)?;
         let caller = string(self.operations.admission.definition(), "principalId")?;
         let operation = self
             .main
@@ -371,7 +376,7 @@ impl<'a> DiagnosticNotifications<'a> {
         Ok(())
     }
     async fn review(&self, original: &mut Json, options: &RequestOptions) -> IvyResult<()> {
-        check(options)?;
+        self.check(options)?;
         let caller = string(self.operations.admission.definition(), "principalId")?;
         let request = original.required("request")?;
         let Some(operation) = self

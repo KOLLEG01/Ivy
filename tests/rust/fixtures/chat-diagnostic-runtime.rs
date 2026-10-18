@@ -14,12 +14,17 @@ use ivy_contracts::{
 use ivy_sdk::{
     clock::Clock,
     rpc::{RequestFuture, RequestOptions, RpcClient},
+    service::{ConnectionOptions, ServiceConnection},
 };
 use std::{
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::{Child, Command as AsyncCommand},
 };
 
 fn text(v: &Json, k: &str) -> String {
@@ -44,9 +49,10 @@ fn result(r: IvyResult<()>) -> Json {
         Err(e) => Json::object([(
             "error",
             Json::object([
-                ("code", e.code.into()),
-                ("message", e.message.into()),
+                ("code", Json::String(e.code_js())),
+                ("message", Json::String(e.message_js())),
                 ("outcome", e.outcome.as_str().into()),
+                ("details", e.details.unwrap_or(Json::Null)),
             ]),
         )]),
     }
@@ -113,21 +119,36 @@ struct Control {
     page: usize,
     options: RequestOptions,
 }
-struct Client(Mutex<Control>);
+struct Client {
+    control: Mutex<Control>,
+    connection: Option<ServiceConnection>,
+    close_reason: Option<IvyError>,
+}
 impl Client {
     fn log(&self, method: &str, params: Json) {
-        self.0.lock().unwrap().calls.push(Json::object([
+        self.control.lock().unwrap().calls.push(Json::object([
             ("method", method.into()),
             ("params", params),
         ]));
     }
     fn step(&self) -> Json {
-        self.0.lock().unwrap().step.clone()
+        self.control.lock().unwrap().step.clone()
+    }
+    fn cancel(&self, state: &Control) {
+        if let Some(connection) = &self.connection {
+            connection.close_with(self.close_reason.clone().unwrap());
+            connection.close_with(IvyError::new(
+                "later",
+                "Do not replace the original reason.",
+            ));
+        } else {
+            state.options.cancellation.cancel();
+        }
     }
     fn abort(&self, at: &str) {
-        let state = self.0.lock().unwrap();
+        let state = self.control.lock().unwrap();
         if state.step.get("abort") == Some(&Json::from(at)) {
-            state.options.cancellation.cancel();
+            self.cancel(&state);
         }
     }
     fn execute(&self, method: &str, params: Json, options: RequestOptions) -> IvyResult<Json> {
@@ -135,7 +156,7 @@ impl Client {
         if options.cancellation.is_cancelled() {
             return Err(options.cancel_error);
         }
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.control.lock().unwrap();
         let step = state.step.clone();
         match method {
             "system.status" => {
@@ -155,7 +176,7 @@ impl Client {
                     ));
                 }
                 if step.get("abort") == Some(&Json::from("settings")) {
-                    state.options.cancellation.cancel();
+                    self.cancel(&state);
                 }
                 Ok(Json::object([(
                     "settings",
@@ -184,7 +205,7 @@ impl Client {
                     ));
                 }
                 if step.get("abort") == Some(&Json::from(format!("page-{index}"))) {
-                    state.options.cancellation.cancel();
+                    self.cancel(&state);
                 }
                 Ok(array(&step, "pages")[index].clone())
             }
@@ -193,6 +214,9 @@ impl Client {
     }
 }
 impl RpcClient for Client {
+    fn service_connection(&self) -> Option<&ServiceConnection> {
+        self.connection.as_ref()
+    }
     fn request<'a>(
         &'a self,
         method: &'a str,
@@ -201,6 +225,38 @@ impl RpcClient for Client {
     ) -> RequestFuture<'a> {
         Box::pin(async move { self.execute(method, params, options) })
     }
+}
+// Reuse the owner's loopback provider fixture. Diagnostic reads stay synthetic;
+// the cancellation token and first-close-reason owner are real SDK connections.
+async fn connection() -> (Child, ServiceConnection) {
+    let mut child = AsyncCommand::new("node")
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/sdk-provider-peer.mjs",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let first = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let info = parse(&first, usize::MAX).unwrap();
+    let connection = ServiceConnection::connect(
+        &text(&info, "url"),
+        "fixture-token",
+        ConnectionOptions::new("fixture-node".into()),
+        RequestOptions::default().cancellation,
+    )
+    .await
+    .unwrap();
+    (child, connection)
 }
 struct Main<'a> {
     ops: &'a ChatOperations<'a>,
@@ -390,12 +446,46 @@ async fn diagnostic_tick_journal_and_failures_match_original_typescript() {
     let scope = text(&corpus, "scope");
     for case in array(&corpus, "cases") {
         let fixture = Fixture::new(case.required("database").unwrap());
-        let client = Arc::new(Client(Mutex::new(Control {
-            step: Json::Null,
-            calls: vec![],
-            page: 0,
-            options: RequestOptions::default(),
-        })));
+        let mut peer = None;
+        let mut close_reason = None;
+        let mut sdk_connection = None;
+        if let Some(reason) = case.get("closeReason") {
+            let (child, connection) = connection().await;
+            peer = Some(child);
+            sdk_connection = Some(connection);
+            close_reason = Some(
+                IvyError::new_js(
+                    reason
+                        .required("code")
+                        .unwrap()
+                        .as_js_string()
+                        .unwrap()
+                        .clone(),
+                    reason
+                        .required("message")
+                        .unwrap()
+                        .as_js_string()
+                        .unwrap()
+                        .clone(),
+                )
+                .with_outcome(match text(reason, "outcome").as_str() {
+                    "completed" => Outcome::Completed,
+                    "not_executed" => Outcome::NotExecuted,
+                    _ => Outcome::Unknown,
+                })
+                .with_details(reason.required("details").unwrap().clone()),
+            );
+        }
+        let client = Arc::new(Client {
+            control: Mutex::new(Control {
+                step: Json::Null,
+                calls: vec![],
+                page: 0,
+                options: RequestOptions::default(),
+            }),
+            connection: sdk_connection,
+            close_reason,
+        });
         let mut store = ChatStore::open(client.clone(), None, Some(fixture.0.clone()))
             .await
             .unwrap();
@@ -404,8 +494,11 @@ async fn diagnostic_tick_journal_and_failures_match_original_typescript() {
         for step in array(case, "steps") {
             let mut options = RequestOptions::default();
             options.cancel_error = cancelled();
+            if let Some(connection) = &client.connection {
+                options.cancellation = connection.signal();
+            }
             {
-                let mut state = client.0.lock().unwrap();
+                let mut state = client.control.lock().unwrap();
                 state.step = step.clone();
                 state.calls.clear();
                 state.page = 0;
@@ -477,7 +570,10 @@ async fn diagnostic_tick_journal_and_failures_match_original_typescript() {
             .await;
             actual.push(Json::object([
                 ("result", result(r)),
-                ("calls", Json::Array(client.0.lock().unwrap().calls.clone())),
+                (
+                    "calls",
+                    Json::Array(client.control.lock().unwrap().calls.clone()),
+                ),
                 ("writes", Json::Array(fixture.snapshots(&mut last_write))),
                 (
                     "state",
@@ -490,6 +586,10 @@ async fn diagnostic_tick_journal_and_failures_match_original_typescript() {
             ]));
         }
         store.close().await.unwrap();
+        if let Some(mut peer) = peer {
+            peer.kill().await.unwrap();
+            peer.wait().await.unwrap();
+        }
         let actual = normalize(&Json::Array(actual));
         let expected = normalize(case.required("expected").unwrap());
         for (i, (a, e)) in actual

@@ -89,6 +89,8 @@ for(const notifyError of ['before','after','returned-failed'])add('notification-
 for(const failure of ['first-page','second-page','settings'])add('failed-'+failure+'-preserves-receipts',[tick([],now+delay,{pages:[page([],'next'),page([])],failure}),restart,tick()],{saved:seed([entry('snapshot')])});
 for(const abort of ['before','page-0','page-1','settings','find','notify'])add('abort-'+abort,[tick([base,other],now+delay,{pages:[page([base],'next'),page([other])],abort}),restart,tick([base,other],now+delay+1)],{saved:seed([entry('aborted',{alert:null})])});
 add('quiet-return-after-settings-abort',[tick([],Date.parse('2026-10-13T21:00Z'),{quiet,abort:'settings'})],{saved:seed([entry('quiet')])});
+for(const [index,abort]of ['page-1','settings','notify'].entries())add('connection-close-'+abort,[tick([base,other],now+delay,{pages:[page([base],'next'),page([other])],abort})],{
+ saved:seed([entry('connection',{alert:null})]),closeReason:{code:'fixture_close_\ud800',message:'Original \udfff '+'x'.repeat(2050),outcome:['not_executed','unknown','completed'][index],details:{text:'\ud800',nested:[1,null,false]}}});
 const completed=entry('completed',{active:false,resolvedAt:now,alert:pending('completed',true,true),recovery:pending('completed-recovery',true,true)});
 add('completed-seven-day-boundary',[tick([],now+7*86400000),restart,tick([],now+7*86400000+1)],{saved:seed([completed])});
 add('bounded-history-keeps-active-and-unconfirmed',[tick([],now)],{saved:seed([{...completed,code:'completed-oldest'},{...completed,code:'completed-newest',resolvedAt:now+1},entry('active',{code:'active'}),entry('unconfirmed',{code:'unconfirmed',active:false,resolvedAt:now})]),historyLimits:{count:3,bytes:16777216}});
@@ -100,7 +102,7 @@ const all=[];
 for(const c of cases){
  const root=mkdtempSync(join(tmpdir(),'ivy-chat-diagnostic-tick-'));
  const control={step:{},calls:[],page:0,signal:null};
- const error=()=>new IvyError('fixture_cancelled','The original monitor signal was aborted.','unknown');
+ const error=()=>c.closeReason?new IvyError(c.closeReason.code,c.closeReason.message,c.closeReason.outcome,c.closeReason.details):new IvyError('fixture_cancelled','The original monitor signal was aborted.','unknown');
  const log=(method,params={})=>control.calls.push({method,params:structuredClone(params)});
  const client={async request(method,params,options){
   log(method,params);if(options?.signal?.aborted)throw options.signal.reason;
@@ -134,6 +136,7 @@ for(const c of cases){
  db.close();
  c.database=readFileSync(join(root,'chat-bridge.sqlite')).toString('base64');
  store=new ChatStore(client,null,root);ops=new ChatOperations(store,admission);
+ if(c.historyLimits)Object.assign(store.diagnosticHistoryLimits,c.historyLimits);
  const main={get admission(){return admission;},get store(){return store;},get operations(){return ops;},
   async find(){log('main.find');if(control.step.abort==='find')control.signal.abort(error());return control.step.mainMissing?null:{value:{conversation:pin}};},
   native:{async ready(){log('main.ready');if(control.step.readyError)throw new IvyError('fixture_not_ready','Native owner is not ready.');}},
@@ -156,7 +159,7 @@ for(const c of cases){
     if(step.action==='reopen'){store.close();store=new ChatStore(client,null,root);ops=new ChatOperations(store,admission);if(c.historyLimits)Object.assign(store.diagnosticHistoryLimits,c.historyLimits);}
     else if(step.action==='forgetQueued'){const state=store.diagnosticNoticeState(scope);for(const e of Object.values(state))if(e.alert)e.alert.queued=false;store.saveDiagnosticNoticeState(scope,state);}
     else {if(step.abort==='before')control.signal.abort(error());await new DiagnosticNotifications(main,c.language,()=>step.now).tick(control.signal.signal);}
-   }catch(error){const e=IvyError.from(error);result={error:{code:e.code,message:e.message,outcome:e.outcome}};}
+   }catch(error){const e=IvyError.from(error);result={error:{code:e.code,message:e.message,outcome:e.outcome,details:e.details??null}};}
    const d=new DatabaseSync(join(root,'chat-bridge.sqlite'));
    const operationCount=d.prepare("SELECT COUNT(*) AS count FROM documents WHERE key='chat-bridge/operation'").get().count;d.close();
    c.expected.push({result,calls:control.calls,writes:snapshots(),state:store.diagnosticNoticeState(scope),operationCount});
@@ -172,7 +175,7 @@ for(const c of cases){
  if(c.label==='bounded-history-keeps-active-and-unconfirmed'&&(!c.expected[0].writes.length||Object.values(final.state).some(e=>e.code==='completed-oldest')||Object.keys(final.state).length!==3))throw Error('Completed-history pressure was not forced.');
  if(c.label.includes('evicts-')&&Object.keys(final.state).length!==0)throw Error('Completed row was restored after eviction.');
  if(c.label==='completed-seven-day-boundary'&&(Object.keys(c.expected[0].state).length!==1||Object.keys(final.state).length!==0))throw Error('Seven-day deduplication boundary was not exercised.');
- for(const e of c.expected)if(e.result.error&&!['fixture_cancelled','fixture_not_ready','fixture_unavailable','publication_pending','outcome_unknown','chat_main_missing','chat_operational_notice_failed'].includes(e.result.error.code))throw Error('Unexpected fixture failure: '+c.label+' '+e.result.error.code);
+ for(const e of c.expected)if(e.result.error&&!['fixture_cancelled','fixture_not_ready','fixture_unavailable','publication_pending','outcome_unknown','chat_main_missing','chat_operational_notice_failed',c.closeReason?.code].includes(e.result.error.code))throw Error('Unexpected fixture failure: '+c.label+' '+e.result.error.code);
  all.push(c);
 }
 process.stdout.write(JSON.stringify({definition,scope,cases:all}));
