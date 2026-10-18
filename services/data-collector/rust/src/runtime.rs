@@ -5,7 +5,10 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::canonical};
 
 pub enum Read {
     Local(IvyJson),
-    Remote { method: &'static str, params: IvyJson },
+    Remote {
+        method: &'static str,
+        params: IvyJson,
+    },
 }
 pub struct Updated {
     pub value: IvyJson,
@@ -23,11 +26,20 @@ pub struct Runtime<'a> {
     pub root_id: &'a str,
 }
 fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
-    if condition { Ok(()) } else { Err(IvyError::new(code, message)) }
+    if condition {
+        Ok(())
+    } else {
+        Err(IvyError::new(code, message))
+    }
 }
-fn nullable(value: Option<&IvyJson>) -> IvyJson { value.cloned().unwrap_or(IvyJson::Null) }
+fn nullable(value: Option<&IvyJson>) -> IvyJson {
+    value.cloned().unwrap_or(IvyJson::Null)
+}
 fn select(value: &IvyJson, keys: &[&str]) -> IvyJson {
-    IvyJson::object(keys.iter().filter_map(|key| value.get(key).map(|v| (*key, v.clone()))))
+    IvyJson::object(
+        keys.iter()
+            .filter_map(|key| value.get(key).map(|v| (*key, v.clone()))),
+    )
 }
 impl Runtime<'_> {
     pub fn read(&self, args: &IvyJson) -> IvyResult<Read> {
@@ -39,12 +51,27 @@ impl Runtime<'_> {
             let mut items = Vec::new();
             for row in self.store.list(false)? {
                 let mut visible = cache.visible(&row, maximum)?;
-                visible.insert("task", select(model::field(&row, "task")?, &["id", "name", "enabled"]));
+                visible.insert(
+                    "task",
+                    select(model::field(&row, "task")?, &["id", "name", "enabled"]),
+                );
                 items.push(visible);
             }
             return Ok(Read::Local(IvyJson::object([
                 ("rootObjectId", self.root_id.into()),
-                ("limits", select(self.settings, &["retention", "concurrency", "maximumTasks", "maximumMemoryMb", "maximumTimeoutSeconds"])),
+                (
+                    "limits",
+                    select(
+                        self.settings,
+                        &[
+                            "retention",
+                            "concurrency",
+                            "maximumTasks",
+                            "maximumMemoryMb",
+                            "maximumTimeoutSeconds",
+                        ],
+                    ),
+                ),
                 ("items", IvyJson::Array(items)),
             ])));
         }
@@ -52,37 +79,85 @@ impl Runtime<'_> {
             let id = model::sqlite_key(model::field(&input, "operationId")?)?;
             let run = self.store.run(&id)?;
             return Ok(Read::Local(IvyJson::object([
-                ("operation", self.store.operation(&id)?.unwrap_or(IvyJson::Null)),
-                ("run", run.as_ref().map(|r| select(r, &["id", "taskId", "status", "startedAt", "finishedAt", "error"])).unwrap_or(IvyJson::Null)),
+                (
+                    "operation",
+                    self.store.operation(&id)?.unwrap_or(IvyJson::Null),
+                ),
+                (
+                    "run",
+                    run.as_ref()
+                        .map(|r| {
+                            select(
+                                r,
+                                &["id", "taskId", "status", "startedAt", "finishedAt", "error"],
+                            )
+                        })
+                        .unwrap_or(IvyJson::Null),
+                ),
             ])));
         }
         let row = cache.task(&model::text(&input, "id")?)?;
-        if view == "task" { return Ok(Read::Local(cache.visible(&row, maximum)?)); }
-        let Some(result) = row.get("resultObjectId").filter(|v| !v.is_null() && v.as_js_string().is_some_and(|s| !s.0.is_empty())) else {
+        if view == "task" {
+            return Ok(Read::Local(cache.visible(&row, maximum)?));
+        }
+        let Some(result) = row
+            .get("resultObjectId")
+            .filter(|v| !v.is_null() && v.as_js_string().is_some_and(|s| !s.0.is_empty()))
+        else {
             return Ok(Read::Local(IvyJson::Null));
         };
         let mut params = IvyJson::object([("objectId", result.clone())]);
         if view == "history" {
             params.insert("limit", IvyJson::Number(50.0));
-            if let Some(cursor) = input.get("cursor").filter(|v| v.as_js_string().is_some_and(|s| !s.0.is_empty())) { params.insert("cursor", cursor.clone()); }
-            Ok(Read::Remote { method: "objects.history", params })
+            if let Some(cursor) = input
+                .get("cursor")
+                .filter(|v| v.as_js_string().is_some_and(|s| !s.0.is_empty()))
+            {
+                params.insert("cursor", cursor.clone());
+            }
+            Ok(Read::Remote {
+                method: "objects.history",
+                params,
+            })
         } else {
-            if let Some(revision) = input.get("revision") { params.insert("revision", revision.clone()); }
-            Ok(Read::Remote { method: "objects.read", params })
+            if let Some(revision) = input.get("revision") {
+                params.insert("revision", revision.clone());
+            }
+            Ok(Read::Remote {
+                method: "objects.read",
+                params,
+            })
         }
     }
 
     /// Run on the store's blocking owner. Authentication deletion is synchronous
     /// and executes inside the original mutation, before saving the tombstone.
     pub fn update(
-        &self, args: &IvyJson, context: Option<Context<'_>>, now_ms: i64, now_iso: &str,
-        active: impl Fn(&str) -> bool, mut clear_authentication: impl FnMut(&str) -> IvyResult<()>,
+        &self,
+        args: &IvyJson,
+        context: Option<Context<'_>>,
+        now_ms: i64,
+        now_iso: &str,
+        active: impl Fn(&str) -> bool,
+        mut clear_authentication: impl FnMut(&str) -> IvyResult<()>,
     ) -> IvyResult<Updated> {
         let input = schema::parse_schema("runtimeUpdateSchema", args)?;
         let operation = model::field(&input, "operationId")?;
-        require(context.as_ref().and_then(|c| c.operation_id).is_none_or(|id| id.0.is_empty() || operation.as_js_string() == Some(id)), "operation_conflict", "Routed and inner operation IDs must match.")?;
-        let caller = context.map(|c| IvyJson::String(c.caller.clone())).unwrap_or("local".into());
-        let key = canonical(&IvyJson::object([("caller", caller), ("input", input.clone())]), ivy_contracts::limits::MANAGEMENT_FRAME_BYTES)?;
+        require(
+            context
+                .as_ref()
+                .and_then(|c| c.operation_id)
+                .is_none_or(|id| id.0.is_empty() || operation.as_js_string() == Some(id)),
+            "operation_conflict",
+            "Routed and inner operation IDs must match.",
+        )?;
+        let caller = context
+            .map(|c| IvyJson::String(c.caller.clone()))
+            .unwrap_or("local".into());
+        let key = canonical(
+            &IvyJson::object([("caller", caller), ("input", input.clone())]),
+            ivy_contracts::limits::MANAGEMENT_FRAME_BYTES,
+        )?;
         let operation_key = model::sqlite_key(operation)?;
         let action = model::text(&input, "action")?;
         let mut disabled = None;

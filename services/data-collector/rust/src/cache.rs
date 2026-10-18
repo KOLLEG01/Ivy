@@ -32,16 +32,16 @@ impl ExecutionCache<'_> {
     }
     /// Admission occurs inside mutate/transaction, before acknowledging a run.
     /// Publishing rows deliberately do not prevent another execution.
-    pub fn enqueue(
+    pub fn enqueue(&self, row: RecordTask, id: &str, input: IvyJson, now_ms: f64) -> IvyResult<()> {
+        self.enqueue_json(row, id.into(), input, now_ms)
+    }
+    pub fn enqueue_json(
         &self,
-        row: RecordTask,
-        id: &str,
+        mut row: RecordTask,
+        id: IvyJson,
         input: IvyJson,
         now_ms: f64,
     ) -> IvyResult<()> {
-        self.enqueue_json(row, id.into(), input, now_ms)
-    }
-    pub fn enqueue_json(&self, mut row: RecordTask, id: IvyJson, input: IvyJson, now_ms: f64) -> IvyResult<()> {
         self.require_stopped(&row)?;
         require(
             !self.store.used_run_id(&model::sqlite_key(&id)?)?,
