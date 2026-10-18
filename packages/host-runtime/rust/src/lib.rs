@@ -3,6 +3,7 @@ pub use ivy_contracts::{IvyError, IvyJson, IvyResult, Outcome};
 pub mod build_identity;
 pub mod candidate_identity;
 pub mod accepted_configuration;
+pub mod actions;
 pub mod artifact;
 pub mod codex_admission;
 pub mod codex_app_tools;

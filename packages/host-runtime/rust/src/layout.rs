@@ -43,6 +43,23 @@ pub fn service_paths_for_style(config: &IvyJson, instance: &IvyJson, style: Styl
     Ok(IvyJson::object([("data", joined(style, &[base.clone(), "data".into()])?), ("work", joined(style, &[base.clone(), "work".into()])?), ("logs", joined(style, &[base, "logs".into()])?)]))
 }
 
+/// Unreduced permanent storage union for bidirectional overlap checks only.
+/// Selecting stable storage keys/order is a separate locale-sensitive operation.
+pub(crate) fn storage_overlap_roots(config: &IvyJson, account_home: impl Fn() -> IvyResult<JsString>) -> IvyResult<Vec<JsString>> {
+    let mut roots = vec![text(config.required("runtimeRoot")?)?];
+    for instance in config.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
+        roots.extend(service_paths(config, instance)?.as_object().ok_or_else(IvyError::internal)?.iter()
+            .map(|(_, value)| text(value)).collect::<IvyResult<Vec<_>>>()?);
+        if instance.get("componentId") == Some(&"agent-manager".into()) {
+            roots.push(match instance.required("settings")?.get("internalProjectRoot").and_then(IvyJson::as_js_string) {
+                Some(root) => root.clone(),
+                None => node_path::join(Style::native(), &[account_home()?, ".ivy".into(), "codex-projects".into()]),
+            });
+        }
+    }
+    Ok(roots)
+}
+
 /// The owning process supplies its OS homedir result separately from the
 /// environment overrides. This also permits resolving another host's config
 /// without reading or changing this process's account or environment.

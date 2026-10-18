@@ -39,10 +39,16 @@ pub async fn exec_file(command: FileCommand, bootstrap_root: PathBuf, options: F
     if command.timeout_ms == 0 || command.timeout_ms > 3_600_000 || command.maximum_buffer_bytes > 64 * 1024 * 1024 {
         return Err(IvyError::new("invalid_arguments", "Exec-file requires bounded time and output limits."));
     }
-    tokio::spawn(run(command, bootstrap_root, options)).await.map_err(|_| IvyError::internal())
+    tokio::spawn(run(command, bootstrap_root, options, false)).await.map_err(|_| IvyError::internal())
 }
 
-async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: OutputStream, overflow: mpsc::Sender<OutputStream>, stop_capture: CancellationToken, text: Arc<Mutex<Vec<u16>>>) -> std::io::Result<()> {
+/// Source's original spawnSync closes stdin and counts raw bytes across both
+/// streams. Keep that private policy separate from public execFile semantics.
+pub(crate) async fn source_output(command: FileCommand, bootstrap_root: PathBuf) -> IvyResult<FileResult> {
+    tokio::spawn(run(command, bootstrap_root, FileOptions::default(), true)).await.map_err(|_| IvyError::internal())
+}
+
+async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: OutputStream, overflow: mpsc::Sender<OutputStream>, stop_capture: CancellationToken, text: Arc<Mutex<Vec<u16>>>, combined: Option<Arc<std::sync::atomic::AtomicUsize>>) -> std::io::Result<()> {
     let mut decoder = Utf8Decoder::preserving_bom();
     let mut length = 0;
     let mut bytes = vec![0u8; 65536];
@@ -51,7 +57,13 @@ async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: Outp
         let chunk = decoder.decode(&bytes[..read], read == 0);
         if !stop_capture.is_cancelled() {
             let mut text=text.lock().unwrap_or_else(|p|p.into_inner());
-            let chunk_bytes = String::from_utf16_lossy(&chunk).len();
+            if let Some(total) = &combined {
+                if total.fetch_add(read, std::sync::atomic::Ordering::Relaxed).saturating_add(read) > maximum {
+                    stop_capture.cancel(); let _ = overflow.try_send(stream);
+                    continue;
+                }
+            }
+            let chunk_bytes = if combined.is_some() { 0 } else { String::from_utf16_lossy(&chunk).len() };
             if length + chunk_bytes > maximum {
                 // execFile counts encoded bytes but slices the overflowing
                 // decoded chunk by UTF-16 units, including a split surrogate.
@@ -64,7 +76,7 @@ async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: Outp
     Ok(())
 }
 
-async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions) -> FileResult {
+async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions, synchronous_input: bool) -> FileResult {
     if options.cancellation.is_cancelled() { return empty(FileFailure::Cancelled) }
     let environment = options.environment.unwrap_or_else(|| std::env::vars_os().collect());
     let (command,environment,resolved) = match tokio::task::spawn_blocking(move || {
@@ -77,13 +89,14 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
     let mut child = match process::spawn_resolved(resolved, &bootstrap_root, launch, Some(environment), Some(command.executable.clone())).await {
         Ok(value) => value, Err(error) => return empty(if error.outcome == ivy_contracts::Outcome::Unknown { FileFailure::Unknown } else { FileFailure::Spawn }),
     };
-    // execFile leaves its piped stdin open. A command waiting for EOF must
-    // still wait for cancellation/deadline rather than succeed with empty input.
+    // execFile leaves stdin open; spawnSync's absent input is immediate EOF.
+    if synchronous_input { drop(child.stdin.take()); }
     let (overflow, mut exceeded) = mpsc::channel(2);
     let stop_capture = CancellationToken::new();
     let out=Arc::new(Mutex::new(Vec::new()));let err=Arc::new(Mutex::new(Vec::new()));
-    let mut stdout = tokio::spawn(collect(child.stdout.take().unwrap(), command.maximum_buffer_bytes, OutputStream::Stdout, overflow.clone(), stop_capture.clone(),out.clone()));
-    let mut stderr = tokio::spawn(collect(child.stderr.take().unwrap(), command.maximum_buffer_bytes, OutputStream::Stderr, overflow.clone(), stop_capture.clone(),err.clone()));
+    let combined = synchronous_input.then(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+    let mut stdout = tokio::spawn(collect(child.stdout.take().unwrap(), command.maximum_buffer_bytes, OutputStream::Stdout, overflow.clone(), stop_capture.clone(),out.clone(),combined.clone()));
+    let mut stderr = tokio::spawn(collect(child.stderr.take().unwrap(), command.maximum_buffer_bytes, OutputStream::Stderr, overflow.clone(), stop_capture.clone(),err.clone(),combined));
     let completion = child.completion.clone();
     let mut failure = tokio::select! {
         biased;

@@ -135,34 +135,7 @@ fn instance_paths(config: &IvyJson, instance: &IvyJson) -> IvyResult<Vec<JsStrin
 /// unreduced union has the same bidirectional overlap coverage without locale
 /// sorting; stable storage-area selection remains a separate layout operation.
 fn permanent_roots(config: &IvyJson, context: &HostContext) -> IvyResult<Vec<JsString>> {
-    let mut roots = vec![field(config, "runtimeRoot")?];
-    for instance in config
-        .required("instances")?
-        .as_array()
-        .ok_or_else(IvyError::internal)?
-    {
-        roots.extend(instance_paths(config, instance)?);
-        if instance.get("componentId") == Some(&"agent-manager".into()) {
-            roots.push(
-                instance
-                    .required("settings")?
-                    .get("internalProjectRoot")
-                    .and_then(IvyJson::as_js_string)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        node_path::join(
-                            context.paths.style,
-                            &[
-                                context.account_home.clone(),
-                                ".ivy".into(),
-                                "codex-projects".into(),
-                            ],
-                        )
-                    }),
-            );
-        }
-    }
-    Ok(roots)
+    layout::storage_overlap_roots(config, || Ok(context.account_home.clone()))
 }
 fn shared_home_paths(config: &IvyJson, context: &HostContext) -> IvyResult<Vec<JsString>> {
     let mut roots = permanent_roots(config, context)?;
