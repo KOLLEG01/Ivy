@@ -2,6 +2,7 @@
 pub mod diagnostics;
 pub mod dtmf;
 pub mod dtmf_access;
+pub mod dtmf_detector;
 pub mod ipc;
 pub mod media;
 pub mod native_rpc;
