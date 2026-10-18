@@ -228,14 +228,13 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
     ) -> IvyResult<Option<Json>> {
         // Terminal closure may retain a prepared pin older than the observed
         // call. Read its current identity, then verify that exact returned pin.
-        let call = self
-            .store
-            .read(
-                "task-board/native-call",
-                &Json::String(string(call_pin, "objectId")?.clone()),
-                true,
-            )
-            .await?;
+        let call = Store::read(
+            self.store,
+            "task-board/native-call",
+            &Json::String(string(call_pin, "objectId")?.clone()),
+            true,
+        )
+        .await?;
         if !truthy(field(&call.value, "evidence"))
             || field(&call.value, "ownerPhase") != &Json::from("failed")
             || field(&call.value, "state") != &Json::from("observed")
@@ -287,10 +286,13 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
         {
             return Ok(None);
         }
-        let result = self
-            .store
-            .read("task-board/result", value.required("result")?, true)
-            .await?;
+        let result = Store::read(
+            self.store,
+            "task-board/result",
+            value.required("result")?,
+            true,
+        )
+        .await?;
         let result_run = field(&result.value, "run");
         require(
             result.value.get("taskId").and_then(Json::as_js_string) == Some(task_id)
@@ -308,7 +310,7 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
             "task_board_evidence_mismatch",
             "Recovery requires the exact saved attempt before its terminal publication.",
         )?;
-        let saved = self.store.read("task-board/run", result_run, true).await?;
+        let saved = Store::read(self.store, "task-board/run", result_run, true).await?;
         let calls = field(&saved.value, "calls");
         if truthy(field(&saved.value, "turnId"))
             || truthy(field(calls, "steer"))
@@ -347,10 +349,13 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
         }
         missing_proof(
             async {
-                let run = self
-                    .store
-                    .read("task-board/run", task.value.required("lastRun")?, true)
-                    .await?;
+                let run = Store::read(
+                    self.store,
+                    "task-board/run",
+                    task.value.required("lastRun")?,
+                    true,
+                )
+                .await?;
                 let Some(proof) = self
                     .unstarted_attempt(string(&task.pin, "objectId")?, primary, &run)
                     .await?
@@ -394,7 +399,7 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
                         "task_board_evidence_mismatch",
                         "The native context Run lineage contains a cycle.",
                     )?;
-                    let run = self.store.read("task-board/run", &pin, true).await?;
+                    let run = Store::read(self.store, "task-board/run", &pin, true).await?;
                     if !same(run.value.get("primaryResourceRef"), primary)? {
                         return Ok(!first);
                     }
@@ -433,23 +438,22 @@ impl<S: Store + ReadEvidenceStore, Q: Fn(&Json, &JsString) -> IvyResult<bool>>
                         }
                         first = false;
                     }
-                    let initial = self
-                        .store
-                        .read(
-                            "task-board/task",
-                            &Json::object([
-                                ("objectId", task.pin.required("objectId")?.clone()),
-                                (
-                                    "revision",
-                                    run.value
-                                        .required("originalRequest")?
-                                        .required("expectedRevision")?
-                                        .clone(),
-                                ),
-                            ]),
-                            true,
-                        )
-                        .await?;
+                    let initial = Store::read(
+                        self.store,
+                        "task-board/task",
+                        &Json::object([
+                            ("objectId", task.pin.required("objectId")?.clone()),
+                            (
+                                "revision",
+                                run.value
+                                    .required("originalRequest")?
+                                    .required("expectedRevision")?
+                                    .clone(),
+                            ),
+                        ]),
+                        true,
+                    )
+                    .await?;
                     if !same(initial.value.get("primaryResourceRef"), primary)? {
                         return Ok(true);
                     }
