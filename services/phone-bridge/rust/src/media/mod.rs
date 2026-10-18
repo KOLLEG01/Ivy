@@ -1,10 +1,12 @@
 mod permit;
 mod queue;
 mod rtp;
+mod startup;
 
 pub use permit::AudioPermit;
 pub use queue::AudioQueue;
 pub use rtp::{RtpAudioPacket, RtpReceiveQueue, RtpReceiveStatus};
+pub use startup::RtpStartupGate;
 
 pub const SAMPLE_RATE: usize = 48_000;
 pub const FRAME_SAMPLES: usize = SAMPLE_RATE / 50;

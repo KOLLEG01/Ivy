@@ -4,8 +4,69 @@ use ivy_phone_bridge::media::{
 };
 use std::{collections::VecDeque, time::Duration};
 
+#[test]
+fn dtmf_transport_replays_do_not_refresh_fifo_or_cross_source_window() {
+    use ivy_phone_bridge::dtmf::{
+        InputDeduplicator, InputSource::*, RtpEventTracker, SipInfoTracker, rtp_event_digit,
+    };
+    let mut rtp = RtpEventTracker::default();
+    let mut sip = SipInfoTracker::default();
+    for sequence in 0..64 {
+        assert!(rtp.is_new(1, sequence, 10));
+        assert!(sip.is_new(sequence as i32));
+    }
+    assert!(!rtp.is_new(1, 0, 10));
+    assert!(!sip.is_new(0));
+    assert!(rtp.is_new(1, 64, 10));
+    assert!(sip.is_new(64));
+    assert!(rtp.is_new(1, 0, 10));
+    assert!(sip.is_new(0));
+    assert!(rtp.is_new(2, 0, 10));
+    assert!(rtp.is_new(1, 0, 11));
+    assert!(!rtp.is_new(1, 0, 11));
+    let mut input = InputDeduplicator::default();
+    assert!(input.is_new('1', Rfc4733, ms(0)));
+    assert!(!input.is_new('1', SipInfo, ms(399)));
+    assert!(!input.is_new('1', InBandAudio, ms(400)));
+    assert!(input.is_new('1', Rfc4733AlternatePayload, ms(401)));
+    assert!(input.is_new('1', Rfc4733AlternatePayload, ms(402)));
+    assert!(input.is_new('2', SipInfo, ms(403)));
+    assert!(!input.is_new('2', Rfc4733, ms(404)));
+    // Disposal starts a new call's identity; unrelated calls never share trackers.
+    assert!(InputDeduplicator::default().is_new('2', Rfc4733, ms(404)));
+    assert_eq!(
+        (0..16)
+            .map(|id| rtp_event_digit(id).unwrap())
+            .collect::<String>(),
+        "0123456789*#ABCD"
+    );
+    assert!((16..=255).all(|id| rtp_event_digit(id).is_none()));
+}
+
 fn ms(value: u64) -> Duration {
     Duration::from_millis(value)
+}
+
+#[test]
+fn startup_probation_drops_bootstrap_and_requires_authenticated_consecutive_packets() {
+    use ivy_phone_bridge::media::RtpStartupGate;
+    let mut gate = RtpStartupGate::default();
+    assert!(!gate.may_authenticate(false, 10, 40000));
+    assert!(!gate.may_authenticate(true, 10, 40001));
+    assert!(!gate.may_authenticate(true, 10, 65535));
+    assert!(gate.may_authenticate(true, 10, 0));
+    // A failed authentication does not end probation.
+    assert!(!gate.may_authenticate(true, 20, 1));
+    assert!(gate.may_authenticate(true, 20, 2));
+    gate.authenticated();
+    assert!(!gate.may_authenticate(false, 20, 200));
+    assert!(gate.may_authenticate(true, 20, 201));
+    // Once established, SRTP owns replay and reordering. This gate must not
+    // become a second sequence filter on ordinary delivery or audio resume.
+    assert!(gate.may_authenticate(true, 20, 4));
+    assert!(gate.may_authenticate(true, 20, 3));
+    assert!(gate.may_authenticate(true, 20, 3));
+    assert!(!RtpStartupGate::default().may_authenticate(true, 20, 4));
 }
 fn packet(sequence: u16) -> RtpAudioPacket {
     RtpAudioPacket {
