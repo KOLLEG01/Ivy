@@ -417,7 +417,7 @@ impl CollectionRuntime for Runtime<'_> {
         })
     }
 }
-fn compact(value: &Json) -> Json {
+pub(super) fn compact(value: &Json) -> Json {
     match value {
         Json::String(s) if s.utf16_len() > 512 => {
             let utf16: Vec<u8> = s.0.iter().flat_map(|u| u.to_le_bytes()).collect();

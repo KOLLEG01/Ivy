@@ -92,9 +92,12 @@ impl Gate {
                 )
             }),
             INSTRUCTIONS.get_or_init(|| {
-                String::from_utf8(STANDARD.decode(text(oracle(), "instructions")).unwrap())
+                let bytes = STANDARD.decode(text(oracle(), "instructions")).unwrap();
+                parse(std::str::from_utf8(&bytes).unwrap(), usize::MAX)
                     .unwrap()
-                    .into()
+                    .as_js_string()
+                    .unwrap()
+                    .clone()
             }),
         )
     }
@@ -106,11 +109,15 @@ impl Gate {
             .pop_front()
             .unwrap_or_else(|| panic!("Unexpected {kind} gate"));
         assert_eq!(text(&expected, "kind"), kind);
-        equal(&input, field(&expected, "input"), kind);
+        equal(
+            &collector::compact(&input),
+            &collector::compact(field(&expected, "input")),
+            kind,
+        );
         let output = result(actual.clone());
         equal(
-            &output,
-            field(&expected, "output"),
+            &collector::compact(&output),
+            &collector::compact(field(&expected, "output")),
             &format!("actual {kind} validation"),
         );
         self.calls.lock().unwrap().push(Json::object([
