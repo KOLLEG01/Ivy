@@ -1,6 +1,9 @@
 //! Durable HTTP receipts and ordered publication across real process/epoch changes.
 use super::*;
 
+#[path = "data-collector-periodic.inc.rs"]
+mod periodic;
+
 fn runs(fixture: &Fixture) -> Vec<IvyJson> {
     let db = sqlite::open(
         &database(fixture),
@@ -93,7 +96,16 @@ async fn hive_state(
     value
 }
 
-async fn scenario(original: bool) -> IvyJson {
+struct Running {
+    fixture: Fixture,
+    hive: tokio::process::Child,
+    output: BufReader<tokio::process::ChildStdout>,
+    client: Arc<dyn RpcClient>,
+    child: OwnedProcess,
+    initial_health: IvyJson,
+}
+
+async fn start(original: bool) -> Running {
     let mut fixture = Fixture::new(false).await;
     let mut hive = Command::new(node())
         .args([
@@ -142,15 +154,19 @@ async fn scenario(original: bool) -> IvyJson {
         )
         .unwrap();
     }
-    let mut child = launch_service(&fixture, original).await;
+    let child = launch_service(&fixture, original).await;
     let initial_health = online(&fixture, &child, None, &client, SOURCE).await;
-    let initial_epoch = client
-        .request("system.status", model::object(), RequestOptions::default())
-        .await
-        .unwrap()
-        .required("runtimeEpoch")
-        .unwrap()
-        .clone();
+    Running {
+        fixture,
+        hive,
+        output,
+        client,
+        child,
+        initial_health,
+    }
+}
+
+fn definition(fixture: &Fixture, interval_seconds: u32) -> IvyJson {
     let mut task = parse(r#"{"id":"transfer","name":"Offline inputs","enabled":false,"intervalSeconds":3600,"timeoutSeconds":10,"memoryMb":64,"dependencies":{},"config":{},"secretNames":[],"allowUnauthenticatedInput":true,"script":"import {appendFileSync} from 'node:fs'; export default ({state,input})=>{const cursor=(state?.cursor??0)+1;const data={cursor,previous:state?.cursor??null,input:input?.value??null};appendFileSync('marker',JSON.stringify(data)+'\\n');return {data,state:{cursor},events:[{name:'first',payload:{cursor,index:0}},{name:'second',payload:{cursor,index:1}}]};}"}"#, usize::MAX).unwrap();
     let settings = schema::parse_schema(
         "settingsSchema",
@@ -158,6 +174,27 @@ async fn scenario(original: bool) -> IvyJson {
     )
     .unwrap();
     task.insert("retention", settings.required("retention").unwrap().clone());
+    task.insert("intervalSeconds", IvyJson::Number(interval_seconds as f64));
+    task
+}
+
+async fn scenario(original: bool) -> IvyJson {
+    let Running {
+        fixture,
+        mut hive,
+        mut output,
+        client,
+        mut child,
+        initial_health,
+    } = start(original).await;
+    let initial_epoch = client
+        .request("system.status", model::object(), RequestOptions::default())
+        .await
+        .unwrap()
+        .required("runtimeEpoch")
+        .unwrap()
+        .clone();
+    let task = definition(&fixture, 3600);
     let saved = invoke(
         &client,
         SOURCE,
@@ -269,7 +306,7 @@ async fn scenario(original: bool) -> IvyJson {
     );
     drop(db);
     let reopened = hive_state(&mut hive, &mut output, "online").await;
-    assert_eq!(reopened.get("url"), Some(&url.into()));
+    assert_eq!(reopened.get("url"), fixture.config.get("publicBaseUrl"));
     online(&fixture, &child, None, &client, SOURCE).await;
     let epoch = client
         .request("system.status", model::object(), RequestOptions::default())
@@ -295,12 +332,44 @@ async fn scenario(original: bool) -> IvyJson {
     ));
     assert!(json_equal(&markers(&fixture), &expected_markers));
 
+    let timeline = verify_publication(&client, &result_id, &completed, &expected_markers).await;
+    stop(&fixture, &child).await;
+    assert!(json_equal(&markers(&fixture), &expected_markers));
+    hive.stdin
+        .take()
+        .unwrap()
+        .write_all(b"close\n")
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(12), hive.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    IvyJson::object([
+        ("markers", expected_markers),
+        (
+            "timeline",
+            IvyJson::Array(timeline.into_iter().map(IvyJson::from).collect()),
+        ),
+        ("completed", IvyJson::Number(completed.len() as f64)),
+    ])
+}
+
+async fn verify_publication(
+    client: &Arc<dyn RpcClient>,
+    result_id: &IvyJson,
+    completed: &[IvyJson],
+    expected_markers: &IvyJson,
+) -> Vec<String> {
     let history = client
         .request(
             "objects.history",
             IvyJson::object([
                 ("objectId", result_id.clone()),
-                ("limit", IvyJson::Number(10.0)),
+                ("limit", IvyJson::Number((completed.len() + 1) as f64)),
             ]),
             RequestOptions::default(),
         )
@@ -308,7 +377,7 @@ async fn scenario(original: bool) -> IvyJson {
         .unwrap();
     assert_eq!(history.get("historyComplete"), Some(&true.into()));
     let revisions = history.required("items").unwrap().as_array().unwrap();
-    assert_eq!(revisions.len(), 4);
+    assert_eq!(revisions.len(), completed.len());
     for (i, revision) in revisions.iter().rev().enumerate() {
         let value = client
             .request(
@@ -363,7 +432,7 @@ async fn scenario(original: bool) -> IvyJson {
         for event in batch.required("items").unwrap().as_array().unwrap() {
             let payload = event.required("payload").unwrap();
             if event.get("topic") == Some(&"hive.object.changed".into()) {
-                if payload.get("objectId") == Some(&result_id) {
+                if payload.get("objectId") == Some(result_id) {
                     timeline.push(format!(
                         "result:{}",
                         model::number(payload, "revision").unwrap()
@@ -373,7 +442,7 @@ async fn scenario(original: bool) -> IvyJson {
                 let cursor =
                     model::number(payload.required("payload").unwrap(), "cursor").unwrap() as usize;
                 let index = model::number(payload, "eventIndex").unwrap() as usize;
-                assert!((1..=4).contains(&cursor) && index < 2);
+                assert!((1..=completed.len()).contains(&cursor) && index < 2);
                 assert_eq!(payload.get("runId"), completed[cursor - 1].get("id"));
                 assert_eq!(
                     model::number(payload.required("payload").unwrap(), "index").unwrap() as usize,
@@ -393,7 +462,7 @@ async fn scenario(original: bool) -> IvyJson {
         assert_ne!(next, after);
         after = next;
     }
-    let expected_timeline = (1..=4)
+    let expected_timeline = (1..=completed.len())
         .flat_map(|i| {
             [
                 format!("result:{i}"),
@@ -403,30 +472,8 @@ async fn scenario(original: bool) -> IvyJson {
         })
         .collect::<Vec<_>>();
     assert_eq!(timeline, expected_timeline);
-    assert_eq!(event_ids.len(), 8);
-    stop(&fixture, &child).await;
-    assert!(json_equal(&markers(&fixture), &expected_markers));
-    hive.stdin
-        .take()
-        .unwrap()
-        .write_all(b"close\n")
-        .await
-        .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(12), hive.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success()
-    );
-    IvyJson::object([
-        ("markers", expected_markers),
-        (
-            "timeline",
-            IvyJson::Array(timeline.into_iter().map(IvyJson::from).collect()),
-        ),
-        ("completed", IvyJson::Number(completed.len() as f64)),
-    ])
+    assert_eq!(event_ids.len(), completed.len() * 2);
+    timeline
 }
 
 #[tokio::test]
