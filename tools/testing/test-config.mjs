@@ -17,7 +17,7 @@ export function scope(file) {
   if (/data-collector/.test(file)) return "data-collector";
   if (/dashboards/.test(file)) return "dashboards";
   if (
-    /deployment-plan|build-(cache|inputs)|test-(runner|selection|reporter)/.test(
+    /deployment-plan|build-(cache|inputs|rust-backend)|test-(runner|selection|reporter)/.test(
       file,
     )
   )

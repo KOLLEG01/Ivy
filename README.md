@@ -178,6 +178,11 @@ Use the Node/npm versions and commands in [package.json](package.json), install 
 [tools/build](tools/build); component preparation uses each component's `deploy.json`.
 [Local host operations](specs/DEPLOYMENT.md#local-host-operations) cover deployment and recovery.
 
+For a registered Rust component, `node tools/build/build-rust-backend.mjs --component
+<component> --target <triple>` compiles its executable targets with the pinned lockfile
+and stages them under `.local/build/rust`. These target payloads are inputs to package
+assembly; they do not replace the component's readiness helpers or qualify other platforms.
+
 Format only selected handwritten JavaScript, TypeScript, Vue, JSON or Markdown files with
 `npm run format:check -- <files>` and `npm run format:write -- <files>`. Check selected
 JavaScript, TypeScript and Vue files with `npm run lint -- <files>`; linting never fixes files.
