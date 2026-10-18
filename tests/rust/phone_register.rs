@@ -339,7 +339,7 @@ async fn keepalive_uses_confirmed_source_then_stops_at_public_lease_expiry() {
         related(&first, &refresh, 2, false);
         assert_eq!(refresh.expires_header().unwrap().value(), "10");
         peer.send(&response(&refresh, 200, "Expires: 9000000000\r\nContact: <sip:other@127.0.0.2>;expires=8000000000\r\n")).await;
-        observed(&registration, |state| state.granted_expiry_seconds == Some(8_000_000_000)).await;
+        observed(&registration, |state| state.granted_expiry_seconds == Some(u32::MAX.into())).await;
         registration.request_stop();
         let close = tokio::spawn(async move {registration.close().await.unwrap(); registration});
         let remove = peer.receive().await;

@@ -625,7 +625,10 @@ fn contact(value: &str) -> (Option<Uri>, Option<u64>) {
             key.eq_ignore_ascii_case("expires")
                 .then(|| lifetime(value))
                 .flatten()
-        });
+        })
+        // The original Contact accessor caps its long parameter at uint32,
+        // while the general Expires header retains its full signed 64 bits.
+        .map(|seconds| seconds.min(u32::MAX.into()));
     let mut uri = Uri::try_from(uri.trim()).ok();
     if let Some(uri) = &mut uri {
         uri.params.clear();
@@ -694,7 +697,7 @@ mod tests {
             ),
             (
                 "Expires: 30\r\nContact: <sip:other@127.0.0.2>;expires=8000000000\r\n",
-                (8_000_000_000, 30),
+                (u32::MAX.into(), 30),
             ),
             ("Expires: 9000000000\r\n", (9_000_000_000, 7200)),
             (
