@@ -600,7 +600,8 @@ impl Actor {
             }
             return Ok(());
         }
-        let id = frame.get("id").unwrap_or(&IvyJson::Null);
+        let missing_id = IvyJson::Null;
+        let id = frame.get("id").unwrap_or(&missing_id);
         validate_agent_frame(id, NativeFrameKind::RequestId)?;
         require(
             id.as_js_string().is_some(),
