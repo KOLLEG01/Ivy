@@ -177,6 +177,9 @@ async fn read_reply(mut stream: TcpStream) -> IvyJson {
         .await
         .unwrap();
     assert!(received.is_ok() || !bytes.is_empty(), "{received:?}");
+    if bytes.is_empty() {
+        return IvyJson::object([("status", IvyJson::Null), ("body", IvyJson::Null)]);
+    }
     let split = bytes.windows(4).position(|b| b == b"\r\n\r\n").unwrap();
     let headers = String::from_utf8(bytes[..split].to_vec()).unwrap();
     let status = headers
