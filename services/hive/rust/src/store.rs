@@ -9,6 +9,13 @@ use ivy_contracts::{
 use rusqlite::{Connection, OptionalExtension, config::DbConfig, params};
 use std::{path::Path, time::Duration};
 
+#[path = "store_ledger.rs"]
+mod ledger;
+pub use ledger::{AuthenticatedContext, LedgerResult, ReceiptKind};
+#[path = "store_events.rs"]
+mod events;
+pub use events::EVENT_MAX_COUNT;
+
 const SCHEMA: &str = include_str!("schema.sql");
 const IMMUTABLE: &[&str] = &[
     "contracts",

@@ -1,6 +1,7 @@
 import {registerHooks,stripTypeScriptTypes} from 'node:module';
 import {existsSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
 registerHooks({resolve(specifier,context,next){
   if(specifier.startsWith('.')&&specifier.endsWith('.js')&&context.parentURL){const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(source)))return next(source.href,context);}
   return next(specifier,context);
@@ -12,7 +13,8 @@ const {HiveStore}=await import('../../services/hive/src/store.ts');
 const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const input=JSON.parse(readFileSync(0,'utf8'));
 let store;
-const snapshot=()=>({principals:store.all('SELECT * FROM principals ORDER BY id'),credentials:store.all('SELECT * FROM credentials ORDER BY digest'),nodes:store.all('SELECT * FROM service_nodes ORDER BY id'),sessions:store.all('SELECT * FROM browser_sessions ORDER BY digest'),subscriptions:store.all('SELECT * FROM subscriptions ORDER BY node_id,name'),durable:store.all('SELECT * FROM durable_subscriptions ORDER BY node_id,name'),changes:[...store.changes]});
+const tableHash=(table,columns)=>'sha256:'+createHash('sha256').update(store.get(`SELECT json_group_array(json_array(${columns})) AS encoded FROM (SELECT rowid AS record_id,* FROM ${table} ORDER BY rowid)`).encoded).digest('hex');
+const snapshot=()=>({principals:store.all('SELECT * FROM principals ORDER BY id'),credentials:store.all('SELECT * FROM credentials ORDER BY digest'),nodes:store.all('SELECT * FROM service_nodes ORDER BY id'),sessions:store.all('SELECT * FROM browser_sessions ORDER BY digest'),subscriptions:store.all('SELECT * FROM subscriptions ORDER BY node_id,name'),durable:store.all('SELECT * FROM durable_subscriptions ORDER BY node_id,name'),changes:[...store.changes],mutations:tableHash('mutations','record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes'),events:tableHash('events','sequence,topic,topic_version,source,occurred_at,mutation_id,payload'),metadata:store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),retention:store.all('SELECT * FROM retention_families ORDER BY contract_key')});
 const rows=[];
 try {
  store=new HiveStore(input.path);
@@ -26,6 +28,21 @@ try {
     case 'invalidate':store.invalidate(step.scope);break;
     case 'transaction':store.transaction(()=>{store.db.exec(step.sql);store.invalidate(step.scope);if(step.fail)throw new IvyError('fixture_failure','Rollback requested.');});break;
     case 'reopen':store.close();store=new HiveStore(input.path);break;
+    case 'mutate':{
+      const realNow=Date.now;Date.now=()=>step.now;
+      try{value=store.mutate(step.context,step.method,step.params,()=>{
+        store.db.exec(step.sql??'');if(step.scope)store.invalidate(step.scope);
+        if(step.fail)throw new IvyError('fixture_failure','Rollback requested.');
+        return {value:step.value,kind:step.kind,reference:step.reference};
+      });}finally{Date.now=realNow;}break;
+    }
+    case 'receipt':value=store.objectWriteReceipt(step.context,step.mutationId,step.hash);break;
+    case 'contract':value=store.contract(step.key,step.version);break;
+    case 'cleanup':store.transaction(()=>store.cleanupMutationReceipts(step.bytes??0,step.count??0));break;
+    case 'adjust':store.adjustRetentionUsage(step.key,step.objects,step.revisions,step.bytes);break;
+    case 'event':store.transaction(()=>store.appendCoreEvent(step.principal,step.objectId,step.revision,step.operation,step.mutationId,step.now,step.key));break;
+    case 'admit':store.transaction(()=>store.admitEvent(step.reserve??false));break;
+    case 'durableBoundary':value=store.durableEventBoundary();break;
     default:throw Error('Unknown trace action');
    }
   }catch(e){error=IvyError.from(e).toWire();}

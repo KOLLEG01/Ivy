@@ -1,5 +1,9 @@
-use ivy_contracts::{IvyError, JsString, json::stringify};
-use ivy_hive::store::{AuthContext, Credential, Store};
+use ivy_contracts::{IvyError, IvyJson, JsString, json::stringify};
+use ivy_hive::store::{
+    AuthContext, AuthenticatedContext, Credential, LedgerResult, Principal, ReceiptKind, Store,
+};
+#[path = "hive_ledger.rs"]
+mod ledger;
 use rusqlite::types::ValueRef;
 use serde_json::{Value, json};
 use std::{
@@ -58,7 +62,20 @@ fn rows(store: &Store, sql: &str) -> Value {
     json!(values)
 }
 fn snapshot(store: &Store) -> Value {
-    json!({"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>()})
+    let table_hash = |table: &str, columns: &str| {
+        let encoded:String=store.connection().query_row(&format!("SELECT json_group_array(json_array({columns})) FROM (SELECT rowid AS record_id,* FROM {table} ORDER BY rowid)"),[],|r|r.get(0)).unwrap();
+        ivy_contracts::hash::digest(encoded)
+    };
+    json!({"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events","sequence,topic,topic_version,source,occurred_at,mutation_id,payload"),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key")})
+}
+fn context(value: &Value) -> AuthenticatedContext {
+    AuthenticatedContext {
+        principal_id: value["principalId"].as_str().unwrap().into(),
+        credential_digest: value["credentialDigest"].as_str().unwrap().into(),
+    }
+}
+fn wire(value: IvyJson) -> Value {
+    serde_json::from_str(&stringify(&value, 1 << 26).unwrap()).unwrap()
 }
 fn native(path: &Path, steps: &[Value]) -> Value {
     let mut store = Store::open(path).unwrap();
@@ -107,6 +124,91 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                 store = Store::open(path).unwrap();
                 Ok(Value::Null)
             }
+            "mutate" => {
+                let kind = match step["kind"].as_str() {
+                    Some("contract") => ReceiptKind::Contract,
+                    Some("event") => ReceiptKind::Event,
+                    _ => ReceiptKind::Snapshot,
+                };
+                store
+                    .mutate(
+                        &context(&step["context"]),
+                        &step["method"].as_str().unwrap().into(),
+                        &IvyJson::from_serde(&step["params"]).unwrap(),
+                        step["now"].as_u64().unwrap(),
+                        |s, _| {
+                            s.connection()
+                                .execute_batch(step["sql"].as_str().unwrap_or(""))
+                                .map_err(|_| IvyError::internal())?;
+                            if let Some(scope) = step["scope"].as_str() {
+                                s.invalidate(scope.into());
+                            }
+                            if step["fail"] == true {
+                                return Err(IvyError::new(
+                                    "fixture_failure",
+                                    "Rollback requested.",
+                                ));
+                            }
+                            Ok(LedgerResult {
+                                value: IvyJson::from_serde(&step["value"]).unwrap(),
+                                kind,
+                                reference: step
+                                    .get("reference")
+                                    .map(|v| IvyJson::from_serde(v).unwrap()),
+                            })
+                        },
+                    )
+                    .map(wire)
+            }
+            "receipt" => store
+                .object_write_receipt(
+                    &context(&step["context"]),
+                    &step["mutationId"].as_str().unwrap().into(),
+                    step["hash"].as_str().unwrap(),
+                )
+                .map(|v| v.map(wire).unwrap_or(Value::Null)),
+            "contract" => store
+                .contract(
+                    &step["key"].as_str().unwrap().into(),
+                    &step["version"].as_str().unwrap().into(),
+                )
+                .map(wire),
+            "cleanup" => store
+                .transaction(|s| {
+                    s.cleanup_mutation_receipts(
+                        step["bytes"].as_u64().unwrap_or(0) as usize,
+                        step["count"].as_u64().unwrap_or(0) as usize,
+                    )
+                })
+                .map(|_| Value::Null),
+            "adjust" => store
+                .adjust_retention_usage(
+                    &step["key"].as_str().unwrap().into(),
+                    step["objects"].as_i64().unwrap(),
+                    step["revisions"].as_i64().unwrap(),
+                    step["bytes"].as_i64().unwrap(),
+                )
+                .map(|_| Value::Null),
+            "event" => store
+                .transaction(|s| {
+                    s.append_core_event(
+                        &Principal {
+                            principal_id: step["principal"]["principalId"].as_str().unwrap().into(),
+                            credential_digest: "unused".into(),
+                        },
+                        &step["objectId"].as_str().unwrap().into(),
+                        step["revision"].as_u64().unwrap(),
+                        &step["operation"].as_str().unwrap().into(),
+                        &step["mutationId"].as_str().unwrap().into(),
+                        &step["now"].as_str().unwrap().into(),
+                        step["key"].as_str().map(JsString::from).as_ref(),
+                    )
+                })
+                .map(|_| Value::Null),
+            "admit" => store
+                .transaction(|s| s.admit_event(step["reserve"].as_bool().unwrap_or(false)))
+                .map(|_| Value::Null),
+            "durableBoundary" => store.durable_event_boundary().map(|v| json!(v)),
             _ => panic!("unknown step"),
         };
         let (value, error) = match outcome {
