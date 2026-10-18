@@ -153,6 +153,10 @@ fn accepted_configuration_preserves_installation_and_revision_boundaries() {
             compare_config_oracle(IvyJson::object([("kind", "layout".into()), ("operation", "servicePaths".into()), ("args", IvyJson::Array(vec![source.clone(), id.into()]))]), service_paths(&source, &id.into()));
         }
     }
+    let mut source = anchor.clone();
+    source.insert("runtimeRoot", fixture.0.join("state/../runtime").to_string_lossy().to_string().into());
+    compare_config_oracle(IvyJson::object([("kind", "layout".into()), ("operation", "servicePaths".into()), ("args", IvyJson::Array(vec![source.clone(), "fixture".into()]))]), service_paths(&source, &"fixture".into()));
+    compare_config_oracle(IvyJson::object([("kind", "layout".into()), ("operation", "hostConfigurationPath".into()), ("args", IvyJson::Array(vec![source.clone()]))]), host_configuration_path(&source).map(|p| p.to_string_lossy().to_string().into()));
 }
 
 #[test]
