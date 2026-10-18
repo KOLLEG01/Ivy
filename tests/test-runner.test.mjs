@@ -211,6 +211,12 @@ test("Cargo dispatch groups selected targets and stops after a failed prerequisi
   const agentOnly = run("", ["tests/rust/agent-interactions.rs"]);
   assert.equal(agentOnly.result.status, 0, agentOnly.result.stderr);
   assert.deepEqual(agentOnly.commands, expected.filter(args => args.includes('ivy-agent-manager') || (args[0] === 'build' && args.at(-1) === 'ivy-job')));
+  const projectsOnly = run("", ["tests/rust/agent-projects.rs"]);
+  assert.equal(projectsOnly.result.status, 0, projectsOnly.result.stderr);
+  assert.deepEqual(projectsOnly.commands, [
+    ...(process.platform === "win32" ? [["build", "--locked", "--package", "ivy-host-runtime", "--bin", "ivy-job"]] : []),
+    ["test", "--locked", "--package", "ivy-agent-manager", "--test", "agent-projects"],
+  ]);
   const secretaryOnly = run("", ["tests/secretary-rust/delivery.rs"]);
   assert.equal(secretaryOnly.result.status, 0, secretaryOnly.result.stderr);
   assert.deepEqual(secretaryOnly.commands, [
