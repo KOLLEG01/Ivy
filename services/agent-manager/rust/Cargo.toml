@@ -14,7 +14,9 @@ uuid.workspace = true
 
 [dev-dependencies]
 ivy-sdk.workspace = true
+ivy-host-runtime.workspace = true
 futures-util.workspace = true
+tokio-tungstenite.workspace = true
 
 [[test]]
 name = "agent-state"

@@ -17,6 +17,10 @@ mod app_tools_launch_cases;
 mod native_rpc_cases;
 #[path = "agent-native-compatibility.rs"]
 mod native_compatibility_cases;
+#[path = "agent-native-proxy.rs"]
+mod native_proxy_cases;
+#[path = "agent-native-handshake.rs"]
+mod native_handshake_cases;
 
 fn json(s: &str) -> IvyJson {
     parse(s, 1024 * 1024).unwrap()
