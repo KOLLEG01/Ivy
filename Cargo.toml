@@ -47,6 +47,8 @@ libc = "=0.2.191"
 tar = { version = "=0.4.46", default-features = false }
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 rsipstack = { version = "=0.7.4", default-features = false, features = ["platform-tokio", "rustls", "srv_lookup"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-platform-verifier = "=0.7.1"
 
 [profile.release]
 lto = "thin"
