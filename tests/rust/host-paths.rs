@@ -95,8 +95,8 @@ fn compare_config_oracle(input: IvyJson, result: ivy_contracts::IvyResult<IvyJso
 
 fn stop_fence() -> IvyJson {
     IvyJson::object([
-        ("schemaVersion", 1.0.into()), ("owner", "native".into()),
-        ("ownerId", "native-owner".into()), ("processId", 123.0.into()),
+        ("schemaVersion", IvyJson::Number(1.0)), ("owner", "native".into()),
+        ("ownerId", "native-owner".into()), ("processId", IvyJson::Number(123.0)),
         ("observedAt", "2026-01-01T00:00:00.000Z".into()), ("code", "outcome_unknown".into()),
     ])
 }
