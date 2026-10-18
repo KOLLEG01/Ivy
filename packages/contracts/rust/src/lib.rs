@@ -8,6 +8,7 @@ pub mod json;
 pub mod limits;
 pub mod operation;
 pub mod read_request;
+pub mod re2;
 pub mod schema;
 pub mod validation;
 pub mod wire_schema;
