@@ -121,6 +121,7 @@ async fn original_engine_initialization_settings_and_assignment_queries() {
             clock: &clock,
             operation_clock: &clock,
             runtime_epoch: &runtime_epoch,
+            new_uuid: ivy_secretary::engine::random_uuid,
             tools: &tools,
             issues: &issues,
         };

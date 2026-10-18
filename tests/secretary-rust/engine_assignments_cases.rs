@@ -156,6 +156,7 @@ async fn original_public_assignment_writes_and_operation_reads() {
             clock: &clock,
             operation_clock: &operation_clock,
             runtime_epoch: corpus.required("epoch").unwrap().as_js_string().unwrap(),
+            new_uuid: ivy_secretary::engine::random_uuid,
             tools: &tools,
             issues: &issues,
         };

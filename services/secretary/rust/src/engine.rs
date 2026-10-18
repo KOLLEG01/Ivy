@@ -81,8 +81,14 @@ pub struct SecretaryEngine<'a, 'engine, 'journal> {
     /// engine's injectable observation clock.
     pub operation_clock: &'a dyn Clock,
     pub runtime_epoch: &'a JsString,
+    /// Generation composition supplies real UUIDs; deterministic reference tests
+    /// supply the same UUID stream as the original crypto boundary.
+    pub new_uuid: fn() -> JsString,
     pub tools: &'a ToolClients,
     pub issues: &'a RefCell<RecoveryScan>,
+}
+pub fn random_uuid() -> JsString {
+    uuid::Uuid::new_v4().to_string().into()
 }
 impl SecretaryEngine<'_, '_, '_> {
     pub(crate) fn now(&self) -> IvyResult<JsString> {

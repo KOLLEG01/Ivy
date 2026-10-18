@@ -33,14 +33,18 @@ fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
 }
 impl SecretaryEngine<'_, '_, '_> {
-    fn workflow(&self) -> AssignmentWorkflow<'_, '_, '_> {
+    pub(crate) fn workflow(&self) -> AssignmentWorkflow<'_, '_, '_> {
         AssignmentWorkflow {
             evidence: self.evidence,
             runtime_epoch: self.runtime_epoch,
             clock: self.operation_clock,
         }
     }
-    fn prior_workflow(&self, caller: &IvyJson, id: &IvyJson) -> IvyResult<Option<Document>> {
+    pub(crate) fn prior_workflow(
+        &self,
+        caller: &IvyJson,
+        id: &IvyJson,
+    ) -> IvyResult<Option<Document>> {
         self.evidence.store.journal.named(
             WORKFLOW_OPERATION_KEY,
             &operation_name(caller, id)?.to_utf8()?,

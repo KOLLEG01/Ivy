@@ -192,6 +192,7 @@ async fn original_inbox_effect_recovery_and_bounded_scan() {
             clock: &clock,
             operation_clock: &clock,
             runtime_epoch: &runtime_epoch,
+            new_uuid: ivy_secretary::engine::random_uuid,
             tools: &tools,
             issues: &scan,
         };

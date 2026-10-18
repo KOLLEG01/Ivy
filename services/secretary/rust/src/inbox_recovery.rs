@@ -40,24 +40,6 @@ fn prepared_key(value: &IvyJson) -> IvyResult<Record> {
         _ => Err(IvyError::internal()),
     }
 }
-fn ignored(source: &IvyJson, message: &IvyJson) -> IvyResult<bool> {
-    if message.get("outgoing") == Some(&IvyJson::Bool(true)) {
-        return Ok(true);
-    }
-    let sender = message.required("senderId")?;
-    let own = source
-        .required("ownSenderIds")?
-        .as_array()
-        .ok_or_else(IvyError::internal)?;
-    if own.contains(sender) {
-        return Ok(true);
-    }
-    Ok(source
-        .get("allowedSenderIds")
-        .filter(|v| !v.is_null())
-        .and_then(IvyJson::as_array)
-        .is_some_and(|allowed| !allowed.contains(sender)))
-}
 pub struct InboxRecovery<'a, 'engine, 'journal> {
     pub evidence: &'a InboxEvidence<'engine, 'journal>,
 }
@@ -216,10 +198,11 @@ impl InboxRecovery<'_, '_, '_> {
             )?;
             if key == Record::Item {
                 need(
-                    !ignored(
+                    crate::inbox_evidence::ignored_reason(
                         source.unwrap(),
                         prepared.required("value")?.required("message")?,
-                    )?,
+                    )?
+                    .is_none(),
                     "secretary_authorization_changed",
                     "The current source policy no longer admits a new effect for this message.",
                 )?;
