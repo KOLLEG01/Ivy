@@ -415,20 +415,18 @@ impl Store<'_> {
         if let Some(existing) = self.named(key, name).await? {
             return Ok(existing);
         }
-        let result = async {
-            let p = self
-                .write(
-                    key,
-                    value,
-                    &IvyJson::object([("createName", IvyJson::String(name.clone()))]),
-                    id,
-                )
-                .await?;
-            self.read(key, &p).await
-        }
-        .await;
+        // The original returns the read promise without awaiting it in the
+        // write-recovery catch. A rejected read must not trigger winner lookup.
+        let result = self
+            .write(
+                key,
+                value,
+                &IvyJson::object([("createName", IvyJson::String(name.clone()))]),
+                id,
+            )
+            .await;
         match result {
-            Ok(v) => Ok(v),
+            Ok(p) => self.read(key, &p).await,
             Err(error) => match self.named(key, name).await? {
                 Some(winner) => Ok(winner),
                 None => Err(error),
@@ -456,14 +454,11 @@ impl Store<'_> {
             ]),
         )
         .await?;
-        let result = async {
-            let next = self
-                .write(key, value, &IvyJson::object([("object", p.clone())]), &id)
-                .await?;
-            self.read(key, &next).await
-        }
-        .await;
+        let result = self
+            .write(key, value, &IvyJson::object([("object", p.clone())]), &id)
+            .await;
         match result {
+            Ok(next) => self.read(key, &next).await,
             Err(error)
                 if matches!(
                     error.code.as_str(),
