@@ -1,0 +1,22 @@
+pub mod browser_path;
+#[cfg(feature = "browser")]
+pub mod browser;
+#[cfg(feature = "browser")]
+pub mod cdp;
+pub mod document;
+pub mod handlers;
+pub mod png;
+pub mod raster;
+pub mod sources;
+pub mod store;
+pub mod validation;
+#[cfg(feature = "browser")]
+pub mod runtime;
+
+pub fn registry() -> ivy_contracts::IvyJson {
+    ivy_contracts::json::parse(
+        include_str!("../assets/registry.json"),
+        ivy_contracts::limits::MANAGEMENT_FRAME_BYTES,
+    )
+    .expect("embedded dashboard registry is valid JSON")
+}

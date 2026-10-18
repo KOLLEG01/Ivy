@@ -1,0 +1,59 @@
+[package]
+name = "ivy-chat-bridge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ivy-contracts.workspace = true
+ivy-sdk.workspace = true
+ivy-store.workspace = true
+uuid.workspace = true
+base64.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+
+[[test]]
+name = "chat-native-driver"
+path = "../../../tests/rust/chat-native-driver.rs"
+
+[[test]]
+name = "chat-registry"
+path = "../../../tests/rust/chat-registry.rs"
+
+[[test]]
+name = "chat-input-media"
+path = "../../../tests/rust/chat-input-media.rs"
+
+[[test]]
+name = "chat-admission"
+path = "../../../tests/rust/chat-admission.rs"
+
+[[test]]
+name = "chat-storage"
+path = "../../../tests/rust/chat-storage.rs"
+
+[[test]]
+name = "chat-audio"
+path = "../../../tests/rust/chat-audio.rs"
+
+[[test]]
+name = "chat-output"
+path = "../../../tests/rust/chat-output.rs"
+
+[[test]]
+name = "chat-identity"
+path = "../../../tests/rust/chat-identity.rs"
+
+[[test]]
+name = "chat-journal"
+path = "../../../tests/rust/chat-journal.rs"
+
+[[test]]
+name = "chat-diagnostics"
+path = "../../../tests/rust/chat-diagnostics.rs"
+
+[[test]]
+name = "chat-sender"
+path = "../../../tests/rust/chat-sender.rs"

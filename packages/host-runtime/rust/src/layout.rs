@@ -1,46 +1,143 @@
 //! Storage locations shared by host admission and runtime supervision.
 use crate::{IvyError, IvyJson, IvyResult};
-use std::path::{Component, Path, PathBuf};
+use crate::node_path::{self, Style};
+use ivy_contracts::{JsString, json};
+use std::{collections::BTreeMap, path::{Path, PathBuf}};
 
 pub(crate) fn path(value: &IvyJson) -> IvyResult<PathBuf> { crate::config::path_value(value) }
 pub(crate) fn path_json(path: &Path) -> IvyJson {
-    #[cfg(windows)] {
-        use std::os::windows::ffi::OsStrExt;
-        IvyJson::String(ivy_contracts::JsString(path.as_os_str().encode_wide().collect()))
-    }
-    #[cfg(not(windows))] { path.to_string_lossy().as_ref().into() }
+    IvyJson::String(node_path::from_native(path))
 }
-fn normalized(path: &Path) -> PathBuf {
-    let mut result = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::CurDir => (),
-            Component::ParentDir => {
-                if matches!(result.components().next_back(), Some(Component::Normal(_))) { result.pop(); }
-                else if !result.has_root() { result.push(".."); }
-            }
-            part => result.push(part.as_os_str()),
-        }
+fn text(value: &IvyJson) -> IvyResult<JsString> { value.as_js_string().cloned().ok_or_else(IvyError::internal) }
+fn selected<'a>(value: &'a IvyJson, key: &str) -> Option<&'a IvyJson> { value.get(key).filter(|v| !v.is_null()) }
+fn joined(style: Style, parts: &[IvyJson]) -> IvyResult<IvyJson> {
+    Ok(IvyJson::String(node_path::join(style, &parts.iter().map(text).collect::<IvyResult<Vec<_>>>()?)))
+}
+fn service_base(config: &IvyJson, instance: &IvyJson, style: Style) -> IvyResult<IvyJson> {
+    match config.get("servicesRoot").filter(|v| v.as_js_string().is_some_and(|s| !s.0.is_empty())) {
+        Some(root) => joined(style, &[root.clone(), instance.required("componentId")?.clone()]),
+        None => joined(style, &[config.required("runtimeRoot")?.clone(), "instances".into(), instance.required("instanceId")?.clone()]),
     }
-    result
 }
 pub fn host_configuration_path(config: &IvyJson) -> IvyResult<PathBuf> {
-    match config.get("configPath").filter(|v| !v.is_null()) {
-        Some(value) => path(value),
-        None => Ok(normalized(&path(config.required("runtimeRoot")?)?.join("host.json"))),
+    path(&host_configuration_path_for_style(config, Style::native())?)
+}
+pub fn host_configuration_path_for_style(config: &IvyJson, style: Style) -> IvyResult<IvyJson> {
+    match selected(config, "configPath") {
+        Some(value) => Ok(value.clone()),
+        None => joined(style, &[config.required("runtimeRoot")?.clone(), "host.json".into()]),
     }
 }
 /// `instance` is either a configured instance object or its instance ID.
 pub fn service_paths(config: &IvyJson, instance: &IvyJson) -> IvyResult<IvyJson> {
+    service_paths_for_style(config, instance, Style::native())
+}
+pub fn service_paths_for_style(config: &IvyJson, instance: &IvyJson, style: Style) -> IvyResult<IvyJson> {
     let instance = if instance.as_js_string().is_some() {
         config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter()
             .find(|v| v.get("instanceId") == Some(instance))
             .ok_or_else(|| IvyError::new("not_found", "Unknown service instance for path resolution."))?
     } else { instance };
+    let base = service_base(config, instance, style)?;
     if let Some(paths) = instance.get("paths").filter(|v| !v.is_null()) { return Ok(paths.clone()); }
-    let base = match config.get("servicesRoot").filter(|v| v.as_js_string().is_some_and(|s| !s.0.is_empty())) {
-        Some(root) => path(root)?.join(path(instance.required("componentId")?)?),
-        None => path(config.required("runtimeRoot")?)?.join("instances").join(path(instance.required("instanceId")?)?),
-    };
-    Ok(IvyJson::object([("data", path_json(&normalized(&base.join("data")))), ("work", path_json(&normalized(&base.join("work")))), ("logs", path_json(&normalized(&base.join("logs"))))]))
+    Ok(IvyJson::object([("data", joined(style, &[base.clone(), "data".into()])?), ("work", joined(style, &[base.clone(), "work".into()])?), ("logs", joined(style, &[base, "logs".into()])?)]))
+}
+
+/// The owning process supplies its OS homedir result separately from the
+/// environment overrides. This also permits resolving another host's config
+/// without reading or changing this process's account or environment.
+pub fn account_home(environment: &BTreeMap<JsString, JsString>, style: Style, os_home: &JsString) -> IvyResult<JsString> {
+    let key = if style == Style::Windows { "USERPROFILE" } else { "HOME" };
+    let home = environment.get(&JsString::from(key)).filter(|home| !home.0.is_empty()).unwrap_or(os_home);
+    if !node_path::is_absolute(style, home) {
+        return Err(IvyError::new("invalid_arguments", "The executing account must have an absolute user home."));
+    }
+    Ok(node_path::normalize(style, home))
+}
+pub fn default_host_config_path(environment: &BTreeMap<JsString, JsString>, style: Style, os_home: &JsString) -> IvyResult<JsString> {
+    Ok(node_path::join(style, &[account_home(environment, style, os_home)?, ".ivy".into(), "config.json".into()]))
+}
+fn claude(settings: &IvyJson) -> bool { settings.get("appServer").and_then(|v| v.get("mode")) == Some(&"claude-adapter".into()) }
+pub fn agent_manager_account_settings(settings: &IvyJson, home: &JsString, style: Style) -> IvyResult<IvyJson> {
+    let mut result = settings.clone();
+    for (key, suffix) in [("projectRoot", vec!["projects"]), ("internalProjectRoot", vec![".ivy", "codex-projects"])] {
+        if selected(settings, key).is_none() {
+            let mut parts = vec![home.clone()]; parts.extend(suffix.into_iter().map(JsString::from));
+            result.insert(key, IvyJson::String(node_path::join(style, &parts)));
+        }
+    }
+    if !claude(settings) {
+        let skills = match selected(settings, "skillsRoot") {
+            Some(value) => value.clone(),
+            None => {
+                let native_home = match selected(settings, "codexHome").or_else(|| selected(settings, "nativeHome")) {
+                    Some(value) => json::try_js_string(value)?,
+                    None => node_path::join(style, &[home.clone(), ".codex".into()]),
+                };
+                IvyJson::String(node_path::join(style, &[native_home, "skills".into()]))
+            }
+        };
+        result.insert("skillsRoot", skills);
+    }
+    Ok(result)
+}
+
+/// Resolve the accepted input exactly once at the host boundary. Optional old
+/// roots retain the original layout; account defaults use the selected flavor.
+pub fn resolve_host_configuration(input: &IvyJson, source_path: &JsString, environment: &BTreeMap<JsString, JsString>, style: Style, os_home: &JsString) -> IvyResult<IvyJson> {
+    let home = account_home(environment, style, os_home)?;
+    let modern = input.get("ivyRoot").is_some() || input.get("servicesRoot").is_some() || input.get("runtimeRoot").is_none()
+        || node_path::normalize(style, source_path) == default_host_config_path(environment, style, os_home)?;
+    let ivy_root = selected(input, "ivyRoot").cloned().unwrap_or_else(|| IvyJson::String(node_path::join(style, &[home.clone(), ".ivy".into()])));
+    let mut config = input.clone();
+    for (key, suffix) in [("runtimeRoot","runtime"),("artifactRoot","artifacts"),("stagingRoot","staging")] {
+        if selected(input, key).is_none() { config.insert(key, joined(style, &[ivy_root.clone(), suffix.into()])?); }
+    }
+    if modern {
+        config.insert("ivyRoot", ivy_root.clone());
+        config.insert("servicesRoot", match selected(input, "servicesRoot") { Some(v) => v.clone(), None => joined(style, &[ivy_root.clone(), "services".into()])? });
+        config.insert("configPath", selected(input, "configPath").cloned().unwrap_or_else(|| IvyJson::String(source_path.clone())));
+    }
+    for key in ["packageUpdates", "configurationUpdates"] {
+        if selected(&config, key).is_none() { config.insert(key, IvyJson::object([("intervalSeconds", IvyJson::Number(60.0))])); }
+    }
+    let mut instances = Vec::new();
+    for instance in input.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
+        let component = instance.required("componentId")?.as_str()?;
+        let mut settings = crate::default_settings::default_service_settings_for_paths(&component, instance.required("settings")?, &text(&ivy_root)?, source_path, style)?;
+        if component == "agent-manager" {
+            let is_claude = claude(&settings);
+            let data = match instance.get("paths").and_then(|p| selected(p, "data")) {
+                Some(value) => value.clone(),
+                None => joined(style, &[service_base(&config, instance, style)?, "data".into()])?,
+            };
+            let native_home = if is_claude { joined(style, &[data, "codex-home".into()])? }
+                else { joined(style, &[ivy_root.clone(), "codex".into(), instance.required("instanceId")?.clone()])? };
+            // Undefined and explicit null differ here in the original resolver.
+            if settings.get("codexHome").is_none() && settings.get("nativeHome").is_none() { settings.insert("codexHome", native_home); }
+            if selected(&settings, "internalProjectRoot").is_none() { settings.insert("internalProjectRoot", joined(style, &[ivy_root.clone(), "codex-projects".into()])?); }
+            if selected(&settings, "appServer").is_none() { settings.insert("appServer", IvyJson::object([("mode", if style == Style::Windows { "external-proxy".into() } else { "owned-stdio".into() })])); }
+            settings = agent_manager_account_settings(&settings, &home, style)?;
+        }
+        let mut instance = instance.clone(); instance.insert("settings", settings);
+        let process_is_falsy = match instance.get("process") {
+            None | Some(IvyJson::Null) | Some(IvyJson::Bool(false)) => true,
+            Some(IvyJson::Number(n)) => *n == 0.0 || n.is_nan(),
+            Some(IvyJson::String(s)) => s.0.is_empty(),
+            _ => false,
+        };
+        if component == "service-manager" && instance.get("engine") == Some(&"process".into()) && style == Style::Windows && process_is_falsy {
+            instance.insert("process", IvyJson::object([("allowWindowsBreakaway", true.into())]));
+        }
+        instances.push(instance);
+    }
+    config.insert("instances", IvyJson::Array(instances));
+    for key in ["runtimeRoot","artifactRoot","stagingRoot","ivyRoot","servicesRoot","configPath"] {
+        if let Some(value) = config.get(key) {
+            if !node_path::is_absolute(style, &text(value)?) {
+                return Err(IvyError::new("invalid_arguments", "Host directories and configuration path must be absolute."));
+            }
+        }
+    }
+    Ok(config)
 }

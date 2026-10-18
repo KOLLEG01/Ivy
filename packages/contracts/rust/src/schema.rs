@@ -2,6 +2,9 @@
 use crate::{IvyError, IvyJson, IvyResult, JsString, json::array_index};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
+#[path = "schema_keywords.rs"]
+mod keywords;
+pub use keywords::validate_compiler_keyword_values;
 #[path = "schema_meta.rs"]
 mod meta;
 #[path = "schema_resources.rs"]
@@ -34,6 +37,11 @@ impl AdmittedSchema {
     /// Compiler-wide registrations and validator compilation are separate.
     pub fn resource_index(&self) -> IvyResult<SchemaResourceIndex<'_>> {
         resources::index(&self.schema)
+    }
+    /// Check compiler-wide resource collisions and root registration against
+    /// the bundled meta-schemas. Reference compilation remains a separate stage.
+    pub fn registered_resources(&self) -> IvyResult<SchemaResourceIndex<'_>> {
+        resources::register(&self.schema)
     }
 }
 

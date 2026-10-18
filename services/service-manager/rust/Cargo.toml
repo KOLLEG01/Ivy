@@ -1,0 +1,30 @@
+[package]
+name = "ivy-service-manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ivy-contracts.workspace = true
+ivy-sdk.workspace = true
+ivy-host-runtime.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+
+[[test]]
+name = "service-manager-policy"
+path = "../../../tests/rust/service-manager-policy.rs"
+
+[[test]]
+name = "service-manager-data"
+path = "../../../tests/rust/service-manager-data.rs"
+
+[[test]]
+name = "service-manager-shutdown"
+path = "../../../tests/rust/service-manager-shutdown.rs"
+
+[[test]]
+name = "service-manager-stop"
+path = "../../../tests/rust/service-manager-stop.rs"

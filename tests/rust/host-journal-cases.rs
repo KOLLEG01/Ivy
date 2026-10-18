@@ -39,6 +39,149 @@ async fn journal_executor_lock_excludes_owners_and_allows_shared_readers_after_c
 }
 fn request(action: &str, operation: &str) -> IvyJson { IvyJson::object([("action", action.into()), ("operationId", operation.into()), ("instanceId", "fixture".into())]) }
 
+fn policy_target(fixture: &ServiceFixture, revision: &str) -> IvyJson {
+    IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("instanceId", "fixture".into()), ("revision", revision.into()), ("candidateId", hash("a")), ("desired", "running".into()), ("configPath", fixture.0.join("state/instance.json").to_string_lossy().to_string().into()), ("requestedAt", DATE.into())])
+}
+fn policy_key(target: &IvyJson) -> String {
+    format!("runtime-policy:{}", ivy_contracts::hash::hash_json(&IvyJson::object([("instanceId",target.required("instanceId").unwrap().clone()),("revision",target.required("revision").unwrap().clone())])).unwrap())
+}
+async fn policy_operation(journal: &HostJournal, operation: &str) -> String {
+    let mut request=request("deploy",operation); request.insert("candidateId",hash("a"));
+    let entry=journal.accept(request,None).await.unwrap();
+    let id=entry.required("record").unwrap().required("deploymentId").unwrap().as_str().unwrap();
+    journal.advance(&id,"prepared","checking",empty()).await.unwrap(); id
+}
+async fn select_policy_target(journal: &HostJournal, fixture: &ServiceFixture, operation: &str, revision: &str) -> (String,IvyJson) {
+    let id=policy_operation(journal,operation).await;
+    journal.advance(&id,"checking","draining",empty()).await.unwrap();
+    let target=policy_target(fixture,revision);
+    journal.advance(&id,"draining","activating",IvyJson::object([("target",target.clone())])).await.unwrap();
+    (id,target)
+}
+
+#[tokio::test]
+async fn accepted_target_policy_survives_restart_desired_edits_and_original_ts_cross_open() {
+    let fixture=ServiceFixture::new(); let config=host_configuration(&fixture); let journal=open(&config).await;
+    journal.save_candidate(candidate(),manifest()).await.unwrap();
+    let id=policy_operation(&journal,"policy-accepted").await;
+    let mut desired=config.clone(); let mut executables=desired.required("executables").unwrap().clone(); executables.insert("tool","different-tool".into()); desired.insert("executables",executables);
+    journal.use_configuration(desired.clone()).await.unwrap();
+    journal.advance(&id,"checking","draining",empty()).await.unwrap(); let target=policy_target(&fixture,"policy-1");
+    journal.advance(&id,"draining","activating",IvyJson::object([("target",target.clone())])).await.unwrap();
+    assert_optional_json_eq(journal.accepted_target_policy(target.clone()).await.unwrap(),Some(config.clone()));
+    let key=policy_key(&target); let retained:String=sql(&config).query_row("SELECT value FROM meta WHERE key=?",[&key],|r|r.get(0)).unwrap();
+    assert!(!retained.contains("different-tool"));
+    journal.close().await.unwrap();
+    compare(&desired,"target",vec!["fixture".into()],Ok(target.clone()));
+    let journal=open(&desired).await;
+    assert_optional_json_eq(journal.accepted_target_policy(target.clone()).await.unwrap(),Some(config));
+    assert_eq!(sql(&desired).query_row::<String,_,_>("SELECT value FROM meta WHERE key=?",[&key],|r|r.get(0)).unwrap(),retained);
+    let mut legacy=target.clone(); legacy.insert("revision","old-writer-revision".into());
+    compare(&desired,"restoreTarget",vec![legacy.clone()],Ok(IvyJson::Null));
+    assert_optional_json_eq(journal.target("fixture").await.unwrap(),Some(legacy.clone()));
+    assert_eq!(journal.accepted_target_policy(legacy).await.unwrap(),None);
+    assert!(journal.accepted_target_policy(target).await.unwrap().is_some()); journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn accepted_target_policy_carries_drain_and_rollback_including_unassociated_legacy() {
+    for legacy in [false,true] {
+        let fixture=ServiceFixture::new(); let config=host_configuration(&fixture); let journal=open(&config).await;
+        journal.save_candidate(candidate(),manifest()).await.unwrap();
+        let (_,mut prior)=select_policy_target(&journal,&fixture,"old-policy","old-launch").await;
+        if legacy { prior.insert("revision","legacy-launch".into()); journal.restore_target(prior.clone()).await.unwrap(); }
+        journal.set_installed(IvyJson::object([("instanceId","fixture".into()),("candidateId",hash("a")),("buildId",hash("a")),("enabled",true.into()),("installedAt",DATE.into())])).await.unwrap();
+        let mut desired=config.clone(); let mut executables=desired.required("executables").unwrap().clone(); executables.insert("tool","new-tool".into()); desired.insert("executables",executables);
+        journal.use_configuration(desired.clone()).await.unwrap(); let id=policy_operation(&journal,"new-policy").await;
+        let mut drain=prior.clone(); drain.insert("revision","draining-launch".into()); drain.insert("desired","stopped".into());
+        let mut wrong=drain.clone(); wrong.insert("configPath",fixture.0.join("state/other.json").to_string_lossy().to_string().into());
+        assert_eq!(journal.advance(&id,"checking","draining",IvyJson::object([("target",wrong)])).await.unwrap_err().code,"target_conflict");
+        journal.advance(&id,"checking","draining",IvyJson::object([("target",drain.clone())])).await.unwrap();
+        assert_optional_json_eq(journal.accepted_target_policy(drain).await.unwrap(),(!legacy).then_some(config.clone()));
+        let target=policy_target(&fixture,"new-launch"); journal.advance(&id,"draining","activating",IvyJson::object([("target",target.clone())])).await.unwrap();
+        assert_optional_json_eq(journal.accepted_target_policy(target.clone()).await.unwrap(),Some(desired.clone()));
+        let mut stopped=target; stopped.insert("revision","rollback-stop".into()); stopped.insert("desired","stopped".into());
+        journal.advance(&id,"activating","rolling_back",IvyJson::object([("target",stopped.clone())])).await.unwrap();
+        assert_optional_json_eq(journal.accepted_target_policy(stopped).await.unwrap(),Some(desired.clone()));
+        let rollback=policy_target(&fixture,"rollback-launch");
+        journal.advance(&id,"rolling_back","rolling_back",IvyJson::object([("target",rollback.clone()),("rollbackTargetRevision","rollback-launch".into())])).await.unwrap();
+        assert_optional_json_eq(journal.accepted_target_policy(rollback.clone()).await.unwrap(),(!legacy).then_some(config.clone()));
+        journal.close().await.unwrap(); let journal=open(&desired).await;
+        assert_optional_json_eq(journal.accepted_target_policy(rollback).await.unwrap(),(!legacy).then_some(config));
+        assert_eq!(journal.accepted_target_policy(prior).await.unwrap().is_none(),legacy); journal.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn accepted_target_policy_rejects_corrupt_evidence_and_never_rebinds_a_revision() {
+    let fixture=ServiceFixture::new(); let config=host_configuration(&fixture); let journal=open(&config).await;
+    journal.save_candidate(candidate(),manifest()).await.unwrap();
+    let (_,target)=select_policy_target(&journal,&fixture,"policy-original","immutable-policy").await;
+    let db=sql(&config); let key=policy_key(&target); let original:String=db.query_row("SELECT value FROM meta WHERE key=?",[&key],|r|r.get(0)).unwrap();
+    let mut different=target.clone(); different.insert("desired","stopped".into());
+    assert_eq!(journal.accepted_target_policy(different.clone()).await.unwrap_err().code,"target_conflict");
+    assert_eq!(journal.restore_target(different).await.unwrap_err().code,"target_conflict");
+    for mode in ["invalid-json","version","missing-field","extra-field","wrong-target","outside","missing","directory","invalid-config","different-installation"] {
+        let mut value=json::parse(&original,usize::MAX).unwrap();
+        match mode {
+            "version"=>value.insert("schemaVersion",IvyJson::Number(2.0)),
+            "missing-field"=>{value.remove("configurationPath");},
+            "extra-field"=>value.insert("extension",true.into()),
+            "wrong-target"=>{let mut wrong=target.clone();wrong.insert("requestedAt","2026-01-02T00:00:00.000Z".into());value.insert("target",wrong);},
+            "outside"=>value.insert("configurationPath",fixture.0.join("elsewhere.json").to_string_lossy().to_string().into()),
+            "missing"=>value.insert("configurationPath",fixture.0.join("state/accepted-configurations/missing.json").to_string_lossy().to_string().into()),
+            "directory"=>value.insert("configurationPath",fixture.0.join("state/accepted-configurations").to_string_lossy().to_string().into()),
+            "invalid-config" | "different-installation"=>{
+                let file=fixture.0.join("state/accepted-configurations/bad.json"); let mut changed=config.clone();changed.insert("hostId","different-host".into());
+                fs::write(&file,if mode=="invalid-config" {"{}".to_string()}else{encode(&changed)}).unwrap();value.insert("configurationPath",file.to_string_lossy().to_string().into());
+            },
+            _=>(),
+        }
+        db.execute("UPDATE meta SET value=? WHERE key=?",params![if mode=="invalid-json" {"{".to_string()}else{encode(&value)},key]).unwrap();
+        assert!(journal.accepted_target_policy(target.clone()).await.is_err(),"{mode}");
+        assert_optional_json_eq(journal.target("fixture").await.unwrap(),Some(target.clone()));
+    }
+    db.execute("UPDATE meta SET value=? WHERE key=?",params![original,key]).unwrap();
+    let id=policy_operation(&journal,"same-revision-different-acceptance").await; journal.advance(&id,"checking","draining",empty()).await.unwrap();
+    assert_eq!(journal.advance(&id,"draining","activating",IvyJson::object([("target",target.clone())])).await.unwrap_err().code,"target_conflict");
+    assert_eq!(journal.get(&id).await.unwrap().required("record").unwrap().required("phase").unwrap(),&IvyJson::from("draining"));
+    assert_optional_json_eq(journal.target("fixture").await.unwrap(),Some(target));journal.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn accepted_target_policy_is_atomic_and_restore_clears_only_launch_metadata() {
+    let fixture=ServiceFixture::new(); let config=host_configuration(&fixture);
+    let journal=HostJournal::open_with_options(config.clone(),ivy_host_runtime::journal::HistoryLimits{count:1,bytes:1},Arc::new(FixedClock)).await.unwrap();
+    journal.save_candidate(candidate(),manifest()).await.unwrap(); let id=policy_operation(&journal,"policy-transaction").await;
+    journal.advance(&id,"checking","draining",empty()).await.unwrap(); let target=policy_target(&fixture,"atomic-policy"); let db=sql(&config);
+    db.execute_batch("CREATE TRIGGER reject_target BEFORE INSERT ON runtime_targets BEGIN SELECT RAISE(ABORT,'fixture failure'); END").unwrap();
+    assert!(journal.advance(&id,"draining","activating",IvyJson::object([("target",target.clone())])).await.is_err());
+    assert_eq!(journal.accepted_target_policy(target.clone()).await.unwrap(),None); assert_eq!(journal.target("fixture").await.unwrap(),None);
+    assert_eq!(journal.get(&id).await.unwrap().required("record").unwrap().required("phase").unwrap(),&IvyJson::from("draining"));
+    db.execute_batch("DROP TRIGGER reject_target").unwrap(); journal.advance(&id,"draining","activating",IvyJson::object([("target",target.clone())])).await.unwrap();
+    let record:String=db.query_row("SELECT value FROM meta WHERE key=?",[policy_key(&target)],|r|r.get(0)).unwrap();let record=json::parse(&record,usize::MAX).unwrap();
+    let file=std::path::PathBuf::from(record.required("configurationPath").unwrap().as_str().unwrap()); assert!(file.is_file());
+    journal.advance(&id,"activating","verifying",empty()).await.unwrap();journal.advance(&id,"verifying","succeeded",empty()).await.unwrap();
+    // The original history policy always keeps the newest two terminal entries.
+    for operation in ["retention-pressure-1","retention-pressure-2"] {
+        let newer=policy_operation(&journal,operation).await;
+        for (from,to) in [("checking","draining"),("draining","activating"),("activating","verifying"),("verifying","succeeded")] {
+            journal.advance(&newer,from,to,empty()).await.unwrap();
+        }
+    }
+    assert_eq!(journal.get(&id).await.unwrap_err().code,"operation_expired");
+    assert_optional_json_eq(journal.accepted_target_policy(target.clone()).await.unwrap(),Some(config.clone()));assert!(file.is_file());
+    db.execute("INSERT INTO meta VALUES ('recovery-original','retained')",[]).unwrap(); db.execute("INSERT INTO meta VALUES ('runtime-policy-other','untouched')",[]).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_policy_clear BEFORE DELETE ON meta WHEN OLD.key GLOB 'runtime-policy:*' BEGIN SELECT RAISE(ABORT,'fixture restore failure'); END").unwrap();
+    assert!(journal.clear_runtime_targets_for_restore().await.is_err());assert_optional_json_eq(journal.target("fixture").await.unwrap(),Some(target.clone()));
+    assert!(journal.accepted_target_policy(target.clone()).await.unwrap().is_some());db.execute_batch("DROP TRIGGER reject_policy_clear").unwrap();
+    journal.clear_runtime_targets_for_restore().await.unwrap(); assert_eq!(journal.target("fixture").await.unwrap(),None); assert_eq!(journal.accepted_target_policy(target).await.unwrap(),None);
+    assert_eq!(db.query_row::<String,_,_>("SELECT value FROM meta WHERE key='recovery-original'",[],|r|r.get(0)).unwrap(),"retained");
+    assert_eq!(db.query_row::<String,_,_>("SELECT value FROM meta WHERE key='runtime-policy-other'",[],|r|r.get(0)).unwrap(),"untouched");
+    assert_eq!(db.query_row::<i64,_,_>("PRAGMA user_version",[],|r|r.get(0)).unwrap(),1);assert!(file.is_file());
+    journal.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn journal_admission_replays_exact_identity_and_advances_atomically() {
     let fixture=ServiceFixture::new(); let config=host_configuration(&fixture); let journal=open(&config).await;

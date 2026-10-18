@@ -32,6 +32,10 @@ fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson { static NULL: IvyJso
 fn non_null(value: &IvyJson) -> Option<&IvyJson> { (!value.is_null()).then_some(value) }
 fn truthy(value: &IvyJson) -> bool { match value { IvyJson::Null => false, IvyJson::Bool(v) => *v, IvyJson::Number(v) => *v != 0.0 && !v.is_nan(), IvyJson::String(v) => !v.0.is_empty(), _ => true } }
 fn fallback(value: &IvyJson, other: &IvyJson) -> IvyJson { non_null(value).unwrap_or(other).clone() }
+fn policy_key(target: &IvyJson) -> IvyResult<String> {
+    validate_host("RuntimeTarget", target)?;
+    Ok(format!("runtime-policy:{}", hash_json(&project(target, &["instanceId", "revision"]))?))
+}
 fn project(value: &IvyJson, keys: &[&str]) -> IvyJson {
     IvyJson::object(keys.iter().filter_map(|key| value.get(key).map(|v| (*key, v.clone()))))
 }
@@ -85,6 +89,11 @@ impl HostJournal {
     }
     pub async fn config(&self) -> IvyResult<IvyJson> { self.with(|s| Ok(s.config.clone())).await }
     pub async fn accepted_configuration(&self, source: PathBuf) -> IvyResult<IvyJson> { self.with(move |s| read_accepted_configuration(&s.config, &source)).await }
+    /// None means an unassociated legacy target. The owner must retain its
+    /// frozen startup policy; present but invalid evidence is always an error.
+    pub async fn accepted_target_policy(&self, target: IvyJson) -> IvyResult<Option<IvyJson>> {
+        self.with(move |s| s.policy(&target).map(|policy| policy.map(|(_, config)| config))).await
+    }
     pub async fn use_configuration(&self, config: IvyJson) -> IvyResult<()> {
         self.with(move |s| { same_installation(&s.config, &config)?; s.transaction(|s| s.identities(&config))?; s.config = config; Ok(()) }).await
     }
@@ -141,8 +150,17 @@ impl HostJournal {
             validate_host("RuntimeTarget", &value)?;
             s.instance(&value.required("instanceId")?.as_str()?)?;
             s.candidate(&value.required("candidateId")?.as_str()?)?;
-            s.save_target(&value)
+            s.transaction(|s| { s.policy_reference(&value)?; s.save_target(&value) })
         }).await
+    }
+    /// Restore invalidates launch associations together with target selection.
+    /// Accepted files and unrelated metadata, including recovery-original, stay.
+    pub async fn clear_runtime_targets_for_restore(&self) -> IvyResult<()> {
+        self.with(|s| s.transaction(|s| {
+            internal(s.db.execute("DELETE FROM runtime_targets", []))?;
+            internal(s.db.execute("DELETE FROM meta WHERE key GLOB 'runtime-policy:*'", []))?;
+            Ok(())
+        })).await
     }
     pub async fn sync_bootstrap(&self, plan: IvyJson, clear_targets: bool) -> IvyResult<()> {
         self.with(move |s| s.sync_bootstrap(&plan, clear_targets)).await
@@ -280,6 +298,34 @@ impl State {
     }
     fn save_target(&self, value: &IvyJson) -> IvyResult<()> {
         internal(self.db.execute("INSERT INTO runtime_targets VALUES (?,?) ON CONFLICT(instance_id) DO UPDATE SET value=excluded.value", params![value.required("instanceId")?.as_str()?, encoded(value)?]))?; Ok(())
+    }
+    fn policy_reference(&self, target: &IvyJson) -> IvyResult<Option<IvyJson>> {
+        self.policy(target).map(|policy| policy.map(|(reference, _)| reference))
+    }
+    fn policy(&self, target: &IvyJson) -> IvyResult<Option<(IvyJson, IvyJson)>> {
+        let Some(text) = self.text("SELECT value FROM meta WHERE key=?", &policy_key(target)?)? else { return Ok(None) };
+        let invalid = || IvyError::new("configuration_changed", "Accepted runtime policy association is invalid.");
+        let value = decoded(&text).map_err(|_| invalid())?;
+        require(value.as_object().is_some_and(|object| object.len() == 3)
+            && value.get("schemaVersion") == Some(&IvyJson::Number(1.0))
+            && value.get("configurationPath").is_some_and(|value| value.as_js_string().is_some())
+            && value.get("target").is_some(), "configuration_changed", "Accepted runtime policy association is invalid.")?;
+        let retained = value.required("target")?;
+        validate_host("RuntimeTarget", retained).map_err(|_| invalid())?;
+        require(encoded(retained)? == encoded(target)?, "target_conflict", "Runtime target differs from its accepted policy association.")?;
+        let reference = value.required("configurationPath")?.clone();
+        let config = read_accepted_configuration(&self.config, &path(&reference)?)?;
+        Ok(Some((reference, config)))
+    }
+    fn associate_policy(&self, target: &IvyJson, reference: Option<IvyJson>) -> IvyResult<()> {
+        let prior = self.policy_reference(target)?;
+        require(prior.is_none() || prior == reference, "target_conflict", "Accepted runtime policy association cannot be rebound.")?;
+        if let Some(reference) = reference {
+            read_accepted_configuration(&self.config, &path(&reference)?)?;
+            let value = IvyJson::object([("schemaVersion", IvyJson::Number(1.0)), ("target", target.clone()), ("configurationPath", reference)]);
+            self.save_meta(&policy_key(target)?, &encoded(&value)?)?;
+        }
+        Ok(())
     }
     fn sync_bootstrap(&self, plan: &IvyJson, clear_targets: bool) -> IvyResult<()> {
         validate_host("BootstrapPlan", plan)?;
@@ -610,6 +656,21 @@ impl State {
                 validate_host("RuntimeTarget", target)?;
                 require(target.get("instanceId") == record.get("instanceId") && [entry.get("candidateId"), entry.get("previousCandidateId")].contains(&target.get("candidateId")), "target_conflict", "Runtime target must belong to this deployment.")?;
                 require(internal(crate::paths::inside(&path(s.config.required("runtimeRoot")?)?, &path(target.required("configPath")?)?))?, "target_conflict", "Runtime configuration must belong to this host.")?;
+                let reference = if change.get("rollbackTargetRevision").is_some() {
+                    let previous = activation.required("previousTarget")?;
+                    if previous.is_null() { None } else { s.policy_reference(previous)? }
+                } else if phase == "draining" || phase == "rolling_back" {
+                    // Stopping an existing launch carries its existing policy,
+                    // including an explicitly unassociated legacy launch.
+                    let current = s.target(&target.required("instanceId")?.as_str()?)?.ok_or_else(|| IvyError::new("target_conflict", "A stop target must retain its current launch."))?;
+                    require(target.get("desired") == Some(&IvyJson::from("stopped"))
+                        && target.get("candidateId") == current.get("candidateId") && target.get("configPath") == current.get("configPath"),
+                        "target_conflict", "A stop target must retain its current launch.")?;
+                    s.policy_reference(&current)?
+                } else {
+                    Some(entry.required("configurationPath")?.clone())
+                };
+                s.associate_policy(target, reference)?;
                 s.save_target(target)?;
             }
             if let Some(revision) = change.get("rollbackTargetRevision") {
