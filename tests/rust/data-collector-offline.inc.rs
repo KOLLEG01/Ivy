@@ -148,7 +148,7 @@ async fn scenario(original: bool) -> IvyJson {
     let mut child = launch_service(&fixture, original).await;
     let initial_health = online(&fixture, &child, None, &client, SOURCE).await;
     let initial_epoch = client
-        .request("hive.status", model::object(), RequestOptions::default())
+        .request("system.status", model::object(), RequestOptions::default())
         .await
         .unwrap()
         .required("runtimeEpoch")
@@ -180,8 +180,15 @@ async fn scenario(original: bool) -> IvyJson {
     )
     .await
     .unwrap();
-    // Let the real scheduler perform its initial due run; later HTTP inputs use
-    // the committed cursor while the next due time remains an hour away.
+    // New adoption schedules the first due run an hour away. Commit one actual
+    // online worker before exercising the independent offline input queue.
+    invoke(
+        &client,
+        SOURCE,
+        IvyJson::object([("action", "run".into()), ("id", TASK.into())]),
+    )
+    .await
+    .unwrap();
     wait_runs(&fixture, 1, "succeeded").await;
     let first = snapshot(&fixture);
     let result_id = first.required("resultObjectId").unwrap().clone();
@@ -248,7 +255,7 @@ async fn scenario(original: bool) -> IvyJson {
     assert_eq!(reopened.get("url"), Some(&url.into()));
     online(&fixture, &child, None, &client, SOURCE).await;
     let epoch = client
-        .request("hive.status", model::object(), RequestOptions::default())
+        .request("system.status", model::object(), RequestOptions::default())
         .await
         .unwrap()
         .required("runtimeEpoch")
