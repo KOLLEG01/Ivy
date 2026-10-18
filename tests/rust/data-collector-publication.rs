@@ -17,6 +17,9 @@ use tokio_util::sync::CancellationToken;
 #[path = "data-collector-provider.inc.rs"]
 mod provider;
 
+#[path = "data-collector-engine.inc.rs"]
+mod engine;
+
 fn json(s: &str) -> IvyJson {
     parse(s, usize::MAX).unwrap()
 }
