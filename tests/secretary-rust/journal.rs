@@ -389,10 +389,6 @@ fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
             } else {
                 "secretary/operation"
             };
-            let persisted = journal
-                .read(key, &pin.object_id, None, technical)
-                .unwrap()
-                .value;
             let pin = if technical {
                 let saved = journal.create_technical(key, "protected", &bad).unwrap();
                 journal
@@ -402,6 +398,10 @@ fn protected_cleanup_short_circuits_fallible_receipt_inspection() {
             } else {
                 journal.create_local(key, "protected", &bad, 1).unwrap()
             };
+            let persisted = journal
+                .read(key, &pin.object_id, None, technical)
+                .unwrap()
+                .value;
             let reference = IvyJson::String(pin.object_id.clone().into());
             let before = journal.usage().unwrap();
             journal.limits.count = 0;
