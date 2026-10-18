@@ -11,6 +11,9 @@ use tokio::io::AsyncWriteExt;
 
 #[path = "data-collector-offline.inc.rs"]
 mod offline;
+#[cfg(windows)]
+#[path = "data-collector-recovery.inc.rs"]
+mod recovery;
 
 const SOURCE: &str = "source.collector";
 const TARGET: &str = "target.collector";

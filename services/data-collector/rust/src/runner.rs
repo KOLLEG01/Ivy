@@ -480,24 +480,11 @@ impl Runner for TaskRunner {
         };
         Box::pin(async move { runner.run_task(task, state, input, signal, register).await })
     }
-    fn stopped(&self, task_id: String, job_name: String) -> ServiceFuture<bool> {
-        let expected = self.job_name(&task_id);
-        Box::pin(async move {
-            if !cfg!(windows) || expected? != job_name {
-                return Ok(false);
-            }
-            #[cfg(windows)]
-            {
-                return tokio::task::spawn_blocking(move || {
-                    ivy_host_runtime::platform::windows_job::job_stopped(&job_name)
-                })
-                .await
-                .map_err(|_| IvyError::internal())?
-                .map_err(io_error);
-            }
-            #[cfg(not(windows))]
-            Ok(false)
-        })
+    fn stopped(&self, _task_id: String, _job_name: String) -> ServiceFuture<bool> {
+        // A persisted name cannot reconstruct the retired tree's native proof.
+        // Preserve the unknown fence until operator confirmation or an external
+        // owner's qualified retirement proof is available.
+        Box::pin(async { Ok(false) })
     }
     fn clear_authentication(&self, task_id: &str) -> IvyResult<()> {
         remove(&self.directory(task_id)?.join(".auth")).map_err(io_error)

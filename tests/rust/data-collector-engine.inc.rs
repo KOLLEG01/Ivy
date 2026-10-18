@@ -28,7 +28,8 @@ impl Clock for TestClock {
 struct TestRunner {
     calls: Arc<Mutex<Vec<IvyJson>>>,
     finish: Arc<Semaphore>,
-    absent: Arc<AtomicBool>,
+    proved_stopped: Arc<AtomicBool>,
+    observation_failure: Arc<AtomicBool>,
 }
 impl Runner for TestRunner {
     fn run(
@@ -55,8 +56,18 @@ impl Runner for TestRunner {
         })
     }
     fn stopped(&self, _: String, _: String) -> ServiceFuture<bool> {
-        let absent = self.absent.load(Ordering::Acquire);
-        Box::pin(async move { Ok(absent) })
+        let proved = self.proved_stopped.load(Ordering::Acquire);
+        let failure = self.observation_failure.load(Ordering::Acquire);
+        Box::pin(async move {
+            if failure {
+                Err(IvyError::new(
+                    "observation_failed",
+                    "Retirement is unproven.",
+                ))
+            } else {
+                Ok(proved)
+            }
+        })
     }
     fn clear_authentication(&self, _: &str) -> IvyResult<()> {
         Ok(())
@@ -87,7 +98,8 @@ async fn fixture() -> (Directory, Engine, TestRunner, Arc<TestClock>) {
     let runner = TestRunner {
         calls: Arc::default(),
         finish: Arc::new(Semaphore::new(0)),
-        absent: Arc::new(AtomicBool::new(false)),
+        proved_stopped: Arc::new(AtomicBool::new(false)),
+        observation_failure: Arc::new(AtomicBool::new(false)),
     };
     let clock = Arc::new(TestClock(AtomicI64::new(1000000)));
     let engine = Engine::new(
@@ -213,7 +225,8 @@ async fn concurrency_disable_recovery_and_concurrent_close_preserve_job_fences()
     wait(|| engine.active("b")).await;
     runner.finish.add_permits(1);
     wait(|| !engine.active("b")).await;
-    runner.absent.store(true, Ordering::Release);
+    // This mock supplies positive retained-owner proof, not namespace absence.
+    runner.proved_stopped.store(true, Ordering::Release);
     clock.0.store(1003000, Ordering::Release);
     engine.tick(false).await.unwrap();
     engine
@@ -240,4 +253,161 @@ async fn concurrency_disable_recovery_and_concurrent_close_preserve_job_fences()
     let count = runner.calls.lock().unwrap().len();
     engine.tick(false).await.unwrap();
     assert_eq!(runner.calls.lock().unwrap().len(), count);
+}
+
+#[tokio::test]
+async fn unknown_fence_survives_observation_failures_and_only_current_stopped_confirmation() {
+    let (_directory, engine, runner, clock) = fixture().await;
+    save(&engine, "a", false).await;
+    engine
+        .update(
+            json(r#"{"action":"run","operationId":"first-a","id":"a"}"#),
+            None,
+        )
+        .await
+        .unwrap();
+    engine.tick(false).await.unwrap();
+    wait(|| engine.active("a")).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if engine
+                .store()
+                .call(|s| s.run("first-a"))
+                .await
+                .unwrap()
+                .unwrap()
+                .get("workerJobName")
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Model an unresolved persisted observation while the real engine still
+    // owns an active runner: a caller assertion cannot override active work.
+    engine
+        .store()
+        .call(|s| {
+            let mut run = s.run("first-a")?.unwrap();
+            run.insert("error", "outcome_unknown".into());
+            s.save_run(&run)
+        })
+        .await
+        .unwrap();
+    let busy=engine.update(json(r#"{"action":"disable","operationId":"busy-confirm","id":"a","expectedRevision":1,"confirmedStoppedRunId":"first-a"}"#),None).await.unwrap_err();
+    assert_eq!(busy.code, "task_busy");
+    engine
+        .store()
+        .call(|s| {
+            let mut run = s.run("first-a")?.unwrap();
+            run.insert("error", IvyJson::Null);
+            s.save_run(&run)
+        })
+        .await
+        .unwrap();
+    engine
+        .update(
+            json(r#"{"action":"disable","operationId":"stop-a","id":"a","expectedRevision":1}"#),
+            None,
+        )
+        .await
+        .unwrap();
+    wait(|| !engine.active("a")).await;
+    for (now, failure) in [(1003000, false), (1006000, true), (1009000, false)] {
+        runner.observation_failure.store(failure, Ordering::Release);
+        clock.0.store(now, Ordering::Release);
+        engine.tick(false).await.unwrap();
+        let run = engine
+            .store()
+            .call(|s| s.run("first-a"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.get("error"), Some(&"outcome_unknown".into()));
+        assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    }
+    engine
+        .store()
+        .call(|s| {
+            let first = s.run("first-a")?.unwrap();
+            let mut stale = first.clone();
+            stale.insert("id", "stale-a".into());
+            s.save_run(&stale)?;
+            let mut foreign = first;
+            foreign.insert("id", "foreign-b".into());
+            foreign.insert("taskId", "b".into());
+            let mut task = foreign.required("task")?.clone();
+            task.insert("id", "b".into());
+            foreign.insert("task", task);
+            s.save_run(&foreign)
+        })
+        .await
+        .unwrap();
+    for (operation, confirmed, revision, code) in [
+        ("stale-confirm", "stale-a", 2.0, "operation_conflict"),
+        ("foreign-confirm", "foreign-b", 2.0, "operation_conflict"),
+        ("missing-confirm", "missing", 2.0, "operation_conflict"),
+        ("stale-revision", "first-a", 1.0, "revision_conflict"),
+    ] {
+        let error = engine
+            .update(
+                IvyJson::object([
+                    ("action", "disable".into()),
+                    ("operationId", operation.into()),
+                    ("id", "a".into()),
+                    ("expectedRevision", IvyJson::Number(revision)),
+                    ("confirmedStoppedRunId", confirmed.into()),
+                ]),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, code);
+        assert_eq!(
+            engine
+                .store()
+                .call(|s| s.run("first-a"))
+                .await
+                .unwrap()
+                .unwrap()
+                .get("error"),
+            Some(&"outcome_unknown".into())
+        );
+    }
+    engine.update(json(r#"{"action":"disable","operationId":"matching-confirm","id":"a","expectedRevision":2,"confirmedStoppedRunId":"first-a"}"#),None).await.unwrap();
+    let confirmed = engine
+        .store()
+        .call(|s| s.run("first-a"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        confirmed.get("error"),
+        Some(&"Operator confirmed worker termination; execution outcome remains unknown.".into())
+    );
+    engine
+        .update(
+            json(r#"{"action":"run","operationId":"after-confirm","id":"a"}"#),
+            None,
+        )
+        .await
+        .unwrap();
+    engine.tick(false).await.unwrap();
+    wait(|| runner.calls.lock().unwrap().len() == 2).await;
+    runner.finish.add_permits(1);
+    wait(|| !engine.active("a")).await;
+    assert_eq!(
+        engine
+            .store()
+            .call(|s| s.run("after-confirm"))
+            .await
+            .unwrap()
+            .unwrap()
+            .get("status"),
+        Some(&"publishing".into())
+    );
+    engine.close().await;
 }
