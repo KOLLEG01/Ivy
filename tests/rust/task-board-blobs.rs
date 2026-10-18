@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 #[path = "../fixtures/task-board-artifact.rs"]
 mod artifact;
+#[path = "../fixtures/task-board-context-recovery.rs"]
+mod context_recovery;
 #[path = "../fixtures/task-board-journal-store.rs"]
 mod journal_store;
 #[path = "../fixtures/task-board-native-intent.rs"]
