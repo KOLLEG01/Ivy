@@ -11,6 +11,8 @@ mod browser_notice_cases;
 mod inbox_evidence_cases;
 #[path = "store_cases.rs"]
 mod store_cases;
+#[path = "workflow_cases.rs"]
+mod workflow_cases;
 
 struct Scripted {
     steps: Mutex<VecDeque<IvyJson>>,
