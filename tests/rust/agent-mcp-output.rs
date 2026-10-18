@@ -1,6 +1,9 @@
 use ivy_agent_manager::mcp_output::{McpOutputInput, plan_mcp_output};
 use ivy_agent_manager::mcp_render::{hive_mcp_urls, render_mcp_sections};
-use ivy_contracts::{IvyJson, json::parse};
+use ivy_contracts::{
+    IvyJson,
+    json::{canonical, parse},
+};
 use std::{path::PathBuf, process::Command};
 fn string(v: &IvyJson) -> String {
     v.as_js_string().unwrap().to_utf8().unwrap()
@@ -68,7 +71,11 @@ fn ownership_and_output_match_original_manager_filesystem_effects() {
                 "result",
                 IvyJson::object([
                     ("text", String::from_utf8(result.bytes).unwrap().into()),
-                    ("state", result.state),
+                    // Compare the persisted state, after atomic_json's canonical encoding.
+                    (
+                        "state",
+                        parse(&canonical(&result.state, usize::MAX).unwrap(), usize::MAX).unwrap(),
+                    ),
                     ("applied", result.applied.into()),
                     ("managedBytes", IvyJson::Number(result.managed_bytes as f64)),
                 ]),

@@ -1,5 +1,8 @@
 use ivy_agent_manager::mcp_prepare::prepare_mcp;
-use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
+use ivy_contracts::{
+    IvyError, IvyJson, Outcome,
+    json::{canonical, parse},
+};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use std::{collections::VecDeque, path::PathBuf, process::Command, sync::Mutex};
 struct Client(Mutex<VecDeque<IvyJson>>);
@@ -87,7 +90,12 @@ async fn preparation_order_failures_and_output_identity_match_original_manager()
                     "result",
                     IvyJson::object([
                         ("text", String::from_utf8(planned.bytes).unwrap().into()),
-                        ("state", planned.state),
+                        // The original fixture observes the canonical atomic_json file.
+                        (
+                            "state",
+                            parse(&canonical(&planned.state, usize::MAX).unwrap(), usize::MAX)
+                                .unwrap(),
+                        ),
                         ("applied", planned.applied.into()),
                         (
                             "managedBytes",

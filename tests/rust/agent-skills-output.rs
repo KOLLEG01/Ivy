@@ -1,5 +1,9 @@
 use ivy_agent_manager::{skills_output::inspect_ownership, skills_prepare::prepare_skills};
-use ivy_contracts::{IvyError, IvyJson, JsString, Outcome, hash::digest, json::parse};
+use ivy_contracts::{
+    IvyError, IvyJson, JsString, Outcome,
+    hash::digest,
+    json::{canonical, parse},
+};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use std::{
     collections::VecDeque,
@@ -199,7 +203,15 @@ fn skills_ownership_migration_collisions_and_retention_match_original_effects() 
                 }
                 IvyJson::object([(
                     "result",
-                    IvyJson::object([("state", planned.state), ("trees", trees)]),
+                    // State files use atomic_json's canonical object order.
+                    IvyJson::object([
+                        (
+                            "state",
+                            parse(&canonical(&planned.state, usize::MAX).unwrap(), usize::MAX)
+                                .unwrap(),
+                        ),
+                        ("trees", trees),
+                    ]),
                 )])
             }
         };
