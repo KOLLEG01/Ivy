@@ -75,6 +75,6 @@ for (const observedAt of times) for (const complete of [true, false]) for (const
   add('messageUnreadSnapshot', { complete, unread, observedAt }, batch);
 }
 add('messageUnreadSnapshot', { complete: true, unread: false, observedAt: due }, { ...batch, dueAt: 'invalid' });
-// These inputs supply Date.parse results only at the dependency boundary. This
-// oracle checks owned policy; it does not qualify any Rust date parser.
+// Retain exact date inputs and Node results alongside the original policy output
+// so the Rust consumer can verify its shared parser without injecting Node values.
 process.stdout.write(JSON.stringify({ dates: [...dates], rows }));

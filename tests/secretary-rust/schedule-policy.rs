@@ -2,9 +2,9 @@ use ivy_secretary::{policy::*, schedule::*};
 
 #[test]
 fn original_object_and_message_event_policy_differential() {
-    use ivy_contracts::{IvyJson, JsString, json::parse};
+    use ivy_contracts::{IvyJson, json::parse};
     use ivy_secretary::{assignment_message::*, assignment_object::*};
-    use std::{collections::HashMap, process::Command};
+    use std::process::Command;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut command = Command::new("node");
     command
@@ -26,21 +26,16 @@ fn original_object_and_message_event_policy_differential() {
         4 * 1024 * 1024,
     )
     .unwrap();
-    let dates: HashMap<JsString, f64> = corpus
-        .required("dates")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| {
-            let pair = row.as_array().unwrap();
-            (
-                pair[0].as_js_string().unwrap().clone(),
-                pair[1].as_f64().unwrap_or(f64::NAN),
-            )
-        })
-        .collect();
-    let date = |value: &JsString| *dates.get(value).expect("Unrecorded date dependency");
+    for row in corpus.required("dates").unwrap().as_array().unwrap() {
+        let pair = row.as_array().unwrap();
+        let actual = ivy_sdk::clock::parse_date(pair[0].as_js_string().unwrap());
+        let expected = pair[1].as_f64().unwrap_or(f64::NAN);
+        assert!(
+            actual == expected || (actual.is_nan() && expected.is_nan()),
+            "date {:?}: {actual} != {expected}",
+            pair[0]
+        );
+    }
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert!(rows.len() >= 500);
     for (index, row) in rows.iter().enumerate() {
@@ -87,15 +82,13 @@ fn original_object_and_message_event_policy_differential() {
                     condition.as_ref(),
                     a[2].as_js_string().unwrap(),
                     a[3].as_f64().unwrap_or(0.0),
-                    &date,
                 )))
             }
-            "messageChannel" => Ok(message_channel(&a[0], &date).unwrap_or(IvyJson::Null)),
-            "messageBatch" => Ok(message_batch(&a[0], &date).unwrap_or(IvyJson::Null)),
+            "messageChannel" => Ok(message_channel(&a[0]).unwrap_or(IvyJson::Null)),
+            "messageBatch" => Ok(message_batch(&a[0]).unwrap_or(IvyJson::Null)),
             "messageUnreadSnapshot" => message_unread_snapshot(
                 &a[0],
                 a[1].required("dueAt").unwrap().as_js_string().unwrap(),
-                &date,
             )
             .map(IvyJson::Bool),
             method => panic!("Unknown method {method}"),

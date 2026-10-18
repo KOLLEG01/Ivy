@@ -1,6 +1,6 @@
-//! Object event projections and freshness policy. Date parsing is supplied by the
-//! shared runtime; it must retain Date.parse semantics, not strict ISO admission.
+//! Object event projections and freshness policy using shared Date.parse semantics.
 use ivy_contracts::{IvyJson, IvyResult, JsString, hash::hash_json};
+use ivy_sdk::clock::parse_date;
 
 pub const OBJECT_WINDOW_KEY: &str = "secretary/object-window";
 
@@ -81,7 +81,6 @@ pub fn observation_ready(
     observation: Option<&Observation>,
     due_at: &JsString,
     now: f64,
-    parse_date: &impl Fn(&JsString) -> f64,
 ) -> bool {
     let Some(condition) = observation else {
         return true;

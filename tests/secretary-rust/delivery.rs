@@ -1,7 +1,7 @@
-use ivy_contracts::{IvyError, IvyJson, JsString, Outcome, json::parse};
+use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
 use ivy_sdk::{rpc::*, tools::ToolClients};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     sync::{Arc, Mutex},
 };
 
@@ -73,21 +73,16 @@ async fn original_voice_discovery_and_message_unread_rpc_traces() {
         4 * 1024 * 1024,
     )
     .unwrap();
-    let dates: HashMap<JsString, f64> = corpus
-        .required("dates")
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| {
-            let pair = row.as_array().unwrap();
-            (
-                pair[0].as_js_string().unwrap().clone(),
-                pair[1].as_f64().unwrap_or(f64::NAN),
-            )
-        })
-        .collect();
-    let date = |value: &JsString| *dates.get(value).expect("Unrecorded date input");
+    for row in corpus.required("dates").unwrap().as_array().unwrap() {
+        let pair = row.as_array().unwrap();
+        let actual = ivy_sdk::clock::parse_date(pair[0].as_js_string().unwrap());
+        let expected = pair[1].as_f64().unwrap_or(f64::NAN);
+        assert!(
+            actual == expected || (actual.is_nan() && expected.is_nan()),
+            "date {:?}: {actual} != {expected}",
+            pair[0]
+        );
+    }
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
     assert!(rows.len() >= 70);
     for (index, row) in rows.iter().enumerate() {
@@ -124,7 +119,6 @@ async fn original_voice_discovery_and_message_unread_rpc_traces() {
                     &tools,
                     input.required("root").unwrap().as_js_string().unwrap(),
                     input.required("batch").unwrap(),
-                    &date,
                 )
                 .await
                 .map(IvyJson::Bool),

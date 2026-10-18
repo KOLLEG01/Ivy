@@ -1,15 +1,12 @@
-//! Producer-independent message-channel admission. The injected date parser must
-//! implement the shared Date.parse boundary, including invalid-date NaN results.
+//! Producer-independent message-channel admission using shared Date.parse semantics.
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
+use ivy_sdk::clock::parse_date;
 
 pub const MESSAGE_WINDOW_KEY: &str = "secretary/channel-window";
 pub const MESSAGE_BATCH_KIND: &str = "secretary.channel.batch";
 pub const MESSAGE_WINDOW_MS: i64 = 5 * 60_000;
 
-pub fn message_channel(
-    payload: &IvyJson,
-    parse_date: &impl Fn(&JsString) -> f64,
-) -> Option<IvyJson> {
+pub fn message_channel(payload: &IvyJson) -> Option<IvyJson> {
     let value = payload.get("messageChannel")?;
     let key = value.get("key")?.as_js_string()?;
     let occurred_at = value.get("occurredAt")?.as_js_string()?;
@@ -31,12 +28,9 @@ pub fn message_channel(
     ]))
 }
 
-pub fn message_batch(payload: &IvyJson, parse_date: &impl Fn(&JsString) -> f64) -> Option<IvyJson> {
+pub fn message_batch(payload: &IvyJson) -> Option<IvyJson> {
     let channel = payload.get("channel")?;
-    message_channel(
-        &IvyJson::object([("messageChannel", channel.clone())]),
-        parse_date,
-    )?;
+    message_channel(&IvyJson::object([("messageChannel", channel.clone())]))?;
     if payload.get("kind")?.as_js_string()? != &JsString::from(MESSAGE_BATCH_KIND)
         || payload.get("dueAt")?.as_js_string().is_none()
         || payload.get("serviceNodeId")?.as_js_string().is_none()
@@ -58,11 +52,7 @@ pub fn message_batch(payload: &IvyJson, parse_date: &impl Fn(&JsString) -> f64) 
     Some(payload.clone())
 }
 
-pub fn message_unread_snapshot(
-    observation: &IvyJson,
-    due_at: &JsString,
-    parse_date: &impl Fn(&JsString) -> f64,
-) -> IvyResult<bool> {
+pub fn message_unread_snapshot(observation: &IvyJson, due_at: &JsString) -> IvyResult<bool> {
     let pending = || {
         IvyError::new(
             "secretary_message_unread_pending",
@@ -94,7 +84,6 @@ pub async fn message_conversation_unread(
     tools: &ivy_sdk::tools::ToolClients,
     root_object_id: &JsString,
     batch: &IvyJson,
-    parse_date: &impl Fn(&JsString) -> f64,
 ) -> IvyResult<bool> {
     use ivy_sdk::{
         rpc::RequestOptions,
@@ -150,7 +139,6 @@ pub async fn message_conversation_unread(
                 .required("dueAt")?
                 .as_js_string()
                 .ok_or_else(IvyError::internal)?,
-            parse_date,
         )
     }
     .await;
