@@ -173,7 +173,7 @@ fn body(c: &IvyJson) -> Vec<u8> {
 }
 async fn read_reply(mut stream: TcpStream) -> IvyJson {
     let mut bytes = Vec::new();
-    let received = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes))
+    let received = tokio::time::timeout(Duration::from_secs(45), stream.read_to_end(&mut bytes))
         .await
         .unwrap();
     assert!(received.is_ok() || !bytes.is_empty(), "{received:?}");
@@ -272,6 +272,98 @@ async fn raw_http_matches_original_ingress_and_mcp_status_auth_headers_and_limit
 async fn raw_http_header_parser_boundaries_match_original() {
     http_trace("boundaries").await;
 }
+#[tokio::test]
+async fn raw_http_request_deadlines_match_original_scan_windows() {
+    http_trace("timeouts").await;
+}
+fn normalize_generated_ids(response: &mut IvyJson, queued: &mut IvyJson) {
+    fn generated(value: &IvyJson) -> bool {
+        value
+            .as_str()
+            .is_ok_and(|s| uuid::Uuid::parse_str(&s).is_ok())
+    }
+    if let Some(mut body) = response.get("body").cloned() {
+        if body.get("runId").is_some_and(generated) {
+            body.insert("runId", "{generated}".into());
+            response.insert("body", body);
+        }
+    }
+    if let Some(rows) = queued.as_array() {
+        *queued = IvyJson::Array(
+            rows.iter()
+                .cloned()
+                .map(|mut row| {
+                    if row.get("id").is_some_and(generated) {
+                        row.insert("id", "{generated}".into());
+                    }
+                    row
+                })
+                .collect(),
+        );
+    }
+}
+async fn observe_http(c: &IvyJson) -> (IvyJson, IvyJson, usize, f64) {
+    let started = Instant::now();
+    let (response, queued, calls) = if model::text(c, "kind").unwrap() == "ingress" {
+        let (_directory, engine, ingress) = fixture(c).await;
+        let mut response = send(ingress.address(), c, "").await;
+        if model::truth(c, "repeat") {
+            response = send(ingress.address(), c, "").await;
+        }
+        let queued = engine
+            .store()
+            .call(|s| {
+                Ok(IvyJson::Array(
+                    s.runs("queued")?
+                        .iter()
+                        .map(|r| {
+                            IvyJson::object([
+                                ("id", r.get("id").unwrap().clone()),
+                                ("input", r.get("input").unwrap().clone()),
+                            ])
+                        })
+                        .collect(),
+                ))
+            })
+            .await
+            .unwrap();
+        ingress.close().await;
+        engine.close().await;
+        (response, queued, 0)
+    } else {
+        let session = Session::new(false);
+        let signal = CancellationToken::new();
+        if model::truth(c, "cancelled") {
+            signal.cancel();
+        }
+        let bridge = LocalBridge::open(session.clone(), signal).await.unwrap();
+        let context = bridge.context();
+        let url = model::text(&context, "url").unwrap();
+        let address = url
+            .strip_prefix("http://")
+            .unwrap()
+            .strip_suffix("/call")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let token = model::text(&context, "token").unwrap();
+        assert_eq!(token.len(), 43);
+        let response = send(address, c, &token).await;
+        bridge.close().await.unwrap();
+        assert_eq!(session.closes.load(Ordering::SeqCst), 1);
+        (
+            response,
+            IvyJson::Null,
+            session.calls.load(Ordering::SeqCst),
+        )
+    };
+    (
+        response,
+        queued,
+        calls,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+}
 async fn http_trace(mode: &str) {
     let oracle = Database::new();
     let output = std::process::Command::new("node")
@@ -292,73 +384,54 @@ async fn http_trace(mode: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     let cases = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let cases = cases.as_array().unwrap();
+    let mut observed = Vec::new();
+    if mode == "timeouts" {
+        let mut pending = tokio::task::JoinSet::new();
+        for (index, expected) in cases.iter().enumerate() {
+            let c = expected.required("case").unwrap().clone();
+            pending.spawn(async move { (index, observe_http(&c).await) });
+        }
+        while let Some(result) = pending.join_next().await {
+            observed.push(result.unwrap());
+        }
+        observed.sort_by_key(|r| r.0);
+    } else {
+        for (index, expected) in cases.iter().enumerate() {
+            observed.push((
+                index,
+                observe_http(expected.required("case").unwrap()).await,
+            ));
+        }
+    }
     let mut gaps = Vec::new();
-    for expected in cases.as_array().unwrap() {
+    for ((_, (mut response, mut queued, calls, elapsed)), expected) in
+        observed.into_iter().zip(cases)
+    {
         let c = expected.get("case").unwrap();
         let name = model::text(c, "name").unwrap();
-        let (response, queued, calls) = if model::text(c, "kind").unwrap() == "ingress" {
-            let (_directory, engine, ingress) = fixture(c).await;
-            let mut response = send(ingress.address(), c, "").await;
-            if model::truth(c, "repeat") {
-                response = send(ingress.address(), c, "").await;
-            }
-            let queued = engine
-                .store()
-                .call(|s| {
-                    Ok(IvyJson::Array(
-                        s.runs("queued")?
-                            .iter()
-                            .map(|r| {
-                                IvyJson::object([
-                                    ("id", r.get("id").unwrap().clone()),
-                                    ("input", r.get("input").unwrap().clone()),
-                                ])
-                            })
-                            .collect(),
-                    ))
-                })
-                .await
-                .unwrap();
-            ingress.close().await;
-            engine.close().await;
-            (response, queued, 0)
-        } else {
-            let session = Session::new(false);
-            let signal = CancellationToken::new();
-            if model::truth(c, "cancelled") {
-                signal.cancel();
-            }
-            let bridge = LocalBridge::open(session.clone(), signal).await.unwrap();
-            let context = bridge.context();
-            let url = model::text(&context, "url").unwrap();
-            let address = url
-                .strip_prefix("http://")
-                .unwrap()
-                .strip_suffix("/call")
-                .unwrap()
-                .parse()
-                .unwrap();
-            let token = model::text(&context, "token").unwrap();
-            assert_eq!(token.len(), 43);
-            let response = send(address, c, &token).await;
-            bridge.close().await.unwrap();
-            assert_eq!(session.closes.load(Ordering::SeqCst), 1);
-            (
-                response,
-                IvyJson::Null,
-                session.calls.load(Ordering::SeqCst),
-            )
-        };
-        if !json_equal(&response, expected.get("response").unwrap())
-            || !json_equal(&queued, expected.get("queued").unwrap())
+        let mut expected_response = expected.required("response").unwrap().clone();
+        let mut expected_queued = expected.required("queued").unwrap().clone();
+        normalize_generated_ids(&mut response, &mut queued);
+        normalize_generated_ids(&mut expected_response, &mut expected_queued);
+        let timing_matches = mode != "timeouts"
+            || if name.ends_with("-timeout") {
+                (25_000.0..=36_000.0).contains(&elapsed)
+            } else {
+                (model::number(expected, "elapsedMs").unwrap() - elapsed).abs() < 3000.0
+            };
+        if !json_equal(&response, &expected_response)
+            || !json_equal(&queued, &expected_queued)
             || calls as f64 != model::number(expected, "calls").unwrap()
+            || !timing_matches
         {
             gaps.push(format!(
-                "{name}: actual {} expected {}; queuedEqual={}, calls={calls}/{}",
+                "{name}: actual {} expected {}; queuedEqual={}, calls={calls}/{}, elapsedMs={elapsed:.0}/{:.0}, timingMatches={timing_matches}",
                 stringify(&response, usize::MAX).unwrap(),
-                stringify(expected.get("response").unwrap(), usize::MAX).unwrap(),
-                json_equal(&queued, expected.get("queued").unwrap()),
-                model::number(expected, "calls").unwrap()
+                stringify(&expected_response, usize::MAX).unwrap(),
+                json_equal(&queued, &expected_queued),
+                model::number(expected, "calls").unwrap(),
+                expected.get("elapsedMs").and_then(IvyJson::as_f64).unwrap_or(0.0)
             ));
         }
     }
