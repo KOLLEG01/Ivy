@@ -18,6 +18,7 @@ pub mod node_runtime;
 pub mod native_catalog_compatibility;
 pub mod package_requirements;
 pub mod paths;
+pub mod node_path;
 pub mod platform;
 pub mod process;
 pub mod process_fence;
