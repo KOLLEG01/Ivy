@@ -31,23 +31,6 @@ pub(crate) fn strip_extended(path: &[u16]) -> Vec<u16> {
 fn ascii_upper(c: u16) -> u16 {
     if (97..=122).contains(&c) { c - 32 } else { c }
 }
-/// ECMAScript default lowercase retains unpaired UTF-16 units as non-cased boundaries.
-pub(crate) fn lowercase(value: &[u16]) -> JsString {
-    let mut output = Vec::new();
-    let mut segment = String::new();
-    for c in char::decode_utf16(value.iter().copied()) {
-        match c {
-            Ok(c) => segment.push(c),
-            Err(e) => {
-                output.extend(segment.to_lowercase().encode_utf16());
-                segment.clear();
-                output.push(e.unpaired_surrogate());
-            }
-        }
-    }
-    output.extend(segment.to_lowercase().encode_utf16());
-    JsString(output)
-}
 fn reserved_device(value: &[u16]) -> bool {
     let value: Vec<_> = value.iter().copied().map(ascii_upper).collect();
     ["CON", "PRN", "AUX", "NUL"]
@@ -141,7 +124,7 @@ pub(crate) fn path_key(value: &JsString) -> IvyResult<JsString> {
         normalized.push(47);
     }
     if windows {
-        let mut value = lowercase(&normalized);
+        let mut value = JsString(normalized).to_english_lowercase();
         for c in &mut value.0 {
             if *c == 92 {
                 *c = 47;
