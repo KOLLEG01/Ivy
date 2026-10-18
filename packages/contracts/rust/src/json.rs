@@ -20,10 +20,14 @@ impl From<String> for JsString {
     }
 }
 impl JsString {
+    /// ECMAScript's locale-independent full Unicode lowercase mapping.
+    pub fn to_lowercase(&self) -> Self {
+        self.map_case(str::to_lowercase)
+    }
     /// English locale lowercase, retaining unpaired UTF-16 units as non-cased
     /// boundaries and preserving context within each well-formed segment.
     pub fn to_english_lowercase(&self) -> Self {
-        self.map_case(str::to_lowercase)
+        self.to_lowercase()
     }
     /// ECMAScript's locale-independent full Unicode uppercase mapping.
     pub fn to_uppercase(&self) -> Self {

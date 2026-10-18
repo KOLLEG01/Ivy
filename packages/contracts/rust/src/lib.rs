@@ -15,6 +15,7 @@ pub mod core_schema;
 pub mod error;
 pub mod hash;
 pub mod host_bundle;
+pub mod js_path;
 pub mod json;
 pub mod limits;
 mod native_catalog_path;

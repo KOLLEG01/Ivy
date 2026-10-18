@@ -73,7 +73,7 @@ fn uppercase_and_trim_start_match_node_scalars_units_and_surrogates() {
 }
 
 #[test]
-fn english_lowercase_matches_node_scalars_context_and_unpaired_units() {
+fn default_and_english_lowercase_match_node_scalars_context_and_unpaired_units() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let output = std::process::Command::new("node")
         .args(["tests/fixtures/english-lowercase-oracle.mjs"])
@@ -86,6 +86,7 @@ fn english_lowercase_matches_node_scalars_context_and_unpaired_units() {
         String::from_utf8_lossy(&output.stderr)
     );
     let oracle: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(oracle["defaultMatchesEnglish"], true);
     let units = |value: &serde_json::Value| -> Vec<u16> {
         value
             .as_array()
@@ -115,7 +116,7 @@ fn english_lowercase_matches_node_scalars_context_and_unpaired_units() {
         let input = JsString::from(c.to_string());
         let expected = mappings.remove(&point).unwrap_or_else(|| input.0.clone());
         assert_eq!(
-            input.to_english_lowercase().0,
+            input.to_lowercase().0,
             expected,
             "U+{point:04X}; Rust Unicode {:?}; Node {} Unicode {}",
             char::UNICODE_VERSION,
@@ -128,10 +129,41 @@ fn english_lowercase_matches_node_scalars_context_and_unpaired_units() {
     assert!(oracle["contexts"].as_array().unwrap().len() > 12000);
     for row in oracle["contexts"].as_array().unwrap() {
         let input = JsString(units(&row["input"]));
+        assert_eq!(input.to_lowercase().0, units(&row["output"]), "{input:?}");
+        assert_eq!(input.to_english_lowercase(), input.to_lowercase());
+    }
+}
+
+#[test]
+fn win32_normalization_and_default_lowercase_match_node_without_host_io() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .arg("tests/fixtures/win32-path-oracle.mjs")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let oracle: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = oracle["rows"].as_array().unwrap();
+    assert!(rows.len() > 5000);
+    for row in rows {
+        let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
+        let normalized = ivy_contracts::js_path::normalize_win32(input.as_js_string().unwrap());
         assert_eq!(
-            input.to_english_lowercase().0,
-            units(&row["output"]),
-            "{input:?}"
+            IvyJson::String(normalized.clone()),
+            parse(row["normalized"].as_str().unwrap(), 100_000).unwrap(),
+            "path {}",
+            row["input"]
+        );
+        assert_eq!(
+            IvyJson::String(normalized.to_lowercase()),
+            parse(row["key"].as_str().unwrap(), 100_000).unwrap(),
+            "key {}",
+            row["input"]
         );
     }
 }
