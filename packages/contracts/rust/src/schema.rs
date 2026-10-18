@@ -4,6 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 #[path = "schema_meta.rs"]
 mod meta;
+#[path = "schema_resources.rs"]
+mod resources;
+pub use resources::{SchemaResourceGraph, SchemaResourceNode};
 
 /// An admitted finite schema graph. Compilation separately checks keyword values.
 pub struct AdmittedSchema {
@@ -17,6 +20,11 @@ impl AdmittedSchema {
     /// compilation stage; it does not resolve resource IDs or compile validators.
     pub fn validate_meta_schema(&self) -> IvyResult<()> {
         meta::validate(&self.schema)
+    }
+    /// Enumerate compiler resource locations and select isolated compilation.
+    /// URI resolution, duplicate-ID checks and validator compilation are separate.
+    pub fn resource_graph(&self) -> SchemaResourceGraph<'_> {
+        resources::collect(&self.schema)
     }
 }
 
