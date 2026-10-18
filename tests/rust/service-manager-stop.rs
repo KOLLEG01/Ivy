@@ -193,9 +193,15 @@ fn native_executable_interoperates_with_unchanged_hive_and_public_sdk() {
             "./tests/fixtures/service-manager-native-loader.mjs",
             "tests/fixtures/service-manager-native-hive.mjs",
         ])
-        .arg(binary)
+        .arg(&binary)
         .arg(&root.0)
         .arg(helper)
+        .arg(std::env::current_exe().unwrap())
+        .arg(binary.parent().unwrap().join(if cfg!(windows) {
+            "ivy-health.exe"
+        } else {
+            "ivy-health"
+        }))
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .output()
         .unwrap();
@@ -221,8 +227,96 @@ fn native_executable_interoperates_with_unchanged_hive_and_public_sdk() {
             .as_array()
             .unwrap()
             .len(),
-        6
+        if cfg!(windows) { 8 } else { 6 }
     );
+}
+
+/// The unchanged Hive fixture drives a real Rust RuntimeOwner in this process.
+/// Its child is the retained Node dispatcher and actual Manager binary, not a
+/// second service implementation in the fixture.
+#[cfg(windows)]
+#[tokio::test]
+async fn dispatcher_owner_fixture() {
+    use ivy_host_runtime::{
+        config::json_file, journal::HostJournal, node_runtime::NodeRuntime,
+        runtime_owner::RuntimeOwner,
+    };
+    let Some(request) = std::env::var_os("IVY_MANAGER_DISPATCH_OWNER") else {
+        return;
+    };
+    let request = json_file(PathBuf::from(request), MANAGEMENT_FRAME_BYTES)
+        .await
+        .unwrap();
+    let path = |key: &str| PathBuf::from(request.required(key).unwrap().as_str().unwrap());
+    let host = json_file(path("hostConfigPath"), MANAGEMENT_FRAME_BYTES)
+        .await
+        .unwrap();
+    let journal = HostJournal::open(host.clone()).await.unwrap();
+    let target = request.required("target").unwrap().clone();
+    let entry = journal
+        .accept(
+            IvyJson::object([
+                ("action", "deploy".into()),
+                ("instanceId", "manager".into()),
+                (
+                    "candidateId",
+                    target.required("candidateId").unwrap().clone(),
+                ),
+                ("operationId", target.required("revision").unwrap().clone()),
+            ]),
+            None,
+        )
+        .await
+        .unwrap();
+    let id = entry
+        .required("record")
+        .unwrap()
+        .required("deploymentId")
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let empty = || IvyJson::object(Vec::<(String, IvyJson)>::new());
+    journal
+        .advance(&id, "prepared", "checking", empty())
+        .await
+        .unwrap();
+    journal
+        .advance(&id, "checking", "draining", empty())
+        .await
+        .unwrap();
+    journal
+        .advance(
+            &id,
+            "draining",
+            "activating",
+            IvyJson::object([("target", target.clone())]),
+        )
+        .await
+        .unwrap();
+    assert!(
+        journal
+            .accepted_target_policy(target)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let node_path = path("nodeExecutable");
+    let node = NodeRuntime::discover(Some(&node_path)).await.unwrap();
+    let owner = RuntimeOwner::for_host(host, "manager".into(), path("bootstrapRoot"), node)
+        .await
+        .unwrap();
+    owner.start().unwrap();
+    let close = path("closePath");
+    let requested = tokio::time::timeout(Duration::from_secs(60), async {
+        while !close.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let result = owner.close().await;
+    journal.close().await.unwrap();
+    result.unwrap();
+    requested.expect("Dispatcher owner fixture exceeded its deadline");
 }
 
 #[test]

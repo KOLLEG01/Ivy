@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFile, mkdir, copyFile, writeFile, rm} from 'node:fs/promises';
-import {join} from 'node:path';
+import {join, resolve} from 'node:path';
 import {createServer} from 'node:net';
 import {spawn, spawnSync} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
@@ -11,14 +11,15 @@ import {atomicJson} from '../../packages/host-runtime/src/config.ts';
 import {hostConfig} from '../../packages/host-runtime/src/host-config.ts';
 import {runtimeResetMarker} from '../../packages/host-runtime/src/runtime-maintenance.ts';
 import {digest} from '../../packages/contracts/src/canonical.ts';
+import {buildNativeDispatchers} from '../../tools/build/build-native-dispatchers.mjs';
 
-const [binary, root, job] = process.argv.slice(2);
+const [binary, root, job, ownerBinary, healthBinary] = process.argv.slice(2);
 const token = 'isolated-native-manager-fixture';
 const hash = digest('isolated-manager-artifact');
 const configPath = join(root, 'host.json');
 const artifact = join(root, 'artifacts', 'manager');
-const managerData = join(root, 'manager-data');
-const instancePath = join(root, 'manager.json');
+const managerData = join(root, 'state', 'instances', 'manager', 'data');
+const instancePath = join(root, 'state', 'manager.json');
 const results = [];
 async function until(work, timeout = 15000) {
   const deadline = Date.now() + timeout;
@@ -65,7 +66,104 @@ journal.setInstalled({instanceId:'fixture', candidateId, buildId:candidateId, en
 const hive = new HiveServer({filename:join(root,'hive.sqlite'), packageRoot:join(root,'packages'), publicBaseUrl, listenHost:'127.0.0.1', listenPort:port,
   version:'test', buildId:digest('isolated-hive'), credentials:[{principalId:'manager',digest:digest(token)}]});
 let manager;
+let dispatcherOwner;
 let executorTimer;
+
+// Read only the exact owned PID and its parents; never enumerate other trees.
+function windowsProcess(pid) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 0);
+  const script = `$ErrorActionPreference='Stop';$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}';if($null -eq $p){'null'}else{$p|Select-Object ProcessId,ParentProcessId,ExecutablePath|ConvertTo-Json -Compress}`;
+  const result = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],
+    {encoding:'utf8',windowsHide:true,timeout:10000});
+  assert.equal(result.status,0,result.stderr);
+  return JSON.parse(result.stdout.trim());
+}
+
+async function qualifyDispatcherOwner() {
+  const dist = join(artifact,'dist');
+  buildNativeDispatchers({component:'service-manager',outputRoot:dist});
+  const payload = join(dist,'native',`${process.platform}-${process.arch}`);
+  await mkdir(payload,{recursive:true});
+  await copyFile(binary,join(payload,'ivy-service-manager.exe'));
+  await copyFile(healthBinary,join(payload,'ivy-health.exe'));
+  const plan = JSON.parse(await readFile('services/service-manager/deploy.json','utf8'));
+  const manifest = Object.fromEntries(['schemaVersion','componentId','kind','connectsToHive','requirements','entrypoint','readiness','shutdown','restart','storage','runtimeReset']
+    .map(key=>[key,plan[key]]));
+  Object.assign(manifest,{version:instance.version,buildId:hash});
+  await atomicJson(join(artifact,'manifest.json'),manifest);
+  journal.saveCandidate({candidateId:hash,componentId:'service-manager',artifactRoot:artifact,manifestPath:join(artifact,'manifest.json'),
+    buildId:hash,createdAt:new Date().toISOString(),platform:{os:process.platform,arch:process.arch,node:process.versions.node}},manifest);
+  const ownerPath = join(root,'dispatcher-owner.json'), closePath = join(root,'dispatcher-owner-close');
+  const target = {schemaVersion:1,instanceId:'manager',revision:'dispatcher-owner-launch',candidateId:hash,desired:'running',
+    configPath:instancePath,requestedAt:new Date().toISOString()};
+  await atomicJson(ownerPath,{hostConfigPath:configPath,nodeExecutable:process.execPath,bootstrapRoot:artifact,closePath,target});
+  let diagnostics = '';
+  const child = spawn(ownerBinary,['--exact','dispatcher_owner_fixture','--nocapture'],{env:{...process.env,IVY_MANAGER_DISPATCH_OWNER:ownerPath},
+    windowsHide:true,stdio:['ignore','pipe','pipe']});
+  for (const stream of [child.stdout,child.stderr]) stream.on('data',bytes=>{diagnostics=(diagnostics+bytes).slice(-32768);});
+  const completion = new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+  dispatcherOwner = {child,completion,closePath};
+  const ready = await until(()=>{
+    assert.equal(child.exitCode,null,diagnostics);
+    const value = journal.observations().manager;
+    return value?.state==='ready' && value.health?.launchId===target.revision && value;
+  },25000);
+  const health = ready.health;
+  assert.equal(ready.ownerPid,child.pid);
+  assert.notEqual(health.pid,child.pid,'Rust service health is distinct from its RuntimeOwner');
+  const native = windowsProcess(health.pid), dispatcher = windowsProcess(native.ParentProcessId), helper = windowsProcess(dispatcher.ParentProcessId);
+  const samePath = (left,right)=>assert.equal(resolve(left).toLowerCase(),resolve(right).toLowerCase());
+  samePath(native.ExecutablePath,join(payload,'ivy-service-manager.exe'));
+  samePath(dispatcher.ExecutablePath,process.execPath);
+  samePath(helper.ExecutablePath,join(artifact,'dist','native','ivy-job.exe'));
+  assert.equal(helper.ParentProcessId,child.pid);
+  assert.notEqual(health.pid,dispatcher.ProcessId,'Health identifies the native child of the retained Node dispatcher');
+  assert.equal(health.buildId,hash);assert.ok(health.bootId);
+
+  // The manifest health command is a direct read-only probe, with no service Job.
+  const controlPath = join(managerData,'control.json');
+  const beforeControl = await readFile(controlPath,'utf8');
+  const probe = spawn(process.execPath,[...plan.readiness.command.args,'--config',instancePath],
+    {cwd:artifact,env:{...process.env,IVY_NODE_EXECUTABLE:'intentionally-invalid-node'},windowsHide:true,stdio:['ignore','pipe','pipe']});
+  let stdout='',stderr='';probe.stdout.on('data',bytes=>{stdout+=bytes;});probe.stderr.on('data',bytes=>{stderr+=bytes;});
+  const probeExit = await new Promise((resolve,reject)=>{probe.once('error',reject);probe.once('close',code=>resolve(code));});
+  assert.equal(probeExit,0,stderr);assert.equal(stderr,'');
+  const observed = JSON.parse(stdout.trim());
+  assert.deepEqual(observed,{ok:true,buildId:hash,generation:health.generation});
+  assert.equal(await readFile(controlPath,'utf8'),beforeControl);
+  results.push('real RuntimeOwner/Job/Node/native Manager chain and direct native health dispatcher');
+
+  // A mismatched boot/launch cannot stop the actual native child through its wrapper.
+  await atomicJson(controlPath,{schemaVersion:1,instanceId:'manager',launchId:'wrong-launch',bootId:health.bootId,action:'shutdown',requestedAt:new Date().toISOString()});
+  await delay(650);assert.equal(child.exitCode,null,diagnostics);
+  assert.ok(windowsProcess(health.pid));
+  await writeFile(closePath,'close');
+  const ended = await Promise.race([completion,delay(20000,undefined,{ref:false}).then(()=>{throw Error('Dispatcher RuntimeOwner cleanup deadline exceeded');})]);
+  assert.equal(ended.code,0,diagnostics);
+  const final = JSON.parse(await readFile(join(managerData,'health.json'),'utf8'));
+  assert.equal(final.ready,false);assert.equal(final.bootId,health.bootId);assert.equal(final.details,'ServiceManager stopped.');
+  const control = JSON.parse(await readFile(controlPath,'utf8'));
+  assert.equal(control.launchId,target.revision);assert.equal(control.bootId,health.bootId);
+  for (const pid of [health.pid,dispatcher.ProcessId,helper.ProcessId]) assert.equal(windowsProcess(pid),null,'Owned dispatcher tree survived cleanup');
+  assert.equal(journal.observations().manager.state,'stopped');
+  dispatcherOwner = null;
+  results.push('RuntimeOwner cooperative boot-bound shutdown retires the complete dispatcher Job tree');
+}
+
+async function stopDispatcherOwner() {
+  if (!dispatcherOwner) return;
+  const current = dispatcherOwner;
+  await writeFile(current.closePath,'close');
+  try {
+    await Promise.race([current.completion,delay(20000,undefined,{ref:false}).then(()=>{throw Error('Dispatcher owner cleanup exceeded its deadline');})]);
+  } finally {
+    if (current.child.exitCode===null) {
+      spawnSync('taskkill.exe',['/PID',String(current.child.pid),'/T','/F'],{windowsHide:true});
+      await current.completion;
+    }
+    dispatcherOwner = null;
+  }
+}
 async function start() {
   let stderr = '';
   const child = spawn(binary, ['--config', instancePath], {env:{...process.env,IVY_NODE_EXECUTABLE:process.execPath,IVY_LAUNCH_ID:'integration-launch'},
@@ -192,8 +290,9 @@ try {
   const replay = await call('deploy',deploy);assert.equal(replay.deploymentId,record.deploymentId);assert.equal(replay.phase,'failed');
   await stop();
   results.push('host reload refusal, control binding, process replacement replay');
+  if (process.platform==='win32') await qualifyDispatcherOwner();
   console.log(JSON.stringify({ok:true,results,limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
 } finally {
   clearInterval(executorTimer);
-  try {await stop();} finally {await hive.close();journal.close();}
+  try {await stopDispatcherOwner();await stop();} finally {await hive.close();journal.close();}
 }
