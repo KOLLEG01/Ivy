@@ -15,6 +15,8 @@ mod assignment_delivery_cases;
 mod assignment_runner_cases;
 #[path = "assignment_result_cases.rs"]
 mod assignment_result_cases;
+#[path = "assignment_native_cases.rs"]
+mod assignment_native_cases;
 
 #[path = "browser_notice_cases.rs"]
 mod browser_notice_cases;
@@ -64,11 +66,13 @@ impl RpcClient for Scripted {
                     "completed" => Outcome::Completed,
                     _ => Outcome::NotExecuted,
                 };
-                return Err(IvyError::new(
+                let mut failure = IvyError::new(
                     error.required("code")?.as_str()?,
                     error.required("message")?.as_str()?,
                 )
-                .with_outcome(outcome));
+                .with_outcome(outcome);
+                failure.details = error.get("details").cloned();
+                return Err(failure);
             }
             Ok(step.required("value")?.clone())
         })

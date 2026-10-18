@@ -3,6 +3,30 @@ use crate::store::{Record, Store};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::js_string};
 use ivy_sdk::{connection_owner::connection_owner, rpc::RequestOptions};
 
+/// Check the live Secretary identity without borrowing the local journal. This
+/// also serves the native dispatch guard, which must be Send + Sync.
+pub async fn verify_owner(
+    client: &dyn ivy_sdk::rpc::RpcClient,
+    service_node_id: &JsString,
+    settings: &IvyJson,
+    cancellation: &RequestOptions,
+) -> IvyResult<()> {
+    if cancellation.cancellation.is_cancelled() {
+        return Err(cancellation.cancel_error.clone());
+    }
+    let owner = connection_owner(client, service_node_id).await?;
+    let identity = settings.required("identity")?;
+    need(
+        owner.get("connected").is_some_and(truthy)
+            && owner.get("synced").is_some_and(truthy)
+            && owner.get("principalId") == identity.get("principalId")
+            && owner.get("hostId") == identity.get("hostId")
+            && owner.get("serviceName") == Some(&IvyJson::from("secretary")),
+        "secretary_owner_mismatch",
+        "Secretary work requires its original authenticated live owner.",
+    )
+}
+
 fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
@@ -157,20 +181,13 @@ impl InboxEvidence<'_, '_> {
         Ok(())
     }
     pub async fn verify_owner(&self) -> IvyResult<()> {
-        if self.cancellation.cancellation.is_cancelled() {
-            return Err(self.cancellation.cancel_error.clone());
-        }
-        let owner = connection_owner(self.store.client.as_ref(), self.service_node_id).await?;
-        let identity = self.settings.required("identity")?;
-        need(
-            owner.get("connected").is_some_and(truthy)
-                && owner.get("synced").is_some_and(truthy)
-                && owner.get("principalId") == identity.get("principalId")
-                && owner.get("hostId") == identity.get("hostId")
-                && owner.get("serviceName") == Some(&IvyJson::from("secretary")),
-            "secretary_owner_mismatch",
-            "Secretary work requires its original authenticated live owner.",
+        verify_owner(
+            self.store.client.as_ref(),
+            self.service_node_id,
+            self.settings,
+            &self.cancellation,
         )
+        .await
     }
     pub async fn source(&self, id: &IvyJson) -> IvyResult<IvyJson> {
         let source = self
