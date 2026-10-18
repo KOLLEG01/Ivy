@@ -1,4 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[path = "chat-publication-cases.rs"]
+mod publication;
 use ivy_chat_bridge::{
     admission::ChatAdmission,
     operations::ChatOperations,

@@ -10,6 +10,7 @@ const exported={
  '../../../packages/contracts/src/limits.ts':['managementFrameBytes'],
  '../../../packages/contracts/src/bundle.ts':['bundledSchema'],
  '../../../packages/sdk/src/receipt-archive.ts':['hasUnresolvedOutcome'],
+ '../../../packages/sdk/src/main-chat.ts':['mainNotification'],
 };
 const sdk='data:text/javascript;base64,'+Buffer.from(Object.entries(exported).map(([path,names])=>`export {${names.join(',')}} from '${new URL(path,import.meta.url)}';`).join('\n')).toString('base64');
 registerHooks({resolve(specifier,context,next){

@@ -12,6 +12,7 @@ pub mod notice_input;
 pub mod notices;
 pub mod operations;
 pub mod outbox;
+pub mod publisher;
 pub mod queries;
 pub mod queue;
 pub mod registry;
