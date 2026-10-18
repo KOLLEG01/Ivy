@@ -223,7 +223,6 @@ pub fn parse_with_options(
         text,
         bytes: text.as_bytes(),
         at: 0,
-        nodes: 0,
         options,
     };
     let value = p.value(0)?;
@@ -237,7 +236,6 @@ struct Parser<'a> {
     text: &'a str,
     bytes: &'a [u8],
     at: usize,
-    nodes: usize,
     options: ParseOptions,
 }
 impl Parser<'_> {
@@ -266,8 +264,9 @@ impl Parser<'_> {
         }
     }
     fn value(&mut self, depth: usize) -> IvyResult<IvyJson> {
-        self.nodes += 1;
-        if self.nodes > 400_000 || depth > 128 {
+        // Ordinary JSON.parse has no validator node budget. Keep the recursion
+        // guard until deep values can also be destroyed without recursive drop.
+        if depth > 128 {
             return Err(complexity());
         }
         self.space();
@@ -535,7 +534,7 @@ impl Encoder {
     }
     fn value(&mut self, value: &IvyJson, depth: usize) -> IvyResult<()> {
         self.nodes += 1;
-        if self.nodes > 400_000 || depth > 128 {
+        if (self.validate && self.nodes > 400_000) || depth > 128 {
             return Err(complexity());
         }
         match value {
