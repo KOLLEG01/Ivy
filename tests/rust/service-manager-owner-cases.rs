@@ -390,6 +390,24 @@ async fn observation(journal: &HostJournal, expected: &str) -> IvyJson {
     })
 }
 async fn target(root: &Fixture, journal: &HostJournal, revision: &str) -> IvyJson {
+    target_with_policy(
+        root,
+        journal,
+        revision,
+        json("{}"),
+        json(r#"{"policy":"always","minimumDelayMs":60000,"maximumDelayMs":60000}"#),
+        3000,
+    )
+    .await
+}
+async fn target_with_policy(
+    root: &Fixture,
+    journal: &HostJournal,
+    revision: &str,
+    settings: IvyJson,
+    restart: IvyJson,
+    deadline: u64,
+) -> IvyJson {
     let artifact = root.0.join("artifacts/release");
     std::fs::create_dir_all(artifact.join("dist")).unwrap();
     let stamp = IvyJson::object([("version", "1.0.0".into()), ("buildId", hash())]);
@@ -418,13 +436,13 @@ async fn target(root: &Fixture, journal: &HostJournal, revision: &str) -> IvyJso
         ("entrypoint", entry),
         (
             "readiness",
-            IvyJson::object([("command", probe), ("timeoutMs", IvyJson::Number(3000.0))]),
+            IvyJson::object([
+                ("command", probe),
+                ("timeoutMs", IvyJson::Number(deadline as f64)),
+            ]),
         ),
         ("shutdown", json(r#"{"timeoutMs":1000}"#)),
-        (
-            "restart",
-            json(r#"{"policy":"always","minimumDelayMs":60000,"maximumDelayMs":60000}"#),
-        ),
+        ("restart", restart),
         (
             "storage",
             json(r#"{"writeFormat":1,"minReadableFormat":1,"maxReadableFormat":1}"#),
@@ -478,7 +496,7 @@ async fn target(root: &Fixture, journal: &HostJournal, revision: &str) -> IvyJso
             "artifactRoot",
             artifact.to_string_lossy().to_string().into(),
         ),
-        ("settings", json("{}")),
+        ("settings", settings),
     ]);
     atomic_json(config_path.clone(), config).await.unwrap();
     let target = IvyJson::object([
@@ -501,13 +519,25 @@ async fn target(root: &Fixture, journal: &HostJournal, revision: &str) -> IvyJso
 fn owner_probe_fixture() {}
 #[test]
 fn owner_child_fixture() {
+    use std::io::Write;
     let Some(config_path) = std::env::var_os("IVY_INSTANCE_CONFIG") else {
         return;
     };
     let config = json(&std::fs::read_to_string(config_path).unwrap());
     let data = PathBuf::from(config.required("dataRoot").unwrap().as_str().unwrap());
     let launch = std::env::var("IVY_LAUNCH_ID").unwrap();
-    let health = IvyJson::object([
+    let settings = config.required("settings").unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data.join("launches"))
+            .unwrap(),
+        "{}",
+        std::process::id()
+    )
+    .unwrap();
+    let mut health = IvyJson::object([
         ("schemaVersion", IvyJson::Number(1.0)),
         ("instanceId", "fixture".into()),
         ("componentId", "fixture".into()),
@@ -523,6 +553,20 @@ fn owner_child_fixture() {
     ]);
     let started = std::time::Instant::now();
     while started.elapsed() < Duration::from_secs(30) {
+        if let Some(code) = settings.get("exitCode").and_then(IvyJson::as_f64) {
+            if started.elapsed() >= Duration::from_millis(200) {
+                if code == 0.0 {
+                    return;
+                }
+                std::process::exit(code as i32);
+            }
+        }
+        let ready = settings
+            .get("unreadyAfterMs")
+            .and_then(IvyJson::as_f64)
+            .is_none_or(|after| started.elapsed().as_millis() < after as u128);
+        health.insert("ready", ready.into());
+        health.insert("observedAt", now().into());
         std::fs::write(data.join("health.json"), encoded(&health)).unwrap();
         if let Ok(value) = std::fs::read_to_string(data.join("control.json")) {
             let control = json(&value);
@@ -537,6 +581,107 @@ fn owner_child_fixture() {
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!("Owner child watchdog expired");
+}
+
+#[tokio::test]
+async fn real_process_exit_uses_each_restart_policy_without_duplicate_ownership() {
+    for (policy, code, restarts) in [
+        ("never", 1, false),
+        ("on-failure", 0, false),
+        ("always", 0, true),
+        ("on-failure", 1, true),
+    ] {
+        let root = Fixture::new();
+        let accepted = host(&root);
+        let journal = HostJournal::open(accepted.clone()).await.unwrap();
+        target_with_policy(
+            &root,
+            &journal,
+            "exit-policy",
+            IvyJson::object([("exitCode", IvyJson::Number(code as f64))]),
+            IvyJson::object([
+                ("policy", policy.into()),
+                ("minimumDelayMs", IvyJson::Number(100.0)),
+                ("maximumDelayMs", IvyJson::Number(1000.0)),
+            ]),
+            3000,
+        )
+        .await;
+        let owner = owner(&root, &accepted).await;
+        owner.start().unwrap();
+        let launches = root.0.join("state/instances/fixture/data/launches");
+        let count = || {
+            std::fs::read_to_string(&launches)
+                .map(|v| v.lines().count())
+                .unwrap_or(0)
+        };
+        if restarts {
+            tokio::time::timeout(Duration::from_secs(8), async {
+                while count() < 2 {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .unwrap();
+        } else {
+            observation(&journal, "exited").await;
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            assert_eq!(count(), 1, "{policy}/{code} relaunched an exited target");
+        }
+        owner.close().await.unwrap();
+        journal.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn real_readiness_loss_retires_the_child_then_records_restart_backoff() {
+    let root = Fixture::new();
+    let accepted = host(&root);
+    let journal = HostJournal::open(accepted.clone()).await.unwrap();
+    target_with_policy(
+        &root,
+        &journal,
+        "loses-readiness",
+        json(r#"{"unreadyAfterMs":2500}"#),
+        json(r#"{"policy":"always","minimumDelayMs":60000,"maximumDelayMs":60000}"#),
+        1500,
+    )
+    .await;
+    let owner = owner(&root, &accepted).await;
+    owner.start().unwrap();
+    observation(&journal, "ready").await;
+    let failed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let value = journal
+                .observations()
+                .await
+                .unwrap()
+                .required("fixture")
+                .unwrap()
+                .clone();
+            if value.get("code") == Some(&"readiness_deadline".into()) {
+                break value;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(failed.get("restartCount"), Some(&IvyJson::Number(1.0)));
+    assert!(
+        failed
+            .required("nextRestartAt")
+            .unwrap()
+            .as_js_string()
+            .is_some()
+    );
+    assert!(
+        root.0
+            .join("state/instances/fixture/data/cooperatively-stopped")
+            .exists()
+    );
+    owner.close().await.unwrap();
+    journal.close().await.unwrap();
 }
 
 #[tokio::test]
