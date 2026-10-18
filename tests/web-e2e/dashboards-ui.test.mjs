@@ -17,6 +17,9 @@ test(
     const browser = process.env.DASHBOARDS_TEST_BROWSER;
     const f = await fixture(t, false, undefined, {}, browser ? { executablePath: browser } : {});
     const build = JSON.parse(await readFile("dist/build-info.json", "utf8"));
+    if (process.env.DASHBOARDS_TEST_DISPATCH) {
+      build.version = JSON.parse(await readFile("services/dashboards/deploy.json", "utf8")).version;
+    }
     const config = {
       schemaVersion: 1,
       componentId: "dashboards",
