@@ -314,6 +314,7 @@ fn health_rpc_fixture(result: IvyJson, expected_method: &'static str) -> (String
                     Err(error) => panic!("health fixture accept: {error}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut bytes = Vec::new(); let header_end;
             loop { let mut b = [0]; stream.read_exact(&mut b).unwrap(); bytes.push(b[0]); if bytes.ends_with(b"\r\n\r\n") { header_end = bytes.len(); break; } assert!(bytes.len() < 16384); }
@@ -394,4 +395,3 @@ async fn native_health_cli_preserves_config_precedence_and_json_exit_contract() 
         }
     }
 }
-
