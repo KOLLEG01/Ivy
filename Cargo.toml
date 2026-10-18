@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["packages/contracts/rust", "packages/store", "packages/sdk/rust", "packages/host-runtime/rust"]
+members = ["packages/contracts/rust", "packages/store", "packages/sdk/rust", "packages/host-runtime/rust", "packages/cli/rust"]
 
 [workspace.package]
 version = "0.2.40"
@@ -19,6 +19,7 @@ serde_json = { version = "=1.0.154", features = ["preserve_order", "raw_value"] 
 sha2 = "=0.11.1"
 ryu-js = "=1.0.3"
 url = "=2.5.8"
+icu_normalizer = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
 tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process", "signal", "fs"] }
 tokio-util = { version = "=0.7.20", features = ["rt"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream", "json", "multipart"] }
