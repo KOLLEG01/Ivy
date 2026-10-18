@@ -1,4 +1,6 @@
 pub mod browser_path;
+#[cfg(feature = "browser")]
+pub mod cdp;
 pub mod document;
 pub mod png;
 pub mod raster;

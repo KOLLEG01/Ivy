@@ -1,0 +1,49 @@
+[
+  {
+    "name": "async-data",
+    "html": "<div id='tile' style='width:100vw;height:100vh'></div><script>dashboard.onUpdate(async ({data,output})=>{await new Promise(r=>setTimeout(r,25));document.querySelector('#tile').style.background=data.color;if(output.mode!=='image'||output.width!==120)throw Error('output');});</script>",
+    "data": {
+      "color": "#1248ab"
+    }
+  },
+  {
+    "name": "finite-infinite-shadow",
+    "html": "<style>@keyframes finite{from{background:red}to{background:lime}}@keyframes infinite{from{background:blue}to{background:yellow}}#finite{width:60px;height:100px;animation:finite 60s both}#infinite{position:absolute;left:60px;top:0;width:60px;height:100px;animation:infinite 60s infinite}</style><div id='finite'></div><div id='infinite'></div><div id='shadow'></div><script>const s=document.querySelector('#shadow').attachShadow({mode:'open'});s.innerHTML='<style>@keyframes a{from{background:red}to{background:cyan}}div{position:absolute;top:50px;width:120px;height:50px;animation:a 60s both}</style><div></div>';</script>",
+    "data": {}
+  },
+  {
+    "name": "isolated-screenshot-apis",
+    "html": "<style>@keyframes finish{from{background:red}to{background:lime}}div{width:120px;height:100px;animation:finish 60s both}</style><div></div><script>document.getAnimations=()=>[];Element.prototype.getAnimations=()=>[];</script>",
+    "data": {}
+  },
+  {
+    "name": "caret",
+    "html": "<div contenteditable='true' style='font:24px monospace;color:black;width:120px;height:100px'>test</div><script>dashboard.onUpdate(()=>{const el=document.querySelector('div');el.focus();const range=document.createRange();range.selectNodeContents(el);range.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(range);});</script>",
+    "data": {}
+  },
+  {
+    "name": "embedded-image",
+    "html": "<img style='width:120px;height:100px;image-rendering:pixelated' src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22100%22%3E%3Crect width=%22120%22 height=%22100%22 fill=%22%23008040%22/%3E%3C/svg%3E'>",
+    "data": {}
+  },
+  {
+    "name": "blob-image",
+    "html": "<img id='image' style='width:120px;height:100px'><script>dashboard.onUpdate(()=>{const svg='<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"100\"><rect width=\"120\" height=\"100\" fill=\"#804020\"/></svg>';document.querySelector('#image').src=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml'}));});</script>",
+    "data": {}
+  },
+  {
+    "name": "opaque-sandbox",
+    "html": "<script>dashboard.onUpdate(async()=>{let denied=0;try{parent.document.body; }catch{denied++}try{localStorage.getItem('x')}catch{denied++}try{document.cookie='x=secret';document.cookie}catch{denied++}try{await fetch('https://example.invalid/data')}catch{denied++}try{await new Promise((resolve,reject)=>{const ws=new WebSocket('wss://example.invalid/socket');ws.onopen=resolve;ws.onerror=reject;})}catch{denied++}try{await navigator.serviceWorker.register('https://example.invalid/worker.js')}catch{denied++}if(denied!==6)throw Error('sandbox '+denied);document.body.style.background='rgb(1,2,3)';});</script>",
+    "data": {}
+  },
+  {
+    "name": "legacy-json-property-semantics",
+    "html": "<script>dashboard.onUpdate(({data})=>{if(Object.hasOwn(data,'__proto__')||Object.hasOwn(data.nested,'__proto__')||Object.hasOwn(data.list[0],'__proto__')||data.text.charCodeAt(0)!==0xd800)throw Error('Legacy JSON delivery changed');document.body.style.background='rgb(12,34,56)';});</script>",
+    "data": { "__proto__": { "value": 42 }, "nested": { "__proto__": null }, "list": [{ "__proto__": "text" }], "text": "\ud800" }
+  },
+  {
+    "name": "no-handler",
+    "html": "<div style='width:120px;height:100px;background:rgb(127,128,129)'></div>",
+    "data": {}
+  }
+]
