@@ -314,6 +314,25 @@ impl RecoveryScan {
         limit: usize,
     ) -> IvyResult<()> {
         recovery.evidence.verify_owner().await?;
+        let ids = self.page(recovery, limit)?;
+        Self::recover_page(recovery, ids, &RefCell::new(self)).await
+    }
+    /// The engine and its independent workers share issues, never an exclusive
+    /// RefCell borrow across RPC waits. The cursor advances before row recovery.
+    pub(crate) async fn tick_shared(
+        state: &RefCell<Self>,
+        recovery: &InboxRecovery<'_, '_, '_>,
+        limit: usize,
+    ) -> IvyResult<()> {
+        recovery.evidence.verify_owner().await?;
+        let ids = state.borrow_mut().page(recovery, limit)?;
+        Self::recover_page(recovery, ids, state).await
+    }
+    fn page(
+        &mut self,
+        recovery: &InboxRecovery<'_, '_, '_>,
+        limit: usize,
+    ) -> IvyResult<Vec<String>> {
         let ids = recovery
             .evidence
             .store
@@ -324,6 +343,13 @@ impl RecoveryScan {
         } else {
             ids.last().cloned()
         };
+        Ok(ids)
+    }
+    async fn recover_page(
+        recovery: &InboxRecovery<'_, '_, '_>,
+        ids: Vec<String>,
+        issues: &dyn RecoveryIssues,
+    ) -> IvyResult<()> {
         for id in ids {
             let result = async {
                 let operation = recovery
@@ -335,12 +361,12 @@ impl RecoveryScan {
             }
             .await;
             match result {
-                Ok(_) => self.issues.retain(|(existing, _)| existing != &id),
+                Ok(_) => issues.clear(&id),
                 Err(error) => {
                     if recovery.evidence.cancellation.cancellation.is_cancelled() {
                         return Err(error);
                     }
-                    self.issue(&id, &error.code);
+                    issues.issue(&id, &error.code);
                 }
             }
         }

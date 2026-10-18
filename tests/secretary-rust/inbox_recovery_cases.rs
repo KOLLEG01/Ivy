@@ -1,12 +1,49 @@
 use super::*;
 use ivy_contracts::{hash::hash_json, json::canonical};
 use ivy_secretary::{
+    engine::SecretaryEngine,
     inbox_evidence::InboxEvidence,
     inbox_recovery::{InboxRecovery, RecoveryScan},
     journal::{Journal, Limits},
     store::Store,
 };
 use ivy_store::rusqlite::params;
+use std::{
+    cell::RefCell,
+    ops::Deref,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+use tokio::sync::Notify;
+
+struct RecoveryClient {
+    scripted: Scripted,
+    independent_issue: bool,
+    calls: AtomicUsize,
+    entered: Notify,
+    released: Notify,
+}
+impl Deref for RecoveryClient {
+    type Target = Scripted;
+    fn deref(&self) -> &Scripted {
+        &self.scripted
+    }
+}
+impl RpcClient for RecoveryClient {
+    fn request<'a>(
+        &'a self,
+        method: &'a str,
+        params: IvyJson,
+        options: RequestOptions,
+    ) -> RequestFuture<'a> {
+        Box::pin(async move {
+            if self.independent_issue && self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.entered.notify_one();
+                self.released.notified().await;
+            }
+            self.scripted.request(method, params, options).await
+        })
+    }
+}
 
 #[tokio::test]
 async fn original_inbox_effect_recovery_and_bounded_scan() {
@@ -34,18 +71,24 @@ async fn original_inbox_effect_recovery_and_bounded_scan() {
     assert!(rows.len() >= 60);
     for (index, row) in rows.iter().enumerate() {
         let input = row.required("input").unwrap();
-        let client = Arc::new(Scripted {
-            steps: Mutex::new(
-                input
-                    .required("steps")
-                    .unwrap()
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .cloned()
-                    .collect(),
-            ),
-            trace: Mutex::new(Vec::new()),
+        let client = Arc::new(RecoveryClient {
+            scripted: Scripted {
+                steps: Mutex::new(
+                    input
+                        .required("steps")
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .collect(),
+                ),
+                trace: Mutex::new(Vec::new()),
+            },
+            independent_issue: input.get("independentIssue") == Some(&IvyJson::Bool(true)),
+            calls: AtomicUsize::new(0),
+            entered: Notify::new(),
+            released: Notify::new(),
         });
         let journal = Journal::open(std::path::Path::new(":memory:"), Limits::default()).unwrap();
         for local in input.required("locals").unwrap().as_array().unwrap() {
@@ -124,7 +167,7 @@ async fn original_inbox_effect_recovery_and_bounded_scan() {
         let recovery = InboxRecovery {
             evidence: &evidence,
         };
-        let mut scan = RecoveryScan {
+        let scan = RefCell::new(RecoveryScan {
             cursor: input
                 .get("cursor")
                 .filter(|v| !v.is_null())
@@ -140,41 +183,59 @@ async fn original_inbox_effect_recovery_and_bounded_scan() {
                     (a[0].as_str().unwrap(), a[1].as_str().unwrap())
                 })
                 .collect(),
+        });
+        let clock = ivy_sdk::clock::SystemClock;
+        let tools = ToolClients::new(client.clone());
+        let engine = SecretaryEngine {
+            evidence: &evidence,
+            clock: &clock,
+            tools: &tools,
+            issues: &scan,
         };
-        let mut results = Vec::new();
-        for _ in 0..input.required("repeats").unwrap().as_f64().unwrap() as usize {
-            let result = if input.get("method") == Some(&"tick".into()) {
-                scan.tick(
-                    &recovery,
-                    evidence
-                        .settings
-                        .required("recordsPerTick")
-                        .unwrap()
-                        .as_f64()
-                        .unwrap() as usize,
-                )
-                .await
-                .map(|_| IvyJson::Null)
-            } else {
-                recovery
-                    .apply(&IvyJson::object([(
-                        "pin",
-                        IvyJson::object([
-                            ("objectId", "00000000-0000-4000-8000-000000000004".into()),
-                            ("revision", IvyJson::Number(1.0)),
-                        ]),
-                    )]))
-                    .await
-            };
-            results.push(match result {
-                Ok(value) => IvyJson::object([("value", value)]),
-                Err(e) => IvyJson::object([
-                    ("code", e.code.into()),
-                    ("message", e.message.into()),
-                    ("outcome", e.outcome.as_str().into()),
-                ]),
-            });
-        }
+        let work = async {
+            let mut results = Vec::new();
+            for _ in 0..input.required("repeats").unwrap().as_f64().unwrap() as usize {
+                let result = if input.get("method") == Some(&"tick".into()) {
+                    engine.tick().await.map(|_| IvyJson::Null)
+                } else {
+                    recovery
+                        .apply(&IvyJson::object([(
+                            "pin",
+                            IvyJson::object([
+                                ("objectId", "00000000-0000-4000-8000-000000000004".into()),
+                                ("revision", IvyJson::Number(1.0)),
+                            ]),
+                        )]))
+                        .await
+                };
+                results.push(match result {
+                    Ok(value) => IvyJson::object([("value", value)]),
+                    Err(e) => IvyJson::object([
+                        ("code", e.code.into()),
+                        ("message", e.message.into()),
+                        ("outcome", e.outcome.as_str().into()),
+                    ]),
+                });
+            }
+            results
+        };
+        let observer = async {
+            if client.independent_issue {
+                client.entered.notified().await;
+                assert_eq!(
+                    scan.borrow().cursor.as_deref(),
+                    Some("00000000-0000-4000-8000-000000000004")
+                );
+                scan.borrow_mut().issue("independent", "background_issue");
+                client.released.notify_one();
+            }
+        };
+        let (results, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(work, observer)
+        })
+        .await
+        .expect("Recovery RPC gate budget");
+        let scan = scan.into_inner();
         let retained = journal
             .db
             .prepare(

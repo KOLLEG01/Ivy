@@ -40,6 +40,8 @@ mod browser_notice_cases;
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
 mod inbox_recovery_cases;
+#[path = "engine_cases.rs"]
+mod engine_cases;
 #[path = "notice_scan_cases.rs"]
 mod notice_scan_cases;
 #[path = "notice_evidence_cases.rs"]

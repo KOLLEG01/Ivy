@@ -37,7 +37,7 @@ fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 fn same(a: &IvyJson, b: &IvyJson) -> IvyResult<bool> {
     Ok(hash_json(a)? == hash_json(b)?)
 }
-fn truthy(value: &IvyJson) -> bool {
+pub(crate) fn truthy(value: &IvyJson) -> bool {
     match value {
         IvyJson::Null => false,
         IvyJson::Bool(v) => *v,
