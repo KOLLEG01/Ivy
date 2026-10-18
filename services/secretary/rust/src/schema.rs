@@ -31,14 +31,7 @@ pub fn validate(schema: Schema, value: &IvyJson) -> IvyResult<()> {
         })
         .as_ref()
         .map_err(Clone::clone)?;
-    if bundle
-        .matches_named(
-            "https://ivy.invalid/schemas/secretary.schema.json",
-            schema.name(),
-            value,
-        )?
-        .unwrap_or(false)
-    {
+    if bundle.matches(&format!("#/$defs/{}", schema.name()), value)? {
         Ok(())
     } else {
         Err(IvyError::new(
