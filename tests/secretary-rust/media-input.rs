@@ -73,6 +73,49 @@ fn catalogue_identity_preserves_exact_observed_account_differential() {
 }
 
 #[test]
+fn original_triage_final_assessment_and_turn_identity_differential() {
+    use ivy_secretary::triage_results::{result_items, triage_result, triage_turn};
+    let corpus = oracle("tests/secretary-rust/triage-results-oracle.mjs");
+    let cases = corpus.as_array().unwrap();
+    assert!(cases.len() > 100);
+    for case in cases {
+        let observation = case.required("observation").unwrap();
+        let turn_id = case.required("turnId").unwrap().as_js_string().unwrap();
+        let result = if case.required("mode").unwrap() == &IvyJson::from("turn") {
+            triage_turn(
+                observation,
+                turn_id,
+                case.required("full").unwrap().as_bool().unwrap(),
+            )
+            .cloned()
+        } else {
+            let decoded = triage_result(observation, turn_id);
+            // Paginated native verification supplies this exact turn/item seam.
+            if let Ok(turn) = triage_turn(observation, turn_id, true) {
+                if let Some(items) = turn.get("items").and_then(IvyJson::as_array) {
+                    assert_eq!(result_items(turn, items), decoded);
+                }
+            }
+            decoded
+        };
+        let actual = match result {
+            Ok(value) => IvyJson::object([("value", value)]),
+            Err(error) => IvyJson::object([
+                ("code", error.code.into()),
+                ("message", error.message.into()),
+                ("outcome", error.outcome.as_str().into()),
+            ]),
+        };
+        assert_eq!(
+            &actual,
+            case.required("expected").unwrap(),
+            "{}",
+            case.required("label").unwrap().as_str().unwrap()
+        );
+    }
+}
+
+#[test]
 fn original_triage_media_order_gaps_video_offsets_and_budget_differential() {
     use ivy_contracts::hash::{digest, hash_json};
     use ivy_secretary::{

@@ -7,3 +7,4 @@ pub mod policy;
 pub mod schedule;
 pub mod source_identity;
 pub mod triage_media;
+pub mod triage_results;
