@@ -19,8 +19,8 @@ fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
 }
 fn array<'a>(value: &'a Json, key: &str) -> IvyResult<&'a [Json]> {
     value
-        .required(key)?
-        .as_array()
+        .get(key)
+        .and_then(Json::as_array)
         .ok_or_else(IvyError::internal)
 }
 fn number(value: &Json, key: &str) -> IvyResult<f64> {
