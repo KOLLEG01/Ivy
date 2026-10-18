@@ -639,9 +639,9 @@ async fn snapshot(
         &ids,
     );
     drop(state);
-    if let Json::Array(calls) = answer.get("calls").unwrap().clone() {
+    if let Some(calls) = answer.get("calls").unwrap().as_array() {
         let mut normalized = Vec::new();
-        for mut call in calls {
+        for mut call in calls.iter().cloned() {
             if call.get("method") == Some(&Json::from("objects.write")) {
                 let mut params = call.required("params").unwrap().clone();
                 let id = text(&params, "mutationId");
