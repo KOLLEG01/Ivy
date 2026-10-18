@@ -22,6 +22,8 @@ mod project_locations_cases;
 mod reconciliation_cases;
 #[path = "agent-service-work.rs"]
 mod service_work_cases;
+#[path = "agent-shutdown.rs"]
+mod shutdown_cases;
 #[path = "agent-staged-files.rs"]
 mod staged_files_cases;
 fn repository() -> PathBuf {

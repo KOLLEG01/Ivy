@@ -30,7 +30,7 @@ use std::sync::{
 };
 use tokio::sync::watch;
 
-fn data() -> &'static IvyJson {
+pub(super) fn data() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| oracle("agent-reconciliation-oracle.mjs", None))
 }
@@ -49,7 +49,7 @@ fn outcome(result: IvyResult<()>) -> IvyJson {
         Err(error) => IvyJson::object([("error", error.to_wire())]),
     }
 }
-fn journal(maximum: usize, maximum_bytes: usize) -> Arc<Mutex<NativeJournal>> {
+pub(super) fn journal(maximum: usize, maximum_bytes: usize) -> Arc<Mutex<NativeJournal>> {
     Arc::new(Mutex::new(
         NativeJournal::new(
             Owner {
@@ -66,7 +66,7 @@ fn journal(maximum: usize, maximum_bytes: usize) -> Arc<Mutex<NativeJournal>> {
         .unwrap(),
     ))
 }
-fn health(root: &Root, journal: Arc<Mutex<NativeJournal>>) -> AgentHealth {
+pub(super) fn health(root: &Root, journal: Arc<Mutex<NativeJournal>>) -> AgentHealth {
     let config = InstanceConfig::from_json(IvyJson::object([
         ("schemaVersion", IvyJson::Number(1.0)),
         ("hostId", "host".into()),
@@ -164,7 +164,7 @@ fn environment(
         skills: make("skills"),
     }
 }
-fn manager(
+pub(super) fn manager(
     journal: Arc<Mutex<NativeJournal>>,
     closing: Arc<AtomicBool>,
     locations: Arc<Mutex<Vec<IvyJson>>>,

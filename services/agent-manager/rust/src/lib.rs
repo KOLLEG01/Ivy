@@ -33,6 +33,7 @@ pub mod project_management;
 pub mod registry;
 pub mod reconciliation;
 pub mod service_work;
+pub mod shutdown;
 pub mod skills;
 pub mod skills_output;
 pub mod skills_prepare;
