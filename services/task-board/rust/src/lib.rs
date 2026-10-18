@@ -10,6 +10,7 @@ pub mod local_journal;
 pub mod local_retention;
 pub mod local_workspaces;
 pub mod journal_store;
+pub mod inspection_journal;
 pub mod operations;
 pub mod publication;
 pub mod task_keys;

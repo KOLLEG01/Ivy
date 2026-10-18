@@ -8,9 +8,11 @@ use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::{Connection, params, types::ValueRef};
 use ivy_task_board::{
     evidence_bytes::{BlobStore, ChunkKey},
+    inspection_journal::InspectionJournal,
     journal_store::{Contracts, JournalStore, ReadCache},
     local_journal::{self, LocalJournal},
     local_retention::HistoryLimits,
+    native_inspector::{InspectionStore, NativeInspector},
     operations::{Document, Operations, Store},
     read_evidence::ReadEvidenceStore,
 };
@@ -64,15 +66,25 @@ impl RpcClient for Client {
             let failure = match method {
                 "objects.read" => self.input.get("readError"),
                 "objects.write" => self.input.get("writeError"),
+                "serviceNodes.get" => self.input.get("ownerError"),
                 _ => None,
             };
             if let Some(failure) = failure {
-                return Err(IvyError::new(text(failure, "code"), "Fixture RPC failure.")
-                    .with_outcome(if failure.get("outcome") == Some(&Json::from("unknown")) {
+                return Err(IvyError::new(
+                    text(failure, "code"),
+                    if method == "serviceNodes.get" {
+                        "Fixture owner read."
+                    } else {
+                        "Fixture RPC failure."
+                    },
+                )
+                .with_outcome(
+                    if failure.get("outcome") == Some(&Json::from("unknown")) {
                         Outcome::Unknown
                     } else {
                         Outcome::NotExecuted
-                    }));
+                    },
+                ));
             }
             Ok(match method {
                 "objects.read" => {
@@ -92,6 +104,23 @@ impl RpcClient for Client {
                     result
                 }
                 "objects.write" => self.input.required("writeResult")?.clone(),
+                "serviceNodes.get" => {
+                    let count = self
+                        .trace
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|entry| {
+                            entry.as_array().unwrap()[0] == Json::from("serviceNodes.get")
+                        })
+                        .count();
+                    self.input
+                        .get("owners")
+                        .and_then(Json::as_array)
+                        .and_then(|owners| owners.get(count - 1))
+                        .unwrap_or(self.input.required("owner")?)
+                        .clone()
+                }
                 "objects.query" => self.input.get("query").cloned().unwrap_or_else(|| {
                     Json::object([
                         (
@@ -191,6 +220,210 @@ fn snapshot(db: &Connection) -> Json {
             .unwrap();
         (table, Json::Array(rows))
     }))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inspection_owner_and_saved_primary_guards_use_the_journal_connection() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/task-board-inspection-owner-oracle.mjs",
+        ])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = parse(
+        std::str::from_utf8(&output.stdout).unwrap(),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    let catalogs = ivy_contracts::checked_native_contract::CheckedNativeContracts::new(root);
+    for row in rows.as_array().unwrap() {
+        let input = row.required("input").unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        local_journal::initialize(&db).unwrap();
+        let client = Arc::new(Client {
+            input: input.clone(),
+            trace: Mutex::default(),
+        });
+        let store = JournalStore {
+            journal: LocalJournal {
+                connection: &db,
+                root_object_id: Some("root".into()),
+            },
+            client: client.clone(),
+            contracts: FixtureContracts {
+                local: HashSet::new(),
+                allowed: [hash_json(input.required("run").unwrap()).unwrap()].into(),
+            },
+            limits: HistoryLimits::default(),
+            now: || TIME.into(),
+            new_id: || panic!("An inspection guard must not create a record"),
+            cache: None,
+        };
+        let inspection = InspectionJournal::new(
+            &store,
+            string(input, "principal"),
+            string(input, "serviceNodeId"),
+        );
+        let mut outcomes = vec![];
+        for _ in 0..input.get("repeat").and_then(Json::as_f64).unwrap_or(1.0) as usize {
+            let result = if input
+                .get("context")
+                .and_then(Json::as_bool)
+                .unwrap_or(false)
+            {
+                NativeInspector {
+                    store: &inspection,
+                    catalogs: &catalogs,
+                }
+                .context(input.required("pin").unwrap())
+                .await
+                .map(|context| context.value())
+            } else {
+                inspection.verify_owner().await.map(|_| Json::Null)
+            };
+            outcomes.push(match result {
+                Ok(value) => value,
+                Err(error) => Json::object([(
+                    "error",
+                    Json::object([
+                        ("code", Json::String(error.code_js())),
+                        ("message", Json::String(error.message_js())),
+                        ("outcome", error.outcome.as_str().into()),
+                    ]),
+                )]),
+            });
+        }
+        let actual = Json::object([
+            ("outcomes", Json::Array(outcomes)),
+            ("trace", Json::Array(client.trace.lock().unwrap().clone())),
+        ]);
+        assert_eq!(
+            canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap(),
+            canonical(row.required("expected").unwrap(), MANAGEMENT_FRAME_BYTES).unwrap(),
+            "{}",
+            text(row, "name")
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inspection_evidence_delegates_to_the_same_validated_sqlite_journal() {
+    let db = Connection::open_in_memory().unwrap();
+    local_journal::initialize(&db).unwrap();
+    let value = Json::object([("state", "retained".into())]);
+    let client = Arc::new(Client {
+        input: Json::Null,
+        trace: Mutex::default(),
+    });
+    let store = JournalStore {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        client: client.clone(),
+        contracts: FixtureContracts {
+            local: ["task-board/native-read-evidence".into()].into(),
+            allowed: [hash_json(&value).unwrap()].into(),
+        },
+        limits: HistoryLimits::default(),
+        now: || TIME.into(),
+        new_id: || "evidence".into(),
+        cache: None,
+    };
+    let inspection = InspectionJournal::new(&store, "caller".into(), "board".into());
+    let destination = Json::object([(
+        "create",
+        Json::object([("parentId", "root".into()), ("name", "record".into())]),
+    )]);
+    let pin = inspection
+        .write_document(
+            "task-board/native-read-evidence",
+            &value,
+            "mutation",
+            &destination,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inspection
+            .named_document("task-board/native-read-evidence", "record", &"root".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .pin,
+        pin
+    );
+    assert_eq!(
+        inspection
+            .read_document("task-board/native-read-evidence", &pin, true)
+            .await
+            .unwrap()
+            .value,
+        value
+    );
+    assert_eq!(
+        inspection
+            .write_document(
+                "task-board/native-read-evidence",
+                &Json::Null,
+                "other",
+                &destination
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+    assert_eq!(
+        ReadEvidenceStore::validate(&inspection, "unknown", &value)
+            .unwrap_err()
+            .code,
+        "contract_not_found"
+    );
+    let chunk = BlobStore::save(
+        &inspection,
+        ChunkKey::NativeReadEvidence,
+        "part",
+        &"evidence".into(),
+        b"exact",
+    )
+    .unwrap();
+    assert_eq!(
+        BlobStore::read(
+            &inspection,
+            ChunkKey::NativeReadEvidence,
+            &chunk,
+            &"evidence".into()
+        )
+        .unwrap(),
+        b"exact"
+    );
+    assert_eq!(
+        BlobStore::read(
+            &inspection,
+            ChunkKey::NativeReadEvidence,
+            &chunk,
+            &"other".into()
+        )
+        .unwrap_err()
+        .code,
+        "task_board_evidence_mismatch"
+    );
+    assert!(client.trace.lock().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
