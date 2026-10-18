@@ -12,6 +12,48 @@ registerHooks({resolve(specifier,context,next) {
 const {canonical,hashJson}=await import('../../packages/contracts/src/canonical.ts');
 const {deriveOperationId}=await import('../../packages/contracts/src/operation-id.ts');
 const {validateJson}=await import('../../packages/contracts/src/canonical-json.ts');
+if(process.argv[2]==='deep') {
+  const {createHash}=await import('node:crypto');
+  const cases=[];
+  for(const depth of [128,129,512,4096,20_000]) {
+    for(const kind of ['array','object','mixed']) {
+      const opens=[], closes=[];
+      for(let i=0;i<depth;i++) {
+        const array=kind==='array'||(kind==='mixed'&&i%2===0);
+        opens.push(array?'[':'{"next":');closes.push(array?']':'}');
+      }
+      const input=opens.join('')+'"\\ud800"'+closes.reverse().join('');
+      const value=JSON.parse(input), item={depth,kind};
+      try {item.stringifyHash=createHash('sha256').update(JSON.stringify(value)).digest('hex');}catch(error){item.stringifyError={name:error.name,message:error.message};}
+      try {const text=String(value);item.coercionUnits=Array.from({length:text.length},(_,i)=>text.charCodeAt(i));}catch(error){item.coercionError={name:error.name,message:error.message};}
+      for(const [name,fn] of Object.entries({canonical,validateJson})) {
+        try {fn(value,4_000_000);item[name]=null;}catch(error){item[name]=error.code??error.name;}
+      }
+      cases.push(item);
+    }
+  }
+  process.stdout.write(JSON.stringify({runtime:{node:process.versions.node,v8:process.versions.v8},cases}));
+  process.exit(0);
+}
+if(process.argv[2]==='wide') {
+  const {createHash}=await import('node:crypto');
+  const cases=[];
+  for(const count of [399_999,400_000,400_001,450_000]) {
+    for(const envelope of [false,true]) {
+      const array='['+'null,'.repeat(count-1)+'null]';
+      const input=envelope?'\u007b"values":'+array+'}':array;
+      const value=JSON.parse(input);
+      const encoded=JSON.stringify(value);
+      const item={count,envelope,bytes:Buffer.byteLength(encoded),sha256:createHash('sha256').update(encoded).digest('hex')};
+      for(const [name,fn] of Object.entries({canonical,validateJson})) {
+        try {fn(value,4_000_000);item[name]=null;} catch(error){item[name]=error.code;}
+      }
+      cases.push(item);
+    }
+  }
+  process.stdout.write(JSON.stringify(cases));
+  process.exit(0);
+}
 if(process.argv[2]==='limits') {
   const cases=[];
   for(const value of [[Number.MAX_SAFE_INTEGER+1],{x:Number.MAX_SAFE_INTEGER+1},[null,Number.MAX_SAFE_INTEGER+1],['😀'],{a:[1,2]}]) {

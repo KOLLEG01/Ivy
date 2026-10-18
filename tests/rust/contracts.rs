@@ -1,5 +1,92 @@
 use ivy_contracts::{IvyJson, JsString, hash::*, json::*, operation::*};
 #[test]
+fn ordinary_json_node_counts_are_independent_of_validation_limits() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/json-oracle.mjs",
+            "wide",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cases: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cases.len(), 8);
+    for case in cases {
+        let count = case["count"].as_u64().unwrap() as usize;
+        let array = format!("[{}null]", "null,".repeat(count - 1));
+        let input = if case["envelope"] == true {
+            format!(r#"{{"values":{array}}}"#)
+        } else {
+            array
+        };
+        let value = parse(&input, input.len()).unwrap();
+        let encoded = stringify(&value, input.len()).unwrap();
+        assert_eq!(encoded.len() as u64, case["bytes"].as_u64().unwrap());
+        assert_eq!(
+            digest(&encoded),
+            format!("sha256:{}", case["sha256"].as_str().unwrap())
+        );
+        assert_eq!(
+            stringify(&value, input.len() - 1).unwrap_err().code,
+            "content_too_large"
+        );
+        for (name, result) in [
+            ("canonical", canonical(&value, 4_000_000).map(|_| ())),
+            ("validateJson", validate_json(&value, 4_000_000)),
+        ] {
+            assert_eq!(
+                result.err().map(|e| e.code),
+                case[name].as_str().map(str::to_owned),
+                "{case}"
+            );
+        }
+    }
+    let malformed = format!("[{}]", "null,".repeat(400_001));
+    assert_eq!(
+        parse(&malformed, malformed.len()).unwrap_err().code,
+        "invalid_arguments"
+    );
+    assert_eq!(
+        parse(&malformed, malformed.len() - 1).unwrap_err().code,
+        "content_too_large"
+    );
+    let strict = ParseOptions {
+        reject_duplicate_keys: true,
+        maximum_container_depth: Some(1),
+    };
+    let wide = format!("[{}null]", "null,".repeat(400_000));
+    assert!(parse_with_options(&wide, wide.len(), strict).is_ok());
+}
+#[test]
+fn long_unicode_strings_preserve_utf16_and_parser_boundaries() {
+    let text =
+        "\u{7f}\u{80}\u{7ff}\u{800}\u{d7ff}\u{e000}\u{ffff}\u{10000}\u{10ffff}".repeat(32_768);
+    let input = format!(r#"{{"{text}":["{text}\n\ud800","tail"]}}"#);
+    let value = parse(&input, input.len()).unwrap();
+    let (key, values) = &value.as_object().unwrap()[0];
+    assert_eq!(key, &JsString::from(text.as_str()));
+    let mut expected: Vec<u16> = text.encode_utf16().collect();
+    expected.extend([10, 0xd800]);
+    let values = values.as_array().unwrap();
+    assert_eq!(values[0].as_js_string().unwrap().0, expected);
+    assert_eq!(values[1].as_str().unwrap(), "tail");
+    assert_eq!(
+        parse(&input, input.len() - 1).unwrap_err().code,
+        "content_too_large"
+    );
+    for malformed in ["\"é", "\"😀\\", "\"界\\é\"", "\"é\\u界000\"", "[\"😀\",é]"] {
+        assert_eq!(parse(malformed, 100).unwrap_err().code, "invalid_arguments");
+    }
+}
+#[test]
 fn surrogate_identifiers_error_messages_and_strict_native_json() {
     let parent = parse(r#""\ud800:00042:\udfff""#, 100).unwrap();
     let parent = parent.as_js_string().unwrap();
@@ -82,6 +169,9 @@ fn transport_frame_admission_matches_typescript() {
         let result = match case["kind"].as_str().unwrap() {
             "request" => validate_request(&value),
             "response" => validate_response_frame(&value),
+            "service-notification" => validate_service_notification_frame(&value),
+            "provider-notification" => validate_provider_notification_frame(&value),
+            "event-availability" => validate_event_availability_frame(&value),
             _ => validate_provider_call_frame(&value),
         };
         if case["ok"] == true {

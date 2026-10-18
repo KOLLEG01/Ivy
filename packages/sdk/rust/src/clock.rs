@@ -1,6 +1,11 @@
 use crate::{IvyError, IvyResult};
+pub use crate::date_parse::{parse_date, parse_date_in_zone, parse_with_local_offset};
 use chrono::{Datelike, TimeZone as _, Timelike, Utc};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 pub trait Clock: Send + Sync {
     fn utc_millis(&self) -> i64;
@@ -30,6 +35,9 @@ pub struct LocalParts {
 }
 pub struct TimeZone;
 impl TimeZone {
+    pub fn database_version() -> Option<&'static str> {
+        jiff_tzdb::VERSION
+    }
     pub fn local_parts(utc_millis: i64, zone: &str) -> IvyResult<LocalParts> {
         let utc = Utc
             .timestamp_millis_opt(utc_millis)
@@ -59,17 +67,29 @@ impl TimeZone {
             .unwrap();
             utc.with_timezone(&offset).naive_local()
         } else {
-            let zone = zone
-                .parse::<chrono_tz::Tz>()
-                .ok()
-                .or_else(|| {
-                    chrono_tz::TZ_VARIANTS
-                        .iter()
-                        .find(|candidate| candidate.name().eq_ignore_ascii_case(zone))
-                        .copied()
-                })
+            let (name, data) = jiff_tzdb::get(zone)
                 .ok_or_else(|| IvyError::new("invalid_arguments", "Invalid IANA time zone."))?;
-            utc.with_timezone(&zone).naive_local()
+            static ZONES: OnceLock<Mutex<HashMap<&'static str, Arc<tz::TimeZone>>>> =
+                OnceLock::new();
+            let zones = ZONES.get_or_init(|| Mutex::new(HashMap::new()));
+            let zone = {
+                let mut zones = zones.lock().unwrap();
+                if let Some(zone) = zones.get(name) {
+                    zone.clone()
+                } else {
+                    let zone = Arc::new(
+                        tz::TimeZone::from_tz_data(data).map_err(|_| IvyError::internal())?,
+                    );
+                    zones.insert(name, zone.clone());
+                    zone
+                }
+            };
+            let seconds = zone
+                .find_local_time_type(utc_millis.div_euclid(1000))
+                .map_err(|_| IvyError::new("invalid_arguments", "Invalid UTC date."))?
+                .ut_offset();
+            let offset = chrono::FixedOffset::east_opt(seconds).ok_or_else(IvyError::internal)?;
+            utc.with_timezone(&offset).naive_local()
         };
         Ok(LocalParts {
             year: local.year(),

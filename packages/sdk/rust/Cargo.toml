@@ -10,13 +10,48 @@ publish.workspace = true
 ivy-contracts.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tokio-tungstenite.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-chrono-tz.workspace = true
+iana-time-zone.workspace = true
+jiff-tzdb.workspace = true
+tz-rs.workspace = true
 
 [[test]]
 name = "sdk"
 path = "../../../tests/rust/sdk.rs"
+
+[[test]]
+name = "sdk-operation-ids"
+path = "../../../tests/rust/sdk-operation-ids.rs"
+
+[[test]]
+name = "sdk-native"
+path = "../../../tests/rust/sdk-native.rs"
+
+[[test]]
+name = "sdk-consumers"
+path = "../../../tests/rust/sdk-consumers.rs"
+
+[[test]]
+name = "sdk-provider"
+path = "../../../tests/rust/sdk-provider.rs"
+
+[[test]]
+name = "sdk-native-project"
+path = "../../../tests/rust/sdk-native-project.rs"
+
+[[test]]
+name = "sdk-native-observations"
+path = "../../../tests/rust/sdk-native-observations.rs"
+
+[[test]]
+name = "sdk-native-discovery"
+path = "../../../tests/rust/sdk-native-discovery.rs"
+
+[[test]]
+name = "sdk-date-parse"
+path = "../../../tests/rust/sdk-date-parse.rs"

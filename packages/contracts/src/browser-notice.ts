@@ -1,3 +1,5 @@
+import browserNotice from "../../../specs/schemas/browser-notice.schema.json" with { type: "json" };
+
 /** Shared envelope for a service-owned *.browser-notification event. */
 export interface BrowserNotice {
   title: string;
@@ -5,25 +7,7 @@ export interface BrowserNotice {
   tag: string;
   target: { uiId: string; fragment: string };
 }
-export const browserNoticeSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    title: { type: "string", minLength: 1, maxLength: 100 },
-    body: { type: "string", maxLength: 300 },
-    tag: { type: "string", minLength: 1, maxLength: 256 },
-    target: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        uiId: { type: "string", pattern: "^[a-z][a-z0-9-]{0,63}$" },
-        fragment: { type: "string", pattern: "^#/[ -~]*$", maxLength: 1024 },
-      },
-      required: ["uiId", "fragment"],
-    },
-  },
-  required: ["title", "body", "tag", "target"],
-};
+export const browserNoticeSchema = browserNotice;
 export function browserNoticeTopic(namespace: string) {
   return {
     topic: namespace + ".browser-notification",
