@@ -1,4 +1,5 @@
 //! Durable producer-independent message and object event windows.
+use crate::assignment_error::{SchedulerFailure, SchedulerResult, untyped};
 use crate::{
     assignment_decision::trimmed,
     assignment_message::{
@@ -14,47 +15,50 @@ use ivy_sdk::{
     rpc::RequestOptions,
 };
 
-fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
+fn need(ok: bool, code: &str, message: &str) -> SchedulerResult<()> {
     if ok {
         Ok(())
     } else {
-        Err(IvyError::new(code, message))
+        Err(IvyError::new(code, message).into())
     }
 }
-fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
+fn text(value: &IvyJson, key: &str) -> SchedulerResult<JsString> {
     value
         .required(key)?
         .as_js_string()
         .cloned()
-        .ok_or_else(IvyError::internal)
+        .ok_or(SchedulerFailure::Uncoded)
 }
-fn number(value: &IvyJson, key: &str) -> IvyResult<f64> {
-    value.required(key)?.as_f64().ok_or_else(IvyError::internal)
+fn number(value: &IvyJson, key: &str) -> SchedulerResult<f64> {
+    value
+        .required(key)?
+        .as_f64()
+        .ok_or(SchedulerFailure::Uncoded)
 }
 fn pending(value: &IvyJson) -> Option<&IvyJson> {
     value.get("pending").filter(|v| !v.is_null())
 }
-fn iso(value: f64) -> IvyResult<JsString> {
-    date_to_iso(value).map_err(|_| IvyError::internal())
+fn iso(value: f64) -> SchedulerResult<JsString> {
+    date_to_iso(value).map_err(SchedulerFailure::uncoded)
 }
-fn projection(value: &IvyJson, trigger: &IvyJson) -> IvyResult<IvyJson> {
+fn projection(value: &IvyJson, trigger: &IvyJson) -> SchedulerResult<IvyJson> {
     let paths = trigger
         .required("paths")?
         .as_array()
-        .ok_or_else(IvyError::internal)?
+        .ok_or(SchedulerFailure::Uncoded)?
         .iter()
-        .map(|v| v.as_js_string().cloned().ok_or_else(IvyError::internal))
-        .collect::<IvyResult<Vec<_>>>()?;
+        .map(|v| v.as_js_string().cloned().ok_or(SchedulerFailure::Uncoded))
+        .collect::<SchedulerResult<Vec<_>>>()?;
     Ok(object_projection(value, &paths))
 }
-fn joined(parts: &[IvyJson]) -> IvyResult<JsString> {
+fn joined(parts: &[IvyJson]) -> SchedulerResult<JsString> {
     let mut result = JsString::default();
     for part in parts {
-        result.0.extend(try_js_string(part)?.0);
+        result.0.extend(coerce_string(part)?.0);
     }
     Ok(result)
 }
-pub(crate) fn revision_number(value: Option<&IvyJson>) -> IvyResult<f64> {
+pub(crate) fn revision_number(value: Option<&IvyJson>) -> SchedulerResult<f64> {
     let n = match value {
         Some(IvyJson::Number(n)) => *n,
         Some(IvyJson::Bool(b)) => {
@@ -66,7 +70,7 @@ pub(crate) fn revision_number(value: Option<&IvyJson>) -> IvyResult<f64> {
         }
         Some(IvyJson::Null) => 0.0,
         Some(v @ (IvyJson::String(_) | IvyJson::Array(_))) => {
-            let s = try_js_string(v)?;
+            let s = coerce_string(v)?;
             let s = String::from_utf16(trimmed(&s.0)).unwrap_or_default();
             if s.is_empty() {
                 0.0
@@ -97,7 +101,7 @@ pub(crate) fn revision_number(value: Option<&IvyJson>) -> IvyResult<f64> {
             }
         }
         Some(v @ IvyJson::Object(_)) => {
-            try_js_string(v)?;
+            coerce_string(v)?;
             f64::NAN
         }
         None => f64::NAN,
@@ -105,7 +109,7 @@ pub(crate) fn revision_number(value: Option<&IvyJson>) -> IvyResult<f64> {
     Ok(n)
 }
 // Only Number(payload.revision)'s positive-safe-integer result is admissible.
-fn object_revision(value: Option<&IvyJson>) -> IvyResult<f64> {
+fn object_revision(value: Option<&IvyJson>) -> SchedulerResult<f64> {
     let n = revision_number(value)?;
     need(
         n.is_finite() && n.fract() == 0.0 && n > 0.0 && n <= 9_007_199_254_740_991.0,
@@ -115,11 +119,11 @@ fn object_revision(value: Option<&IvyJson>) -> IvyResult<f64> {
     Ok(n)
 }
 impl AssignmentScheduler<'_, '_, '_> {
-    pub async fn collect_object_event(
+    pub(crate) async fn collect_object_event_inner(
         &self,
         assignment: &IvyJson,
         event: &IvyJson,
-    ) -> IvyResult<()> {
+    ) -> SchedulerResult<()> {
         let value = assignment.required("value")?;
         let trigger = value.required("trigger")?;
         if trigger.get("kind") != Some(&"object-change".into()) {
@@ -127,11 +131,11 @@ impl AssignmentScheduler<'_, '_, '_> {
         }
         let payload = event.required("payload")?;
         if payload.is_null() {
-            return Err(IvyError::internal());
+            return Err(SchedulerFailure::Uncoded);
         }
         let object_id = payload
             .get("objectId")
-            .map(try_js_string)
+            .map(coerce_string)
             .transpose()?
             .unwrap_or_else(|| "undefined".into());
         let revision = object_revision(payload.get("revision"))?;
@@ -246,12 +250,12 @@ impl AssignmentScheduler<'_, '_, '_> {
             .amend_technical(OBJECT_WINDOW_KEY, &saved.pin, &next)?;
         Ok(())
     }
-    pub async fn flush_due_object_windows(
+    pub(crate) async fn flush_due_object_windows_inner(
         &self,
         assignment: &IvyJson,
         configuration: &IvyJson,
         now: i64,
-    ) -> IvyResult<()> {
+    ) -> SchedulerResult<()> {
         let store = self.evidence.store;
         for saved in store.journal.list(OBJECT_WINDOW_KEY, true)? {
             if saved.value.get("assignmentId") != assignment.required("value")?.get("assignmentId")
@@ -292,7 +296,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                 .get("observation")
                 .filter(|v| !v.is_null())
                 .map(|v| {
-                    Ok::<_, IvyError>(Observation {
+                    Ok::<_, SchedulerFailure>(Observation {
                         complete_path: text(v, "completePath")?,
                         observed_at_path: text(v, "observedAtPath")?,
                         maximum_age_seconds: number(v, "maximumAgeSeconds")?,
@@ -349,11 +353,11 @@ impl AssignmentScheduler<'_, '_, '_> {
         }
         Ok(())
     }
-    pub async fn flush_message_window(
+    pub(crate) async fn flush_message_window_inner(
         &self,
         saved: &Document,
         configuration: &IvyJson,
-    ) -> IvyResult<()> {
+    ) -> SchedulerResult<()> {
         let Some(window) = pending(&saved.value) else {
             return Ok(());
         };
@@ -400,12 +404,12 @@ impl AssignmentScheduler<'_, '_, '_> {
             .amend_technical(MESSAGE_WINDOW_KEY, &saved.pin, &next)?;
         Ok(())
     }
-    pub async fn collect_message_event(
+    pub(crate) async fn collect_message_event_inner(
         &self,
         assignment: &IvyJson,
         event: &IvyJson,
         configuration: &IvyJson,
-    ) -> IvyResult<()> {
+    ) -> SchedulerResult<()> {
         let absent = IvyJson::Null;
         let payload = event
             .get("payload")
@@ -458,7 +462,7 @@ impl AssignmentScheduler<'_, '_, '_> {
         )?;
         if let Some(window) = saved.as_ref().and_then(|s| pending(&s.value)) {
             if occurred_at >= parse_date(&text(window, "dueAt")?) {
-                self.flush_message_window(saved.as_ref().unwrap(), configuration)
+                self.flush_message_window_inner(saved.as_ref().unwrap(), configuration)
                     .await?;
                 saved = journal.named(MESSAGE_WINDOW_KEY, &name, true)?;
             }
@@ -469,7 +473,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                 let mut ids = window
                     .required("itemIds")?
                     .as_array()
-                    .ok_or_else(IvyError::internal)?
+                    .ok_or(SchedulerFailure::Uncoded)?
                     .to_vec();
                 ids.push(item_id.clone());
                 next.insert("itemIds", IvyJson::Array(ids));
@@ -477,7 +481,7 @@ impl AssignmentScheduler<'_, '_, '_> {
             let mut ids = window
                 .required("eventIds")?
                 .as_array()
-                .ok_or_else(IvyError::internal)?
+                .ok_or(SchedulerFailure::Uncoded)?
                 .to_vec();
             ids.push(IvyJson::String(event_id.unwrap().clone()));
             next.insert("eventIds", IvyJson::Array(ids));
@@ -522,22 +526,78 @@ impl AssignmentScheduler<'_, '_, '_> {
         }
         Ok(())
     }
+    pub(crate) async fn flush_due_message_windows_inner(
+        &self,
+        assignment: &IvyJson,
+        configuration: &IvyJson,
+        now: i64,
+    ) -> SchedulerResult<()> {
+        for saved in self.evidence.store.journal.list(MESSAGE_WINDOW_KEY, true)? {
+            if saved.value.get("assignmentId") == assignment.required("value")?.get("assignmentId")
+            {
+                if let Some(window) = pending(&saved.value) {
+                    if parse_date(&text(window, "dueAt")?) <= now as f64 {
+                        self.flush_message_window_inner(&saved, configuration)
+                            .await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn coerce_string(value: &IvyJson) -> SchedulerResult<JsString> {
+    untyped(try_js_string(value))
+}
+
+impl AssignmentScheduler<'_, '_, '_> {
+    pub async fn collect_object_event(
+        &self,
+        assignment: &IvyJson,
+        event: &IvyJson,
+    ) -> IvyResult<()> {
+        self.collect_object_event_inner(assignment, event)
+            .await
+            .map_err(IvyError::from)
+    }
+    pub async fn flush_due_object_windows(
+        &self,
+        assignment: &IvyJson,
+        configuration: &IvyJson,
+        now: i64,
+    ) -> IvyResult<()> {
+        self.flush_due_object_windows_inner(assignment, configuration, now)
+            .await
+            .map_err(IvyError::from)
+    }
+    pub async fn flush_message_window(
+        &self,
+        saved: &Document,
+        configuration: &IvyJson,
+    ) -> IvyResult<()> {
+        self.flush_message_window_inner(saved, configuration)
+            .await
+            .map_err(IvyError::from)
+    }
+    pub async fn collect_message_event(
+        &self,
+        assignment: &IvyJson,
+        event: &IvyJson,
+        configuration: &IvyJson,
+    ) -> IvyResult<()> {
+        self.collect_message_event_inner(assignment, event, configuration)
+            .await
+            .map_err(IvyError::from)
+    }
     pub async fn flush_due_message_windows(
         &self,
         assignment: &IvyJson,
         configuration: &IvyJson,
         now: i64,
     ) -> IvyResult<()> {
-        for saved in self.evidence.store.journal.list(MESSAGE_WINDOW_KEY, true)? {
-            if saved.value.get("assignmentId") == assignment.required("value")?.get("assignmentId")
-            {
-                if let Some(window) = pending(&saved.value) {
-                    if parse_date(&text(window, "dueAt")?) <= now as f64 {
-                        self.flush_message_window(&saved, configuration).await?;
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.flush_due_message_windows_inner(assignment, configuration, now)
+            .await
+            .map_err(IvyError::from)
     }
 }

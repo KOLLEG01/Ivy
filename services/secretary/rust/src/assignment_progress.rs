@@ -1,4 +1,5 @@
 //! Assignment retirement and durable, revision-aware schedule catch-up.
+use crate::assignment_error::{SchedulerFailure, SchedulerResult, untyped};
 use crate::{
     assignment_scheduler::AssignmentScheduler,
     assignment_schema::{assignment_name, validate_assignment},
@@ -13,30 +14,33 @@ use ivy_sdk::{
 };
 use std::collections::HashMap;
 
-fn need(ok: bool, code: &str, message: &str) -> IvyResult<()> {
+fn need(ok: bool, code: &str, message: &str) -> SchedulerResult<()> {
     if ok {
         Ok(())
     } else {
-        Err(IvyError::new(code, message))
+        Err(IvyError::new(code, message).into())
     }
 }
-fn text(value: &IvyJson, key: &str) -> IvyResult<JsString> {
+fn text(value: &IvyJson, key: &str) -> SchedulerResult<JsString> {
     value
         .required(key)?
         .as_js_string()
         .cloned()
-        .ok_or_else(IvyError::internal)
+        .ok_or(SchedulerFailure::Uncoded)
 }
-fn time(value: &IvyJson, key: &str) -> IvyResult<f64> {
+fn time(value: &IvyJson, key: &str) -> SchedulerResult<f64> {
     Ok(parse_date(&text(value, key)?))
 }
-fn iso(value: f64) -> IvyResult<JsString> {
+fn iso(value: f64) -> SchedulerResult<JsString> {
     // A failed Date.toISOString is an ordinary JavaScript exception.
-    date_to_iso(value).map_err(|_| IvyError::internal())
+    date_to_iso(value).map_err(SchedulerFailure::uncoded)
 }
-fn written_at(document: &IvyJson, fallback: &str) -> IvyResult<JsString> {
+fn written_at(document: &IvyJson, fallback: &str) -> SchedulerResult<JsString> {
     match document.get("writtenAt").filter(|v| !v.is_null()) {
-        Some(value) => value.as_js_string().cloned().ok_or_else(IvyError::internal),
+        Some(value) => value
+            .as_js_string()
+            .cloned()
+            .ok_or(SchedulerFailure::Uncoded),
         None => text(document.required("value")?, fallback),
     }
 }
@@ -113,20 +117,20 @@ impl SchedulerAssignments {
         for row in page
             .required("items")?
             .as_array()
-            .ok_or_else(IvyError::internal)?
+            .ok_or(SchedulerFailure::Uncoded)?
         {
             let object_id = text(row, "objectId")?;
             let issue_key = format!("assignment-record:{}", object_id.to_utf8()?);
-            let outcome: IvyResult<Option<IvyJson>> = async {
+            let outcome: SchedulerResult<Option<IvyJson>> = async {
                 let values = row.required("values")?;
                 let archived =
                     values.get("object.effectivelyArchived") == Some(&IvyJson::Bool(true));
-                let mut retirement = try_js_string(row.required("revision")?)?;
+                let mut retirement = coerce_string(row.required("revision")?)?;
                 retirement.0.push(58);
                 retirement.0.extend(
                     values
                         .get("object.archivedAt")
-                        .map(try_js_string)
+                        .map(coerce_string)
                         .transpose()?
                         .unwrap_or_else(|| "undefined".into())
                         .0,
@@ -212,9 +216,9 @@ impl SchedulerAssignments {
                 Ok(Some(assignment)) => result.push(assignment),
                 Ok(None) => (),
                 Err(error) if evidence.cancellation.cancellation.is_cancelled() => {
-                    return Err(error);
+                    return Err(error.into());
                 }
-                Err(error) => issues.issue(&issue_key, &error.code),
+                Err(error) => issues.issue(&issue_key, &error.code("secretary_assignment_invalid")),
             }
         }
         Ok(result)
@@ -222,12 +226,12 @@ impl SchedulerAssignments {
 }
 
 impl AssignmentScheduler<'_, '_, '_> {
-    pub fn occurrences(
+    pub(crate) fn occurrences_inner(
         &self,
         assignment: &IvyJson,
         now: i64,
         checked_at: &JsString,
-    ) -> IvyResult<IvyJson> {
+    ) -> SchedulerResult<IvyJson> {
         let since = parse_date(checked_at);
         need(
             since.is_finite(),
@@ -271,7 +275,7 @@ impl AssignmentScheduler<'_, '_, '_> {
                 minutes: trigger
                     .required("intervalMinutes")?
                     .as_f64()
-                    .ok_or_else(IvyError::internal)? as u32,
+                    .ok_or(SchedulerFailure::Uncoded)? as u32,
             }
         } else {
             Schedule::Civil {
@@ -289,10 +293,10 @@ impl AssignmentScheduler<'_, '_, '_> {
                 .settings
                 .required("recordsPerTick")?
                 .as_f64()
-                .ok_or_else(IvyError::internal)? as u32,
+                .ok_or(SchedulerFailure::Uncoded)? as u32,
             |at, zone| {
-                let p = TimeZone::local_parts(at, zone)?;
-                Ok::<_, IvyError>(LocalMinute {
+                let p = untyped(TimeZone::local_parts(at, zone))?;
+                Ok::<_, SchedulerFailure>(LocalMinute {
                     date: format!("{:04}-{:02}-{:02}", p.year, p.month, p.day),
                     time: format!("{:02}:{:02}", p.hour, p.minute),
                     weekday: p.weekday as u8,
@@ -334,18 +338,18 @@ impl AssignmentScheduler<'_, '_, '_> {
                     ("payload", payload),
                 ]))
             })
-            .collect::<IvyResult<Vec<_>>>()?;
+            .collect::<SchedulerResult<Vec<_>>>()?;
         Ok(IvyJson::object([
             ("items", IvyJson::Array(items)),
             ("checkedAt", IvyJson::String(iso(page.checked_at as f64)?)),
         ]))
     }
-    pub async fn schedules(
+    pub(crate) async fn schedules_inner(
         &self,
         assignment: &IvyJson,
         configuration: &IvyJson,
         now: i64,
-    ) -> IvyResult<()> {
+    ) -> SchedulerResult<()> {
         let value = assignment.required("value")?;
         let assignment_id = text(value, "assignmentId")?;
         let pin = assignment.required("pin")?;
@@ -420,11 +424,11 @@ impl AssignmentScheduler<'_, '_, '_> {
                 .required("assignment")?
                 .required("revision")?
                 .as_f64()
-                .ok_or_else(IvyError::internal)?;
+                .ok_or(SchedulerFailure::Uncoded)?;
             let latest = pin
                 .required("revision")?
                 .as_f64()
-                .ok_or_else(IvyError::internal)?;
+                .ok_or(SchedulerFailure::Uncoded)?;
             if retained > latest {
                 return Ok(());
             }
@@ -457,7 +461,7 @@ impl AssignmentScheduler<'_, '_, '_> {
             let result = if progress.required("assignmentSnapshot")?.get("enabled")
                 == Some(&IvyJson::Bool(true))
             {
-                self.occurrences(
+                self.occurrences_inner(
                     progress.required("assignmentSnapshot")?,
                     through,
                     &text(progress, "checkedAt")?,
@@ -478,7 +482,7 @@ impl AssignmentScheduler<'_, '_, '_> {
             let items = result
                 .required("items")?
                 .as_array()
-                .ok_or_else(IvyError::internal)?;
+                .ok_or(SchedulerFailure::Uncoded)?;
             for occurrence in items {
                 self.enqueue(&original, occurrence, configuration).await?;
             }
@@ -508,5 +512,31 @@ impl AssignmentScheduler<'_, '_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+fn coerce_string(value: &IvyJson) -> SchedulerResult<JsString> {
+    untyped(try_js_string(value))
+}
+
+impl AssignmentScheduler<'_, '_, '_> {
+    pub fn occurrences(
+        &self,
+        assignment: &IvyJson,
+        now: i64,
+        checked_at: &JsString,
+    ) -> IvyResult<IvyJson> {
+        self.occurrences_inner(assignment, now, checked_at)
+            .map_err(IvyError::from)
+    }
+    pub async fn schedules(
+        &self,
+        assignment: &IvyJson,
+        configuration: &IvyJson,
+        now: i64,
+    ) -> IvyResult<()> {
+        self.schedules_inner(assignment, configuration, now)
+            .await
+            .map_err(IvyError::from)
     }
 }
