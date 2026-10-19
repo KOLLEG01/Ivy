@@ -4,6 +4,8 @@ use ivy_contracts::{
 use ivy_task_board::turn_output::*;
 use std::{path::Path, process::Command};
 
+#[path = "../fixtures/task-board-frozen-contracts.rs"]
+mod frozen_contracts;
 #[path = "../fixtures/task-board-inspector.rs"]
 mod inspector;
 #[path = "../fixtures/task-board-signals.rs"]

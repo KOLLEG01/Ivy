@@ -15,7 +15,8 @@ const {toolDefinitionHash}=await import('../../packages/contracts/src/tool-defin
 // An explicit isolated catalog, not the accepted TaskBoard registry/contract overlay.
 const definition={namespace:'task-board',name:'workspace',description:'Isolated owner invocation.',interfaceVersion:'1.0.0',inputSchema:{},outputSchema:{}};
 const actionDefinition={...definition,name:'update',description:'Isolated retained action invocation.'};
-const registry={namespaces:[{namespace:'task-board',description:'Fixture',guideMarkdown:'',tools:[definition,...(process.argv.includes('--engine')?[actionDefinition]:[])],topics:[],inventoryKinds:[]}],contracts:[],requiredContracts:[]};
+const factory=process.argv.includes('--factory');
+const registry={namespaces:[{namespace:'task-board',description:'Fixture',guideMarkdown:'',tools:[definition,...(process.argv.includes('--engine')||factory?[actionDefinition]:[])],topics:[],inventoryKinds:[]}],contracts:[],requiredContracts:[]};
 const wss=new WebSocketServer({host:'127.0.0.1',port:0,perMessageDeflate:false,maxPayload:32*1024*1024});
 await once(wss,'listening');
 console.log(JSON.stringify({url:`http://127.0.0.1:${wss.address().port}/ivy/`,registry}));
@@ -40,6 +41,10 @@ wss.on('connection',(socket,request)=>{
     else if(method==='objects.stat'&&selected===1&&params.objectId==='missing-root')send({jsonrpc:'2.0',id,error:{code:-32000,message:'Refused root.',data:{code:'fixture_refusal',outcome:'unknown',details:{phase:'root'}}}});
     else if(['registry.sync','notifications.subscribe','objects.stat'].includes(method))reply(id,{});
     else if(method==='serviceNodes.get')reply(id,{serviceNodeId:params.serviceNodeId,serviceName:'task-board',connected:true,synced:true,principalId:'fixture-principal'});
+    else if(factory&&method==='system.status')reply(id,{runtimeEpoch:'11111111-1111-4111-8111-111111111111'});
+    else if(factory&&method==='events.head')reply(id,{throughSequence:0});
+    else if(factory&&method==='events.subscribe')reply(id,{items:[],throughSequence:0,gap:null});
+    else if(factory&&method==='events.ack')reply(id,{});
     else if(method==='test.invoke'||method==='test.invokeAction'){
       const key='invoke-'+(++invocation);pending.set(key,id);
       const tool=method==='test.invoke'?definition:actionDefinition;

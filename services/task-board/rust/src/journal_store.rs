@@ -40,6 +40,23 @@ pub trait Contracts {
     fn validate_record(&self, key: &str, version: &JsString, value: &Json) -> IvyResult<()>;
     fn validate_definition(&self, name: &str, value: &Json) -> IvyResult<()>;
 }
+impl<P: Contracts + ?Sized> Contracts for &P {
+    fn version(&self, key: &str) -> IvyResult<String> {
+        (**self).version(key)
+    }
+    fn local(&self, key: &str) -> IvyResult<bool> {
+        (**self).local(key)
+    }
+    fn readable_version(&self, key: &str, version: &JsString) -> IvyResult<bool> {
+        (**self).readable_version(key, version)
+    }
+    fn validate_record(&self, key: &str, version: &JsString, value: &Json) -> IvyResult<()> {
+        (**self).validate_record(key, version, value)
+    }
+    fn validate_definition(&self, name: &str, value: &Json) -> IvyResult<()> {
+        (**self).validate_definition(name, value)
+    }
+}
 
 #[derive(Clone)]
 struct ReadRecord {

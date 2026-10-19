@@ -7,6 +7,7 @@ pub mod coordination;
 pub mod deliveries;
 pub mod engine_admission;
 pub mod engine_invocations;
+pub mod engine_factory;
 pub mod engine_service;
 pub mod service_bridge;
 pub mod generation;
