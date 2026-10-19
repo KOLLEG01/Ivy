@@ -167,8 +167,8 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
         })
         .await
     }
-    pub async fn stop(&self) {
+    pub fn stop(&self) -> impl Future<Output = ()> + '_ {
         self.stop_admissions();
-        self.settled().await;
+        self.settled()
     }
 }

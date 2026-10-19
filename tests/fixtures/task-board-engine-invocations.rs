@@ -284,9 +284,9 @@ async fn abandoned_admission_survives_pending_owner_then_nested_execution_and_re
 
 #[tokio::test(flavor = "current_thread")]
 async fn retirement_keeps_parallel_results_errors_and_unwinding_work_separate() {
+    let gate = Gate::default();
     let executor = Executor::default();
     let invocations = EngineInvocations::new(&executor);
-    let gate = Gate::default();
     let first = invocations
         .run(async {
             gate.wait().await;
@@ -304,7 +304,11 @@ async fn retirement_keeps_parallel_results_errors_and_unwinding_work_separate() 
     let panicked = invocations
         .run(async { panic!("owner task panic") })
         .unwrap();
-    invocations.stop_admissions();
+    let mut stop = Box::pin(invocations.stop());
+    assert!(
+        invocations.run(async { Ok(Json::Null) }).is_err(),
+        "Stop closes entry before its drain future is polled."
+    );
     // The same unwind boundary used by a local owner: dropping its failed job
     // releases accounting, but reports an uncertain result to a live observer.
     let mut work = executor.work.borrow_mut().pop_back().unwrap();
@@ -320,7 +324,6 @@ async fn retirement_keeps_parallel_results_errors_and_unwinding_work_separate() 
     let failure = panicked.await.unwrap_err();
     assert_eq!(failure.code_js(), JsString::from("internal_error"));
     assert_eq!(failure.outcome, Outcome::Unknown);
-    let mut stop = Box::pin(invocations.stop());
     poll_fn(|cx| {
         executor.step(cx);
         assert!(stop.as_mut().poll(cx).is_pending());
