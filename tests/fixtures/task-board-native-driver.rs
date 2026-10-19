@@ -47,8 +47,9 @@ fn merge(v: &Json, p: Option<&Json>) -> Json {
     }
     v
 }
-fn event(log: &RefCell<Vec<Json>>, items: impl IntoIterator<Item = Json>) {
-    log.borrow_mut()
+fn event(log: &Arc<Mutex<Vec<Json>>>, items: impl IntoIterator<Item = Json>) {
+    log.lock()
+        .unwrap()
         .push(Json::Array(items.into_iter().collect()));
 }
 fn failure(code: JsString) -> IvyError {
@@ -95,7 +96,7 @@ impl RpcClient for NoRpc {
     }
 }
 struct State {
-    log: RefCell<Vec<Json>>,
+    log: Arc<Mutex<Vec<Json>>>,
     fault: RefCell<Json>,
     scopes: RefCell<HashMap<String, JsString>>,
     identities: Cell<u64>,
@@ -409,7 +410,7 @@ async fn durable_preparation_matches_original_replays_races_guards_and_uncertain
                 cache: None,
             };
             let state = State {
-                log: RefCell::default(),
+                log: Arc::default(),
                 fault: RefCell::new(
                     input
                         .get("fault")
@@ -473,7 +474,7 @@ async fn durable_preparation_matches_original_replays_races_guards_and_uncertain
                     )
                     .unwrap();
             }
-            state.log.borrow_mut().clear();
+            state.log.lock().unwrap().clear();
             let driver = NativeDriver {
                 store: &trace,
                 runtime: &state,
@@ -535,7 +536,7 @@ async fn durable_preparation_matches_original_replays_races_guards_and_uncertain
             }
             let actual = Json::object([
                 ("outcomes", Json::Array(outcomes)),
-                ("trace", Json::Array(state.log.into_inner())),
+                ("trace", Json::Array(state.log.lock().unwrap().clone())),
                 ("calls", calls(&db)),
             ]);
             assert_eq!(
@@ -598,20 +599,20 @@ async fn real_runtime_identity_survives_journal_reopen_on_its_live_connection() 
         requests: Mutex::default(),
     });
     let updates = Arc::new(Mutex::new(Vec::<Json>::new()));
-    let runtime = DriverRuntime {
-        client: client.clone(),
-        principal_id: "workflow-owner".into(),
-        service_node_id: "workflow-service".into(),
-        native_update: |r: Json| {
+    let runtime = DriverRuntime::new(
+        client.clone(),
+        "workflow-owner".into(),
+        "workflow-service".into(),
+        |r: Json| {
             updates.lock().unwrap().push(r);
             std::future::ready(Ok(Json::Null))
         },
-        now: || JsString::from(TIME),
-    };
+        || JsString::from(TIME),
+    );
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     let state = State {
-        log: RefCell::default(),
+        log: Arc::default(),
         fault: RefCell::new(Json::Null),
         scopes: RefCell::default(),
         identities: Cell::new(0),
@@ -702,15 +703,15 @@ async fn real_runtime_identity_survives_journal_reopen_on_its_live_connection() 
         Json::object([("kind", "initial".into())]),
     ]);
     let retained = runtime.scoped_operation_id(&scope).await.unwrap();
-    let fresh = DriverRuntime {
-        client: Arc::new(Client {
+    let fresh = DriverRuntime::new(
+        Arc::new(Client {
             requests: Mutex::default(),
         }),
-        principal_id: "workflow-owner".into(),
-        service_node_id: "workflow-service".into(),
-        native_update: |_: Json| std::future::ready(Ok(Json::Null)),
-        now: || JsString::from(TIME),
-    };
+        "workflow-owner".into(),
+        "workflow-service".into(),
+        |_: Json| std::future::ready(Ok(Json::Null)),
+        || JsString::from(TIME),
+    );
     let fresh_id = fresh.scoped_operation_id(&scope).await.unwrap();
     assert_ne!(
         retained, fresh_id,
@@ -733,15 +734,18 @@ async fn real_runtime_identity_survives_journal_reopen_on_its_live_connection() 
             2
         );
     }
-    let wrong = DriverRuntime {
-        client: client.clone(),
-        principal_id: "wrong-owner".into(),
-        service_node_id: "workflow-service".into(),
-        native_update: |_: Json| std::future::ready(Ok(Json::Null)),
-        now: || JsString::from(TIME),
-    };
+    let wrong = DriverRuntime::new(
+        client.clone(),
+        "wrong-owner".into(),
+        "workflow-service".into(),
+        |_: Json| std::future::ready(Ok(Json::Null)),
+        || JsString::from(TIME),
+    );
     assert_eq!(
         wrong.verify_owner().await.unwrap_err().code,
         "task_board_principal_mismatch"
     );
 }
+
+#[path = "task-board-native-resume.rs"]
+mod resume;
