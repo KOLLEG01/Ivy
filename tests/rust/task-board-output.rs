@@ -20,6 +20,8 @@ mod native_publication;
 mod categories;
 #[path = "../fixtures/task-board-engine-read.rs"]
 mod engine_read;
+#[path = "../fixtures/task-board-engine-execution.rs"]
+mod engine_execution;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {
