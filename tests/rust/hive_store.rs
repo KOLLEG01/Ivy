@@ -4,6 +4,8 @@ use ivy_hive::store::{
 };
 #[path = "hive_contracts.rs"]
 mod contracts;
+#[path = "hive_events.rs"]
+mod events;
 #[path = "hive_ledger.rs"]
 mod ledger;
 #[path = "hive_object_delete.rs"]
@@ -165,6 +167,13 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                     json!({"kind":kind,"data":data,"byteLength":result.byte_length,"contentHash":result.content_hash})
                 })
             }
+            "events" => events::native_event(&mut store, step).map(|value| {
+                if step["lossless"] == true {
+                    json!({"encoded":stringify(&value,1<<26).unwrap()})
+                } else {
+                    wire(value)
+                }
+            }),
             "write" => object_write::native_write(&mut store, step).map(wire),
             "readObject" => ivy_hive::objects::read(
                 &store,

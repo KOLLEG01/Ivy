@@ -113,6 +113,7 @@ pub(super) fn compare(steps: &[Value]) -> Value {
     }
     assert_eq!(actual["definitions"], expected["definitions"]);
     assert_eq!(actual["metadata"], expected["metadata"]);
+    assert_eq!(actual["topics"], expected["topics"]);
     expected
 }
 fn object<'a>(rows: &'a Value, index: usize, id: &str) -> &'a Value {

@@ -52,7 +52,7 @@ impl Store {
             .map(JsString::from)
             .ok_or_else(IvyError::internal)
     }
-    pub(super) fn metadata_number(&self, key: &str) -> IvyResult<f64> {
+    pub(crate) fn metadata_number(&self, key: &str) -> IvyResult<f64> {
         Ok(number_from_string(
             &self.metadata(key)?.unwrap_or_else(|| "0".into()).into(),
         ))

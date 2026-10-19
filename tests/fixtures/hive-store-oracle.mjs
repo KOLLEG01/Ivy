@@ -12,6 +12,7 @@ registerHooks({resolve(specifier,context,next){
 }});
 const {HiveStore}=await import('../../services/hive/src/store.ts');
 const {Objects}=await import('../../services/hive/src/objects.ts');
+const {Events}=await import('../../services/hive/src/events.ts');
 const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const input=JSON.parse(readFileSync(0,'utf8'));
 let store;
@@ -65,6 +66,30 @@ try {
         },step.overdue?-1:10000);
         if(step.watchChanges)value={result:value,changes:Number(store.get('SELECT total_changes() AS n').n)-changes};
       }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;syncBuiltinESMExports();}
+      break;
+    }
+    case 'events':{
+      const RealDate=Date;
+      if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
+      globalThis.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[step.now]));}static now(){return step.now;}};
+      try{
+        const events=new Events(store),params=structuredClone(step.params);
+        for(const [pointer,units]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...units));
+        const context=step.context?{...store.authenticate(step.context),serviceNodeId:step.context.serviceNodeId,generation:1}:null;
+        value=store.withBudget(()=>{
+          switch(step.method){
+            case 'registerTopic':events.registerTopic(params,step.owner);return null;
+            case 'publish':return events.publish(context,params);
+            case 'subscribe':return events.subscribe(context,params);
+            case 'ack':return events.ack(context,params);
+            case 'unsubscribe':return events.unsubscribe(context,params);
+            case 'read':return events.read(params);
+            case 'head':return events.head();
+            default:throw Error('Unknown event method');
+          }
+        },step.overdue?-1:10000);
+        if(step.lossless)value={encoded:JSON.stringify(value)};
+      }finally{globalThis.Date=RealDate;}
       break;
     }
     case 'readObject':value=new Objects(store).read({objectId:step.objectId,revision:step.revision});break;
