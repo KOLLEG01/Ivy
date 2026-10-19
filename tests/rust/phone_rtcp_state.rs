@@ -115,15 +115,15 @@ fn original_reception_statistics_match_controlled_clock_wrap_loss_and_sampling_i
         let mut next = 0;
         for action in input.get("actions").unwrap().as_array().unwrap() {
             let a = action.as_array().unwrap();
-            let value = |i| a[i].as_f64().unwrap() as u32;
-            match a[0].as_str().unwrap() {
+            let value = |i: usize| a[i].as_f64().unwrap() as u32;
+            match a[0].as_str().unwrap().as_str() {
                 "rx" => state.record(value(1) as u16, value(2), value(3)),
                 "sr" => {
-                    assert_eq!(trace[next].get("kind").unwrap().as_str(), Some("sr"));
+                    assert_eq!(trace[next].get("kind").unwrap().as_str().unwrap(), "sr");
                     let received =
                         trace[next].get("receivedNtp32").unwrap().as_f64().unwrap() as u32;
                     state.sender_report(
-                        u64::from_str_radix(a[1].as_str().unwrap(), 16).unwrap(),
+                        u64::from_str_radix(&a[1].as_str().unwrap(), 16).unwrap(),
                         received,
                     );
                     next += 1;
@@ -196,8 +196,8 @@ fn report_schedule_matches_actual_original_timer_callbacks_sr_rr_and_timeout_lat
     assert_eq!(trace[1].get("sender").unwrap().as_bool(), Some(false));
     assert_eq!(trace[2].get("bye").unwrap().as_bool(), Some(true));
     assert_eq!(
-        trace[2].get("reason").unwrap().as_str(),
-        Some("phone_media_closed")
+        trace[2].get("reason").unwrap().as_str().unwrap(),
+        "phone_media_closed"
     );
     for point in trace {
         assert_eq!(point.get("timeouts").unwrap().as_f64(), Some(1.0));
