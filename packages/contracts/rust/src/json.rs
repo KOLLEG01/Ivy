@@ -2,6 +2,8 @@ use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
 #[path = "json_number.rs"]
 mod number;
+#[path = "json_trim.rs"]
+mod trim;
 #[path = "json_value.rs"]
 mod value_traits;
 pub use number::number_from_string;
@@ -20,6 +22,30 @@ impl From<String> for JsString {
     }
 }
 impl JsString {
+    /// ECMAScript String.normalize("NFC"), preserving unpaired UTF-16 units.
+    pub fn normalize_nfc(&self) -> Self {
+        self.map_unicode_segments(|value| {
+            icu_normalizer::ComposingNormalizer::new_nfc()
+                .normalize(value)
+                .into_owned()
+        })
+    }
+    fn map_unicode_segments(&self, mapping: fn(&str) -> String) -> Self {
+        let mut output = Vec::new();
+        let mut segment = String::new();
+        for c in char::decode_utf16(self.0.iter().copied()) {
+            match c {
+                Ok(c) => segment.push(c),
+                Err(error) => {
+                    output.extend(mapping(&segment).encode_utf16());
+                    segment.clear();
+                    output.push(error.unpaired_surrogate());
+                }
+            }
+        }
+        output.extend(mapping(&segment).encode_utf16());
+        Self(output)
+    }
     pub fn contains_ascii(&self, needle: &str) -> bool {
         debug_assert!(needle.is_ascii());
         needle.is_empty()
