@@ -593,7 +593,7 @@ impl<S: LifecycleStore, C: Fn() -> String, R: EngineReadRuntime> EngineReads<'_,
                 .write(
                     "task-board/comment-read-state",
                     &value,
-                    &mutation(&name, &step)?,
+                    &mutation(&JsString::from(name.as_str()), &step)?,
                     &destination,
                 )
                 .await
