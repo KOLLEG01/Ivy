@@ -61,6 +61,9 @@ impl Scenario {
         current.insert("originalRequest", request);
         current.insert("attempt", Json::Number(2.0));
         current.insert("phase", "completed".into());
+        current.insert("primaryResourceRef", f(&task, "primaryResourceRef").clone());
+        current.insert("turnId", "newer-turn".into());
+        current.insert("nativeEpoch", "epoch".into());
         current.insert("result", pin("current-result"));
         current.insert("cancellation", Json::Null);
         current.insert("finishedAt", clock().into());
@@ -76,12 +79,23 @@ impl Scenario {
         if self.current_run {
             task.insert("lastRun", pin("newer-run"));
         }
-        vec![
+        let records = vec![
             ("task-board/result", current_result, "current-result"),
             ("task-board/run", current, "newer-run"),
             ("task-board/run", run, "run"),
             ("task-board/task", task, "task"),
-        ]
+        ];
+        for (key, value, id) in &records {
+            let definition = match *key {
+                "task-board/task" => "Task",
+                "task-board/run" => "Run",
+                "task-board/result" => "Result",
+                _ => unreachable!(),
+            };
+            admission(definition, value)
+                .unwrap_or_else(|error| panic!("Invalid retirement seed {id}: {error:?}"));
+        }
+        records
     }
     pub(super) fn bind(&self, context: &Context<'_>) -> IvyResult<()> {
         if context.owner.generation == 3.0 {
@@ -243,6 +257,8 @@ async fn retired_unstarted_runs_recover_terminal_publication_without_replacing_c
                 response: RefCell::default(),
             });
             let scenario = fixture.retirement.as_ref().unwrap();
+            // Refuse an invalid seed before starting an asynchronous owner.
+            let _ = scenario.records();
             let contracts = ContractsBinding;
             let catalogs =
                 CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
