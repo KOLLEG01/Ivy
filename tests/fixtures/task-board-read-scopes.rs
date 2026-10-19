@@ -9,6 +9,7 @@ use ivy_task_board::{
     journal_store::{Contracts, JournalStore, ReadScopes},
     local_journal::{LocalJournal, initialize},
     local_retention::HistoryLimits,
+    operations::Store,
     reconciler::ReconcileExecutor,
 };
 use std::{
@@ -359,7 +360,7 @@ async fn action_scopes_match_original_async_local_store_including_retained_submi
                     ("mark", "v1".into()),
                     (
                         "nested",
-                        Json::object([("list", Json::Array(vec![1.0.into()]))]),
+                        Json::object([("list", Json::Array(vec![Json::Number(1.0)]))]),
                     ),
                 ]),
                 &TIME.into(),
