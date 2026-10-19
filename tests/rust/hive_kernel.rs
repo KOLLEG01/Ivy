@@ -12,6 +12,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+#[path = "hive_kernel_domains.rs"]
+mod domains;
 
 fn options() -> Options {
     Options {
@@ -24,6 +26,12 @@ fn options() -> Options {
 }
 fn compose(path: &Path, profile: &Value, clock: Rc<Cell<f64>>) -> Kernel {
     let mut store = Store::open(path).unwrap();
+    let cursor_secret = "0123456789abcdef".repeat(4);
+    if store.metadata("cursor_secret").unwrap().as_deref() != Some(cursor_secret.as_str()) {
+        store.set_metadata("cursor_secret", &cursor_secret).unwrap();
+        drop(store);
+        store = Store::open(path).unwrap();
+    }
     let runtime = Rc::new(registry::ObservedRuntime::new(profile));
     store.bind_query_runtime(Arc::new(registry::ObservedRuntime::new(profile)));
     let registry = Rc::new(RefCell::new(
@@ -67,6 +75,11 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
     let clock = Rc::new(Cell::new(100000.0));
     let mut kernel = Some(compose(path, profile, clock.clone()));
     let mut observations = vec![];
+    let inventory_trace = steps.iter().any(|step| {
+        step["request"]["method"]
+            .as_str()
+            .is_some_and(|method| method.starts_with("inventory."))
+    });
     for original in steps {
         let mut step = original.clone();
         if step["identityBindings"].is_array() {
@@ -108,6 +121,34 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                         &registry::ObservedRuntime::new(profile),
                         clock.get(),
                     ),
+                    "pageError" => {
+                        let params = IvyJson::from_serde(&step["params"]).unwrap();
+                        let mut identity = IvyJson::object([("method", "fixture.pager".into())]);
+                        for (key, value) in params.as_object().unwrap() {
+                            if key != &JsString::from("cursor") {
+                                identity.insert(key.clone(), value.clone());
+                            }
+                        }
+                        ivy_hive::paging::try_catalog_page(
+                            &kernel.parts.store,
+                            &mut [
+                                IvyJson::object([("id", "a".into())]),
+                                IvyJson::object([("id", "b".into())]),
+                            ],
+                            &identity,
+                            |_| {
+                                Err(IvyError::new(
+                                    "fixture_failure",
+                                    "Catalog key requested failure.",
+                                ))
+                            },
+                            params
+                                .get("limit")
+                                .and_then(IvyJson::as_f64)
+                                .map(|v| v as usize),
+                            params.get("cursor").and_then(IvyJson::as_js_string),
+                        )
+                    }
                     _ => panic!("Unexpected kernel fixture method"),
                 },
                 "configure" => kernel
@@ -145,7 +186,22 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
             Err(e) => (Value::Null, wire(e.to_wire())),
         };
         let registry = kernel.parts.registry.borrow();
-        observations.push(json!({"value":value,"error":error,"state":snapshot(&kernel.parts.store,&step),
+        let mut state = snapshot(&kernel.parts.store, &step);
+        state["deploymentReports"] = rows(
+            &kernel.parts.store,
+            "SELECT * FROM deployment_reports ORDER BY host_id,deployment_id",
+        );
+        if inventory_trace {
+            state["inventorySets"] = rows(
+                &kernel.parts.store,
+                "SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind",
+            );
+            state["inventory"] = rows(
+                &kernel.parts.store,
+                "SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id",
+            );
+        }
+        observations.push(json!({"value":value,"error":error,"state":state,
             "registry":{"changedNodes":registry.changed_nodes().iter().map(|v|&v.0).collect::<Vec<_>>(),
             "changedGenerations":registry.changed_generations().iter().map(|(id,g)|json!([id.0,wire(IvyJson::Number(*g))])).collect::<Vec<_>>()}}));
     }

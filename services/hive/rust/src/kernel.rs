@@ -15,6 +15,8 @@ use ivy_contracts::{
     validation::validate_request,
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+#[path = "kernel_catalogs.rs"]
+mod catalogs;
 
 pub struct Options {
     pub version: JsString,
@@ -154,8 +156,20 @@ impl Kernel {
             "hostConfigurations.edit",
             "hostConfigurations.save",
             "hostConfigurations.history",
+            "inventory.sync",
+            "inventory.get",
+            "inventory.list",
+            "events.publish",
+            "events.subscribe",
+            "events.ack",
+            "events.unsubscribe",
+            "retention.preview",
+            "retention.status",
         ] {
             kernel.add(method, domain)?;
+        }
+        for method in catalogs::METHODS {
+            kernel.add(method, catalogs::handle)?;
         }
         Ok(kernel)
     }
@@ -559,6 +573,63 @@ fn domain(
         }
         "events.head" => events::head(call.store),
         "events.read" => events::read(call.store, params),
+        "events.publish" => {
+            service(context)?;
+            let now = (call.clock)();
+            events::publish(
+                call.store,
+                &principal(context)?,
+                string(context, "serviceNodeId")?,
+                params,
+                now as u64,
+                &call.runtime.iso_date(now)?,
+            )
+        }
+        "events.subscribe" => {
+            service(context)?;
+            events::subscribe(call.store, string(context, "serviceNodeId")?, params)
+        }
+        "events.ack" => {
+            service(context)?;
+            events::ack(call.store, string(context, "serviceNodeId")?, params)
+        }
+        "events.unsubscribe" => {
+            service(context)?;
+            events::unsubscribe(
+                call.store,
+                &principal(context)?,
+                string(context, "serviceNodeId")?,
+                params,
+                (call.clock)() as u64,
+            )
+        }
+        "inventory.sync" => {
+            service(context)?;
+            crate::inventory::sync(
+                call.store,
+                call.registry,
+                string(context, "serviceNodeId")?,
+                params,
+                call.runtime,
+                (call.clock)(),
+            )
+        }
+        "inventory.get" => crate::inventory::get(
+            call.store,
+            call.registry,
+            field(params, "resourceRef")?,
+            call.runtime,
+            (call.clock)(),
+        ),
+        "inventory.list" => crate::inventory::list(
+            call.store,
+            call.registry,
+            params,
+            call.runtime,
+            (call.clock)(),
+        ),
+        "retention.preview" => crate::retention::preview(call.store, call.runtime, (call.clock)()),
+        "retention.status" => crate::retention::status(call.store, call.runtime, (call.clock)()),
         "hostConfigurations.list" => {
             let mut records = call.configurations.list(call.store, call.runtime)?;
             let mut identity = IvyJson::object([("method", method.into())]);

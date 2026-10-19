@@ -50,7 +50,7 @@ if(input.steps.some(step=>step.op==='packageKernel')){
  kernelPackageAction=new Function('kernel','requireThat','message',stripTypeScriptTypes('function execute(){switch(message.action){'+workerSource.slice(actionStart,actionEnd)+'}}',{mode:'strip'})+'return execute();');
 }
 const registryTrace=kernelTrace||input.steps.some(step=>['registry','inventory','discovery','configurations','uis'].includes(step.op));
-const inventoryTrace=input.steps.some(step=>step.op==='inventory');
+const inventoryTrace=input.steps.some(step=>step.op==='inventory'||step.op==='kernel'&&step.request?.method?.startsWith('inventory.'));
 const discoveryTrace=kernelTrace||input.steps.some(step=>step.op==='discovery');
 const plainLowercase=new Map(),uppercase=new Map(),englishStrings=new Set(),wordCharacters=new Map();
 const realPlainLower=String.prototype.toLowerCase,realUpper=String.prototype.toUpperCase,realCompare=String.prototype.localeCompare;
@@ -126,6 +126,7 @@ const snapshot=(compactEvents=false,compactDiagnostics=false)=>({contracts:table
 const rows=[];
 try {
  store=new HiveStore(input.path);
+ if(kernelTrace){store.setMetadata('cursor_secret','0123456789abcdef'.repeat(4));store.close();store=new HiveStore(input.path);}
  for(const original of input.steps){
   const step=original.bindings||original.identityBindings?structuredClone(original):original;
   const set=(value,pointer,next)=>{const fields=pointer.split('/').slice(1).map(s=>s.replaceAll('~1','/').replaceAll('~0','~'));for(const field of fields.slice(0,-1))value=value[field];value[fields.at(-1)]=next;};
@@ -136,13 +137,15 @@ try {
    switch(step.op){
     case 'kernel':{
       const RealDate=Date,realUUID=crypto.randomUUID,realGlobalUUID=globalThis.crypto.randomUUID;
+      const realLocaleLower=String.prototype.toLocaleLowerCase;
+      if(inventoryTrace)String.prototype.toLocaleLowerCase=function(...args){const value=realLocaleLower.apply(this,args);lowercase.set(String(this),value);return value;};
       registryStrings({...step,params:step.request?.params??step.params});globalThis.Date=retentionDate(RealDate,step.now);
       if(step.createdId){crypto.randomUUID=()=>step.createdId;globalThis.crypto.randomUUID=()=>step.createdId;syncBuiltinESMExports();}
       try{
        if(step.method==='reopen'){store.close();store=new HiveStore(input.path);kernelExecution=undefined;}
        if(!kernelExecution||step.method==='constructor'){
         registry=new Registry(store);discovery=new Discovery(registry);configurations=new Configurations(store,new Objects(store));
-        kernelExecution=Object.assign(new KernelExecution(),{store,registry,discovery,configurations,objects:new Objects(store),events:new Events(store),handlers:new Map(),connectionGeneration:0,options:{version:'1.0.0',buildId:'sha256:'+'a'.repeat(64),publicBaseUrl:'https://example.invalid/base',...step.options}});
+        kernelExecution=Object.assign(new KernelExecution(),{store,registry,discovery,configurations,objects:new Objects(store),events:new Events(store),inventory:new Inventory(store,registry),retention:new Retention(store,registry),handlers:new Map(),connectionGeneration:0,options:{version:'1.0.0',buildId:'sha256:'+'a'.repeat(64),publicBaseUrl:'https://example.invalid/base',...step.options}});
         kernelExecution.registerHandlers();
        }
        if(step.options)Object.assign(kernelExecution.options,step.options);
@@ -157,9 +160,10 @@ try {
         case 'registerSlow':kernelExecution.add(step.name,()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1100);store.checkBudget();return null;});break;
         case 'binding':value=discovery.describe({serviceName:'hive',tools:[step.name]}).items[0];break;
         case 'node':value=registry.node(step.id);break;
+        case 'pageError':value=kernelExecution.page('fixture.pager',step.params,[{id:'a'},{id:'b'}],()=>{throw new IvyError('fixture_failure','Catalog key requested failure.');});break;
         default:throw Error('Unknown kernel execution fixture method');
        }
-      }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;globalThis.crypto.randomUUID=realGlobalUUID;syncBuiltinESMExports();}
+      }finally{globalThis.Date=RealDate;String.prototype.toLocaleLowerCase=realLocaleLower;crypto.randomUUID=realUUID;globalThis.crypto.randomUUID=realGlobalUUID;syncBuiltinESMExports();}
       break;
     }
     case 'packageKernel':{
@@ -541,6 +545,7 @@ try {
   const state=snapshot(step.compactEvents??false,step.compactDiagnostics??false);
   if(step.op==='uiFiles'||step.op==='uis')state.appAssets=store.all('SELECT * FROM app_assets ORDER BY app_id,release_id,path');
   if(inventoryTrace){state.inventorySets=store.all('SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind');state.inventory=step.compactInventory?tableHash('inventory','record_id,node_id,namespace,kind,native_id,schema_version,summary,observed_at'):store.all('SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id');}
+  if(kernelTrace)state.deploymentReports=store.all('SELECT * FROM deployment_reports ORDER BY host_id,deployment_id');
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
   rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{}) ,...(packageTrace?{catalogMutations:store.all('SELECT mutation_id FROM mutations ORDER BY rowid')}:{})});
