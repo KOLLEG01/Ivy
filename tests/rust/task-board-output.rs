@@ -28,6 +28,8 @@ mod engine_admission;
 mod engine_publication;
 #[path = "../fixtures/task-board-engine-actions.rs"]
 mod engine_actions;
+#[path = "../fixtures/task-board-engine-validation.rs"]
+mod engine_validation;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {

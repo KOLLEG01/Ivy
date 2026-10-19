@@ -103,34 +103,54 @@ impl LifecyclePages for NoPages {
         panic!("No page scan allowed")
     }
 }
-struct Checks {
+struct Checks<'a, S> {
     first: bool,
+    store: &'a S,
 }
-impl ActionPolicies for Checks {
-    async fn aggregate(&self, task: &Json, _: &JsString) -> IvyResult<()> {
+impl<S: Store> ActionValidationChecks for Checks<'_, S> {
+    async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {
         assert!(self.first, "Recovery must retain original admission");
-        admission("Task", task)
+        admission("Task", task)?;
+        check_aggregate(self.store, task, id).await
     }
-    async fn validate_action(
+    async fn fields(&self, _: &Json, _: &JsString) -> IvyResult<()> {
+        panic!("No field edit")
+    }
+    async fn execution_options(&self, _: &Json, _: Option<&Json>) -> IvyResult<()> {
+        panic!("No execution options")
+    }
+    async fn execution(
         &self,
-        request: &Json,
-        task: &Json,
-        actor: &Json,
-        at: &JsString,
+        _: &Json,
+        _: &Json,
         _: &JsString,
-    ) -> IvyResult<()> {
-        assert!(self.first, "Recovery must retain original admission");
-        admission("CommentActionRequest", request)?;
-        // Finite semantic policy for this one admitted user comment. The
-        // owner's current action/question/handoff policy remains required.
-        assert_eq!(f(request, "expectedRevision"), &Json::Number(1.0));
-        assert_eq!(f(task, "workflowState"), &Json::from("waiting"));
-        assert_eq!(f(actor, "source"), &Json::from("user"));
-        assert_eq!(at, &JsString::from(clock()));
-        Ok(())
+        _: &JsString,
+        _: &Json,
+        _: &Json,
+        _: bool,
+    ) -> IvyResult<Json> {
+        panic!("No execution")
+    }
+    async fn deferral(&self, _: &Json, _: &JsString, _: &JsString) -> IvyResult<()> {
+        panic!("No deferral")
+    }
+    async fn content(&self, _: &Json) -> IvyResult<()> {
+        panic!("No final material")
+    }
+    async fn artifact(&self, _: &Json) -> IvyResult<()> {
+        panic!("No attachment")
+    }
+    fn coordination_pending(&self, _: &Json) -> IvyResult<bool> {
+        panic!("No scheduling")
+    }
+    async fn failed_rate_limit_retry_at(&self, _: &Document) -> IvyResult<Option<JsString>> {
+        panic!("No recovery proof")
+    }
+    async fn unstarted_archived_context(&self, _: &Document) -> IvyResult<bool> {
+        panic!("No recovery proof")
     }
 }
-impl ActionRestore for Checks {
+impl<S> ActionRestore for Checks<'_, S> {
     async fn restore_for_execution(&self, _: &Document, _: &Document) -> IvyResult<()> {
         panic!("No continuation")
     }
@@ -380,14 +400,21 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
                 Ok(())
             })
         };
-        let checks = Checks { first: round == 0 };
+        let checks = Checks {
+            first: round == 0,
+            store: &operations.store,
+        };
+        let validation = ActionValidation {
+            store: &operations.store,
+            checks: &checks,
+        };
         let unused = Unused;
         let settings = Json::object([("phoneTarget", Json::Null)]);
         let actions = TaskActions {
             store: &operations.store,
             settings: &settings,
             catalogs: &catalogs,
-            policies: &checks,
+            policies: &validation,
             lifecycle: &checks,
         };
         let routes = Routes(&actions);
