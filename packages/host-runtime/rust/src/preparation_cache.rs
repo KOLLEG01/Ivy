@@ -361,50 +361,6 @@ fn workspace_path(path: &JsString, links: &Links) -> bool {
             || path.0.starts_with(&location.0) && path.0.get(location.0.len()) == Some(&47)
     })
 }
-fn copy_entry(from: &Path, to: &Path, source: &Path, links: &Links, parents: bool) -> Result<()> {
-    let local = Context::current()?.relative(
-        &node_path::from_native(source),
-        &node_path::from_native(from),
-    );
-    let local = JsString(
-        local
-            .0
-            .into_iter()
-            .map(|c| if c == 92 { 47 } else { c })
-            .collect(),
-    );
-    if workspace_path(&local, links) {
-        return Ok(());
-    }
-    let metadata = fs::symlink_metadata(fs_path(from))?;
-    let destination = preparation_links::check_copy_paths(from, to, metadata.is_dir(), parents)?;
-    if metadata.file_type().is_symlink() {
-        preparation_links::copy_observed_link(from, to)?;
-        return Ok(());
-    }
-    if metadata.is_dir() {
-        let created = destination.is_none();
-        if created {
-            fs::create_dir(fs_path(to))?;
-        }
-        for entry in fs::read_dir(fs_path(from))? {
-            let entry = entry?;
-            let name = node_path::to_native(&node_path::node_utf8(&entry.file_name()));
-            copy_entry(&from.join(&name), &to.join(name), source, links, false)?;
-        }
-        if created {
-            fs::set_permissions(fs_path(to), metadata.permissions())?;
-        }
-    } else if metadata.is_file() {
-        if destination.is_some() {
-            fs::remove_file(fs_path(to))?;
-        }
-        fs::copy(fs_path(from), fs_path(to))?;
-    } else {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
-    }
-    Ok(())
-}
 async fn copy_external(source: PathBuf, destination: PathBuf, links: Links) -> Result<()> {
     let root = destination.clone();
     blocking(move || {
@@ -428,7 +384,23 @@ async fn copy_external(source: PathBuf, destination: PathBuf, links: Links) -> R
         let to = destination.join(name);
         let source = source.clone();
         let links = links.clone();
-        blocking(move || copy_entry(&from, &to, &source, &links, true))
+        blocking(move || {
+            crate::preparation_copy::entry(&from, &to, true, true, &|path| {
+                let local = Context::current()?.relative(
+                    &node_path::from_native(&source),
+                    &node_path::from_native(path),
+                );
+                let local = JsString(
+                    local
+                        .0
+                        .into_iter()
+                        .map(|c| if c == 92 { 47 } else { c })
+                        .collect(),
+                );
+                Ok(!workspace_path(&local, &links))
+            })?;
+            Ok(())
+        })
     })
     .await?;
     Ok(())

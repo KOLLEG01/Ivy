@@ -1,4 +1,4 @@
-//! The observed-link branch of Node cp(...,{verbatimSymlinks:true}).
+//! Observed links in Node cp, with its default and verbatim target handling.
 use crate::{filesystem, node_path::{self,Context,Style}, paths};
 use ivy_contracts::JsString;
 use std::{fs,io,path::{Path,PathBuf}};
@@ -62,15 +62,21 @@ pub(super) fn check_paths(source:&Path,destination:&Path,directory:bool,parents:
 }
 
 pub(super) fn copy(source:&Path,destination:&Path)->io::Result<()> {
+    copy_with_options(source,destination,true,true)
+}
+pub(super) fn copy_with_options(source:&Path,destination:&Path,verbatim:bool,parents:bool)->io::Result<()> {
     let context=Context::current()?;
     let source_metadata=fs::symlink_metadata(fs_path(source))?;
-    let destination_metadata=check_paths(source,destination,false,true)?;
+    let destination_metadata=check_paths(source,destination,false,parents)?;
     if !source_metadata.file_type().is_symlink() { return invalid(); }
     let parent=node_path::dirname(context.style,&node_path::from_native(destination));
     match fs::metadata(node_path::filesystem_path(&parent)) {
         Ok(_)=>(),Err(error) if error.kind()==io::ErrorKind::NotFound=>fs::create_dir_all(node_path::filesystem_path(&parent))?,Err(error)=>return Err(error),
     }
     let target=read_link(source)?;
+    let target=if !verbatim&&!node_path::is_absolute(context.style,&node_path::from_native(&target)) {
+        node_path::to_native(&context.resolve(&[node_path::dirname(context.style,&node_path::from_native(source)),node_path::from_native(&target)]))
+    } else {target};
     if destination_metadata.is_none() { return create(&target,destination); }
     let destination_target=match read_link(destination) {
         Ok(value)=>value,

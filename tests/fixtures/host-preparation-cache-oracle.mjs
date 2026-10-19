@@ -15,6 +15,8 @@ const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const prepare=readFileSync(new URL('../../packages/host-runtime/src/prepare.ts',import.meta.url),'utf8');
 const config=readFileSync(new URL('../../packages/host-runtime/src/config.ts',import.meta.url),'utf8');
 function span(source,start,end){const a=source.indexOf(start),b=source.indexOf(end,a+start.length);if(a<0||b<a)throw Error('Original helper boundary changed');return source.slice(a,b);}
+const fallback=prepare.match(/    if \(directory\) await cp\(source, destination, \{ recursive: true \}\);\r?\n    else await copyFile\(source, destination\);/)?.[0];
+if(!fallback)throw Error('Original transfer copy phase changed');
 const source=`
 import {mkdir,cp,stat,realpath,readdir,rm,symlink,link,copyFile,rename,readFile,open,unlink} from 'node:fs/promises';
 import {join,relative,dirname,isAbsolute,resolve} from 'node:path';
@@ -27,7 +29,9 @@ const process=${JSON.stringify(input.profile??{platform:process.platform,arch:pr
 ${span(config,'export async function jsonFile<','export async function instanceConfig(')}
 ${span(prepare,'async function copyDirectory(','async function copySourceTree(')}
 ${span(prepare,'async function linkDependencyDirectory(','/** Only a different filesystem')}
-export {dependencyCacheKey,workspaceLinkEntries,validCache,restoreDependencies,retainDependencies,copyDirectory,isWorkspacePath};
+${span(prepare,'async function transferPreparedPayload(','async function emittedRuntimePackages(')}
+async function copyPreparedPayload(source:string,destination:string,directory:boolean):Promise<void>{${fallback}}
+export {dependencyCacheKey,workspaceLinkEntries,validCache,restoreDependencies,retainDependencies,copyDirectory,isWorkspacePath,transferPreparedPayload,copyPreparedPayload};
 `;
 const helpers=await import('data:text/javascript,'+encodeURIComponent(stripTypeScriptTypes(source,{mode:'transform'})));
 const links=new Map(input.links??[]);
@@ -52,12 +56,14 @@ try{
   else if(input.operation==='order')value={keys:[...links.keys()],matrix:[...links.keys()].map(left=>[...links.keys()].map(right=>Math.sign(left.localeCompare(right)))),profile:{locale:Intl.DateTimeFormat().resolvedOptions().locale,icu:process.versions.icu,node:process.version,platform:process.platform,arch:process.arch}};
   else if(input.operation==='snapshot')value=null;
   else{
-    const sourceRoot=path.join(input.originalRoot,input.sourceLocal??'source'),cacheRoot=path.join(input.originalRoot,input.cacheLocal??'cache');
+    const sourceRoot=input.sourceOriginal??path.join(input.originalRoot,input.sourceLocal??'source'),cacheRoot=input.destinationOriginal??path.join(input.originalRoot,input.cacheLocal??'cache');
     if(input.operation==='restore')value=await helpers.restoreDependencies(sourceRoot,cacheRoot,input.key,links);
     else if(input.operation==='retain')await helpers.retainDependencies(sourceRoot,cacheRoot,input.key,links);
     else if(input.operation==='copy')await helpers.copyDirectory(path.join(sourceRoot,'node_modules'),cacheRoot,{dereference:false,verbatimSymlinks:true,filter:async file=>!helpers.isWorkspacePath(path.relative(sourceRoot,file).replaceAll('\\','/'),links)});
+    else if(input.operation==='transfer')await helpers.transferPreparedPayload(sourceRoot,cacheRoot,input.directory);
+    else if(input.operation==='copyPayload')await helpers.copyPreparedPayload(sourceRoot,cacheRoot,input.directory);
     else throw Error('Unknown cache operation');
   }
   operation={ok:true,value:value??null};
 }catch(error){nativeError={name:error.name,...(error.code?{code:error.code}:{})};operation={ok:false,error:IvyError.from(error).toWire()};}
-process.stdout.write(JSON.stringify({operation,...(nativeError?{nativeError}:{}),...(input.actualRoot?{actualTree:tree(input.actualRoot),originalTree:tree(input.originalRoot)}:{})}));
+process.stdout.write(JSON.stringify({operation,...(nativeError?{nativeError}:{}),...(input.actualRoot?{actualTree:tree(input.actualRoot),originalTree:tree(input.originalRoot)}:{}),...(input.destinationActual?{actualDestinationTree:tree(input.destinationActual),originalDestinationTree:tree(input.destinationOriginal)}:{})}));
