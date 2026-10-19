@@ -8,9 +8,9 @@ use ivy_task_board::{
     configuration::initial_configuration,
     engine_execution::{
         CachedExecution, ExecutionCategories, ExecutionComponents, ExecutionProgram,
-        ExecutionProofs, ExecutionReadScope,
+        ExecutionProofs,
     },
-    journal_store::{Contracts, JournalStore},
+    journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_journal::{LocalJournal, initialize},
     local_retention::HistoryLimits,
@@ -175,14 +175,6 @@ impl ExecutionProofs for Unused {
         panic!("No native transcript")
     }
 }
-impl ExecutionReadScope for Unused {
-    async fn with_read_cache<F: Future<Output = IvyResult<Json>>>(
-        &self,
-        work: F,
-    ) -> IvyResult<Json> {
-        work.await
-    }
-}
 struct Cleanup(std::path::PathBuf);
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -215,6 +207,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
     for round in 0..3 {
         let connection = Connection::open(&path).unwrap();
         initialize(&connection).unwrap();
+        let read_scopes = ReadScopes::default();
         let journal = JournalStore {
             journal: LocalJournal {
                 connection: &connection,
@@ -225,7 +218,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             limits: HistoryLimits::default(),
             now: clock as fn() -> String,
             new_id: || uuid::Uuid::new_v4().to_string().into(),
-            cache: None,
+            cache: Some(read_scopes.cache()),
         };
         let pages = NoPages;
         let operations = Operations {
@@ -331,7 +324,7 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             categories: &unused,
             proofs: &unused,
             publication: &publisher,
-            read_scope: &unused,
+            read_scope: &read_scopes,
         };
         let cached = CachedExecution {
             operations: &operations,

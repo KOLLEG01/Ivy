@@ -21,7 +21,15 @@ use ivy_sdk::{
     rpc::{RequestOptions, RpcClient},
 };
 use ivy_store::sqlite::error;
-use std::{cell::RefCell, collections::HashSet, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 /// Bind this to the accepted TaskBoard contract bundle. Retained public versions
 /// can be admitted as exact records, but are never rewritten during a read.
@@ -40,9 +48,89 @@ struct ReadRecord {
     metadata: Option<Json>,
 }
 
-/// Create a new cache per action, sharing it only with nested work in that action.
-#[derive(Default)]
-pub struct ReadCache(RefCell<Vec<(Json, ReadRecord)>>);
+type CacheEntries = Rc<RefCell<Vec<(Json, ReadRecord)>>>;
+enum CacheBinding {
+    Fixed(CacheEntries),
+    Scoped(RefCell<Option<CacheEntries>>),
+}
+/// An explicit cache for one action. A service owner uses ReadScopes::cache
+/// instead, so independent asynchronous actions cannot share cached pins.
+pub struct ReadCache(CacheBinding);
+impl Default for ReadCache {
+    fn default() -> Self {
+        Self(CacheBinding::Fixed(CacheEntries::default()))
+    }
+}
+impl ReadCache {
+    fn entries(&self) -> Option<CacheEntries> {
+        match &self.0 {
+            CacheBinding::Fixed(entries) => Some(entries.clone()),
+            CacheBinding::Scoped(active) => active.borrow().clone(),
+        }
+    }
+}
+/// Async-local action caches on the journal's local owner. Every poll installs
+/// its captured context and restores the preceding one, including on unwind.
+pub struct ReadScopes {
+    cache: ReadCache,
+}
+impl Default for ReadScopes {
+    fn default() -> Self {
+        Self {
+            cache: ReadCache(CacheBinding::Scoped(RefCell::default())),
+        }
+    }
+}
+impl ReadScopes {
+    pub fn cache(&self) -> &ReadCache {
+        &self.cache
+    }
+    /// Nested actions inherit the current map; independent actions get a new one.
+    pub fn with_read_cache<F: Future>(&self, work: F) -> ReadScopeFuture<'_, F> {
+        ReadScopeFuture {
+            scopes: self,
+            entries: Some(self.cache.entries().unwrap_or_default()),
+            work: Box::pin(work),
+        }
+    }
+    /// Capture at submission time when work is moved to the owner executor.
+    /// Work submitted outside an action keeps an absent context, not a new map.
+    pub fn inherit<F: Future>(&self, work: F) -> ReadScopeFuture<'_, F> {
+        ReadScopeFuture {
+            scopes: self,
+            entries: self.cache.entries(),
+            work: Box::pin(work),
+        }
+    }
+}
+pub struct ReadScopeFuture<'a, F> {
+    scopes: &'a ReadScopes,
+    entries: Option<CacheEntries>,
+    work: Pin<Box<F>>,
+}
+struct RestoreCache<'a> {
+    active: &'a RefCell<Option<CacheEntries>>,
+    previous: Option<CacheEntries>,
+}
+impl Drop for RestoreCache<'_> {
+    fn drop(&mut self) {
+        self.active.replace(self.previous.take());
+    }
+}
+impl<F: Future> Future for ReadScopeFuture<'_, F> {
+    type Output = F::Output;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let CacheBinding::Scoped(active) = &this.scopes.cache.0 else {
+            unreachable!("ReadScopes always owns a scoped cache")
+        };
+        let _restore = RestoreCache {
+            active,
+            previous: active.replace(this.entries.clone()),
+        };
+        this.work.as_mut().poll(cx)
+    }
+}
 
 /// Runs on the journal owner's blocking context. A transaction never spans a
 /// remote await; retention rechecks its graph before committing a collection.
@@ -297,8 +385,9 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 include_archived.into(),
             ])
         });
-        if let (Some(cache), Some(cache_key)) = (self.cache, &cache_key) {
-            if let Some((_, document)) = cache.0.borrow().iter().find(|(key, _)| key == cache_key) {
+        let cache = self.cache.and_then(ReadCache::entries);
+        if let (Some(cache), Some(cache_key)) = (&cache, &cache_key) {
+            if let Some((_, document)) = cache.borrow().iter().find(|(key, _)| key == cache_key) {
                 return Ok(document.clone());
             }
         }
@@ -360,8 +449,8 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             archived,
             metadata: Some(object.clone()),
         };
-        if let (Some(cache), Some(cache_key)) = (self.cache, cache_key) {
-            let mut entries = cache.0.borrow_mut();
+        if let (Some(cache), Some(cache_key)) = (cache, cache_key) {
+            let mut entries = cache.borrow_mut();
             if revision
                 .required("byteLength")?
                 .as_f64()
@@ -664,12 +753,41 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             }
             Err(failure) => return Err(failure),
         };
-        if let Some(cache) = self.cache {
+        if let Some(cache) = self.cache.and_then(ReadCache::entries) {
             let id = result.required("object")?.required("id")?;
-            cache
-                .0
-                .borrow_mut()
-                .retain(|(_, record)| record.document.pin.get("objectId") != Some(id));
+            let mut entries = cache.borrow_mut();
+            entries.retain(|(_, record)| record.document.pin.get("objectId") != Some(id));
+            if result
+                .required("revision")?
+                .required("byteLength")?
+                .as_f64()
+                .ok_or_else(IvyError::internal)?
+                <= 65536.0
+                && entries.len() < 256
+            {
+                let object = result.required("object")?;
+                let revision = result.required("revision")?;
+                // The original write key omits includeArchived. It consumes a
+                // bounded slot but pinned reads use a different key; preserve it.
+                let primary =
+                    object.get("parentId") == Some(&nullable(self.journal.root_object_id.as_ref()));
+                entries.push((
+                    Json::Array(vec![key.into(), pin(&result)?, primary.into()]),
+                    ReadRecord {
+                        document: Document {
+                            pin: pin(&result)?,
+                            value: value.clone(),
+                            parent_id: object.required("parentId")?.as_js_string().cloned(),
+                            content_hash: revision.required("contentHash")?.as_str()?,
+                        },
+                        archived: object
+                            .get("effectivelyArchived")
+                            .and_then(Json::as_bool)
+                            .unwrap_or(false),
+                        metadata: Some(object.clone()),
+                    },
+                ));
+            }
         }
         pin(&result)
     }

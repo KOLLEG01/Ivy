@@ -3,7 +3,7 @@ use ivy_contracts::builtin_schema::SchemaBundle;
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
-    journal_store::{Contracts, JournalStore},
+    journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_journal::{LocalJournal, initialize},
     local_retention::HistoryLimits,
@@ -115,14 +115,6 @@ impl ExecutionProofs for Bindings {
     }
     async fn verify_transcript(&self, _: &Json, _: &Json) -> IvyResult<Json> {
         unreachable!()
-    }
-}
-impl ExecutionReadScope for Bindings {
-    async fn with_read_cache<F: Future<Output = IvyResult<Json>>>(
-        &self,
-        work: F,
-    ) -> IvyResult<Json> {
-        work.await
     }
 }
 struct Publisher<'a, S, C> {
@@ -247,6 +239,7 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
     for round in 0..3 {
         let c = Connection::open(&path).unwrap();
         initialize(&c).unwrap();
+        let read_scopes = ReadScopes::default();
         let journal = JournalStore {
             journal: LocalJournal {
                 connection: &c,
@@ -260,7 +253,7 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
             },
             now: clock as fn() -> String,
             new_id: || uuid::Uuid::new_v4().to_string().into(),
-            cache: None,
+            cache: Some(read_scopes.cache()),
         };
         let task_pin = match &task_pin {
             Some(p) => p.clone(),
@@ -363,7 +356,7 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
             categories: &bindings,
             proofs: &bindings,
             publication: &publisher,
-            read_scope: &bindings,
+            read_scope: &read_scopes,
         };
         let cached = CachedExecution {
             operations: &operations,

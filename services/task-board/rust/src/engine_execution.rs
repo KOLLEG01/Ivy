@@ -1,7 +1,7 @@
 //! Retained publication recovery and coalesced execution on the scoped owner.
 //! Domain publication, current read scope and graph evidence stay explicit.
 use crate::{
-    journal_store::{Contracts, JournalStore},
+    journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::LifecycleJournal,
     local_workspaces::{LocalWorkspaces, workspace_key},
     operations::{Document, Operations, Store},
@@ -134,6 +134,25 @@ pub trait ExecutionReadScope {
         &self,
         work: F,
     ) -> IvyResult<Json>;
+}
+impl ExecutionReadScope for ReadScopes {
+    async fn with_read_cache<F: Future<Output = IvyResult<Json>>>(
+        &self,
+        work: F,
+    ) -> IvyResult<Json> {
+        ReadScopes::with_read_cache(self, work).await
+    }
+}
+/// Keep async-local read context when an action submits category, execution or
+/// reconciliation work to the same owner. The underlying executor retains it.
+pub struct ReadScopeExecutor<'a, 'x, X> {
+    pub scopes: &'a ReadScopes,
+    pub executor: &'x X,
+}
+impl<'a, X: ReconcileExecutor<'a>> ReconcileExecutor<'a> for ReadScopeExecutor<'a, '_, X> {
+    fn spawn(&self, work: Pin<Box<dyn Future<Output = ()> + 'a>>) {
+        self.executor.spawn(Box::pin(self.scopes.inherit(work)));
+    }
 }
 pub struct ExecutionComponents<'a, K, N, P, R> {
     pub categories: &'a K,

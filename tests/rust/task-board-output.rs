@@ -32,6 +32,8 @@ mod engine_actions;
 mod engine_validation;
 #[path = "../fixtures/task-board-checks.rs"]
 mod checks;
+#[path = "../fixtures/task-board-read-scopes.rs"]
+mod read_scopes;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {
