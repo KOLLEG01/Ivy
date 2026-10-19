@@ -189,6 +189,17 @@ async fn real_service_resumes_original_queue_lanes_and_wakes_only_the_current_tu
         .await
         .unwrap();
         app.service().wait_ready(None).await.unwrap();
+        if kind == "deliver-prepared" || kind.starts_with("wake-") {
+            state_until(
+                &mut peer,
+                |s| {
+                    field(s, "reads").as_f64().unwrap() > 0.0
+                        && !field(s, "collections").as_array().unwrap().is_empty()
+                },
+                "autonomous delivered input never entered its collection checkpoint",
+            )
+            .await;
+        }
         peer.command(command("quiet")).await;
         let mut outputs = vec![];
         if kind.starts_with("wake-") {

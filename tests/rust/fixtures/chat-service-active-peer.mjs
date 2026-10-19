@@ -7,6 +7,7 @@ import{once}from'node:events';
 import{createInterface}from'node:readline';
 import{setTimeout as delay}from'node:timers/promises';
 import{WebSocketServer}from'ws';
+import{DatabaseSync}from'node:sqlite';
 const error=e=>{e=IvyError.from(e);return{code:e.code,message:e.message,outcome:e.outcome,...(e.details===undefined?{}:{details:e.details})};};
 const until=async(f,label)=>{for(let n=0;n<2000;n++){const v=await f();if(v)return v;await delay(5);}throw Error('Timed out '+label);};
 let scope,serial=0;const sockets=new Map(),pending=new Map();
@@ -36,11 +37,11 @@ function open(spec){
  const env=environment(spec.seed,false,ext);
  // Both service and synthetic peer inspect this same isolated SQLite file.
  // Existing fixture guards therefore verify the actual durable native claim.
- scope={spec,env,get context(){return context;},calls:[],handshakes:[],heartbeats:[],notifications:[],bad:[],pending:0,generation:6,reads:0,hold:null,held:false,armReads:0};
+ scope={spec,env,observer:new DatabaseSync(env.file,{readOnly:true}),get context(){return context;},calls:[],handshakes:[],heartbeats:[],notifications:[],bad:[],pending:0,generation:6,reads:0,hold:null,held:false,armReads:0};
  return{url:base,root:env.root};
 }
 function summary(){return{calls:scope.calls,handshakes:scope.handshakes,heartbeats:scope.heartbeats,notifications:scope.notifications,bad:scope.bad,reads:scope.reads,held:scope.held,readsAfterArm:scope.reads-scope.armReads,pending:scope.pending};}
-async function quiet(){let previous=-1,stable=0;for(let n=0;n<1000;n++){const count=scope.calls.length;if(!scope.pending&&count===previous){if(++stable>=20)return;}else stable=0;previous=count;await delay(10);}throw Error('Autonomous service did not settle');}
+async function quiet(){let previous='',stable=0;for(let n=0;n<1000;n++){const count=scope.calls.length+':'+scope.observer.prepare('PRAGMA data_version').get().data_version;if(!scope.pending&&count===previous){if(++stable>=20)return;}else stable=0;previous=count;await delay(10);}throw Error('Autonomous service did not settle');}
 async function invoke(name,args){
  const[s,session]=[...sockets].find(([,v])=>v.generation===7)??[];if(!s||!session.registry)throw Error('No registered provider');
  const definition=session.registry.namespaces[0].tools.find(t=>t.name===name),id='active-'+(++serial),response=new Promise(done=>pending.set(id,done));
@@ -50,7 +51,7 @@ async function invoke(name,args){
 async function command(c){
  if(c.action==='begin')return open(c.spec);
  if(c.action==='summary')return summary();
- if(c.action==='state')return{main:(await scope.env.main.find())?.value??null,inputs:scope.context.records.filter(r=>r.object.contractKey==='chat-bridge/input').map(r=>r.content.value)};
+ if(c.action==='state')return{main:(await scope.env.main.find())?.value??null,inputs:scope.context.records.filter(r=>r.object.contractKey==='chat-bridge/input').map(r=>r.content.value),collections:scope.observer.prepare("SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/collection'").all().map(r=>JSON.parse(r.value_json)),reads:scope.reads};
  if(c.action==='quiet'){await quiet();return summary();}
  if(c.action==='invoke')return invoke(c.name,c.arguments);
  if(c.action==='arm'){
@@ -63,7 +64,7 @@ async function command(c){
  if(c.action==='release'){const hold=scope.hold;scope.hold=null;hold.release();return null;}
  if(c.action==='end'){
   await quiet();const snapshot=await scope.env.snapshot(c.output),database=readFileSync(scope.env.file).toString('base64'),report=summary();
-  scope.env.close();scope=null;return{snapshot,database,report};
+  scope.observer.close();scope.env.close();scope=null;return{snapshot,database,report};
  }
  throw Error('Unexpected active fixture command '+c.action);
 }
@@ -125,7 +126,9 @@ if(process.argv[2]==='peer'){
   globalThis[key]={config:{componentId:'chat-bridge',credential:'fixture-token',dataRoot:scope.env.root,serviceNodeId:'chat-provider',hostId:'fixture-host',version:'1.0.0',buildId:'sha256:'+'a'.repeat(64),publicBaseUrl:base,settings:{definition:spec.seed.definition,pollMs:60000,whatsappConfigPath:'synthetic-account-lifecycle'}},
    async write(ready,details,generation){health.push({ready,details,generation:generation??null});},async control(){return null;},
    transport:{transport:{state:'fixture-connected'},journal:{set(key,value){events.push({created:key,value});}},start(){events.push('start');},attach(v){events.push({attach:v?.main.native.owner.generation??null});},changed(){events.push('changed');},notification(){events.push('notification');},async settled(){events.push('settled');},async close(){events.push('close');}}};
-  const app=await startChatBridge('isolated-active-fixture'),outputs=[];await until(()=>app.service.ready,'ready');await quiet();
+  const app=await startChatBridge('isolated-active-fixture'),outputs=[];await until(()=>app.service.ready,'ready');
+  if(spec.kind==='deliver-prepared'||spec.kind.startsWith('wake-'))await until(()=>scope.reads>0,'original delivered input entered collection');
+  await quiet();
   if(spec.kind.startsWith('wake-')){
    const op=await scope.env.ops.find('alice',`chat:${now}:main-send`);spec.sendRequest=clone(op.value.request);
    await command({action:'arm'});outputs.push(await invoke('send',spec.sendRequest));await until(()=>scope.held,'active native read');
