@@ -5,6 +5,7 @@ pub mod candidate_identity;
 pub mod accepted_configuration;
 pub mod actions;
 pub mod artifact;
+mod artifact_inventory;
 pub mod codex_admission;
 pub mod codex_app_tools;
 pub mod codex_connection;

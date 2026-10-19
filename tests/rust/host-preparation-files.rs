@@ -3,6 +3,8 @@ use std::{fs, path::PathBuf};
 
 #[path = "host-preparation-files-cases.rs"]
 mod preparation_files_cases;
+#[path = "host-artifact-inventory-cases.rs"]
+mod artifact_inventory_cases;
 
 struct ServiceFixture(PathBuf);
 impl ServiceFixture {

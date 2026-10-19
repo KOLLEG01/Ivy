@@ -3,6 +3,7 @@ use crate::{IvyError, IvyJson, IvyResult, config::{path_value, read_json, FileEr
 use ivy_contracts::{JsString, core_schema::validate_host};
 use std::{fs, path::{Path, PathBuf}};
 pub use crate::streaming_hash::file_hash;
+pub use crate::artifact_inventory::{ArtifactFile, FileCompare, artifact_files, artifact_source_identity};
 use crate::streaming_hash::hash_file;
 
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> { value.map_err(|_| IvyError::internal()) }
