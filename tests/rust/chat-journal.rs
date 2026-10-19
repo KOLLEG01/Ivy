@@ -11,6 +11,8 @@ use rusqlite::types::Value;
 mod commands;
 #[path = "chat-session-cases.rs"]
 mod session;
+#[path = "chat-listener-cases.rs"]
+mod listener;
 use std::{
     io::Write,
     process::{Command, Stdio},
