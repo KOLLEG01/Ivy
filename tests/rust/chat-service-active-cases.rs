@@ -1,4 +1,4 @@
-use super::{Fixed, Peer, Probe, equal, field, flag, text};
+use super::{Peer, Probe, equal, field, flag, text};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -11,12 +11,23 @@ use ivy_contracts::{
     checked_native_contract::CheckedNativeContracts,
     json::{canonical, parse},
 };
+use ivy_sdk::clock::Clock;
 use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
+// The original oracle fixes Date but leaves performance.now advancing.
+struct ActiveClock(i64);
+impl Clock for ActiveClock {
+    fn utc_millis(&self) -> i64 {
+        self.0
+    }
+    fn monotonic(&self) -> Instant {
+        Instant::now()
+    }
+}
 fn command(action: &str) -> Json {
     Json::object([("action", action.into())])
 }
@@ -190,10 +201,7 @@ async fn real_service_resumes_original_queue_lanes_and_wakes_only_the_current_tu
             generation(row, &corpus, root),
             probe.health(),
             Some(transport),
-            Arc::new(Fixed(
-                field(&corpus, "now").as_f64().unwrap() as i64,
-                Instant::now(),
-            )),
+            Arc::new(ActiveClock(field(&corpus, "now").as_f64().unwrap() as i64)),
         )
         .await
         .unwrap();
@@ -320,14 +328,17 @@ async fn real_service_resumes_original_queue_lanes_and_wakes_only_the_current_tu
             .await;
         let health = array(probe.health.lock().unwrap().clone());
         let events = array(probe.events.lock().unwrap().clone());
-        captures.push(Json::object([
+        let captured = Json::object([
             ("label", label.clone().into()),
             ("actual", actual.clone()),
             ("health", health.clone()),
             ("events", events.clone()),
-        ]));
+        ]);
+        // Bound canonicalization to each fixture frame. The complete evidence
+        // archive may exceed the management JSON node budget across all cases.
+        captures.push(canonical(&captured, usize::MAX).unwrap());
         if let Some(p) = std::env::var_os("IVY_CHAT_ACTIVE_RUNTIME_ACTUAL_CAPTURE") {
-            std::fs::write(p, canonical(&array(captures.clone()), usize::MAX).unwrap()).unwrap();
+            std::fs::write(p, format!("[{}]", captures.join(","))).unwrap();
         }
         let expected = field(row, "final");
         equal(
