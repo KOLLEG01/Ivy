@@ -62,7 +62,7 @@ for(const original of policySpecs){
  const events=[],j=new WhatsAppJournal(':memory:');if('preferences'in spec)j.set('preferences',spec.preferences);let finds=0;
  const selected=()=>clone(spec.mainReads[Math.min(finds++,spec.mainReads.length-1)]);
  const store={events,plan:spec.plan,client:{events},async read(key,pin){events.push(['binding',key,clone(pin)]);return clone(spec.binding);}};
- const bridge={main:{store,admission:{expected(sender){events.push(['expected',sender]);return{sender};}},async find(){events.push(['main']);return selected();},async create(sender,request){events.push(['create',sender,clone(request)]);return clone(spec.newResult);}}};
+ const bridge={main:{store,admission:{definition:{nativePlan:{nativeVersion:'0.159.2',catalogSourceHash:'sha256:'+'f'.repeat(64)}},expected(sender){events.push(['expected',sender]);return{sender};}},async find(){events.push(['main']);return selected();},async create(sender,request){events.push(['create',sender,clone(request)]);return clone(spec.newResult);}}};
  const native={invalidate(){events.push(['invalidate']);},async read(method,params){events.push(['read',method,clone(params)]);return clone(spec.read);},async command(key,method,factory,guard){events.push(['command',key,method]);const params=await factory();events.push(['params',clone(params)]);if(guard){events.push(['guard']);await guard();}events.push(['dispatch',snapshot(j)]);return 'nativeResult'in spec?clone(spec.nativeResult):clone(method==='model/list'?spec.models:method==='thread/list'?spec.threads:{ok:true});}};
  const commands=new WhatsAppCommands(bridge,j,native,async(action,key)=>{events.push(['desktop',action,key]);return'desktop-result';},translator(spec.language));
  const steps=[];
@@ -102,5 +102,6 @@ for(const original of dispatchSpecs){
  }
  dispatches.push({spec,steps,events});await j.close();
 }
-const corpus={parsers,policies,dispatches,boundary:'Unchanged commands.ts and WhatsAppNative.command with actual original in-memory SQLite journal and translator. Main/plan/native session/desktop/owner network are explicit mandatory boundary probes; native owner adapter compiles against the real SDK. No account, complete WhatsAppNative runtime or installed/platform acceptance.'};
+if(typeof policies.find(r=>r.spec.label==='toggles').steps.at(-1).result.value!=='string')throw Error('Positive original status fixture failed');
+const corpus={parsers,policies,dispatches,boundary:'Unchanged commands.ts and WhatsAppNative.command with actual original in-memory SQLite journal and translator. Main/plan/native session/desktop/owner network are explicit mandatory boundary probes; the separate real NativeOwner test checks physical disk commit, failed writer and reopen. No account, complete WhatsAppNative runtime or installed/platform acceptance.'};
 const output=JSON.stringify(corpus);if(process.env.IVY_CHAT_COMMANDS_ORACLE_CAPTURE)writeFileSync(process.env.IVY_CHAT_COMMANDS_ORACLE_CAPTURE,output);process.stdout.write(output);
