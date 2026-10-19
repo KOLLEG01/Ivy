@@ -3,34 +3,11 @@ use crate::{IvyError, IvyJson, IvyResult, node_runtime::NodeRuntime, paths::insi
 use ivy_contracts::{JsString, core_schema::validate_host, json};
 use std::{ffi::OsString, fs, path::{Path, PathBuf}};
 pub use crate::protected_config::protected_json_file;
+pub use crate::config_file::json_file;
+pub(crate) use crate::config_file::{FileError, read_json};
 
 pub const CONFIGURATION_BYTES: usize = 1024 * 1024;
 
-pub(crate) enum FileError { Missing, Invalid(IvyError) }
-impl FileError {
-    pub(crate) fn error(self) -> IvyError {
-        match self { Self::Missing => IvyError::internal(), Self::Invalid(error) => error }
-    }
-}
-fn file_error(error: std::io::Error) -> FileError {
-    if error.kind() == std::io::ErrorKind::NotFound { FileError::Missing }
-    else { FileError::Invalid(IvyError::internal()) }
-}
-pub(crate) fn read_json(path: &Path, limit: usize) -> Result<IvyJson, FileError> {
-    let metadata = fs::metadata(path).map_err(file_error)?;
-    if !metadata.is_file() || metadata.len() > limit as u64 {
-        return Err(FileError::Invalid(IvyError::new("invalid_arguments", "Configuration must be a bounded regular file.")));
-    }
-    let bytes = fs::read(path).map_err(file_error)?;
-    // Node readFile(..., 'utf8') replaces malformed input before JSON.parse.
-    json::parse(&String::from_utf8_lossy(&bytes), usize::MAX)
-        .map_err(|_| FileError::Invalid(IvyError::internal()))
-}
-pub async fn json_file(path: impl Into<PathBuf>, limit: usize) -> IvyResult<IvyJson> {
-    let path = path.into();
-    tokio::task::spawn_blocking(move || read_json(&path, limit).map_err(FileError::error))
-        .await.map_err(|_| IvyError::internal())?
-}
 pub async fn atomic_json(path: impl Into<PathBuf>, value: IvyJson) -> IvyResult<()> {
     let path = path.into();
     tokio::task::spawn_blocking(move || write_json(&path, &value))
