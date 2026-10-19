@@ -12,6 +12,8 @@ use tokio::sync::{mpsc, oneshot};
 mod authentication;
 #[path = "hive_browser_push_http.rs"]
 mod http;
+#[path = "hive_oauth.rs"]
+mod oauth;
 
 type Posted = (IvyJson, oneshot::Sender<IvyResult<IvyJson>>);
 static CORPUS: Mutex<()> = Mutex::new(());
