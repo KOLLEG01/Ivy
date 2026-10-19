@@ -1,5 +1,5 @@
 use ivy_contracts::{
-    IvyJson, IvyResult, agent_bundle, core_bundle, host_bundle,
+    IvyJson, IvyResult, agent_bundle, core_bundle, core_schema, host_bundle,
     json::{parse, stringify},
 };
 use sha2::{Digest, Sha256};
@@ -23,6 +23,9 @@ fn all_canonical_definitions_and_operation_inputs_match_typescript() {
     );
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert!(rows.len() > 400);
+    let catalog: &'static serde_json::Map<String, serde_json::Value> =
+        core_schema::operation_catalog();
+    assert!(std::ptr::eq(catalog, core_schema::operation_catalog()));
     // Heap traversal also keeps bundling within a small native-thread stack.
     std::thread::Builder::new()
         .stack_size(256 * 1024)
@@ -34,6 +37,55 @@ fn all_canonical_definitions_and_operation_inputs_match_typescript() {
                     .map(|text| parse(text, 10000).unwrap());
                 let reference = reference.as_js_string().unwrap();
                 let document = document.as_ref().and_then(IvyJson::as_js_string);
+                if row["kind"] == "operation" {
+                    let method = reference.to_utf8().unwrap();
+                    let definition = core_schema::operation_definition(&method);
+                    assert_eq!(definition.is_some(), row["ownOperation"].as_bool().unwrap());
+                    assert_eq!(
+                        definition,
+                        (!row["descriptor"].is_null()).then_some(&row["descriptor"])
+                    );
+                    if let Some(names) = row["catalogNames"].as_array() {
+                        assert_eq!(
+                            catalog.keys().map(String::as_str).collect::<Vec<_>>(),
+                            names
+                                .iter()
+                                .map(|name| name.as_str().unwrap())
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    for case in row["validation"].as_array().unwrap() {
+                        let value = parse(case["input"].as_str().unwrap(), usize::MAX).unwrap();
+                        let result = if case["direction"] == "input" {
+                            core_schema::validate_input(&method, &value)
+                        } else {
+                            core_schema::validate_output(&method, &value)
+                        };
+                        let expected = &case["expected"];
+                        assert_eq!(
+                            result.is_ok(),
+                            expected["ok"].as_bool().unwrap(),
+                            "{method}: {case}: {result:?}"
+                        );
+                        if let Err(error) = result {
+                            assert_eq!(
+                                error.code,
+                                expected["code"].as_str().unwrap(),
+                                "{method}: {case}"
+                            );
+                            assert_eq!(
+                                error.message,
+                                expected["message"].as_str().unwrap(),
+                                "{method}: {case}"
+                            );
+                            assert_eq!(
+                                error.outcome.as_str(),
+                                expected["outcome"].as_str().unwrap(),
+                                "{method}: {case}"
+                            );
+                        }
+                    }
+                }
                 let result: IvyResult<IvyJson> = match row["kind"].as_str().unwrap() {
                     "core" => core_bundle::bundled_schema(reference, document),
                     "host" => host_bundle::bundled_schema(reference, document),
