@@ -1007,3 +1007,174 @@ async fn real_sdk_session_keeps_disk_fence_and_rejects_changed_history_authority
     journal.close().await.unwrap();
     std::fs::remove_dir_all(temporary).unwrap();
 }
+
+struct GatedMain {
+    probe: Arc<Probe>,
+    entered: tokio::sync::mpsc::UnboundedSender<usize>,
+    releases: Mutex<Vec<Option<tokio::sync::oneshot::Receiver<IvyResult<Json>>>>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+impl CommandMain for GatedMain {
+    fn find(&self) -> RequestFuture<'_> {
+        Box::pin(async {
+            let index = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let receiver = self.releases.lock().unwrap()[index].take().unwrap();
+            self.entered.send(index).unwrap();
+            receiver.await.unwrap()
+        })
+    }
+    fn binding(&self, pin: Json) -> RequestFuture<'_> {
+        CommandMain::binding(self.probe.as_ref(), pin)
+    }
+    fn plan(&self) -> RequestFuture<'_> {
+        CommandMain::plan(self.probe.as_ref())
+    }
+    fn expected(&self, sender: &JsString) -> Json {
+        CommandMain::expected(self.probe.as_ref(), sender)
+    }
+    fn operation_id(&self, scope: Json) -> RequestFuture<'_> {
+        CommandMain::operation_id(self.probe.as_ref(), scope)
+    }
+    fn create<'a>(&'a self, sender: &'a JsString, request: &'a Json) -> RequestFuture<'a> {
+        CommandMain::create(self.probe.as_ref(), sender, request)
+    }
+}
+impl SessionMain for GatedMain {
+    fn change_version(&self) -> u64 {
+        SessionMain::change_version(self.probe.as_ref())
+    }
+    fn catalogs(&self) -> &CheckedNativeContracts {
+        SessionMain::catalogs(self.probe.as_ref())
+    }
+    fn instructions(&self) -> &JsString {
+        SessionMain::instructions(self.probe.as_ref())
+    }
+    fn admit(&self, sender: &JsString, request: &Json) -> IvyResult<()> {
+        SessionMain::admit(self.probe.as_ref(), sender, request)
+    }
+    fn input<'a>(&'a self, sender: &'a JsString, request: &'a Json) -> RequestFuture<'a> {
+        SessionMain::input(self.probe.as_ref(), sender, request)
+    }
+}
+#[tokio::test]
+async fn pending_binding_survives_caller_cancellation_and_old_failure_keeps_new_work() {
+    let journal = Journal::new(JournalIo::open(":memory:").unwrap());
+    let main = Json::object([
+        (
+            "pin",
+            Json::object([("objectId", "main".into()), ("revision", Json::Number(1.0))]),
+        ),
+        (
+            "value",
+            Json::object([(
+                "binding",
+                Json::object([
+                    ("objectId", "binding".into()),
+                    ("revision", Json::Number(1.0)),
+                ]),
+            )]),
+        ),
+    ]);
+    let binding = Json::object([
+        (
+            "pin",
+            Json::object([
+                ("objectId", "binding".into()),
+                ("revision", Json::Number(1.0)),
+            ]),
+        ),
+        ("value", Json::Object(vec![])),
+    ]);
+    let probe = Arc::new(Probe {
+        spec: Json::object([("bindingReads", Json::Array(vec![binding]))]),
+        identity: Json::Null,
+        events: Mutex::new(vec![]),
+        state: Mutex::new(State::default()),
+        catalogs: Arc::new(CheckedNativeContracts::new("unused")),
+        instructions: "".into(),
+        journal: journal.clone(),
+        session: Mutex::new(None),
+        start: Instant::now(),
+    });
+    let (entered, mut arrivals) = tokio::sync::mpsc::unbounded_channel();
+    let (release1, work1) = tokio::sync::oneshot::channel();
+    let (release2, work2) = tokio::sync::oneshot::channel();
+    let (release3, work3) = tokio::sync::oneshot::channel();
+    let gated = Arc::new(GatedMain {
+        probe: probe.clone(),
+        entered,
+        releases: Mutex::new(vec![Some(work1), Some(work2), Some(work3)]),
+        calls: 0.into(),
+    });
+    let native = WhatsAppNative::with_dependencies(
+        gated.clone(),
+        probe.clone(),
+        journal.clone(),
+        Translator::default(),
+        probe.clone(),
+        Arc::new(Ids),
+        Arc::new(Ids),
+    );
+    let first = {
+        let native = native.clone();
+        tokio::spawn(async move { native.bound().await })
+    };
+    assert_eq!(arrivals.recv().await, Some(0));
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let second = {
+        let native = native.clone();
+        tokio::spawn(async move { native.bound().await })
+    };
+    release1.send(Ok(main.clone())).unwrap();
+    second.await.unwrap().unwrap();
+    native.bound().await.unwrap();
+    assert_eq!(gated.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    native.invalidate(false);
+    let old = {
+        let native = native.clone();
+        tokio::spawn(async move { native.bound().await })
+    };
+    assert_eq!(arrivals.recv().await, Some(1));
+    native.invalidate(false);
+    let new = {
+        let native = native.clone();
+        tokio::spawn(async move { native.bound().await })
+    };
+    assert_eq!(arrivals.recv().await, Some(2));
+    release2
+        .send(Err(IvyError::new(
+            "service_unavailable",
+            "Old lookup failed.",
+        )))
+        .unwrap();
+    assert_eq!(old.await.unwrap().unwrap_err().code, "service_unavailable");
+    release3.send(Ok(main)).unwrap();
+    let latest = new.await.unwrap().unwrap();
+    equal(
+        &native.bound().await.unwrap(),
+        &latest,
+        "Old failure must not clear its replacement",
+    );
+    assert_eq!(gated.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    if let Some(path) = std::env::var_os("IVY_CHAT_SESSION_CACHE_CAPTURE") {
+        std::fs::write(
+            path,
+            canonical(
+                &Json::object([
+                    ("lookups", Json::Number(3.0)),
+                    ("cancelledCaller", true.into()),
+                    ("replacementRetained", true.into()),
+                    ("events", Json::Array(probe.events.lock().unwrap().clone())),
+                ]),
+                usize::MAX,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    drop(native);
+    drop(gated);
+    drop(probe);
+    journal.close().await.unwrap();
+}
