@@ -184,6 +184,11 @@ async fn cyclic_driver_graph_keeps_queued_originals_across_retirement_and_abando
         // Declare in journal-release order, initialize in dependency order.
         // The callback handle contains no engine/executor reference.
         let program;
+        let execution_executor = LocalExecutor::default();
+        let execution_scoped = ReadScopeExecutor {
+            scopes: &scopes,
+            executor: &execution_executor,
+        };
         let execution;
         let engine;
         let executor = LocalExecutor::default();
@@ -212,7 +217,7 @@ async fn cyclic_driver_graph_keeps_queued_originals_across_retirement_and_abando
             ),
             probe: &journal,
         };
-        execution = ExecutionQueue::new(&program, &scoped);
+        execution = ExecutionQueue::new(&program, &execution_scoped);
         engine = EngineAdmission::new(
             &operations,
             f(row, "settings"),
@@ -309,7 +314,8 @@ async fn cyclic_driver_graph_keeps_queued_originals_across_retirement_and_abando
             internal.recover_publication().err().unwrap().code,
             "service_not_ready"
         );
-        let mut driver = Box::pin(executor.drive(internal_owner.run(&engine, stop)));
+        let mut driver =
+            Box::pin(executor.drive(execution_executor.drive(internal_owner.run(&engine, stop))));
         poll_fn(|cx| {
             assert!(driver.as_mut().poll(cx).is_pending());
             if owner_gate.entered.load(Ordering::SeqCst) == 1 {
