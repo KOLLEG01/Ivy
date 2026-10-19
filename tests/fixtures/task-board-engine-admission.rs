@@ -6,6 +6,7 @@ use ivy_contracts::{
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_task_board::{
     engine_admission::{AdmissionExecution, AdmissionRuntime, EngineAdmission, EngineOwner},
+    engine_invocations::EngineInvocations,
     engine_read::ReadContext,
     journal_store::Contracts,
     operations::{Document, Operations, Store},
@@ -17,6 +18,8 @@ use std::{
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
+#[path = "task-board-engine-invocations.rs"]
+mod invocations;
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(k).unwrap_or(&NULL)
@@ -236,9 +239,8 @@ impl AdmissionExecution for Bindings {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn public_admission_matches_original_identity_plan_and_recovery_boundaries() {
-    let catalogs = CheckedNativeContracts::new(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."),
-    );
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     for row in data().as_array().unwrap() {
         let replay = Arc::new(Replay {
             steps: Mutex::new(
@@ -273,6 +275,8 @@ async fn public_admission_matches_original_identity_plan_and_recovery_boundaries
         match EngineAdmission::new(&operations, f(row, "settings"), &owner, &runtime, &bindings) {
             Err(e) => outcomes.push(outcome(Err(e))),
             Ok(engine) => {
+                let executor = invocations::Executor::default();
+                let invocations = EngineInvocations::new(&executor);
                 for step in f(row, "steps").as_array().unwrap() {
                     let caller = f(step, "caller")
                         .as_js_string()
@@ -291,7 +295,12 @@ async fn public_admission_matches_original_identity_plan_and_recovery_boundaries
                         check_cancelled: &cancelled,
                     };
                     let result = match s(step, "method").to_utf8().unwrap().as_str() {
-                        "invoke" => engine.invoke(f(step, "request"), &context).await,
+                        "invoke" => {
+                            let request = invocations
+                                .invoke(&engine, f(step, "request"), &context)
+                                .unwrap();
+                            executor.drive(request).await
+                        }
                         "configuration" => engine.configuration().await,
                         "schedule" => engine.schedule(f(step, "request")).await,
                         "nativeUpdate" => engine.native_update(f(step, "request")).await,
@@ -302,6 +311,7 @@ async fn public_admission_matches_original_identity_plan_and_recovery_boundaries
                     };
                     outcomes.push(outcome(result));
                 }
+                executor.drive(invocations.stop()).await;
             }
         }
         let actual = Json::object([("outcomes", Json::Array(outcomes))]);

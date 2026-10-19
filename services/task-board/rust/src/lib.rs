@@ -5,6 +5,7 @@ pub mod checks;
 pub mod coordination;
 pub mod deliveries;
 pub mod engine_admission;
+pub mod engine_invocations;
 pub mod engine_actions;
 pub mod engine_validation;
 pub mod engine_publication;
