@@ -36,6 +36,7 @@ wss.on('connection',(socket,request)=>{
     const {method,params,id}=frame;emit({kind:'rpc',method,params});
     if(method==='service.connect')reply(id,{generation:selected});
     else if(method==='service.heartbeat')reply(id,{ready:params.ready});
+    else if(method==='objects.stat'&&selected===1&&params.objectId==='missing-root')send({jsonrpc:'2.0',id,error:{code:-32000,message:'Refused root.',data:{code:'fixture_refusal',outcome:'unknown',details:{phase:'root'}}}});
     else if(['registry.sync','notifications.subscribe','objects.stat'].includes(method))reply(id,{});
     else if(method==='serviceNodes.get')reply(id,{serviceNodeId:params.serviceNodeId,connected:true,synced:true,principalId:'fixture-principal'});
     else if(method==='test.invoke'){

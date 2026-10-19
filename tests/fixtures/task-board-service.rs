@@ -67,7 +67,12 @@ impl Peer {
             .spawn()
             .unwrap();
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-        let config = json(&bounded(lines.next_line()).await.unwrap().unwrap());
+        let config = json(
+            &bounded(lines.next_line())
+                .await
+                .unwrap()
+                .expect("Loopback peer exited before returning its configuration; inspect stderr"),
+        );
         let frames = Arc::new(Mutex::new(vec![]));
         let selected = frames.clone();
         let reader = tokio::spawn(async move {
@@ -440,6 +445,16 @@ async fn sdk_reconnect_keeps_prior_sqlite_owner_until_calls_tick_stop_and_drain_
         until(|| factory.count(1, "verify") == 1).await;
         assert!(!service.client.ready());
         assert!(!peer.methods(1).contains(&"objects.stat".into()));
+        let checking = factory.connections.borrow()[0].clone();
+        assert_eq!(
+            service
+                .control
+                .readiness(&checking)
+                .await
+                .unwrap_err()
+                .message_js(),
+            "Workflow state is not attached to this generation.".into()
+        );
         let refused = service.control.handler("workspace")(Json::Null, context(1))
             .await
             .unwrap_err();
@@ -684,5 +699,39 @@ async fn lost_reconcile_observer_still_installs_and_dropped_root_reports_unknown
     assert_eq!(error.code_js(), "internal_error".into());
     assert_eq!(error.outcome, Outcome::Unknown);
     bounded(service.close()).await.unwrap_err();
+    peer.finish().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_root_refusal_prevents_readiness_and_preserves_rpc_error_before_reconnect() {
+    let peer = Peer::start().await;
+    let admission = Admission {
+        calls: Cell::new(0),
+        refuse: false,
+    };
+    let mut options = setup(&peer, true);
+    options
+        .settings
+        .insert("rootObjectId", "missing-root".into());
+    let (service, owner) = make_service(options, &admission).unwrap();
+    let factory = Factory::new(vec![Plan::opened(), Plan::opened()]);
+    let script = async {
+        service.start();
+        let ready = bounded(service.client.wait_ready(None)).await.unwrap();
+        assert_eq!(ready.generation(), 2);
+        assert_eq!(factory.count(1, "verify"), 1);
+        assert_eq!(factory.count(1, "tick"), 0);
+        assert_eq!(factory.count(1, "release"), 1);
+        assert_eq!(
+            factory.connections.borrow()[0].close_reason().unwrap(),
+            failure("root")
+        );
+        let methods = peer.methods(1);
+        assert!(methods.contains(&"objects.stat".into()));
+        assert!(!methods.contains(&"service.heartbeat".into()));
+        bounded(service.close()).await.unwrap();
+    };
+    let (result, ()) = bounded(async { tokio::join!(owner.run(&factory), script) }).await;
+    result.unwrap();
     peer.finish().await;
 }
