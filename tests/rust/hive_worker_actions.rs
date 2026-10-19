@@ -389,6 +389,21 @@ fn worker_package_actions_preserve_constructor_principal_and_protocol_diagnostic
         action(json!({"action":"package.catalog","after":0,"includeUis":true})),
     );
     ok(&mut s, action(json!({"action":"package.prune"})));
+    let upload = super::super::package_catalog::authorization("worker-package", "1.0.0", "service");
+    let published = ok(
+        &mut s,
+        action(json!({"action":"package.publish","input":upload,"publisherPrincipalId":"beta"})),
+    );
+    let replayed = ok(
+        &mut s,
+        action(json!({"action":"package.publish","input":upload,"publisherPrincipalId":"alpha"})),
+    );
+    let mut altered = upload;
+    altered["archiveHash"] = credential("c").into();
+    let conflict = push(
+        &mut s,
+        action(json!({"action":"package.publish","input":altered,"publisherPrincipalId":"beta"})),
+    );
     let invalid = [Value::Null, json!([]), json!({}), json!({"manifest":null})].map(|input| {
         push(
             &mut s,
@@ -409,6 +424,15 @@ fn worker_package_actions_preserve_constructor_principal_and_protocol_diagnostic
     );
     let diagnostics = ok(&mut s, action(json!({"action":"binding.diagnostics"})));
     let result = compare(&s);
+    assert_eq!(
+        result["rows"][published]["value"]["publisherPrincipalId"],
+        "beta"
+    );
+    assert_eq!(
+        result["rows"][published]["value"],
+        result["rows"][replayed]["value"]
+    );
+    error(&result, conflict, "version_conflict");
     assert_eq!(
         result["rows"][seeded]["value"]["objectId"],
         result["rows"][catalog]["value"]["objectId"]

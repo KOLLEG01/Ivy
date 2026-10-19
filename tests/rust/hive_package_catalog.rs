@@ -115,7 +115,7 @@ fn setup() -> Vec<Value> {
     steps[1]["requireSuccess"] = true.into();
     steps
 }
-fn authorization(component: &str, version: &str, kind: &str) -> Value {
+pub(super) fn authorization(component: &str, version: &str, kind: &str) -> Value {
     let build = ivy_contracts::hash::digest(format!("{component}/{version}"));
     let mut manifest = json!({"schemaVersion":1,"componentId":component,"kind":kind,"version":version,"buildId":build,"connectsToHive":false,"requirements":{"node":">=24.18.0 <25.0.0","hiveProtocol":1,"contracts":[]}});
     if kind == "app" {
