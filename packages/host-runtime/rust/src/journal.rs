@@ -56,7 +56,10 @@ pub fn requires_bootstrap_replacement(instance: &IvyJson) -> bool {
     field(instance, "componentId") == &IvyJson::from("host-executor") || cfg!(windows) && field(instance, "componentId") == &IvyJson::from("service-manager")
 }
 pub fn bootstrap_launch_id(plan: &IvyJson, instance_id: &str) -> IvyResult<String> {
-    hash_json(&IvyJson::object([("planHash", hash_json(plan)?.into()), ("instanceId", instance_id.into())]))
+    bootstrap_launch_id_js(plan, &instance_id.into())
+}
+pub(crate) fn bootstrap_launch_id_js(plan: &IvyJson, instance_id: &JsString) -> IvyResult<String> {
+    hash_json(&IvyJson::object([("planHash", hash_json(plan)?.into()), ("instanceId", IvyJson::String(instance_id.clone()))]))
 }
 
 pub use crate::executor_lock::ExecutorLock;

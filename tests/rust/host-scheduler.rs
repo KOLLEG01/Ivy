@@ -4,6 +4,9 @@ use ivy_host_runtime::scheduler;
 #[path = "host-target-storage-cases.rs"]
 mod target_storage_cases;
 
+#[path = "host-linux-platform-cases.rs"]
+mod linux_platform_cases;
+
 use scheduler::{Deployment, exclusive_deployment, parallel_deployments};
 
 fn entry<'a>(id: &'a str, instance: &'a str, exclusive: bool) -> Deployment<'a> {
