@@ -20,6 +20,8 @@ mod object_mutations;
 mod object_write;
 #[path = "hive_online_backup.rs"]
 mod online_backup;
+#[path = "hive_package_catalog.rs"]
+mod package_catalog;
 #[path = "hive_query.rs"]
 mod query;
 #[path = "hive_registry.rs"]
@@ -113,6 +115,8 @@ fn native(path: &Path, steps: &[Value]) -> Value {
 fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) -> Value {
     let mut store = Store::open(path).unwrap();
     let mut result = vec![];
+    let package_trace = steps.iter().any(|step| step["op"] == "packageCatalog");
+    let mut package_catalog = package_catalog::Trace::default();
     let registry_trace = steps.iter().any(|step| {
         step["op"] == "registry"
             || step["op"] == "inventory"
@@ -138,6 +142,7 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
         };
         let mut wiki_calls = vec![];
         let outcome = match step["op"].as_str().unwrap() {
+            "packageCatalog" => package_catalog.execute(&mut store, step).map(wire),
             "uiFiles" => ui_files::execute(&mut store, step, path).map(wire),
             "wiki" => {
                 let (result, calls) = wiki::execute(
@@ -298,6 +303,7 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
                 }
             }),
             "reopen" => {
+                package_catalog.reset();
                 drop(store);
                 store = Store::open(path).unwrap();
                 registry.reset_owner();
@@ -462,6 +468,10 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
             ),
         };
         let mut row = json!({"value":value,"error":error,"state":snapshot(&store,step)});
+        if package_trace {
+            row["catalogMutations"] =
+                rows(&store, "SELECT mutation_id FROM mutations ORDER BY rowid");
+        }
         if step["op"] == "uiFiles" || step["op"] == "uis" {
             row["fileTree"] = ui_files::tree(&path.with_extension("files"));
             row["state"]["appAssets"] = rows(

@@ -24,6 +24,7 @@ const {Configurations}=await import('../../services/hive/src/configurations.ts')
 const {UiFiles}=await import('../../services/hive/src/ui-files.ts');
 const {Uis,assetPath}=await import('../../services/hive/src/uis.ts');
 const {uiContentPolicy}=await import('../../services/hive/src/ui-security.ts');
+const {PackageCatalogObject}=await import('../../services/hive/src/package-catalog-object.ts');
 const {wikiHandlers}=await import('../../services/hive/src/wiki.ts');
 const {validateInput,validateOutput}=await import('../../packages/contracts/src/core-validation.ts');
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
@@ -36,7 +37,8 @@ if(identityStart<0||identityEnd<identityStart)throw Error('Original worker ident
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
-let store,registry,discovery,configurations,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
+let store,registry,discovery,configurations,packageCatalog,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
+const packageTrace=input.steps.some(step=>step.op==='packageCatalog');
 const registryTrace=input.steps.some(step=>['registry','inventory','discovery','configurations','uis'].includes(step.op));
 const inventoryTrace=input.steps.some(step=>step.op==='inventory');
 const discoveryTrace=input.steps.some(step=>step.op==='discovery');
@@ -111,6 +113,34 @@ try {
   let value=null,error=null,wikiCalls=[];
   try {
    switch(step.op){
+    case 'packageCatalog':{
+      const RealDate=Date,realUUID=crypto.randomUUID,realGlobalUUID=globalThis.crypto.randomUUID;
+      const params=structuredClone(step.params);
+      for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...codeUnits));
+      globalThis.Date=retentionDate(RealDate,step.now);
+      let offset=0;
+      if(step.uuids){const next=()=>{if(offset>=step.uuids.length)throw Error('Unobserved catalog entropy');return step.uuids[offset++];};crypto.randomUUID=next;globalThis.crypto.randomUUID=next;syncBuiltinESMExports();}
+      try{
+        if(!packageCatalog||step.method==='constructor')packageCatalog=new PackageCatalogObject(store,new Objects(store),()=>{
+          store.run("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='fixture_protected_calls'");
+          const statement=store.metadata('fixture_protected_sql');if(statement)store.db.exec(statement);
+          if(store.metadata('fixture_protected_failure')==='yes')throw new IvyError('fixture_failure','Protected builds unavailable.');
+          return new Set(JSON.parse(store.metadata('fixture_protected_builds')??'[]'));
+        });
+        value=store.withBudget(()=>{
+          switch(step.method){
+            case 'constructor':return null;
+            case 'current':return packageCatalog.current();
+            case 'seed':return packageCatalog.seed(params.catalog,step.principal??'publisher');
+            case 'list':return packageCatalog.list(params.after,params.includeUis??false);
+            case 'publish':return packageCatalog.publish(params.authorization,step.principal??'publisher');
+            case 'prune':return packageCatalog.prune(step.principal??'publisher');
+            default:throw Error('Unknown package catalog method');
+          }
+        },step.overdue?-1:10000);
+      }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;globalThis.crypto.randomUUID=realGlobalUUID;syncBuiltinESMExports();}
+      break;
+    }
     case 'register':{
       const definition={...step.definition};for(const [field,units]of Object.entries(step.definitionUnits??{}))definition[field]=String.fromCharCode(...units);
       value=new Objects(store).register(definition,step.owner);if(step.lossless)value={encoded:JSON.stringify(value)};break;
@@ -409,7 +439,7 @@ try {
     case 'sql':store.db.exec(step.sql);break;
     case 'invalidate':store.invalidate(step.scope);break;
     case 'transaction':store.transaction(()=>{store.db.exec(step.sql);store.invalidate(step.scope);if(step.fail)throw new IvyError('fixture_failure','Rollback requested.');});break;
-    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;discovery=undefined;configurations=undefined;break;
+    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;discovery=undefined;configurations=undefined;packageCatalog=undefined;break;
     case 'reorder':case 'archive':case 'delete':case 'move':{
       const RealDate=Date;
       if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
@@ -445,7 +475,7 @@ try {
   if(inventoryTrace){state.inventorySets=store.all('SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind');state.inventory=step.compactInventory?tableHash('inventory','record_id,node_id,namespace,kind,native_id,schema_version,summary,observed_at'):store.all('SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id');}
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
-  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{})});
+  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{}) ,...(packageTrace?{catalogMutations:store.all('SELECT mutation_id FROM mutations ORDER BY rowid')}:{})});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");

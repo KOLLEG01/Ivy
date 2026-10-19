@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod mcp_request;
 pub mod mcp_schema;
 pub mod objects;
+pub mod package_catalog_object;
 pub mod paging;
 pub mod query;
 pub mod registry;
