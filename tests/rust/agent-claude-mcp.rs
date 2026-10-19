@@ -270,8 +270,8 @@ async fn original_claude_mcp_policy_and_owned_files_match() {
     assert_eq!(rows.len(), 36);
     for row in rows {
         let mode = field(row, "mode").as_str().unwrap();
-        let base = root.0.join(mode);
-        let target = install(&base, mode);
+        let base = root.0.join(&mode);
+        let target = install(&base, &mode);
         let credential = if field(row, "credentialMode") == &IvyJson::from("large") {
             JsString::from("x".repeat(4 * 1024 * 1024))
         } else {

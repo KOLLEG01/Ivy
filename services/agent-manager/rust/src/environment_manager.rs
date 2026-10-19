@@ -298,10 +298,9 @@ impl ManagedEnvironment {
                 managers.synchronizers().synchronize(bootstrap).await;
                 if owner.claude() {
                     let status = managers.mcp.status();
-                    if !matches!(
-                        status.get("state").and_then(IvyJson::as_str),
-                        Some("applied" | "disabled")
-                    ) {
+                    if status.get("state") != Some(&IvyJson::from("applied"))
+                        && status.get("state") != Some(&IvyJson::from("disabled"))
+                    {
                         return Err(IvyError::new(
                             "native_environment_unavailable",
                             "Claude adapter MCP configuration was not applied.",
