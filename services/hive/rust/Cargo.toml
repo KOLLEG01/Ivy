@@ -22,6 +22,10 @@ tokio = { workspace = true, features = ["test-util"] }
 name = "ivy-hive-offline-backup"
 path = "src/bin/offline_backup.rs"
 
+[[bin]]
+name = "ivy-hive-inspect-storage"
+path = "src/bin/inspect_storage.rs"
+
 # Integration-test process; no deployment plan references this executable.
 [[bin]]
 name = "ivy-hive-worker-fixture"

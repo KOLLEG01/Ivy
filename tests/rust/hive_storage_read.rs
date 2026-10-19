@@ -11,6 +11,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+#[path = "hive_storage_inspector.rs"]
+mod inspector;
 
 struct Root(PathBuf);
 impl Root {

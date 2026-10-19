@@ -16,6 +16,7 @@ pub mod paging;
 pub mod query;
 pub mod registry;
 pub mod retention;
+pub mod storage_inspector;
 pub mod storage_read;
 pub mod store;
 pub mod ui_files;
