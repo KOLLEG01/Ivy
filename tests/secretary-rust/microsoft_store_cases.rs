@@ -90,7 +90,10 @@ fn resolve(value: &IvyJson, results: &[IvyJson]) -> IvyJson {
         _ => value.clone(),
     }
 }
-fn normalize(value: &IvyJson, ids: &HashMap<ivy_contracts::JsString, IvyJson>) -> IvyJson {
+pub(super) fn normalize(
+    value: &IvyJson,
+    ids: &HashMap<ivy_contracts::JsString, IvyJson>,
+) -> IvyJson {
     match value {
         IvyJson::String(s) => ids.get(s).cloned().unwrap_or_else(|| value.clone()),
         IvyJson::Array(values) => {
@@ -102,7 +105,7 @@ fn normalize(value: &IvyJson, ids: &HashMap<ivy_contracts::JsString, IvyJson>) -
         _ => value.clone(),
     }
 }
-fn retained(journal: &Journal) -> (IvyJson, HashMap<ivy_contracts::JsString, IvyJson>) {
+pub(super) fn retained(journal: &Journal) -> (IvyJson, HashMap<ivy_contracts::JsString, IvyJson>) {
     let mut ids = HashMap::new();
     let mut query = journal.db.prepare("SELECT id,key,name,current_revision,value_json FROM technical_documents ORDER BY key,name").unwrap();
     let documents = query
@@ -198,7 +201,7 @@ fn retained(journal: &Journal) -> (IvyJson, HashMap<ivy_contracts::JsString, Ivy
         ids,
     )
 }
-fn seed(journal: &Journal, input: &IvyJson) {
+pub(super) fn seed(journal: &Journal, input: &IvyJson) {
     for row in input.required("documents").unwrap().as_array().unwrap() {
         let revision = row.get("revision").and_then(IvyJson::as_f64).unwrap_or(1.) as i64;
         let revisions = row.get("revisions").cloned().unwrap_or_else(|| {
