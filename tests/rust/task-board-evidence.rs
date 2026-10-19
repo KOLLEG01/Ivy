@@ -11,6 +11,8 @@ use support::oracle;
 mod native_evidence;
 #[path = "../fixtures/task-board-read-evidence.rs"]
 mod read_evidence;
+#[path = "../fixtures/task-board-turn-evidence.rs"]
+mod turn_evidence;
 
 struct Memory {
     mutation: String,

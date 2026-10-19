@@ -16,6 +16,7 @@ pub mod native_intent;
 pub mod native_plan;
 pub mod native_recovery;
 pub mod native_signals;
+pub mod native_turn_evidence;
 pub mod operations;
 pub mod publication;
 pub mod read_evidence;

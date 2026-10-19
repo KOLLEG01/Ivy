@@ -70,6 +70,15 @@ pub struct LocalArtifact {
 }
 
 impl LocalJournal<'_> {
+    pub fn name(&self, id: &JsString) -> IvyResult<JsString> {
+        self.connection
+            .query_row("SELECT name FROM documents WHERE id=?", [text(id)], |row| {
+                row.get::<_, String>(0)
+            })
+            .map(Into::into)
+            .map_err(error)
+    }
+
     pub fn artifact(&self, pin: &Json) -> IvyResult<Option<LocalArtifact>> {
         let id = pin
             .required("objectId")?
