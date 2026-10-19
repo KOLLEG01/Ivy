@@ -187,6 +187,12 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
   await expect(f.page.getByText('Direct agent answer', { exact: true })).toBeVisible();
   await expect(f.page.getByText('Cross-agent note', { exact: true })).toHaveCount(0);
   await expect.poll(async () => (await f.taskBoard().runtime.engine.task({ task: user.objectId }, 'browser-fixture')).unreadAgentComments).toBe(1);
+  // The retained board is intentionally aria-hidden while the overlay is open.
+  const backgroundCard = f.page.locator('[data-slot=task-board-background] article').filter({ hasText: 'User feedback' });
+  await toggle.click();
+  await expect(backgroundCard.locator('[title="3 comments"]')).toHaveCount(1, { timeout: 1000 });
+  await toggle.click();
+  await expect(backgroundCard.locator('[title="2 comments"]')).toHaveCount(1, { timeout: 1000 });
   await toggle.click();
   await expect(f.page.getByRole('dialog', { name: 'Task details' })).toBeVisible();
   await expect(f.page.getByText('Cross-agent note', { exact: true })).toBeVisible();

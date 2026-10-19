@@ -133,8 +133,8 @@ const pages = usePage(async (signal, cursor) => {
       resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
       conditionDetail: view.executionCondition.detail, openQuestionCount: task.openQuestionCount ?? 0,
       checkFailure: task.scheduledCheckFailure, nextReviewAt: fields.nextReviewAt ?? '', dueAt: fields.dueAt ?? '',
-      commentCount: showCrossAgent.value ? view.commentCount : view.directCommentCount,
-      unreadAgentComments: showCrossAgent.value ? view.unreadAgentComments : view.unreadDirectAgentComments,
+      commentCount: view.commentCount, directCommentCount: view.directCommentCount,
+      unreadAgentComments: view.unreadAgentComments, unreadDirectAgentComments: view.unreadDirectAgentComments,
       group: waiting ? waitingGroup(task, view.executionCondition, dependency) : '',
       context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,
         waiting: task.waiting?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
@@ -143,7 +143,7 @@ const pages = usePage(async (signal, cursor) => {
   if (waiting) items.sort((a, b) => waitingGroups.findIndex(group => group.id === a.group) - waitingGroups.findIndex(group => group.id === b.group));
   return { nextCursor: result.nextCursor, items };
 }, 15000, () => 'ivy.task-board.column:' + JSON.stringify([base.href, order.value, props.workspace.serviceNodeId,
-  props.workspace.callerPrincipalId, props.column.id, !!props.archived, props.swimlane, showCrossAgent.value,
+  props.workspace.callerPrincipalId, props.column.id, !!props.archived, props.swimlane,
   ['q', 'status', 'control', 'host', 'category', 'project'].map(key => props.query.get(key))]), ['objects/task-board/task']);
 
 type Item = { id: string; category: string; group: string; context: TransitionContext };
@@ -165,10 +165,13 @@ const endDrag = () => {
   emit("drag", null);
 };
 const lane = (category: string) => category || "Uncategorized";
-const items = computed(() => (pages.value.value?.items ?? []) as Item[]);
+const items = computed(() => (pages.value.value?.items ?? []).map(item => ({ ...item,
+  commentCount: showCrossAgent.value ? item.commentCount : item.directCommentCount,
+  unreadAgentComments: showCrossAgent.value ? item.unreadAgentComments : item.unreadDirectAgentComments,
+})));
 const groups = computed(() => props.column.id === 'waiting' && !props.archived
-  ? waitingGroups.map(group => ({ ...group, items: (pages.value.value?.items ?? []).filter(item => item.group === group.id) }))
-  : [{ id: '', title: '', items: pages.value.value?.items ?? [] }]);
+  ? waitingGroups.map(group => ({ ...group, items: items.value.filter(item => item.group === group.id) }))
+  : [{ id: '', title: '', items: items.value }]);
 // Neighbours within the same swimlane, so ranking never jumps across categories.
 const sameLane = (a: Item, b: Item | undefined) =>
   !!b && a.group === b.group && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
