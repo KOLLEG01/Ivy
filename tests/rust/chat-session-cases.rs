@@ -828,6 +828,7 @@ impl ivy_sdk::rpc::RpcClient for SdkClient {
                     };
                     self.reply(Json::object([
                         ("operationId", f(args, "operationId").clone()),
+                        ("epoch", "epoch".into()),
                         ("reply", reply),
                     ]))
                 }
