@@ -30,6 +30,8 @@ mod engine_publication;
 mod engine_actions;
 #[path = "../fixtures/task-board-engine-validation.rs"]
 mod engine_validation;
+#[path = "../fixtures/task-board-checks.rs"]
+mod checks;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {

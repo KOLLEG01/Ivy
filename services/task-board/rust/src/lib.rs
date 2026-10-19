@@ -1,6 +1,7 @@
 pub mod configuration;
 pub mod allocation;
 pub mod category_projection;
+pub mod checks;
 pub mod coordination;
 pub mod deliveries;
 pub mod engine_admission;

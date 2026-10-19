@@ -1,7 +1,9 @@
 use super::*;
 use ivy_contracts::builtin_schema::SchemaBundle;
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
+use ivy_sdk::tools::ToolClients;
 use ivy_store::rusqlite::Connection;
+use ivy_task_board::checks::{CheckStore, TaskChecks};
 use ivy_task_board::{
     configuration::initial_configuration,
     engine_execution::{
@@ -98,29 +100,32 @@ impl LifecyclePages for NoPages {
         panic!("No page scan allowed")
     }
 }
-struct Checks {
+struct Checks<'a, S> {
     first: bool,
+    core: TaskChecks<'a, S>,
 }
-impl CreationChecks for Checks {
+impl<S: CheckStore> CreationChecks for Checks<'_, S> {
     async fn fields(&self, fields: &Json) -> IvyResult<()> {
         assert!(self.first, "Recovery must retain original checks");
-        admission("TaskFields", fields)
+        admission("TaskFields", fields)?;
+        self.core.fields(fields, None).await
     }
-    async fn initial_state(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<Json> {
+    async fn initial_state(
+        &self,
+        request: &Json,
+        fields: &Json,
+        actor: &Json,
+        at: &JsString,
+    ) -> IvyResult<Json> {
         assert!(self.first, "Recovery must retain original state");
-        Ok(Json::object([
-            ("workflowState", "review".into()),
-            ("waiting", Json::Null),
-        ]))
+        self.core.initial_state(request, fields, actor, at).await
     }
     async fn execution_options(&self, fields: &Json, allow: bool) -> IvyResult<()> {
         assert!(self.first);
-        assert_eq!(f(fields, "control"), &Json::from("user"));
-        assert!(!allow);
-        Ok(())
+        self.core.execution_options(fields, None, allow).await
     }
 }
-impl RootPublicationChecks for Checks {
+impl<S: CheckStore> RootPublicationChecks for Checks<'_, S> {
     async fn configuration(&self, _: &Json) -> IvyResult<()> {
         panic!("Not a configure request")
     }
@@ -305,7 +310,15 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
                 Ok(())
             })
         };
-        let checks = Checks { first: round == 0 };
+        let tools = ToolClients::new(client.clone());
+        let checks = Checks {
+            first: round == 0,
+            core: TaskChecks {
+                store: &operations.store,
+                catalogs: &catalogs,
+                tools: &tools,
+            },
+        };
         let unused = Unused;
         let publisher = EnginePublisher {
             operations: &operations,
