@@ -1,9 +1,12 @@
 //! One bounded reconciliation pass over retained native calls and observations.
-//! Current engine admission, prompts, peer and handoff policy remain explicit.
+//! Current engine admission, prompts and handoff policy remain explicit.
 use crate::{
+    engine_read::peer_state,
+    journal_store::ReadScopes,
     native_driver::{NativeDriver, NativeDriverConnection, NativeDriverRuntime, NativeDriverStore},
     native_inspector::{Inspection, InspectionContext, InspectionStore, NativeInspector, PageSize},
     native_intent::{NativeSlot, TaskPrompts},
+    native_lifecycle::LifecycleStore,
     native_state::{finished_run, project_native_state},
     native_turn_evidence::{TurnEvidence, TurnEvidenceStore},
     operations::{Document, Store, mutation},
@@ -18,7 +21,8 @@ use ivy_sdk::native_observations::NativeObservations;
 use std::{cell::RefCell, collections::HashSet, future::Future};
 
 /// The owning engine must bind its current nativeUpdate, read-cache scope,
-/// handoff/claim/peer policy and comment mirroring. There are no policy defaults.
+/// peer observation and current policy. The runtime below supplies the concrete
+/// journal/read-scope bindings without introducing policy defaults.
 #[allow(async_fn_in_trait)]
 pub trait OrchestrationEngine: NativeDriverRuntime {
     fn now_millis(&self) -> f64;
@@ -27,6 +31,69 @@ pub trait OrchestrationEngine: NativeDriverRuntime {
     async fn peer_state(&self, task: &Json, task_id: &JsString) -> IvyResult<JsString>;
     async fn sync_native_comments(&self, run: &JsString) -> IvyResult<()>;
     async fn with_read_cache<T, F: Future<Output = IvyResult<T>>>(&self, work: F) -> IvyResult<T>;
+}
+/// These decisions belong to the current engine. In particular, native comment
+/// mirroring must use its accepted current question/answer admission path.
+#[allow(async_fn_in_trait)]
+pub trait OrchestrationPolicies {
+    fn run_handoff(&self, task: &Json, run: &JsString) -> IvyResult<bool>;
+    fn claimed_workflow_state(&self, waiting: &Json) -> IvyResult<JsString>;
+    async fn sync_native_comments(&self, run: &JsString) -> IvyResult<()>;
+}
+/// Borrow the authenticated driver and the owner's lifecycle journal. Bind the
+/// journal's cache to these same read scopes when constructing the owner graph.
+pub struct OrchestrationRuntime<'a, D, S, P, C> {
+    pub driver: &'a D,
+    pub store: &'a S,
+    pub policies: &'a P,
+    pub read_scopes: &'a ReadScopes,
+    pub now_millis: C,
+}
+impl<D: NativeDriverRuntime, S, P, C> NativeDriverRuntime for OrchestrationRuntime<'_, D, S, P, C> {
+    async fn verify_owner(&self) -> IvyResult<()> {
+        self.driver.verify_owner().await
+    }
+    async fn scoped_operation_id(&self, scope: &Json) -> IvyResult<JsString> {
+        self.driver.scoped_operation_id(scope).await
+    }
+    async fn native_update(&self, request: &Json) -> IvyResult<Json> {
+        self.driver.native_update(request).await
+    }
+    fn now(&self) -> JsString {
+        self.driver.now()
+    }
+}
+impl<D: NativeDriverConnection, S, P, C> NativeDriverConnection
+    for OrchestrationRuntime<'_, D, S, P, C>
+{
+    fn tools(&self) -> &std::sync::Arc<ivy_sdk::tools::ToolClients> {
+        self.driver.tools()
+    }
+    fn principal_id(&self) -> &JsString {
+        self.driver.principal_id()
+    }
+}
+impl<D: NativeDriverRuntime, S: LifecycleStore, P: OrchestrationPolicies, C: Fn() -> f64>
+    OrchestrationEngine for OrchestrationRuntime<'_, D, S, P, C>
+{
+    fn now_millis(&self) -> f64 {
+        (self.now_millis)()
+    }
+    fn run_handoff(&self, task: &Json, run: &JsString) -> IvyResult<bool> {
+        self.policies.run_handoff(task, run)
+    }
+    fn claimed_workflow_state(&self, waiting: &Json) -> IvyResult<JsString> {
+        self.policies.claimed_workflow_state(waiting)
+    }
+    async fn peer_state(&self, task: &Json, task_id: &JsString) -> IvyResult<JsString> {
+        peer_state(self.store, task, task_id).await
+    }
+    async fn sync_native_comments(&self, run: &JsString) -> IvyResult<()> {
+        self.policies.sync_native_comments(run).await
+    }
+    async fn with_read_cache<T, F: Future<Output = IvyResult<T>>>(&self, work: F) -> IvyResult<T> {
+        self.read_scopes.with_read_cache(work).await
+    }
 }
 /// Component boundaries retain the original ordering. The concrete adapter
 /// below uses the existing driver, inspector and immutable evidence verifier.

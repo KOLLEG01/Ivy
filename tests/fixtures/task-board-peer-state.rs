@@ -1,5 +1,22 @@
 use super::*;
-use ivy_task_board::engine_read::peer_state;
+use ivy_task_board::{
+    journal_store::ReadScopes,
+    native_driver::{DriverRuntime, NativeDriverRuntime},
+    native_orchestrator::{OrchestrationEngine, OrchestrationPolicies, OrchestrationRuntime},
+};
+
+struct UnusedPolicies;
+impl OrchestrationPolicies for UnusedPolicies {
+    fn run_handoff(&self, _: &Json, _: &JsString) -> IvyResult<bool> {
+        panic!("Peer observation must not infer handoff policy")
+    }
+    fn claimed_workflow_state(&self, _: &Json) -> IvyResult<JsString> {
+        panic!("Peer observation must not infer claim policy")
+    }
+    async fn sync_native_comments(&self, _: &JsString) -> IvyResult<()> {
+        panic!("Peer observation must not admit native comments")
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn peer_state_matches_original_paging_pins_paths_order_and_errors() {
@@ -34,7 +51,23 @@ async fn peer_state_matches_original_paging_pins_paths_order_and_errors() {
             replay: replay.clone(),
             root: Some("root".into()),
         };
-        let result = peer_state(&store, f(row, "task"), s(row, "taskId"))
+        let scopes = ReadScopes::default();
+        let driver = DriverRuntime::new(
+            Arc::new(NoRemote),
+            "caller".into(),
+            "task-board-node".into(),
+            |_: Json| std::future::ready(Err(IvyError::internal())),
+            || panic!("Peer observation must not read the native clock"),
+        );
+        let runtime = OrchestrationRuntime {
+            driver: &driver,
+            store: &store,
+            policies: &UnusedPolicies,
+            read_scopes: &scopes,
+            now_millis: || panic!("Peer observation must not read retry time"),
+        };
+        let result = runtime
+            .with_read_cache(runtime.peer_state(f(row, "task"), s(row, "taskId")))
             .await
             .map(Json::String);
         assert_eq!(
@@ -64,6 +97,7 @@ use std::cell::{Cell, RefCell};
 
 struct PeerContracts {
     values: Vec<Json>,
+    reads: Cell<usize>,
 }
 impl Contracts for PeerContracts {
     fn version(&self, key: &str) -> IvyResult<String> {
@@ -79,6 +113,7 @@ impl Contracts for PeerContracts {
     }
     fn validate_record(&self, key: &str, _: &JsString, value: &Json) -> IvyResult<()> {
         assert_eq!(key, "task-board/task");
+        self.reads.set(self.reads.get() + 1);
         assert!(
             self.values
                 .iter()
@@ -177,16 +212,18 @@ async fn peer_state_reads_the_paged_sqlite_revision_even_after_a_later_workspace
     };
     // Finite explicit local Task admission/routing. This does not supply the
     // current Task schema, production page engine or public-record placement.
+    let scopes = ReadScopes::default();
     let journal = JournalStore {
         journal: local,
         client: Arc::new(NoRemote),
         contracts: PeerContracts {
             values: vec![old.clone(), newer.clone()],
+            reads: Cell::new(0),
         },
         limits: HistoryLimits::default(),
         now: || "2026-01-02T00:00:00.000Z".to_owned(),
         new_id: || -> JsString { panic!("Observation cannot allocate identities") },
-        cache: None,
+        cache: Some(scopes.cache()),
     };
     let store = LifecycleJournal {
         journal: &journal,
@@ -194,8 +231,25 @@ async fn peer_state_reads_the_paged_sqlite_revision_even_after_a_later_workspace
     };
     let own = task("c:/work/path", "todo");
     let expected = JsString::from(hash_json(&Json::Array(vec!["peer:waiting".into()])).unwrap());
+    let driver = DriverRuntime::new(
+        journal.client.clone(),
+        "caller".into(),
+        "task-board-node".into(),
+        |_: Json| std::future::ready(Err(IvyError::internal())),
+        || "2026-01-02T00:00:00.000Z".into(),
+    );
+    let runtime = OrchestrationRuntime {
+        driver: &driver,
+        store: &store,
+        policies: &UnusedPolicies,
+        read_scopes: &scopes,
+        now_millis: || 0.0,
+    };
     assert_eq!(
-        peer_state(&store, &own, &"self".into()).await.unwrap(),
+        runtime
+            .with_read_cache(runtime.peer_state(&own, &"self".into()))
+            .await
+            .unwrap(),
         expected
     );
     assert_eq!(
@@ -210,12 +264,18 @@ async fn peer_state_reads_the_paged_sqlite_revision_even_after_a_later_workspace
         hash_json(&newer).unwrap()
     );
     assert_eq!(
-        peer_state(&store, &own, &"self".into()).await.unwrap(),
+        runtime
+            .with_read_cache(runtime.peer_state(&own, &"self".into()))
+            .await
+            .unwrap(),
         expected
     );
     *pages.pin.borrow_mut() = second;
     assert_eq!(
-        peer_state(&store, &own, &"self".into()).await.unwrap(),
+        runtime
+            .with_read_cache(runtime.peer_state(&own, &"self".into()))
+            .await
+            .unwrap(),
         JsString::from(hash_json(&Json::Array(vec![])).unwrap())
     );
     assert_eq!(
@@ -231,4 +291,192 @@ async fn peer_state_reads_the_paged_sqlite_revision_even_after_a_later_workspace
     );
     assert_eq!(rows(), 2);
     assert_eq!(pages.calls.get(), 3);
+}
+
+struct CurrentPolicies {
+    refusal: RefCell<Option<IvyError>>,
+    calls: RefCell<Vec<Json>>,
+}
+impl OrchestrationPolicies for CurrentPolicies {
+    fn run_handoff(&self, task: &Json, run: &JsString) -> IvyResult<bool> {
+        self.calls.borrow_mut().push(Json::Array(vec![
+            "handoff".into(),
+            task.clone(),
+            Json::String(run.clone()),
+        ]));
+        if let Some(error) = self.refusal.borrow().clone() {
+            return Err(error);
+        }
+        Ok(true)
+    }
+    fn claimed_workflow_state(&self, waiting: &Json) -> IvyResult<JsString> {
+        self.calls.borrow_mut().push(waiting.clone());
+        Ok("waiting".into())
+    }
+    async fn sync_native_comments(&self, run: &JsString) -> IvyResult<()> {
+        self.calls.borrow_mut().push(Json::String(run.clone()));
+        if let Some(error) = self.refusal.borrow().clone() {
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn orchestration_runtime_isolates_interleaved_journal_actions_and_keeps_current_policy_refusals()
+ {
+    use std::{
+        future::{Future, poll_fn},
+        task::Poll,
+    };
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    let scopes = ReadScopes::default();
+    let old = task("c:/work/path", "waiting");
+    let newer = task("c:/work/path", "review");
+    let journal = JournalStore {
+        journal: LocalJournal {
+            connection: &db,
+            root_object_id: Some("root".into()),
+        },
+        client: Arc::new(NoRemote),
+        contracts: PeerContracts {
+            values: vec![old.clone(), newer.clone()],
+            reads: Cell::new(0),
+        },
+        limits: HistoryLimits::default(),
+        now: || "2026-01-02T00:00:00.000Z".to_owned(),
+        new_id: || -> JsString { panic!("Observation cannot allocate identities") },
+        cache: Some(scopes.cache()),
+    };
+    let at = JsString::from("2026-01-02T00:00:00.000Z");
+    let pin = journal
+        .journal
+        .create(
+            "task-board/task",
+            &"Peer".into(),
+            Some(&"root".into()),
+            &old,
+            &at,
+            &"peer".into(),
+        )
+        .unwrap();
+    let pages = Snapshot {
+        pin: RefCell::new(pin.clone()),
+        calls: Cell::new(0),
+    };
+    let store = LifecycleJournal {
+        journal: &journal,
+        pages: &pages,
+    };
+    let refusal = IvyError::new_js(
+        "current_policy_refused".into(),
+        JsString(vec![0xd800, 0x0021]),
+    )
+    .with_outcome(Outcome::Unknown)
+    .with_details(Json::object([("current", true.into())]));
+    let policies = CurrentPolicies {
+        refusal: RefCell::new(Some(refusal.clone())),
+        calls: RefCell::default(),
+    };
+    let driver = DriverRuntime::new(
+        journal.client.clone(),
+        "caller".into(),
+        "task-board-node".into(),
+        |_: Json| std::future::ready(Err(IvyError::internal())),
+        || at.clone(),
+    );
+    let runtime = OrchestrationRuntime {
+        driver: &driver,
+        store: &store,
+        policies: &policies,
+        read_scopes: &scopes,
+        now_millis: || 0.0,
+    };
+    // Exact revision pins are cached by the original store. Bare string latest
+    // reads intentionally bypass the action cache. Count actual journal
+    // admissions to distinguish inherited and independent action contexts.
+    let address = pin;
+    let held = Cell::new(true);
+    let mut first = Box::pin(runtime.with_read_cache(async {
+        let before = store.read("task-board/task", &address, true).await?;
+        poll_fn(|_| {
+            if held.get() {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await;
+        let after = runtime
+            .with_read_cache(store.read("task-board/task", &address, true))
+            .await?;
+        Ok((before.pin, after.pin))
+    }));
+    poll_fn(|cx| {
+        assert!(first.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(journal.contracts.reads.get(), 1);
+    journal
+        .journal
+        .update("task-board/task", &"peer".into(), 1.0, &newer, &at)
+        .unwrap();
+    let written_changes = db.total_changes();
+    let second = runtime
+        .with_read_cache(async {
+            let before = store.read("task-board/task", &address, true).await?;
+            assert_eq!(journal.contracts.reads.get(), 2);
+            let after = runtime
+                .with_read_cache(store.read("task-board/task", &address, true))
+                .await?;
+            assert_eq!(journal.contracts.reads.get(), 2);
+            let latest = store.read("task-board/task", &"peer".into(), true).await?;
+            assert_eq!(f(&latest.pin, "revision"), &Json::Number(2.0));
+            Ok((before.pin, after.pin))
+        })
+        .await
+        .unwrap();
+    assert_eq!(f(&second.0, "revision"), &Json::Number(1.0));
+    assert_eq!(second.0, second.1);
+    assert_eq!(journal.contracts.reads.get(), 3);
+    held.set(false);
+    let first = first.await.unwrap();
+    assert_eq!(f(&first.0, "revision"), &Json::Number(1.0));
+    assert_eq!(first.0, first.1);
+    assert_eq!(journal.contracts.reads.get(), 3);
+    store.read("task-board/task", &address, true).await.unwrap();
+    assert_eq!(journal.contracts.reads.get(), 4);
+
+    let run = JsString(vec![0x0072, 0xdfff]);
+    let error = runtime.run_handoff(&old, &run).unwrap_err();
+    assert_eq!(error.code_js(), refusal.code_js());
+    assert_eq!(error.message_js(), refusal.message_js());
+    assert_eq!(error.outcome, refusal.outcome);
+    assert_eq!(error.details, refusal.details);
+    let error = runtime
+        .with_read_cache(runtime.sync_native_comments(&run))
+        .await
+        .unwrap_err();
+    assert_eq!(error.message_js(), refusal.message_js());
+    assert_eq!(error.outcome, refusal.outcome);
+    assert_eq!(error.details, refusal.details);
+    *policies.refusal.borrow_mut() = None;
+    assert!(runtime.run_handoff(&old, &run).unwrap());
+    runtime.sync_native_comments(&run).await.unwrap();
+    assert_eq!(
+        *policies.calls.borrow(),
+        vec![
+            Json::Array(vec![
+                "handoff".into(),
+                old.clone(),
+                Json::String(run.clone())
+            ]),
+            Json::String(run.clone()),
+            Json::Array(vec!["handoff".into(), old, Json::String(run.clone())]),
+            Json::String(run),
+        ]
+    );
+    assert_eq!(pages.calls.get(), 0);
+    assert_eq!(db.total_changes(), written_changes);
 }

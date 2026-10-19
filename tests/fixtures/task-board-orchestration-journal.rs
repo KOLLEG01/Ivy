@@ -8,14 +8,15 @@ use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
     evidence_bytes::{BlobStore, ChunkKey},
     inspection_journal::InspectionJournal,
-    journal_store::{Contracts, JournalStore},
+    journal_store::{Contracts, JournalStore, ReadScopes},
+    lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_journal::{self, LocalJournal},
     local_retention::HistoryLimits,
     native_comments::{NativeCommentStore, sync_native_comments},
     native_driver::{DriverRuntime, NativeDriver},
     native_inspector::{InspectionStore, NativeInspector},
     native_intent::TaskPrompts,
-    native_orchestrator::NativeServices,
+    native_orchestrator::{NativeServices, OrchestrationPolicies, OrchestrationRuntime},
     native_turn_evidence::TurnEvidence,
     read_evidence::ReadEvidenceStore,
 };
@@ -438,10 +439,7 @@ impl NativeDriverRuntime for Engine<'_, '_> {
         Ok(Json::Null)
     }
 }
-impl OrchestrationEngine for Engine<'_, '_> {
-    fn now_millis(&self) -> f64 {
-        0.0
-    }
+impl OrchestrationPolicies for Engine<'_, '_> {
     fn run_handoff(&self, task: &Json, run: &JsString) -> IvyResult<bool> {
         Ok(f(task, "comments").as_array().unwrap().iter().any(|v| {
             f(v, "purpose") == &"handoff".into()
@@ -455,14 +453,14 @@ impl OrchestrationEngine for Engine<'_, '_> {
         );
         Ok("in_progress".into())
     }
-    async fn peer_state(&self, _: &Json, _: &JsString) -> IvyResult<JsString> {
-        panic!("No terminal steering")
-    }
     async fn sync_native_comments(&self, r: &JsString) -> IvyResult<()> {
         sync_native_comments(&Comments(self.inspected), r).await
     }
-    async fn with_read_cache<T, F: Future<Output = IvyResult<T>>>(&self, f: F) -> IvyResult<T> {
-        f.await
+}
+struct NoPeers;
+impl LifecyclePages for NoPeers {
+    async fn page(&self, _: &str, _: &Json) -> IvyResult<Json> {
+        panic!("Terminal recovery must not observe steering peers")
     }
 }
 struct NoPrompts;
@@ -604,17 +602,30 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
                 summary: RefCell::default(),
                 updates: RefCell::default(),
             };
+            let engine_ref = &engine;
             let driver_runtime = DriverRuntime::new(
                 client.clone(),
                 "caller".into(),
                 "task-board-node".into(),
-                |_: Json| std::future::ready(Err(IvyError::internal())),
+                move |q: Json| async move { engine_ref.native_update(&q).await },
                 || "2026-01-02T03:04:05.006Z".into(),
             );
+            let lifecycle = LifecycleJournal {
+                journal: &store,
+                pages: &NoPeers,
+            };
+            let scopes = ReadScopes::default();
+            let runtime = OrchestrationRuntime {
+                driver: &driver_runtime,
+                store: &lifecycle,
+                policies: &engine,
+                read_scopes: &scopes,
+                now_millis: || 0.0,
+            };
             let services = NativeServices {
                 driver: NativeDriver {
                     store: &store,
-                    runtime: &driver_runtime,
+                    runtime: &runtime,
                     prompts: &NoPrompts,
                     catalogs: &catalogs,
                 },
@@ -628,7 +639,7 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
                     principal_id: &"caller".into(),
                 },
             };
-            let coordinator = NativeOrchestrator::new(&store, &engine, &services, &catalogs);
+            let coordinator = NativeOrchestrator::new(&store, &runtime, &services, &catalogs);
             if round == 0 {
                 coordinator.drain(&id(200)).await.unwrap();
                 assert_eq!(
