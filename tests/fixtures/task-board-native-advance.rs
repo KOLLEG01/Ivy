@@ -839,15 +839,23 @@ async fn actual_receipt_blobs_and_call_cas_survive_file_reopen_without_redispatc
             catalogs: &catalogs,
         };
         assert_eq!(
-            evidence
-                .read(
-                    &saved.pin,
-                    saved.value.required("evidence").unwrap(),
-                    &expected
-                )
-                .await
-                .unwrap(),
-            operation(base, "thread", "accepted", "2026-01-02T03:04:05.007Z")
+            canonical(
+                &evidence
+                    .read(
+                        &saved.pin,
+                        saved.value.required("evidence").unwrap(),
+                        &expected
+                    )
+                    .await
+                    .unwrap(),
+                MANAGEMENT_FRAME_BYTES
+            )
+            .unwrap(),
+            canonical(
+                &operation(base, "thread", "accepted", "2026-01-02T03:04:05.007Z"),
+                MANAGEMENT_FRAME_BYTES
+            )
+            .unwrap()
         );
         assert_eq!(
             db.query_row("SELECT count(*) FROM blobs", [], |r| r.get::<_, i64>(0))
