@@ -9,10 +9,12 @@ use ivy_contracts::{
 use rusqlite::types::Value;
 #[path = "chat-command-cases.rs"]
 mod commands;
-#[path = "chat-session-cases.rs"]
-mod session;
 #[path = "chat-listener-cases.rs"]
 mod listener;
+#[path = "chat-session-cases.rs"]
+mod session;
+#[path = "chat-wa-runtime-cases.rs"]
+mod wa_runtime;
 use std::{
     io::Write,
     process::{Command, Stdio},
