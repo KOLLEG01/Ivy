@@ -49,12 +49,14 @@ pub(crate) fn read(journal: &Journal, key: &str) -> IvyResult<Option<IvyJson>> {
         .map_err(sqlite::error)?;
     text.map(|text| parse(&text, FRAME)).transpose()
 }
-/// Each imported record/receipt is bounded by the existing journal limits. No
-/// quota cleanup, expiry fence or original revision is modified to make room.
+/// Record receipts share the existing count/byte bounds. The single run cursor
+/// is control state, not a source record; its bytes still count against the cap.
 pub(crate) fn save(journal: &Journal, key: &str, value: &IvyJson) -> IvyResult<()> {
     let encoded = canonical(value, FRAME)?;
-    let (count,bytes):(i64,i64)=journal.db.query_row("SELECT COUNT(*),COALESCE(SUM(length(CAST(value AS BLOB))),0) FROM journal_state WHERE key LIKE 'secretary/import/%' AND key<>?",[key],|r|Ok((r.get(0)?,r.get(1)?))).map_err(sqlite::error)?;
-    if count >= journal.limits.count || bytes + encoded.len() as i64 > journal.limits.bytes {
+    let (count,bytes):(i64,i64)=journal.db.query_row("SELECT COUNT(CASE WHEN key<>? THEN 1 END),COALESCE(SUM(length(CAST(value AS BLOB))),0) FROM journal_state WHERE key LIKE 'secretary/import/%' AND key<>?",params![RUN,key],|r|Ok((r.get(0)?,r.get(1)?))).map_err(sqlite::error)?;
+    if (key != RUN && count >= journal.limits.count)
+        || bytes + encoded.len() as i64 > journal.limits.bytes
+    {
         return Err(error(
             "capacity_exceeded",
             "The explicit import receipt budget is full; original data remains intact.",

@@ -118,6 +118,8 @@ mod reconcile_cases;
 mod registry_cases;
 #[path = "retained_import_cases.rs"]
 mod retained_import_cases;
+#[path = "retained_storage_cases.rs"]
+mod retained_storage_cases;
 #[path = "service_cases.rs"]
 mod service_cases;
 #[path = "service_handlers_cases.rs"]

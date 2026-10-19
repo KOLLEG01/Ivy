@@ -27,15 +27,15 @@ impl Drop for Process {
         let _ = self.0.wait();
     }
 }
-struct Attempt {
-    state: IvyJson,
-    current: bool,
-    error: Option<String>,
+pub(super) struct Attempt {
+    pub(super) state: IvyJson,
+    pub(super) current: bool,
+    pub(super) error: Option<String>,
     stages: Vec<IvyJson>,
     snapshot: IvyJson,
-    receipts: IvyJson,
+    pub(super) receipts: IvyJson,
 }
-fn empty() -> IvyJson {
+pub(super) fn empty() -> IvyJson {
     IvyJson::Object(vec![])
 }
 fn read_state(journal: &Journal, key: &str) -> Option<IvyJson> {
@@ -47,7 +47,7 @@ fn read_state(journal: &Journal, key: &str) -> Option<IvyJson> {
         .ok()
         .map(|v| parse(&v, 32 * 1024 * 1024).unwrap())
 }
-async fn connect(address: &str) -> ServiceConnection {
+pub(super) async fn connect(address: &str) -> ServiceConnection {
     ServiceConnection::connect(
         address,
         "fixture",
@@ -57,7 +57,7 @@ async fn connect(address: &str) -> ServiceConnection {
     .await
     .unwrap()
 }
-async fn request(client: &ServiceConnection, method: &str, params: IvyJson) -> IvyJson {
+pub(super) async fn request(client: &ServiceConnection, method: &str, params: IvyJson) -> IvyJson {
     client
         .request(method, params, RequestOptions::default())
         .await
@@ -160,7 +160,7 @@ fn retained(before: &IvyJson, after: &IvyJson, receipts: &IvyJson) {
         );
     }
 }
-async fn attempt(
+pub(super) async fn attempt(
     path: &Path,
     data: &IvyJson,
     client: &ServiceConnection,
@@ -416,7 +416,7 @@ fn writes(state: &IvyJson, method: &str) -> Vec<IvyJson> {
         .map(|r| r.required("params").unwrap().clone())
         .collect()
 }
-fn assert_no_effects(state: &IvyJson) {
+pub(super) fn assert_no_effects(state: &IvyJson) {
     for row in state.required("trace").unwrap().as_array().unwrap() {
         let method = row.required("method").unwrap().as_str().unwrap();
         if method == "tools.call" {
@@ -429,7 +429,7 @@ fn assert_no_effects(state: &IvyJson) {
         assert!(!method.starts_with("fixture."));
     }
 }
-fn complete_state(data: &IvyJson, path: &Path, hive: &IvyJson) {
+pub(super) fn complete_state(data: &IvyJson, path: &Path, hive: &IvyJson) {
     let records = hive.required("records").unwrap().as_array().unwrap();
     let execution = records
         .iter()

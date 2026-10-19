@@ -48,6 +48,7 @@ for(const [id,pending] of [['ready',false],['pending',true]]){
 const checkpoint={action:'checkpoint',phase:'succeeded',checkpointCaptures:[{objectId:'retained-capture',revision:2}]};
 source.db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run('checkpoint','secretary/operation','checkpoint',2,0,1,canonical(checkpoint));
 source.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run('checkpoint',1,'{ "retained":"\\ud800" }');source.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run('checkpoint',2,canonical(checkpoint));
+const storage=process.argv[3]==='storage' ? await import('./retained-storage-fixture.mjs').then(m=>m.seed(source,location,settings,at)) : null;
 const before=snapshot(source.db);source.close();
 const bytes=readFileSync(join(location,'secretary.sqlite'));
 const initial=[
@@ -107,5 +108,5 @@ async function request(method,p){
 }
 const server=new WebSocketServer({host:'127.0.0.1',port:0});await new Promise((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
 server.on('connection',socket=>socket.on('message',async bytes=>{const {id,method,params}=JSON.parse(bytes.toString());try{const result=await request(method,params);socket.send(JSON.stringify({jsonrpc:'2.0',id,result}));}catch(error){const code=error.code??'fixture_unexpected';socket.send(JSON.stringify({jsonrpc:'2.0',id,error:{code:-32000,message:error.message??'Fixture refused unexpected behavior.',data:{code,outcome:error.outcome??'unknown'}}}));}}));
-process.stdout.write(JSON.stringify({port:server.address().port,settings,owner,rootId,coreBase64:bytes.toString('base64'),before,questions,main,voice,assignment,configuration,execution,at:Date.parse(at)+3600000})+'\n');
+process.stdout.write(JSON.stringify({port:server.address().port,settings,owner,rootId,coreBase64:bytes.toString('base64'),before,questions,main,voice,assignment,configuration,execution,storage,at:Date.parse(at)+3600000})+'\n');
 process.stdin.resume();process.stdin.on('end',()=>{for(const socket of server.clients)socket.terminate();server.close();});
