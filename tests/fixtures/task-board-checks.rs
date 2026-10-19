@@ -427,7 +427,7 @@ async fn mandatory_current_policy_precedes_domain_reads_and_preserves_recovery_r
     }
     impl CheckPolicy for Policy {
         async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {
-            self.enter("aggregate", vec![task.clone(), id.clone().into()])
+            self.enter("aggregate", vec![task.clone(), Json::String(id.clone())])
         }
         async fn fields(&self, fields: &Json, own: Option<&JsString>) -> IvyResult<()> {
             self.enter(
@@ -451,7 +451,7 @@ async fn mandatory_current_policy_precedes_domain_reads_and_preserves_recovery_r
                     request.clone(),
                     fields.clone(),
                     actor.clone(),
-                    at.clone().into(),
+                    Json::String(at.clone()),
                 ],
             )
         }
@@ -523,7 +523,7 @@ async fn mandatory_current_policy_precedes_domain_reads_and_preserves_recovery_r
     let at = JsString::from("2026-01-02T03:04:05.006Z");
     let retained = Document {
         pin: Json::object([
-            ("objectId", id.clone().into()),
+            ("objectId", Json::String(id.clone())),
             ("revision", Json::Number(7.0)),
         ]),
         value: task.clone(),
@@ -569,11 +569,11 @@ async fn mandatory_current_policy_precedes_domain_reads_and_preserves_recovery_r
     let trace = policy.seen.borrow();
     assert_eq!(
         f(&trace[0], "args"),
-        &Json::Array(vec![task.clone(), id.clone().into()])
+        &Json::Array(vec![task.clone(), Json::String(id.clone())])
     );
     assert_eq!(
         f(&trace[1], "args"),
-        &Json::Array(vec![fields.clone(), id.clone().into()])
+        &Json::Array(vec![fields.clone(), Json::String(id.clone())])
     );
     assert_eq!(
         f(&trace[2], "args"),
@@ -585,7 +585,7 @@ async fn mandatory_current_policy_precedes_domain_reads_and_preserves_recovery_r
             request.clone(),
             fields.clone(),
             actor.clone(),
-            at.clone().into()
+            Json::String(at.clone())
         ])
     );
     drop(trace);
