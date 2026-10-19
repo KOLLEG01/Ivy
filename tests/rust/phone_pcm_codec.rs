@@ -485,7 +485,7 @@ async fn opus_packet_durations_real_fec_and_plc_interoperate() {
     let mut encoder = opus::Encoder::new(
         48000,
         opus::Channels::Mono,
-        opus::Application::RestrictedLowDelay,
+        opus::Application::LowDelay,
     )
     .unwrap();
     let mut parts = Vec::new();
