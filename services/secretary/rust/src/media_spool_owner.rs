@@ -1,6 +1,7 @@
 //! Filesystem admission for the private media journal and its original SQLite owner.
+use crate::local_files::{native, safe_directory};
 use ivy_contracts::{IvyError, IvyResult};
-use ivy_host_runtime::{filesystem, node_path, paths};
+use ivy_host_runtime::{filesystem, node_path};
 use ivy_store::{rusqlite::Connection, sqlite};
 use std::{fs, path::Path, time::Duration};
 
@@ -13,35 +14,6 @@ fn check(valid: bool, code: &str) -> IvyResult<()> {
             "Media spool must retain its exact original owner, intent, evidence and complete bytes.",
         ))
     }
-}
-fn native(path: &Path) -> std::path::PathBuf {
-    node_path::filesystem_path(&node_path::from_native(path))
-}
-fn directory(root: &Path) -> IvyResult<()> {
-    let context = node_path::Context::current().map_err(|_| IvyError::internal())?;
-    let absolute = context.resolve(&[node_path::from_native(root)]);
-    let path = node_path::to_native(&absolute);
-    let mut ancestors: Vec<_> = path.ancestors().collect();
-    ancestors.reverse();
-    for (index, part) in ancestors.iter().enumerate() {
-        let metadata = fs::symlink_metadata(native(part)).map_err(|_| IvyError::internal())?;
-        check(metadata.is_dir(), "path_unsafe")?;
-        if index > 0 {
-            let actual = paths::realpath(part).map_err(|_| IvyError::internal())?;
-            check(
-                !metadata.file_type().is_symlink()
-                    && context
-                        .relative(
-                            &node_path::from_native(part),
-                            &node_path::from_native(&actual),
-                        )
-                        .0
-                        .is_empty(),
-                "path_unsafe",
-            )?;
-        }
-    }
-    Ok(())
 }
 fn private_file(path: &Path) -> IvyResult<()> {
     #[cfg(unix)]
@@ -76,7 +48,7 @@ pub(crate) fn open(root: &Path) -> IvyResult<(Connection, Connection)> {
     builder
         .create(native(root))
         .map_err(|_| IvyError::internal())?;
-    directory(root)?;
+    safe_directory(root)?;
     for name in [
         "owner.sqlite",
         "media.sqlite",

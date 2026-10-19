@@ -88,6 +88,10 @@ pub struct OwnedProcess {
     pub stderr: Option<ChildStderr>,
     pub completion: Completion,
     stop: mpsc::Sender<Duration>,
+    #[cfg(unix)]
+    group_pid: u32,
+    #[cfg(windows)]
+    job_retired: Arc<std::sync::atomic::AtomicBool>,
 }
 impl OwnedProcess {
     /// Send termination immediately, escalate after grace, retain unknown after
@@ -103,6 +107,26 @@ impl OwnedProcess {
         }
         Ok(self.completion.wait().await)
     }
+}
+
+/// Observe only the tree created by this owner. Await completion before settling
+/// a final stop record; a pending or unproved Windows Job always returns false.
+/// Unix keeps the original ten 50ms probes and accepts only ESRCH as retirement.
+pub async fn owned_process_tree_stopped(process: &OwnedProcess) -> IvyResult<bool> {
+    #[cfg(windows)]
+    return Ok(process.job_retired.load(std::sync::atomic::Ordering::Acquire));
+    #[cfg(unix)]
+    {
+        for _ in 0..10 {
+            if unsafe { libc::kill(-(process.group_pid as i32), 0) } != 0 {
+                return Ok(std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(false)
+    }
+    #[cfg(not(any(windows, unix)))]
+    Ok(false)
 }
 
 fn invalid(message: &str) -> IvyError {
@@ -299,6 +323,24 @@ pub async fn spawn(
     spawn_resolved(resolved, root, context, None, None).await
 }
 
+/// Use exactly context.environment while retaining ordinary executable/cwd
+/// admission and the shared process-tree owner. No ambient keys are added.
+/// With raw_output the caller owns both byte pipes, their limits, deadlines,
+/// cancellation and stdin closure; no diagnostic stream is retained here.
+/// Await stop/completion and owned_process_tree_stopped before claiming
+/// retirement. The ordinary spawn API keeps its filtered runtime environment.
+pub async fn spawn_exact_environment(
+    command: &Command,
+    root: &Path,
+    executables: &BTreeMap<String, PathBuf>,
+    mut context: LaunchContext,
+) -> IvyResult<OwnedProcess> {
+    validate_capture(&context)?;
+    let resolved = resolve_command(command, root, executables)?;
+    let environment = std::mem::take(&mut context.environment);
+    spawn_resolved(resolved, root, context, Some(environment), None).await
+}
+
 fn validate_capture(context: &LaunchContext) -> IvyResult<()> {
     if context.redact.iter().any(|value| value.0.len() > 65536) {
         return Err(invalid("Redaction values exceed their bounded length."));
@@ -309,8 +351,8 @@ fn validate_capture(context: &LaunchContext) -> IvyResult<()> {
     Ok(())
 }
 
-/// Shared process-tree owner. Only the exec-file adapter selects unrestricted
-/// executable/environment semantics; artifact commands keep resolve_command.
+/// Shared process-tree owner. Exec-file supplies its separate executable/argv0
+/// semantics; ordinary and exact-environment commands keep resolve_command.
 pub(crate) async fn spawn_resolved(
     resolved: ResolvedCommand,
     root: &Path,
@@ -455,6 +497,10 @@ pub(crate) async fn spawn_resolved(
     }
     let (stop, mut requests) = mpsc::channel::<Duration>(1);
     let (finished, completion) = watch::channel(None);
+    #[cfg(windows)]
+    let job_retired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(windows)]
+    let retirement_observation = job_retired.clone();
     tokio::spawn(async move {
         let status;
         let mut unknown = false;
@@ -493,8 +539,9 @@ pub(crate) async fn spawn_resolved(
         signal_tree(pid, true);
         #[cfg(windows)]
         if let Some(proof) = &mut launch_proof {
-            if proof.retire(retirement_deadline).await.is_err() {
-                unknown = true;
+            match proof.retire(retirement_deadline).await {
+                Ok(()) => retirement_observation.store(true, std::sync::atomic::Ordering::Release),
+                Err(_) => unknown = true,
             }
         }
         // Pipe draining shares the retirement deadline. Raw protocol owners drain
@@ -554,6 +601,10 @@ pub(crate) async fn spawn_resolved(
         stderr,
         completion: Completion(completion),
         stop,
+        #[cfg(unix)]
+        group_pid: pid,
+        #[cfg(windows)]
+        job_retired,
     })
 }
 
