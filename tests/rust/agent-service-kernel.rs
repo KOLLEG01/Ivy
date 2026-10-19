@@ -47,10 +47,7 @@ use std::{
     fs,
     path::PathBuf,
     process::Command,
-    sync::{
-        Arc, Mutex, OnceLock,
-        atomic::AtomicBool,
-    },
+    sync::{Arc, Mutex, OnceLock, atomic::AtomicBool},
     time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -435,15 +432,29 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
             use futures_util::StreamExt;
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            while let Some(message) = socket.next().await { if message.is_err() { break; } }
+            while let Some(message) = socket.next().await {
+                if message.is_err() {
+                    break;
+                }
+            }
         });
         let mut connection_options = ConnectionOptions::new("fixture.agent".into());
         connection_options.handlers = options.handlers.clone();
         connection_options.json_handlers = options.json_handlers.clone();
-        let connection = ServiceConnection::connect(&base, "fixture-only", connection_options, Default::default()).await.unwrap();
+        let connection = ServiceConnection::connect(
+            &base,
+            "fixture-only",
+            connection_options,
+            Default::default(),
+        )
+        .await
+        .unwrap();
         connection.prepare_registry(&registry).unwrap();
         connection.close();
-        tokio::time::timeout(Duration::from_secs(5), peer).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), peer)
+            .await
+            .unwrap()
+            .unwrap();
         let context = InvocationContext::detached(
             "caller".into(),
             None,
@@ -461,7 +472,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
             options.handlers[&"agent.resolveProject".into()](
                 IvyJson::object([(
                     "selection",
-                    IvyJson::object([("kind", "projectless".into())])
+                    IvyJson::object([("kind", "projectless".into()), ("key", "fixture".into())])
                 )]),
                 context
             )
@@ -476,7 +487,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
     }
 }
 #[tokio::test]
-async fn service_state_health_matches_original_reconciliation_messages_and_does_not_close_native() {
+async fn service_state_health_matches_original_reconciliation_messages_and_closing_fence() {
     for row in field(data(), "states").as_array().unwrap() {
         let root = Root::new();
         let config = config(&root, "0.154.0".into());
