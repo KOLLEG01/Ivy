@@ -259,8 +259,10 @@ impl GenerationRuntime for Runtime<'_> {
         self.event("changed");
     }
     fn notification(&self, value: &Json) -> bool {
-        assert_eq!(value.get("namespace"), Some(&"agent".into()));
-        assert_eq!(value.get("name"), Some(&"notification".into()));
+        assert_eq!(value.get("method"), Some(&"notifications.provider".into()));
+        let params = value.get("params").unwrap();
+        assert_eq!(params.get("namespace"), Some(&"agent".into()));
+        assert_eq!(params.get("name"), Some(&"notification".into()));
         self.event("notification");
         true
     }
@@ -722,10 +724,12 @@ async fn startup_root_refusal_prevents_readiness_and_preserves_rpc_error_before_
         assert_eq!(factory.count(1, "verify"), 1);
         assert_eq!(factory.count(1, "tick"), 0);
         assert_eq!(factory.count(1, "release"), 1);
-        assert_eq!(
-            factory.connections.borrow()[0].close_reason().unwrap(),
-            failure("root")
-        );
+        let error = factory.connections.borrow()[0].close_reason().unwrap();
+        let expected = failure("root");
+        assert_eq!(error.code_js(), expected.code_js());
+        assert_eq!(error.message_js(), expected.message_js());
+        assert_eq!(error.outcome, expected.outcome);
+        assert_eq!(error.details, expected.details);
         let methods = peer.methods(1);
         assert!(methods.contains(&"objects.stat".into()));
         assert!(!methods.contains(&"service.heartbeat".into()));
