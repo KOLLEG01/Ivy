@@ -348,7 +348,6 @@ impl WhatsAppRuntime {
             // Keep the lane admitted through the success/error continuation and
             // its finalizer, as the original then/catch/finally chain does.
             tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
             let next = {
                 let mut state = owner.0.state.lock().unwrap();
                 state.tasks.remove(name);
