@@ -782,6 +782,7 @@ impl WhatsAppNative {
             turn_id,
         )
         .await?;
+        let missing_item_type = verified.items.iter().any(|item| item.get("type").is_none());
         let mut complete = spread(&verified.turn);
         complete.insert("itemsView", "full".into());
         complete.insert(
@@ -817,6 +818,13 @@ impl WhatsAppNative {
             try_js_string(f(&turn, "status")).ok().as_ref() == Some(&JsString::from(*status))
         }) && f(&turn, "completedAt").as_f64().is_some_and(f64::is_finite)
         {
+            // The original projection retains an undefined type property. Its
+            // canonical cache serialization rejects that non-JSON value.
+            require(
+                !missing_item_type,
+                "invalid_arguments",
+                "Value is outside the JSON domain.",
+            )?;
             let bytes = canonical(&complete, usize::MAX)?.len();
             if bytes <= 32 * 1024 * 1024 {
                 let mut state = self.0.state.lock().unwrap();
