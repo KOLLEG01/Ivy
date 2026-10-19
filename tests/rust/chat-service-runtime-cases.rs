@@ -159,6 +159,9 @@ struct Probe {
     closes: AtomicUsize,
     close_gate: Mutex<Option<watch::Receiver<bool>>>,
     settled_gate: Mutex<Option<watch::Receiver<bool>>>,
+    ready_gate: Mutex<Option<watch::Receiver<bool>>>,
+    control_gate: Mutex<Option<watch::Receiver<bool>>>,
+    control_finished: AtomicUsize,
 }
 async fn gate(mut receiver: Option<watch::Receiver<bool>>) {
     if let Some(r) = &mut receiver {
@@ -178,6 +181,9 @@ impl Probe {
             closes: AtomicUsize::new(0),
             close_gate: Mutex::new(None),
             settled_gate: Mutex::new(None),
+            ready_gate: Mutex::new(None),
+            control_gate: Mutex::new(None),
+            control_finished: AtomicUsize::new(0),
         })
     }
     fn health(self: &Arc<Self>) -> ChatHealth {
@@ -199,7 +205,13 @@ impl Probe {
                     || owner.label == "queued-health-failure"
                         && v.details == JsString::from("Hive ChatBridge connection is not ready."))
                     && !owner.health_failed.swap(true, Ordering::SeqCst);
+                let held = if v.ready {
+                    owner.ready_gate.lock().unwrap().clone()
+                } else {
+                    None
+                };
                 Box::pin(async move {
+                    gate(held).await;
                     if fail {
                         Err(IvyError::new(
                             "fixture_health_unavailable",
@@ -212,8 +224,13 @@ impl Probe {
             }),
             control: Arc::new(move || {
                 control.events.lock().unwrap().push("control".into());
-                let stop = control.control.load(Ordering::SeqCst);
-                Box::pin(async move { Ok(stop) })
+                let held = control.control_gate.lock().unwrap().clone();
+                let control = control.clone();
+                Box::pin(async move {
+                    gate(held).await;
+                    control.control_finished.fetch_add(1, Ordering::SeqCst);
+                    Ok(control.control.load(Ordering::SeqCst))
+                })
             }),
         }
     }
@@ -290,9 +307,6 @@ fn rpc_set(peer: &Json) -> Json {
             .filter(|v| v.get("method") != Some(&Json::from("service.heartbeat")))
             .cloned(),
     )
-}
-fn health_set(health: &Json) -> Json {
-    unique(health.as_array().unwrap().iter().cloned())
 }
 fn attached(events: &Json) -> Json {
     Json::Array(
@@ -428,6 +442,20 @@ async fn service_start_reconnect_health_control_and_close_match_original_main() 
             ("settings", settings),
         ]);
         let probe = Probe::new(label.clone());
+        let ready_release = if label == "held-ready-health" {
+            let (release, receive) = watch::channel(false);
+            *probe.ready_gate.lock().unwrap() = Some(receive);
+            Some(release)
+        } else {
+            None
+        };
+        let control_release = if label == "held-control-poll" {
+            let (release, receive) = watch::channel(false);
+            *probe.control_gate.lock().unwrap() = Some(receive);
+            Some(release)
+        } else {
+            None
+        };
         let transport: Option<Arc<dyn ChatTransport>> = if flag(row, "transport") {
             Some(probe.clone())
         } else {
@@ -451,126 +479,207 @@ async fn service_start_reconnect_health_control_and_close_match_original_main() 
         );
         let mut observed = Json::object([("label", label.clone().into())]);
         if let Ok(app) = started {
-            app.service().wait_ready(None).await.unwrap();
-            let mut reconciled = false;
-            for _ in 0..2000 {
-                let snapshot = peer
-                    .command(Json::object([("action", "summary".into())]))
-                    .await;
-                let calls = field(&snapshot, "calls").as_array().unwrap();
-                let diagnostic = calls
-                    .iter()
-                    .any(|c| c.get("method") == Some(&Json::from("system.diagnostics")));
-                let settings = calls
-                    .iter()
-                    .any(|c| c.get("method") == Some(&Json::from("settings.get")));
-                let notice = field(&snapshot, "heartbeats")
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|h| !field(h, "diagnostics").as_array().unwrap().is_empty());
-                if diagnostic
-                    && if label == "diagnostic-read-failure" {
-                        notice
-                    } else {
-                        settings
-                    }
-                {
-                    reconciled = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            assert!(
-                reconciled,
-                "diagnostic work must finish before observing lifecycle"
-            );
-            if label == "reconnect-held-retirement" {
-                let old = app.runtime().unwrap();
-                let (release, receive) = watch::channel(false);
-                *probe.settled_gate.lock().unwrap() = Some(receive);
-                peer.command(Json::object([("action", "disconnect".into())]))
-                    .await;
+            if label == "held-ready-health" {
                 until(
                     || {
-                        app.service()
-                            .connection()
-                            .is_ok_and(|c| c.generation() == 8)
+                        probe
+                            .health
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|h| flag(h, "ready"))
                     },
-                    "reconnected generation",
-                )
-                .await;
-                let lease = old.accept().unwrap();
-                let readable = lease
-                    .store()
-                    .named("chat-bridge/main", "retiring-runtime")
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.into_ivy());
-                equal(
-                    &result(readable),
-                    field(row, "oldReadable"),
-                    "transport settling retains old store",
-                );
-                drop(lease);
-                release.send_replace(true);
-                until(|| old.accept().is_err(), "old admission retired").await;
-                settled(old.retire()).await.unwrap();
-            }
-            let number = app.service().connection().unwrap().generation();
-            if label == "held-idempotent-close" {
-                let (release, receive) = watch::channel(false);
-                *probe.close_gate.lock().unwrap() = Some(receive);
-                drop(app.close()); // Dropping the first observer must not cancel accepted cleanup.
-                until(
-                    || probe.closes.load(Ordering::SeqCst) == 1,
-                    "transport close entered",
+                    "ready health entered",
                 )
                 .await;
                 equal(
                     &Json::Bool(app.service().ready()),
-                    field(row, "readyWhileClosing"),
-                    "SDK remains available until transport close settles",
+                    field(row, "readyWhileHealthHeld"),
+                    "health must precede readiness acknowledgement",
                 );
-                let invoked = peer
-                    .command(Json::object([
-                        ("action", "invoke".into()),
-                        ("generation", Json::Number(number as f64)),
-                    ]))
-                    .await;
-                compare_invocation(&invoked, field(row, "invoked"));
-                release.send_replace(true);
+                let closing = tokio::spawn(app.close());
+                tokio::time::sleep(Duration::from_millis(30)).await;
                 equal(
-                    &result(app.close().await),
+                    &Json::Bool(!closing.is_finished()),
+                    field(row, "closePendingWhileHealthHeld"),
+                    "close flushes accepted health work",
+                );
+                equal(
+                    &Json::Array(probe.health.lock().unwrap().clone()),
+                    field(row, "healthBeforeRelease"),
+                    "later health writes must not overtake blocked ready write",
+                );
+                ready_release.unwrap().send_replace(true);
+                equal(
+                    &result(closing.await.unwrap()),
                     field(row, "closed"),
-                    "held close",
-                );
-                equal(
-                    &result(app.close().await),
-                    field(row, "closedAgain"),
-                    "idempotent close",
-                );
-            } else if label == "control-close" {
-                probe.control.store(true, Ordering::SeqCst);
-                until(|| probe.closes.load(Ordering::SeqCst) == 1, "control close").await;
-                equal(
-                    &result(app.close().await),
-                    field(row, "closed"),
-                    "control close result",
+                    "held health close",
                 );
             } else {
-                let invoked = peer
-                    .command(Json::object([
-                        ("action", "invoke".into()),
-                        ("generation", Json::Number(number as f64)),
-                    ]))
-                    .await;
-                compare_invocation(&invoked, field(row, "invoked"));
-                equal(
-                    &result(app.close().await),
-                    field(row, "closed"),
-                    "close outcome",
+                app.service().wait_ready(None).await.unwrap();
+                let mut reconciled = false;
+                for _ in 0..2000 {
+                    let snapshot = peer
+                        .command(Json::object([("action", "summary".into())]))
+                        .await;
+                    let calls = field(&snapshot, "calls").as_array().unwrap();
+                    let diagnostic = calls
+                        .iter()
+                        .any(|c| c.get("method") == Some(&Json::from("system.diagnostics")));
+                    let settings = calls
+                        .iter()
+                        .any(|c| c.get("method") == Some(&Json::from("settings.get")));
+                    let notice = field(&snapshot, "heartbeats")
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|h| !field(h, "diagnostics").as_array().unwrap().is_empty());
+                    if diagnostic
+                        && if label == "diagnostic-read-failure" {
+                            notice
+                        } else {
+                            settings
+                        }
+                    {
+                        reconciled = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(
+                    reconciled,
+                    "diagnostic work must finish before observing lifecycle"
                 );
+                if label == "reconnect-held-retirement" {
+                    let old = app.runtime().unwrap();
+                    let (release, receive) = watch::channel(false);
+                    *probe.settled_gate.lock().unwrap() = Some(receive);
+                    peer.command(Json::object([("action", "disconnect".into())]))
+                        .await;
+                    until(
+                        || {
+                            app.service()
+                                .connection()
+                                .is_ok_and(|c| c.generation() == 8)
+                        },
+                        "reconnected generation",
+                    )
+                    .await;
+                    let lease = old.accept().unwrap();
+                    let readable = lease
+                        .store()
+                        .named("chat-bridge/main", "retiring-runtime")
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.into_ivy());
+                    equal(
+                        &result(readable),
+                        field(row, "oldReadable"),
+                        "transport settling retains old store",
+                    );
+                    drop(lease);
+                    release.send_replace(true);
+                    until(|| old.accept().is_err(), "old admission retired").await;
+                    settled(old.retire()).await.unwrap();
+                }
+                let number = app.service().connection().unwrap().generation();
+                if label == "held-idempotent-close" {
+                    let (release, receive) = watch::channel(false);
+                    *probe.close_gate.lock().unwrap() = Some(receive);
+                    drop(app.close()); // Dropping the first observer must not cancel accepted cleanup.
+                    until(
+                        || probe.closes.load(Ordering::SeqCst) == 1,
+                        "transport close entered",
+                    )
+                    .await;
+                    equal(
+                        &Json::Bool(app.service().ready()),
+                        field(row, "readyWhileClosing"),
+                        "SDK remains available until transport close settles",
+                    );
+                    let invoked = peer
+                        .command(Json::object([
+                            ("action", "invoke".into()),
+                            ("generation", Json::Number(number as f64)),
+                        ]))
+                        .await;
+                    compare_invocation(&invoked, field(row, "invoked"));
+                    release.send_replace(true);
+                    equal(
+                        &result(app.close().await),
+                        field(row, "closed"),
+                        "held close",
+                    );
+                    equal(
+                        &result(app.close().await),
+                        field(row, "closedAgain"),
+                        "idempotent close",
+                    );
+                } else if label == "held-control-poll" {
+                    until(
+                        || {
+                            probe
+                                .events
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .any(|e| e == &Json::from("control"))
+                        },
+                        "control read entered",
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(1100)).await;
+                    let polls = probe
+                        .events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|e| e == &&Json::from("control"))
+                        .count();
+                    equal(
+                        &Json::Number(polls as f64),
+                        field(row, "pollsWhileHeld"),
+                        "control ticks cannot overlap an accepted read",
+                    );
+                    probe.control.store(true, Ordering::SeqCst);
+                    equal(
+                        &result(app.close().await),
+                        field(row, "closed"),
+                        "close does not wait for control poll",
+                    );
+                    equal(
+                        &Json::Bool(probe.control_finished.load(Ordering::SeqCst) == 0),
+                        field(row, "controlPendingAfterClose"),
+                        "stop preserves accepted control poll",
+                    );
+                    control_release.unwrap().send_replace(true);
+                    until(
+                        || probe.control_finished.load(Ordering::SeqCst) == 1,
+                        "accepted control read settled",
+                    )
+                    .await;
+                } else if label == "control-close" {
+                    probe.control.store(true, Ordering::SeqCst);
+                    until(|| probe.closes.load(Ordering::SeqCst) == 1, "control close").await;
+                    equal(
+                        &result(app.close().await),
+                        field(row, "closed"),
+                        "control close result",
+                    );
+                } else {
+                    let invoked = peer
+                        .command(Json::object([
+                            ("action", "invoke".into()),
+                            ("generation", Json::Number(number as f64)),
+                        ]))
+                        .await;
+                    compare_invocation(&invoked, field(row, "invoked"));
+                    equal(
+                        &result(app.close().await),
+                        field(row, "closed"),
+                        "close outcome",
+                    );
+                }
             }
             assert!(!app.service().ready(), "closed SDK is not ready");
         }
@@ -612,9 +721,9 @@ async fn service_start_reconnect_health_control_and_close_match_original_main() 
         );
         let health = Json::Array(probe.health.lock().unwrap().clone());
         equal(
-            &health_set(&health),
-            &health_set(field(row, "health")),
-            "serialized health outcomes",
+            &health,
+            field(row, "health"),
+            "ordered serialized health outcomes",
         );
         equal(
             &attached(&Json::Array(probe.events.lock().unwrap().clone())),

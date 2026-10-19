@@ -20,7 +20,10 @@ use ivy_sdk::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -772,6 +775,7 @@ impl ChatService {
     fn start_control(&self) {
         let owner = Arc::downgrade(&self.0);
         let mut stopped = self.0.core.stopped.subscribe();
+        let checking = Arc::new(AtomicBool::new(false));
         tokio::spawn(async move {
             let mut timer = tokio::time::interval_at(
                 tokio::time::Instant::now() + Duration::from_millis(500),
@@ -784,7 +788,15 @@ impl ChatService {
                     _ = timer.tick() => {
                         let Some(app) = owner.upgrade().map(ChatService) else {break;};
                         if app.0.core.state.lock().unwrap().closed {break;}
-                        if app.0.health.control.as_ref()().await == Ok(true) {let _ = app.close().await;}
+                        // Keep interval ticks independent of an accepted slow
+                        // read, like the original checkingControl guard. A late
+                        // read neither overlaps nor creates an immediate retry.
+                        if checking.swap(true, Ordering::AcqRel) {continue;}
+                        let checking = checking.clone();
+                        tokio::spawn(async move {
+                            if app.0.health.control.as_ref()().await == Ok(true) {let _ = app.close().await;}
+                            checking.store(false, Ordering::Release);
+                        });
                     }
                 }
             }
