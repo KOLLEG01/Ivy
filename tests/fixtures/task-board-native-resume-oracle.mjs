@@ -15,6 +15,9 @@ const {NativeOwner}=await import('../../packages/sdk/src/native-owner.ts');
 const {serviceTools}=await import('../../packages/sdk/src/client.ts');
 const load=n=>readFileSync('services/task-board/src/runtime/'+n+'.ts','utf8');
 const mutation=new Function('hashJson',stripTypeScriptTypes(load('store').match(/export const mutation = [\s\S]*?;/)[0].replace('export ',''))+'\nreturn mutation;')(hashJson);
+const originalStore=load('store'),localStart=originalStore.indexOf('  private localDocument<');
+const localSource=originalStore.slice(localStart,originalStore.indexOf('\n  async read<',localStart));
+const localDocument=new Function('requireThat','hashJson','contractVersion',stripTypeScriptTypes('class OriginalLocalStore {\n'+localSource+'\n}',{mode:'transform'})+'\nreturn OriginalLocalStore.prototype.localDocument;')(requireThat,hashJson,()=> '1.0.0');
 const intentSource=load('native-intent').slice(load('native-intent').indexOf('export type NativeSlot')).replaceAll('export ','');
 const original=load('native-driver');
 const driverSource=original.slice(original.indexOf('export class TaskBoardNativeDriver'),original.indexOf('  async advance')).replace('export class','class')+'\n}';
@@ -82,6 +85,10 @@ for(const previous of bases){
   if(i.attachedTurn&&!i.missingTurn)docs.push(doc('task-board/native-call',301,1,activeTurn));
   if(i.turnNext)docs.push(doc('task-board/native-call',301,2,{...activeTurn}));
   const latest=(key,address)=>{const list=docs.filter(d=>d.key===key&&d.pin.objectId===(typeof address==='string'?address:address.objectId));return typeof address==='string'?list.at(-1):list.find(d=>d.pin.revision===address.revision);};
+  const local={prepare(sql){return {get(objectId,keyOrRevision){
+   if(sql.includes('FROM documents')){const d=latest(keyOrRevision,objectId);return d?{parent_id:'root',current_revision:d.pin.revision,created_at:time,updated_at:time,name:d.name}:undefined;}
+   assert.ok(sql.includes('FROM revisions'));const d=docs.find(d=>d.pin.objectId===objectId&&d.pin.revision===keyOrRevision);return d?{value_json:JSON.stringify(d.value),created_at:time}:undefined;
+  }}}};
   const fail=(code,message='Fixture driver unavailable.')=>{throw new IvyError(code,message,code==='outcome_unknown'?'unknown':'not_executed');};
   const client={async request(method,params){
    trace.push(['rpc',method,structuredClone(params)]);
@@ -93,7 +100,7 @@ for(const previous of bases){
    return {schemaVersion:1,observationId:'read',callerPrincipalId:'workflow-owner',serviceNodeId:'native-agent',nativeVersion:request.nativeVersion,nativeExecutableHash:status.nativeExecutableHash,catalogHash:status.catalogHash,epoch:'new-epoch',requestId:1,observedAt:time,method:m,params:p,requestHash:hashJson({method:m,params:p}),reply:{result:{thread:{id:'thread',ephemeral:false}}},...i.read};
   }};
   const store={client,rootObjectId:'root',
-   async read(key,address,upgrade=true){trace.push(['read',key,address,upgrade]);const d=latest(key,address);if(!d)fail('task_board_evidence_mismatch','The local workflow revision is unavailable.');if(key==='task-board/native-call')validateTaskBoard('NativeCall',d.value);return structuredClone(d);},
+   async read(key,address,upgrade=true){trace.push(['read',key,address,upgrade]);const d=localDocument.call({local,rootObjectId:'root'},key,address,upgrade);if(key==='task-board/native-call')validateTaskBoard('NativeCall',d.value);return d;},
    async named(key,name,parent){trace.push(['named',key,name,parent??null]);return structuredClone(docs.filter(d=>d.key===key&&d.name===name).at(-1)??null);},
    async write(key,value,m,destination){trace.push(['write',key,value,m,destination]);validateTaskBoard('NativeCall',value);const d=doc(key,400+writes++,1,value,destination.create.name);docs.push(d);return d.pin;},
   };
