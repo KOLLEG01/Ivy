@@ -627,6 +627,24 @@ struct SdkClient {
     corrupt_caller: std::sync::atomic::AtomicBool,
     corrupt_epoch: std::sync::atomic::AtomicBool,
 }
+impl SdkClient {
+    fn reply(&self, value: Json) -> IvyResult<Json> {
+        let mut calls = self.calls.lock().unwrap();
+        calls.last_mut().unwrap().insert("reply", value.clone());
+        if let Some(path) = std::env::var_os("IVY_CHAT_SESSION_SDK_CAPTURE") {
+            std::fs::write(
+                path,
+                canonical(
+                    &Json::object([("calls", Json::Array(calls.clone()))]),
+                    usize::MAX,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        Ok(value)
+    }
+}
 impl ivy_sdk::rpc::RpcClient for SdkClient {
     fn request<'a>(
         &'a self,
@@ -642,7 +660,7 @@ impl ivy_sdk::rpc::RpcClient for SdkClient {
             if method == "tools.list" {
                 let namespace = s(&params, "namespace");
                 let name = s(&params, "namePrefix");
-                return Ok(Json::object([
+                return self.reply(Json::object([
                     (
                         "provider",
                         Json::object([(
@@ -716,7 +734,7 @@ impl ivy_sdk::rpc::RpcClient for SdkClient {
                     ] {
                         status.insert(key, value);
                     }
-                    Ok(status)
+                    self.reply(status)
                 }
                 "agent.read" => {
                     let method = s(args, "method");
@@ -756,7 +774,7 @@ impl ivy_sdk::rpc::RpcClient for SdkClient {
                     {
                         observed.insert("epoch", "changed-epoch".into());
                     }
-                    Ok(observed)
+                    self.reply(observed)
                 }
                 "agent.interact" => {
                     let method = s(args, "method");
@@ -808,7 +826,7 @@ impl ivy_sdk::rpc::RpcClient for SdkClient {
                             Json::object([("turn", Json::object([("id", "sdk-turn".into())]))]),
                         )])
                     };
-                    Ok(Json::object([
+                    self.reply(Json::object([
                         ("operationId", f(args, "operationId").clone()),
                         ("reply", reply),
                     ]))
