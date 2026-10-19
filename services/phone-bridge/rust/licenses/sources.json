@@ -1,0 +1,129 @@
+[
+  {
+    "name": "audio-codec-algorithms",
+    "version": "0.8.1",
+    "source": "https://static.crates.io/crates/audio-codec-algorithms/audio-codec-algorithms-0.8.1.crate",
+    "archiveSha256": "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107",
+    "license": "0BSD OR Apache-2.0",
+    "notice": "audio-codec-algorithms-0.8.1.txt"
+  },
+  {
+    "name": "audioadapter",
+    "version": "5.0.0",
+    "source": "https://static.crates.io/crates/audioadapter/audioadapter-5.0.0.crate",
+    "archiveSha256": "d1292ef9edf681b7426ed089004b021a42896492f58bd0c909ad44e5faec9ac4",
+    "license": "MIT OR Apache-2.0",
+    "notice": "audioadapter-5.0.0.txt"
+  },
+  {
+    "name": "audioadapter-buffers",
+    "version": "5.2.0",
+    "source": "https://static.crates.io/crates/audioadapter-buffers/audioadapter-buffers-5.2.0.crate",
+    "archiveSha256": "46289a81a3bfa26d0f8b2415f8ca9decde9a66308a150568af5c102381b3c8ce",
+    "license": "MIT OR Apache-2.0",
+    "notice": "audioadapter-buffers-5.2.0.txt"
+  },
+  {
+    "name": "audioadapter-sample",
+    "version": "5.2.0",
+    "source": "https://static.crates.io/crates/audioadapter-sample/audioadapter-sample-5.2.0.crate",
+    "archiveSha256": "5258faecf4edbe35ec483bda9b1f7438e6b391891819269c6b5461aeaa0e8d7d",
+    "license": "MIT OR Apache-2.0",
+    "notice": "audioadapter-sample-5.2.0.txt"
+  },
+  {
+    "name": "bytemuck",
+    "version": "1.25.2",
+    "source": "https://static.crates.io/crates/bytemuck/bytemuck-1.25.2.crate",
+    "archiveSha256": "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797",
+    "license": "Zlib OR Apache-2.0 OR MIT",
+    "notice": "bytemuck-1.25.2.txt"
+  },
+  {
+    "name": "nanoaudio-core",
+    "version": "0.1.0",
+    "source": "https://static.crates.io/crates/nanoaudio-core/nanoaudio-core-0.1.0.crate",
+    "archiveSha256": "1b74a376bebf8ae8cc2b0fd16441e87f5834467252c85c540b88ac948064f4e6",
+    "license": "MIT",
+    "notice": "nanoaudio-core-0.1.0.txt"
+  },
+  {
+    "name": "nanoaudio-g722",
+    "version": "0.1.0",
+    "source": "https://static.crates.io/crates/nanoaudio-g722/nanoaudio-g722-0.1.0.crate",
+    "archiveSha256": "4ed4b6c1b985ab5af69f2770f910d58bc4113bb3d6c64115896f9c0c016aee1a",
+    "license": "MIT",
+    "notice": "nanoaudio-g722-0.1.0.txt"
+  },
+  {
+    "name": "num-integer",
+    "version": "0.1.47",
+    "source": "https://static.crates.io/crates/num-integer/num-integer-0.1.47.crate",
+    "archiveSha256": "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b",
+    "license": "MIT OR Apache-2.0",
+    "notice": "num-integer-0.1.47.txt"
+  },
+  {
+    "name": "opus",
+    "version": "0.4.0",
+    "source": "https://static.crates.io/crates/opus/opus-0.4.0.crate",
+    "archiveSha256": "33718946cc77d4032911d4efe03a66dbcbfbd2bb16c3da06aaeadcc637c32216",
+    "license": "MIT/Apache-2.0",
+    "notice": "opus-0.4.0.txt"
+  },
+  {
+    "name": "opusic-sys",
+    "version": "0.7.5",
+    "source": "https://static.crates.io/crates/opusic-sys/opusic-sys-0.7.5.crate",
+    "archiveSha256": "c9d1ecdf206421bc74343ab3bb2f30ad2abbfee41fa341f7181fecbaf957769a",
+    "license": "BSD-3-Clause",
+    "notice": "opusic-sys-0.7.5.txt"
+  },
+  {
+    "name": "rubato",
+    "version": "5.0.1",
+    "source": "https://static.crates.io/crates/rubato/rubato-5.0.1.crate",
+    "archiveSha256": "cc1e951b9f5432ec1422f4dcfa5733fc501265902612edf5ef8bd8ecdd960930",
+    "license": "MIT OR Apache-2.0",
+    "notice": "rubato-5.0.1.txt"
+  },
+  {
+    "name": "safe_arch",
+    "version": "1.2.0",
+    "source": "https://static.crates.io/crates/safe_arch/safe_arch-1.2.0.crate",
+    "archiveSha256": "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f",
+    "license": "Zlib OR Apache-2.0 OR MIT",
+    "notice": "safe_arch-1.2.0.txt"
+  },
+  {
+    "name": "visibility",
+    "version": "0.1.1",
+    "source": "https://static.crates.io/crates/visibility/visibility-0.1.1.crate",
+    "archiveSha256": "d674d135b4a8c1d7e813e2f8d1c9a58308aee4a680323066025e53132218bd91",
+    "license": "Zlib OR MIT OR Apache-2.0",
+    "notice": "visibility-0.1.1.txt"
+  },
+  {
+    "name": "wide",
+    "version": "1.7.1",
+    "source": "https://static.crates.io/crates/wide/wide-1.7.1.crate",
+    "archiveSha256": "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f",
+    "license": "Zlib OR Apache-2.0 OR MIT",
+    "notice": "wide-1.7.1.txt"
+  },
+  {
+    "name": "windowfunctions",
+    "version": "0.1.1",
+    "source": "https://static.crates.io/crates/windowfunctions/windowfunctions-0.1.1.crate",
+    "archiveSha256": "90628d739333b7c5d2ee0b70210b97b8cddc38440c682c96fd9e2c24c2db5f3a",
+    "license": "MIT",
+    "notice": "windowfunctions-0.1.1.txt"
+  },
+  {
+    "name": "libopus",
+    "version": "1.6.1",
+    "source": "https://opus-codec.org/",
+    "bundledBy": "opusic-sys@0.7.5",
+    "notice": "libopus-1.6.1.txt"
+  }
+]

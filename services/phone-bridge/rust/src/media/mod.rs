@@ -1,4 +1,5 @@
 mod evs;
+mod codecs;
 mod format;
 mod g711;
 mod negotiation;
@@ -40,6 +41,7 @@ impl std::fmt::Display for MediaError {
     }
 }
 impl std::error::Error for MediaError {}
+pub use codecs::{CodecError, G722Decoder, G722Encoder, OpusDecoder, OpusEncoder};
 pub use evs::{
     EVS_OFFER_PARAMETERS, EvsProfile, evs_channels, evs_header_full, evs_offer_parameters,
     evs_select, evs_sender,

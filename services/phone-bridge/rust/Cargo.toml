@@ -5,6 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
+opus.workspace = true
+nanoaudio-core.workspace = true
+nanoaudio-g722.workspace = true
+rubato.workspace = true
 ivy-contracts = { workspace = true }
 ivy-host-runtime = { workspace = true }
 tokio = { workspace = true, features = ["io-std"] }
