@@ -11,6 +11,7 @@ use std::collections::HashSet;
 pub(super) const METHODS: &[&str] = &[
     "system.diagnostics",
     "contracts.list",
+    "contracts.summaries",
     "hosts.observations",
     "hosts.list",
     "serviceNodes.list",
@@ -75,7 +76,7 @@ fn page(
         snapshot,
     )
 }
-fn try_page(
+pub(super) fn try_page(
     call: &Call<'_>,
     method: &str,
     params: &IvyJson,
@@ -154,7 +155,7 @@ pub(super) fn handle(
                 None,
             )
         }
-        "contracts.list" => {
+        "contracts.list" | "contracts.summaries" => {
             let filter = optional_string(params, "key").map(text);
             let mut statement = sql(
                 call.store,
@@ -182,6 +183,33 @@ pub(super) fn handle(
                     }
                 }
                 records = latest;
+            }
+            if method == "contracts.summaries" {
+                records = records
+                    .into_iter()
+                    .map(|record| {
+                        let mut description =
+                            crate::discovery::collapse_whitespace(string(&record, "specMarkdown")?);
+                        description.0.truncate(512);
+                        if description.0.is_empty() {
+                            description = string(&record, "key")?.clone();
+                        }
+                        let mut summary = IvyJson::object(std::iter::empty::<(&str, IvyJson)>());
+                        for name in ["key", "version"] {
+                            if let Some(value) = record.get(name) {
+                                summary.insert(name, value.clone());
+                            }
+                        }
+                        summary.insert("description", IvyJson::String(description));
+                        for name in ["owner", "mediaType"] {
+                            if let Some(value) = record.get(name) {
+                                summary.insert(name, value.clone());
+                            }
+                        }
+                        summary.insert("hasJsonSchema", record.get("jsonSchema").is_some().into());
+                        Ok(summary)
+                    })
+                    .collect::<IvyResult<Vec<_>>>()?;
             }
             page(
                 call,

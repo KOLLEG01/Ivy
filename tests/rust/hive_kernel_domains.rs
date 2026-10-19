@@ -1,13 +1,13 @@
 use super::*;
 
-fn ok(steps: &mut Vec<Value>, mut step: Value) -> usize {
+pub(super) fn ok(steps: &mut Vec<Value>, mut step: Value) -> usize {
     step["requireSuccess"] = true.into();
     push(steps, step)
 }
-fn value(result: &Value, index: usize) -> &Value {
+pub(super) fn value(result: &Value, index: usize) -> &Value {
     &result["rows"][index]["value"]["value"]
 }
-fn follow(mut step: Value, from: usize) -> Value {
+pub(super) fn follow(mut step: Value, from: usize) -> Value {
     step["request"]["params"]["cursor"] = "bound".into();
     bind(
         &mut step,
@@ -17,7 +17,7 @@ fn follow(mut step: Value, from: usize) -> Value {
     );
     step
 }
-fn catalog() -> Value {
+pub(super) fn catalog() -> Value {
     let tools = ["alpha","beta"].map(|name|json!({"namespace":"fixture","name":name,"nativeMethod":name,"nativeSchemaIdentity":"synthetic","interfaceVersion":"1.0.0","description":name,"inputSchema":{"type":"object"},"outputSchema":{"type":"object"}}));
     json!({"namespaces":[{
         "namespace":"fixture","description":"Fixture namespace","guideMarkdown":"Fixture guide.",
@@ -29,7 +29,7 @@ fn catalog() -> Value {
         {"key":"fixture/text","readVersions":["1.0.0"],"writeVersions":[]}
     ]})
 }
-fn ready(steps: &mut Vec<Value>, id: &str, host: &str, service: &str) {
+pub(super) fn ready(steps: &mut Vec<Value>, id: &str, host: &str, service: &str) {
     let mut connection = connect(id, Some(1.0));
     connection["request"]["params"]["hostId"] = host.into();
     connection["request"]["params"]["serviceName"] = service.into();

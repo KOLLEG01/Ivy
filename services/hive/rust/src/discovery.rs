@@ -15,6 +15,7 @@ use std::{
 };
 #[path = "discovery_text.rs"]
 mod strings;
+pub(crate) use strings::collapse_whitespace;
 use strings::*;
 
 /// Language primitives supplied by the runtime; catalog/search policy stays here.

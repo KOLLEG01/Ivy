@@ -5,6 +5,7 @@ use ivy_hive::{
     discovery::Discovery,
     kernel::{Call, Kernel, Options, Parts},
     registry::Registry,
+    ui_files::UiFiles,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -12,6 +13,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+#[path = "hive_kernel_content.rs"]
+mod content;
 #[path = "hive_kernel_domains.rs"]
 mod domains;
 
@@ -45,6 +48,7 @@ fn compose(path: &Path, profile: &Value, clock: Rc<Cell<f64>>) -> Kernel {
             registry,
             discovery,
             configurations,
+            ui_files: UiFiles::new(path.with_extension("files").join("private")),
         },
         options(),
         runtime,
@@ -86,6 +90,9 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
             identity::bind(&mut step, &observations);
         }
         clock.set(step["now"].as_f64().unwrap_or(100000.0));
+        if step["files"].is_array() {
+            ui_files::fixture(&path.with_extension("files"), &step["files"]);
+        }
         if step["method"] == "reopen" {
             drop(kernel.take());
             kernel = Some(compose(path, profile, clock.clone()));
@@ -99,7 +106,16 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                     "execute" => {
                         let mut request = IvyJson::from_serde(&step["request"]).unwrap();
                         object_write::apply_units(&mut request, &step);
-                        kernel.execute(&IvyJson::from_serde(&step["context"]).unwrap(), &request)
+                        let value = kernel
+                            .execute(&IvyJson::from_serde(&step["context"]).unwrap(), &request)?;
+                        if step["lossless"] == true {
+                            Ok(IvyJson::object([(
+                                "encoded",
+                                ivy_contracts::json::stringify(&value, usize::MAX)?.into(),
+                            )]))
+                        } else {
+                            Ok(value)
+                        }
                     }
                     "register" | "registerSlow" => kernel
                         .add(
@@ -191,6 +207,10 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
             &kernel.parts.store,
             "SELECT * FROM deployment_reports ORDER BY host_id,deployment_id",
         );
+        state["appAssets"] = rows(
+            &kernel.parts.store,
+            "SELECT * FROM app_assets ORDER BY app_id,release_id,path",
+        );
         if inventory_trace {
             state["inventorySets"] = rows(
                 &kernel.parts.store,
@@ -201,7 +221,7 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                 "SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id",
             );
         }
-        observations.push(json!({"value":value,"error":error,"state":state,
+        observations.push(json!({"value":value,"error":error,"state":state,"fileTree":ui_files::tree(&path.with_extension("files")),
             "registry":{"changedNodes":registry.changed_nodes().iter().map(|v|&v.0).collect::<Vec<_>>(),
             "changedGenerations":registry.changed_generations().iter().map(|(id,g)|json!([id.0,wire(IvyJson::Number(*g))])).collect::<Vec<_>>()}}));
     }
@@ -221,6 +241,7 @@ fn compare(steps: &[Value]) -> Value {
     for (i, step) in bound.iter_mut().enumerate() {
         if step["request"]["params"]["create"].is_object()
             || step["request"]["method"] == "hostConfigurations.put"
+            || step["request"]["method"] == "wiki.create"
         {
             let value = &actual["rows"][i]["value"]["value"];
             let id = value["object"]["id"]

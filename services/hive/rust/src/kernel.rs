@@ -8,6 +8,7 @@ use crate::{
     registry::{ConnectionContext, Registry},
     storage_read::{self, STORAGE_FORMAT},
     store::{AuthenticatedContext, Store},
+    ui_files::UiFiles,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
@@ -17,6 +18,8 @@ use ivy_contracts::{
 use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 #[path = "kernel_catalogs.rs"]
 mod catalogs;
+#[path = "kernel_wiki.rs"]
+mod wiki;
 
 pub struct Options {
     pub version: JsString,
@@ -32,16 +35,19 @@ pub struct Parts {
     pub registry: Rc<RefCell<Registry>>,
     pub discovery: Discovery,
     pub configurations: Configurations,
+    pub ui_files: UiFiles,
 }
 pub struct Call<'a> {
     pub store: &'a mut Store,
     pub registry: &'a mut Registry,
     pub discovery: &'a mut Discovery,
     pub configurations: &'a Configurations,
+    pub ui_files: &'a UiFiles,
     pub options: &'a Options,
     pub runtime: &'a dyn Runtime,
     pub clock: &'a dyn Fn() -> f64,
     pub connection_generation: &'a mut f64,
+    handlers: &'a HashMap<JsString, Handler>,
 }
 pub type Handler = fn(&mut Call<'_>, &IvyJson, &IvyJson, &str) -> IvyResult<IvyJson>;
 
@@ -165,11 +171,22 @@ impl Kernel {
             "events.unsubscribe",
             "retention.preview",
             "retention.status",
+            "uis.list",
+            "uis.get",
+            "uis.catalog",
+            "uis.releases",
+            "uis.inspect",
+            "uis.deploy",
+            "uis.stageAsset",
+            "uis.rollback",
         ] {
             kernel.add(method, domain)?;
         }
         for method in catalogs::METHODS {
             kernel.add(method, catalogs::handle)?;
+        }
+        for method in wiki::METHODS {
+            kernel.add(method, wiki::handle)?;
         }
         Ok(kernel)
     }
@@ -184,6 +201,23 @@ impl Kernel {
         Ok(())
     }
     pub fn execute(&mut self, context: &IvyJson, value: &IvyJson) -> IvyResult<IvyJson> {
+        Call {
+            store: &mut self.parts.store,
+            registry: &mut self.parts.registry.borrow_mut(),
+            discovery: &mut self.parts.discovery,
+            configurations: &self.parts.configurations,
+            ui_files: &self.parts.ui_files,
+            options: &self.options,
+            runtime: self.runtime.as_ref(),
+            clock: self.clock.as_ref(),
+            connection_generation: &mut self.connection_generation,
+            handlers: &self.handlers,
+        }
+        .execute(context, value)
+    }
+}
+impl Call<'_> {
+    fn execute(&mut self, context: &IvyJson, value: &IvyJson) -> IvyResult<IvyJson> {
         if context.is_null() {
             return Err(IvyError::internal());
         }
@@ -229,11 +263,11 @@ impl Kernel {
         }
         if let Err(error) = validate_input(&method, params) {
             if method == "registry.sync" && context.get("serviceNodeId").is_some() {
-                let mut registry = self.parts.registry.borrow_mut();
+                let registry = &mut *self.registry;
                 let mut node = registry.node(
-                    &self.parts.store,
+                    self.store,
                     string(context, "serviceNodeId")?,
-                    self.runtime.as_ref(),
+                    self.runtime,
                     (self.clock)(),
                 )?;
                 let now = self.runtime.iso_date((self.clock)())?;
@@ -244,9 +278,9 @@ impl Kernel {
                 ] {
                     node.insert(key, value);
                 }
-                registry.save(&mut self.parts.store, &node, true)?;
+                registry.save(self.store, &node, true)?;
                 registry.diagnostic(
-                    &mut self.parts.store,
+                    self.store,
                     &IvyJson::object([
                         ("code", "registry_invalid".into()),
                         (
@@ -266,7 +300,7 @@ impl Kernel {
                             "Registry input failed contract validation.".into(),
                         ),
                     ]),
-                    self.runtime.as_ref(),
+                    self.runtime,
                     (self.clock)(),
                 )?;
             }
@@ -291,7 +325,7 @@ impl Kernel {
                 "caller_changed",
                 "Return to the original caller before reconciling or repeating this action.",
             )?;
-            let resolved = self.parts.discovery.resolve_call(params)?;
+            let resolved = self.discovery.resolve_call(params)?;
             let mut request = value.clone();
             for (key, value) in resolved.as_object().ok_or_else(IvyError::internal)? {
                 request.insert(key.clone(), value.clone());
@@ -303,33 +337,39 @@ impl Kernel {
             "objects.query" | "objects.delete" => 15_000,
             _ => 1000,
         });
-        let Self {
-            parts,
+        let Call {
+            store,
+            registry,
+            discovery,
+            configurations,
+            ui_files,
             options,
             runtime,
             clock,
             handlers,
             connection_generation,
         } = self;
-        parts.store.with_budget_mut(duration, |store| {
+        store.with_budget_mut(duration, |store| {
             require(
                 method != "tools.call",
                 "internal_error",
                 "Tool routing is owned by the live connection table.",
             )?;
-            let handler = handlers
+            let handler = *handlers
                 .get(&JsString::from(method.as_str()))
                 .ok_or_else(|| IvyError::new("not_found", "Unknown Hive operation."))?;
             let result = handler(
                 &mut Call {
                     store,
-                    registry: &mut parts.registry.borrow_mut(),
-                    discovery: &mut parts.discovery,
-                    configurations: &parts.configurations,
+                    registry,
+                    discovery,
+                    configurations,
+                    ui_files,
                     options,
-                    runtime: runtime.as_ref(),
-                    clock: clock.as_ref(),
+                    runtime: *runtime,
+                    clock: *clock,
                     connection_generation,
+                    handlers,
                 },
                 context,
                 params,
@@ -630,6 +670,47 @@ fn domain(
         ),
         "retention.preview" => crate::retention::preview(call.store, call.runtime, (call.clock)()),
         "retention.status" => crate::retention::status(call.store, call.runtime, (call.clock)()),
+        method if method.starts_with("uis.") => {
+            let owner = crate::uis::Uis::new(call.registry, call.ui_files);
+            match method {
+                "uis.list" => {
+                    let records = owner.list(call.store)?;
+                    catalogs::try_page(
+                        call,
+                        method,
+                        params,
+                        records,
+                        |value| string(field(value, "metadata")?, "uiId").cloned(),
+                        None,
+                    )
+                }
+                "uis.get" => owner.get(call.store, string(params, "uiId")?),
+                "uis.catalog" => owner.catalog(call.store, params),
+                "uis.releases" => owner.releases(call.store, params),
+                "uis.inspect" => owner.inspect(call.store, params, call.runtime, call.clock),
+                "uis.stageAsset" => owner.stage_asset(
+                    call.store,
+                    &principal(context)?,
+                    params,
+                    (call.clock)() as u64,
+                ),
+                "uis.deploy" => owner.deploy(
+                    call.store,
+                    &principal(context)?,
+                    params,
+                    (call.clock)() as u64,
+                ),
+                "uis.rollback" => owner.rollback(
+                    call.store,
+                    &principal(context)?,
+                    params,
+                    (call.clock)() as u64,
+                    call.runtime,
+                    call.clock,
+                ),
+                _ => Err(IvyError::internal()),
+            }
+        }
         "hostConfigurations.list" => {
             let mut records = call.configurations.list(call.store, call.runtime)?;
             let mut identity = IvyJson::object([("method", method.into())]);

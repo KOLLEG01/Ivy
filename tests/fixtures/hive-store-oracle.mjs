@@ -142,10 +142,12 @@ try {
       registryStrings({...step,params:step.request?.params??step.params});globalThis.Date=retentionDate(RealDate,step.now);
       if(step.createdId){crypto.randomUUID=()=>step.createdId;globalThis.crypto.randomUUID=()=>step.createdId;syncBuiltinESMExports();}
       try{
+       const fileRoot=input.path.replace(/\.[^.\\/]+$/,'')+'.files';
+       if(step.files)uiFileSetup(fileRoot,step.files);
        if(step.method==='reopen'){store.close();store=new HiveStore(input.path);kernelExecution=undefined;}
        if(!kernelExecution||step.method==='constructor'){
         registry=new Registry(store);discovery=new Discovery(registry);configurations=new Configurations(store,new Objects(store));
-        kernelExecution=Object.assign(new KernelExecution(),{store,registry,discovery,configurations,objects:new Objects(store),events:new Events(store),inventory:new Inventory(store,registry),retention:new Retention(store,registry),handlers:new Map(),connectionGeneration:0,options:{version:'1.0.0',buildId:'sha256:'+'a'.repeat(64),publicBaseUrl:'https://example.invalid/base',...step.options}});
+        kernelExecution=Object.assign(new KernelExecution(),{store,registry,discovery,configurations,objects:new Objects(store),events:new Events(store),inventory:new Inventory(store,registry),retention:new Retention(store,registry),uis:new Uis(store,registry,new UiFiles(join(fileRoot,'private'))),handlers:new Map(),connectionGeneration:0,options:{version:'1.0.0',buildId:'sha256:'+'a'.repeat(64),publicBaseUrl:'https://example.invalid/base',...step.options}});
         kernelExecution.registerHandlers();
        }
        if(step.options)Object.assign(kernelExecution.options,step.options);
@@ -154,7 +156,8 @@ try {
         case 'execute':{
          const request=structuredClone(step.request);
          for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(request,pointer,String.fromCharCode(...codeUnits));
-         value=kernelExecution.execute(step.context,request);break;
+         if(['objects.search','wiki.search'].includes(request?.method)){observeSearch(request.params);for(const [point,word]of searchWordCharacters)wordCharacters.set(point,word);}
+         value=kernelExecution.execute(step.context,request);if(step.lossless)value={encoded:JSON.stringify(value)};break;
         }
         case 'register':kernelExecution.add(step.name,()=>{store.setMetadata('kernel-handler-effect','written');return false;});break;
         case 'registerSlow':kernelExecution.add(step.name,()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1100);store.checkBudget();return null;});break;
@@ -543,12 +546,12 @@ try {
    }
   }catch(e){error=IvyError.from(e).toWire();}
   const state=snapshot(step.compactEvents??false,step.compactDiagnostics??false);
-  if(step.op==='uiFiles'||step.op==='uis')state.appAssets=store.all('SELECT * FROM app_assets ORDER BY app_id,release_id,path');
+  if(kernelTrace||step.op==='uiFiles'||step.op==='uis')state.appAssets=store.all('SELECT * FROM app_assets ORDER BY app_id,release_id,path');
   if(inventoryTrace){state.inventorySets=store.all('SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind');state.inventory=step.compactInventory?tableHash('inventory','record_id,node_id,namespace,kind,native_id,schema_version,summary,observed_at'):store.all('SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id');}
   if(kernelTrace)state.deploymentReports=store.all('SELECT * FROM deployment_reports ORDER BY host_id,deployment_id');
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
-  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{}) ,...(packageTrace?{catalogMutations:store.all('SELECT mutation_id FROM mutations ORDER BY rowid')}:{})});
+  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(kernelTrace||['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{}) ,...(packageTrace?{catalogMutations:store.all('SELECT mutation_id FROM mutations ORDER BY rowid')}:{})});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");

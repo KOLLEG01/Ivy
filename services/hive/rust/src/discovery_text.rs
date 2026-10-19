@@ -50,7 +50,7 @@ pub(super) fn default_group(group: &JsString) -> JsString {
     value.extend(" operations and tools.".encode_utf16());
     JsString(value)
 }
-pub(super) fn compact(value: &JsString) -> JsString {
+pub(crate) fn collapse_whitespace(value: &JsString) -> JsString {
     let mut normalized = vec![];
     let mut space = false;
     for c in &value.0 {
@@ -64,6 +64,10 @@ pub(super) fn compact(value: &JsString) -> JsString {
             normalized.push(*c);
         }
     }
+    JsString(normalized)
+}
+pub(super) fn compact(value: &JsString) -> JsString {
+    let normalized = collapse_whitespace(value).0;
     let mut out = vec![];
     let mut bytes = 0;
     let mut i = 0;
