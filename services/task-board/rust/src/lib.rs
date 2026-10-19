@@ -1,5 +1,6 @@
 pub mod configuration;
 pub mod allocation;
+pub mod category_projection;
 pub mod coordination;
 pub mod deliveries;
 pub mod evidence_bytes;
