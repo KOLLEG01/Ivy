@@ -3,6 +3,7 @@ use crate::{
     agent_health::AgentHealth,
     browser_notices::{BrowserNoticeSettings, BrowserNotices, FormQuery},
     capabilities::{CapabilityManagement, SqliteCapabilityStore, initialize_profile},
+    control::AgentControl,
     directories::DirectoryComparator,
     environment_defaults::load_environment_defaults,
     environment_manager::{EnvironmentManagerSettings, ManagedEnvironment},
@@ -832,18 +833,32 @@ fn control_timer(
     shutdown: std::sync::Weak<AgentShutdown>,
     closing: Arc<AtomicBool>,
 ) {
+    let file = health.file().clone();
+    let control = AgentControl::new(
+        Arc::new(move || {
+            let file = file.clone();
+            Box::pin(async move { Ok(file.control().await?.is_some()) })
+        }),
+        Arc::new(move |code| {
+            if let Some(shutdown) = shutdown.upgrade() {
+                let _ = shutdown.close(code);
+            }
+        }),
+        closing,
+    );
     tokio::spawn(async move {
         let period = Duration::from_millis(500);
         let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            if *stopped.borrow() {
+                break;
+            }
             tokio::select! {
                 biased;
                 _ = stopped.changed() => break,
                 _ = timer.tick() => {
-                    if closing.load(Ordering::Acquire) { continue; }
-                    let code = match health.file().control().await { Ok(None) => continue, Ok(Some(_)) => "agent_stopped", Err(_) => "agent_control_failed" };
-                    if let Some(shutdown) = shutdown.upgrade() { let _ = shutdown.close(code.into()); }
+                    control.tick();
                 }
             }
         }

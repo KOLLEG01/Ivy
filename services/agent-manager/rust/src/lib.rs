@@ -2,6 +2,7 @@
 pub mod agent_health;
 pub mod browser_notices;
 pub mod capabilities;
+pub mod control;
 pub mod claude_mcp;
 pub mod claude_launch;
 pub mod directories;

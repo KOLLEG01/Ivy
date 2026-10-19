@@ -2,6 +2,7 @@ use ivy_agent_manager::{
     agent_health::AgentHealth,
     browser_notices::{input_browser_notice, native_browser_notice, service_owns_completion},
     capabilities::{CapabilityManagement, SqliteCapabilityStore},
+    control::AgentControl,
     interactions::{Limits as InteractionLimits, NativeInteractions},
     inventory::NativeInventory,
     inventory_manager::InventoryManager,
@@ -47,7 +48,10 @@ use std::{
     fs,
     path::PathBuf,
     process::Command,
-    sync::{Arc, Mutex, OnceLock, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -694,4 +698,78 @@ async fn dropping_the_prepared_start_waiter_preserves_admitted_cleanup() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn control_ticks_skip_busy_reads_and_preserve_original_close_and_failure_policy() {
+    for row in field(data(), "control").as_array().unwrap() {
+        let closing = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(Mutex::new(Vec::<IvyJson>::new()));
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let receiver = Arc::new(Mutex::new(Some(receiver)));
+        let settled = Arc::new(tokio::sync::Notify::new());
+        let control = AgentControl::new(
+            Arc::new({
+                let calls = calls.clone();
+                let settled = settled.clone();
+                move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let receiver = receiver.lock().unwrap().take();
+                    let settled = settled.clone();
+                    Box::pin(async move {
+                        let result = match receiver {
+                            Some(receiver) => receiver.await.unwrap(),
+                            None => Ok(false),
+                        };
+                        settled.notify_one();
+                        result
+                    })
+                }
+            }),
+            Arc::new({
+                let closing = closing.clone();
+                let stops = stops.clone();
+                move |code| {
+                    closing.store(true, Ordering::SeqCst);
+                    stops.lock().unwrap().push(IvyJson::String(code));
+                }
+            }),
+            closing.clone(),
+        );
+        assert!(control.tick());
+        assert!(!control.tick());
+        assert!(!control.tick());
+        let scenario = text(row, "scenario").to_utf8().unwrap();
+        if scenario == "error-after-closing" {
+            closing.store(true, Ordering::SeqCst);
+        }
+        sender
+            .send(if scenario.starts_with("error") {
+                Err(IvyError::internal())
+            } else {
+                Ok(scenario == "present")
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), settled.notified())
+            .await
+            .unwrap();
+        if control.tick() {
+            tokio::time::timeout(Duration::from_secs(2), settled.notified())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst) as f64,
+            field(row, "calls").as_f64().unwrap()
+        );
+        same(
+            &IvyJson::Array(stops.lock().unwrap().clone()),
+            field(row, "stops"),
+        );
+        same(
+            &IvyJson::Bool(closing.load(Ordering::SeqCst)),
+            field(row, "closing"),
+        );
+    }
 }

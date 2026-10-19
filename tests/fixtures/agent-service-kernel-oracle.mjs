@@ -3,10 +3,11 @@ import {readFileSync,readdirSync} from 'node:fs';
 import ts from 'typescript';
 import {nativeBrowserNotice,inputBrowserNotice,serviceOwnsCompletion} from '../../dist/services/agent-manager/src/notifications.js';
 const source=ts.createSourceFile('main.ts',readFileSync('services/agent-manager/src/main.ts','utf8'),ts.ScriptTarget.Latest,true);
-let declaration,options;
+let declaration,options,controlTick;
 function visit(node){
  if(ts.isVariableDeclaration(node)&&node.name.getText(source)==='handlers')declaration=node.initializer;
  if(ts.isNewExpression(node)&&node.expression.getText(source)==='ServiceClient')options=node.arguments[0];
+ if(ts.isCallExpression(node)&&node.expression.getText(source)==='setInterval')controlTick=node.arguments[0];
  ts.forEachChild(node,visit);
 }visit(source);assert(declaration&&options);
 const handlers=declaration.properties.map(p=>p.name.text).sort();assert.equal(handlers.length,22);
@@ -42,4 +43,20 @@ for(const closing of [false,true])for(const status of ['connecting','offline','s
  observer({status,code,generation:7,phase:'fixture'});await Promise.resolve();
  states.push({closing,status,code,health});
 }
-console.log(JSON.stringify({config,identity:captured.identity,heartbeatMs:captured.heartbeatMs,handlers,catalogs,notices,serviceOwnership,states}));
+assert(controlTick);
+const control=[];
+for(const scenario of ['absent','present','error','error-after-closing']){
+ let release,reject;const stops=[];
+ const env={closing:false,controlBusy:false,calls:0,health:{control(){env.calls++;return new Promise((resolve,failed)=>{release=resolve;reject=failed;});}},
+  close(){env.closing=true;stops.push('agent_stopped');return Promise.resolve();},
+  fail(code){if(!env.closing){env.closing=true;stops.push(code);}}};
+ const expression=ts.transpileModule(controlTick.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText.replace(/;\s*$/,'');
+ const tick=Function('env','with(env){return '+expression+'}')(env);
+ tick();tick();tick();assert.equal(env.calls,1);
+ if(scenario==='error-after-closing')env.closing=true;
+ if(scenario.startsWith('error'))reject(new Error('fixture'));else release(scenario==='present'?{}:null);
+ await new Promise(setImmediate);tick();
+ if(env.calls===2){release(null);await new Promise(setImmediate);}
+ control.push({scenario,calls:env.calls,stops,closing:env.closing,busy:env.controlBusy});
+}
+console.log(JSON.stringify({config,identity:captured.identity,heartbeatMs:captured.heartbeatMs,handlers,catalogs,notices,serviceOwnership,states,control}));
