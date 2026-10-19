@@ -25,6 +25,7 @@ pub mod queries;
 pub mod queue;
 pub mod registry;
 pub mod result_text;
+pub mod runtime;
 pub mod schema;
 pub mod store;
 pub mod whatsapp;

@@ -253,19 +253,18 @@ impl ChatGenerationLease {
         self.native()?.verify_owner().await
     }
     pub async fn monitor_diagnostics(&self) -> IvyResult<()> {
+        self.monitor_diagnostics_with_clock(Arc::new(SystemClock))
+            .await
+    }
+    pub async fn monitor_diagnostics_with_clock(&self, clock: Arc<dyn Clock>) -> IvyResult<()> {
         let native = self.native()?;
         let operations = self.operations()?;
         let main = ChatMain::new(&operations, &native, &self.config.notice_instructions)?;
-        DiagnosticNotifications::with_clock(
-            &operations,
-            &main,
-            self.config.language.clone(),
-            Arc::new(SystemClock),
-        )
-        .tick(RequestOptions {
-            cancellation: self.connection.signal(),
-            ..Default::default()
-        })
-        .await
+        DiagnosticNotifications::with_clock(&operations, &main, self.config.language.clone(), clock)
+            .tick(RequestOptions {
+                cancellation: self.connection.signal(),
+                ..Default::default()
+            })
+            .await
     }
 }

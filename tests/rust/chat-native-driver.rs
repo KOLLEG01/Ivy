@@ -5,6 +5,8 @@ use ivy_chat_bridge::{
 mod durable;
 #[path = "chat-generation-cases.rs"]
 mod generation;
+#[path = "chat-service-runtime-cases.rs"]
+mod runtime;
 use ivy_contracts::{
     IvyError, IvyJson as Json, Outcome, checked_native_contract::CheckedNativeContracts,
     json::parse,

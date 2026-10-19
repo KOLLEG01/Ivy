@@ -22,6 +22,7 @@ pub struct ChatWorker<'a> {
     pub cancellation: ChatCancelWorker<'a>,
     delivery: &'a ChatDelivery<'a>,
     clock: Arc<dyn Clock>,
+    turn_observer: Option<Arc<dyn Fn(Option<JsString>) + Send + Sync>>,
 }
 impl<'a> ChatWorker<'a> {
     /// The generation owns these existing components in dependency order. Keep
@@ -60,7 +61,18 @@ impl<'a> ChatWorker<'a> {
             ),
             delivery,
             clock,
+            turn_observer: None,
         })
+    }
+    pub(crate) fn observe_turns(&mut self, observer: Arc<dyn Fn(Option<JsString>) + Send + Sync>) {
+        observer(self.turn_id.clone());
+        self.turn_observer = Some(observer);
+    }
+    fn selected_turn(&mut self, value: Option<JsString>) {
+        self.turn_id = value.clone();
+        if let Some(observer) = &self.turn_observer {
+            observer(value);
+        }
     }
     pub async fn drain<F: FnMut() -> bool + Send>(
         &mut self,
@@ -95,7 +107,7 @@ impl<'a> ChatWorker<'a> {
                 .and_then(|q| q.first());
             let Some(ticket) = ticket else {
                 self.idle = true;
-                self.turn_id = None;
+                self.selected_turn(None);
                 return Ok(());
             };
             if current
@@ -116,7 +128,7 @@ impl<'a> ChatWorker<'a> {
                 )
                 .await
                 .map_err(|e| e.into_ivy())?;
-            self.turn_id = input.value.required("turnId")?.as_js_string().cloned();
+            self.selected_turn(input.value.required("turnId")?.as_js_string().cloned());
             if input.value.get("finishedAt").is_some_and(truthy)
                 && !input.value.get("turnId").is_some_and(truthy)
             {
