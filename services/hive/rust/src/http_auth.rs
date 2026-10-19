@@ -1,7 +1,7 @@
 //! Bounded HTTP/WS authentication. The transport owns normalized headers and
 //! socket lifetime; OAuth validation and the storage worker are required owners.
 use crate::{
-    admission::{AuthenticationRate, RequestBudget, RequestBudgetOptions},
+    admission::{AuthenticationRate, RequestBudget, RequestBudgetOptions, RequestLease},
     browser_push::{RequestFuture, Worker},
 };
 use ivy_contracts::{
@@ -60,6 +60,12 @@ struct Inner {
 #[derive(Clone)]
 pub struct Authentication(Arc<Inner>);
 impl Authentication {
+    pub fn canonical_origin(&self) -> &JsString {
+        &self.0.options.canonical_origin
+    }
+    pub fn base_path(&self) -> &JsString {
+        &self.0.options.base_path
+    }
     /// Canonical origin/base path come from the server's validated public URL.
     /// No anonymous OAuth, default worker or wall-clock fallback is supplied.
     pub fn new(
@@ -139,6 +145,15 @@ pub struct Connection {
     state: Mutex<ConnectionState>,
 }
 impl Connection {
+    pub fn authentication(&self) -> Authentication {
+        Authentication(self.owner.clone())
+    }
+    /// Login/OAuth routes share the same arrival counter and retained slots as
+    /// bounded bearer/session authentication on this connection's owner.
+    pub fn admit_authentication(&self, headers: &Headers) -> IvyResult<RequestLease> {
+        self.owner
+            .admit_authentication(&self.client_address(headers)?)
+    }
     pub fn client_address(&self, headers: &Headers) -> IvyResult<JsString> {
         let peer = normalize(
             self.remote_address
@@ -234,13 +249,7 @@ impl Connection {
                 "Connection identity capacity reached.",
             )?;
             let key = self.client_address(&request.headers)?;
-            owner
-                .state
-                .lock()
-                .unwrap()
-                .arrivals
-                .admit(&key, (owner.clock)())?;
-            let mut lease = owner.authentication.acquire(&key, None)?;
+            let mut lease = owner.admit_authentication(&key)?;
             let work = owner.authenticate(request);
             let (completed, pending) = watch::channel(None);
             entries.insert(identity.clone(), pending);
@@ -282,6 +291,14 @@ impl Drop for Connection {
     }
 }
 impl Inner {
+    fn admit_authentication(&self, key: &JsString) -> IvyResult<RequestLease> {
+        self.state
+            .lock()
+            .unwrap()
+            .arrivals
+            .admit(key, (self.clock)())?;
+        self.authentication.acquire(key, None)
+    }
     fn same_origin(&self, headers: &Headers) -> IvyResult<()> {
         same_origin(&self.options.canonical_origin, headers.origin.as_ref())
     }

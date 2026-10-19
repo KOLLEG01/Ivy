@@ -3,6 +3,7 @@ pub mod admission;
 pub mod browser_push;
 pub mod browser_push_http;
 pub mod browser_push_store;
+pub mod browser_session;
 pub mod configurations;
 pub mod discovery;
 pub mod events;

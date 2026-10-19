@@ -1,4 +1,6 @@
 use super::*;
+#[path = "hive_browser_session.rs"]
+mod browser_session;
 use ivy_hive::http_auth::{
     self, Authentication, Headers as AuthHeaders, OAuth, Options as AuthOptions,
     Request as AuthRequest,

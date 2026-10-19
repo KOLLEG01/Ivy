@@ -179,6 +179,32 @@ fn actor(input: &Value) -> Option<mpsc::UnboundedSender<Posted>> {
                         .as_js_string()
                         .unwrap(),
                 ),
+                "session.end" => {
+                    let context = request.get("context").unwrap();
+                    ivy_hive::worker_identity::end_session(
+                        &store,
+                        &ivy_hive::store::AuthenticatedContext {
+                            credential_digest: context
+                                .get("credentialDigest")
+                                .unwrap()
+                                .as_js_string()
+                                .unwrap()
+                                .clone(),
+                            principal_id: context
+                                .get("principalId")
+                                .unwrap()
+                                .as_js_string()
+                                .unwrap()
+                                .clone(),
+                        },
+                        context.get("sessionDigest").and_then(IvyJson::as_js_string),
+                    )
+                }
+                "fixture.sessions" => Ok(IvyJson::from_serde(&rows(
+                    &store,
+                    "SELECT digest,credential_digest FROM browser_sessions ORDER BY digest",
+                ))
+                .unwrap()),
                 "fixture.sql" => {
                     store
                         .connection()
