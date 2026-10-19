@@ -88,8 +88,8 @@ impl RpcClient for ProbeClient {
 }
 
 // The execution graph owns the driver whose callback calls back into that graph.
-// Only the last publication is a finite source replay; both admissions and
-// execution queues, the callback bridge and their local executor are production.
+// Record/RPC/contract ports and the final publication are finite source replays.
+// Admissions, execution queues, the bridge and local executors are production.
 struct DriverProgram<'a, D, S> {
     program: Program<'a>,
     driver: D,
@@ -111,257 +111,283 @@ impl<D, S: Store> ExecutionProgram for DriverProgram<'_, D, S> {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn cyclic_driver_graph_keeps_queued_originals_across_retirement_and_abandoned_replies() {
-    for (method, name) in [
-        ("nativeUpdate", "internal nativeUpdate"),
-        ("nativeComment", "internal nativeComment"),
-        ("schedule", "internal schedule"),
-        ("recoverOperation", "recover exact operation"),
-        (
-            "recoverPublication",
-            "pending publication resumes exact operation",
-        ),
-    ] {
-        let row = data()
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|r| s(r, "name") == &JsString::from(name))
-            .unwrap();
-        let replay = Arc::new(Replay {
-            steps: Mutex::new(
-                f(row, "boundaries")
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .cloned()
-                    .collect(),
+    for root_failed_early in [false, true] {
+        for (method, name) in [
+            ("nativeUpdate", "internal nativeUpdate"),
+            ("nativeComment", "internal nativeComment"),
+            ("schedule", "internal schedule"),
+            ("recoverOperation", "recover exact operation"),
+            (
+                "recoverPublication",
+                "pending publication resumes exact operation",
             ),
-            name: s(row, "name").clone(),
-        });
-        let owner_gate = Arc::new(Gate::default());
-        let client = Arc::new(PendingClient {
-            client: Client(replay.clone()),
-            first: AtomicBool::new(true),
-            gate: owner_gate.clone(),
-        });
-        let catalogs =
-            CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-        let bindings = Bindings(replay.clone());
-        let runtime = AdmissionRuntime {
-            client: client.clone(),
-            contracts: &bindings,
-            catalogs: &catalogs,
-        };
-        let owner = EngineOwner {
-            service_node_id: "task-node".into(),
-            generation: 7.0,
-        };
-        let operations = Operations {
-            store: World {
-                replay: replay.clone(),
-                root: f(row, "root").as_js_string().cloned(),
-            },
-            now: || "2026-01-02T03:04:05.006Z".to_owned(),
-        };
-        let execution_gate = Gate::default();
-        let scopes = ReadScopes::default();
-        let db = Connection::open_in_memory().unwrap();
-        initialize(&db).unwrap();
-        let initialized_changes = db.total_changes();
-        let journal = JournalStore {
-            journal: LocalJournal {
-                connection: &db,
-                root_object_id: Some("root".into()),
-            },
-            client: Arc::new(ProbeClient::default()),
-            contracts: ProbeContracts,
-            limits: HistoryLimits::default(),
-            now: || "2026-01-02T03:04:05.006Z".to_owned(),
-            new_id: || -> JsString { panic!("No probe write") },
-            cache: Some(scopes.cache()),
-        };
-        let inspection = InspectionJournal::new(&journal, "owner".into(), "task-node".into());
-        // Declare in journal-release order, initialize in dependency order.
-        // The callback handle contains no engine/executor reference.
-        let program;
-        let execution_executor = LocalExecutor::default();
-        let execution_scoped = ReadScopeExecutor {
-            scopes: &scopes,
-            executor: &execution_executor,
-        };
-        let execution;
-        let engine;
-        let executor = LocalExecutor::default();
-        let scoped = ReadScopeExecutor {
-            scopes: &scopes,
-            executor: &executor,
-        };
-        let invocations = EngineInvocations::new(&scoped);
-        let (internal, internal_owner) = invocations.internal_calls(&scopes);
-        let update = internal.clone();
-        program = DriverProgram {
-            program: Program {
-                bindings: &bindings,
-                gate: &execution_gate,
-                calls: Cell::new(0),
-            },
-            driver: DriverRuntime::new(
-                client,
-                "owner".into(),
-                "task-node".into(),
-                move |request: Json| {
-                    let observer = update.native_update(&request);
-                    async move { observer?.await }
+        ] {
+            let row = data()
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| s(r, "name") == &JsString::from(name))
+                .unwrap();
+            let replay = Arc::new(Replay {
+                steps: Mutex::new(
+                    f(row, "boundaries")
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .collect(),
+                ),
+                name: s(row, "name").clone(),
+            });
+            let owner_gate = Arc::new(Gate::default());
+            let client = Arc::new(PendingClient {
+                client: Client(replay.clone()),
+                first: AtomicBool::new(true),
+                gate: owner_gate.clone(),
+            });
+            let catalogs =
+                CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+            let bindings = Bindings(replay.clone());
+            let runtime = AdmissionRuntime {
+                client: client.clone(),
+                contracts: &bindings,
+                catalogs: &catalogs,
+            };
+            let owner = EngineOwner {
+                service_node_id: "task-node".into(),
+                generation: 7.0,
+            };
+            let operations = Operations {
+                store: World {
+                    replay: replay.clone(),
+                    root: f(row, "root").as_js_string().cloned(),
                 },
-                || "2026-01-02T03:04:05.006Z".into(),
-            ),
-            probe: &journal,
-        };
-        execution = ExecutionQueue::new(&program, &execution_scoped);
-        engine = EngineAdmission::new(
-            &operations,
-            f(row, "settings"),
-            &owner,
-            &runtime,
-            &execution,
-        )
-        .unwrap();
-        let step = &f(row, "steps").as_array().unwrap()[0];
-        let mut request = f(step, "request").clone();
-        let mut object_id = f(step, "objectId")
-            .as_js_string()
-            .cloned()
-            .unwrap_or_default();
-        // Exercise DriverRuntime's actual required nativeUpdate callback.
-        // Other methods submit before the receiver/root has ever been polled.
-        let observer = scopes
-            .with_read_cache(async {
-                journal
-                    .read("task-board/task", &probe_pin(), true)
-                    .await
-                    .unwrap();
-                if method == "nativeUpdate" {
-                    let mut call = Box::pin(program.driver.native_update(&request));
-                    poll_fn(|cx| {
-                        assert!(call.as_mut().poll(cx).is_pending());
-                        Poll::Ready(())
-                    })
-                    .await;
-                    drop(call);
-                    None
-                } else if method == "nativeComment" {
-                    let comments = NativeCommentJournal {
-                        inspection: &inspection,
-                        native_comment: |request: Json| {
-                            let observer = internal.native_comment(&request);
-                            async move { observer?.await }
-                        },
-                    };
-                    let mut call = Box::pin(comments.native_comment(&request));
-                    poll_fn(|cx| {
-                        assert!(call.as_mut().poll(cx).is_pending());
-                        Poll::Ready(())
-                    })
-                    .await;
-                    drop(call);
-                    None
+                now: || "2026-01-02T03:04:05.006Z".to_owned(),
+            };
+            let execution_gate = Gate::default();
+            let scopes = ReadScopes::default();
+            let db = Connection::open_in_memory().unwrap();
+            initialize(&db).unwrap();
+            let initialized_changes = db.total_changes();
+            let journal = JournalStore {
+                journal: LocalJournal {
+                    connection: &db,
+                    root_object_id: Some("root".into()),
+                },
+                client: Arc::new(ProbeClient::default()),
+                contracts: ProbeContracts,
+                limits: HistoryLimits::default(),
+                now: || "2026-01-02T03:04:05.006Z".to_owned(),
+                new_id: || -> JsString { panic!("No probe write") },
+                cache: Some(scopes.cache()),
+            };
+            let inspection = InspectionJournal::new(&journal, "owner".into(), "task-node".into());
+            // Declare in journal-release order, initialize in dependency order.
+            // The callback handle contains no engine/executor reference.
+            let program;
+            let execution_executor = LocalExecutor::default();
+            let execution_scoped = ReadScopeExecutor {
+                scopes: &scopes,
+                executor: &execution_executor,
+            };
+            let execution;
+            let engine;
+            let executor = LocalExecutor::default();
+            let scoped = ReadScopeExecutor {
+                scopes: &scopes,
+                executor: &executor,
+            };
+            let invocations = EngineInvocations::new(&scoped);
+            let (internal, internal_owner) = invocations.internal_calls(&scopes);
+            let update = internal.clone();
+            program = DriverProgram {
+                program: Program {
+                    bindings: &bindings,
+                    gate: &execution_gate,
+                    calls: Cell::new(0),
+                },
+                driver: DriverRuntime::new(
+                    client,
+                    "owner".into(),
+                    "task-node".into(),
+                    move |request: Json| {
+                        let observer = update.native_update(&request);
+                        async move { observer?.await }
+                    },
+                    || "2026-01-02T03:04:05.006Z".into(),
+                ),
+                probe: &journal,
+            };
+            execution = ExecutionQueue::new(&program, &execution_scoped);
+            engine = EngineAdmission::new(
+                &operations,
+                f(row, "settings"),
+                &owner,
+                &runtime,
+                &execution,
+            )
+            .unwrap();
+            let step = &f(row, "steps").as_array().unwrap()[0];
+            let mut request = f(step, "request").clone();
+            let mut object_id = f(step, "objectId")
+                .as_js_string()
+                .cloned()
+                .unwrap_or_default();
+            // Exercise DriverRuntime's actual required nativeUpdate callback.
+            // Other methods submit before the receiver/root has ever been polled.
+            let observer = scopes
+                .with_read_cache(async {
+                    journal
+                        .read("task-board/task", &probe_pin(), true)
+                        .await
+                        .unwrap();
+                    if method == "nativeUpdate" {
+                        let mut call = Box::pin(program.driver.native_update(&request));
+                        poll_fn(|cx| {
+                            assert!(call.as_mut().poll(cx).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        drop(call);
+                        None
+                    } else if method == "nativeComment" {
+                        let comments = NativeCommentJournal {
+                            inspection: &inspection,
+                            native_comment: |request: Json| {
+                                let observer = internal.native_comment(&request);
+                                async move { observer?.await }
+                            },
+                        };
+                        let mut call = Box::pin(comments.native_comment(&request));
+                        poll_fn(|cx| {
+                            assert!(call.as_mut().poll(cx).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        drop(call);
+                        None
+                    } else {
+                        Some(
+                            match method {
+                                "schedule" => internal.schedule(&request),
+                                "recoverOperation" => internal.recover_operation(&object_id),
+                                "recoverPublication" => internal.recover_publication(),
+                                _ => unreachable!(),
+                            }
+                            .unwrap(),
+                        )
+                    }
+                })
+                .await;
+            // A distinct action must not reuse the submitted action's map. Its map
+            // must not replace the queued call's original context either.
+            scopes
+                .with_read_cache(journal.read("task-board/task", &probe_pin(), true))
+                .await
+                .unwrap();
+            assert_eq!(journal.client.0.load(Ordering::SeqCst), 2);
+            if matches!(request, Json::Object(_)) {
+                request.insert("reason", "changed after submission".into());
+            }
+            object_id.0.clear();
+            let stop = invocations.stop();
+            assert_eq!(
+                internal.native_update(&Json::Null).err().unwrap().code,
+                "service_not_ready"
+            );
+            assert_eq!(
+                internal.native_comment(&Json::Null).err().unwrap().code,
+                "service_not_ready"
+            );
+            assert_eq!(
+                internal.schedule(&Json::Null).err().unwrap().code,
+                "service_not_ready"
+            );
+            assert_eq!(
+                internal
+                    .recover_operation(&JsString(vec![0xd800]))
+                    .err()
+                    .unwrap()
+                    .code,
+                "service_not_ready"
+            );
+            assert_eq!(
+                internal.recover_publication().err().unwrap().code,
+                "service_not_ready"
+            );
+            let original_error = IvyError::new_js(
+                "fixture_root_refusal".into(),
+                JsString(vec![0xd800, 0x0021]),
+            )
+            .with_outcome(Outcome::Unknown)
+            .with_details(Json::object([("original", true.into())]));
+            let root = async {
+                if root_failed_early {
+                    Err(original_error.clone())
                 } else {
-                    Some(
-                        match method {
-                            "schedule" => internal.schedule(&request),
-                            "recoverOperation" => internal.recover_operation(&object_id),
-                            "recoverPublication" => internal.recover_publication(),
-                            _ => unreachable!(),
-                        }
-                        .unwrap(),
-                    )
+                    stop.await;
+                    Ok(())
+                }
+            };
+            let mut driver = Box::pin(
+                executor.drive(execution_executor.drive(internal_owner.run(&engine, root))),
+            );
+            poll_fn(|cx| {
+                assert!(driver.as_mut().poll(cx).is_pending());
+                if owner_gate.entered.load(Ordering::SeqCst) == 1 {
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
                 }
             })
             .await;
-        // A distinct action must not reuse the submitted action's map. Its map
-        // must not replace the queued call's original context either.
-        scopes
-            .with_read_cache(journal.read("task-board/task", &probe_pin(), true))
-            .await
-            .unwrap();
-        assert_eq!(journal.client.0.load(Ordering::SeqCst), 2);
-        if matches!(request, Json::Object(_)) {
-            request.insert("reason", "changed after submission".into());
+            drop(observer);
+            owner_gate.release();
+            poll_fn(|cx| {
+                assert!(driver.as_mut().poll(cx).is_pending());
+                if execution_gate.entered.load(Ordering::SeqCst) == 1 {
+                    assert_eq!(program.program.calls.get(), 1);
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            execution_gate.release();
+            let result = driver.await;
+            if root_failed_early {
+                let error = result.unwrap_err();
+                assert_eq!(error.code_js(), original_error.code_js());
+                assert_eq!(error.message_js(), original_error.message_js());
+                assert_eq!(error.outcome, original_error.outcome);
+                assert_eq!(error.details, original_error.details);
+            } else {
+                result.unwrap();
+            }
+            execution.settled().await;
+            assert_eq!(program.program.calls.get(), 1);
+            assert_eq!(
+                journal.client.0.load(Ordering::SeqCst),
+                2,
+                "{method}: nested execution lost original cache"
+            );
+            journal
+                .read("task-board/task", &probe_pin(), true)
+                .await
+                .unwrap();
+            assert_eq!(journal.client.0.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                db.total_changes(),
+                initialized_changes,
+                "The probe journal was not written"
+            );
+            assert!(
+                replay.steps.lock().unwrap().is_empty(),
+                "{method}: unused source effects"
+            );
         }
-        object_id.0.clear();
-        let stop = invocations.stop();
-        assert_eq!(
-            internal.native_update(&Json::Null).err().unwrap().code,
-            "service_not_ready"
-        );
-        assert_eq!(
-            internal.native_comment(&Json::Null).err().unwrap().code,
-            "service_not_ready"
-        );
-        assert_eq!(
-            internal.schedule(&Json::Null).err().unwrap().code,
-            "service_not_ready"
-        );
-        assert_eq!(
-            internal
-                .recover_operation(&JsString(vec![0xd800]))
-                .err()
-                .unwrap()
-                .code,
-            "service_not_ready"
-        );
-        assert_eq!(
-            internal.recover_publication().err().unwrap().code,
-            "service_not_ready"
-        );
-        let mut driver =
-            Box::pin(executor.drive(execution_executor.drive(internal_owner.run(&engine, stop))));
-        poll_fn(|cx| {
-            assert!(driver.as_mut().poll(cx).is_pending());
-            if owner_gate.entered.load(Ordering::SeqCst) == 1 {
-                Poll::Ready(())
-            } else {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        })
-        .await;
-        drop(observer);
-        owner_gate.release();
-        poll_fn(|cx| {
-            assert!(driver.as_mut().poll(cx).is_pending());
-            if execution_gate.entered.load(Ordering::SeqCst) == 1 {
-                assert_eq!(program.program.calls.get(), 1);
-                Poll::Ready(())
-            } else {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        })
-        .await;
-        execution_gate.release();
-        driver.await;
-        execution.settled().await;
-        assert_eq!(program.program.calls.get(), 1);
-        assert_eq!(
-            journal.client.0.load(Ordering::SeqCst),
-            2,
-            "{method}: nested execution lost original cache"
-        );
-        journal
-            .read("task-board/task", &probe_pin(), true)
-            .await
-            .unwrap();
-        assert_eq!(journal.client.0.load(Ordering::SeqCst), 3);
-        assert_eq!(
-            db.total_changes(),
-            initialized_changes,
-            "The probe journal was not written"
-        );
-        assert!(
-            replay.steps.lock().unwrap().is_empty(),
-            "{method}: unused source effects"
-        );
     }
 }
 
