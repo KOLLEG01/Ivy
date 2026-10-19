@@ -1,4 +1,6 @@
 $ErrorActionPreference='Stop'
+[Console]::InputEncoding=[Text.UTF8Encoding]::new($false,$true)
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false,$true)
 $task93Directory=[IO.Path]::GetFullPath($env:IVY_PHONE_CONFIG_ORACLE_DIR)
 $task93Resolver=[Func[System.Runtime.Loader.AssemblyLoadContext,System.Reflection.AssemblyName,System.Reflection.Assembly]]{
  param($context,$name)
@@ -34,7 +36,8 @@ try {
    $proxy=if($null -ne $value.Binding.OutboundProxy){[SIPSorcery.SIP.SIPEndPoint]::ParseSIPEndPoint($value.Binding.OutboundProxy).ToString()}else{$null}
    [ordered]@{error=$null;endpoint=$endpoint.ToString();proxy=$proxy;incoming=@($peers|ForEach-Object{$_.ToString()}|Sort-Object -Unique);registered=$value.IncomingPeers -ccontains 'registered';packetMs=$value.Codecs.PacketMs;receiveReorderMs=$value.Codecs.ReceiveReorderMs;preferences=@($value.Codecs.Preferences);ringSeconds=$value.Binding.IncomingRingSeconds;offerMode=$value.Binding.OutgoingOfferMode;delayed=($value.Binding.OutgoingOfferMode -ceq 'delayed' -or ($value.Binding.OutgoingOfferMode -ceq 'auto' -and $value.Codecs.Preferences[0] -ceq 'EVS'));rtpStart=$value.Binding.RtpPortRangeStart;rtpEnd=$value.Binding.RtpPortRangeEnd;maxCalls=$value.Binding.MaxConcurrentCalls;keepalive=if($null -ne $value.Registration){$value.Registration.KeepAliveIntervalSeconds}else{$null};passwordUnits=if($null -ne $value.Password){$value.Password.Length}else{$null};micro=if($null -ne $value.Micro){$value.Micro.UsbipExecutable}else{$null}}
   } catch {
-   $failure=$_.Exception.GetBaseException()
+   $failure=$_.Exception
+   while(($failure -is [Management.Automation.MethodInvocationException] -or $failure -is [Reflection.TargetInvocationException]) -and $null -ne $failure.InnerException){$failure=$failure.InnerException}
    [ordered]@{error=if($failure -is [ArgumentException] -or $failure -is [Text.Json.JsonException]){'invalid_request'}else{'operation_outcome_unknown'}}
   }
  }

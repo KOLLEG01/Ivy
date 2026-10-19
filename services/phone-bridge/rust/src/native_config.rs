@@ -79,7 +79,7 @@ pub struct NativeSipBinding {
     offer: OfferMode,
     rtp_start: u16,
     rtp_end: u16,
-    proxy: Option<SipAddr>,
+    proxy: Option<SocketAddr>,
     max_calls: u8,
 }
 impl NativeSipBinding {
@@ -98,11 +98,21 @@ impl NativeSipBinding {
     pub fn rtp_port_range(&self) -> (u16, u16) {
         (self.rtp_start, self.rtp_end)
     }
-    pub fn outbound_proxy(&self) -> Option<&SipAddr> {
-        self.proxy.as_ref()
+    pub fn outbound_proxy(&self) -> Option<SocketAddr> {
+        self.proxy
     }
     pub fn max_concurrent_calls(&self) -> u8 {
         self.max_calls
+    }
+    pub fn format_endpoint(&self, endpoint: SocketAddr) -> String {
+        format!(
+            "{}:{}",
+            self.transport.to_string().to_ascii_lowercase(),
+            native_socket_text(endpoint)
+        )
+    }
+    pub fn outbound_proxy_text(&self) -> Option<String> {
+        self.proxy.map(|address| self.format_endpoint(address))
     }
 }
 pub struct NativeIncomingPeers {
@@ -301,25 +311,39 @@ impl NativeSipConfiguration {
             micro,
         })
     }
-    pub fn into_parts(self) -> NativeConfigurationParts {
+    pub fn into_parts(self) -> Result<NativeConfigurationParts> {
+        let proxy = self
+            .binding
+            .proxy
+            .map(|address| {
+                let routed = SipAddr::new(self.binding.transport, address.into());
+                // A dependency that erases a zone must not silently route this
+                // configuration through a different interface. Retain the DTO;
+                // host composition requires the scoped-address dependency API.
+                if routed.get_socketaddr().ok() != Some(address) {
+                    return Err(OutcomeUnknown);
+                }
+                Ok(routed)
+            })
+            .transpose()?;
         let host = SipHostConfiguration::new(
             SipHostBinding::new(
                 self.binding.endpoint,
                 self.binding.transport,
-                self.binding.proxy.clone(),
+                proxy,
                 self.binding.max_calls.into(),
             )
             .expect("validated binding"),
             self.registration,
         )
         .expect("validated registration transport");
-        NativeConfigurationParts {
+        Ok(NativeConfigurationParts {
             host,
             binding: self.binding,
             codecs: self.codecs,
             incoming: self.incoming,
             micro: self.micro,
-        }
+        })
     }
 }
 const BINDING_FIELDS: &[&str] = &[
@@ -599,7 +623,10 @@ fn windows_filename(path: &str) -> &str {
         {
             Some(8)
         } else if device {
-            root = 4;
+            root = bytes[4..]
+                .iter()
+                .position(|b| sep(*b))
+                .map_or(bytes.len(), |at| at + 5);
             None
         } else {
             Some(2)
@@ -638,7 +665,14 @@ fn parse_ip(value: &str) -> Option<SocketAddr> {
         value
     };
     let (ip, scope) = value.split_once('%').map_or((value, 0), |(ip, scope)| {
-        (ip, scope.parse::<u32>().unwrap_or(0))
+        (
+            ip,
+            if !scope.is_empty() && scope.bytes().all(|b| b.is_ascii_digit()) {
+                scope.parse::<u32>().unwrap_or(0)
+            } else {
+                0
+            },
+        )
     });
     let ip = if ip.contains('.') {
         let colon = ip.rfind(':')?;
@@ -695,7 +729,7 @@ fn ipv4_decimal(value: &str) -> Option<Ipv4Addr> {
     let parts = value
         .split('.')
         .map(|v| {
-            if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+            if !v.is_empty() && !v.starts_with("00") && v.bytes().all(|b| b.is_ascii_digit()) {
                 v.parse::<u8>().ok()
             } else {
                 None
@@ -704,11 +738,71 @@ fn ipv4_decimal(value: &str) -> Option<Ipv4Addr> {
         .collect::<Option<Vec<_>>>()?;
     (parts.len() == 4).then(|| Ipv4Addr::new(parts[0], parts[1], parts[2], parts[3]))
 }
-fn parse_proxy(value: &str, expected: Transport) -> Result<SipAddr> {
+fn native_socket_text(address: SocketAddr) -> String {
+    let SocketAddr::V6(address) = address else {
+        return address.to_string();
+    };
+    let segments = address.ip().segments();
+    let first_four_zero = segments[..4].iter().all(|n| *n == 0);
+    let embedded = segments[6] != 0
+        && ((first_four_zero
+            && ((segments[4] == 0 && matches!(segments[5], 0 | 0xffff))
+                || (segments[4] == 0xffff && segments[5] == 0)))
+            || (matches!(segments[4], 0 | 0x0200) && segments[5] == 0x5efe));
+    let hex = if embedded {
+        &segments[..6]
+    } else {
+        &segments[..]
+    };
+    let mut longest = (0, 0);
+    let mut at = 0;
+    while at < hex.len() {
+        if hex[at] != 0 {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < hex.len() && hex[at] == 0 {
+            at += 1;
+        }
+        if at - start > longest.1 {
+            longest = (start, at - start);
+        }
+    }
+    let join = |values: &[u16]| {
+        values
+            .iter()
+            .map(|v| format!("{v:x}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    let mut text = if longest.1 >= 2 {
+        format!(
+            "{}::{}",
+            join(&hex[..longest.0]),
+            join(&hex[longest.0 + longest.1..])
+        )
+    } else {
+        join(hex)
+    };
+    if embedded {
+        if !text.ends_with(':') {
+            text.push(':');
+        }
+        let octets = address.ip().octets();
+        text.push_str(&Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]).to_string());
+    }
+    if address.scope_id() != 0 {
+        text.push_str(&format!("%{}", address.scope_id()));
+    }
+    format!("[{text}]:{}", address.port())
+}
+fn parse_proxy(value: &str, expected: Transport) -> Result<SocketAddr> {
     if value.encode_utf16().count() > 256 || value.chars().any(char::is_control) {
         return Err(InvalidRequest);
     }
-    let mut address = value.split(';').next().unwrap().trim();
+    let mut pieces = value.split(';');
+    let mut address = pieces.next().unwrap();
     let mut protocol = Transport::Udp;
     for (prefix, transport) in [
         ("udp:", Transport::Udp),
@@ -726,8 +820,23 @@ fn parse_proxy(value: &str, expected: Transport) -> Result<SipAddr> {
             break;
         }
     }
+    for parameter in pieces {
+        if let Some((key, value)) = parameter.split_once('=') {
+            if key.eq_ignore_ascii_case("transport") {
+                protocol = match value.to_ascii_lowercase().as_str() {
+                    "udp" => Transport::Udp,
+                    "tcp" => Transport::Tcp,
+                    "tls" => Transport::Tls,
+                    _ => return Err(OutcomeUnknown),
+                };
+            }
+        }
+    }
     if protocol != expected {
         return Err(InvalidRequest);
+    }
+    if let Some((_, host)) = address.rsplit_once('@') {
+        address = host;
     }
     let (ip, port) = if address.starts_with('[') {
         let end = address.find(']').ok_or(OutcomeUnknown)?;
@@ -752,5 +861,5 @@ fn parse_proxy(value: &str, expected: Transport) -> Result<SipAddr> {
     } else {
         port
     });
-    Ok(SipAddr::new(protocol, ip.into()))
+    Ok(ip)
 }

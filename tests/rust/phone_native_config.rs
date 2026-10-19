@@ -80,6 +80,21 @@ fn cases() -> Vec<String> {
         "fe80::1%bad",
         "::1%4294967296",
         "::ffff:127.0.0.01",
+        "::ffff:127.0.0.001",
+        "::ffff:127.0.0.00",
+        "::ffff:127.0.0.08",
+        "::ffff:127.0.0.010",
+        "::1%+12",
+        "::127.0.0.1",
+        "::2",
+        "::ffff:0",
+        "::ffff:0:2",
+        "::ffff:0:192.0.2.1",
+        "2001:db8::192.0.2.1",
+        "fe80::5efe:192.0.2.1",
+        "2001:db8::5efe:192.0.2.1",
+        "fe80::5efe:0.0.0.2",
+        "64:ff9b::1.2.3.4",
     ] {
         let ip = stringify(&ip.into(), 65536).unwrap();
         cases.push(change(&["binding", "address"], &ip));
@@ -211,9 +226,40 @@ fn cases() -> Vec<String> {
             &stringify(&proxy.into(), 65536).unwrap(),
         ));
     }
+    for protocol in ["udp", "tcp", "tls"] {
+        for proxy in [
+            "sips:127.0.0.1",
+            "sips:127.0.0.1;transport=tcp",
+            "udp:127.0.0.1;transport=tcp",
+            "sip:user:pass@127.0.0.1:0",
+            "tcp:127.0.0.1:0",
+            "tls:127.0.0.1:0",
+            "udp:127.0.0.1;transport=UDP",
+            "sip:127.0.0.1;transport=bogus",
+        ] {
+            cases.push(
+                change(
+                    &["binding", "outboundProxy"],
+                    &stringify(&proxy.into(), 65536).unwrap(),
+                )
+                .replace(
+                    "\"transport\":\"udp\"",
+                    &format!("\"transport\":\"{protocol}\""),
+                ),
+            );
+        }
+    }
     let reg = r#"{"accountUri":"sip:public@account.example.test","registrarUri":"sip:registrar.example.test","contactUser":"contact","authUsername":"auth","realm":null,"expirySeconds":60,"retrySeconds":10}"#;
     let registered = change(&["registration"], reg)
         .replace("\"password\":null", "\"password\":\"synthetic-only\"");
+    for count in [2048, 2049] {
+        cases.push(registered.replace("synthetic-only", &"🦊".repeat(count)));
+    }
+    for value in [r#""\ud800""#, r#""\udfff""#] {
+        cases.push(BASE.replace("\"127.0.0.1\"", value));
+        cases.push(registered.replace("\"synthetic-only\"", value));
+        cases.push(registered.replace("\"contact\"", value));
+    }
     cases.push(registered.clone());
     for value in ["null", "\"\"", "\"\\u0000\"", "\"\\u007f\"", "\"\\u009f\""] {
         cases.push(registered.replace("\"synthetic-only\"", value));
@@ -382,30 +428,19 @@ fn configuration_matches_actual_original_record_validators_without_starting_nati
         };
         let binding = actual.binding();
         let (rtp_start, rtp_end) = binding.rtp_port_range();
-        let proxy = binding.outbound_proxy().map(|proxy| {
-            format!(
-                "{}:{}",
-                proxy.r#type.unwrap().to_string().to_ascii_lowercase(),
-                proxy.get_socketaddr().unwrap()
-            )
-        });
-        let mut addresses = actual
-            .incoming_peers()
-            .addresses()
-            .iter()
-            .map(|address| {
-                let mut address = address.to_string();
-                if let Some(rest) = address.strip_prefix('[') {
-                    address = rest[..rest.rfind(']').unwrap()].to_string();
-                } else {
-                    address = address[..address.rfind(':').unwrap()].to_string();
-                }
-                address
-            })
-            .collect::<Vec<_>>();
+        let proxy = binding.outbound_proxy_text();
+        let mut addresses = actual.incoming_peers().addresses().to_vec();
         addresses.sort();
         let snapshot = IvyJson::object([
-            ("endpoint", binding.endpoint().to_string().into()),
+            (
+                "endpoint",
+                binding
+                    .format_endpoint(binding.endpoint())
+                    .split_once(':')
+                    .unwrap()
+                    .1
+                    .into(),
+            ),
             ("proxy", proxy.map(Into::into).unwrap_or(IvyJson::Null)),
             (
                 "registered",
@@ -473,7 +508,16 @@ fn configuration_matches_actual_original_record_validators_without_starting_nati
             .as_array()
             .unwrap()
             .iter()
-            .map(|v| v.as_str().unwrap())
+            .map(|v| {
+                let address = v.as_str().unwrap();
+                if address.contains(':') {
+                    format!("[{address}]:0")
+                } else {
+                    format!("{address}:0")
+                }
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+            })
             .collect::<Vec<_>>();
         expected_addresses.sort();
         if addresses != expected_addresses {
@@ -491,7 +535,7 @@ async fn validated_native_configuration_uses_real_binding_and_retains_media_poli
         .replace("[\"PCMA\"]", "[\"EVS\",\"OPUS\"]");
     let config = configuration(&params).unwrap();
     assert!(config.uses_delayed_offer());
-    let parts = config.into_parts();
+    let parts = config.into_parts().unwrap();
     let host = SipHost::new();
     let endpoint = host.configure(parts.host).await.unwrap();
     assert_eq!(
@@ -502,7 +546,7 @@ async fn validated_native_configuration_uses_real_binding_and_retains_media_poli
     assert_eq!(parts.binding.rtp_port_range(), (30000, 31000));
     assert_eq!(parts.codecs.preferences()[0].name(), "EVS");
     assert!(
-        host.configure(configuration(BASE).unwrap().into_parts().host)
+        host.configure(configuration(BASE).unwrap().into_parts().unwrap().host)
             .await
             .is_err()
     );
@@ -539,4 +583,19 @@ fn incoming_configuration_keeps_scoped_ip_identity_and_requires_live_registratio
             .allows(peer("127.0.0.1:5060"), &host)
     );
     assert_eq!(host.observation().configured, false);
+}
+
+#[test]
+fn scoped_proxy_cannot_be_silently_changed_by_an_unqualified_stack_conversion() {
+    let config = configuration(&change(
+        &["binding", "outboundProxy"],
+        "\"udp:[fe80::1%12]:5060\"",
+    ))
+    .unwrap();
+    let original = config.binding().outbound_proxy().unwrap();
+    let routed =
+        rsipstack::transport::SipAddr::new(rsipstack::sip::Transport::Udp, original.into());
+    let supported = routed.get_socketaddr().ok() == Some(original);
+    assert_eq!(config.into_parts().is_ok(), supported);
+    assert_eq!(original, "[fe80::1%12]:5060".parse().unwrap());
 }
