@@ -69,7 +69,8 @@ pub struct AgentRuntimeBindings {
 }
 
 /// Every management and installed native handler is composed before registry
-/// publication. Accepted invocations use the same work owner as shutdown.
+/// publication. The original tracked management calls and every native call
+/// use the same work owner as shutdown; pure queries stay immediate.
 pub struct AgentHandlers {
     pub native: NativeManagement,
     pub capabilities: CapabilityManagement,
@@ -104,7 +105,28 @@ impl AgentHandlers {
         HandlerSet {
             management: handlers
                 .into_iter()
-                .map(|(name, handler)| (name, work.handler(handler)))
+                .map(|(name, handler)| {
+                    let tracked = [
+                        "agent.configureCapabilities",
+                        "agent.resolveWorkspace",
+                        "agent.listDirectories",
+                        "agent.resolveProject",
+                        "agent.stageFile",
+                        "agent.invoke",
+                        "agent.interact",
+                        "agent.read",
+                    ]
+                    .iter()
+                    .any(|v| name == JsString::from(*v));
+                    (
+                        name,
+                        if tracked {
+                            work.handler(handler)
+                        } else {
+                            handler
+                        },
+                    )
+                })
                 .collect(),
             native: self
                 .native
@@ -527,7 +549,6 @@ async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyRes
             notifications: notifications.clone(),
             policy: policy.clone(),
             query: bindings.form_query,
-            work: work.clone(),
         });
         let paths = node_path::Context {
             style: bindings.home.paths.style,

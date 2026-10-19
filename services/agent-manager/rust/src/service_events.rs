@@ -9,7 +9,6 @@ use crate::{
     notice_policy::NativeNoticePolicy,
     notifications::NativeNotifications,
     service_link::ServiceLink,
-    service_work::AgentWork,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::codex_rpc::{Events, NativeNotification, NativeRpc};
@@ -33,7 +32,6 @@ pub struct ServiceEventSettings {
     pub notifications: Arc<Mutex<NativeNotifications>>,
     pub policy: Arc<Mutex<NativeNoticePolicy>>,
     pub query: Arc<FormQuery>,
-    pub work: AgentWork,
 }
 struct Inner {
     settings: ServiceEventSettings,
@@ -133,10 +131,11 @@ impl ServiceEvents {
             .notices
             .clone();
         if let Some(notices) = notices {
-            let _ = self.0.settings.work.track(Box::pin(async move {
-                notices.send(thread, notice, turn).await?;
-                Ok(IvyJson::Null)
-            }))?;
+            // Notices are detached in the original service. Including them in
+            // invocation drain would change the shutdown wait boundary.
+            tokio::spawn(async move {
+                let _ = notices.send(thread, notice, turn).await;
+            });
         }
         Ok(())
     }

@@ -466,25 +466,27 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
             Default::default(),
             IvyError::internal(),
         );
-        same(
-            &options.handlers[&"agent.catalog".into()](IvyJson::Null, context.clone())
-                .await
-                .unwrap(),
-            &catalog,
+        let catalog_call =
+            options.handlers[&"agent.catalog".into()](IvyJson::Null, context.clone());
+        assert_eq!(
+            work.pending().unwrap(),
+            0,
+            "Pure catalog query is not a tracked invocation"
+        );
+        same(&catalog_call.await.unwrap(), &catalog);
+        let project_call = options.handlers[&"agent.resolveProject".into()](
+            IvyJson::object([(
+                "selection",
+                IvyJson::object([("kind", "projectless".into()), ("key", "fixture".into())]),
+            )]),
+            context,
         );
         assert_eq!(
-            options.handlers[&"agent.resolveProject".into()](
-                IvyJson::object([(
-                    "selection",
-                    IvyJson::object([("kind", "projectless".into()), ("key", "fixture".into())])
-                )]),
-                context
-            )
-            .await
-            .unwrap_err()
-            .code,
-            "fixture_unavailable"
+            work.pending().unwrap(),
+            1,
+            "Admitted project work belongs to shutdown"
         );
+        assert_eq!(project_call.await.unwrap_err().code, "fixture_unavailable");
         work.drain_snapshot().await.unwrap();
         rpc.close("fixture_complete").await;
         state.lock().unwrap().close_shared().unwrap();
@@ -558,7 +560,6 @@ async fn launch_time_clock_is_answered_after_attach_and_offline_notifications_re
             notifications: notifications.clone(),
             policy: policy.clone(),
             query: Arc::new(|_| panic!("Offline observations cannot construct notice URLs")),
-            work: AgentWork::default(),
         },
         Arc::new(|| "2026-10-19T00:00:00.000Z".into()),
     );
