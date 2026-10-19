@@ -615,6 +615,11 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                         "Completion must identify a terminal native outcome."
                     },
                 )?;
+                let handoff = if transcript {
+                    Json::Null
+                } else {
+                    self.engine.handoff(task_value, run_id)?
+                };
                 let turn = f(f(&verified, "snapshot"), "turn");
                 let body = if eq(&verified, "status", "failed")
                     && truthy(f(f(turn, "error"), "message"))
@@ -623,7 +628,6 @@ impl<S: NativePublicationStore, E: NativePublicationEngine, V: NativePublication
                 } else if transcript {
                     f(&verified, "summary").clone()
                 } else {
-                    let handoff = self.engine.handoff(task_value, run_id)?;
                     if truthy(&handoff) {
                         f(&handoff, "body").clone()
                     } else {
