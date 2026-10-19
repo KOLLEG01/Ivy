@@ -159,18 +159,34 @@ fn operation(fixture: &Fixture, kind: &str) -> Option<(String, u64, Json)> {
 fn count(fixture: &Fixture, sql: &str) -> i64 {
     fixture.database().query_row(sql, [], |r| r.get(0)).unwrap()
 }
-async fn reached(fixture: &Fixture, stage: &str, mut condition: impl FnMut() -> bool) {
-    let result = tokio::time::timeout(Duration::from_secs(8), async {
+async fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
+    tokio::time::timeout(Duration::from_secs(8), async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
-    .await;
+    .await
+    .is_ok()
+}
+fn state(fixture: &Fixture) -> String {
+    let rows = ["task-board/operation", "task-board/run"]
+        .into_iter()
+        .flat_map(|key| fixture.rows(key))
+        .map(|(id, revision, value)| {
+            Json::object([
+                ("object", pin(&id, revision as f64)),
+                ("phase", f(&value, "phase").clone()),
+                ("error", f(&value, "error").clone()),
+            ])
+        })
+        .collect();
+    ivy_contracts::json::canonical(&Json::Array(rows), 32768).unwrap()
+}
+async fn reached(fixture: &Fixture, stage: &str, condition: impl FnMut() -> bool) {
     assert!(
-        result.is_ok(),
-        "Native observation stage {stage}; operations {:?}; Runs {:?}",
-        fixture.rows("task-board/operation"),
-        fixture.rows("task-board/run")
+        wait_for(condition).await,
+        "Native observation stage {stage}; {}",
+        state(fixture)
     );
 }
 fn children(fixture: &Fixture, key: &str) -> Vec<(String, u64, String, Json)> {
@@ -385,11 +401,31 @@ async fn started_retained_runs_publish_verified_snapshot_output_and_recover_with
                     .is_some_and(|o| f(&o.2, "phase") == &"succeeded".into())
             })
             .await;
-            reached(&fixture, "verified completion", || {
+            if !wait_for(|| {
                 operation(&fixture, "completion")
                     .is_some_and(|o| f(&o.2, "phase") == &"succeeded".into())
             })
-            .await;
+            .await
+            {
+                let readiness = bounded(service.control.readiness(&second)).await.unwrap();
+                let reads: Vec<_> = peer
+                    .frames
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|v| f(v, "kind") == &"observation".into())
+                    .map(|v| f(f(v, "observation"), "method").clone())
+                    .collect();
+                panic!(
+                    "Native observation completion; {}; {}",
+                    state(&fixture),
+                    ivy_contracts::json::canonical(
+                        &Json::object([("readiness", readiness), ("reads", Json::Array(reads))]),
+                        32768
+                    )
+                    .unwrap()
+                );
+            }
             let recovered = operation(&fixture, "readSnapshot").unwrap();
             assert_eq!(recovered.0, original.0);
             for key in ["request", "requestHash", "actor", "writes"] {
