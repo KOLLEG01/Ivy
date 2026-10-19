@@ -312,11 +312,29 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
         ("action", "handshake".into()),
         ("rows", IvyJson::Array(rows.clone())),
     ]));
-    let catalog = parse(
+    let mut catalog = parse(
         include_str!("../../specs/native/codex-0.142.3/catalog.json"),
         usize::MAX,
     )
     .unwrap();
+    // This corpus qualifies initialization over the real RPC actor. Repeating
+    // validation of every unrelated method's large schema in all108 rows hides
+    // useful deadlines; complete catalogs are checked by admission cases above.
+    for (key, method) in [
+        ("clientRequests", "initialize"),
+        ("clientNotifications", "initialized"),
+    ] {
+        let definitions = field(&catalog, key)
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|definition| definition.get("method") == Some(&IvyJson::from(method)))
+            .cloned()
+            .collect();
+        catalog.insert(key, IvyJson::Array(definitions));
+    }
+    catalog.insert("serverRequests", IvyJson::Array(vec![]));
+    catalog.insert("serverNotifications", IvyJson::Array(vec![]));
     for (row, expected_row) in rows.iter().zip(field(&oracle, "rows").as_array().unwrap()) {
         let mode = match text(row, "mode").to_utf8().unwrap().as_str() {
             "external" => NativeMode::ExternalProxy,
