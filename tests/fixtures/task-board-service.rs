@@ -28,6 +28,8 @@ use tokio::{
     process::{Child, Command},
     sync::Notify,
 };
+#[path = "task-board-service-engine.rs"]
+mod engine;
 
 fn json(text: &str) -> Json {
     parse(text, 32 * 1024 * 1024).unwrap()
@@ -57,12 +59,16 @@ struct Peer {
 }
 impl Peer {
     async fn start() -> Self {
+        Self::start_with_engine(false).await
+    }
+    async fn start_with_engine(engine: bool) -> Self {
         let mut child = Command::new("node")
             .args([
                 "--experimental-transform-types",
                 "--disable-warning=ExperimentalWarning",
                 "tests/fixtures/task-board-service-peer.mjs",
             ])
+            .args(if engine { vec!["--engine"] } else { vec![] })
             .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
             .kill_on_drop(true)
             .stdout(Stdio::piped())

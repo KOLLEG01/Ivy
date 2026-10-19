@@ -1,8 +1,15 @@
 //! SDK lifecycle binding for the local TaskBoard journal owner. The supplied
 //! factory constructs the admitted engine graph in its own borrowed scope.
 use crate::{
+    engine_admission::AdmissionExecution,
+    engine_invocations::{EngineInvocations, InternalOwner},
+    engine_read::EngineReadRuntime,
+    engine_service::{EngineService, RetainedService, ServiceCategories, ServiceRuntime},
     generation::{Generation, GenerationClock, GenerationControl, GenerationRuntime, generation},
     journal_store::Contracts,
+    native_lifecycle::LifecycleStore,
+    publication_coordination::CoordinationStore,
+    reconciler::ReconcileExecutor,
     service_bridge::LocalHandler,
 };
 use futures_util::FutureExt;
@@ -248,6 +255,49 @@ impl ServiceControl {
 impl Activation {
     pub fn settings(&self) -> &Json {
         &self.settings
+    }
+    /// Bind public and internal entry to the same admitted engine and invocation
+    /// drain. Generation retirement first stops and drains public handlers,
+    /// ticks and reconciliation; then close the shared engine gate and drain
+    /// queued admissions before the required execution/projection drain.
+    /// Drive this root from the graph's existing local executor layers.
+    pub async fn run_engine<
+        'a,
+        's: 'a,
+        S: LifecycleStore + CoordinationStore + 'a,
+        C: Fn() -> String + 'a,
+        P: Contracts + 'a,
+        E: AdmissionExecution + 'a,
+        R: EngineReadRuntime + 'a,
+        T: ServiceRuntime + 'a,
+        K: ServiceCategories + 'a,
+        X: ReconcileExecutor<'a>,
+        G: GenerationRuntime,
+        D: GenerationClock,
+    >(
+        &self,
+        control: &GenerationControl,
+        owner: Generation,
+        public: &'a EngineService<'a, S, C, P, E, R, T, K>,
+        invocations: &EngineInvocations<'a, '_, X>,
+        internal: InternalOwner<'s, '_, X>,
+        runtime: &G,
+        clock: &D,
+        drain: impl Future<Output = IvyResult<()>>,
+    ) -> IvyResult<()> {
+        let retained = RetainedService {
+            handler: public,
+            invocations,
+        };
+        internal
+            .run(
+                public.admission,
+                self.run(control, owner, &retained, runtime, clock, async {
+                    invocations.stop().await;
+                    drain.await
+                }),
+            )
+            .await
     }
     /// Verify the current authenticated owner and optional root before exposing
     /// any slot or acknowledging the SDK reconcile callback.
