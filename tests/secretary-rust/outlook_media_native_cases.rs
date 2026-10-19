@@ -250,7 +250,7 @@ async fn original_outlook_media_native_account_cleanup_recovery_and_coverage() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 35);
+    assert_eq!(rows.len(), 37);
     for row in rows {
         let input = row.required("input").unwrap();
         let label = input.required("label").unwrap().as_str().unwrap();

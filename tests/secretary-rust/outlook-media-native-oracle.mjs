@@ -29,7 +29,7 @@ async function add(label,c={}){
  const plan={schemaVersion:1,admission,item:itemPin,captureOperationId:captureId,configuration,epoch:'old-epoch',createdAt:at,bindings:methods.map(method=>({method,definitionHash:hash('d'),outputSchema:{}}))};
  const input={label,settings,configuration,plan,spoolOwner:{scope:settings.identity.scope,producerPrincipalId:principal},locals:[{id:'source',key:'secretary/source',name:sourceName('mail'),revision:1,value:source,history:[{revision:1,value:source}]},{id:'capture',key:'secretary/operation',name:operationName(principal,captureId),revision:2,value:capture,history:[{revision:1,value:first},{revision:2,value:capture}]}],actions:[],documents:[],blobs:[],attempts:c.attempts??3,noCalls:c.noCalls??false};
  const file={id:'file',attachment_type:'fileAttachment',odata_type:'#microsoft.graph.fileAttachment',name:'inert.txt',content_type:'text/plain',size_bytes:4,is_inline:false,content_id:null,last_modified_date_time:null,payload_fetch_supported:true,payload_status:'not_requested',payload_error:null,file_uri:null};
- const attachments=c.empty?[]:[file,...(c.unsupported?[{...file,id:'reference',attachment_type:'referenceAttachment',odata_type:'#microsoft.graph.referenceAttachment',payload_fetch_supported:false}]:[])];
+ const attachments=c.empty?[]:[...Array.from({length:c.files??1},(_,index)=>({...clone(file),id:(c.files??1)>1?'file-'+index:file.id})),...(c.unsupported?[{...file,id:'reference',attachment_type:'referenceAttachment',odata_type:'#microsoft.graph.referenceAttachment',payload_fetch_supported:false}]:[])];
  const payload={message_id:admission.providerMessageId,attachment_id:'file',attachment_type:'fileAttachment',filename:file.name,size_bytes:file.size_bytes,mime_type:file.content_type,is_inline:false,content_id:null,payload_status:'materialized',file_uri:{file_name:file.name,mime_type:file.content_type,file_id:'original-file',download_url:'https://fixture.oaiusercontent.com/protected-original?sig=synthetic'}};
  if(c.badMaterialization)payload.attachment_id='other';
  const calls=[],operations=new Map(),trace=[],steps=[],downloads=[];let store,failedWrite=false,invoked=false;
@@ -44,7 +44,8 @@ async function add(label,c={}){
  const selected=[0,1,2,3,...attachments.flatMap((attachment,index)=>attachment.payload_fetch_supported?[4+index]:[]),36,37,38];
  for(const slot of selected){
   const original=invocation(slot),id='fixture-epoch:'+wall+':media-slot-'+slot;
-  let result=slot===0||slot===37?{account:{type:'chatgpt',email:c.accountMismatch===slot?'foreign@example.test':'native@example.test'},requiresOpenaiAuth:true}:slot===1?{thread:{id:'original-media-thread'}}:slot===38?{status:c.cleanupStatus??'unsubscribed'}:{content:[],isError:false,structuredContent:slot===3?{message_id:admission.providerMessageId,attachments,errors:[],next_link:null}:slot>=4&&slot<=35?payload:c.profileMismatch===slot?{...configuration.profile,email:'foreign@example.test'}:configuration.profile};
+  const selectedPayload=(c.files??1)>1&&slot>=4&&slot<=35?{...clone(payload),attachment_id:attachments[slot-4].id,file_uri:{...clone(payload.file_uri),file_id:'original-file-'+(slot-4),download_url:payload.file_uri.download_url+'&attachment='+String(slot-4)}}:payload;
+  let result=slot===0||slot===37?{account:{type:'chatgpt',email:c.accountMismatch===slot?'foreign@example.test':'native@example.test'},requiresOpenaiAuth:true}:slot===1?{thread:{id:'original-media-thread'}}:slot===38?{status:c.cleanupStatus??'unsubscribed'}:{content:[],isError:false,structuredContent:slot===3?{message_id:admission.providerMessageId,attachments,errors:[],next_link:null}:slot>=4&&slot<=35?selectedPayload:c.profileMismatch===slot?{...configuration.profile,email:'foreign@example.test'}:configuration.profile};
   const operation={schemaVersion:1,operationId:id,callerPrincipalId:principal,serviceNodeId:target.serviceNodeId,nativeVersion:target.nativeVersion,nativeExecutableHash:target.nativeExecutableHash,...original,requestHash:hashJson(original),phase:c.pending===slot?'accepted':c.failed===slot?'failed':'succeeded',createdAt:at,updatedAt:at,epoch:c.pending===slot?null:'old-epoch',requestId:c.pending===slot?null:slot+42,reply:c.pending===slot?null:c.failed===slot?{error:{code:-1,message:'Native failed'}}:{result:clone(result)},code:c.pending===slot?null:c.failed===slot?'native_failed':null};
   const call={planHash:hashJson(plan),slot,...original,operationId:id,definitionHash:hash('d'),preparedAt:at};
   operations.set(id,operation);
@@ -104,6 +105,8 @@ async function add(label,c={}){
 }
 try{
  await add('acquire once then publish after both account gates',{verify:true});
+ await add('two complete original acquisitions publish distinct manifests',{files:2,attempts:4,verify:true});
+ await add('all thirty-two attachment slots finish before profile and cleanup',{files:32,attempts:34,verify:true});
  await add('unsupported attachment retains explicit coverage gap',{unsupported:true,verify:true});
  await add('empty attachment list still requires cleanup',{empty:true,verify:true});
  await add('inline original content remains an explicit whole gap',{inline:true,verify:true});
@@ -133,5 +136,8 @@ try{
  await add('retained native invocation cannot change',{callMutation:rows=>{rows.find(row=>row.call.slot===0).call.params.refreshToken=true;}});
  for(const name of ['acquire once then publish after both account gates','unsupported attachment retains explicit coverage gap','empty attachment list still requires cleanup','inline original content remains an explicit whole gap','new epoch closes original read without replacement bytes'])assert(rows.find(row=>row.input.label===name).expected.results.some(result=>result.value?.phase==='complete'),name);
  assert.equal(rows.find(row=>row.input.label==='acquire once then publish after both account gates').input.downloads.length,1);
+ for(const [label,count]of [['two complete original acquisitions publish distinct manifests',2],['all thirty-two attachment slots finish before profile and cleanup',32]]){
+  const row=rows.find(row=>row.input.label===label);assert.equal(row.input.downloads.length,count);const complete=row.expected.results.find(result=>result.value?.phase==='complete');assert(complete,label);assert.equal(complete.value.coverage.attachments.length,count);assert(complete.value.coverage.attachments.every(entry=>entry.manifest&&entry.errorCode===null),label);
+ }
  console.log(JSON.stringify({rootId,nodeId:outlookNativeCorpus.nodeId,time:outlookNativeCorpus.time,wall,rows}));
 }finally{Date.now=previousNow;}
