@@ -17,8 +17,9 @@ use ivy_task_board::{
     local_journal::{LocalJournal, initialize},
     local_retention::HistoryLimits,
     publication_coordination::PublicationCoordination,
+    task_written::{TaskCommentNotices, TaskWriteObserver, TaskWriteProjection},
 };
-use std::{cell::Cell, future::Future, pin::Pin};
+use std::cell::{Cell, RefCell};
 fn admission(name: &str, value: &Json) -> IvyResult<()> {
     static B: OnceLock<SchemaBundle> = OnceLock::new();
     let bundle = B.get_or_init(|| {
@@ -186,6 +187,40 @@ fn count(connection: &Connection, table: &str) -> i64 {
         .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
         .unwrap()
 }
+// Projection is an explicit finite capture. Gate release, notice selection and
+// operation-scoped publication use the production programs in this fixture.
+#[derive(Default)]
+struct Projection(RefCell<Vec<(JsString, f64, Json)>>);
+impl TaskWriteProjection for Projection {
+    fn observe(&self, id: &JsString, revision: f64, task: &Json) -> IvyResult<()> {
+        self.0
+            .borrow_mut()
+            .push((id.clone(), revision, task.clone()));
+        Ok(())
+    }
+}
+struct LostFinalWrite<'a, W> {
+    observer: &'a W,
+    failed: &'a Cell<bool>,
+    operation_id: &'a JsString,
+}
+impl<W: TaskWriteSink> TaskWriteSink for LostFinalWrite<'_, W> {
+    async fn written(&self, operation: &Document, pin: &Json, task: &Json) -> IvyResult<()> {
+        assert_eq!(s(&operation.pin, "objectId"), self.operation_id);
+        assert_eq!(
+            f(f(&operation.value, "request"), "operationId"),
+            &Json::from("create-journal")
+        );
+        self.observer.written(operation, pin, task).await?;
+        if f(task, "publication").is_null() && self.failed.replace(false) {
+            return Err(
+                IvyError::new("outcome_unknown", "Lost final creation callback.")
+                    .with_outcome(Outcome::Unknown),
+            );
+        }
+        Ok(())
+    }
+}
 #[tokio::test(flavor = "current_thread")]
 async fn actual_create_reopens_original_key_result_history_and_task_after_lost_final_callback() {
     let path = std::env::temp_dir().join(format!(
@@ -284,22 +319,20 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
         };
         let failed = Cell::new(round == 0);
         let id = s(&operation.pin, "objectId").clone();
-        let callback = |_: Json, task: Json| -> Pin<Box<dyn Future<Output = IvyResult<()>> + '_>> {
-            let gates = &gates;
-            let failed = &failed;
-            let id = &id;
-            Box::pin(async move {
-                if f(f(&task, "publication"), "objectId").as_js_string() == Some(id) {
-                    gates.release(id, true).await?;
-                }
-                if f(&task, "publication").is_null() && failed.replace(false) {
-                    return Err(
-                        IvyError::new("outcome_unknown", "Lost final creation callback.")
-                            .with_outcome(Outcome::Unknown),
-                    );
-                }
-                Ok(())
-            })
+        let projection = Projection::default();
+        let notices = TaskCommentNotices;
+        let node = JsString::from("board-node");
+        let observer = TaskWriteObserver {
+            projection: &projection,
+            gates: &gates,
+            notices: &notices,
+            client: client.clone(),
+            service_node_id: &node,
+        };
+        let callback = LostFinalWrite {
+            observer: &observer,
+            failed: &failed,
+            operation_id: &id,
         };
         let tools = ToolClients::new(client.clone());
         let policy = Policy { first: round == 0 };
@@ -316,12 +349,12 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             creation: &checks,
         };
         let unused = Unused;
-        let publisher = EnginePublisher {
+        let publisher = ObservedPublication {
             operations: &operations,
             catalogs: &catalogs,
             checks: &root_checks,
             routes: &unused,
-            task_written: &callback,
+            observer: &callback,
         };
         let components = ExecutionComponents {
             categories: &unused,
@@ -378,6 +411,16 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
         assert_eq!(f(&task.value, "latestResult"), f(&writes[1], "outcome"));
         assert_eq!(f(&task.value, "lastHistory"), f(&writes[2], "outcome"));
         assert_eq!(count(&connection, "active_gates"), 0);
+        let observed = projection.0.borrow();
+        assert_eq!(observed.len(), if round == 2 { 0 } else { 2 });
+        if !observed.is_empty() {
+            assert_eq!(observed.iter().map(|v| v.1).collect::<Vec<_>>(), [1.0, 2.0]);
+            assert!(
+                observed
+                    .iter()
+                    .all(|v| &Json::String(v.0.clone()) == f(&task.pin, "objectId"))
+            );
+        }
         if round == 0 {
             assert_eq!(result.unwrap_err().outcome, Outcome::Unknown);
             assert_eq!(f(&saved.value, "phase"), &Json::from("needs_attention"));

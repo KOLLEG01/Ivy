@@ -5,13 +5,14 @@ use ivy_contracts::{
 };
 use ivy_task_board::{
     engine_publication::{
-        CreationChecks, EnginePublisher, PublicationRoutes, RootPublicationChecks,
+        CreationChecks, ObservedPublication, PublicationRoutes, RootPublicationChecks,
         RootPublicationStore,
     },
     native_lifecycle::LifecyclePublication,
     native_lifecycle::{LifecycleDocument, LifecycleStore},
     operations::{Document, Operations, Store},
     task_keys,
+    task_written::TaskWriteSink,
 };
 use std::{
     collections::VecDeque,
@@ -21,6 +22,8 @@ use std::{
 };
 #[path = "task-board-engine-publication-journal.rs"]
 mod journal;
+#[path = "task-board-observed-publication.rs"]
+mod observed;
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(k).unwrap_or(&NULL)
@@ -222,6 +225,26 @@ impl RootPublicationStore for World {
     }
 }
 struct Bindings(Arc<Replay>);
+struct ObservedBindings {
+    replay: Arc<Replay>,
+    operations: Vec<Document>,
+}
+impl TaskWriteSink for ObservedBindings {
+    async fn written(&self, operation: &Document, pin: &Json, task: &Json) -> IvyResult<()> {
+        assert!(
+            self.operations.iter().any(|expected| {
+                expected.pin == operation.pin
+                    && expected.content_hash == operation.content_hash
+                    && hash_json(&expected.value).unwrap() == hash_json(&operation.value).unwrap()
+                    && expected.parent_id == operation.parent_id
+            }),
+            "The observer must receive the original publication Operation"
+        );
+        self.replay
+            .call("taskWritten", [pin.clone(), task.clone()])
+            .map(|_| ())
+    }
+}
 impl CreationChecks for Bindings {
     async fn fields(&self, fields: &Json) -> IvyResult<()> {
         self.0
@@ -356,17 +379,21 @@ async fn root_publication_matches_original_dispatch_creation_configuration_plan_
             now: clock,
         };
         let bindings = Bindings(replay.clone());
-        let callback = |pin: Json, task: Json| {
-            let replay = replay.clone();
-            Box::pin(async move { replay.call("taskWritten", [pin, task]).map(|_| ()) })
-                as std::pin::Pin<Box<dyn std::future::Future<Output = IvyResult<()>>>>
+        let observer = ObservedBindings {
+            replay: replay.clone(),
+            operations: f(row, "calls")
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|call| document(f(call, "operation")))
+                .collect(),
         };
-        let engine = EnginePublisher {
+        let engine = ObservedPublication {
             operations: &operations,
             catalogs: &catalogs,
             checks: &bindings,
             routes: &bindings,
-            task_written: &callback,
+            observer: &observer,
         };
         let mut outcomes = vec![];
         for call in f(row, "calls").as_array().unwrap() {

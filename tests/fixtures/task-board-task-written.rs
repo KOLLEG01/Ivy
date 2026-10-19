@@ -5,7 +5,9 @@ use ivy_contracts::{
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_task_board::{
     operations::Document,
-    task_written::{TaskCommentNotices, TaskWriteGates, TaskWriteObserver, TaskWriteProjection},
+    task_written::{
+        TaskCommentNotices, TaskWriteGates, TaskWriteObserver, TaskWriteProjection, TaskWriteSink,
+    },
 };
 use std::{
     collections::VecDeque,
@@ -204,8 +206,7 @@ async fn task_write_observer_matches_original_selection_notice_bytes_order_and_f
                 service_node_id: &node,
             };
             outcomes.push(outcome(
-                observer
-                    .written(&operation, f(call, "pin"), f(call, "task"))
+                TaskWriteSink::written(&observer, &operation, f(call, "pin"), f(call, "task"))
                     .await,
             ));
         }

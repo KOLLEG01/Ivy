@@ -19,6 +19,7 @@ use crate::{
     operations::{Document, Operations},
     publication::{Publication, TaskWritten},
     task_keys,
+    task_written::TaskWriteSink,
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
@@ -178,6 +179,65 @@ pub struct EnginePublisher<'a, S, C, P, H> {
     /// Observe categories, publish current user notices, and release reserved
     /// gates under the owner's accepted policy. Every Task write uses it.
     pub task_written: &'a TaskWritten<'a>,
+}
+/// Bind the shared observer separately for each publication. The underlying
+/// step callback keeps its existing pin/value interface and receives the exact
+/// original Operation through this call's borrowed scope, including on replay.
+pub struct ObservedPublication<'a, S, C, P, H, W> {
+    pub operations: &'a Operations<S, C>,
+    pub catalogs: &'a CheckedNativeContracts,
+    pub checks: &'a P,
+    pub routes: &'a H,
+    pub observer: &'a W,
+}
+impl<S: RootPublicationStore, C: Fn() -> String, P: RootPublicationChecks, H, W: TaskWriteSink>
+    ObservedPublication<'_, S, C, P, H, W>
+{
+    pub async fn publish<T>(
+        &self,
+        operation: &Document,
+        transcript: Option<&T>,
+        normalized: Option<&JsString>,
+    ) -> IvyResult<Json>
+    where
+        H: PublicationRoutes<T>,
+    {
+        let observer = self.observer;
+        let written = |pin: Json,
+                       task: Json|
+         -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = IvyResult<()>> + '_>,
+        > {
+            Box::pin(async move { observer.written(operation, &pin, &task).await })
+        };
+        EnginePublisher {
+            operations: self.operations,
+            catalogs: self.catalogs,
+            checks: self.checks,
+            routes: self.routes,
+            task_written: &written,
+        }
+        .publish(operation, transcript, normalized)
+        .await
+    }
+}
+impl<
+    S: RootPublicationStore,
+    C: Fn() -> String,
+    P: RootPublicationChecks,
+    H: PublicationRoutes<T>,
+    W: TaskWriteSink,
+    T,
+> ExecutionPublication<T> for ObservedPublication<'_, S, C, P, H, W>
+{
+    async fn publish(
+        &self,
+        operation: &Document,
+        transcript: Option<&T>,
+        normalized: Option<&JsString>,
+    ) -> IvyResult<Json> {
+        ObservedPublication::publish(self, operation, transcript, normalized).await
+    }
 }
 fn f<'a>(v: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;

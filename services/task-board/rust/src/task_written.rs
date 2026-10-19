@@ -32,6 +32,12 @@ impl<S: CoordinationStore, C: Fn() -> String> TaskWriteGates for PublicationCoor
 pub trait TaskNoticePolicy {
     fn comment(&self, task: &Json, operation_id: &JsString) -> IvyResult<Option<Json>>;
 }
+/// Preserve the exact publication's Operation context for every Task step.
+/// Implementations must not infer it from a latest record or mutable owner slot.
+#[allow(async_fn_in_trait)]
+pub trait TaskWriteSink {
+    async fn written(&self, operation: &Document, pin: &Json, task: &Json) -> IvyResult<()>;
+}
 /// Source-compatible question/handoff selection for explicit composition. The
 /// owner must qualify this against its finalized current Task/comment overlay.
 pub struct TaskCommentNotices;
@@ -160,5 +166,12 @@ impl<P: TaskWriteProjection, G: TaskWriteGates, N: TaskNoticePolicy>
                 .await?;
         }
         Ok(())
+    }
+}
+impl<P: TaskWriteProjection, G: TaskWriteGates, N: TaskNoticePolicy> TaskWriteSink
+    for TaskWriteObserver<'_, P, G, N>
+{
+    async fn written(&self, operation: &Document, pin: &Json, task: &Json) -> IvyResult<()> {
+        TaskWriteObserver::written(self, operation, pin, task).await
     }
 }
