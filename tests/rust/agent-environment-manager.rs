@@ -360,14 +360,14 @@ async fn original_prelaunch_fallback_modes_status_and_real_files_match() {
         let (environment, client) = create(&base, row);
         let home = node_path::from_native(&base.join("home"));
         let error = if flag(row, "before") {
-            environment
-                .before_launch(home.clone(), client.clone())
-                .unwrap()
-                .wait()
-                .await
-                .err()
-                .map(|e| IvyJson::from(e.code))
-                .unwrap_or(IvyJson::Null)
+            ivy_agent_manager::native_launch::managed_environment_before_launch(
+                environment.clone(),
+                client.clone(),
+            )(home.clone())
+            .await
+            .err()
+            .map(|e| IvyJson::from(e.code))
+            .unwrap_or(IvyJson::Null)
         } else {
             IvyJson::Null
         };

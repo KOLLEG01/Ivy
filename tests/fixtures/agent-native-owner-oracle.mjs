@@ -51,7 +51,8 @@ function prepare(root,variant){
   if(variant==='claude-null-settings')save(join(config,'settings.json'),null);
   if(variant==='claude-config-link'){mkdirSync(join(root,'external-config'));symlinkSync(join(root,'external-config'),config,'junction');}
  }
- const catalog=JSON.parse(readFileSync('specs/native/codex-0.142.3/catalog.json','utf8'));catalog.nativeExecutableHash=settings.nativeExecutableHash;
+ const retainedCatalog='specs/native/codex-'+version+'/catalog.json';
+ const catalog=JSON.parse(readFileSync(existsSync(retainedCatalog)?retainedCatalog:'specs/native/codex-0.142.3/catalog.json','utf8'));catalog.nativeExecutableHash=settings.nativeExecutableHash;
  if(variant==='catalog-hash')catalog.nativeExecutableHash='sha256:'+'0'.repeat(64);
  if(variant==='executable-hash'){settings.nativeExecutableHash='sha256:'+'0'.repeat(64);catalog.nativeExecutableHash=settings.nativeExecutableHash;}
  if(variant==='no-realtime')catalog.clientRequests=catalog.clientRequests.filter(row=>row.method!=='thread/realtime/start');

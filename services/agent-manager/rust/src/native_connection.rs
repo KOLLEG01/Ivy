@@ -68,13 +68,16 @@ pub struct AgentNativeConnection {
 impl AgentNativeConnection {
     /// Retain one completion even if a close waiter is abandoned. Losing the
     /// connection also releases its owned child, without stopping a daemon.
-    pub async fn close(&self) -> IvyResult<()> {
+    pub fn close(&self) -> impl Future<Output = IvyResult<()>> + Send + use<> {
         self.stop.send_replace(true);
-        let result = self.completion.wait().await?;
-        if result.error_code.as_deref() == Some("outcome_unknown") {
-            return Err(unknown());
+        let completion = self.completion.clone();
+        async move {
+            let result = completion.wait().await?;
+            if result.error_code.as_deref() == Some("outcome_unknown") {
+                return Err(unknown());
+            }
+            Ok(())
         }
-        Ok(())
     }
     pub fn status_owner(&self) -> IvyJson {
         IvyJson::object([

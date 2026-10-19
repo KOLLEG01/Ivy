@@ -221,7 +221,7 @@ async fn abandoning_launch_observation_does_not_cancel_accepted_before_launch() 
     let prepared = prepared(&root, "owned");
     let entered = Arc::new(Notify::new());
     let observed = entered.clone();
-    let (release, mut wait) = watch::channel(false);
+    let (release, wait) = watch::channel(false);
     let finished = Arc::new(AtomicBool::new(false));
     let completed = finished.clone();
     let run = start_native_process(options(
@@ -348,25 +348,48 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
         });
         let mut read = BufReader::new(read);
         let mut line = String::new();
-        read.read_line(&mut line).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), read.read_line(&mut line))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "initialize request was not written: {} (task finished: {})",
+                    stringify(row, 65536).unwrap(),
+                    task.is_finished()
+                )
+            })
+            .unwrap();
         let request = parse(&line, 65536).unwrap();
         let mut frame = request.clone();
         frame.remove("id");
         let mut frames = vec![frame];
         let mut reply = field(row, "reply").clone();
         reply.insert("id", field(&request, "id").clone());
-        write
-            .write_all(format!("{}\n", stringify(&reply, 65536).unwrap()).as_bytes())
+        let bytes = format!("{}\n", stringify(&reply, 65536).unwrap());
+        tokio::time::timeout(Duration::from_secs(2), write.write_all(bytes.as_bytes()))
             .await
+            .unwrap()
             .unwrap();
         let actual = tokio::time::timeout(Duration::from_secs(2), task)
             .await
-            .unwrap()
+            .unwrap_or_else(|_| {
+                panic!(
+                    "initialize did not settle: {}",
+                    stringify(row, 65536).unwrap()
+                )
+            })
             .unwrap();
         let (value, error) = match actual {
             Ok(value) => {
                 line.clear();
-                read.read_line(&mut line).await.unwrap();
+                tokio::time::timeout(Duration::from_secs(2), read.read_line(&mut line))
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "initialized notification was not written: {}",
+                            stringify(row, 65536).unwrap()
+                        )
+                    })
+                    .unwrap();
                 frames.push(parse(&line, 65536).unwrap());
                 (
                     IvyJson::object([
@@ -380,13 +403,23 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
                     IvyJson::Null,
                 )
             }
-            Err(error) => (
-                IvyJson::Null,
-                IvyJson::object([
-                    ("code", IvyJson::String(error.code_js())),
-                    ("message", IvyJson::String(error.message_js())),
-                ]),
-            ),
+            Err(error) => {
+                line.clear();
+                if let Ok(Ok(count)) =
+                    tokio::time::timeout(Duration::from_millis(20), read.read_line(&mut line)).await
+                {
+                    if count != 0 {
+                        frames.push(parse(&line, 65536).unwrap());
+                    }
+                }
+                (
+                    IvyJson::Null,
+                    IvyJson::object([
+                        ("code", IvyJson::String(error.code_js())),
+                        ("message", IvyJson::String(error.message_js())),
+                    ]),
+                )
+            }
         };
         same(
             &IvyJson::object([
@@ -396,6 +429,13 @@ async fn agent_handshake_modes_and_payload_match_original_over_real_rpc_streams(
             ]),
             expected_row,
         );
-        rpc.close("fixture_complete").await;
+        tokio::time::timeout(Duration::from_secs(2), rpc.close("fixture_complete"))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "RPC close did not settle: {}",
+                    stringify(row, 65536).unwrap()
+                )
+            });
     }
 }
