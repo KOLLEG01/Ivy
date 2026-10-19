@@ -79,12 +79,14 @@ const drain=()=>new Promise(resolve=>setImmediate(resolve));
 const snapshot=j=>{try{return Object.fromEntries(['kv','inbox','outgoing','retired_inbox','retired_outgoing'].map(t=>[t,j.db.prepare(`SELECT * FROM ${t} ORDER BY ${t==='kv'?'key':'id'}`).all().map(r=>Object.values(r))]));}catch{return 'closed';}};
 const rows=[];
 for(const spec of specs){
- const j=new WhatsAppJournal(':memory:'),events=[],counts=new Map(),gates=new Map();let current={},recovery=0;
+ const j=new WhatsAppJournal(':memory:'),events=[],counts=new Map(),gates=new Map(),ready=[];let current={},recovery=0;
  const emit=(...args)=>events.push(clone(args));
  const unwrap=value=>{if(value?.throw)throw new IvyError(value.throw.code,value.throw.message,value.throw.outcome);return clone(value);};
  const take=(key,fallback)=>{const values=current.calls?.[key]??[fallback],at=counts.get(key)??0;counts.set(key,at+1);return clone(values[Math.min(at,values.length-1)]);};
  const getGate=name=>{let gate=gates.get(name);if(!gate){let release;const promise=new Promise(resolve=>{release=resolve;});gate={promise,release};gates.set(name,gate);}return gate;};
- const call=async(key,args=[],fallback=null)=>{emit(key,...args);const entry=take(key,fallback);if(entry?.gate)await getGate(entry.gate).promise;else await Promise.resolve();return unwrap(entry&&Object.hasOwn(entry,'value')?entry.value:entry);};
+ const call=async(key,args=[],fallback=null)=>{emit(key,...args);const entry=take(key,fallback);if(entry?.gate)await getGate(entry.gate).promise;else await new Promise(resolve=>ready.push(resolve));return unwrap(entry&&Object.hasOwn(entry,'value')?entry.value:entry);};
+ // Fully drain language continuations between explicitly ordered I/O completions.
+ const drainReady=async()=>{for(let i=0;i<10000;i++){await drain();if(!ready.length)return;ready.shift()();}throw Error('Runtime probe completion limit');};
  const sync=(key,args=[],fallback=null)=>{emit(key,...args);return unwrap(take(key,fallback));};
  ctx={now:1000,timers:[],emit,call,text:message=>{emit('text',message);return message.message?.conversation??message.message?.extendedTextMessage?.text??'';}};globalThis.waRuntimeProbe=ctx;
  const make=id=>{
@@ -99,7 +101,7 @@ for(const spec of specs){
  };
  const socket={state:'connected',connected:true,online:true,privacy:true,lastOnlinePresenceAt:null,errorCode:null,lastSendMs:null,start:()=>emit('socketStart'),flush:()=>call('flush'),flushReadReceipts:()=>call('readReceipts'),setBusy:jids=>emit('setBusy',jids),presence:()=>call('presence'),close:()=>call('socketClose')};
  const runtime=Object.assign(Object.create(WhatsAppRuntime.prototype),{config:spec.config??config,dataRoot:'synthetic-root',hostId:'host',journal:j,transport:socket,authStore:{close:()=>{emit('authClose',snapshot(j)==='closed');unwrap(take('authClose',null));}},lock:{close:()=>sync('lockClose')},attached:null,timers:[],tasks:new Map(),again:new Map(),closed:false,closing:null,errors:new Map(),nativeBusy:false,nativeBusyAt:0,nativeEventRevision:0,events:[],lastNativeSequence:0,lastNativeEpoch:null,t:translator(spec.language??'en')});
- runtime.attach(make('A'));await drain();events.length=0;counts.clear();current=clone(spec);recovery=spec.recoveryCount??0;Object.assign(socket,spec.socket??{});
+ runtime.attach(make('A'));await drainReady();events.length=0;counts.clear();current=clone(spec);recovery=spec.recoveryCount??0;Object.assign(socket,spec.socket??{});
  for(const value of spec.rows??[])j.accept(value);
  if(spec.saved)j.saveRequest('input',spec.saved);if(spec.savedRaw)j.db.prepare("UPDATE inbox SET request=? WHERE id='input'").run(spec.savedRaw);if(spec.direct)j.set('direct-input:input',true);
  const invoke=lane=>({'control':()=>runtime.control(),'input':()=>runtime.input(),'listener':()=>runtime.listen(),'output':()=>socket.flush(),'status':()=>runtime.status(),'read-receipts':()=>socket.flushReadReceipts(),'activity':()=>runtime.activity(),'retention':async()=>{j.prune();if(!runtime.nativeBusy)await call('prune');}}[lane]);
@@ -119,9 +121,9 @@ for(const spec of specs){
   case'close':case'startCloseAgain':await runtime.close();break;
   default:throw Error('Unknown runtime action '+action.op);
  }return null;};
- const steps=[];for(const action of spec.actions){const result=await capture(()=>apply(action));await drain();steps.push({result,events:events.splice(0),snapshot:snapshot(j)});}
- for(const gate of gates.values())gate.release();await drain();await runtime.close().catch(()=>{});rows.push({label:spec.label,steps});
+ const steps=[];for(const action of spec.actions){const pending=capture(()=>apply(action));await drainReady();const result=await pending;steps.push({result,events:events.splice(0),snapshot:snapshot(j)});}
+ for(const gate of gates.values())gate.release();await drainReady();const closing=runtime.close().catch(()=>{});await drainReady();await closing;rows.push({label:spec.label,steps});
 }
 const retryable=['outcome_unknown','service_not_ready','service_unavailable','storage_unavailable','deadline_exceeded','native_unavailable','native_capacity','stale_generation','chat_pending_action','revision_conflict','native_read_pending','not_found','invalid_arguments','chat_auth_required','tool_definition_changed','other'].map(code=>({code,value:retryableWhatsAppError(code)}));
-const result={specs,rows,retryable,boundaries:'Original constructor filesystem setup is excluded. Actual runtime methods/journal use explicit native/Main/listener/media/socket/Host/scoped-identity and manually fired interval probes.'};
+const result={specs,rows,retryable,boundaries:'Original constructor filesystem setup is excluded. Actual runtime methods/journal use explicit native/Main/listener/media/socket/Host/scoped-identity and manually fired interval probes. Asynchronous boundary completions are FIFO, one after each complete language-continuation drain; named gates explicitly hold overlapping work. This qualifies causal ordering/coalescing under controlled I/O, not JavaScript-versus-Tokio immediately-ready microtask timing.'};
 if(process.env.IVY_CHAT_WA_RUNTIME_ORACLE_CAPTURE)writeFileSync(process.env.IVY_CHAT_WA_RUNTIME_ORACLE_CAPTURE,JSON.stringify(result));process.stdout.write(JSON.stringify(result));

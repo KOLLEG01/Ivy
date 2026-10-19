@@ -21,7 +21,7 @@ use ivy_contracts::{
 };
 use ivy_sdk::{clock::Clock, rpc::RequestFuture, service::ServiceFuture};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     process::Command,
     sync::{Arc, Mutex},
     time::Instant,
@@ -69,6 +69,7 @@ struct State {
     events: Vec<Json>,
     counts: HashMap<String, usize>,
     gates: HashMap<String, watch::Sender<bool>>,
+    ready: VecDeque<watch::Sender<bool>>,
     recovery: i64,
 }
 struct Probe {
@@ -121,13 +122,15 @@ impl Probe {
         Box::pin(async move {
             self.emit(&key, args);
             let entry = self.take(&key, fallback);
-            if let Some(name) = entry.get("gate") {
-                let mut gate = self.gate(&name.as_str()?);
-                while !*gate.borrow_and_update() {
-                    gate.changed().await.unwrap();
-                }
+            let mut gate = if let Some(name) = entry.get("gate") {
+                self.gate(&name.as_str()?)
             } else {
-                tokio::task::yield_now().await;
+                let (send, receive) = watch::channel(false);
+                self.state.lock().unwrap().ready.push_back(send);
+                receive
+            };
+            while !*gate.borrow_and_update() {
+                gate.changed().await.unwrap();
             }
             unwrap(entry.get("value").cloned().unwrap_or(entry))
         })
@@ -465,11 +468,22 @@ fn lane(name: &str) -> RuntimeWork {
         _ => panic!("Unknown lane"),
     }
 }
-async fn drain() {
-    // A bounded single-thread executor drain; held gates remain pending.
-    for _ in 0..1024 {
-        tokio::task::yield_now().await;
+async fn drain(probe: &Probe) {
+    // Drain continuations before admitting the next explicit FIFO I/O result.
+    // Named gates stay pending; no wall-clock sleeps decide provider ordering.
+    for _ in 0..10000 {
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        let next = probe.state.lock().unwrap().ready.pop_front();
+        match next {
+            Some(send) => {
+                send.send_replace(true);
+            }
+            None => return,
+        }
     }
+    panic!("Runtime probe completion limit");
 }
 fn frame(index: usize) -> Json {
     Json::object([(
@@ -578,6 +592,7 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
                 events: vec![],
                 counts: HashMap::new(),
                 gates: HashMap::new(),
+                ready: VecDeque::new(),
                 recovery: 0,
             }),
             start: Instant::now(),
@@ -604,7 +619,7 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
             translator:Translator::new(spec.get("language").and_then(Json::as_js_string)),
         },probe.clone(),timers.clone());
         runtime.attach(Some(make(&probe, "A")));
-        drain().await;
+        drain(&probe).await;
         probe.collect();
         {
             let mut state = probe.state.lock().unwrap();
@@ -650,8 +665,21 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
         }
         let mut steps = Vec::new();
         for a in f(spec, "actions").as_array().unwrap() {
-            let value = result(apply(a, &runtime, &probe, &timers, &socket).await);
-            drain().await;
+            let (a, owner, p, t, socket_owner) = (
+                a.clone(),
+                runtime.clone(),
+                probe.clone(),
+                timers.clone(),
+                socket.clone(),
+            );
+            let work = tokio::spawn(async move { apply(&a, &owner, &p, &t, &socket_owner).await });
+            drain(&probe).await;
+            assert!(
+                work.is_finished(),
+                "Action awaits an unreleased boundary: {}",
+                s(spec, "label")
+            );
+            let value = result(work.await.unwrap());
             steps.push(Json::object([
                 ("result", value),
                 ("events", Json::Array(probe.collect())),
@@ -666,8 +694,14 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
         for gate in probe.state.lock().unwrap().gates.values() {
             gate.send_replace(true);
         }
-        drain().await;
-        let _ = runtime.close().await;
+        drain(&probe).await;
+        let closing = tokio::spawn(async move { runtime.close().await });
+        drain(&probe).await;
+        assert!(
+            closing.is_finished(),
+            "Cleanup awaits an unreleased boundary"
+        );
+        let _ = closing.await.unwrap();
         rows.push(Json::object([
             ("label", f(spec, "label").clone()),
             ("steps", Json::Array(steps)),
