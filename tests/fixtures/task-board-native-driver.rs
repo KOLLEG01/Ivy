@@ -74,8 +74,15 @@ impl Contracts for Policy {
         Ok(v == &"1.0.0".into())
     }
     fn validate_record(&self, key: &str, _: &JsString, v: &Json) -> IvyResult<()> {
-        if key == "task-board/native-call" {
-            super::native_intent::validate("NativeCall", v)
+        if matches!(key, "task-board/native-call" | "task-board/native-evidence") {
+            super::native_intent::validate(
+                if key == "task-board/native-call" {
+                    "NativeCall"
+                } else {
+                    "NativeEvidence"
+                },
+                v,
+            )
         } else if self.allowed.borrow().contains(&hash_json(v)?) {
             Ok(())
         } else {
@@ -210,7 +217,15 @@ impl<S: Store + ReadEvidenceStore> Store for Trace<'_, S> {
             &self.state.log,
             ["write".into(), key.into(), v.clone(), m.into(), d.clone()],
         );
-        let f = self.state.take("write");
+        let matching = self.state.fault.borrow().get("write").is_some_and(|v| {
+            v.get("key")
+                .is_none_or(|expected| expected == &Json::from(key))
+        });
+        let f = if matching {
+            self.state.take("write")
+        } else {
+            None
+        };
         if let Some(f) = f
             .as_ref()
             .filter(|f| f.get("commit") == Some(&Json::Bool(false)))
@@ -233,11 +248,37 @@ impl<S: Store + ReadEvidenceStore> Store for Trace<'_, S> {
 impl<S: ReadEvidenceStore> BlobStore for Trace<'_, S> {
     type Pin = Json;
     type Error = IvyError;
-    fn save(&self, _: ChunkKey, _: &str, _: &JsString, _: &[u8]) -> IvyResult<Json> {
-        panic!("Preparation wrote blob")
+    fn save(&self, key: ChunkKey, name: &str, parent: &JsString, bytes: &[u8]) -> IvyResult<Json> {
+        event(
+            &self.state.log,
+            [
+                "blob-save".into(),
+                key.as_str().into(),
+                name.into(),
+                Json::String(parent.clone()),
+                ivy_contracts::hash::digest(bytes).into(),
+                Json::Number(bytes.len() as f64),
+            ],
+        );
+        if let Some(v) = self.state.take("blobSave") {
+            return Err(failure(v.as_js_string().unwrap().clone()));
+        }
+        BlobStore::save(self.inner, key, name, parent, bytes)
     }
-    fn read(&self, _: ChunkKey, _: &Json, _: &JsString) -> IvyResult<Vec<u8>> {
-        panic!("Preparation read blob")
+    fn read(&self, key: ChunkKey, pin: &Json, parent: &JsString) -> IvyResult<Vec<u8>> {
+        event(
+            &self.state.log,
+            [
+                "blob-read".into(),
+                key.as_str().into(),
+                pin.clone(),
+                Json::String(parent.clone()),
+            ],
+        );
+        if let Some(v) = self.state.take("blobRead") {
+            return Err(failure(v.as_js_string().unwrap().clone()));
+        }
+        BlobStore::read(self.inner, key, pin, parent)
     }
 }
 impl<S: Store + ReadEvidenceStore> ReadEvidenceStore for Trace<'_, S> {
@@ -245,11 +286,17 @@ impl<S: Store + ReadEvidenceStore> ReadEvidenceStore for Trace<'_, S> {
         event(&self.state.log, ["validate".into(), n.into()]);
         self.inner.validate(n, v)
     }
-    async fn read_document(&self, _: &str, _: &Json, _: bool) -> IvyResult<Document> {
-        panic!("Preparation read evidence")
+    async fn read_document(&self, key: &str, address: &Json, primary: bool) -> IvyResult<Document> {
+        Store::read(self, key, address, primary).await
     }
-    async fn write_document(&self, _: &str, _: &Json, _: &str, _: &Json) -> IvyResult<Json> {
-        panic!("Preparation wrote evidence")
+    async fn write_document(
+        &self,
+        key: &str,
+        value: &Json,
+        mutation: &str,
+        destination: &Json,
+    ) -> IvyResult<Json> {
+        Store::write(self, key, value, mutation, destination).await
     }
 }
 struct Prompts<'a>(&'a State);
@@ -747,5 +794,7 @@ async fn real_runtime_identity_survives_journal_reopen_on_its_live_connection() 
     );
 }
 
+#[path = "task-board-native-advance.rs"]
+mod advance;
 #[path = "task-board-native-resume.rs"]
 mod resume;

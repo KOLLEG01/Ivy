@@ -1,8 +1,9 @@
-//! Retain native calls and recover an uncertain input-free resume. The current
-//! engine owns native-update admission; neither operation dispatches a turn.
+//! Retain and reconcile attached original native calls. The current engine owns
+//! native-update admission; dispatch keeps the original request and domain guards.
 use crate::{
     inspection_journal::verify_owner,
     journal_store::{Contracts, JournalStore},
+    native_evidence::NativeEvidence,
     native_inspector::management_read,
     native_intent::{NativeIntent, NativeSlot, TaskPrompts},
     native_plan::catalog,
@@ -10,12 +11,19 @@ use crate::{
     read_evidence::ReadEvidenceStore,
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString,
+    IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
     checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{
-    native_evidence::{NativeOwnerIdentity, validate_native_status},
+    native_evidence::{
+        NativeOwnerIdentity, NativeReadIdentity, validate_native_read, validate_native_status,
+    },
+    native_observations::NativeObservations,
+    native_operation::{
+        NativeOperationCall, NativeOperationJournal, NativeReconciliation,
+        reconcile_native_operation_local,
+    },
     native_owner::NativeOwner,
     operation_ids::scoped_operation_id,
     rpc::{RequestOptions, RpcClient},
@@ -261,6 +269,199 @@ impl<S: NativeDriverStore, R: NativeDriverConnection, P: TaskPrompts> NativeDriv
         )
         .await?;
         Ok(true)
+    }
+    /// Reconcile only the attached original operation. Confirmed owner absence
+    /// reaches domain dispatch guards; a missing receipt never authorizes replay.
+    pub async fn advance(&self, run_id: &JsString, slot: NativeSlot) -> IvyResult<Json> {
+        let current = self.current(run_id).await?;
+        let run = &current.run.value;
+        let pin = field(field(run, "calls"), slot.as_str());
+        require(
+            truthy(pin),
+            "task_board_native_order",
+            "Dispatch requires an attached retained NativeCall.",
+        )?;
+        let call = Store::read(
+            self.store,
+            "task-board/native-call",
+            pin.required("objectId")?,
+            true,
+        )
+        .await?;
+        let intent = NativeIntent {
+            store: self.store,
+            catalogs: self.catalogs,
+        };
+        let request = call.value.required("request")?;
+        let native_request = intent.resolve_native_request(request)?;
+        // Publish the exact committed observation after a lost response before
+        // making any owner/evidence query, even when that observation concluded.
+        if call
+            .pin
+            .required("revision")?
+            .as_f64()
+            .ok_or_else(IvyError::internal)?
+            > pin
+                .required("revision")?
+                .as_f64()
+                .ok_or_else(IvyError::internal)?
+        {
+            return self
+                .update(
+                    &current,
+                    Json::object([
+                        ("kind", "observeCall".into()),
+                        ("slot", slot.as_str().into()),
+                        ("call", call.pin.clone()),
+                    ]),
+                )
+                .await;
+        }
+        require(
+            !["succeeded", "failed"]
+                .iter()
+                .any(|v| field(&call.value, "ownerPhase") == &Json::from(*v)),
+            "task_board_native_order",
+            "The attached call already has its conclusive original observation.",
+        )?;
+        let evidence = NativeEvidence {
+            store: self.store,
+            catalogs: self.catalogs,
+        };
+        let expected = intent.evidence_identity(run, &call.value, self.runtime.principal_id())?;
+        let owner = self.native_owner(run, &call.value)?;
+        let previous = if truthy(field(&call.value, "evidence")) {
+            Some(
+                evidence
+                    .read(&call.pin, call.value.required("evidence")?, &expected)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let original = NativeOperationCall {
+            operation_id: string(&call.value, "operationId")?.clone(),
+            method: string(request, "method")?.clone(),
+            params: native_request.required("params")?.clone(),
+            definition_hash: string(&call.value, "expectedDefinitionHash")?.clone(),
+        };
+        let current_ref = &current;
+        let call_ref = &call;
+        let expected_ref = &expected;
+        let evidence_ref = &evidence;
+        let owner_ref = &owner;
+        let native_request_ref = &native_request;
+        let reconciled = reconcile_native_operation_local(
+            &owner,
+            &original,
+            NativeOperationJournal {
+                current: Json::Null,
+                previous,
+                was_observed: field(&call.value, "state") != &Json::from("prepared")
+                    || field(&call.value, "ownerPhase") != &Json::Null,
+                retain: |observed: Json| async move {
+                    let artifact = evidence_ref.save(&call_ref.pin, &observed, expected_ref).await?;
+                    let mut next = call_ref.value.clone();
+                    next.insert("state", if field(&observed,"phase")==&Json::from("outcome_unknown") {
+                        "outcome_unknown".into()
+                    } else { "observed".into() });
+                    for (target, source) in [("ownerPhase","phase"),("observedAt","updatedAt"),("epoch","epoch"),("code","code")] {
+                        next.insert(target, observed.required(source)?.clone());
+                    }
+                    next.insert("evidence", artifact);
+                    let saved = Store::write(self.store,"task-board/native-call",&next,
+                        &mutation(string(&call_ref.pin,"objectId")?, &format!("observe:{}",hash_json(&observed)?))?,
+                        &Json::object([
+                            ("objectId",call_ref.pin.required("objectId")?.clone()),
+                            ("expectedRevision",call_ref.pin.required("revision")?.clone()),
+                        ]),
+                    ).await?;
+                    self.update(current_ref,Json::object([
+                        ("kind","observeCall".into()),("slot",slot.as_str().into()),("call",saved),
+                    ])).await
+                },
+            },
+            Some(move |original: NativeOperationCall, absence: Json| async move {
+                let owner = owner_ref;
+                let current = current_ref;
+                let call = call_ref;
+                let native_request = native_request_ref;
+                let status = self.status(run,&call.value).await?;
+                require(absence.get("epoch")==status.get("epoch"),
+                    "task_board_native_epoch_changed", "Absence and current native status must come from the same epoch.")?;
+                let thread_pin = field(field(run,"calls"),"thread");
+                let primary_failed = if slot==NativeSlot::Turn && truthy(thread_pin) {
+                    let thread = Store::read(self.store,"task-board/native-call",thread_pin,true).await?;
+                    field(&thread.value,"ownerPhase")==&Json::from("failed")
+                } else { false };
+                if (!current.active || truthy(field(run,"cancellation")) || primary_failed
+                    || slot==NativeSlot::Steer && status.get("epoch")!=run.get("nativeEpoch"))
+                    && slot!=NativeSlot::Interrupt
+                {
+                    let prevented = owner.management("prevent",Json::object([
+                        ("operationId",call.value.required("operationId")?.clone()),
+                        ("nativeVersion",request.required("nativeVersion")?.clone()),
+                        ("method",request.required("method")?.clone()),
+                        ("params",native_request.required("params")?.clone()),
+                        ("expectedDefinitionHash",call.value.required("expectedDefinitionHash")?.clone()),
+                    ]),Some(string(&call.value,"operationId")?.clone())).await?;
+                    validate_agent("Operation",&prevented)?;
+                    return Ok(Some(prevented));
+                }
+                if slot==NativeSlot::Turn {
+                    require(status.get("epoch")==run.get("nativeEpoch"),
+                        "task_board_reattach_required", "The saved primary must be confirmed in the current native epoch before turn dispatch.")?;
+                    require(truthy(thread_pin),"task_board_native_order","A turn needs its retained thread receipt.")?;
+                    let thread = Store::read(self.store,"task-board/native-call",thread_pin,true).await?;
+                    require(field(&thread.value,"ownerPhase")==&Json::from("succeeded")
+                        && thread.value.get("epoch")==status.get("epoch"),
+                        "task_board_native_order","The latest primary attachment must be confirmed in this native epoch before dispatch.")?;
+                    let primary = run.required("primaryResourceRef")?;
+                    let params = Json::object([
+                        ("threadId",primary.required("nativeId")?.clone()),("includeTurns",false.into()),
+                    ]);
+                    let snapshot = management_read(self.runtime.tools(),string(run.required("target")?,"serviceNodeId")?,
+                        "read",Json::object([
+                            ("nativeVersion",request.required("nativeVersion")?.clone()),
+                            ("method","thread/read".into()),("params",params.clone()),
+                        ]),
+                    ).await?;
+                    validate_native_read(&snapshot,&NativeReadIdentity {
+                        owner:owner.target().clone(),caller_principal_id:self.runtime.principal_id().clone(),
+                        epoch:string(&status,"epoch")?.clone(),method:"thread/read".into(),params,
+                    },Some("task_board_native_unavailable"))?;
+                    let result = snapshot.required("reply")?.get("result");
+                    require(result.is_some(),"task_board_native_unavailable",
+                        "Turn dispatch requires a successful fresh native primary observation.")?;
+                    let source = self.catalogs.checked_native_contract(string(&snapshot,"nativeVersion")?,
+                        Some(&Json::object([("catalogHash",snapshot.required("catalogHash")?.clone())])))?;
+                    let state = NativeObservations::new(&source).native_thread_state(result.unwrap())?;
+                    require(state.thread.get("id")==primary.get("nativeId")
+                        && field(&state.thread,"ephemeral")==&Json::Bool(false) && state.can_start_turn,
+                        "task_board_native_not_idle",
+                        "The native primary must be currently attached, accept input and have no active turn before its turn starts.")?;
+                }
+                if slot==NativeSlot::Interrupt {
+                    require(status.get("epoch")==run.get("nativeEpoch"),"task_board_native_epoch_changed",
+                        "An old turn cannot be interrupted as if the replacement owner controlled it.")?;
+                }
+                owner.dispatch_local(&original,|| async {
+                    let fresh = self.current(run_id).await?;
+                    require(canonical(&fresh.run.pin,MANAGEMENT_FRAME_BYTES)?==canonical(&current.run.pin,MANAGEMENT_FRAME_BYTES)?
+                        && canonical(&fresh.task.pin,MANAGEMENT_FRAME_BYTES)?==canonical(&current.task.pin,MANAGEMENT_FRAME_BYTES)?,
+                        "revision_conflict","Task or Run changed before native dispatch; reconcile it before sending.")?;
+                    self.runtime.verify_owner().await
+                }).await
+            }),
+            Some("task_board_native_absence_conflict"),
+        ).await?;
+        match reconciled {
+            NativeReconciliation::Observed { value, .. } => Ok(value),
+            NativeReconciliation::Absent { .. } => Err(IvyError::new(
+                "task_board_native_outcome_unavailable",
+                "No original native operation was observed after dispatch; do not invent a receipt.",
+            )),
+        }
     }
 }
 struct Current {
