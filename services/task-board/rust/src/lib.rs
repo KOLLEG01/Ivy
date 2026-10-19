@@ -3,6 +3,7 @@ pub mod allocation;
 pub mod category_projection;
 pub mod coordination;
 pub mod deliveries;
+pub mod engine_read;
 pub mod evidence_bytes;
 pub mod full_turn_evidence;
 pub mod inspection_journal;

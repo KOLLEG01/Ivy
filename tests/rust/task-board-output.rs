@@ -18,6 +18,8 @@ mod reconciler;
 mod native_publication;
 #[path = "../fixtures/task-board-categories.rs"]
 mod categories;
+#[path = "../fixtures/task-board-engine-read.rs"]
+mod engine_read;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {
