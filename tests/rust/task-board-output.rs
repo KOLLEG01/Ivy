@@ -22,6 +22,8 @@ mod categories;
 mod engine_read;
 #[path = "../fixtures/task-board-engine-execution.rs"]
 mod engine_execution;
+#[path = "../fixtures/task-board-engine-admission.rs"]
+mod engine_admission;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {
