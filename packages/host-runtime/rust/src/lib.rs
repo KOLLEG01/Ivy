@@ -21,3 +21,4 @@ pub mod node_path;
 pub mod portable_native_files;
 #[path = "artifact/file_hash.rs"] pub mod streaming_hash;
 pub mod package_archive;
+pub mod filesystem_error;

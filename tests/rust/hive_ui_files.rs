@@ -6,6 +6,8 @@ use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
 };
+#[path = "hive_ui_collection_causes.rs"]
+mod collection_causes;
 #[cfg(windows)]
 #[path = "hive_filesystem.rs"]
 mod filesystem;

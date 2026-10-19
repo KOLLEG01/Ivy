@@ -21,6 +21,8 @@ use std::{
 };
 
 const DAY_MS: f64 = 86_400_000.0;
+#[path = "ui_collection.rs"]
+mod collection;
 fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
     if value {
         Ok(())
@@ -108,19 +110,6 @@ fn entries(path: &Path) -> IvyResult<Vec<fs::DirEntry>> {
             .cmp(text(&os_string(&b.file_name())).as_bytes())
     });
     Ok(values)
-}
-fn modified_ms(path: &Path) -> IvyResult<f64> {
-    let time = fs::metadata(fs_path(path)?)
-        .map_err(sql_error)?
-        .modified()
-        .map_err(sql_error)?;
-    Ok(match time.duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_secs() as f64 * 1000.0 + d.subsec_nanos() as f64 / 1_000_000.0,
-        Err(e) => {
-            -(e.duration().as_secs() as f64 * 1000.0
-                + e.duration().subsec_nanos() as f64 / 1_000_000.0)
-        }
-    })
 }
 fn remove(path: &Path, recursive: bool) -> IvyResult<()> {
     let path = fs_path(path)?;
@@ -459,99 +448,6 @@ impl UiFiles {
             Err(e) => return Err(sql_error(e)),
         }
         result
-    }
-    pub fn collect(
-        &self,
-        ui: &JsString,
-        retained: &HashSet<JsString>,
-        now_ms: f64,
-    ) -> IvyResult<()> {
-        let directory = absolute(&self.root.join(component_id(ui)?)).map_err(sql_error)?;
-        if !exists(&directory) {
-            return Ok(());
-        }
-        for entry in entries(&directory)? {
-            let name = os_string(&entry.file_name());
-            if !entry.file_type().map_err(sql_error)?.is_dir() || retained.contains(&name) {
-                continue;
-            }
-            release_id(&name)?;
-            let target = absolute(&directory.join(entry.file_name())).map_err(sql_error)?;
-            require(
-                contained(&directory, &target),
-                "storage_invalid",
-                "UI release directory is invalid.",
-            )?;
-            if modified_ms(&target)? <= now_ms - DAY_MS {
-                remove(&target, true)?;
-            }
-        }
-        if retained.is_empty() && entries(&directory)?.is_empty() {
-            fs::remove_dir(fs_path(directory)?).map_err(sql_error)?;
-        }
-        Ok(())
-    }
-    pub fn collect_all(
-        &self,
-        retained: &HashMap<JsString, HashSet<JsString>>,
-        now_ms: &dyn Fn() -> f64,
-    ) -> IvyResult<()> {
-        if !exists(&self.root) {
-            return Ok(());
-        }
-        for entry in entries(&self.root)? {
-            let name = os_string(&entry.file_name());
-            if !entry.file_type().map_err(sql_error)?.is_dir()
-                || name.0.first() == Some(&(b'.' as u16))
-            {
-                continue;
-            }
-            component_id(&name)?;
-            self.collect(
-                &name,
-                retained.get(&name).unwrap_or(&HashSet::new()),
-                now_ms(),
-            )?;
-        }
-        self.collect_temporary(now_ms())
-    }
-    pub fn collect_temporary(&self, now_ms: f64) -> IvyResult<()> {
-        fn sweep(directory: &Path, depth: usize, cutoff: f64) -> IvyResult<()> {
-            if !exists(&directory) {
-                return Ok(());
-            }
-            for entry in entries(directory)? {
-                if !entry.file_type().map_err(sql_error)?.is_dir() {
-                    continue;
-                }
-                let target = absolute(&directory.join(entry.file_name())).map_err(sql_error)?;
-                require(
-                    contained(directory, &target),
-                    "storage_invalid",
-                    "UI staging path is invalid.",
-                )?;
-                if depth > 0 {
-                    sweep(&target, depth - 1, cutoff)?;
-                    if entries(&target)?.is_empty() {
-                        fs::remove_dir(fs_path(target)?).map_err(sql_error)?;
-                    }
-                } else if modified_ms(&target)? < cutoff {
-                    remove(&target, true)?;
-                }
-            }
-            Ok(())
-        }
-        let cutoff = now_ms - DAY_MS;
-        sweep(
-            &absolute(&self.root.join(".incoming")).map_err(sql_error)?,
-            0,
-            cutoff,
-        )?;
-        sweep(
-            &absolute(&self.root.join(".staging")).map_err(sql_error)?,
-            1,
-            cutoff,
-        )
     }
     pub fn migrate_legacy(&self, store: &mut Store) -> IvyResult<()> {
         if store.metadata("ui_files_v1")?.as_deref() == Some("ready") {

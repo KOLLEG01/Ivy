@@ -1,4 +1,4 @@
-//! An operation may journal a database cause without adding it to a wire error.
+//! An operation may journal a native cause without adding it to a wire error.
 use super::*;
 use std::cell::RefCell;
 
@@ -25,10 +25,13 @@ impl FailureCause {
         }
     }
     pub(super) fn record(&self, message: impl FnOnce() -> JsString) {
+        self.record_optional(|| Some(message()));
+    }
+    fn record_optional(&self, message: impl FnOnce() -> Option<JsString>) {
         let mut state = self.0.borrow_mut();
         if state.active {
             // A rollback failure supersedes the work/COMMIT failure in the source.
-            state.message = Some(message());
+            state.message = message();
         }
     }
 }
@@ -38,9 +41,12 @@ impl Drop for Capture {
     }
 }
 impl Store {
-    /// Capture an original SQLite message for a local failure journal. The IvyError
+    pub(crate) fn observe_failure(&self, message: impl FnOnce() -> Option<JsString>) {
+        self.failure.record_optional(message);
+    }
+    /// Capture an original native message for a local failure journal. The IvyError
     /// and its wire serialization remain unchanged. Named failures without a raw
-    /// database cause use the error's own message at the journal's calling boundary.
+    /// native cause use the error's own message at the journal's calling boundary.
     /// Nested captures and unwinding restore the enclosing observation scope.
     pub fn capture_failure<T>(
         &mut self,

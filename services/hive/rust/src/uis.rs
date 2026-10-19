@@ -838,7 +838,7 @@ impl<'a> Uis<'a> {
                 .collect::<IvyResult<HashSet<_>>>()?;
             retained.insert(id.into(), values);
         }
-        self.files.collect_all(&retained, clock)
+        self.files.collect_all_for_store(store, &retained, clock)
     }
 }
 
