@@ -76,7 +76,16 @@ fn authorization(manifest: &IvyJson) -> IvyJson {
 async fn package_authorization_and_identity_first_index_match_original_limits_and_projection() {
     let (_fixture, _, manifest) = fixture("fixture", true).await;
     let good = authorization(&manifest);
-    let mut cases = vec![IvyJson::Null, IvyJson::Array(vec![]), good.clone()];
+    let mut cases = vec![IvyJson::Null, IvyJson::Array(vec![]), true.into(), IvyJson::Number(1.0),
+        "authorization".into(), good.clone(), IvyJson::object([] as [(&str, IvyJson); 0])];
+    // Manifest admission precedes version/identity checks; an absent JS property
+    // reaches canonical(undefined), whereas explicit null reaches schema validation.
+    for manifest in [None, Some(IvyJson::Null), Some(IvyJson::Array(vec![])), Some(IvyJson::Number(1.0)),
+        Some("manifest".into()), Some(IvyJson::object([] as [(&str, IvyJson); 0]))] {
+        let mut value = good.clone(); value.insert("version", "invalid-version".into());
+        if let Some(manifest) = manifest { value.insert("manifest", manifest); } else { value.remove("manifest"); }
+        cases.push(value);
+    }
     for (key, value) in [("componentId", "bad_id".into()), ("componentId", "different".into()), ("version", "01.0.0".into()),
         ("version", IvyJson::String(ivy_contracts::JsString(vec![0xd800]))), ("buildId", "sha256:bad".into()),
         ("archiveHash", format!("sha256:{}", "A".repeat(64)).into()), ("bytes", IvyJson::Number(0.0)),
@@ -106,6 +115,13 @@ async fn package_authorization_and_identity_first_index_match_original_limits_an
         ("publisherPrincipalId", "".into()), ("publisherPrincipalId", "a".repeat(256).into()), ("publisherPrincipalId", "a".repeat(257).into())] {
         let mut value_case = entry.clone(); value_case.insert(key, value); cases.push(catalog(value_case));
     }
+    for manifest in [None, Some(IvyJson::Null)] {
+        let mut value = entry.clone(); value.insert("revision", IvyJson::Number(0.0));
+        if let Some(manifest) = manifest { value.insert("manifest", manifest); } else { value.remove("manifest"); }
+        cases.push(catalog(value));
+    }
+    let mut invalid_identity = entry; invalid_identity.remove("manifest"); invalid_identity.insert("version", "invalid-version".into());
+    cases.push(catalog(invalid_identity));
     for value in cases { compare("validatePackageCatalog", vec![value.clone()], package_archive::validate_package_catalog(&value)); }
 }
 

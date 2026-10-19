@@ -21,8 +21,9 @@ fn id(value: Option<&IvyJson>) -> bool {
 
 pub fn validate_package_authorization(value: &IvyJson) -> IvyResult<IvyJson> {
     require(matches!(value, IvyJson::Object(_)), "invalid_arguments", "Package upload authorization needs an object.")?;
-    let null = IvyJson::Null;
-    let manifest = value.get("manifest").unwrap_or(&null);
+    // The original host validator canonicalizes the property before its schema;
+    // an absent property is undefined, which is outside the JSON domain.
+    let manifest = value.get("manifest").ok_or_else(|| IvyError::new("invalid_arguments", "Value is outside the JSON domain."))?;
     validate_host("ReleaseManifest", manifest)?;
     json::compare_versions(&json::js_string(value.get("version").unwrap_or(&IvyJson::Null)).to_utf8().unwrap_or_default(), "0.0.0")?;
     require(id(value.get("componentId")) && value.get("componentId") == manifest.get("componentId")
@@ -64,4 +65,3 @@ pub fn validate_package_catalog(value: &IvyJson) -> IvyResult<IvyJson> {
     }
     Ok(value.clone())
 }
-
