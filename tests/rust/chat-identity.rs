@@ -1,5 +1,7 @@
 use ivy_chat_bridge::whatsapp::identity::{identity, output_parts};
 use ivy_contracts::{IvyJson, JsString, json::parse};
+#[path = "chat-messages-cases.rs"]
+mod messages;
 
 #[test]
 fn ordinary_json_identities_match_node_without_canonical_reordering() {
