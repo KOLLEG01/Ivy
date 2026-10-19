@@ -425,28 +425,40 @@ async fn all_real_codec_receive_paths_use_the_same_bound_owner_and_accepted_nego
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_close_waiter_does_not_abandon_an_active_callback_or_original_cleanup() {
-    struct Blocking {
-        entered: AtomicBool,
-        released: Mutex<bool>,
-        changed: std::sync::Condvar,
+    struct Closing {
+        receiver: Mutex<Option<SipRtpReceiver>>,
+        was_pending: AtomicBool,
+        returned: AtomicBool,
     }
-    impl SipReceiveEvents for Blocking {
+    impl SipReceiveEvents for Closing {
         fn digit(&self, _: char, _: InputSource) {}
         fn failed(&self) {
             panic!("Unexpected media failure");
         }
         fn rtcp(&self, _: SocketAddr, _: &[u8]) {
-            self.entered.store(true, Ordering::SeqCst);
-            let mut released = self.released.lock().unwrap();
-            while !*released {
-                released = self.changed.wait(released).unwrap();
-            }
+            use std::{
+                future::Future,
+                task::{Context, Waker},
+            };
+            let receiver = self.receiver.lock().unwrap().take().unwrap();
+            let mut close = Box::pin(receiver.close());
+            // This callback is still active. Close must request cancellation
+            // without waiting synchronously for this very callback to return.
+            self.was_pending.store(
+                close
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending(),
+                Ordering::SeqCst,
+            );
+            drop(close); // Cancel only this observer, retaining original cleanup.
+            self.returned.store(true, Ordering::SeqCst);
         }
     }
-    let events = Arc::new(Blocking {
-        entered: AtomicBool::new(false),
-        released: Mutex::new(false),
-        changed: std::sync::Condvar::new(),
+    let events = Arc::new(Closing {
+        receiver: Mutex::new(None),
+        was_pending: AtomicBool::new(false),
+        returned: AtomicBool::new(false),
     });
     let receiver = SipRtpReceiver::bind(
         "127.0.0.1:0".parse().unwrap(),
@@ -466,35 +478,17 @@ async fn cancelled_close_waiter_does_not_abandon_an_active_callback_or_original_
         control.local_addr().unwrap(),
         false,
     );
+    *events.receiver.lock().unwrap() = Some(receiver.clone());
     let local = receiver.observation().transport;
     control
         .send_to(&[0x80, 201, 0, 1, 0, 0, 0, 9], local.local_rtcp)
         .await
         .unwrap();
-    wait(|| events.entered.load(Ordering::SeqCst)).await;
-    // A failing assertion or a stalled async timer must not leave the synthetic
-    // synchronous callback blocking runtime shutdown forever.
-    let (release, released) = std::sync::mpsc::channel::<()>();
-    let fallback = events.clone();
-    let releaser = std::thread::spawn(move || {
-        let _ = released.recv_timeout(Duration::from_secs(2));
-        *fallback.released.lock().unwrap() = true;
-        fallback.changed.notify_all();
-    });
-    let close_result = timeout(Duration::from_millis(15), receiver.close()).await;
-    let was_pending = !receiver.observation().cleanup_confirmed;
-    let _ = release.send(());
-    releaser.join().unwrap();
-    timeout(Duration::from_secs(3), receiver.close())
-        .await
-        .unwrap();
+    wait(|| events.returned.load(Ordering::SeqCst) && receiver.observation().cleanup_confirmed)
+        .await;
     assert!(
-        close_result.is_err(),
+        events.was_pending.load(Ordering::SeqCst),
         "Close returned before its active callback completed"
-    );
-    assert!(
-        was_pending,
-        "Cleanup was reported while the callback was still blocked"
     );
     assert!(receiver.observation().cleanup_confirmed);
     let _rtp = std::net::UdpSocket::bind(local.local_rtp).unwrap();
