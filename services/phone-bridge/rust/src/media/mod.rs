@@ -1,5 +1,6 @@
 mod evs;
 mod format;
+mod g711;
 mod permit;
 mod queue;
 mod rtp;
@@ -36,3 +37,4 @@ pub use evs::{
     evs_select, evs_sender,
 };
 pub use format::{AudioFormat, Codec, FormatError};
+pub use g711::G711Codec;

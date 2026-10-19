@@ -3,7 +3,7 @@ use ivy_contracts::{
     json::{parse, stringify},
 };
 use ivy_phone_bridge::media::{
-    AudioFormat, Codec, evs_channels, evs_header_full, evs_select, evs_sender,
+    AudioFormat, Codec, G711Codec, evs_channels, evs_header_full, evs_select, evs_sender,
 };
 
 fn number(value: impl Into<f64>) -> IvyJson {
@@ -36,6 +36,13 @@ fn select_case(text: Option<&str>, answering: bool, channels: u8) -> IvyJson {
 }
 fn cases() -> Vec<IvyJson> {
     let mut cases = Vec::new();
+    for (name, payload) in [("PCMA", 8), ("PCMU", 0)] {
+        cases.push(IvyJson::object([
+            ("operation", "g711".into()),
+            ("name", name.into()),
+            ("payload", number(payload)),
+        ]));
+    }
     for rtpmap in [
         None,
         Some("EVS/16000"),
@@ -264,6 +271,47 @@ fn actual(case: &IvyJson) -> IvyJson {
     let text = case.get("text").and_then(|value| value.as_str().ok());
     let error = || IvyJson::object([("error", "invalid_format".into())]);
     match get("operation").as_str().unwrap().as_str() {
+        "g711" => {
+            use std::fmt::Write;
+            let format = AudioFormat::new(
+                get("payload").as_f64().unwrap() as i32,
+                &get("name").as_str().unwrap(),
+                8000,
+                8000,
+                1,
+                None,
+            )
+            .unwrap();
+            let codec = G711Codec::new(&format).unwrap();
+            let mut encoded = String::with_capacity(131072);
+            let mut first = i32::from(i16::MIN);
+            while first <= i32::from(i16::MAX) {
+                let samples = std::array::from_fn(|offset| {
+                    (first + offset as i32).min(i32::from(i16::MAX)) as i16
+                });
+                let count = (i32::from(i16::MAX) - first + 1).min(160) as usize;
+                for octet in codec.encode_20ms(&samples).into_iter().take(count) {
+                    write!(encoded, "{octet:02x}").unwrap();
+                }
+                first += 160;
+            }
+            let packet: Vec<u8> = (0..=255).collect();
+            IvyJson::object([
+                ("error", IvyJson::Null),
+                ("encoded", encoded.into()),
+                (
+                    "decoded",
+                    IvyJson::Array(
+                        codec
+                            .decode(&packet)
+                            .unwrap()
+                            .into_iter()
+                            .map(number)
+                            .collect(),
+                    ),
+                ),
+            ])
+        }
         "channels" => IvyJson::object([
             ("error", IvyJson::Null),
             ("value", number(evs_channels(text.as_deref()))),
@@ -381,6 +429,18 @@ fn configured_formats_keep_packet_clocks_and_directional_evs_constraints() {
 }
 
 #[test]
+fn g711_packet_bounds_and_silence_are_explicit_at_the_codec_clock() {
+    assert!(G711Codec::new(&Codec::Opus.offered_formats()[0]).is_err());
+    for (law, silence, level) in [(Codec::Pcma, 0xd5, 8), (Codec::Pcmu, 0xff, 0)] {
+        let codec = G711Codec::new(&law.offered_formats()[0]).unwrap();
+        assert_eq!(codec.encode_20ms(&[0; 160]), [silence; 160]);
+        assert_eq!(codec.decode(&[silence; 960]).unwrap(), vec![level; 960]);
+        assert!(codec.decode(&[]).is_err());
+        assert!(codec.decode(&[silence; 961]).is_err());
+    }
+}
+
+#[test]
 fn original_media_format_and_evs_differential() {
     use std::{
         io::Write,
@@ -444,8 +504,16 @@ fn original_media_format_and_evs_differential() {
         if &value != expected {
             failures.push(format!(
                 "Case {index}: {} != {}; input {}",
-                stringify(&value, 65536).unwrap(),
-                stringify(expected, 65536).unwrap(),
+                stringify(&value, 1_000_000)
+                    .unwrap()
+                    .chars()
+                    .take(1200)
+                    .collect::<String>(),
+                stringify(expected, 1_000_000)
+                    .unwrap()
+                    .chars()
+                    .take(1200)
+                    .collect::<String>(),
                 stringify(input, 65536).unwrap()
             ));
         }

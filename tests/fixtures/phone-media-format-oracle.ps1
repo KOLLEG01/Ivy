@@ -40,12 +40,26 @@ try {
      $null=$task93Assembly.GetType('Ivy.PhoneBridge.MediaCodec').GetMethod('ValidateFormat',$flags).Invoke($null,[object[]]@($format))
      [ordered]@{error=$null;duration=[uint32]($format.RtpClockRate/50)}
     }
+    'g711' {
+     $format=[SIPSorceryMedia.Abstractions.AudioFormat]::new([int]$case.payload,[string]$case.name,8000,8000,1,$null)
+     $pcm=[short[]]::new(65536)
+     for($index=0;$index -lt $pcm.Length;$index++){$pcm[$index]=[short]($index-32768)}
+     $octets=[byte[]](0..255)
+     $encoder=[SIPSorcery.Media.AudioEncoder]::new()
+     try {
+      $encoded=$encoder.EncodeAudio($pcm,$format)
+      $decoded=$encoder.DecodeAudio($octets,$format)
+      [ordered]@{error=$null;encoded=[Convert]::ToHexString($encoded).ToLowerInvariant();decoded=@($decoded)}
+     } finally {$encoder.Dispose()}
+    }
     default { throw 'Unknown oracle operation' }
    }
   } catch {
    $failure=$_.Exception
    while(($failure -is [Management.Automation.MethodInvocationException] -or $failure -is [Reflection.TargetInvocationException]) -and $null -ne $failure.InnerException){$failure=$failure.InnerException}
-   [ordered]@{error=if($failure -is [ArgumentException]){'invalid_format'}else{$failure.GetType().FullName}}
+   # Format acceptance combines the library constructor and MediaCodec's validator.
+   # This is a test classification, never a native protocol error-code mapping.
+   [ordered]@{error=if($failure -is [ArgumentException] -or ($case.operation -eq 'validate' -and $failure -is [ApplicationException])){'invalid_format'}else{$failure.GetType().FullName}}
   }
  }
  [Console]::Out.Write((ConvertTo-Json -InputObject @($results) -Compress -Depth 7))
