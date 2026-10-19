@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 mod coordinator;
 mod lane;
 mod runtime;
-pub use coordinator::HostExecutor;
+pub use coordinator::{HostExecutor, PackageUpdateRuntime};
 pub use runtime::{
     NativeActivationRuntime, NativeOfflineHiveInspector, OfflineHiveInspector, OfflineInspection,
 };

@@ -1,8 +1,10 @@
 use super::*;
 use crate::{
     bootstrap_restart::BootstrapConfigurationRestarts,
+    bootstrap_automatic::{AutomaticBootstrapRuntime, AutomaticBootstrapUpdater},
     configuration_updater::{self, ConfigurationUpdater},
     executor_lock::ExecutorLock,
+    package_updater::{PackageClient, PackageUpdater},
     scheduler,
 };
 use futures_util::FutureExt;
@@ -20,6 +22,17 @@ struct Coordinator {
     status: StatusWriter,
     configuration: Option<ConfigurationUpdater>,
     bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
+    packages: Option<(PackageUpdater, AutomaticBootstrapUpdater)>,
+}
+/// Explicit service bindings for the independent maintenance owner, locale
+/// comparison, Node qualification and the selected HTTP transport profile.
+pub struct PackageUpdateRuntime {
+    pub node: crate::node_runtime::NodeRuntime,
+    pub client: Arc<dyn PackageClient>,
+    pub automatic: Arc<dyn AutomaticBootstrapRuntime>,
+    pub compare: crate::artifact::FileCompare,
+    pub distribution: std::path::PathBuf,
+    pub job_launcher: std::path::PathBuf,
 }
 struct Control {
     pending: Mutex<Option<Coordinator>>,
@@ -52,7 +65,7 @@ impl HostExecutor {
         runtime: Arc<dyn ActivationRuntime>,
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
-        Self::open_inner(config, options, runtime, clock, None, None).await
+        Self::open_inner(config, options, runtime, clock, None, None, None).await
     }
     pub async fn open_with_configuration(
         config: IvyJson,
@@ -79,7 +92,7 @@ impl HostExecutor {
         runtime: Arc<dyn ActivationRuntime>,
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
-        Self::open_configuration(config, config_path, credential, options, runtime, clock, None).await
+        Self::open_configuration(config, config_path, credential, options, runtime, clock, None, None).await
     }
     /// Service startup supplies its actual process start time and the immutable
     /// scheduler helper through the reconciler. Existing core constructors do
@@ -93,7 +106,19 @@ impl HostExecutor {
         clock: Arc<dyn Clock>,
         bootstrap_restarts: BootstrapConfigurationRestarts,
     ) -> IvyResult<Self> {
-        Self::open_configuration(config, config_path, credential, options, runtime, clock, Some(bootstrap_restarts)).await
+        Self::open_configuration(config, config_path, credential, options, runtime, clock, Some(bootstrap_restarts), None).await
+    }
+    pub async fn open_with_updates(
+        config: IvyJson,
+        config_path: std::path::PathBuf,
+        credential: Option<JsString>,
+        options: ExecutorOptions,
+        runtime: Arc<dyn ActivationRuntime>,
+        clock: Arc<dyn Clock>,
+        bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
+        packages: PackageUpdateRuntime,
+    ) -> IvyResult<Self> {
+        Self::open_configuration(config, config_path, credential, options, runtime, clock, bootstrap_restarts, Some(packages)).await
     }
     async fn open_configuration(
         config: IvyJson,
@@ -103,6 +128,7 @@ impl HostExecutor {
         runtime: Arc<dyn ActivationRuntime>,
         clock: Arc<dyn Clock>,
         bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
+        packages: Option<PackageUpdateRuntime>,
     ) -> IvyResult<Self> {
         let credential = configuration_updater::update_credential(
             &config,
@@ -117,6 +143,7 @@ impl HostExecutor {
             clock,
             Some((config_path, credential)),
             bootstrap_restarts,
+            packages,
         )
         .await
     }
@@ -127,6 +154,7 @@ impl HostExecutor {
         clock: Arc<dyn Clock>,
         configuration: Option<(std::path::PathBuf, Option<String>)>,
         bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
+        packages: Option<PackageUpdateRuntime>,
     ) -> IvyResult<Self> {
         let lock = ExecutorLock::acquire(
             config::path_value(config.required("runtimeRoot")?)?.join("executor"),
@@ -139,6 +167,15 @@ impl HostExecutor {
                 let _ = lock.close().await;
                 return Err(error);
             }
+        };
+        let packages = match (&configuration, packages) {
+            (Some((path, Some(credential))), Some(bindings)) if !credential.is_empty()
+                && base.config().await?.get("packageUpdates").is_some_and(truthy) => Some((
+                PackageUpdater::new(base.clone(), credential.clone(), bindings.node, bindings.client),
+                AutomaticBootstrapUpdater::with_clock(path.clone(), bindings.distribution, base.clone(),
+                    bindings.automatic, bindings.compare, bindings.job_launcher, clock.clone()),
+            )),
+            _ => None,
         };
         let configuration = match configuration {
             Some((path, Some(credential))) if !credential.is_empty() => {
@@ -174,6 +211,7 @@ impl HostExecutor {
                 status,
                 configuration,
                 bootstrap_restarts,
+                packages,
             })),
             cancel,
             result,
@@ -228,6 +266,7 @@ struct Active {
 struct Status {
     active: Vec<String>,
     configuration_code: Option<JsString>,
+    package_code: Option<JsString>,
     revision: Option<IvyJson>,
     hash: Option<IvyJson>,
 }
@@ -248,6 +287,7 @@ impl StatusWriter {
         let host = self.base.config().await?;
         let mut code = snapshot
             .configuration_code
+            .or(snapshot.package_code)
             .map(IvyJson::String)
             .unwrap_or(IvyJson::Null);
         if state == "ready" && (code.is_null() || code == "storage_retention_attention".into()) {
@@ -386,15 +426,17 @@ impl Coordinator {
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop{tokio::select!{biased;_=stopped.cancelled()=>break,_=ticks.tick()=>{let _=status.write("ready").await;}}}
             }));
-            let mut next_configuration=0.0;let mut next_bootstrap_restart=0.0;let mut last_hint=String::new();
+            let mut next_configuration=0.0;let mut next_bootstrap_restart=0.0;let mut next_package=0.0;let mut last_hint=String::new();
             while !self.cancel.is_cancelled(){
-                if let Some(updater)=&self.configuration {
+                if self.configuration.is_some() || self.packages.is_some() {
                     let config=self.base.config().await?;
                     let hint=config::json_file(config::path_value(config.required("runtimeRoot")?)?.join("desired-state-hint.json"),config::CONFIGURATION_BYTES).await.ok();
                     if let Some(hint)=hint.filter(|v|v.get("schemaVersion")==Some(&IvyJson::Number(1.0))){
                         let identity=json::stringify(&hint,usize::MAX)?;
-                        if identity!=last_hint {last_hint=identity;if truthy(field(&hint,"configuration")){next_configuration=0.0;}}
+                        if identity!=last_hint {last_hint=identity;if truthy(field(&hint,"configuration")){next_configuration=0.0;}if truthy(field(&hint,"packages")){next_package=0.0;}}
                     }
+                }
+                if let Some(updater)=&self.configuration {
                     if self.clock.utc_millis() as f64>=next_configuration {
                         let result=updater.sync().await;
                         {
@@ -417,6 +459,16 @@ impl Coordinator {
                             Err(error)=>self.status.value.lock().map_err(|_|IvyError::internal())?.configuration_code=Some(error.code_js()),
                         }
                     }
+                }
+                if let Some((updater,automatic))=&self.packages && self.clock.utc_millis() as f64>=next_package {
+                    let config=self.base.config().await?;
+                    next_package=self.clock.utc_millis() as f64+config.required("packageUpdates")?.required("intervalSeconds")?.as_f64().ok_or_else(IvyError::internal)?*1000.0;
+                    let result=async {
+                        let result=updater.sync().await?;
+                        if !result.bootstrap.is_empty(){automatic.reconcile(result.bootstrap).await?;}
+                        Ok::<(),IvyError>(())
+                    }.await;
+                    self.status.value.lock().map_err(|_|IvyError::internal())?.package_code=result.err().map(|error|error.code_js());
                 }
                 let mut index=0;
                 while index<active.len(){

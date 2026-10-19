@@ -179,6 +179,14 @@ impl HostJournal {
     pub async fn manifest(&self, candidate_id: &str) -> IvyResult<IvyJson> {
         let id = candidate_id.to_owned(); self.with(move |s| s.manifest(&id)).await
     }
+    pub(crate) async fn retained_candidates(&self, component_id: &str, limit: usize) -> IvyResult<Vec<IvyJson>> {
+        let component = component_id.to_owned();
+        self.with(move |s| {
+            let mut statement = internal(s.db.prepare("SELECT candidate_json FROM candidates WHERE component_id=? ORDER BY candidate_id LIMIT ?"))?;
+            let rows = internal(statement.query_map(params![component, limit as i64], |row| row.get::<_, String>(0)))?;
+            rows.map(|row| decoded(&internal(row)?)).collect()
+        }).await
+    }
     pub(crate) async fn materialization_snapshot(&self, instance_id: &JsString, candidate_id: &str) -> IvyResult<(IvyJson,IvyJson,IvyJson,IvyJson)> {
         let instance_id=instance_id.clone();let candidate_id=candidate_id.to_owned();
         self.with(move |s| Ok((s.config.clone(),s.instance_js(&instance_id)?.clone(),s.candidate(&candidate_id)?,s.manifest(&candidate_id)?))).await

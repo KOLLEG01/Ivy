@@ -238,6 +238,47 @@ pub fn configuration_bootstrap_plan(
     validate_host("BootstrapPlan", &plan)?;
     Ok(plan)
 }
+/// Pick one retained release for each bootstrap component. The caller supplies
+/// the shared default-locale comparator; no byte-order replacement is assumed.
+pub async fn bootstrap_components(
+    config: &IvyJson,
+    journal: &crate::journal::HostJournal,
+    host_candidate: &IvyJson,
+    preferred: &[IvyJson],
+    compare: &crate::artifact::FileCompare,
+) -> IvyResult<Vec<IvyJson>> {
+    let mut result = Vec::new();
+    for instance in config.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
+        let component = instance.required("componentId")?;
+        if instance.get("engine") != Some(&"process".into())
+            || !(component == &"host-executor".into()
+                || host_candidate.required("platform")?.get("os") == Some(&"win32".into()) && component == &"service-manager".into()) { continue; }
+        let installed = journal.installed(&instance.required("instanceId")?.as_str()?).await?;
+        let selected = preferred.iter().find(|value| value.get("candidate").and_then(|value| value.get("componentId")) == Some(component));
+        let candidate = if Some(component) == host_candidate.get("componentId") { Some(host_candidate.clone()) }
+            else if let Some(selected) = selected { Some(selected.required("candidate")?.clone()) }
+            else if let Some(installed) = installed { Some(journal.candidate(&installed.required("candidateId")?.as_str()?).await?) }
+            else {
+                let mut rows = journal.retained_candidates(&component.as_str()?, 1000).await?;
+                if rows.len() > 1 && rows.iter().any(|row| row.get("createdAt").and_then(IvyJson::as_js_string).is_none()) { return Err(IvyError::internal()); }
+                // Both timestamps are schema strings, and stable ties retain the
+                // journal's candidate-id order just as Array.sort does.
+                rows.sort_by(|left, right| compare(right.get("createdAt").and_then(IvyJson::as_js_string).unwrap(), left.get("createdAt").and_then(IvyJson::as_js_string).unwrap()));
+                rows.into_iter().next()
+            };
+        let Some(candidate) = candidate else {
+            if instance.get("enabled").is_some_and(truthy) {
+                return Err(IvyError::new("not_found", format!("No retained bootstrap candidate exists for {}.", component.as_str()?)));
+            }
+            continue;
+        };
+        let manifest = if selected.is_some_and(|selected| selected.get("candidate").and_then(|value| value.get("candidateId")) == candidate.get("candidateId")) {
+            selected.unwrap().required("manifest")?.clone()
+        } else { journal.manifest(&candidate.required("candidateId")?.as_str()?).await? };
+        result.push(IvyJson::object([("candidate", candidate), ("manifest", manifest)]));
+    }
+    Ok(result)
+}
 fn unit_arg(value: &JsString) -> IvyResult<JsString> {
     require(
         !value.0.iter().any(|unit| *unit <= 31),

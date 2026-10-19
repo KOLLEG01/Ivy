@@ -48,6 +48,8 @@ mod host_startup_cases;
 mod configuration_updater_cases;
 #[path = "host-bootstrap-restart-cases.rs"]
 mod bootstrap_restart_cases;
+#[path = "host-package-updater-cases.rs"]
+mod package_updater_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {
