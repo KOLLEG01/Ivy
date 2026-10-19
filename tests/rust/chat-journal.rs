@@ -7,6 +7,8 @@ use ivy_contracts::{
     json::{parse, stringify},
 };
 use rusqlite::types::Value;
+#[path = "chat-command-cases.rs"]
+mod commands;
 use std::{
     io::Write,
     process::{Command, Stdio},
