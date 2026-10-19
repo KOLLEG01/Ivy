@@ -6,6 +6,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Threading;
+using System.Reflection;
+using System.Diagnostics;
 using Ivy.PhoneBridge;
 using SIPSorcery.Net;
 using SIPSorcery.SIP.App;
@@ -42,6 +44,62 @@ public static class PhoneRtcpOracle {
     }
     static object RunCase(JsonElement input) {
         switch (input.GetProperty("op").GetString()) {
+            case "statistics": {
+                var report = new ReceptionReport(input.GetProperty("source").GetUInt32());
+                var record = typeof(ReceptionReport).GetMethod("RtpPacketReceived", BindingFlags.NonPublic | BindingFlags.Instance);
+                var receiveSender = typeof(ReceptionReport).GetMethod("RtcpSenderReportReceived", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (record == null || receiveSender == null) throw new InvalidOperationException("Pinned original statistics entry unavailable");
+                var trace = new List<object>();
+                foreach (var action in input.GetProperty("actions").EnumerateArray()) {
+                    switch(action[0].GetString()) {
+                        case "rx": record.Invoke(report, new object[] { action[1].GetUInt16(), action[2].GetUInt32(), action[3].GetUInt32() }); break;
+                        case "sr": {
+                            receiveSender.Invoke(report, new object[] { ulong.Parse(action[1].GetString(), NumberStyles.HexNumber) });
+                            var timestamp = typeof(ReceptionReport).GetField("m_receivedLSRTimestamp", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(report);
+                            var receivedAt = (DateTime)timestamp.GetType().GetField("ReceivedAt").GetValue(timestamp);
+                            trace.Add(new { kind = "sr", receivedNtp32 = RTCPSession.DateTimeToNtpTimestamp32(receivedAt) }); break;
+                        }
+                        case "sample": {
+                            var sample = report.GetSample(action[1].GetUInt32());
+                            trace.Add(new { kind = "sample", block = Block(sample), hex = Convert.ToHexString(sample.GetBytes()).ToLowerInvariant() }); break;
+                        }
+                        default: throw new ArgumentException("Unknown statistics action");
+                    }
+                }
+                return new { ok = true, trace };
+            }
+            case "timer": {
+                var session = new RTCPSession(SDPMediaTypesEnum.audio, 9);
+                int defaultTimeout = session.NoActivityTimeoutMilliseconds;
+                session.NoActivityTimeoutMilliseconds = 0;
+                using var completed = new CountdownEvent(2);
+                var trace = new List<object>(); var sync = new object();
+                int timeouts = 0;
+                var clock = Stopwatch.StartNew();
+                session.OnTimeout += _ => Interlocked.Increment(ref timeouts);
+                session.OnReportReadyToSend += (_, report) => {
+                    lock(sync) {
+                        trace.Add(new { ms = clock.Elapsed.TotalMilliseconds, sender = report.SenderReport != null,
+                            bye = report.Bye != null, reason = report.Bye?.Reason, timeouts = Volatile.Read(ref timeouts) });
+                        if(report.Bye == null && completed.CurrentCount > 0) completed.Signal();
+                    }
+                };
+                try {
+                    var data = new byte[172]; data[0] = 128; data[3] = 1; data[11] = 9;
+                    session.RecordRtpPacketSend(new RTPPacket(data));
+                    bool firstRead = session.GetRtcpReport().SenderReport != null;
+                    bool secondRead = session.GetRtcpReport().SenderReport != null;
+                    if (!completed.Wait(30000)) throw new InvalidOperationException("Original report callbacks unavailable");
+                    bool afterTimer = session.GetRtcpReport().SenderReport != null;
+                    bool timedOut = session.IsTimedOut;
+                    session.RecordRtpPacketReceived(new RTPPacket(data));
+                    bool activityRecovered = !session.IsTimedOut;
+                    var choose = typeof(RTCPSession).GetMethod("GetNextRtcpInterval", BindingFlags.Instance | BindingFlags.NonPublic);
+                    int[] intervals = Enumerable.Range(0,256).Select(_ => (int)choose.Invoke(session,new object[] {5000})).ToArray();
+                    session.Close("phone_media_closed");
+                    lock(sync) return new { ok=true, defaultTimeout, firstRead, secondRead, afterTimer, timedOut, activityRecovered, intervals, trace=trace.ToArray() };
+                } finally { session.Close("fixture_complete"); }
+            }
             case "receive": {
                 // Actual original application callback/projection, not a
                 // reimplementation. Only owned loopback sockets and zero PCM;

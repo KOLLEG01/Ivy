@@ -14,6 +14,7 @@ mod resample;
 mod rtp;
 mod rtcp;
 mod rtcp_receive;
+mod rtcp_statistics;
 mod send_clock;
 mod sdp;
 mod startup;
@@ -28,6 +29,7 @@ pub use rtcp::{RtcpReportBlock, RtcpReportBuilder, RtcpSenderInfo, RtcpTransmitC
 pub use rtcp_receive::{
     RtcpCompound, RtcpReceiverReport, RtcpReportBlocks, RtcpSenderReport,
 };
+pub use rtcp_statistics::{RtcpReceptionStatistics, RtcpReportSchedule, RtcpTimerEvent};
 pub use send_clock::RtpSendClock;
 pub use sdp::{
     SDP_UNITS, SdpConnection, SdpDirection, SdpDocument, SdpError, SdpFormat, SdpMedia,

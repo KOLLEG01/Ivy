@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::new(), |mut s, b| {
         write!(s, "{b:02x}").unwrap();
@@ -39,7 +39,7 @@ fn block(value: RtcpReportBlock, original_loss: i32) -> IvyJson {
         n(value.delay_since_sender_report),
     ])
 }
-fn original(cases: &[IvyJson]) -> Vec<IvyJson> {
+pub(crate) fn original(cases: &[IvyJson]) -> Vec<IvyJson> {
     let mut child = Command::new("pwsh")
         .args([
             "-NoProfile",

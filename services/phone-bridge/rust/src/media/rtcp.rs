@@ -186,9 +186,9 @@ fn header(output: &mut Vec<u8>, kind: u8, count: u8, size: usize) {
     output.extend_from_slice(&((size / 4 - 1) as u16).to_be_bytes());
 }
 
-/// Count only actual admitted RTP sends. Report creation keeps the original
-/// cumulative SR/RR choice: once RTP was sent, reports remain sender reports.
-/// The report clock and transport completion belong to the media session.
+/// Count only actual admitted RTP sends. The report owner compares the packet
+/// count with the last completed timer callback to choose SR versus RR. A
+/// point-in-time report read does not commit that interval or its sent count.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RtcpTransmitCounters {
     pub packets: u32,
