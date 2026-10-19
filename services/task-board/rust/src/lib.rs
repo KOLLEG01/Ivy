@@ -9,6 +9,7 @@ pub mod local_journal;
 pub mod local_retention;
 pub mod local_workspaces;
 pub mod native_comments;
+pub mod native_driver;
 pub mod native_evidence;
 pub mod native_inspector;
 pub mod native_intent;

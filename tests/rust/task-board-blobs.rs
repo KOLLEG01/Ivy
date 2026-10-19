@@ -10,6 +10,8 @@ mod artifact;
 mod context_recovery;
 #[path = "../fixtures/task-board-journal-store.rs"]
 mod journal_store;
+#[path = "../fixtures/task-board-native-driver.rs"]
+mod native_driver;
 #[path = "../fixtures/task-board-native-intent.rs"]
 mod native_intent;
 #[path = "../fixtures/task-board-native-preparation.rs"]

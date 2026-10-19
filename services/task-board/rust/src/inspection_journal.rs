@@ -27,6 +27,26 @@ fn truthy(value: Option<&Json>) -> bool {
     }
 }
 
+pub(crate) async fn verify_owner(
+    client: &dyn RpcClient,
+    principal_id: &JsString,
+    service_node_id: &JsString,
+) -> IvyResult<()> {
+    let node = connection_owner(client, service_node_id).await?;
+    if node.get("principalId").and_then(Json::as_js_string) == Some(principal_id)
+        && node.get("serviceName") == Some(&Json::from("task-board"))
+        && truthy(node.get("connected"))
+        && truthy(node.get("synced"))
+    {
+        Ok(())
+    } else {
+        Err(IvyError::new(
+            "task_board_principal_mismatch",
+            "Workflow recovery requires the configured authenticated logical principal and a live synchronized service connection.",
+        ))
+    }
+}
+
 impl<'a, 'db, R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString>
     InspectionJournal<'a, 'db, R, P, C, I>
 {
@@ -81,19 +101,12 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     for InspectionJournal<'_, '_, R, P, C, I>
 {
     async fn verify_owner(&self) -> IvyResult<()> {
-        let node = connection_owner(self.journal.client.as_ref(), &self.service_node_id).await?;
-        if node.get("principalId").and_then(Json::as_js_string) == Some(&self.principal_id)
-            && node.get("serviceName") == Some(&Json::from("task-board"))
-            && truthy(node.get("connected"))
-            && truthy(node.get("synced"))
-        {
-            Ok(())
-        } else {
-            Err(IvyError::new(
-                "task_board_principal_mismatch",
-                "Workflow recovery requires the configured authenticated logical principal and a live synchronized service connection.",
-            ))
-        }
+        verify_owner(
+            self.journal.client.as_ref(),
+            &self.principal_id,
+            &self.service_node_id,
+        )
+        .await
     }
     async fn named_document(
         &self,
