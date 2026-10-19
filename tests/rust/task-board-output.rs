@@ -14,6 +14,8 @@ mod native_comments;
 mod orchestrator;
 #[path = "../fixtures/task-board-reconciler.rs"]
 mod reconciler;
+#[path = "../fixtures/task-board-native-publication.rs"]
+mod native_publication;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {

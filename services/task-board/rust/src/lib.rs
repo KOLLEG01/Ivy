@@ -21,6 +21,7 @@ pub mod native_intent;
 pub mod native_lifecycle;
 pub mod native_orchestrator;
 pub mod native_plan;
+pub mod native_publication;
 pub mod native_recovery;
 pub mod native_signals;
 pub mod native_state;
