@@ -16,6 +16,8 @@ use ivy_task_board::{
     task_written::{TaskCommentNotices, TaskNoticePolicy},
 };
 use std::{cmp::Ordering, path::PathBuf};
+#[path = "task-board-engine-factory-native.rs"]
+mod native;
 
 fn clock() -> String {
     "2026-01-02T03:04:05.006Z".to_owned()
@@ -38,6 +40,7 @@ struct Fixture {
     notices: Cell<u64>,
     notice_generations: RefCell<Vec<u64>>,
     refusal: bool,
+    native: Option<native::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -57,6 +60,7 @@ impl Fixture {
             notices: Cell::new(0),
             notice_generations: RefCell::default(),
             refusal,
+            native: None,
         }
     }
     fn database(&self) -> Connection {
@@ -119,6 +123,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         };
         if self.refusal {
             return Err(failure("policy"));
+        }
+        if let Some(native) = &self.native {
+            native.seed(&policy.context)?;
         }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
@@ -206,6 +213,9 @@ impl TaskNoticePolicy for Policies<'_> {
             .notice_generations
             .borrow_mut()
             .push(self.context.owner.generation as u64);
+        if let Some(native) = &self.fixture.native {
+            return native.notice(self.context.owner.generation, task, operation);
+        }
         // An applied first Task step with an uncertain observation must retain
         // its original prepared write and reserved gate for the next owner.
         if self.context.owner.generation == 1.0 {
@@ -229,6 +239,11 @@ impl CategoryLocale for Policies<'_> {
 }
 impl LifecyclePages for Policies<'_> {
     async fn page(&self, key: &str, options: &Json) -> IvyResult<Json> {
+        if let Some(native) = &self.fixture.native {
+            if key == "task-board/run" && self.context.owner.generation == 1.0 {
+                native.inputs_ready.wait().await;
+            }
+        }
         if self.context.owner.generation == 1.0 && options.get("select").is_some() {
             self.fixture.page_waiting.set(true);
             self.fixture.page_held.wait().await;
@@ -247,10 +262,14 @@ impl LifecyclePages for Policies<'_> {
             if let Some(filter) = options.get("where") {
                 if filter.get("op") == Some(&"and".into()) {
                     assert_eq!(key, "task-board/task");
-                    assert_eq!(
-                        value.required("fields")?.get("control"),
-                        Some(&"user".into())
-                    );
+                    if self.fixture.native.is_some() {
+                        assert_eq!(value.get("workflowState"), Some(&"in_progress".into()));
+                    } else {
+                        assert_eq!(
+                            value.required("fields")?.get("control"),
+                            Some(&"user".into())
+                        );
+                    }
                     continue;
                 }
                 assert_eq!(filter.get("op"), Some(&"in".into()));
@@ -348,6 +367,31 @@ fn c(generation: u64, operation: &str) -> InvocationContext {
     c.operation_id = Some(operation.into());
     c
 }
+// Share the closure's Rust type so every case uses one compiled engine graph.
+fn make_factory<'a>(
+    fixture: &'a Fixture,
+    contracts: &'a ContractsBinding,
+    catalogs: &'a CheckedNativeContracts,
+) -> EngineFactory<
+    'a,
+    ContractsBinding,
+    Fixture,
+    impl Fn(&Json) -> IvyResult<OpenedJournal> + 'a,
+    fn() -> String,
+    fn() -> JsString,
+    SystemClock,
+> {
+    EngineFactory {
+        contracts,
+        catalogs,
+        policies: fixture,
+        open_journal: move |s: &Json| fixture.open(s),
+        now: clock as fn() -> String,
+        new_id: id as fn() -> JsString,
+        clock: SystemClock,
+        service_node_id: "fixture-task-board".into(),
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn production_factory_recovers_abandoned_creation_after_reconnect_and_reuses_original_writes()
@@ -357,16 +401,7 @@ async fn production_factory_recovers_abandoned_creation_after_reconnect_and_reus
     let contracts = ContractsBinding;
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    let factory = EngineFactory {
-        contracts: &contracts,
-        catalogs: &catalogs,
-        policies: &fixture,
-        open_journal: |s: &Json| fixture.open(s),
-        now: clock as fn() -> String,
-        new_id: id as fn() -> JsString,
-        clock: SystemClock,
-        service_node_id: "fixture-task-board".into(),
-    };
+    let factory = make_factory(&fixture, &contracts, &catalogs);
     let (service, owner) = make_service(configured(&peer), &contracts).unwrap();
     let original = create();
     let script = async {
@@ -537,16 +572,7 @@ async fn production_factory_policy_refusal_never_exposes_a_generation_or_leaves_
     let contracts = ContractsBinding;
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
-    let factory = EngineFactory {
-        contracts: &contracts,
-        catalogs: &catalogs,
-        policies: &fixture,
-        open_journal: |s: &Json| fixture.open(s),
-        now: clock as fn() -> String,
-        new_id: id as fn() -> JsString,
-        clock: SystemClock,
-        service_node_id: "fixture-task-board".into(),
-    };
+    let factory = make_factory(&fixture, &contracts, &catalogs);
     let (service, owner) = make_service(configured(&peer), &contracts).unwrap();
     let script = async {
         service.start();

@@ -21,6 +21,7 @@ const wss=new WebSocketServer({host:'127.0.0.1',port:0,perMessageDeflate:false,m
 await once(wss,'listening');
 console.log(JSON.stringify({url:`http://127.0.0.1:${wss.address().port}/ivy/`,registry}));
 let generation=0,invocation=0;
+let nativeInputs=[];
 wss.on('connection',(socket,request)=>{
   const selected=++generation,pending=new Map();
   const send=frame=>{if(socket.readyState===1)socket.send(JSON.stringify(frame));};
@@ -45,6 +46,17 @@ wss.on('connection',(socket,request)=>{
     else if(factory&&method==='events.head')reply(id,{throughSequence:0});
     else if(factory&&method==='events.subscribe')reply(id,{items:[],throughSequence:0,gap:null});
     else if(factory&&method==='events.ack')reply(id,{});
+    else if(factory&&method==='test.inputs'){nativeInputs=structuredClone(params.items);reply(id,{});}
+    else if(factory&&method==='tools.list'){
+      const name=params.namePrefix;
+      if(!['inputs','status'].includes(name))throw Error('Unbound finite native tool '+name);
+      const nativeDefinition={namespace:'agent',name,interfaceVersion:'1.0.0',annotations:{readOnlyHint:true},inputSchema:{},outputSchema:{}};
+      reply(id,{provider:{node:{serviceNodeId:'native-agent'}},items:[{qualifiedName:'agent.'+name,definition:nativeDefinition,definitionHash:toolDefinitionHash(nativeDefinition),catalogHash:'sha256:'+'b'.repeat(64)}],nextCursor:null});
+    }
+    else if(factory&&method==='tools.call'&&params.qualifiedName==='agent.inputs')reply(id,{epoch:'epoch',items:nativeInputs,truncated:false});
+    // This explicit read-only boundary keeps native dispatch/status/evidence
+    // outside the mirroring fixture; the real orchestrator records its refusal.
+    else if(factory&&method==='tools.call'&&params.qualifiedName==='agent.status')send({jsonrpc:'2.0',id,error:{code:-32000,message:'Finite native inspection boundary.',data:{code:'fixture_native_stop',outcome:'not_executed',details:{scope:'native-mirroring'}}}});
     else if(method==='test.invoke'||method==='test.invokeAction'){
       const key='invoke-'+(++invocation);pending.set(key,id);
       const tool=method==='test.invoke'?definition:actionDefinition;

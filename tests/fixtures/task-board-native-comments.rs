@@ -17,7 +17,7 @@ use std::{
     cell::RefCell,
     path::Path,
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 type Trace = Arc<Mutex<Vec<Json>>>;
 fn record(trace: &Trace, parts: impl IntoIterator<Item = Json>) {
@@ -183,28 +183,34 @@ impl Store {
         Ok(())
     }
 }
+pub(crate) fn data() -> &'static Json {
+    static DATA: OnceLock<Json> = OnceLock::new();
+    DATA.get_or_init(|| {
+        let output = Command::new("node")
+            .args([
+                "--experimental-transform-types",
+                "--disable-warning=ExperimentalWarning",
+                "tests/fixtures/task-board-native-comments-oracle.mjs",
+            ])
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parse(
+            std::str::from_utf8(&output.stdout).unwrap(),
+            MANAGEMENT_FRAME_BYTES,
+        )
+        .unwrap()
+    })
+}
 #[tokio::test]
 async fn native_comment_mirroring_matches_original_identity_confidentiality_and_publication_traces()
 {
-    let output = Command::new("node")
-        .args([
-            "--experimental-transform-types",
-            "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/task-board-native-comments-oracle.mjs",
-        ])
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let fixture = parse(
-        std::str::from_utf8(&output.stdout).unwrap(),
-        MANAGEMENT_FRAME_BYTES,
-    )
-    .unwrap();
+    let fixture = data();
     for case in fixture.required("rows").unwrap().as_array().unwrap() {
         let input = case.required("input").unwrap();
         let trace: Trace = Arc::default();

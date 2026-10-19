@@ -32,6 +32,7 @@ impl Contracts for ContractsBinding {
         Ok(match key {
             "task-board/task" => "1.8.0",
             "task-board/configuration" => "1.2.0",
+            "task-board/run" => "1.1.0",
             _ => "1.0.0",
         }
         .into())
@@ -52,6 +53,7 @@ impl Contracts for ContractsBinding {
             match key {
                 "task-board/task" => "Task",
                 "task-board/operation" => "Operation",
+                "task-board/run" => "Run",
                 "task-board/coordination" => "Coordination",
                 "task-board/history" => "History",
                 "task-board/result" => "Result",
