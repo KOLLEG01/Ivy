@@ -304,6 +304,7 @@ async fn native_inspection_matches_original_traces_and_search_checkpoints() {
     let catalogs = CheckedNativeContracts::new(root);
     let time = text(&data, "time");
     let rows = data.required("rows").unwrap().as_array().unwrap();
+    let mut retry_adapter_passes = 0;
     for row in rows {
         let i = row.required("input").unwrap();
         let trace: Trace = Arc::default();
@@ -357,14 +358,18 @@ async fn native_inspection_matches_original_traces_and_search_checkpoints() {
                     } else {
                         PageSize::Hundred
                     };
-                    match inspector
-                        .find(
+                    let budget = i.get("budget").and_then(Json::as_f64).unwrap_or(8.0);
+                    let inspected = if budget == 8.0 && matches!(size, PageSize::Hundred) {
+                        retry_adapter_passes += 1;
+                        ivy_task_board::native_rate_limit::RetryInspection::find(
+                            &inspector,
                             data.required("pin")?,
-                            i.get("budget").and_then(Json::as_f64).unwrap_or(8.0),
-                            size,
                         )
                         .await?
-                    {
+                    } else {
+                        inspector.find(data.required("pin")?, budget, size).await?
+                    };
+                    match inspected {
                         Inspection::Found { metadata, turns } => Json::object([
                             ("kind", "found".into()),
                             ("metadata", metadata),
@@ -403,5 +408,6 @@ async fn native_inspection_matches_original_traces_and_search_checkpoints() {
             canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap()
         );
     }
+    assert!(retry_adapter_passes > 0);
     println!("{} native inspection comparisons", rows.len());
 }
