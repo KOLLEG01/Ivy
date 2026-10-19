@@ -151,14 +151,14 @@ test("invalid attachment input is rejected before reserving a Task", async (t) =
   assert.deepEqual((await f.first.store.read("task-board/task", base.taskId)).pin, created.task);
 });
 
-test("attachment identities do not become Hive reference names and leave room for results", async (t) => {
+test("attachment identities do not become Hive reference names and uploaded file counts stay bounded", async (t) => {
   const f = taskBoardFixture(t), created = await f.create();
   const uploaded = await f.invoke({ action: "uploadAttachment", operationId: "attachment-reference", taskId: created.task!.objectId,
     expectedRevision: created.task!.revision, attachmentId: "file: " + "x".repeat(200), filename: "file.txt", mediaType: "text/plain",
     bytesBase64: Buffer.from("saved content").toString("base64") });
   assert.equal(uploaded.attachment?.filename, "file.txt");
   const current = await f.first.store.read("task-board/task", uploaded.task!);
-  const attachments = Array.from({ length: 254 }, (_, index) => ({ ...uploaded.attachment!, attachmentId: "file-" + index,
+  const attachments = Array.from({ length: 256 }, (_, index) => ({ ...uploaded.attachment!, attachmentId: "file-" + index,
     object: { objectId: "capacity-file-" + index, revision: 1 } }));
   // Capacity validation runs before any attempt to dereference or upload these files.
   f.first.checks.aggregate = async () => undefined;

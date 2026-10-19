@@ -14,7 +14,7 @@ import { publishNative } from "./native-publication.js";
 import { verifyNativeTranscript } from "./full-turn-evidence.js";
 import type { ContractValues } from "./schema.js";
 import { contractVersion } from './schema.js';
-import { mutation, taskAttachmentPins, TaskBoardStore } from "./store.js";
+import { mutation, TaskBoardStore } from "./store.js";
 import type { Document } from "./store.js";
 import { initialDelivery } from "./deliveries.js";
 import { checkedNativeContract } from "../../../../packages/sdk/src/node.js";
@@ -1863,10 +1863,7 @@ export class TaskBoardEngine {
         }
         requireThat(!request.nativeInput || actor.source === 'native', 'task_board_forbidden', 'Native input observations are recorded only by TaskBoard.');
         requireThat(!request.contactUser || request.purpose === 'question', 'invalid_arguments', 'Only important questions can request user contact.');
-        const retainedPins = [...taskAttachmentPins({ ...task, attachments: [...task.attachments, ...request.attachments] }),
-          ...(request.handoff?.deliveries ?? []).flatMap(delivery => delivery.artifacts.map(artifact => artifact.object))];
-        requireThat(new Set(retainedPins.map(hashJson)).size + (request.handoff?.deliveries?.length ? 1 : 0) <= 254,
-          "limit_exceeded", "A Task can retain at most 254 attachments alongside its Run and final Result.");
+        // Evidence references are paged by the store; aggregate reference counts cannot reject a handoff.
         for (const attachment of request.attachments)
           await this.checks.artifact({
             object: attachment.object,
@@ -1921,8 +1918,8 @@ export class TaskBoardEngine {
         }
         break;
       case "uploadAttachment":
-        requireThat(task.attachments.length < 256 && taskAttachmentPins(task).length < 254,
-          "limit_exceeded", "A Task can retain at most 254 attachments alongside its Run and final Result.");
+        requireThat(task.attachments.length < 256,
+          "limit_exceeded", "A Task can retain at most 256 uploaded attachments.");
         {
           const bytes = Buffer.from(request.bytesBase64, "base64");
           requireThat(bytes.length <= 8 * 1024 * 1024 && bytes.toString("base64") === request.bytesBase64,

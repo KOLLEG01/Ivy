@@ -35,7 +35,7 @@ test('operation receipts fit the normal service schema admission limits', () => 
   for (const name of ['operation', 'operationReceipt']) assert.doesNotThrow(() => admitSchema(taskBoardTools.find(tool => tool.name === name)!.outputSchema));
 });
 
-test('native completion at the reference limit preserves recovery evidence and retries overflowing pages without loss', async t => {
+test('uploads and recovery handoffs at the reference limit remain admitted and preserve exact evidence', async t => {
   const w = await nativeWorkflow(t); await w.running();
   const store = w.f.first.store, client = store.client, task = await store.read('task-board/task', w.state().task);
   const at = new Date().toISOString(), attachments: TaskBoard.Task['attachments'] = [];
@@ -50,6 +50,14 @@ test('native completion at the reference limit preserves recovery evidence and r
   randomUUID(), { create: { parentId: store.rootObjectId, name: 'Prior retained result' } });
   await store.write('task-board/task', { ...task.value, latestResult: priorResult, attachments }, randomUUID(),
     { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
+  // Exercise public admission as well as storage: Run/Result references do not consume upload slots.
+  for (let index = 254; index < 256; index++) {
+    const current = await store.read('task-board/task', task.pin.objectId);
+    const uploaded = await w.f.invoke({ action: 'uploadAttachment', operationId: randomUUID(),
+      taskId: task.pin.objectId, expectedRevision: current.pin.revision, attachmentId: 'capacity-' + index,
+      filename: 'capacity-' + index + '.txt', mediaType: 'text/plain', bytesBase64: Buffer.from('Retained evidence ' + index).toString('base64') });
+    assert.ok(uploaded.attachment); attachments.push(uploaded.attachment);
+  }
   await w.refresh();
   const closed = await finish(w), raw = await client.request('objects.read', closed.pin);
   assert.equal(closed.value.claim, null);
@@ -89,6 +97,18 @@ test('native completion at the reference limit preserves recovery evidence and r
   assert.deepEqual((await client.request('objects.read', pagePin)).revision.references, page.revision.references);
   assert.deepEqual((await store.read('task-board/task', closed.pin)).value.attachments, attachments);
   assert.deepEqual((await store.read('task-board/task', next)).value.attachments, reordered.attachments);
+  const repair = await new TaskBoardScheduler(w.f.second).task(task.pin.objectId); assert.ok(repair?.run);
+  w.adopt(repair); await w.running();
+  const recovered = await finish(w, { workflowState: 'todo', nextStep: 'Continue the existing authorized work.', nextReviewAt: null,
+    deliveries: [{ key: 'retained-capacity-proof', artifacts: [], codeReferences: [
+      { kind: 'commit', url: 'https://example.test/commit/abc', commit: 'abc', label: 'Existing implementation' },
+    ] }] });
+  assert.equal(recovered.value.completionIssue, undefined);
+  assert.equal(recovered.value.publication, null);
+  assert.equal(recovered.value.attachments.length, 256);
+  assert.equal(recovered.value.deliveries?.[0]?.delivery.key, 'retained-capacity-proof');
+  const recoveredHeader = await client.request('objects.read', recovered.pin);
+  assert.ok(recoveredHeader.revision.references['reference-page-1'], 'the added delivery result gets its own overflow page');
 });
 
 test('an own handoff rejects sourceTaskId precisely and keeps the active claim available for correction', async t => {
