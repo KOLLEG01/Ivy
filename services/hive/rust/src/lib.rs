@@ -28,6 +28,7 @@ pub mod wiki;
 pub mod worker_actions;
 pub mod worker_client;
 pub mod worker_identity;
+pub mod worker_kernel;
 pub mod worker_protocol;
 pub mod worker_runtime;
 pub mod worker_server;

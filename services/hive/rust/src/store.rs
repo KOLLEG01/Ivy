@@ -101,6 +101,11 @@ impl Store {
         store.install_query_functions()?;
         Ok(store)
     }
+    /// Consume the storage owner only after its yielding backup tasks finish.
+    pub fn close(self) -> IvyResult<()> {
+        let connection = Rc::try_unwrap(self.db).map_err(sql_error)?;
+        connection.close().map_err(|(_, error)| sql_error(error))
+    }
     fn initialize(&mut self) -> IvyResult<()> {
         let format: i64 = self
             .db

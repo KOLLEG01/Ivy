@@ -110,6 +110,10 @@ fn location(params: &IvyJson) -> IvyResult<objects::Location<'_>> {
     }
 }
 impl Kernel {
+    /// Close composed storage. Startup retains ownership of any temporary UI root.
+    pub fn close(self) -> IvyResult<()> {
+        self.parts.store.close()
+    }
     /// Compose the execution boundary; this does not open storage or start IPC.
     pub fn compose(
         parts: Parts,

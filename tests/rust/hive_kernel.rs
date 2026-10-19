@@ -21,6 +21,8 @@ mod content;
 mod domains;
 #[path = "hive_worker_actions.rs"]
 mod worker_actions;
+#[path = "hive_worker_kernel.rs"]
+mod worker_kernel;
 
 fn options() -> Options {
     Options {

@@ -15,12 +15,32 @@ use tokio::{
 
 pub type BackupTask = Pin<Box<dyn Future<Output = IvyResult<IvyJson>>>>;
 pub type Progress = Arc<dyn Fn() + Send + Sync>;
+pub enum Completion {
+    Reply(IvyResult<IvyJson>),
+    /// Publication itself failed; already emitted notifications remain visible,
+    /// but the request chain cannot issue a reply or accept more work.
+    Failed(IvyError),
+}
+pub struct Dispatch {
+    pub notifications: Vec<Notification>,
+    pub completion: Completion,
+}
 /// The kernel owns its connection and every action's validation. Backup tasks
 /// must use that same connection in yielding batches, as in the original worker.
 pub trait WorkerService {
     fn handle(&mut self, payload: IvyJson) -> IvyResult<IvyJson>;
     fn backup(&mut self, payload: IvyJson, progress: Progress) -> IvyResult<BackupTask>;
     fn notifications(&mut self) -> Vec<Notification>;
+    /// Existing services keep their action/notification behavior. Kernel-backed
+    /// dispatch also preserves the original fallible publication boundary.
+    fn dispatch(&mut self, payload: IvyJson) -> Dispatch {
+        let close = payload.get("action") == Some(&IvyJson::from("close"));
+        let result = self.handle(payload);
+        Dispatch {
+            notifications: if close { vec![] } else { self.notifications() },
+            completion: Completion::Reply(result),
+        }
+    }
 }
 struct Backup {
     id: u64,
@@ -169,12 +189,14 @@ where
                         finish_backup(&mut writer, &mut running).await?;
                     }
                 }
-                let result = service.handle(request.payload);
-                if !close {
-                    for notification in service.notifications() {
-                        write_frame(&mut writer, &notification.to_json()).await?;
-                    }
+                let dispatch = service.dispatch(request.payload);
+                for notification in dispatch.notifications {
+                    write_frame(&mut writer, &notification.to_json()).await?;
                 }
+                let result = match dispatch.completion {
+                    Completion::Reply(result) => result,
+                    Completion::Failed(error) => return Err(io::Error::other(error)),
+                };
                 write_frame(
                     &mut writer,
                     &Message::Reply {
