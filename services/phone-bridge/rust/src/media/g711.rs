@@ -45,12 +45,23 @@ impl G711Codec {
 fn mu_encode(sample: i16) -> u8 {
     let sample = i32::from(sample);
     let sign = if sample < 0 { 0x80 } else { 0 };
-    let magnitude = sample.abs().min(32635) + 132;
+    // The original i16 encoder wraps abs(MIN) and emits negative zero there.
+    let magnitude = (if sample == i32::from(i16::MIN) {
+        0
+    } else {
+        sample.abs()
+    })
+    .min(32635)
+        + 132;
     let exponent = (31 - magnitude.leading_zeros()).saturating_sub(7);
     let mantissa = (magnitude >> (exponent + 3)) & 15;
     !(sign | (exponent as u8) << 4 | mantissa as u8)
 }
 fn mu_decode(sample: u8) -> i16 {
+    // Preserve the original decoder's negative-zero reconstruction.
+    if sample == 0x7f {
+        return -1;
+    }
     let value = !sample;
     let magnitude = (((i32::from(value & 15) << 3) + 132) << ((value & 0x70) >> 4)) - 132;
     (if value & 0x80 != 0 {
@@ -60,12 +71,21 @@ fn mu_decode(sample: u8) -> i16 {
     }) as i16
 }
 fn a_encode(sample: i16) -> u8 {
-    let sample = i32::from(sample) >> 3;
     let (magnitude, mask) = if sample >= 0 {
-        (sample, 0xd5)
+        (i32::from(sample), 0xd5)
     } else {
-        (-sample - 1, 0x55)
+        // Keep the original negative threshold and i16-MIN behavior. Subtracting
+        // one before quantization changes 127 other negative boundary samples.
+        (
+            if sample == i16::MIN {
+                0
+            } else {
+                -i32::from(sample)
+            },
+            0x55,
+        )
     };
+    let magnitude = magnitude >> 3;
     let segment = (31 - magnitude.max(1).leading_zeros()).saturating_sub(4);
     let mantissa = (magnitude >> if segment < 2 { 1 } else { segment }) & 15;
     (((segment as u8) << 4) | mantissa as u8) ^ mask

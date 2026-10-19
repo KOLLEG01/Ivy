@@ -11,6 +11,8 @@ $task93Resolver=[Func[System.Runtime.Loader.AssemblyLoadContext,System.Reflectio
 [System.Runtime.Loader.AssemblyLoadContext]::Default.add_Resolving($task93Resolver)
 try {
  $task93Assembly=[System.Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath((Join-Path $task93Directory 'Ivy.PhoneRuntime.dll'))
+ $null=[System.Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath((Join-Path $task93Directory 'SIPSorceryMedia.Abstractions.dll'))
+ $null=[System.Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath((Join-Path $task93Directory 'SIPSorcery.dll'))
  $evs=$task93Assembly.GetType('Ivy.PhoneBridge.EvsFormat')
  $flags=[Reflection.BindingFlags]'NonPublic,Static'
  $cases=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
@@ -45,7 +47,7 @@ try {
      $pcm=[short[]]::new(65536)
      for($index=0;$index -lt $pcm.Length;$index++){$pcm[$index]=[short]($index-32768)}
      $octets=[byte[]](0..255)
-     $encoder=[SIPSorcery.Media.AudioEncoder]::new()
+     $encoder=[SIPSorcery.Media.AudioEncoder]::new($false)
      try {
       $encoded=$encoder.EncodeAudio($pcm,$format)
       $decoded=$encoder.DecodeAudio($octets,$format)

@@ -437,6 +437,11 @@ fn g711_packet_bounds_and_silence_are_explicit_at_the_codec_clock() {
         assert_eq!(codec.decode(&[silence; 960]).unwrap(), vec![level; 960]);
         assert!(codec.decode(&[]).is_err());
         assert!(codec.decode(&[silence; 961]).is_err());
+        let minimum = codec.encode_20ms(&[i16::MIN; 160])[0];
+        assert_eq!(minimum, if law == Codec::Pcma { 0x55 } else { 0x7f });
+        if law == Codec::Pcmu {
+            assert_eq!(codec.decode(&[0x7f]).unwrap(), [-1]);
+        }
     }
 }
 
