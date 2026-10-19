@@ -179,7 +179,7 @@ fn children(fixture: &Fixture, key: &str) -> Vec<(String, u64, String, Json)> {
     stmt.query_map([key], |r| {
         Ok((
             r.get(0)?,
-            r.get(1)?,
+            u64::try_from(r.get::<_, i64>(1)?).unwrap(),
             r.get(2)?,
             json(&r.get::<_, String>(3)?),
         ))
