@@ -11,7 +11,7 @@ use crate::{
     service_bridge::LocalHandler,
 };
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, json::try_js_string};
-use ivy_sdk::service_connection::InvocationContext;
+use ivy_sdk::service::InvocationContext;
 
 pub trait ServiceRuntime {
     fn recovered(&self) -> bool;

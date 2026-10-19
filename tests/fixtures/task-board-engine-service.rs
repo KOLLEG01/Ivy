@@ -1,5 +1,5 @@
 use super::*;
-use ivy_sdk::service_connection::InvocationContext;
+use ivy_sdk::service::InvocationContext;
 use ivy_task_board::{
     engine_read::{EngineReads, ReadRuntime},
     engine_service::{EngineService, ServiceCategories, ServiceRuntime},

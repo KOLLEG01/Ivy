@@ -2,7 +2,7 @@
 //! mailbox. The host schedules the owner future; this creates no runtime/thread.
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, Outcome};
-use ivy_sdk::service_connection::{InvocationContext, ServiceFuture, ToolHandler};
+use ivy_sdk::service::{InvocationContext, ServiceFuture, ToolHandler};
 use std::{
     future::Future,
     panic::AssertUnwindSafe,

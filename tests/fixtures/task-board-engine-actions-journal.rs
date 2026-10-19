@@ -668,7 +668,7 @@ async fn check_comment_recovery(question: bool) {
             handler: &facade,
             invocations: &invocations,
         };
-        let context = ivy_sdk::service_connection::InvocationContext {
+        let context = ivy_sdk::service::InvocationContext {
             caller_principal_id: "caller".into(),
             operation_id: Some(s(&operation.value, "operationId").clone()),
             generation: 1,
