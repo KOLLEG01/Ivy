@@ -289,3 +289,102 @@ fn unchanged_typescript_codec_is_the_oracle() {
         assert!(canonical(&value, encoded.len() - 1).is_err());
     }
 }
+
+#[test]
+fn url_projection_matches_node_constructor_fields_and_failures() {
+    use ivy_contracts::whatwg_url::{
+        clear_url_credentials, parse_url, parse_url_with_base, url_components,
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut mismatches = Vec::new();
+    for mode in ["projection", "credentials", "components", "relative"] {
+        let output = std::process::Command::new("node")
+            .args([
+                "--experimental-transform-types",
+                "--disable-warning=ExperimentalWarning",
+                "tests/fixtures/whatwg-url-oracle.mjs",
+            ])
+            .arg(mode)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(rows.len() > 700);
+        for row in rows {
+            let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
+            let expected = parse(row["result"].as_str().unwrap(), 100_000).unwrap();
+            let actual = if mode == "credentials" {
+                match clear_url_credentials(input.as_js_string().unwrap()) {
+                    Ok(value) => {
+                        IvyJson::object([("ok", true.into()), ("value", IvyJson::String(value))])
+                    }
+                    Err(error) => {
+                        IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
+                    }
+                }
+            } else if mode == "components" {
+                match url_components(input.as_js_string().unwrap()) {
+                    Ok(u) => IvyJson::object([
+                        ("ok", true.into()),
+                        (
+                            "value",
+                            IvyJson::object([
+                                ("origin", u.origin.into()),
+                                ("pathname", u.pathname.into()),
+                            ]),
+                        ),
+                    ]),
+                    Err(error) => {
+                        IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
+                    }
+                }
+            } else {
+                let result = if mode == "relative" {
+                    let base = parse(row["base"].as_str().unwrap(), 100_000).unwrap();
+                    parse_url_with_base(input.as_js_string().unwrap(), base.as_js_string().unwrap())
+                } else {
+                    parse_url(input.as_js_string().unwrap())
+                };
+                match result {
+                    Ok(u) => IvyJson::object([
+                        ("ok", true.into()),
+                        (
+                            "value",
+                            IvyJson::object([
+                                ("href", u.href.into()),
+                                ("protocol", u.protocol.into()),
+                                ("hostname", u.hostname.into()),
+                                ("username", u.username.into()),
+                                ("password", u.password.into()),
+                                ("hash", u.hash.into()),
+                            ]),
+                        ),
+                    ]),
+                    Err(error) => {
+                        IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
+                    }
+                }
+            };
+            if actual != expected {
+                mismatches.push(format!(
+                    "URL mode: {mode}, input: {}, base: {}, actual: {}, expected: {}",
+                    row["input"],
+                    row["base"],
+                    stringify(&actual, 100_000).unwrap(),
+                    stringify(&expected, 100_000).unwrap()
+                ));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} URL mismatches: {:#?}",
+        mismatches.len(),
+        &mismatches[..mismatches.len().min(20)]
+    );
+}
