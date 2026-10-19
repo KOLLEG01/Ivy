@@ -42,13 +42,42 @@ pub enum NativeReconciliation<T> {
 pub async fn reconcile_native_operation<T, R, F>(
     owner: &dyn NativeOperationOwner,
     call: &NativeOperationCall,
-    mut journal: NativeOperationJournal<T, R>,
+    journal: NativeOperationJournal<T, R>,
     on_absent: Option<&dyn NativeAbsentHandler>,
     absence_conflict_code: Option<&str>,
 ) -> IvyResult<NativeReconciliation<T>>
 where
     R: FnMut(IvyJson) -> F,
     F: Future<Output = IvyResult<T>>,
+{
+    reconcile_native_operation_local(
+        owner,
+        call,
+        journal,
+        on_absent.map(|handler| {
+            move |call, absence: IvyJson| async move { handler.on_absent(call, &absence).await }
+        }),
+        absence_conflict_code,
+    )
+    .await
+}
+
+/// Reconcile with a caller-local absence callback, allowing current-thread
+/// journals. The callback receives the exact confirmed absence as an owned
+/// value; it is never called for previously observed work. Dispatch authority
+/// and domain guards remain the caller's responsibility.
+pub async fn reconcile_native_operation_local<T, R, F, H, HF>(
+    owner: &dyn NativeOperationOwner,
+    call: &NativeOperationCall,
+    mut journal: NativeOperationJournal<T, R>,
+    on_absent: Option<H>,
+    absence_conflict_code: Option<&str>,
+) -> IvyResult<NativeReconciliation<T>>
+where
+    R: FnMut(IvyJson) -> F,
+    F: Future<Output = IvyResult<T>>,
+    H: FnOnce(NativeOperationCall, IvyJson) -> HF,
+    HF: Future<Output = IvyResult<Option<IvyJson>>>,
 {
     let call = call.clone();
     if let Some(previous) = &journal.previous {
@@ -74,7 +103,7 @@ where
                 absence: observed,
             });
         };
-        observed = match handler.on_absent(call.clone(), &observed).await? {
+        observed = match handler(call.clone(), observed).await? {
             Some(submitted) => submitted,
             None => owner.operation(&call).await?,
         };

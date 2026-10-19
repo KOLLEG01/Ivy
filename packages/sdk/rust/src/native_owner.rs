@@ -22,6 +22,7 @@ use ivy_contracts::{
 };
 use std::{
     collections::VecDeque,
+    future::Future,
     sync::{Arc, Mutex},
 };
 
@@ -194,6 +195,8 @@ impl NativeOwner {
         self.call_management(name, args, operation_id, None, false, None)
             .await
     }
+    // The explicit Send future also breaks status/recovery's recursive future
+    // type. Local guards use the same implementation without this coercion.
     fn call_management<'a>(
         &'a self,
         name: &'a str,
@@ -203,74 +206,97 @@ impl NativeOwner {
         reconcile_unknown: bool,
         reassess: Option<&'a NativeOperationCall>,
     ) -> RequestFuture<'a> {
-        Box::pin(async move {
-            self.check_signal()?;
-            let tools = self.tools.service_tools(
-                self.target.service_node_id.clone(),
-                &[InterfaceRequirement {
-                    namespace: "agent".into(),
-                    interface_version: "1.0.0".into(),
-                }],
-            )?;
-            let mut binding = tools.binding(&format!("agent.{name}").into(), None).await?;
-            for attempt in 0..=1 {
-                let guarded = async {
-                    if let Some(guard) = guard {
-                        guard.check().await?;
+        Box::pin(self.call_management_with_guard(
+            name,
+            args,
+            operation_id,
+            move || async move {
+                if let Some(guard) = guard {
+                    guard.check().await?;
+                }
+                Ok(())
+            },
+            reconcile_unknown,
+            reassess,
+        ))
+    }
+    async fn call_management_with_guard<G, F>(
+        &self,
+        name: &str,
+        args: IvyJson,
+        operation_id: Option<JsString>,
+        guard: G,
+        reconcile_unknown: bool,
+        reassess: Option<&NativeOperationCall>,
+    ) -> IvyResult<IvyJson>
+    where
+        G: Fn() -> F,
+        F: Future<Output = IvyResult<()>>,
+    {
+        self.check_signal()?;
+        let tools = self.tools.service_tools(
+            self.target.service_node_id.clone(),
+            &[InterfaceRequirement {
+                namespace: "agent".into(),
+                interface_version: "1.0.0".into(),
+            }],
+        )?;
+        let mut binding = tools.binding(&format!("agent.{name}").into(), None).await?;
+        for attempt in 0..=1 {
+            let guarded = async {
+                guard().await?;
+                self.check_signal()
+            }
+            .await;
+            if let Err(error) = guarded {
+                return Err(if attempt == 0 {
+                    error
+                } else {
+                    error.with_outcome(Outcome::NotExecuted)
+                });
+            }
+            match call_bound(
+                self.tools.client(),
+                &binding,
+                args.clone(),
+                operation_id.clone(),
+                ToolCallOptions {
+                    request: self.options.clone(),
+                    expected_caller_principal_id: Some(self.caller.clone()),
+                },
+            )
+            .await
+            {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    if reconcile_unknown && error.outcome != Outcome::NotExecuted {
+                        return Ok(IvyJson::Null);
                     }
-                    self.check_signal()
-                }
-                .await;
-                if let Err(error) = guarded {
-                    return Err(if attempt == 0 {
-                        error
-                    } else {
-                        error.with_outcome(Outcome::NotExecuted)
-                    });
-                }
-                match call_bound(
-                    self.tools.client(),
-                    &binding,
-                    args.clone(),
-                    operation_id.clone(),
-                    ToolCallOptions {
-                        request: self.options.clone(),
-                        expected_caller_principal_id: Some(self.caller.clone()),
-                    },
-                )
-                .await
-                {
-                    Ok(value) => return Ok(value),
-                    Err(error) => {
-                        if reconcile_unknown && error.outcome != Outcome::NotExecuted {
-                            return Ok(IvyJson::Null);
-                        }
-                        if attempt > 0
-                            || error.code != "tool_definition_changed"
-                            || error.outcome != Outcome::NotExecuted
+                    if attempt > 0
+                        || error.code != "tool_definition_changed"
+                        || error.outcome != Outcome::NotExecuted
+                    {
+                        return Err(error);
+                    }
+                    let refreshed = async {
+                        let fresh = tools.refresh(&binding).await?;
+                        if fresh.value().get("definitionHash")
+                            == binding.value().get("definitionHash")
                         {
                             return Err(error);
                         }
-                        let refreshed = async {
-                            let fresh = tools.refresh(&binding).await?;
-                            if fresh.value().get("definitionHash")
-                                == binding.value().get("definitionHash")
-                            {
-                                return Err(error);
-                            }
-                            if let Some(call) = reassess {
-                                self.reassess_native(call).await?;
-                            }
-                            Ok(fresh)
+                        if let Some(call) = reassess {
+                            self.reassess_native(call).await?;
                         }
-                        .await;
-                        binding =
-                            refreshed.map_err(|error| error.with_outcome(Outcome::NotExecuted))?;
+                        Ok(fresh)
                     }
+                    .await;
+                    binding =
+                        refreshed.map_err(|error| error.with_outcome(Outcome::NotExecuted))?;
                 }
             }
-            unreachable!()
-        })
+        }
+        unreachable!()
     }
     pub async fn status(&self) -> IvyResult<IvyJson> {
         let value = self.management("status", empty(), None).await?;
@@ -364,15 +390,29 @@ impl NativeOwner {
         call: &NativeOperationCall,
         guard: &dyn NativeDispatchGuard,
     ) -> IvyResult<Option<IvyJson>> {
+        self.dispatch_local(call, || guard.check()).await
+    }
+    /// Guarded dispatch with a caller-local callback/future. The same guard is
+    /// rechecked before every send, including after definition recovery; local
+    /// state is never moved to a worker thread or granted dispatch authority.
+    pub async fn dispatch_local<G, F>(
+        &self,
+        call: &NativeOperationCall,
+        guard: G,
+    ) -> IvyResult<Option<IvyJson>>
+    where
+        G: Fn() -> F,
+        F: Future<Output = IvyResult<()>>,
+    {
         let binding = self
             .binding(&call.method, Some(&call.definition_hash))
             .await?;
         let value = self
-            .call_management(
+            .call_management_with_guard(
                 "invoke",
                 self.arguments(call, &binding)?,
                 Some(call.operation_id.clone()),
-                Some(guard),
+                guard,
                 true,
                 Some(call),
             )
