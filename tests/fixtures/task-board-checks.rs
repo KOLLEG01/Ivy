@@ -9,6 +9,9 @@ use ivy_sdk::{
 };
 use ivy_task_board::{
     checks::{CheckStore, TaskChecks, date},
+    engine_checks::{CheckPolicy, EngineChecks},
+    engine_publication::CreationChecks,
+    engine_validation::ActionValidationChecks,
     native_lifecycle::{LifecycleDocument, LifecycleStore},
     operations::{Document, Store},
 };
@@ -249,6 +252,29 @@ impl CheckStore for World {
             .map(|_| ())
     }
 }
+// Explicit finite current-policy boundary for the frozen source probes. The
+// concrete domain checks below are not replaced, and production has no default.
+struct FrozenPolicy;
+impl CheckPolicy for FrozenPolicy {
+    fn aggregate(&self, _: &Json, _: &JsString) -> IvyResult<()> {
+        Ok(())
+    }
+    fn fields(&self, _: &Json, _: Option<&JsString>) -> IvyResult<()> {
+        Ok(())
+    }
+    fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
+        Ok(())
+    }
+    fn coordination_pending(&self, _: &Json) -> IvyResult<bool> {
+        panic!("Not a coordination probe")
+    }
+    async fn failed_rate_limit_retry_at(&self, _: &Document) -> IvyResult<Option<JsString>> {
+        panic!("Not a recovery probe")
+    }
+    async fn unstarted_archived_context(&self, _: &Document) -> IvyResult<bool> {
+        panic!("Not a recovery probe")
+    }
+}
 #[tokio::test(flavor = "current_thread")]
 async fn task_checks_match_original_graph_artifact_creation_configuration_and_execution_rules() {
     let catalogs =
@@ -270,10 +296,13 @@ async fn task_checks_match_original_graph_artifact_creation_configuration_and_ex
             root: Some("root".into()),
         };
         let tools = ToolClients::new(store.client());
-        let checks = TaskChecks {
-            store: &store,
-            catalogs: &catalogs,
-            tools: &tools,
+        let checks = EngineChecks {
+            core: TaskChecks {
+                store: &store,
+                catalogs: &catalogs,
+                tools: &tools,
+            },
+            policy: &FrozenPolicy,
         };
         let args = f(row, "args").as_array().unwrap();
         let null = Json::Null;
@@ -286,28 +315,59 @@ async fn task_checks_match_original_graph_artifact_creation_configuration_and_ex
                 "artifact" => checks.artifact(arg(0)).await.map(|_| Json::Null),
                 "content" => checks.content(arg(0)).await.map(|_| Json::Null),
                 "dependencies" => checks
+                    .core
                     .dependencies(arg(0), id(1), arg(2).as_bool().unwrap_or(false))
                     .await
                     .map(|_| Json::Null),
-                "fields" => checks.fields(arg(0), id(1)).await.map(|_| Json::Null),
-                "initialState" => {
-                    checks
-                        .initial_state(arg(0), arg(1), arg(2), arg(3).as_js_string().unwrap())
-                        .await
+                "fields" => match id(1) {
+                    Some(id) => ActionValidationChecks::fields(&checks, arg(0), id).await,
+                    None => CreationChecks::fields(&checks, arg(0)).await,
                 }
-                "deferral" => checks
-                    .deferral(arg(0), id(1), arg(2).as_js_string().unwrap())
-                    .await
-                    .map(|_| Json::Null),
-                "checkBlocker" => checks.check_blocker(args.first()).await.map(|_| Json::Null),
-                "executionOptions" => checks
-                    .execution_options(
+                .map(|_| Json::Null),
+                "initialState" => {
+                    CreationChecks::initial_state(
+                        &checks,
                         arg(0),
-                        (!arg(1).is_null()).then(|| arg(1)),
-                        arg(2).as_bool().unwrap_or(false),
+                        arg(1),
+                        arg(2),
+                        arg(3).as_js_string().unwrap(),
                     )
                     .await
+                }
+                "deferral" => match id(1) {
+                    Some(id) => {
+                        checks
+                            .deferral(arg(0), id, arg(2).as_js_string().unwrap())
+                            .await
+                    }
+                    None => {
+                        checks
+                            .core
+                            .deferral(arg(0), None, arg(2).as_js_string().unwrap())
+                            .await
+                    }
+                }
+                .map(|_| Json::Null),
+                "checkBlocker" => checks
+                    .core
+                    .check_blocker(args.first())
+                    .await
                     .map(|_| Json::Null),
+                "executionOptions" => {
+                    let allow = arg(2).as_bool().unwrap_or(false);
+                    if arg(1).is_null() {
+                        CreationChecks::execution_options(&checks, arg(0), allow).await
+                    } else if !allow {
+                        ActionValidationChecks::execution_options(&checks, arg(0), Some(arg(1)))
+                            .await
+                    } else {
+                        checks
+                            .core
+                            .execution_options(arg(0), Some(arg(1)), allow)
+                            .await
+                    }
+                }
+                .map(|_| Json::Null),
                 "execution" => {
                     checks
                         .execution(
@@ -315,8 +375,8 @@ async fn task_checks_match_original_graph_artifact_creation_configuration_and_ex
                             arg(1),
                             id(2).unwrap(),
                             id(3).unwrap(),
-                            (!arg(4).is_null()).then(|| arg(4)),
-                            (!arg(5).is_null()).then(|| arg(5)),
+                            arg(4),
+                            arg(5),
                             arg(6).as_bool().unwrap_or(false),
                         )
                         .await
@@ -339,4 +399,220 @@ async fn task_checks_match_original_graph_artifact_creation_configuration_and_ex
             replay.name
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mandatory_current_policy_precedes_domain_reads_and_preserves_recovery_results() {
+    use std::cell::{Cell, RefCell};
+    struct Policy {
+        allow: Cell<bool>,
+        seen: RefCell<Vec<Json>>,
+    }
+    impl Policy {
+        fn enter(&self, name: &str, args: Vec<Json>) -> IvyResult<()> {
+            self.seen.borrow_mut().push(Json::object([
+                ("name", name.into()),
+                ("args", Json::Array(args)),
+            ]));
+            if self.allow.get() {
+                Ok(())
+            } else {
+                Err(
+                    IvyError::new("current_policy_refused", "Owner policy refused this input.")
+                        .with_outcome(Outcome::Unknown)
+                        .with_details(Json::object([("policy", name.into())])),
+                )
+            }
+        }
+    }
+    impl CheckPolicy for Policy {
+        fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {
+            self.enter("aggregate", vec![task.clone(), id.clone().into()])
+        }
+        fn fields(&self, fields: &Json, own: Option<&JsString>) -> IvyResult<()> {
+            self.enter(
+                "fields",
+                vec![
+                    fields.clone(),
+                    own.cloned().map(Json::String).unwrap_or(Json::Null),
+                ],
+            )
+        }
+        fn creation(
+            &self,
+            request: &Json,
+            fields: &Json,
+            actor: &Json,
+            at: &JsString,
+        ) -> IvyResult<()> {
+            self.enter(
+                "creation",
+                vec![
+                    request.clone(),
+                    fields.clone(),
+                    actor.clone(),
+                    at.clone().into(),
+                ],
+            )
+        }
+        fn coordination_pending(&self, task: &Json) -> IvyResult<bool> {
+            self.enter("coordination", vec![task.clone()])?;
+            Ok(true)
+        }
+        async fn failed_rate_limit_retry_at(&self, task: &Document) -> IvyResult<Option<JsString>> {
+            self.enter("retry", vec![task.pin.clone(), task.value.clone()])?;
+            Ok(Some("2026-01-02T03:19:05.006Z".into()))
+        }
+        async fn unstarted_archived_context(&self, task: &Document) -> IvyResult<bool> {
+            self.enter("archived", vec![task.pin.clone(), task.value.clone()])?;
+            Ok(true)
+        }
+    }
+    let id = JsString("task".encode_utf16().chain([0xd800]).collect());
+    let run_pin = Json::object([("objectId", "run".into()), ("revision", Json::Number(1.0))]);
+    let task = Json::object([("lastRun", run_pin.clone())]);
+    let boundary = Json::object([
+        ("kind", "read".into()),
+        (
+            "args",
+            Json::Array(vec![
+                "task-board/run".into(),
+                run_pin.clone(),
+                true.into(),
+                false.into(),
+            ]),
+        ),
+        (
+            "value",
+            Json::object([
+                ("pin", run_pin),
+                ("value", Json::object([("taskId", "other".into())])),
+                ("metadata", Json::object([("parentId", "root".into())])),
+            ]),
+        ),
+    ]);
+    let replay = Arc::new(Replay {
+        steps: Mutex::new(VecDeque::from([boundary])),
+        name: "mandatory current policy".into(),
+    });
+    let store = World {
+        replay: replay.clone(),
+        root: Some("root".into()),
+    };
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let tools = ToolClients::new(store.client());
+    let policy = Policy {
+        allow: Cell::new(false),
+        seen: RefCell::new(vec![]),
+    };
+    let checks = EngineChecks {
+        core: TaskChecks {
+            store: &store,
+            catalogs: &catalogs,
+            tools: &tools,
+        },
+        policy: &policy,
+    };
+    let fields = Json::object([
+        ("nextReviewAt", "invalid date".into()),
+        ("control", "user".into()),
+    ]);
+    let request = Json::object([("workflowState", "review".into())]);
+    let actor = Json::object([("source", "user".into())]);
+    let at = JsString::from("2026-01-02T03:04:05.006Z");
+    let retained = Document {
+        pin: Json::object([
+            ("objectId", id.clone().into()),
+            ("revision", Json::Number(7.0)),
+        ]),
+        value: task.clone(),
+        parent_id: Some("root".into()),
+        content_hash: hash_json(&task).unwrap(),
+    };
+    let rejected = [
+        checks.aggregate(&task, &id).await,
+        ActionValidationChecks::fields(&checks, &fields, &id).await,
+        CreationChecks::fields(&checks, &fields).await,
+        CreationChecks::initial_state(&checks, &request, &fields, &actor, &at)
+            .await
+            .map(|_| ()),
+        checks.coordination_pending(&task).map(|_| ()),
+        checks
+            .failed_rate_limit_retry_at(&retained)
+            .await
+            .map(|_| ()),
+        checks
+            .unstarted_archived_context(&retained)
+            .await
+            .map(|_| ()),
+    ];
+    for (result, name) in rejected.into_iter().zip([
+        "aggregate",
+        "fields",
+        "fields",
+        "creation",
+        "coordination",
+        "retry",
+        "archived",
+    ]) {
+        let e = result.unwrap_err();
+        assert_eq!(e.code_js(), JsString::from("current_policy_refused"));
+        assert_eq!(e.outcome, Outcome::Unknown);
+        assert_eq!(e.details, Some(Json::object([("policy", name.into())])));
+    }
+    assert_eq!(
+        replay.steps.lock().unwrap().len(),
+        1,
+        "Refused current policy cannot reach cross-record reads"
+    );
+    let trace = policy.seen.borrow();
+    assert_eq!(
+        f(&trace[0], "args"),
+        &Json::Array(vec![task.clone(), id.clone().into()])
+    );
+    assert_eq!(
+        f(&trace[1], "args"),
+        &Json::Array(vec![fields.clone(), id.clone().into()])
+    );
+    assert_eq!(
+        f(&trace[2], "args"),
+        &Json::Array(vec![fields.clone(), Json::Null])
+    );
+    assert_eq!(
+        f(&trace[3], "args"),
+        &Json::Array(vec![
+            request.clone(),
+            fields.clone(),
+            actor.clone(),
+            at.clone().into()
+        ])
+    );
+    drop(trace);
+    policy.allow.set(true);
+    assert_eq!(
+        checks.aggregate(&task, &id).await.unwrap_err().code_js(),
+        JsString::from("task_board_run_mismatch")
+    );
+    assert!(replay.steps.lock().unwrap().is_empty());
+    assert_eq!(
+        ActionValidationChecks::fields(&checks, &fields, &id)
+            .await
+            .unwrap_err()
+            .code_js(),
+        JsString::from("task_board_invalid_date")
+    );
+    assert_eq!(
+        CreationChecks::initial_state(&checks, &request, &fields, &actor, &at)
+            .await
+            .unwrap_err()
+            .code_js(),
+        JsString::from("task_board_result_required")
+    );
+    assert!(checks.coordination_pending(&task).unwrap());
+    assert_eq!(
+        checks.failed_rate_limit_retry_at(&retained).await.unwrap(),
+        Some("2026-01-02T03:19:05.006Z".into())
+    );
+    assert!(checks.unstarted_archived_context(&retained).await.unwrap());
 }

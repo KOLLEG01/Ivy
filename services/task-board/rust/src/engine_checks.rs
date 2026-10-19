@@ -1,0 +1,100 @@
+//! Bind concrete domain checks to creation and existing-action admission.
+//! Current aggregate, creation, conversation and recovery rules stay mandatory.
+use crate::{
+    checks::{CheckStore, TaskChecks},
+    engine_publication::CreationChecks,
+    engine_validation::ActionValidationChecks,
+    operations::Document,
+};
+use ivy_contracts::{IvyJson as Json, IvyResult, JsString};
+
+/// Current contract/conversation invariants are additional to cross-record and
+/// native checks. No legacy policy, empty implementation or default is supplied.
+#[allow(async_fn_in_trait)]
+pub trait CheckPolicy {
+    fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()>;
+    fn fields(&self, fields: &Json, id: Option<&JsString>) -> IvyResult<()>;
+    fn creation(&self, request: &Json, fields: &Json, actor: &Json, at: &JsString)
+    -> IvyResult<()>;
+    fn coordination_pending(&self, task: &Json) -> IvyResult<bool>;
+    async fn failed_rate_limit_retry_at(&self, task: &Document) -> IvyResult<Option<JsString>>;
+    async fn unstarted_archived_context(&self, task: &Document) -> IvyResult<bool>;
+}
+pub struct EngineChecks<'a, S, P> {
+    pub core: TaskChecks<'a, S>,
+    pub policy: &'a P,
+}
+impl<S: CheckStore, P: CheckPolicy> CreationChecks for EngineChecks<'_, S, P> {
+    async fn fields(&self, fields: &Json) -> IvyResult<()> {
+        self.policy.fields(fields, None)?;
+        self.core.fields(fields, None).await
+    }
+    async fn initial_state(
+        &self,
+        request: &Json,
+        fields: &Json,
+        actor: &Json,
+        at: &JsString,
+    ) -> IvyResult<Json> {
+        self.policy.creation(request, fields, actor, at)?;
+        self.core.initial_state(request, fields, actor, at).await
+    }
+    async fn execution_options(&self, fields: &Json, allow_unavailable: bool) -> IvyResult<()> {
+        self.core
+            .execution_options(fields, None, allow_unavailable)
+            .await
+    }
+}
+impl<S: CheckStore, P: CheckPolicy> ActionValidationChecks for EngineChecks<'_, S, P> {
+    async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {
+        self.policy.aggregate(task, id)?;
+        self.core.aggregate(task, id).await
+    }
+    async fn fields(&self, fields: &Json, id: &JsString) -> IvyResult<()> {
+        self.policy.fields(fields, Some(id))?;
+        self.core.fields(fields, Some(id)).await
+    }
+    async fn execution_options(&self, fields: &Json, task: Option<&Json>) -> IvyResult<()> {
+        self.core.execution_options(fields, task, false).await
+    }
+    async fn execution(
+        &self,
+        task: &Json,
+        intent: &Json,
+        id: &JsString,
+        at: &JsString,
+        target: &Json,
+        workspace: &Json,
+        coordination_only: bool,
+    ) -> IvyResult<Json> {
+        self.core
+            .execution(
+                task,
+                intent,
+                id,
+                at,
+                Some(target),
+                Some(workspace),
+                coordination_only,
+            )
+            .await
+    }
+    async fn deferral(&self, request: &Json, id: &JsString, at: &JsString) -> IvyResult<()> {
+        self.core.deferral(request, Some(id), at).await
+    }
+    async fn content(&self, content: &Json) -> IvyResult<()> {
+        self.core.content(content).await
+    }
+    async fn artifact(&self, artifact: &Json) -> IvyResult<()> {
+        self.core.artifact(artifact).await
+    }
+    fn coordination_pending(&self, task: &Json) -> IvyResult<bool> {
+        self.policy.coordination_pending(task)
+    }
+    async fn failed_rate_limit_retry_at(&self, task: &Document) -> IvyResult<Option<JsString>> {
+        self.policy.failed_rate_limit_retry_at(task).await
+    }
+    async fn unstarted_archived_context(&self, task: &Document) -> IvyResult<bool> {
+        self.policy.unstarted_archived_context(task).await
+    }
+}

@@ -1,10 +1,13 @@
 use super::*;
 use ivy_contracts::builtin_schema::SchemaBundle;
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
+use ivy_sdk::tools::ToolClients;
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
     category_projection::{CategoryLocale, CategoryProjection},
+    checks::TaskChecks,
     engine_admission::{AdmissionRuntime, EngineAdmission, EngineOwner},
+    engine_checks::{CheckPolicy, EngineChecks},
     engine_execution::{
         CachedExecution, ExecutionCategories, ExecutionComponents, ExecutionProofs, ExecutionQueue,
     },
@@ -13,7 +16,7 @@ use ivy_task_board::{
         CreationChecks, EnginePublisher, PublicationRoutes, RootPublicationChecks,
     },
     engine_read::ReadContext,
-    engine_validation::{ActionValidation, ActionValidationChecks, check_aggregate},
+    engine_validation::ActionValidation,
     journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_journal::{LocalJournal, initialize},
@@ -242,42 +245,19 @@ impl Executor<'_> {
         .await
     }
 }
-struct Checks<'a, S> {
+struct Policy {
     first: bool,
-    store: &'a S,
 }
-impl<S: Store> ActionValidationChecks for Checks<'_, S> {
-    async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {
+impl CheckPolicy for Policy {
+    fn aggregate(&self, task: &Json, _: &JsString) -> IvyResult<()> {
         assert!(self.first, "Recovery must retain original admission");
-        admission("Task", task)?;
-        check_aggregate(self.store, task, id).await
+        admission("Task", task)
     }
-    async fn fields(&self, _: &Json, _: &JsString) -> IvyResult<()> {
+    fn fields(&self, _: &Json, _: Option<&JsString>) -> IvyResult<()> {
         panic!("No field edit")
     }
-    async fn execution_options(&self, _: &Json, _: Option<&Json>) -> IvyResult<()> {
-        panic!("No execution options")
-    }
-    async fn execution(
-        &self,
-        _: &Json,
-        _: &Json,
-        _: &JsString,
-        _: &JsString,
-        _: &Json,
-        _: &Json,
-        _: bool,
-    ) -> IvyResult<Json> {
-        panic!("No execution")
-    }
-    async fn deferral(&self, _: &Json, _: &JsString, _: &JsString) -> IvyResult<()> {
-        panic!("No deferral")
-    }
-    async fn content(&self, _: &Json) -> IvyResult<()> {
-        panic!("No final material")
-    }
-    async fn artifact(&self, _: &Json) -> IvyResult<()> {
-        panic!("No attachment")
+    fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
+        panic!("No creation")
     }
     fn coordination_pending(&self, _: &Json) -> IvyResult<bool> {
         panic!("No scheduling")
@@ -289,7 +269,7 @@ impl<S: Store> ActionValidationChecks for Checks<'_, S> {
         panic!("No recovery proof")
     }
 }
-impl<S> ActionRestore for Checks<'_, S> {
+impl ActionRestore for Policy {
     async fn restore_for_execution(&self, _: &Document, _: &Document) -> IvyResult<()> {
         panic!("No continuation")
     }
@@ -577,9 +557,15 @@ async fn check_comment_recovery(question: bool) {
                 Ok(())
             })
         };
-        let checks = Checks {
-            first: round == 0,
-            store: &operations.store,
+        let policy = Policy { first: round == 0 };
+        let tools = ToolClients::new(client.clone());
+        let checks = EngineChecks {
+            core: TaskChecks {
+                store: &operations.store,
+                catalogs: &catalogs,
+                tools: &tools,
+            },
+            policy: &policy,
         };
         let validation = ActionValidation {
             store: &operations.store,
@@ -604,7 +590,7 @@ async fn check_comment_recovery(question: bool) {
             settings: &settings,
             catalogs: &catalogs,
             policies: &validation,
-            lifecycle: &checks,
+            lifecycle: &policy,
         };
         let routes = Routes(&actions);
         let publisher = EnginePublisher {

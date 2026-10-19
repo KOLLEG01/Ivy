@@ -3,7 +3,9 @@ use ivy_contracts::builtin_schema::SchemaBundle;
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_sdk::tools::ToolClients;
 use ivy_store::rusqlite::Connection;
-use ivy_task_board::checks::{CheckStore, TaskChecks};
+use ivy_task_board::checks::TaskChecks;
+use ivy_task_board::engine_checks::{CheckPolicy, EngineChecks};
+use ivy_task_board::engine_publication::RootChecks;
 use ivy_task_board::{
     configuration::initial_configuration,
     engine_execution::{
@@ -100,34 +102,30 @@ impl LifecyclePages for NoPages {
         panic!("No page scan allowed")
     }
 }
-struct Checks<'a, S> {
+struct Policy {
     first: bool,
-    core: TaskChecks<'a, S>,
 }
-impl<S: CheckStore> CreationChecks for Checks<'_, S> {
-    async fn fields(&self, fields: &Json) -> IvyResult<()> {
+impl CheckPolicy for Policy {
+    fn aggregate(&self, _: &Json, _: &JsString) -> IvyResult<()> {
+        panic!("Not an existing Task")
+    }
+    fn fields(&self, fields: &Json, own: Option<&JsString>) -> IvyResult<()> {
         assert!(self.first, "Recovery must retain original checks");
-        admission("TaskFields", fields)?;
-        self.core.fields(fields, None).await
+        assert!(own.is_none());
+        admission("TaskFields", fields)
     }
-    async fn initial_state(
-        &self,
-        request: &Json,
-        fields: &Json,
-        actor: &Json,
-        at: &JsString,
-    ) -> IvyResult<Json> {
+    fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
         assert!(self.first, "Recovery must retain original state");
-        self.core.initial_state(request, fields, actor, at).await
+        Ok(())
     }
-    async fn execution_options(&self, fields: &Json, allow: bool) -> IvyResult<()> {
-        assert!(self.first);
-        self.core.execution_options(fields, None, allow).await
+    fn coordination_pending(&self, _: &Json) -> IvyResult<bool> {
+        panic!("Not a coordination probe")
     }
-}
-impl<S: CheckStore> RootPublicationChecks for Checks<'_, S> {
-    async fn configuration(&self, _: &Json) -> IvyResult<()> {
-        panic!("Not a configure request")
+    async fn failed_rate_limit_retry_at(&self, _: &Document) -> IvyResult<Option<JsString>> {
+        panic!("Not a recovery probe")
+    }
+    async fn unstarted_archived_context(&self, _: &Document) -> IvyResult<bool> {
+        panic!("Not a recovery probe")
     }
 }
 struct Unused;
@@ -304,19 +302,24 @@ async fn actual_create_reopens_original_key_result_history_and_task_after_lost_f
             })
         };
         let tools = ToolClients::new(client.clone());
-        let checks = Checks {
-            first: round == 0,
+        let policy = Policy { first: round == 0 };
+        let checks = EngineChecks {
+            policy: &policy,
             core: TaskChecks {
                 store: &operations.store,
                 catalogs: &catalogs,
                 tools: &tools,
             },
         };
+        let root_checks = RootChecks {
+            journal: &journal,
+            creation: &checks,
+        };
         let unused = Unused;
         let publisher = EnginePublisher {
             operations: &operations,
             catalogs: &catalogs,
-            checks: &checks,
+            checks: &root_checks,
             routes: &unused,
             task_written: &callback,
         };
