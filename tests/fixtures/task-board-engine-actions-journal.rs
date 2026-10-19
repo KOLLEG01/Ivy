@@ -249,14 +249,14 @@ struct Policy {
     first: bool,
 }
 impl CheckPolicy for Policy {
-    fn aggregate(&self, task: &Json, _: &JsString) -> IvyResult<()> {
+    async fn aggregate(&self, task: &Json, _: &JsString) -> IvyResult<()> {
         assert!(self.first, "Recovery must retain original admission");
         admission("Task", task)
     }
-    fn fields(&self, _: &Json, _: Option<&JsString>) -> IvyResult<()> {
+    async fn fields(&self, _: &Json, _: Option<&JsString>) -> IvyResult<()> {
         panic!("No field edit")
     }
-    fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
+    async fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
         panic!("No creation")
     }
     fn coordination_pending(&self, _: &Json) -> IvyResult<bool> {

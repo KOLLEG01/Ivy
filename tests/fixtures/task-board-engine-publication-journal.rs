@@ -106,15 +106,15 @@ struct Policy {
     first: bool,
 }
 impl CheckPolicy for Policy {
-    fn aggregate(&self, _: &Json, _: &JsString) -> IvyResult<()> {
+    async fn aggregate(&self, _: &Json, _: &JsString) -> IvyResult<()> {
         panic!("Not an existing Task")
     }
-    fn fields(&self, fields: &Json, own: Option<&JsString>) -> IvyResult<()> {
+    async fn fields(&self, fields: &Json, own: Option<&JsString>) -> IvyResult<()> {
         assert!(self.first, "Recovery must retain original checks");
         assert!(own.is_none());
         admission("TaskFields", fields)
     }
-    fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
+    async fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
         assert!(self.first, "Recovery must retain original state");
         Ok(())
     }

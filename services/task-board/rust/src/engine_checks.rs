@@ -12,10 +12,15 @@ use ivy_contracts::{IvyJson as Json, IvyResult, JsString};
 /// native checks. No legacy policy, empty implementation or default is supplied.
 #[allow(async_fn_in_trait)]
 pub trait CheckPolicy {
-    fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()>;
-    fn fields(&self, fields: &Json, id: Option<&JsString>) -> IvyResult<()>;
-    fn creation(&self, request: &Json, fields: &Json, actor: &Json, at: &JsString)
-    -> IvyResult<()>;
+    async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()>;
+    async fn fields(&self, fields: &Json, id: Option<&JsString>) -> IvyResult<()>;
+    async fn creation(
+        &self,
+        request: &Json,
+        fields: &Json,
+        actor: &Json,
+        at: &JsString,
+    ) -> IvyResult<()>;
     fn coordination_pending(&self, task: &Json) -> IvyResult<bool>;
     async fn failed_rate_limit_retry_at(&self, task: &Document) -> IvyResult<Option<JsString>>;
     async fn unstarted_archived_context(&self, task: &Document) -> IvyResult<bool>;
@@ -26,7 +31,7 @@ pub struct EngineChecks<'a, S, P> {
 }
 impl<S: CheckStore, P: CheckPolicy> CreationChecks for EngineChecks<'_, S, P> {
     async fn fields(&self, fields: &Json) -> IvyResult<()> {
-        self.policy.fields(fields, None)?;
+        self.policy.fields(fields, None).await?;
         self.core.fields(fields, None).await
     }
     async fn initial_state(
@@ -36,7 +41,7 @@ impl<S: CheckStore, P: CheckPolicy> CreationChecks for EngineChecks<'_, S, P> {
         actor: &Json,
         at: &JsString,
     ) -> IvyResult<Json> {
-        self.policy.creation(request, fields, actor, at)?;
+        self.policy.creation(request, fields, actor, at).await?;
         self.core.initial_state(request, fields, actor, at).await
     }
     async fn execution_options(&self, fields: &Json, allow_unavailable: bool) -> IvyResult<()> {
@@ -47,11 +52,11 @@ impl<S: CheckStore, P: CheckPolicy> CreationChecks for EngineChecks<'_, S, P> {
 }
 impl<S: CheckStore, P: CheckPolicy> ActionValidationChecks for EngineChecks<'_, S, P> {
     async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {
-        self.policy.aggregate(task, id)?;
+        self.policy.aggregate(task, id).await?;
         self.core.aggregate(task, id).await
     }
     async fn fields(&self, fields: &Json, id: &JsString) -> IvyResult<()> {
-        self.policy.fields(fields, Some(id))?;
+        self.policy.fields(fields, Some(id)).await?;
         self.core.fields(fields, Some(id)).await
     }
     async fn execution_options(&self, fields: &Json, task: Option<&Json>) -> IvyResult<()> {

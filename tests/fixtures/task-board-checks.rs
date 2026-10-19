@@ -256,13 +256,13 @@ impl CheckStore for World {
 // concrete domain checks below are not replaced, and production has no default.
 struct FrozenPolicy;
 impl CheckPolicy for FrozenPolicy {
-    fn aggregate(&self, _: &Json, _: &JsString) -> IvyResult<()> {
+    async fn aggregate(&self, _: &Json, _: &JsString) -> IvyResult<()> {
         Ok(())
     }
-    fn fields(&self, _: &Json, _: Option<&JsString>) -> IvyResult<()> {
+    async fn fields(&self, _: &Json, _: Option<&JsString>) -> IvyResult<()> {
         Ok(())
     }
-    fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
+    async fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
         Ok(())
     }
     fn coordination_pending(&self, _: &Json) -> IvyResult<bool> {
@@ -426,10 +426,10 @@ async fn mandatory_current_policy_precedes_domain_reads_and_preserves_recovery_r
         }
     }
     impl CheckPolicy for Policy {
-        fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {
+        async fn aggregate(&self, task: &Json, id: &JsString) -> IvyResult<()> {
             self.enter("aggregate", vec![task.clone(), id.clone().into()])
         }
-        fn fields(&self, fields: &Json, own: Option<&JsString>) -> IvyResult<()> {
+        async fn fields(&self, fields: &Json, own: Option<&JsString>) -> IvyResult<()> {
             self.enter(
                 "fields",
                 vec![
@@ -438,7 +438,7 @@ async fn mandatory_current_policy_precedes_domain_reads_and_preserves_recovery_r
                 ],
             )
         }
-        fn creation(
+        async fn creation(
             &self,
             request: &Json,
             fields: &Json,
