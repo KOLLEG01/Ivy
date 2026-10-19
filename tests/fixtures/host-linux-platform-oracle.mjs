@@ -19,10 +19,10 @@ if(input.module==='systemdAdapter'){
 }
 const require=createRequire(join(process.env.IVY_TEST_ORIGINAL_DEPENDENCIES,'package.json'));
 registerHooks({resolve(specifier,context,next){
- const boundary=input.model&&/\/(?:linux-resources|linux-service-identity|systemd)\.ts$/.test(context.parentURL??'');
+ const boundary=input.model&&/\/(?:linux-resources|linux-service-identity|systemd|bootstrap-os)\.ts$/.test(context.parentURL??'');
  if(boundary&&['node:fs/promises','node:child_process'].includes(specifier))return next(new URL('./host-linux-platform-io.mjs',import.meta.url).href,context);
  if(boundary&&specifier==='node:path')return next('node:path/posix',context);
- if(boundary&&input.module==='systemdAdapter'&&specifier==='node:crypto')return next(new URL('./host-linux-platform-io.mjs',import.meta.url).href,context);
+ if(boundary&&['systemdAdapter','systemdBootstrap'].includes(input.module)&&specifier==='node:crypto')return next(new URL('./host-linux-platform-io.mjs',import.meta.url).href,context);
  if(specifier.startsWith('.')&&specifier.endsWith('.js')){const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(source)))return next(source.href,context);}
  try{return next(specifier,context);}catch(error){if(/^ajv(?:\/|$)/.test(specifier))return next(pathToFileURL(require.resolve(specifier)).href,context);throw error;}
 }});
@@ -37,7 +37,12 @@ try{
   const value=lstatSync(path);
   operation={ok:true,value:{file:value.isFile(),symlink:value.isSymbolicLink(),uid:value.uid,gid:value.gid,mode:value.mode,size:value.size}};
  }else{
- if(input.module==='systemdAdapter'){
+ if(input.module==='systemdBootstrap'){
+  if(!input.model||!['inspect','render','check','apply','prepare','reload','pause','resume'].includes(input.operation))throw Error('Unlisted or unbounded bootstrap operation');
+  const {bootstrapOs}=await import('../../packages/host-runtime/src/bootstrap-os.ts');
+  let value=await bootstrapOs(root)[input.operation](...input.args);if(value===undefined)value=null;
+  operation={ok:true,value};
+ }else if(input.module==='systemdAdapter'){
   if(!['inspectUnit','readUnit','stopUnit','replaceUnit','reload','startUnit'].includes(input.operation))throw Error('Unlisted systemd operation');
   const module=await import(modules.systemd);
   const command=state.model.customCommand?async (_config,args)=>{state.trace.push({op:'customCommand',args});const result=state.model.commands?.[state.commandIndex++]??{};if(Object.hasOwn(result,'error'))throw new IvyError(result.error,'Injected command failure.');return result.stdout??'';}:undefined;

@@ -3,6 +3,31 @@
 use crate::{IvyJson, IvyResult, bootstrap_restart::NativeBootstrapRestartOs};
 use futures_util::future::BoxFuture;
 use std::path::PathBuf;
+mod systemd;
+pub use systemd::SystemdBootstrapOs;
+
+pub fn bootstrap_os(
+    distribution: PathBuf,
+    job_launcher: PathBuf,
+    node: crate::node_runtime::NodeRuntime,
+) -> IvyResult<std::sync::Arc<dyn BootstrapOs>> {
+    if cfg!(windows) {
+        Ok(std::sync::Arc::new(WindowsBootstrapOs::new(
+            distribution,
+            job_launcher,
+        )))
+    } else if cfg!(target_os = "linux") {
+        Ok(std::sync::Arc::new(SystemdBootstrapOs::new(
+            distribution,
+            node,
+        )))
+    } else {
+        Err(crate::IvyError::new(
+            "unsupported_runtime",
+            "Bootstrap maintenance supports Windows and systemd Linux.",
+        ))
+    }
+}
 
 pub trait BootstrapOs: Send + Sync {
     fn inspect(&self, plans: Vec<IvyJson>) -> BoxFuture<'_, IvyResult<Vec<IvyJson>>>;

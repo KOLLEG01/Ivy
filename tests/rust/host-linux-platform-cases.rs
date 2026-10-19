@@ -19,6 +19,8 @@ use std::{
 use tokio::sync::Notify;
 #[path = "host-systemd-cases.rs"]
 mod systemd_cases;
+#[path = "host-systemd-bootstrap-cases.rs"]
+mod systemd_bootstrap_cases;
 #[path = "host-docker-cases.rs"]
 mod docker_cases;
 static CORPUS: Mutex<()> = Mutex::new(());
@@ -151,6 +153,17 @@ impl State {
         let count = self.counts.entry(op.clone()).or_default();
         *count += 1;
         let count = *count;
+        if let Some(mutations) = self.model.get("mutations").and_then(IvyJson::as_array) {
+            for mutation in mutations {
+                if mutation.get("op") == event.get("op")
+                    && mutation.get("at").and_then(IvyJson::as_f64).unwrap_or(1.0) == count as f64
+                    && mutation.get("path").is_none_or(|path| Some(path) == event.get("path")) {
+                    for (path, file) in mutation.required("files").unwrap().as_object().unwrap() {
+                        self.files.insert(path.clone(), file.clone());
+                    }
+                }
+            }
+        }
         if let Some(fault) = self
             .model
             .get("faults")
@@ -218,6 +231,9 @@ fn path_event(op: &str, path: &JsString) -> IvyJson {
     IvyJson::object([("op", op.into()), ("path", IvyJson::String(path.clone()))])
 }
 fn file_bytes(file: &IvyJson) -> Vec<u8> {
+    if let Some(bytes) = file.get("bytes").and_then(IvyJson::as_array) {
+        return bytes.iter().map(|b| b.as_f64().unwrap() as u8).collect();
+    }
     file.get("data")
         .and_then(IvyJson::as_js_string)
         .map(|value| String::from_utf16_lossy(&value.0).into_bytes())

@@ -2,12 +2,12 @@ use super::*;
 use ivy_host_runtime::systemd::{
     NativeSystemdHost, SystemdAdapter, SystemdCommand, SystemdHost, UnitFile,
 };
-struct Host {
-    inner: SimHost,
+pub(super) struct Host {
+    pub(super) inner: SimHost,
     native: Option<Arc<NativeSystemdHost>>,
 }
 impl Host {
-    fn new(model: IvyJson, native: Option<PathBuf>) -> Self {
+    pub(super) fn new(model: IvyJson, native: Option<PathBuf>) -> Self {
         Self {
             inner: SimHost::new(model),
             native: native.map(|root| Arc::new(NativeSystemdHost::new(root))),
