@@ -126,10 +126,15 @@ test('selective read markers preserve hidden cross-agent comments across interle
   assert.equal(card.directCommentCount, 2);
   assert.equal('comments' in card.task, false);
   assert.equal('description' in card.task.fields, false);
+  assert.equal(taskCard({ ...view, task: { ...view.task, openQuestionCount: 0,
+    comments: view.task.comments.map((comment, index) => index ? comment : { ...comment, purpose: 'question' as const }) } }).task.openQuestionCount, 1);
   assert.equal((await f.first.task({ task: pin.objectId }, 'other-user')).unreadDirectAgentComments, 2);
   const all = await f.first.markCommentsRead({ ...request, operationId: 'all-read', includeCrossAgent: true }, context('all-read'));
   assert.equal(all.unreadAgentComments, 0);
   assert.equal((await f.first.markCommentsRead(request, context(request.operationId))).unreadAgentComments, 0);
+  await f.first.archive({ action: 'archive', operationId: 'archive-read-card', taskId: pin.objectId,
+    expectedRevision: pin.revision, archived: true }, context('archive-read-card'));
+  assert.equal(taskCard(await f.first.task({ task: pin.objectId }, 'user')).commentCount, 4);
 });
 
 test("invalid attachment input is rejected before reserving a Task", async (t) => {

@@ -423,8 +423,9 @@ const answerApproval = (
   requestId: string,
   decision: "approved" | "rejected",
   replyTo: string,
-) =>
-  perform(decision === "approved" ? "Approve request" : "Reject request", {
+) => {
+  if (!writable.value) return;
+  optimistic.submit({
     action: "comment",
     commentId: crypto.randomUUID(),
     body: decision === "approved" ? "Approved." : "Rejected.",
@@ -433,6 +434,7 @@ const answerApproval = (
     attachments: [],
     replyTo,
   });
+};
 const images = useAttachmentImages(
   () => props.taskId,
   () => task.value.value?.value.attachments ?? [],
@@ -1254,7 +1256,7 @@ const showArrived = () => {
                         >
                           <Button
                             size="sm"
-                            :disabled="!writable"
+                            :disabled="!writable || !!optimistic.pending.value"
                             @click="
                               answerApproval(
                                 request.requestId,
@@ -1267,7 +1269,7 @@ const showArrived = () => {
                           <Button
                             size="sm"
                             variant="outline"
-                            :disabled="!writable"
+                            :disabled="!writable || !!optimistic.pending.value"
                             @click="
                               answerApproval(
                                 request.requestId,

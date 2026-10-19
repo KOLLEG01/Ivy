@@ -1,5 +1,5 @@
 import type { TaskBoard } from '../../../../packages/sdk/src/node.js';
-import { crossAgentComment } from './conversation.js';
+import { crossAgentComment, openQuestions } from './conversation.js';
 
 /** Board reads carry counts and execution facts, never conversation bodies or attachments. */
 export function taskCard(view: TaskBoard.TaskView): TaskBoard.TaskCardView {
@@ -11,6 +11,6 @@ export function taskCard(view: TaskBoard.TaskView): TaskBoard.TaskCardView {
     unreadDirectAgentComments: view.unreadDirectAgentComments,
     commentCount: comments.length, directCommentCount: comments.filter(comment => !crossAgentComment(comment, view.object.objectId)).length,
     task: { taskKey: task.taskKey, fields, workflowState: task.workflowState, waiting: task.waiting, claim: task.claim,
-      publication: task.publication, latestResult: task.latestResult, openQuestionCount: task.openQuestionCount ?? 0,
+      publication: task.publication, latestResult: task.latestResult, openQuestionCount: openQuestions(task).length,
       questionWait: task.questionWait ?? null, blocker: task.blocker ?? null, scheduledCheckFailure: task.scheduledCheck?.failure?.detail ?? '' } };
 }

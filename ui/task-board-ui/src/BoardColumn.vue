@@ -86,6 +86,7 @@ const toggleOrder = () => {
   } catch {
     /* Optional view state. */
   }
+  pages.reset();
 };
 const manual = computed(() => !props.archived && order.value === "manual");
 const ranked = computed(() => manual.value && props.workspace.role === "user");

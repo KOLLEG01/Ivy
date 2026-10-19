@@ -367,7 +367,8 @@ export class TaskBoardEngine {
   ): Promise<Document<"task-board/task">> {
     let document: Document<"task-board/task">;
     if (typeof query.task === "string")
-      document = await this.store.read("task-board/task", query.task);
+      // Explicit read-only links and archive cards retain access to the same primary ticket.
+      document = await this.store.read("task-board/task", query.task, true, true);
     else {
       const page = await this.store.page("task-board/task", {
         where: { op: "eq", field: "data:/taskKey", value: query.task.taskKey },

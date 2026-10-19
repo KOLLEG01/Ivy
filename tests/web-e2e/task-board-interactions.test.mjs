@@ -54,7 +54,10 @@ test('optimistic comments render once before dispatch and acknowledgement, retai
 test('definitive failure retries the retained message and unknown outcomes only observe the original identity', { timeout: 120000 }, async t => {
   const f = await taskBoardFixture(t);
   const created = await f.invoke({ action: 'create', fields: fields('Retry conversation') }), id = created.task.objectId;
+  await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent', purpose: 'question',
+    commentId: 'original-question', body: 'Reply to this question', requests: [], responses: [], attachments: [], replyTo: null });
   await f.open(routeTo(id));
+  await f.page.getByRole('button', { name: 'Answer question', exact: true }).click();
   const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
   let attempt = 0, firstId;
   await f.page.route('**/api/v1/rpc', async route => {
@@ -79,6 +82,7 @@ test('definitive failure retries the retained message and unknown outcomes only 
   await expect.poll(async () => (await f.task(id)).comments.filter(comment => comment.commentId === firstId).length).toBe(1);
   const comment = (await f.task(id)).comments.find(comment => comment.commentId === firstId);
   assert.equal(comment.attachments[0].filename, 'retained.txt');
+  assert.equal(comment.replyTo, 'original-question');
   await expect(failed).toHaveCount(1);
   await f.page.unroute('**/api/v1/rpc');
   let original, calls = 0;
@@ -104,6 +108,42 @@ test('definitive failure retries the retained message and unknown outcomes only 
   await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
   await expect(unknown.getByRole('button', { name: 'Retry message', exact: true })).toHaveCount(0);
   await expect(unknown).toHaveCount(1);
+  assert.equal(calls, 1);
+  assert.deepEqual(f.pageErrors, []);
+});
+
+test('approval responses use one optimistic message and retain the composer draft', { timeout: 90000 }, async t => {
+  const f = await taskBoardFixture(t);
+  const created = await f.invoke({ action: 'create', fields: fields('Approval conversation') }), id = created.task.objectId;
+  await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent',
+    commentId: 'approval-question', body: 'Approve the requested action',
+    requests: [{ requestId: 'approval-request', type: 'approval', title: 'Requested action', detail: 'Approve this action.' }],
+    responses: [], attachments: [], replyTo: null });
+  await f.open(routeTo(id));
+  const dispatch = gate(), started = gate();
+  t.after(() => dispatch.release());
+  let calls = 0;
+  await f.page.route('**/api/v1/rpc', async route => {
+    if (!isComment(route.request().postDataJSON())) return route.continue();
+    calls++; started.release(); await dispatch.promise; return route.continue();
+  });
+  const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
+  await editor.fill('A separate unsent draft');
+  await f.page.getByRole('button', { name: 'Approve', exact: true }).click();
+  const message = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Approved.' });
+  await expect(message).toHaveCount(1);
+  await expect(message).toBeVisible();
+  await expect(editor).toContainText('A separate unsent draft');
+  await started.promise;
+  assert.equal((await f.task(id)).comments.length, 1);
+  await expect(f.page.getByRole('button', { name: 'Approve', exact: true })).toBeDisabled();
+  dispatch.release();
+  await expect.poll(async () => (await f.task(id)).comments.length).toBe(2);
+  const response = (await f.task(id)).comments[1];
+  assert.equal(response.replyTo, 'approval-question');
+  assert.deepEqual(response.responses, [{ requestId: 'approval-request', type: 'approval', decision: 'approved', detail: '' }]);
+  await expect(message).toHaveCount(1);
+  await expect(editor).toContainText('A separate unsent draft');
   assert.equal(calls, 1);
   assert.deepEqual(f.pageErrors, []);
 });

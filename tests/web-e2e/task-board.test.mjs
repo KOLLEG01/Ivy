@@ -324,13 +324,13 @@ test("automatic native recovery stays in progress while user input stays blocked
     const progress = f.page.getByRole("region", { name: "In progress", exact: true });
     await expect(progress.getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
     await expect(progress.getByText("Statusabgleich", { exact: true })).toBeVisible();
-    await expect(f.page.getByRole("region", { name: "Waiting", exact: true }).getByRole("link", { name: /Recover the original execution/ })).toHaveCount(0);
+    await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).getByRole("link", { name: /Recover the original execution/ })).toHaveCount(0);
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   thread.status = { type: "active", activeFlags: ["waitingOnUserInput"] };
   await runtime.native.step(runId);
-  await expect(f.page.getByRole("region", { name: "Waiting", exact: true }).locator('[data-waiting-group=user]').getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
-  await expect(f.page.getByRole("region", { name: "Waiting", exact: true }).getByText("Needs you", { exact: true })).toHaveCount(0);
+  await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).locator('[data-waiting-group=user]').getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
+  await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).getByText("Needs you", { exact: true })).toHaveCount(0);
   const waiting = await f.task(created.task.objectId);
   assert.equal(waiting.workflowState, "waiting");
   assert.equal(waiting.waiting.reason, "user");

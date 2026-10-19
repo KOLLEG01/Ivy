@@ -50,6 +50,7 @@ test(
     });
     await f.context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await f.open("#/new?node=browser-task-board");
+    await f.page.getByRole('radio', { name: 'Me', exact: true }).check();
     await f.page.getByLabel("Title", { exact: true }).fill("Linked task");
     const description = f.page.getByRole("textbox", { name: "Description", exact: true });
     await description.fill("Read ");
@@ -92,7 +93,8 @@ test(
     ]);
     assert.equal(created.attachments.length, 1);
     assert.ok(created.fields.description.includes("attachment:" + created.attachments[0].attachmentId));
-    await expect(f.page.getByRole("button", { name: "Enlarge pixel.png" })).toBeVisible();
+    await f.page.getByRole('tab', { name: 'Details', exact: true }).click();
+    await expect(f.page.getByRole("button", { name: "Enlarge pixel.png" }).first()).toBeVisible();
     await expect(
       f.page.getByRole("link", { name: "Reference note" }),
     ).toHaveAttribute("href", wikiUrl);
@@ -103,8 +105,9 @@ test(
     await f.page.getByRole("menuitem", { name: "Copy task link" }).click();
     assert.equal(
       await f.page.evaluate(() => navigator.clipboard.readText()),
-      f.url + "#/tasks?id=" + id + "&node=browser-task-board",
+      f.base + "/taskboard/#/tasks?id=" + id + "&node=browser-task-board",
     );
+    await f.page.getByRole('tab', { name: 'Chat', exact: true }).click();
     await f.page.getByRole("textbox", { name: "Comment" }).click();
     await f.page.keyboard.type("A **bold** comment");
     await f.page.getByRole("button", { name: "Add comment" }).click();

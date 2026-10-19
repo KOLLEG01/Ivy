@@ -326,7 +326,7 @@ const archiveTasks = async (id?: string) => {
     refresh();
   }
 };
-// Backlog rank is the Tasks' order among their workspace siblings.
+// Manual rank is the Tasks' order among their workspace siblings.
 const reorder = async (id: string, placement: Placement) => {
   if (disabled.value || id === pendingArchiveTaskId.value || props.workspace.role !== "user") return;
   preparing.value = true;
@@ -363,10 +363,10 @@ const reorder = async (id: string, placement: Placement) => {
     } else await place(id, placement.before);
   } catch (cause) {
     error.value =
-      cause instanceof Error ? cause.message : "The backlog order could not be saved.";
+      cause instanceof Error ? cause.message : "The task order could not be saved.";
   } finally {
     preparing.value = false;
-    void backlogRef.value?.refresh();
+    refresh();
   }
 };
 const dragged = ref<{ id: string; context: TransitionContext } | null>(null);
@@ -590,6 +590,7 @@ const drop = (column: string) => {
         :archive-disabled="archivePending || archive.busy.value || action.busy.value"
         :swimlane="swimlane"
         @transition="transition"
+        @reorder="reorder"
         @drag="dragged = $event"
         @archive="archiveTasks"
         @archive-all="archiveTasks()"

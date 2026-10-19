@@ -40,13 +40,17 @@ for (const width of [1440, 390]) test(`lost upload and comment replies recover w
   assert.equal((await f.task(id)).attachments.length, 1);
   hidden = true;
   await send.click();
-  await expect(composer.getByRole('button', { name: 'Check original action', exact: true })).toBeVisible();
-  await expect(editor).toContainText('Draft survives the lost upload reply');
+  const message = f.page.locator('[data-slot="conversation-message"]').filter({ hasText: 'Draft survives the lost upload reply' });
+  await expect(message).toHaveCount(1);
+  await expect(editor).toBeEmpty();
+  await expect(composer.getByRole('button', { name: 'Check original action', exact: true })).toHaveCount(0);
   await expect(editor).toBeEditable();
+  await editor.fill('A distinct next draft');
   await expect(send).toBeDisabled();
   await expect.poll(async () => (await f.task(id)).comments.length).toBe(1);
   hidden = false;
-  await expect(editor).not.toContainText('Draft survives', { timeout: 20000 });
+  await expect(send).toBeEnabled({ timeout: 20000 });
+  await expect(editor).toContainText('A distinct next draft');
   await expect(composer.getByRole('button', { name: 'Check original action', exact: true })).toHaveCount(0);
   const saved = await f.task(id);
   assert.equal(saved.attachments.length, 1); assert.equal(saved.comments.length, 1);
@@ -62,9 +66,10 @@ for (const width of [1440, 390]) test(`lost upload and comment replies recover w
   store.historyLimits.count = 0;
   try { await store.collectLocal(); } finally { store.historyLimits.count = priorLimit; }
   hidden = false;
-  await expect(composer.getByText('The original action has finished and its receipt was released. Check the task before repeating it.', { exact: true })).toBeVisible({ timeout: 20000 });
-  await expect(send).toBeEnabled();
-  await expect(editor).toContainText('Keep this draft');
+  await expect(f.page.locator('[data-slot="conversation-message"]').filter({ hasText: 'Keep this draft when the completed receipt expires' })).toHaveCount(1);
+  await editor.fill('Next message after the expired receipt');
+  await expect(send).toBeEnabled({ timeout: 20000 });
+  await expect(editor).toContainText('Next message after the expired receipt');
   assert.equal((await f.task(id)).comments.length, 2);
   assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert.deepEqual(f.pageErrors, []);
