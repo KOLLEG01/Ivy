@@ -42,6 +42,8 @@ mod node_path_cases;
 mod layout_cases;
 #[path = "host-startup-cases.rs"]
 mod host_startup_cases;
+#[path = "host-configuration-updater-cases.rs"]
+mod configuration_updater_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {

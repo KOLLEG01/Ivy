@@ -20,6 +20,7 @@ pub mod codex_rpc;
 pub mod codex_windows_shell;
 pub mod concurrency;
 pub mod config;
+pub mod configuration_updater;
 mod config_file;
 mod config_write;
 pub mod default_settings;

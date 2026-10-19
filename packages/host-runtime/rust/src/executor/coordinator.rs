@@ -1,5 +1,9 @@
 use super::*;
-use crate::{executor_lock::ExecutorLock, scheduler};
+use crate::{
+    configuration_updater::{self, ConfigurationUpdater},
+    executor_lock::ExecutorLock,
+    scheduler,
+};
 use futures_util::FutureExt;
 use ivy_contracts::core_schema::validate_host;
 use std::sync::Mutex;
@@ -12,7 +16,8 @@ struct Coordinator {
     options: ExecutorOptions,
     cancel: CancellationToken,
     clock: Arc<dyn Clock>,
-    boot_id: String,
+    status: StatusWriter,
+    configuration: Option<ConfigurationUpdater>,
 }
 struct Control {
     pending: Mutex<Option<Coordinator>>,
@@ -45,6 +50,55 @@ impl HostExecutor {
         runtime: Arc<dyn ActivationRuntime>,
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
+        Self::open_inner(config, options, runtime, clock, None).await
+    }
+    pub async fn open_with_configuration(
+        config: IvyJson,
+        config_path: std::path::PathBuf,
+        credential: Option<JsString>,
+        options: ExecutorOptions,
+        runtime: Arc<dyn ActivationRuntime>,
+    ) -> IvyResult<Self> {
+        Self::open_with_configuration_and_clock(
+            config,
+            config_path,
+            credential,
+            options,
+            runtime,
+            Arc::new(SystemClock),
+        )
+        .await
+    }
+    pub async fn open_with_configuration_and_clock(
+        config: IvyJson,
+        config_path: std::path::PathBuf,
+        credential: Option<JsString>,
+        options: ExecutorOptions,
+        runtime: Arc<dyn ActivationRuntime>,
+        clock: Arc<dyn Clock>,
+    ) -> IvyResult<Self> {
+        let credential = configuration_updater::update_credential(
+            &config,
+            options.own_instance_id.as_deref(),
+            credential.as_ref(),
+        )?;
+        let credential = credential.map(|value| value.to_utf8()).transpose()?;
+        Self::open_inner(
+            config,
+            options,
+            runtime,
+            clock,
+            Some((config_path, credential)),
+        )
+        .await
+    }
+    async fn open_inner(
+        config: IvyJson,
+        options: ExecutorOptions,
+        runtime: Arc<dyn ActivationRuntime>,
+        clock: Arc<dyn Clock>,
+        configuration: Option<(std::path::PathBuf, Option<String>)>,
+    ) -> IvyResult<Self> {
         let lock = ExecutorLock::acquire(
             config::path_value(config.required("runtimeRoot")?)?.join("executor"),
             false,
@@ -57,6 +111,27 @@ impl HostExecutor {
                 return Err(error);
             }
         };
+        let configuration = match configuration {
+            Some((path, Some(credential))) if !credential.is_empty() => {
+                match ConfigurationUpdater::new(path, base.clone(), credential).await {
+                    Ok(updater) => Some(updater),
+                    Err(error) => {
+                        let _ = base.close().await;
+                        let _ = lock.close().await;
+                        return Err(error);
+                    }
+                }
+            }
+            _ => None,
+        };
+        let status = StatusWriter {
+            base: base.clone(),
+            clock: clock.clone(),
+            build_id: options.build_id.clone(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            value: Arc::new(Mutex::new(Status::default())),
+            write: Arc::new(tokio::sync::Mutex::new(())),
+        };
         let cancel = CancellationToken::new();
         let (sender, result) = watch::channel(None);
         Ok(Self(Arc::new(Control {
@@ -67,7 +142,8 @@ impl HostExecutor {
                 options,
                 cancel: cancel.clone(),
                 clock,
-                boot_id: uuid::Uuid::new_v4().to_string(),
+                status,
+                configuration,
             })),
             cancel,
             result,
@@ -118,23 +194,50 @@ struct Active {
     task: JoinHandle<IvyResult<()>>,
 }
 
-impl Coordinator {
-    async fn status(&self, state: &str, active: Option<String>) -> IvyResult<()> {
+#[derive(Clone, Default)]
+struct Status {
+    active: Vec<String>,
+    configuration_code: Option<JsString>,
+    revision: Option<IvyJson>,
+    hash: Option<IvyJson>,
+}
+#[derive(Clone)]
+struct StatusWriter {
+    base: HostJournal,
+    clock: Arc<dyn Clock>,
+    build_id: Option<JsString>,
+    boot_id: String,
+    value: Arc<Mutex<Status>>,
+    write: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl StatusWriter {
+    async fn write(&self, state: &str) -> IvyResult<()> {
+        let _write = self.write.lock().await;
+        let snapshot = self.value.lock().map_err(|_| IvyError::internal())?.clone();
         let host = self.base.config().await?;
-        let code = if state == "ready" {
-            self.base
+        let mut code = snapshot
+            .configuration_code
+            .map(IvyJson::String)
+            .unwrap_or(IvyJson::Null);
+        if state == "ready" && (code.is_null() || code == "storage_retention_attention".into()) {
+            if let Some(retention) = self
+                .base
                 .storage_retention_status()
                 .await?
-                .filter(|v| {
-                    field(v, "state") != &"running".into()
-                        && field(v, "state") != &"succeeded".into()
-                })
-                .map(|_| IvyJson::from("storage_retention_attention"))
-                .unwrap_or(IvyJson::Null)
-        } else {
-            IvyJson::Null
-        };
-        let value = IvyJson::object([
+                .filter(|v| field(v, "state") != &"running".into())
+            {
+                code = if field(&retention, "state") == &"succeeded".into() {
+                    IvyJson::Null
+                } else {
+                    "storage_retention_attention".into()
+                };
+            }
+        }
+        if state != "ready" {
+            code = IvyJson::Null;
+        }
+        let mut value = IvyJson::object([
             ("schemaVersion", IvyJson::Number(1.0)),
             ("hostId", host.required("hostId")?.clone()),
             ("pid", IvyJson::Number(std::process::id() as f64)),
@@ -143,18 +246,26 @@ impl Coordinator {
             ("state", state.into()),
             (
                 "activeDeploymentId",
-                active.map(IvyJson::from).unwrap_or(IvyJson::Null),
+                snapshot
+                    .active
+                    .first()
+                    .cloned()
+                    .map(IvyJson::from)
+                    .unwrap_or(IvyJson::Null),
             ),
             ("code", code),
             (
                 "buildId",
-                self.options
-                    .build_id
+                self.build_id
                     .clone()
                     .map(IvyJson::String)
                     .unwrap_or(IvyJson::Null),
             ),
         ]);
+        if let Some((revision, hash)) = snapshot.revision.zip(snapshot.hash) {
+            value.insert("configurationRevision", revision);
+            value.insert("configurationHash", hash);
+        }
         validate_host("ExecutorStatus", &value)?;
         config::atomic_json(
             config::path_value(host.required("runtimeRoot")?)?.join("executor.json"),
@@ -162,6 +273,8 @@ impl Coordinator {
         )
         .await
     }
+}
+impl Coordinator {
     async fn exclusive(&self, entry: &IvyJson) -> IvyResult<bool> {
         let record = entry.required("record")?;
         // Keep short-circuit/error order: source/HostExecutor need no manifest.
@@ -233,10 +346,39 @@ impl Coordinator {
     async fn run(self) -> IvyResult<()> {
         let mut active: Vec<Active> = Vec::new();
         let mut failure = None;
+        let pulse_cancel = CancellationToken::new();
+        let mut pulse = None;
         let run=std::panic::AssertUnwindSafe(async {
-            self.status("reconciling",None).await?;
-            let mut next_status=self.clock.monotonic();
+            self.status.write("reconciling").await?;
+            let status=self.status.clone();let stopped=pulse_cancel.clone();
+            pulse=Some(tokio::spawn(async move{
+                let mut ticks=tokio::time::interval_at(tokio::time::Instant::now()+std::time::Duration::from_secs(1),std::time::Duration::from_secs(1));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop{tokio::select!{biased;_=stopped.cancelled()=>break,_=ticks.tick()=>{let _=status.write("ready").await;}}}
+            }));
+            let mut next_configuration=0.0;let mut last_hint=String::new();
             while !self.cancel.is_cancelled(){
+                if let Some(updater)=&self.configuration {
+                    let config=self.base.config().await?;
+                    let hint=config::json_file(config::path_value(config.required("runtimeRoot")?)?.join("desired-state-hint.json"),config::CONFIGURATION_BYTES).await.ok();
+                    if let Some(hint)=hint.filter(|v|v.get("schemaVersion")==Some(&IvyJson::Number(1.0))){
+                        let identity=json::stringify(&hint,usize::MAX)?;
+                        if identity!=last_hint {last_hint=identity;if truthy(field(&hint,"configuration")){next_configuration=0.0;}}
+                    }
+                    if self.clock.utc_millis() as f64>=next_configuration {
+                        let result=updater.sync().await;
+                        {
+                            let mut status=self.status.value.lock().map_err(|_|IvyError::internal())?;
+                            match result {
+                                Ok(value)=>{if !value.revision.is_null()&&!value.content_hash.is_null(){status.revision=Some(value.revision);status.hash=Some(value.content_hash);}status.configuration_code=None;}
+                                Err(error)=>status.configuration_code=Some(error.code_js()),
+                            }
+                        }
+                        let config=self.base.config().await?;
+                        let interval=config.get("configurationUpdates").and_then(|v|v.get("intervalSeconds")).filter(|v|!v.is_null()).and_then(IvyJson::as_f64).unwrap_or(60.0);
+                        next_configuration=self.clock.utc_millis() as f64+interval*1000.0;
+                    }
+                }
                 let mut index=0;
                 while index<active.len(){
                     if active[index].task.is_finished(){
@@ -247,12 +389,11 @@ impl Coordinator {
                 let queued=self.base.unfinished().await?;
                 for index in self.selection(&queued,&active).await? {
                     let entry=queued[index].clone();let base=self.base.clone();let runtime=self.runtime.clone();let options=self.options.clone();let cancel=self.cancel.clone();let clock=self.clock.clone();let input=entry.clone();
-                    let task=tokio::spawn(async move{execute_with_clock(base,input,runtime,options,cancel,clock).await});
+                    let id=text(field(&entry,"record"),"deploymentId")?;
+                    self.status.value.lock().map_err(|_|IvyError::internal())?.active.push(id.clone());
+                    let status=ActiveStatus{value:self.status.value.clone(),id};
+                    let task=tokio::spawn(async move{let _status=status;execute_with_clock(base,input,runtime,options,cancel,clock).await});
                     active.push(Active{entry,task});
-                }
-                if self.clock.monotonic()>=next_status{
-                    self.status("ready",active.first().map(|a|text(field(&a.entry,"record"),"deploymentId")).transpose()?).await?;
-                    next_status=self.clock.monotonic()+std::time::Duration::from_secs(1);
                 }
                 tokio::select!{_=self.cancel.cancelled()=>break,_=tokio::time::sleep(std::time::Duration::from_millis(250))=>{}}
             }
@@ -272,9 +413,16 @@ impl Coordinator {
                 failure = result.err();
             }
         }
+        pulse_cancel.cancel();
+        if let Some(pulse) = pulse {
+            let _ = pulse.await;
+        }
+        if let Ok(mut status) = self.status.value.lock() {
+            status.active.clear();
+        }
         for result in [
             self.runtime.dispose().await,
-            self.status("stopping", None).await,
+            self.status.write("stopping").await,
             self.base.close().await,
             self.lock.close().await,
         ] {
@@ -283,5 +431,25 @@ impl Coordinator {
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+}
+struct ActiveStatus {
+    value: Arc<Mutex<Status>>,
+    id: String,
+}
+impl Drop for ActiveStatus {
+    fn drop(&mut self) {
+        if let Ok(mut status) = self.value.lock() {
+            status.active.retain(|id| id != &self.id);
+        }
+    }
+}
+fn truthy(value: &IvyJson) -> bool {
+    match value {
+        IvyJson::Null => false,
+        IvyJson::Bool(v) => *v,
+        IvyJson::Number(v) => *v != 0.0 && !v.is_nan(),
+        IvyJson::String(v) => !v.0.is_empty(),
+        _ => true,
     }
 }
