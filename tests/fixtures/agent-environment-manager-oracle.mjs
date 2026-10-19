@@ -14,7 +14,7 @@ import {digest,canonical} from '../../dist/packages/contracts/src/canonical.js';
 const source=readFileSync('services/agent-manager/src/main.ts','utf8').replaceAll('\r\n','\n');
 function span(begin,end){const first=source.indexOf(begin),last=source.indexOf(end,first+begin.length);assert(first>=0&&last>first,begin);return source.slice(first,last);}
 const factories=span('  const managedSkillsRoot =','  journal.onTerminal');
-const executableFactories=factories.replaceAll(': string','').replaceAll(': Agent.McpDocument','');
+const executableFactories=factories.replaceAll(': string','').replaceAll(': Agent.McpDocument','').replaceAll('config.credential!','config.credential');
 let before=span('      beforeLaunch: async (home) => {','      beginEpoch:');
 before=before.slice(before.indexOf('{')+1,before.lastIndexOf('      },'));
 const after=span('    if (\n      settings.patcherEnabled','    for (const input of startupClocks');

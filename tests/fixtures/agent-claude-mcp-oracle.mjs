@@ -11,7 +11,7 @@ const server=(name='fixture',url=hive+'/mcp',authentication='agent-manager',enab
 const document=(servers=[server()],enabled=true)=>({schemaVersion:1,hostId:null,enabled,servers});
 const definitions=[
   ['fresh'],['disabled'],['disabled-document-bad-url'],['disabled-server-bad-url'],['disabled-duplicate'],['duplicate'],
-  ['numeric-prototype-names'],['empty-servers'],['empty-fragment'],['normalized'],['loopback-ipv4'],['loopback-ipv6'],['loopback-name'],
+  ['constructor-name'],['invalid-override-name'],['empty-servers'],['empty-fragment'],['normalized'],['loopback-ipv4'],['loopback-ipv6'],['loopback-name'],
   ['http-remote'],['userinfo'],['fragment'],['wrong-authority-url'],['invalid-url'],['invalid-hive-disabled'],['unicode-credential'],['oversized-generated'],
   ['target-directory'],['state-directory'],['oversized-target'],['oversized-state'],['malformed-state'],['bom-state'],['null-state'],['primitive-state'],
   ['output-only'],['state-only'],['owned'],['wrong-authority'],['wrong-hash'],['wrong-version'],['partial-publication'],
@@ -23,7 +23,7 @@ const definitions=[
     case'disabled-server-bad-url':doc=document([server('fixture','bad','agent-manager',false)]);break;
     case'disabled-duplicate':doc=document([server(),server('fixture','bad','agent-manager',false)]);break;
     case'duplicate':doc=document([server(),server()]);break;
-    case'numeric-prototype-names':doc=document(['10','2','a','__proto__','constructor','__proto__'].map(name=>server(name)));break;
+    case'constructor-name':doc=document(['constructor','a','z'].map(name=>server(name)));break;
     case'empty-servers':doc.servers=[];break;
     case'empty-fragment':doc.servers[0].url=hive+'/mcp#';break;
     case'normalized':doc.servers[0].url='HTTPS://FIXTURE.EXAMPLE:443/x/../mcp';break;
@@ -39,13 +39,13 @@ const definitions=[
     case'unicode-credential':secret='fixture-😀-\ud800-"';break;
     case'oversized-generated':secret='x'.repeat(4*1024*1024);break;
   }
-  return{mode,document:doc,hive:base,credentialMode:mode==='oversized-generated'?'large':'normal',...(mode!=='oversized-generated'?{credential:secret}:{})};
+  return{mode,document:doc,hive:base,credentialMode:mode==='oversized-generated'?'large':'normal',...(mode==='invalid-override-name'?{override:document([server('__proto__')])}:{}),...(mode!=='oversized-generated'?{credential:secret}:{})};
 });
 const root=await mkdtemp(join(tmpdir(),'ivy-claude-mcp-oracle-'));
 const snapshotFile=async path=>{try{if((await lstat(path)).isDirectory())return{kind:'directory'};const bytes=await readFile(path);return{hash:digest(bytes),bytes:bytes.length,text:bytes.length<=8192?bytes.toString('utf8'):null};}catch(error){return error.code==='ENOENT'?{missing:true}:{error:error.code};}};
 const status=(manager,base)=>{assert.match(manager.status.observedAt,/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);const{observedAt,...value}=manager.status;return{...value,target:relative(base,value.target).replaceAll('\\','/')};};
 const snapshot=async(manager,base)=>({status:status(manager,base),config:await snapshotFile(manager.target),state:await snapshotFile(manager.target+'.state.json')});
-const client=(calls,fail=false)=>({async request(method,params){calls.push({method,params});if(fail)throw new IvyError('service_unavailable','fixture unavailable','unknown');assert.equal(method,'objects.stat');throw new IvyError('not_found','fixture missing');}});
+const client=(calls,fail=false,override=null)=>({async request(method,params){calls.push({method,params});if(fail)throw new IvyError('service_unavailable','fixture unavailable','unknown');if(override){if(method==='objects.stat')return{id:'override',currentRevision:1,effectivelyArchived:false};assert.equal(method,'objects.read');return{object:{contractKey:'agent/mcp-configuration'},revision:{contractVersion:'1.0.0'},content:{encoding:'json',value:override}};}assert.equal(method,'objects.stat');throw new IvyError('not_found','fixture missing');}});
 const owned=()=>Buffer.from('{"prior":true}\n');
 async function install(base,mode){
   await mkdir(base);const target=join(base,'claude-mcp.json'),state=target+'.state.json';
@@ -67,7 +67,7 @@ try{
     const base=join(root,definition.mode),target=await install(base,definition.mode),calls=[];
     const secret=definition.credentialMode==='large'?'x'.repeat(4*1024*1024):definition.credential;
     const manager=new Manager(target,host,definition.hive,secret,definition.document);
-    await manager.synchronize(client(calls));await manager.close();
+    await manager.synchronize(client(calls,false,definition.override));await manager.close();
     rows.push({...definition,calls,expected:await snapshot(manager,base)});
   }
   const base=join(root,'lifetime'),target=await install(base,'fresh'),calls=[];

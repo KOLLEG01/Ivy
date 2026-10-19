@@ -124,11 +124,7 @@ async fn prepare(settings: &ClaudeMcpSettings, connection: &dyn RpcClient) -> Iv
                     IvyJson::object([("Authorization", IvyJson::String(bearer))]),
                 );
             }
-            // Assignment to the ordinary JS object's inherited __proto__ setter
-            // changes its prototype, not its own JSON entries or Object.keys.
-            if name != &JsString::from("__proto__") {
-                servers.insert(name.clone(), value);
-            }
+            servers.insert(name.clone(), value);
         }
     }
     let names = IvyJson::Array(

@@ -229,6 +229,7 @@ struct Client {
     fail: bool,
     entered: Option<Arc<Notify>>,
     release: Option<watch::Receiver<bool>>,
+    override_document: Option<IvyJson>,
 }
 impl RpcClient for Client {
     fn request<'a>(
@@ -251,10 +252,36 @@ impl RpcClient for Client {
                     release.changed().await.unwrap();
                 }
             }
-            assert_eq!(method, "objects.stat");
             if self.fail {
                 Err(IvyError::new("service_unavailable", "fixture unavailable"))
+            } else if let Some(document) = &self.override_document {
+                match method {
+                    "objects.stat" => Ok(IvyJson::object([
+                        ("id", "override".into()),
+                        ("currentRevision", IvyJson::Number(1.0)),
+                        ("effectivelyArchived", false.into()),
+                    ])),
+                    "objects.read" => Ok(IvyJson::object([
+                        (
+                            "object",
+                            IvyJson::object([("contractKey", "agent/mcp-configuration".into())]),
+                        ),
+                        (
+                            "revision",
+                            IvyJson::object([("contractVersion", "1.0.0".into())]),
+                        ),
+                        (
+                            "content",
+                            IvyJson::object([
+                                ("encoding", "json".into()),
+                                ("value", document.clone()),
+                            ]),
+                        ),
+                    ])),
+                    _ => panic!("unexpected method {method}"),
+                }
             } else {
+                assert_eq!(method, "objects.stat");
                 Err(IvyError::new("not_found", "fixture missing"))
             }
         })
@@ -267,7 +294,7 @@ fn calls(client: &Client) -> IvyJson {
 async fn original_claude_mcp_policy_and_owned_files_match() {
     let root = Root::new();
     let rows = field(original(), "rows").as_array().unwrap();
-    assert_eq!(rows.len(), 36);
+    assert_eq!(rows.len(), 37);
     for row in rows {
         let mode = field(row, "mode").as_str().unwrap();
         let base = root.0.join(&mode);
@@ -283,7 +310,10 @@ async fn original_claude_mcp_policy_and_owned_files_match() {
             field(row, "hive").as_js_string().unwrap().clone(),
             credential,
         );
-        let client = Arc::new(Client::default());
+        let client = Arc::new(Client {
+            override_document: row.get("override").cloned(),
+            ..Default::default()
+        });
         manager.synchronize(client.clone()).wait().await;
         manager.close().wait().await;
         same(&calls(&client), field(row, "calls"));
