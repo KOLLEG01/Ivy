@@ -16,8 +16,15 @@ use std::collections::HashSet;
 
 /// Names are stored metadata, including for a competing writer's retained
 /// receipt. They cannot be reconstructed from the caller's proposed label.
+#[allow(async_fn_in_trait)]
 pub trait CollectionStore: InspectionStore + TurnEvidenceStore {
     fn document_name(&self, document: &Document) -> IvyResult<JsString>;
+    async fn named_receipt(
+        &self,
+        key: &str,
+        name: &JsString,
+        parent: &JsString,
+    ) -> IvyResult<Option<Document>>;
 }
 pub struct NativeCollector<'a, S> {
     pub store: &'a S,
@@ -71,16 +78,15 @@ fn artifact<S: CollectionStore>(store: &S, document: &Document) -> IvyResult<Jso
     ]))
 }
 impl<S: CollectionStore> FullTurnCollector<'_, S> {
-    fn name(collection: &Json) -> IvyResult<String> {
-        Ok(format!(
-            "Native full turn transcript {}",
-            s(collection, "collectionId")?.to_utf8()?
-        ))
+    fn name(collection: &Json) -> IvyResult<JsString> {
+        let mut name = JsString::from("Native full turn transcript ");
+        name.0.extend_from_slice(&s(collection, "collectionId")?.0);
+        Ok(name)
     }
     pub async fn retained(&self, run: &Json, collection: &Json) -> IvyResult<Option<Json>> {
         let Some(document) = self
             .store
-            .named_document(
+            .named_receipt(
                 "task-board/native-full-turn-transcript",
                 &Self::name(collection)?,
                 s(run, "objectId")?,
@@ -264,7 +270,7 @@ impl<S: CollectionStore> FullTurnCollector<'_, S> {
                     "create",
                     Json::object([
                         ("parentId", run.required("objectId")?.clone()),
-                        ("name", Self::name(value)?.into()),
+                        ("name", Json::String(Self::name(value)?)),
                     ]),
                 )]),
             )

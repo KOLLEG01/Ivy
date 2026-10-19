@@ -218,6 +218,28 @@ impl<S: TurnEvidenceStore + Store> InspectionStore for CollectionTrace<'_, S> {
     }
 }
 impl<S: TurnEvidenceStore + Store> CollectionStore for CollectionTrace<'_, S> {
+    async fn named_receipt(
+        &self,
+        k: &str,
+        n: &JsString,
+        p: &JsString,
+    ) -> IvyResult<Option<Document>> {
+        self.base.event([
+            "named".into(),
+            k.into(),
+            Json::String(n.clone()),
+            Json::String(p.clone()),
+        ]);
+        let document = LocalJournal {
+            connection: self.db,
+            root_object_id: Some("root".into()),
+        }
+        .named(k, n, Some(p))?;
+        if let Some(d) = &document {
+            validate(definition(k), &d.value)?;
+        }
+        Ok(document)
+    }
     fn document_name(&self, d: &Document) -> IvyResult<JsString> {
         Ok(self
             .db
@@ -433,7 +455,7 @@ async fn collectors_match_original_traces_checkpoints_and_partial_effects_over_a
             assert!(db.is_autocommit());
         }
     }
-    assert_eq!(count, 45);
+    assert_eq!(count, 47);
 }
 
 #[tokio::test(flavor = "current_thread")]

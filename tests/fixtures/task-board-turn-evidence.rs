@@ -548,7 +548,7 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
             assert!(db.is_autocommit());
         }
     }
-    assert_eq!(count, 123);
+    assert_eq!(count, 124);
 }
 
 #[tokio::test(flavor = "current_thread")]

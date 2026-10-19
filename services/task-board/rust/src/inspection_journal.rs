@@ -146,6 +146,14 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
 impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString> CollectionStore
     for InspectionJournal<'_, '_, R, P, C, I>
 {
+    async fn named_receipt(
+        &self,
+        key: &str,
+        name: &JsString,
+        parent: &JsString,
+    ) -> IvyResult<Option<Document>> {
+        self.journal.named_record(key, name, Some(parent)).await
+    }
     fn document_name(&self, document: &Document) -> IvyResult<JsString> {
         self.journal.journal.name(
             document

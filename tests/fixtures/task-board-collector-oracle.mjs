@@ -46,6 +46,8 @@ for(const directory of readdirSync('specs/native').filter(n=>/^codex-/.test(n)))
  add('exact first unsupported item falls back',{steps:fallback,replay:true});
  add('full fallback resumes bounded turn search',{budget:1,passes:2,steps:[unsupported(),page([],'next'),unsupported(),found(),meta(),found(),full(),found()],replay:true});
  if(c.version==='0.159.2'){
+  add('admitted unpaired collection identity',{collectionPatch:{collectionId:'retained\ud800'},replay:true});
+  add('full non-BMP collection identity',{collectionPatch:{collectionId:'保留😄'},steps:fallback,replay:true});
   add('arbitrary native error has no fallback',{steps:[{reply:{error:{code:-32000,message:'failed'}}}]});
   add('later unsupported item has no fallback',{steps:[two[0],unsupported()]});
   add('repeated cursor retains immutable page before refusal',{steps:[two[0],page([entry(comment)],'next')]});
@@ -115,7 +117,7 @@ for(const directory of readdirSync('specs/native').filter(n=>/^codex-/.test(n)))
   const documents=docs.filter((d,index)=>d.key!=='task-board/run'&&!docs.slice(index+1).some(x=>x.pin.objectId===d.pin.objectId)).map(d=>({key:d.key,pin:d.pin,value:d.value,name:d.name,parent:d.parent})).sort((a,b)=>a.pin.objectId<b.pin.objectId?-1:1);
   row.run=run;row.actions=actions;row.writeIds=writeIds;row.observations=observations;row.statusReplies=statusReplies;row.blobs=blobs.map(b=>({key:b.key,name:b.name,parent:b.parent,pin:b.pin,hex:b.initial.toString('hex')}));
   row.expectedHash=hashJson({results,trace,documents});
-  if(['paged completion and idempotent replay','bounded page checkpoint resumes','exact first unsupported item falls back','full fallback resumes bounded turn search','begin competing stable identity','full competing stable identity','final turn search resumes without rereading exhausted items'].includes(row.name)){assert.ok(results.every(r=>'ok'in r),row.name+JSON.stringify(results));assert.equal(results.at(-1).ok.kind,'complete');}
+  if(['paged completion and idempotent replay','bounded page checkpoint resumes','exact first unsupported item falls back','full fallback resumes bounded turn search','begin competing stable identity','full competing stable identity','final turn search resumes without rereading exhausted items','admitted unpaired collection identity','full non-BMP collection identity'].includes(row.name)){assert.ok(results.every(r=>'ok'in r),row.name+JSON.stringify(results));assert.equal(results.at(-1).ok.kind,'complete');}
  }
  groups.push({path,rows});
 }
