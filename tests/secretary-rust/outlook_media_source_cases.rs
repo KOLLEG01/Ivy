@@ -36,6 +36,7 @@ impl Directory {
 }
 impl Drop for Directory {
     fn drop(&mut self) {
+        SPOOL.with(|slot| *slot.borrow_mut() = None);
         let actual = std::fs::canonicalize(&self.0).unwrap();
         assert_eq!(
             actual.parent(),
@@ -53,7 +54,11 @@ impl Drop for Directory {
                 .unwrap()
                 .starts_with("secretary-media-source-rust-")
         );
-        std::fs::remove_dir_all(actual).unwrap();
+        if let Err(error) = std::fs::remove_dir_all(actual) {
+            if !std::thread::panicking() {
+                panic!("Owned fixture cleanup: {error}");
+            }
+        }
     }
 }
 
@@ -81,6 +86,8 @@ struct Yielding {
     scripted: Scripted,
     label: String,
     tamper_after_attach: std::sync::atomic::AtomicBool,
+    immutable: Mutex<std::collections::BTreeMap<String, String>>,
+    intentional_mutation: bool,
 }
 impl RpcClient for Yielding {
     fn request<'a>(
@@ -107,6 +114,55 @@ impl RpcClient for Yielding {
             );
             let attach = method == "objects.write" && params.get("objectId").is_some();
             let result = self.scripted.request(method, params, options).await;
+            if method == "objects.read" && !self.intentional_mutation {
+                if let Ok(raw) = &result {
+                    if raw
+                        .required("object")
+                        .unwrap()
+                        .required("contractKey")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .starts_with("secretary/media-")
+                    {
+                        let key = canonical(
+                            &IvyJson::object([
+                                (
+                                    "objectId",
+                                    raw.required("object")
+                                        .unwrap()
+                                        .required("id")
+                                        .unwrap()
+                                        .clone(),
+                                ),
+                                (
+                                    "revision",
+                                    raw.required("revision")
+                                        .unwrap()
+                                        .required("revision")
+                                        .unwrap()
+                                        .clone(),
+                                ),
+                            ]),
+                            1024,
+                        )
+                        .unwrap();
+                        let immutable = IvyJson::object([
+                            ("content", raw.required("content").unwrap().clone()),
+                            ("metadata", raw.required("revision").unwrap().clone()),
+                        ]);
+                        let bytes = canonical(&immutable, 32 * 1024 * 1024).unwrap();
+                        if let Some(prior) =
+                            self.immutable.lock().unwrap().insert(key, bytes.clone())
+                        {
+                            assert_eq!(
+                                prior, bytes,
+                                "Immutable media bytes/pins changed during recovery"
+                            );
+                        }
+                    }
+                }
+            }
             if attach
                 && self
                     .tamper_after_attach
@@ -479,6 +535,7 @@ async fn compare_case(corpus: &IvyJson, row: &IvyJson, fair: u8) {
     let spool_path = directory.path().join("media.sqlite");
     let mut journal = Journal::open(&journal_path, Limits::default()).unwrap();
     seed_core(&journal, input);
+    journal.db.execute_batch("PRAGMA user_version=37").unwrap();
     if fair > 0 {
         let original = input
             .required("documents")
@@ -520,9 +577,15 @@ async fn compare_case(corpus: &IvyJson, row: &IvyJson, fair: u8) {
     }
     let mut spool = open_spool(&spool_path, input);
     seed_spool(&spool.borrow(), input);
+    if input.required("options").unwrap().get("archiveCut") == Some(&true.into()) {
+        spool.borrow().db.execute_batch("CREATE TEMP TRIGGER retirement_cut BEFORE DELETE ON read_plans BEGIN SELECT RAISE(ABORT,'retirement_cut'); END;").unwrap();
+    }
     SPOOL.with(|slot| *slot.borrow_mut() = Some(spool.clone()));
     let client = Arc::new(Yielding {
         label: label.clone(),
+        immutable: Mutex::default(),
+        intentional_mutation: input.required("options").unwrap().get("mutation").is_some()
+            || input.required("options").unwrap().get("coverageTamper") == Some(&true.into()),
         tamper_after_attach: std::sync::atomic::AtomicBool::new(
             input.required("options").unwrap().get("afterAttachTamper") == Some(&true.into()),
         ),
@@ -627,6 +690,56 @@ async fn compare_case(corpus: &IvyJson, row: &IvyJson, fair: u8) {
         drop(journal);
         journal = Journal::open(&journal_path, Limits::default()).unwrap();
         spool = open_spool(&spool_path, input);
+        let options = input.required("options").unwrap();
+        if let Some(mutation) = options.get("retainedMutation") {
+            let mutation = mutation.as_str().unwrap();
+            let slot = if mutation == "epoch" {
+                4
+            } else {
+                mutation.parse::<i64>().unwrap()
+            };
+            let encoded: String = spool
+                .borrow()
+                .db
+                .query_row(
+                    "SELECT observation FROM read_calls WHERE slot=?",
+                    [slot],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut value = parse(&encoded, 32 * 1024 * 1024).unwrap();
+            if mutation == "epoch" {
+                value.insert("epoch", "foreign-epoch".into());
+            } else {
+                let mut reply = value.required("reply").unwrap().clone();
+                let mut result = reply.required("result").unwrap().clone();
+                let key = if slot == 0 || slot == 37 {
+                    "account"
+                } else {
+                    "structuredContent"
+                };
+                let mut identity = result.required(key).unwrap().clone();
+                identity.insert("email", "foreign@example.test".into());
+                result.insert(key, identity);
+                reply.insert("result", result);
+                value.insert("reply", reply);
+            }
+            spool
+                .borrow()
+                .db
+                .execute(
+                    "UPDATE read_calls SET observation=? WHERE slot=?",
+                    params![canonical(&value, 32 * 1024 * 1024).unwrap(), slot],
+                )
+                .unwrap();
+        }
+        if options.get("noOldPlan") == Some(&true.into()) {
+            spool
+                .borrow()
+                .db
+                .execute_batch("DELETE FROM read_calls; DELETE FROM read_plans;")
+                .unwrap();
+        }
         SPOOL.with(|slot| *slot.borrow_mut() = Some(spool.clone()));
         start = index + 1;
     }
@@ -716,6 +829,48 @@ async fn compare_case(corpus: &IvyJson, row: &IvyJson, fair: u8) {
         downloader.pending.borrow().is_empty(),
         "Missing original acquisition in {label}"
     );
+    let core_version: i64 = journal
+        .db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    let spool_version: i64 = spool
+        .borrow()
+        .db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!((core_version, spool_version), (37, 1));
+    for original in input.required("documents").unwrap().as_array().unwrap() {
+        let (revision, value): (i64, String) = journal
+            .db
+            .query_row(
+                "SELECT current_revision,value_json FROM technical_documents WHERE id=?",
+                [original.required("id").unwrap().as_str().unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            revision as f64,
+            original.required("revision").unwrap().as_f64().unwrap()
+        );
+        assert_eq!(
+            canonical(&parse(&value, 32 * 1024 * 1024).unwrap(), 32 * 1024 * 1024).unwrap(),
+            canonical(original.required("value").unwrap(), 32 * 1024 * 1024).unwrap()
+        );
+    }
+    for original in input.required("blobs").unwrap().as_array().unwrap() {
+        let bytes: Vec<u8> = journal
+            .db
+            .query_row(
+                "SELECT bytes FROM technical_blobs WHERE id=?",
+                [original.required("id").unwrap().as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            STANDARD.encode(bytes),
+            original.required("bytes").unwrap().as_str().unwrap()
+        );
+    }
     SPOOL.with(|slot| *slot.borrow_mut() = None);
     spool.borrow().ensure_idle().unwrap();
 }
@@ -723,7 +878,7 @@ async fn compare_case(corpus: &IvyJson, row: &IvyJson, fair: u8) {
 async fn original_media_source_selection_publication_retirement_and_context() {
     let corpus = corpus();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 27);
+    assert_eq!(rows.len(), 45);
     for row in rows {
         compare_case(&corpus, row, 0).await;
     }

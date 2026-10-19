@@ -374,9 +374,49 @@ impl<'a, 'source, 'engine, 'store, 'journal, V: Validation>
                     .await?
                 {
                     if let Some(old) = old {
-                        self.native
-                            .verify_coverage(&old, covered.required("value")?)
+                        let saved = self
+                            .native
+                            .publication()
+                            .save_coverage(covered.required("value")?, &old)
                             .await?;
+                        check(same(&saved, &covered)?, "media_coverage_invalid")?;
+                        self.native
+                            .verify_coverage(&old, saved.required("value")?)
+                            .await?;
+                        let current = engine
+                            .evidence
+                            .item(old.required("item")?.required("objectId")?)
+                            .await?;
+                        let value = current.required("value")?;
+                        let admission = saved.required("value")?.required("admission")?;
+                        let media = IvyJson::object([
+                            ("contractKey", "secretary/media-coverage".into()),
+                            ("pin", saved.required("pin")?.clone()),
+                            ("contentHash", hash_json(saved.required("value")?)?.into()),
+                            ("name", "Outlook attachments".into()),
+                            ("mediaType", "application/json".into()),
+                            ("errorCode", IvyJson::Null),
+                        ]);
+                        let mut links = 0;
+                        let mut coverage_links = 0;
+                        for link in array(value.required("media")?)? {
+                            if same(link, &media)? {
+                                links += 1;
+                            }
+                            if link.get("contractKey") == Some(&"secretary/media-coverage".into()) {
+                                coverage_links += 1;
+                            }
+                        }
+                        check(
+                            current.required("pin")?.get("objectId")
+                                == old.required("item")?.get("objectId")
+                                && value.get("sourceId") == admission.get("sourceId")
+                                && value.get("identityHash") == admission.get("identityHash")
+                                && value.get("messageHash") == admission.get("messageHash")
+                                && links == 1
+                                && coverage_links == 1,
+                            "media_coverage_invalid",
+                        )?;
                         self.native.spool.borrow().archive_published(&old)?;
                     }
                     if self.issue.is_none() {
