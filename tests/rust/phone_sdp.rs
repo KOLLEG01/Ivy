@@ -294,6 +294,11 @@ fn session_cases() -> Vec<IvyJson> {
         "m=audio 31000 RTP/AVP 0\r\nc=IN IP4 0.0.0.0",
         "m=audio 31000 RTP/AVP 0\r\na=recvonly",
         "m=audio 31000 RTP/AVP 0\r\na=rtcp:31007\r\na=ptime:40",
+        "m=audio 31000 RTP/AVP 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=sctp-port:5000",
+        "m=audio 31000 RTP/AVP 0\r\nm=image 9 udptl t38",
+        "m=audio 31000 RTP/AVP 0\r\na=fmtp:0 a\r\na=foo:bar\r\na=ptime:40",
+        "m=audio 31000 RTP/AVP 0\r\na=rtpmap:110 pcma/8000",
+        "m=audio 31000 RTP/AVP 0\r\nc=IN IP6 ::",
     ] {
         cases.push(session(&preferences, vec![offer(body)]));
     }
@@ -786,7 +791,7 @@ fn evs_policy_composes_channel_maps_packet_time_and_offer_answer_constraints() {
         offer.media()[0].extra_attributes(),
         ["a=ptime:20", "a=maxptime:120"]
     );
-    let remote = SdpDocument::parse(&format!("{PREFIX}m=audio 31000 RTP/AVP 121 120 8 110 112\r\na=rtpmap:121 evs/16000/2\r\na=fmtp:121 br=16.4-24.4;bw=wb-fb;channels=2;hf-only=1\r\na=rtpmap:120 EVS/16000\r\na=fmtp:120 br-send=7.2-24.4;br-recv=16.4-128;bw-send=nb;bw-recv=fb\r\na=rtpmap:110 telephone-event/8000\r\na=rtpmap:112 telephone-event/16000\r\n")).unwrap();
+    let remote = SdpDocument::parse(&format!("{PREFIX}m=audio 31000 RTP/AVP 121 120 8 110 112\r\na=rtpmap:121 evs/16000/2\r\na=fmtp:121 br=16.4-128;bw=nb-fb;channels=2;hf-only=1\r\na=rtpmap:120 EVS/16000\r\na=fmtp:120 br-send=7.2-24.4;br-recv=16.4-128;bw-send=nb;bw-recv=fb\r\na=rtpmap:110 telephone-event/8000\r\na=rtpmap:112 telephone-event/16000\r\n")).unwrap();
     session
         .set_remote_description(SdpType::Offer, &remote)
         .unwrap();

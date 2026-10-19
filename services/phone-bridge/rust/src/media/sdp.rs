@@ -139,6 +139,7 @@ pub struct SdpFormat {
     pub(super) rtpmap: String,
     pub(super) parameters: Option<String>,
     feedback: Vec<String>,
+    video: bool,
 }
 impl SdpFormat {
     pub fn payload(&self) -> u8 {
@@ -167,15 +168,13 @@ impl SdpFormat {
             .and_then(|text| text.trim().parse().ok())
             .unwrap_or(1)
     }
-    fn video(&self, kind: SdpMediaKind) -> bool {
-        kind == SdpMediaKind::Video || matches!(self.payload, 24 | 26 | 28 | 31..=34)
-    }
     pub(super) fn new(payload: u8, rtpmap: String, parameters: Option<String>) -> Self {
         Self {
             payload,
             rtpmap,
             parameters,
             feedback: vec!["transport-cc".into()],
+            video: matches!(payload, 24 | 26 | 28 | 31..=34),
         }
     }
 }
@@ -372,7 +371,7 @@ impl SdpMedia {
         media.port_count = count.parse().unwrap_or(0);
         media.transport = parts[2].into();
         media.direction = None;
-        if kind.rtp() {
+        if !matches!(kind, SdpMediaKind::Application | SdpMediaKind::Message) {
             for payload in parts
                 .iter()
                 .skip(3)
@@ -387,7 +386,11 @@ impl SdpMedia {
                 }
             }
         } else if matches!(kind, SdpMediaKind::Application | SdpMediaKind::Message) {
-            media.application_formats = parts.get(3).copied().unwrap_or("").into();
+            media.application_formats = if kind == SdpMediaKind::Message {
+                "*".into()
+            } else {
+                parts.iter().skip(3).copied().collect::<Vec<_>>().join(" ")
+            };
         }
         Ok(Some(media))
     }
@@ -414,6 +417,15 @@ impl SdpMedia {
             .strip_prefix("a=rtpmap:")
             .filter(|value| value.contains(char::is_whitespace))
         {
+            if self.kind == SdpMediaKind::Application {
+                self.attributes
+                    .known
+                    .push(("a=rtpmap:".into(), value.into()));
+                return Ok(());
+            }
+            if matches!(self.kind, SdpMediaKind::Message | SdpMediaKind::Image) {
+                return Ok(());
+            }
             let (id, map) = split_field(value);
             if let Ok(id) = id.parse::<i32>() {
                 let payload = u8::try_from(id)
@@ -427,13 +439,22 @@ impl SdpMedia {
                 {
                     format.rtpmap = map.into();
                 } else {
-                    self.formats.push(SdpFormat::new(payload, map.into(), None));
+                    let mut format = SdpFormat::new(payload, map.into(), None);
+                    format.video = self.kind == SdpMediaKind::Video;
+                    self.formats.push(format);
                 }
             }
         } else if let Some(value) = text
             .strip_prefix("a=fmtp:")
             .filter(|value| value.contains(char::is_whitespace))
         {
+            if self.kind == SdpMediaKind::Application {
+                self.attributes.known.push(("a=fmtp:".into(), value.into()));
+                return Ok(());
+            }
+            if matches!(self.kind, SdpMediaKind::Message | SdpMediaKind::Image) {
+                return Ok(());
+            }
             let (id, parameters) = split_field(value);
             if let Ok(id) = id.parse::<u8>() {
                 if let Some(format) = self.formats.iter_mut().find(|format| format.payload == id) {
@@ -473,7 +494,7 @@ impl SdpMedia {
         Ok(())
     }
     fn write(&self, output: &mut String) {
-        let formats = if self.kind.rtp() {
+        let formats = if !matches!(self.kind, SdpMediaKind::Application | SdpMediaKind::Message) {
             self.formats
                 .iter()
                 .map(|format| format.payload.to_string())
@@ -527,12 +548,13 @@ impl SdpMedia {
                     line(output, &format!("a=fmtp:{} {}", format.payload, parameters));
                 }
             }
-            if format.video(self.kind) {
+            if format.video {
                 for feedback in &format.feedback {
                     line(output, &format!("a=rtcp-fb:{} {feedback}", format.payload));
                 }
             }
         }
+        self.attributes.write(output, &["a=rtpmap:", "a=fmtp:"]);
         for attribute in &self.attributes.extra {
             line(output, attribute);
         }

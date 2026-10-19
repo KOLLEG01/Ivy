@@ -377,13 +377,7 @@ impl AudioNegotiator {
                 .unwrap_or_else(event_format)
         }));
         let mut receive = Vec::new();
-        // Original format conversion enumerates static payloads before dynamic
-        // ones; sender preference is chosen independently from that order.
-        for format in agreed
-            .iter()
-            .filter(|format| format.payload < 96)
-            .chain(agreed.iter().filter(|format| format.payload >= 96))
-        {
+        for format in &agreed {
             if is_name(format, "telephone-event") {
                 continue;
             }
@@ -434,6 +428,9 @@ impl AudioNegotiator {
             .media
             .iter()
             .enumerate()
+            .filter(|(_, offered)| {
+                matches!(offered.kind, SdpMediaKind::Audio | SdpMediaKind::Video)
+            })
             .map(|(index, offered)| {
                 let accepted = offered.kind == SdpMediaKind::Audio && !accepted_audio;
                 if accepted {
