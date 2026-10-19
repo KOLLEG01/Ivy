@@ -1,23 +1,15 @@
 //! Service configuration boundary. Filesystem work runs on blocking workers.
 use crate::{IvyError, IvyJson, IvyResult, node_runtime::NodeRuntime, paths::inside};
-use ivy_contracts::{JsString, core_schema::validate_host, json};
+use ivy_contracts::{JsString, core_schema::validate_host};
 use std::{ffi::OsString, fs, path::{Path, PathBuf}};
 pub use crate::protected_config::protected_json_file;
 pub use crate::config_file::json_file;
+pub use crate::config_write::atomic_json;
 pub(crate) use crate::config_file::{FileError, read_json};
+pub(crate) use crate::config_write::write_json;
 
 pub const CONFIGURATION_BYTES: usize = 1024 * 1024;
 
-pub async fn atomic_json(path: impl Into<PathBuf>, value: IvyJson) -> IvyResult<()> {
-    let path = path.into();
-    tokio::task::spawn_blocking(move || write_json(&path, &value))
-        .await.map_err(|_| IvyError::internal())?
-}
-pub(crate) fn write_json(path: &Path, value: &IvyJson) -> IvyResult<()> {
-    let mut bytes = json::canonical(value, ivy_contracts::limits::MANAGEMENT_FRAME_BYTES)?.into_bytes();
-    bytes.push(b'\n');
-    ivy_store::atomic::atomic_write(path, &bytes).map_err(|_| IvyError::internal())
-}
 fn absolute(path: &Path) -> bool {
     // node:path.win32 admits root-relative paths as absolute (e.g. \\data).
     #[cfg(windows)] { path.has_root() }

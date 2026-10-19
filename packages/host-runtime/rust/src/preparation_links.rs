@@ -4,6 +4,8 @@ use ivy_contracts::JsString;
 use std::{fs, io, path::{Path, PathBuf}};
 #[path = "preparation_links/copy_link.rs"]
 mod copy_link;
+pub(crate) fn copy_observed_link(source:&Path,destination:&Path)->io::Result<()>{copy_link::copy(source,destination)}
+pub(crate) fn check_copy_paths(source:&Path,destination:&Path,directory:bool,parents:bool)->io::Result<Option<fs::Metadata>>{copy_link::check_paths(source,destination,directory,parents)}
 
 /// Cache restoration distinguishes native ENOENT from policy errors before the
 /// public Ivy boundary. Keep that distinction through concurrent worker drain.

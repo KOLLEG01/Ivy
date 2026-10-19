@@ -8,6 +8,27 @@ fn internal<T,E>(value:Result<T,E>)->IvyResult<T>{value.map_err(|_|IvyError::int
 async fn blocking<T:Send+'static>(work:impl FnOnce()->IvyResult<T>+Send+'static)->IvyResult<T>{internal(tokio::task::spawn_blocking(work).await)?}
 fn fs_path(path:&Path)->PathBuf{node_path::filesystem_path(&node_path::from_native(path))}
 
+/// Match libuv's ordinary rename, including Windows' existing-directory errors.
+/// Rust's POSIX-style replacement on Windows has different cache collision policy.
+pub(crate) fn rename_raw(source:&Path,destination:&Path)->std::io::Result<()> {
+    #[cfg(windows)] {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW,MOVEFILE_REPLACE_EXISTING};
+        let wide=|path:&Path|->std::io::Result<Vec<u16>>{
+            let path=fs_path(path);let mut units:Vec<_>=path.as_os_str().encode_wide().collect();
+            if units.contains(&0){return Err(std::io::ErrorKind::InvalidInput.into())}
+            let absolute=std::path::absolute(&path)?;let absolute:Vec<_>=absolute.as_os_str().encode_wide().collect();
+            if absolute.len()>=248&&!absolute.starts_with(&[92,92,63,92])&&!absolute.starts_with(&[92,92,46,92]) {
+                units=if absolute.starts_with(&[92,92]){"\\\\?\\UNC\\".encode_utf16().chain(absolute[2..].iter().copied()).collect()}else{"\\\\?\\".encode_utf16().chain(absolute).collect()};
+            }
+            units.push(0);Ok(units)
+        };
+        let source=wide(source)?;let destination=wide(destination)?;
+        if unsafe{MoveFileExW(source.as_ptr(),destination.as_ptr(),MOVEFILE_REPLACE_EXISTING)}==0 {Err(std::io::Error::last_os_error())}else{Ok(())}
+    }
+    #[cfg(not(windows))] {fs::rename(fs_path(source),fs_path(destination))}
+}
+
 /// Preparation directory links: a Windows junction or a relative Unix symlink.
 /// This synchronous primitive preserves OS errors for the owning cache policy.
 pub fn directory_link(source:&Path,destination:&Path)->std::io::Result<()>{
@@ -194,9 +215,14 @@ pub async fn remove_file_force(path:impl Into<PathBuf>)->IvyResult<()>{
 }
 pub(crate) async fn remove_payload(path:PathBuf,directory:bool,retries:u64)->IvyResult<()>{remove(path,Some(directory),retries,false).await}
 async fn remove(path:PathBuf,directory:Option<bool>,retries:u64,force:bool)->IvyResult<()>{
-    blocking(move||{
+    blocking(move||remove_native(path,directory,retries,force).map_err(|_|IvyError::internal())).await
+}
+pub(crate) async fn remove_force_raw(path:PathBuf)->std::io::Result<()>{
+    tokio::task::spawn_blocking(move||remove_native(path,None,0,true)).await.map_err(std::io::Error::other)?
+}
+fn remove_native(path:PathBuf,directory:Option<bool>,retries:u64,force:bool)->std::io::Result<()>{
         let path=fs_path(&path);
-        let metadata=match fs::symlink_metadata(&path){Ok(metadata)=>metadata,Err(error) if force&&error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(_)=>return Err(IvyError::internal())};
+        let metadata=match fs::symlink_metadata(&path){Ok(metadata)=>metadata,Err(error) if force&&error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(error)=>return Err(error)};
         let directory=directory.unwrap_or_else(||{
             #[cfg(windows)]{use std::os::windows::fs::MetadataExt;metadata.file_attributes()&0x10!=0}
             #[cfg(not(windows))]{metadata.is_dir()}
@@ -207,11 +233,10 @@ async fn remove(path:PathBuf,directory:Option<bool>,retries:u64,force:bool)->Ivy
             match result{
                 Ok(())=>return Ok(()),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(()),
                 Err(e) if attempt<retries&&retry_remove(&e)=>std::thread::sleep(std::time::Duration::from_millis((attempt+1)*100)),
-                Err(_)=>return Err(IvyError::internal()),
+                Err(error)=>return Err(error),
             }
         }
-        Err(IvyError::internal())
-    }).await
+        unreachable!("the bounded removal loop always returns")
 }
 fn retry_remove(error:&std::io::Error)->bool{
     #[cfg(unix)]{matches!(error.raw_os_error(),Some(libc::EBUSY|libc::EMFILE|libc::ENFILE|libc::ENOTEMPTY|libc::EPERM))}

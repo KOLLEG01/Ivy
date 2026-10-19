@@ -48,17 +48,24 @@ fn unlink(path:&Path)->io::Result<()> {
     fs::remove_file(fs_path(path))
 }
 
-pub(super) fn copy(source:&Path,destination:&Path)->io::Result<()> {
+pub(super) fn check_paths(source:&Path,destination:&Path,directory:bool,parents:bool)->io::Result<Option<fs::Metadata>> {
     let context=Context::current()?;
-    let source_metadata=fs::symlink_metadata(fs_path(source))?;
     let destination_metadata=match fs::symlink_metadata(fs_path(destination)) {
         Ok(value)=>Some(value),Err(error) if error.kind()==io::ErrorKind::NotFound=>None,Err(error)=>return Err(error),
     };
-    if let Some(destination_metadata)=&destination_metadata {
-        if identical(source,destination)?||destination_metadata.is_dir() { return invalid(); }
+    if let Some(other)=&destination_metadata {
+        if identical(source,destination)?||directory!=other.is_dir() {return invalid()}
     }
+    if directory&&subdirectory(&context,&node_path::from_native(source),&node_path::from_native(destination)){return invalid()}
+    if parents {parent_paths(&context,source,destination)?;}
+    Ok(destination_metadata)
+}
+
+pub(super) fn copy(source:&Path,destination:&Path)->io::Result<()> {
+    let context=Context::current()?;
+    let source_metadata=fs::symlink_metadata(fs_path(source))?;
+    let destination_metadata=check_paths(source,destination,false,true)?;
     if !source_metadata.file_type().is_symlink() { return invalid(); }
-    parent_paths(&context,source,destination)?;
     let parent=node_path::dirname(context.style,&node_path::from_native(destination));
     match fs::metadata(node_path::filesystem_path(&parent)) {
         Ok(_)=>(),Err(error) if error.kind()==io::ErrorKind::NotFound=>fs::create_dir_all(node_path::filesystem_path(&parent))?,Err(error)=>return Err(error),

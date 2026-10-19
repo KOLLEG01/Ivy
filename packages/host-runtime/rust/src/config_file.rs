@@ -3,15 +3,15 @@ use crate::{IvyError, IvyJson, IvyResult};
 use ivy_contracts::json;
 use std::{fs, path::{Path, PathBuf}};
 
-pub(crate) enum FileError { Missing, Invalid(IvyError) }
+pub(crate) enum FileError { Missing, Invalid(IvyError), Io(std::io::Error), Syntax }
 impl FileError {
     pub(crate) fn error(self) -> IvyError {
-        match self { Self::Missing => IvyError::internal(), Self::Invalid(error) => error }
+        match self { Self::Missing | Self::Io(_) | Self::Syntax => IvyError::internal(), Self::Invalid(error) => error }
     }
 }
 fn file_error(error: std::io::Error) -> FileError {
     if error.kind() == std::io::ErrorKind::NotFound { FileError::Missing }
-    else { FileError::Invalid(IvyError::internal()) }
+    else { FileError::Io(error) }
 }
 pub(crate) fn read_json(path: &Path, limit: usize) -> Result<IvyJson, FileError> {
     let metadata = fs::metadata(path).map_err(file_error)?;
@@ -21,7 +21,7 @@ pub(crate) fn read_json(path: &Path, limit: usize) -> Result<IvyJson, FileError>
     let bytes = crate::filesystem::read_file_bytes(path).map_err(file_error)?;
     // Node readFile(..., 'utf8') replaces malformed input before JSON.parse.
     json::parse(&String::from_utf8_lossy(&bytes), usize::MAX)
-        .map_err(|_| FileError::Invalid(IvyError::internal()))
+        .map_err(|_| FileError::Syntax)
 }
 pub async fn json_file(path: impl Into<PathBuf>, limit: usize) -> IvyResult<IvyJson> {
     let path = path.into();
