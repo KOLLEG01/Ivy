@@ -26,7 +26,12 @@ try {
    $peerNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
    foreach($peerName in $value.IncomingPeers){$null=$peerNames.Add($peerName)}
    if($null -eq $value.Binding -or $null -eq $value.Codecs -or $null -eq $value.IncomingPeers -or $value.IncomingPeers.Length -gt 32 -or $peerNames.Count -ne $value.IncomingPeers.Length){throw [ArgumentException]::new('Invalid configuration')}
-   $peers=@($value.IncomingPeers | Where-Object {$_ -cne 'registered'} | ForEach-Object {[Net.IPAddress]::Parse($_)})
+   $peers=@(foreach($peerName in $value.IncomingPeers){
+    if($peerName -cne 'registered'){
+     if($null -eq $peerName){throw [ArgumentNullException]::new('ipString')}
+     [Net.IPAddress]::Parse([string]$peerName)
+    }
+   })
    $endpoint=$value.Binding.Endpoint()
    $value.Codecs.Validate()
    if($null -ne $value.Micro){$value.Micro.Validate()}
