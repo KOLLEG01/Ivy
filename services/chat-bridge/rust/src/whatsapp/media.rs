@@ -337,10 +337,7 @@ impl WhatsAppMedia {
                         )
                         .into(),
                     )]);
-                    let root = main.root();
-                    if !root.is_null() {
-                        create.insert("parentId", root);
-                    }
+                    create.insert("parentId", main.root());
                     create.insert(
                         "ownerObjectId",
                         current

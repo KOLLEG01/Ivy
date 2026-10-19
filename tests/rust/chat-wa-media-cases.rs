@@ -269,7 +269,10 @@ impl MediaMain for Probe {
         })
     }
     fn root(&self) -> Json {
-        "root".into()
+        self.spec
+            .get("root")
+            .cloned()
+            .unwrap_or_else(|| "root".into())
     }
     fn write(&self, request: Json) -> RequestFuture<'_> {
         Box::pin(async move {
