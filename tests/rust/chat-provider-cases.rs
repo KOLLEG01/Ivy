@@ -557,8 +557,8 @@ async fn original_provider_operations_use_sdk_context_and_real_domain_owners() {
                             .unwrap_or(7.0) as u64;
                         context.operation_id = action
                             .get("transportId")
-                            .unwrap_or_else(|| args.get("operationId").unwrap_or(&Json::Null))
-                            .as_js_string()
+                            .or_else(|| args.get("operationId"))
+                            .and_then(Json::as_js_string)
                             .cloned();
                         if flag(action, "abortBefore") {
                             connection.close_with(abort_reason());
