@@ -5,6 +5,8 @@ pub mod concurrency;
 pub mod default_settings;
 pub mod logs;
 pub mod node_runtime;
+#[path = "package_validation.rs"]
+pub mod package_archive;
 pub mod package_requirements;
 pub mod paths;
 pub mod platform;
