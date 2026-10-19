@@ -1,9 +1,16 @@
 import {readFileSync,writeFileSync,mkdirSync,statSync,linkSync} from 'node:fs';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {ownedProcessStops,retainOwnedProcessStop} from '../../dist/services/agent-manager/src/process-evidence.js';
-import {IvyError} from '../../dist/packages/contracts/src/errors.js';
+import {stripTypeScriptTypes} from 'node:module';
+import {jsonFile,atomicJson} from '../../dist/packages/host-runtime/src/config.js';
+import {IvyError,requireThat} from '../../dist/packages/contracts/src/errors.js';
 const input=JSON.parse(readFileSync(0,'utf8')),OriginalDate=Date;
+const source=readFileSync('services/agent-manager/src/process-evidence.ts','utf8');
+const start=source.indexOf('const evidencePath =');if(start<0)throw Error('Original evidence module boundary changed');
+const code=stripTypeScriptTypes(source.slice(start).replace(/^export /gm,''),{mode:'transform'});
+// Scope the domain's injected clock lexically. The real shared atomic helper
+// keeps its own deadline clock, as it does in the Rust production boundary.
+const moduleWithClock=new Function('join','jsonFile','atomicJson','requireThat','Date','process',code+'\nreturn {ownedProcessStops,retainOwnedProcessStop};');
 const now=OriginalDate.parse('2026-10-19T12:34:56.789Z'),cutoff=now-14*24*60*60*1000;
 const iso=ms=>new OriginalDate(ms).toISOString(),row=(epoch,at=iso(now))=>({epoch,observedAt:at});
 const cases=[],dates=new Set();
@@ -40,12 +47,13 @@ for(const c of cases){
   if(c.kind==='hard-link'){const target=join(root,'original');writeFileSync(target,bytes);linkSync(target,path);}else writeFileSync(path,bytes);
  }
  const trace={parse:[],observedAt:[],now:[]};let position=0;
- globalThis.Date=class extends OriginalDate{
+ const EvidenceDate=class extends OriginalDate{
   constructor(...args){super(...(args.length?args:[now]));if(!args.length)trace.observedAt.push(iso(now));}
   static now(){const value=c.now[Math.min(position++,c.now.length-1)];trace.now.push(value);return value;}
   static parse(value){trace.parse.push(value);return OriginalDate.parse(value);}
  };
- let reply;try{reply={ok:true,value:c.operation==='read'?await ownedProcessStops(root):(await retainOwnedProcessStop(root,c.epoch),null)};}catch(error){reply={ok:false,error:IvyError.from(error).toWire()};}finally{globalThis.Date=OriginalDate;}
+ const {ownedProcessStops,retainOwnedProcessStop}=moduleWithClock(join,jsonFile,atomicJson,requireThat,EvidenceDate,process);
+ let reply;try{reply={ok:true,value:c.operation==='read'?await ownedProcessStops(root):(await retainOwnedProcessStop(root,c.epoch),null)};}catch(error){reply={ok:false,error:IvyError.from(error).toWire()};}
  let fileHash=null;try{if(statSync(path).isFile())fileHash='sha256:'+createHash('sha256').update(readFileSync(path)).digest('hex');}catch{}
  c.dateParseCalls=trace.parse;delete trace.parse;
  c.expected={reply,fileHash,trace};
