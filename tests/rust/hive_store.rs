@@ -22,6 +22,8 @@ mod object_write;
 mod online_backup;
 #[path = "hive_package_catalog.rs"]
 mod package_catalog;
+#[path = "hive_packages.rs"]
+mod packages;
 #[path = "hive_query.rs"]
 mod query;
 #[path = "hive_registry.rs"]

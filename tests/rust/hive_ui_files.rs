@@ -16,7 +16,7 @@ fn string<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a JsString> {
 fn array<'a>(value: &'a IvyJson, key: &str) -> &'a [IvyJson] {
     value.get(key).and_then(IvyJson::as_array).unwrap()
 }
-fn fixture(root: &Path, actions: &Value) {
+pub(super) fn fixture(root: &Path, actions: &Value) {
     let mut child =
         Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
             .arg(
