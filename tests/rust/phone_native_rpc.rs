@@ -13,6 +13,8 @@ mod resampler;
 mod media_codec;
 #[path = "phone_rtp_transport.rs"]
 mod rtp_transport;
+#[path = "phone_sip_receiver.rs"]
+mod sip_receiver;
 #[path = "phone_sdp.rs"]
 mod sdp;
 #[path = "phone_native_config.rs"]

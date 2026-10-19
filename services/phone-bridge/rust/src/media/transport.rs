@@ -291,6 +291,11 @@ impl RtpTransport {
     /// Cancelling this observer never aborts the original receive/cleanup owner.
     pub async fn close(&self) {
         self.request_close();
+        self.wait_closed().await;
+    }
+    /// Observe original I/O quiescence without requesting a new close. A media
+    /// supervisor uses this to detect receive/callback failure even while idle.
+    pub async fn wait_closed(&self) {
         let inner = &self.handle.inner;
         loop {
             let changed = inner.changed.notified();

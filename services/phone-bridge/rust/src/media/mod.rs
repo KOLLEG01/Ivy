@@ -8,6 +8,8 @@ mod negotiation;
 mod packet;
 mod permit;
 mod queue;
+mod receive_analysis;
+mod receive_owner;
 mod resample;
 mod rtp;
 mod sdp;
@@ -16,6 +18,7 @@ mod transport;
 
 pub use permit::AudioPermit;
 pub use queue::AudioQueue;
+pub use receive_owner::{ReceiveError, SipReceiveEvents, SipReceiveObservation, SipRtpReceiver};
 pub use resample::PcmResampler;
 pub use rtp::{RtpAudioPacket, RtpReceiveQueue, RtpReceiveStatus};
 pub use sdp::{

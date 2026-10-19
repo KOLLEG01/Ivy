@@ -218,6 +218,13 @@ impl InBandDetector {
     }
 }
 
+impl Drop for InBandDetector {
+    fn drop(&mut self) {
+        self.samples.iter_mut().for_each(|sample| *sample = 0);
+        self.weights.fill(0.0);
+    }
+}
+
 fn index_of_maximum(values: &[f64; 4]) -> usize {
     let mut maximum = 0;
     for index in 1..values.len() {
