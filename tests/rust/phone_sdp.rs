@@ -22,7 +22,7 @@ fn s(value: &IvyJson, key: &str) -> Option<String> {
     value.get(key).and_then(|value| value.as_str().ok())
 }
 fn items(value: &IvyJson) -> &[IvyJson] {
-    value.as_array().map(|v| v.as_slice()).unwrap_or(&[])
+    value.as_array().unwrap_or(&[])
 }
 fn parse_case(body: impl Into<String>) -> IvyJson {
     IvyJson::object([("op", "parse".into()), ("sdp", body.into().into())])

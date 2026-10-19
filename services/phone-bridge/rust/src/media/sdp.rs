@@ -239,12 +239,6 @@ impl Attributes {
             self.known.push((key.into(), value.into()));
         }
     }
-    fn get(&self, key: &str) -> Option<&str> {
-        self.known
-            .iter()
-            .find(|pair| pair.0 == key)
-            .map(|pair| pair.1.as_str())
-    }
     fn write(&self, output: &mut String, keys: &[&str]) {
         for key in keys {
             for (_, value) in self.known.iter().filter(|pair| pair.0 == *key) {
