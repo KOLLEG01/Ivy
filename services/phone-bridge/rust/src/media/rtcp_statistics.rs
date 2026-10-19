@@ -113,8 +113,8 @@ pub struct RtcpTimerEvent {
 /// a periodic catch-up clock. Local-wall milliseconds drive inactivity; the
 /// independent monotonic offset drives scheduling. The owner supplies both.
 pub struct RtcpReportSchedule {
-    created_wall_ms: i64,
-    last_activity_wall_ms: Option<i64>,
+    created_wall_ticks: i64,
+    last_activity_wall_ticks: Option<i64>,
     timeout_ms: i32,
     timed_out: bool,
     started: bool,
@@ -128,9 +128,12 @@ impl RtcpReportSchedule {
     pub const BASE_INTERVAL_MS: u16 = 5000;
     pub const DEFAULT_TIMEOUT_MS: i32 = 30000;
     pub fn new(created_wall_ms: i64) -> Self {
+        Self::from_wall_ticks(created_wall_ms.saturating_mul(10_000))
+    }
+    pub fn from_wall_ticks(created_wall_ticks: i64) -> Self {
         Self {
-            created_wall_ms,
-            last_activity_wall_ms: None,
+            created_wall_ticks,
+            last_activity_wall_ticks: None,
             timeout_ms: Self::DEFAULT_TIMEOUT_MS,
             timed_out: false,
             started: false,
@@ -179,13 +182,16 @@ impl RtcpReportSchedule {
         self.started
     }
     pub fn last_activity_wall_ms(&self) -> Option<i64> {
-        self.last_activity_wall_ms
+        self.last_activity_wall_ticks.map(|t| t / 10_000)
     }
     pub fn set_timeout_ms(&mut self, value: i32) {
         self.timeout_ms = value;
     }
     pub fn record_activity(&mut self, wall_ms: i64) {
-        self.last_activity_wall_ms = Some(wall_ms);
+        self.record_activity_ticks(wall_ms.saturating_mul(10_000));
+    }
+    pub fn record_activity_ticks(&mut self, wall_ticks: i64) {
+        self.last_activity_wall_ticks = Some(wall_ticks);
         self.timed_out = false;
     }
     pub fn sender_report(&self, packets_sent: u32) -> bool {
@@ -196,14 +202,24 @@ impl RtcpReportSchedule {
         now: Duration,
         wall_ms: i64,
     ) -> Result<Option<RtcpTimerEvent>, MediaError> {
+        self.begin_report_ticks(now, wall_ms.saturating_mul(10_000))
+    }
+    pub fn begin_report_ticks(
+        &mut self,
+        now: Duration,
+        wall_ticks: i64,
+    ) -> Result<Option<RtcpTimerEvent>, MediaError> {
         self.observe(now)?;
         if self.closed || self.next.is_none_or(|next| now < next) {
             return Ok(None);
         }
         self.next = None;
         self.in_flight = true;
-        let last = self.last_activity_wall_ms.unwrap_or(self.created_wall_ms);
-        let expired = i128::from(wall_ms) - i128::from(last) > i128::from(self.timeout_ms);
+        let last = self
+            .last_activity_wall_ticks
+            .unwrap_or(self.created_wall_ticks);
+        let expired =
+            i128::from(wall_ticks) - i128::from(last) > i128::from(self.timeout_ms) * 10_000;
         let new_timeout = expired && !self.timed_out;
         if new_timeout {
             self.timed_out = true;
@@ -239,5 +255,16 @@ impl RtcpReportSchedule {
     pub fn close(&mut self) {
         self.closed = true;
         self.next = None;
+    }
+    pub(super) fn commit_report_count(&mut self, packets: u32) -> Result<(), MediaError> {
+        if !self.in_flight {
+            return Err(MediaError::InvalidPacket);
+        }
+        self.previous_sent = packets;
+        Ok(())
+    }
+    pub(super) fn stop_timer(&mut self) {
+        self.next = None;
+        self.in_flight = false;
     }
 }

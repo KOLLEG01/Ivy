@@ -14,7 +14,9 @@ mod resample;
 mod rtcp;
 mod rtcp_owner;
 mod rtcp_receive;
+mod rtcp_session;
 mod rtcp_statistics;
+mod rtcp_time;
 mod rtp;
 mod sdp;
 mod send_clock;
@@ -28,7 +30,11 @@ pub use resample::PcmResampler;
 pub use rtcp::{RtcpReportBlock, RtcpReportBuilder, RtcpSenderInfo, RtcpTransmitCounters};
 pub use rtcp_owner::RtcpReceiveObservation;
 pub use rtcp_receive::{RtcpCompound, RtcpReceiverReport, RtcpReportBlocks, RtcpSenderReport};
+pub use rtcp_session::{RtcpSession, RtcpSessionObservation};
 pub use rtcp_statistics::{RtcpReceptionStatistics, RtcpReportSchedule, RtcpTimerEvent};
+#[cfg(windows)]
+pub use rtcp_time::WindowsRtcpRuntime;
+pub use rtcp_time::{RtcpRuntime, RtcpWallTime, rtcp_interval};
 pub use rtp::{RtpAudioPacket, RtpReceiveQueue, RtpReceiveStatus};
 pub use sdp::{
     SDP_UNITS, SdpConnection, SdpDirection, SdpDocument, SdpError, SdpFormat, SdpMedia,
@@ -48,6 +54,8 @@ pub enum MediaError {
     InvalidPacket,
     ClockWentBackwards,
     ClockOverflow,
+    ClockUnavailable,
+    ReportCallbackFailed,
     InvalidPermitAge,
     StaleObservation,
     Revoked,

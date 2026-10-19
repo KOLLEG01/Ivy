@@ -1,12 +1,12 @@
-//! SIP receive composition. The call retains SDP, sender, RTCP scheduling and
-//! owned audio disposal; this owner retains its actual RTP pair and gap pump.
+//! SIP media transport/receive composition. The call retains SDP, audio sender
+//! and route disposal; this owner retains its one RTP pair, RTCP and gap pump.
 use super::receive_analysis::ReceiveAnalysis;
-use super::rtcp_owner::RtcpReceiveOwner;
+use super::rtcp_owner::{RtcpReceiveEffect, RtcpReceiveOwner};
 use super::{
     AudioFormat, AudioNegotiation, CodecError, EvsLibrary, MediaCodec, MediaError, PcmAudioPort,
-    PcmAudioState, RtcpCompound, RtcpReceiveObservation, RtpAudioPacket, RtpDatagramSink,
-    RtpPacket, RtpPeer, RtpReceiveQueue, RtpReceiveStatus, RtpTransport, RtpTransportError,
-    RtpTransportObservation,
+    PcmAudioState, RtcpCompound, RtcpReceiveObservation, RtcpRuntime, RtcpSession,
+    RtcpSessionObservation, RtpAudioPacket, RtpDatagramSink, RtpPacket, RtpPeer, RtpReceiveQueue,
+    RtpReceiveStatus, RtpTransport, RtpTransportError, RtpTransportObservation,
 };
 use crate::dtmf::{InputSource, RtpEventTracker, rtp_event_digit};
 use std::{
@@ -15,7 +15,7 @@ use std::{
         Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -55,6 +55,8 @@ pub trait SipReceiveEvents: Send + Sync + 'static {
     /// application report; BYE or unknown-only controls may publish only here.
     fn rtcp(&self, source: SocketAddr, compound: &[u8]);
     fn report(&self, _source: SocketAddr, _report: &RtcpReceiveObservation) {}
+    fn report_sent(&self, _report: &[u8]) {}
+    fn rtcp_timeout(&self) {}
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,13 +76,13 @@ pub struct SipReceiveObservation {
     pub failure: Option<ReceiveError>,
     pub cleanup_confirmed: bool,
     pub rtcp: RtcpReceiveObservation,
+    pub rtcp_session: Option<RtcpSessionObservation>,
 }
 struct State {
     peer: Option<RtpPeer>,
     formats: Vec<AudioFormat>,
     event_payloads: Vec<u8>,
     selected_event: u8,
-    rtcp: RtcpReceiveOwner,
     queue: RtpReceiveQueue,
     receiver: Option<MediaCodec>,
     observed: Option<PcmAudioState>,
@@ -95,8 +97,15 @@ struct State {
     detected_events: u64,
     failure: Option<ReceiveError>,
 }
+#[derive(Default)]
+struct Reports {
+    admission: RtcpReceiveOwner,
+    session: Option<RtcpSession>,
+    closed: bool,
+}
 struct Inner {
     state: Mutex<State>,
+    reports: Mutex<Reports>,
     audio: Arc<dyn PcmAudioPort>,
     evs: Option<Arc<EvsLibrary>>,
     events: Arc<dyn SipReceiveEvents>,
@@ -107,6 +116,7 @@ struct Inner {
     pending: Notify,
     completed: OnceLock<()>,
     changed: Notify,
+    report_pending: Notify,
 }
 impl Inner {
     fn now(&self) -> Duration {
@@ -114,6 +124,23 @@ impl Inner {
     }
     fn request_close(&self) {
         self.closed.store(true, Ordering::Release);
+        // Separate from PCM decoding and all notifications. Concurrent close
+        // callers serialize this one BYE before closing the original socket.
+        {
+            let mut reports = self.reports.lock().unwrap_or_else(|p| p.into_inner());
+            if !reports.closed {
+                reports.closed = true;
+                if let Some(session) = reports.session.as_mut() {
+                    if let Ok(Ok(Some(report))) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.close()))
+                    {
+                        if let Some(transport) = self.transport.get() {
+                            let _ = transport.send_rtcp(&report);
+                        }
+                    }
+                }
+            }
+        }
         self.stop.cancel();
         if let Some(transport) = self.transport.get() {
             transport.request_close();
@@ -214,7 +241,11 @@ impl Inner {
             return Ok(Vec::new());
         }
         if state.selected_event == 0 || packet.header.payload_type != state.selected_event {
-            state.rtcp.learn(packet.header.source);
+            let mut reports = self.reports.lock().unwrap_or_else(|p| p.into_inner());
+            if reports.closed {
+                return Ok(Vec::new());
+            }
+            reports.admission.learn(packet.header.source);
         }
         if state.event_payloads.contains(&packet.header.payload_type) {
             state.event_packets += 1;
@@ -291,6 +322,34 @@ impl Inner {
         }
         Ok(digits)
     }
+    fn record_received(&self, source: SocketAddr, packet: RtpPacket<'_>) {
+        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if self.closed.load(Ordering::Acquire)
+            || !state.peer.is_some_and(|p| {
+                p.rtp().port() == source.port() && crate::sip::same_ip(p.rtp(), source)
+            })
+            || state.event_payloads.contains(&packet.header.payload_type)
+            || !state
+                .formats
+                .iter()
+                .any(|f| f.payload() == packet.header.payload_type)
+            || (packet.payload.is_empty()
+                && packet.contributing_sources.is_empty()
+                && packet.extension.is_none()
+                && packet.padding == 0)
+        {
+            return;
+        }
+        let mut reports = self.reports.lock().unwrap_or_else(|p| p.into_inner());
+        if reports.closed {
+            return;
+        }
+        if let Some(session) = reports.session.as_mut() {
+            if let Err(error) = session.received(packet.header, packet.payload.len()) {
+                session.stop_timer(error);
+            }
+        }
+    }
 }
 struct Sink(Weak<Inner>);
 impl RtpDatagramSink for Sink {
@@ -305,6 +364,7 @@ impl RtpDatagramSink for Sink {
                             }
                             inner.events.digit(digit, source);
                         }
+                        inner.record_received(source, packet);
                     }
                     Err(error) => inner.fail(error),
                 }
@@ -320,7 +380,7 @@ impl RtpDatagramSink for Sink {
                 return;
             };
             let notification = {
-                let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+                let state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
                 let accepted = !inner.closed.load(Ordering::Acquire)
                     && state.peer.is_some_and(|peer| {
                         peer.rtcp().port() == source.port()
@@ -329,10 +389,39 @@ impl RtpDatagramSink for Sink {
                 if !accepted {
                     return;
                 }
-                if compound.len() > 12 && state.rtcp.receive(report, SystemTime::now()) {
-                    Some(state.rtcp.observation())
+                let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+                if reports.closed || inner.closed.load(Ordering::Acquire) {
+                    return;
+                }
+                let effect = if compound.len() > 12 {
+                    let Reports {
+                        admission, session, ..
+                    } = &mut *reports;
+                    admission.receive(report, || {
+                        if let Some(session) = session.as_mut() {
+                            if let Err(error) = session.report_received(
+                                report.sender.map(|r| r.info.ntp_timestamp),
+                                || inner.now(),
+                            ) {
+                                session.stop_timer(error);
+                            }
+                        }
+                    })
                 } else {
-                    None
+                    RtcpReceiveEffect::None
+                };
+                match effect {
+                    RtcpReceiveEffect::Report => {
+                        inner.report_pending.notify_one();
+                        Some(reports.admission.observation())
+                    }
+                    RtcpReceiveEffect::Bye(source) => {
+                        if let Some(session) = reports.session.as_mut() {
+                            session.remove_reception(source);
+                        }
+                        None
+                    }
+                    RtcpReceiveEffect::None => None,
                 }
             };
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -356,8 +445,8 @@ impl Drop for Handle {
 }
 
 /// A running SIP audio receiver with one actual socket pair and bounded gap
-/// wakeups. It does not own the call's audio route, sender, SIP dialog or RTCP
-/// transmission/timers. Final call disposal must additionally revoke/close that route.
+/// wakeups and opt-in RTCP reporting. It does not own the call's audio route,
+/// audio sender or SIP dialog. Final disposal must additionally close that route.
 #[derive(Clone)]
 pub struct SipRtpReceiver {
     handle: Arc<Handle>,
@@ -379,7 +468,6 @@ impl SipRtpReceiver {
                 formats: Vec::new(),
                 event_payloads: Vec::new(),
                 selected_event: 101,
-                rtcp: RtcpReceiveOwner::default(),
                 queue,
                 receiver: None,
                 observed: None,
@@ -395,6 +483,7 @@ impl SipRtpReceiver {
                 failure: None,
             }),
             audio,
+            reports: Mutex::new(Reports::default()),
             evs,
             events,
             transport: OnceLock::new(),
@@ -404,6 +493,7 @@ impl SipRtpReceiver {
             pending: Notify::new(),
             completed: OnceLock::new(),
             changed: Notify::new(),
+            report_pending: Notify::new(),
         });
         let transport = RtpTransport::bind(
             interface,
@@ -415,6 +505,8 @@ impl SipRtpReceiver {
         let _ = inner.transport.set(transport);
         let worker_inner = inner.clone();
         let mut worker = tokio::spawn(async move { pump(worker_inner).await });
+        let report_inner = inner.clone();
+        let reports = tokio::spawn(async move { report_pump(report_inner).await });
         let completion = inner.clone();
         tokio::spawn(async move {
             tokio::select! {
@@ -429,6 +521,7 @@ impl SipRtpReceiver {
                 },
             }
             completion.request_close();
+            let _ = reports.await;
             completion.transport.get().unwrap().close().await;
             {
                 let mut state = completion.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -457,6 +550,10 @@ impl SipRtpReceiver {
         if inner.closed.load(Ordering::Acquire) {
             return Err(ReceiveError::Closed);
         }
+        let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+        if reports.closed || inner.closed.load(Ordering::Acquire) {
+            return Err(ReceiveError::Closed);
+        }
         inner
             .transport
             .get()
@@ -470,17 +567,67 @@ impl SipRtpReceiver {
         state.formats = plan.receive_formats().to_vec();
         state.event_payloads = plan.offered_event_payloads().to_vec();
         state.selected_event = plan.selected_event_payload();
-        state.rtcp.configure(plan.remote_sources());
+        reports.admission.configure(plan.remote_sources());
         Ok(())
+    }
+    /// Construct once, using the call's SDP/sender identity. Enabling does not
+    /// start the timer; explicit Start, an admitted report or RTP send does.
+    pub fn enable_reporting(
+        &self,
+        source: u32,
+        cname: &str,
+        runtime: Arc<dyn RtcpRuntime>,
+    ) -> Result<(), ReceiveError> {
+        let session = RtcpSession::new(source, cname, runtime)?;
+        let inner = &self.handle.0;
+        let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+        if reports.closed || inner.closed.load(Ordering::Acquire) {
+            return Err(ReceiveError::Closed);
+        }
+        if reports.session.is_some() || !reports.admission.set_local_source(source) {
+            return Err(ReceiveError::InvalidPlan);
+        }
+        reports.session = Some(session);
+        Ok(())
+    }
+    pub fn start_reporting(&self) -> Result<bool, ReceiveError> {
+        let inner = &self.handle.0;
+        let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+        if reports.closed || inner.closed.load(Ordering::Acquire) {
+            return Err(ReceiveError::Closed);
+        }
+        let session = reports.session.as_mut().ok_or(ReceiveError::InvalidPlan)?;
+        let result = session.start(|| inner.now());
+        if let Err(error) = result {
+            session.stop_timer(error);
+        }
+        inner.report_pending.notify_one();
+        result.map_err(ReceiveError::Media)
+    }
+    /// Like the original GetRtcpReport, reading commits reception intervals,
+    /// but does not dispatch or commit the timer's previous sent-packet count.
+    pub fn read_report(&self) -> Result<Vec<u8>, ReceiveError> {
+        let mut reports = self
+            .handle
+            .0
+            .reports
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        reports
+            .session
+            .as_mut()
+            .ok_or(ReceiveError::InvalidPlan)?
+            .report()
+            .map_err(ReceiveError::Media)
     }
     /// The call supplies the same immutable local source as its SDP/sender.
     pub fn set_local_source(&self, source: u32) -> Result<(), ReceiveError> {
         let inner = &self.handle.0;
-        let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
         if inner.closed.load(Ordering::Acquire) {
             return Err(ReceiveError::Closed);
         }
-        if !state.rtcp.set_local_source(source) {
+        if !reports.admission.set_local_source(source) {
             return Err(ReceiveError::InvalidPlan);
         }
         Ok(())
@@ -488,6 +635,7 @@ impl SipRtpReceiver {
     pub fn observation(&self) -> SipReceiveObservation {
         let inner = &self.handle.0;
         let state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        let reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
         SipReceiveObservation {
             transport: inner.transport.get().unwrap().observation(),
             receive: state.queue.status(),
@@ -503,7 +651,8 @@ impl SipRtpReceiver {
             failed: state.failure.is_some(),
             failure: state.failure,
             cleanup_confirmed: inner.completed.get().is_some(),
-            rtcp: state.rtcp.observation(),
+            rtcp: reports.admission.observation(),
+            rtcp_session: reports.session.as_ref().map(RtcpSession::observation),
         }
     }
     /// The call updates this when its access/command policy changes. Analysis
@@ -575,3 +724,94 @@ async fn pump(inner: Arc<Inner>) {
         }
     }
 }
+
+async fn report_pump(inner: Arc<Inner>) {
+    loop {
+        let pending = inner.report_pending.notified();
+        tokio::pin!(pending);
+        pending.as_mut().enable();
+        let next = {
+            let reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+            reports.session.as_ref().and_then(|s| s.observation().next)
+        };
+        let Some(next) = next else {
+            tokio::select! {_=inner.stop.cancelled()=>return,_=pending=>continue}
+        };
+        let Some(deadline) = inner.origin.checked_add(next) else {
+            stop_reports(&inner, MediaError::ClockOverflow);
+            continue;
+        };
+        tokio::select! {_=inner.stop.cancelled()=>return,_=pending=>continue,_=tokio::time::sleep_until(deadline.into())=>()}
+        let begin = {
+            let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+            if reports.closed {
+                return;
+            }
+            match reports.session.as_mut().unwrap().begin_report(inner.now()) {
+                Ok(event) => event,
+                Err(error) => {
+                    reports.session.as_mut().unwrap().stop_timer(error);
+                    None
+                }
+            }
+        };
+        let Some(timeout) = begin else {
+            continue;
+        };
+        if timeout
+            && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                inner.events.rtcp_timeout()
+            }))
+            .is_err()
+        {
+            stop_reports(&inner, MediaError::ReportCallbackFailed);
+            continue;
+        }
+        let report = {
+            let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+            if reports.closed {
+                None
+            } else {
+                match reports.session.as_mut().unwrap().report() {
+                    Ok(bytes) => {
+                        // The original wrapper reports an attempted dispatch
+                        // even with a missing destination or socket send error.
+                        let _ = inner.transport.get().unwrap().send_rtcp(&bytes);
+                        reports.admission.sent();
+                        Some(bytes)
+                    }
+                    Err(error) => {
+                        reports.session.as_mut().unwrap().stop_timer(error);
+                        continue;
+                    }
+                }
+            }
+        };
+        if let Some(report) = report {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                inner.events.report_sent(&report)
+            }))
+            .is_err()
+            {
+                stop_reports(&inner, MediaError::ReportCallbackFailed);
+                continue;
+            }
+        }
+        // Completion may follow a reentrant Close. Commit the original sent
+        // count, but the closed schedule never rearms or dispatches a packet.
+        let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+        let session = reports.session.as_mut().unwrap();
+        if let Err(error) = session.complete_report(|| inner.now()) {
+            session.stop_timer(error);
+        }
+    }
+}
+fn stop_reports(inner: &Inner, error: MediaError) {
+    let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(session) = reports.session.as_mut() {
+        session.stop_timer(error);
+    }
+}
+#[cfg(all(test, windows))]
+#[path = "../../../../../tests/rust/phone_rtcp_runtime_private.rs"]
+mod report_tests;

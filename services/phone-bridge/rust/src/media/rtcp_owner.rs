@@ -8,6 +8,7 @@ use std::time::SystemTime;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RtcpReceiveObservation {
     pub reports_received: u64,
+    pub reports_sent: u64,
     pub last_report_at: Option<SystemTime>,
     pub peer_reports: Vec<RtcpReportBlock>,
     pub learned_source: Option<u32>,
@@ -18,6 +19,12 @@ pub struct RtcpReceiveObservation {
 #[derive(Default)]
 pub(super) struct RtcpReceiveOwner {
     observation: RtcpReceiveObservation,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RtcpReceiveEffect {
+    None,
+    Report,
+    Bye(u32),
 }
 impl RtcpReceiveOwner {
     pub fn observation(&self) -> RtcpReceiveObservation {
@@ -42,6 +49,9 @@ impl RtcpReceiveOwner {
         if self.observation.learned_source == Some(0) {
             self.observation.learned_source = Some(source);
         }
+    }
+    pub fn sent(&mut self) {
+        self.observation.reports_sent = self.observation.reports_sent.wrapping_add(1);
     }
     fn matches(&self, source: u32) -> bool {
         self.observation.local_source == Some(source)
@@ -68,25 +78,31 @@ impl RtcpReceiveOwner {
     /// Called only after whole-datagram validation and the current peer/closed
     /// boundary, under the receiver lock. BYE never publishes an application
     /// report; only its first source can reset an already matched remote track.
-    pub fn receive(&mut self, report: RtcpCompound<'_>, now: SystemTime) -> bool {
+    pub fn receive(
+        &mut self,
+        report: RtcpCompound<'_>,
+        before_report: impl FnOnce(),
+    ) -> RtcpReceiveEffect {
         let matched = self.stream(report);
         if let Some(bye) = report.bye_packet {
             if matched && bye[0] & 31 != 0 && self.observation.learned_source == Some(word(bye, 4))
             {
                 self.observation.learned_source = Some(0);
+                return RtcpReceiveEffect::Bye(word(bye, 4));
             }
-            return false;
+            return RtcpReceiveEffect::None;
         }
         if !matched {
-            return false;
+            return RtcpReceiveEffect::None;
         }
+        before_report();
         self.observation.reports_received = self.observation.reports_received.wrapping_add(1);
-        self.observation.last_report_at = Some(now);
+        self.observation.last_report_at = Some(SystemTime::now());
         self.observation.peer_reports = report
             .reception_reports()
             .map(|blocks| blocks.iter().take(8).collect())
             .unwrap_or_default();
-        true
+        RtcpReceiveEffect::Report
     }
 }
 fn word(bytes: &[u8], offset: usize) -> u32 {

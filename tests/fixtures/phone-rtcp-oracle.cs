@@ -35,6 +35,14 @@ public static class PhoneRtcpOracle {
         highest=value.ExtendedHighestSequenceNumber, jitter=value.Jitter,
         last=value.LastSenderReportTimestamp, delay=value.DelaySinceLastSenderReport
     };
+    static object Time(DateTime value) => new {local=value.Ticks.ToString(),utc=value.ToUniversalTime().Ticks.ToString()};
+    static ReceptionReport Reception(RTCPSession session) => (ReceptionReport)typeof(RTCPSession).GetField("m_receptionReport",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(session);
+    static DateTime? LsrTime(ReceptionReport report) {
+        if(report==null)return null;
+        var stamp=typeof(ReceptionReport).GetField("m_receivedLSRTimestamp",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(report);
+        if(stamp==null)return null;
+        return (DateTime)stamp.GetType().GetField("ReceivedAt").GetValue(stamp);
+    }
     static List<ReceptionReportSample> Blocks(JsonElement input) {
         var list = new List<ReceptionReportSample>();
         foreach (var value in input.GetProperty("blocks").EnumerateArray()) list.Add(new(
@@ -44,6 +52,104 @@ public static class PhoneRtcpOracle {
     }
     static object RunCase(JsonElement input) {
         switch (input.GetProperty("op").GetString()) {
+            case "session": {
+                var session=new RTCPSession(SDPMediaTypesEnum.audio,9);
+                session.PayloadSampleRateHz=10000000;
+                var created=Time(session.CreatedAt);var trace=new List<object>();
+                RTCPCompoundPacket ready=null;
+                session.OnReportReadyToSend+=(_,report)=>ready=report;
+                var timer=typeof(RTCPSession).GetMethod("SendReportTimerCallback",BindingFlags.NonPublic|BindingFlags.Instance);
+                try {
+                    foreach(var action in input.GetProperty("actions").EnumerateArray()) {
+                        string kind=action[0].GetString();DateTime before=DateTime.Now;
+                        ready=null; uint? arrival=null;
+                        if(kind=="tx"||kind=="rx") {
+                            var data=new byte[12+action[4].GetInt32()];data[0]=128;
+                            ushort seq=action[1].GetUInt16();uint ts=action[2].GetUInt32(),ssrc=action[3].GetUInt32();
+                            data[2]=(byte)(seq>>8);data[3]=(byte)seq;
+                            for(int i=0;i<4;i++){data[4+i]=(byte)(ts>>(24-i*8));data[8+i]=(byte)(ssrc>>(24-i*8));}
+                            if(kind=="tx")session.RecordRtpPacketSend(new RTPPacket(data));
+                            else {
+                                session.RecordRtpPacketReceived(new RTPPacket(data));
+                                uint transit=(uint)typeof(ReceptionReport).GetField("m_transit",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(Reception(session));
+                                arrival=unchecked(transit+ts);
+                            }
+                        } else if(kind=="sr") {
+                            var sender=new RTCPSenderReport(7,ulong.Parse(action[1].GetString(),NumberStyles.HexNumber),777,1,160,null);
+                            session.ReportReceived(new IPEndPoint(IPAddress.Loopback,1),new RTCPCompoundPacket(sender,new RTCPSDesReport(7,"fixture")));
+                        } else if(kind=="remove") session.RemoveReceptionReport(action[1].GetUInt32());
+                        else if(kind=="report") ready=session.GetRtcpReport();
+                        else if(kind=="timer") {
+                            if(session.StartedAt==DateTime.MinValue)session.Start();
+                            timer.Invoke(session,new object[]{null});
+                        } else if(kind=="close")session.Close("phone_media_closed");
+                        else throw new ArgumentException("Unknown session action");
+                        var after=DateTime.Now;var reception=Reception(session);var lsr=LsrTime(reception);
+                        uint? sampleTime=null;
+                        if(ready?.SenderReport!=null)sampleTime=RTCPSession.To32Bit(ready.SenderReport.NtpTimestamp);
+                        else if(ready?.ReceiverReport?.ReceptionReports?.Count>0&&lsr.HasValue)
+                            sampleTime=unchecked(ready.ReceiverReport.ReceptionReports[0].DelaySinceLastSenderReport+RTCPSession.DateTimeToNtpTimestamp32(lsr.Value));
+                        trace.Add(new {kind,before=Time(before),after=Time(after),started=session.StartedAt==DateTime.MinValue?null:Time(session.StartedAt),
+                            activity=session.LastActivityAt==DateTime.MinValue?null:Time(session.LastActivityAt),arrival,lsr=lsr.HasValue?Time(lsr.Value):null,
+                            sampleTime,ntp=ready?.SenderReport?.NtpTimestamp.ToString("x16"),hex=ready==null?null:Convert.ToHexString(ready.GetBytes()).ToLowerInvariant(),
+                            sent=session.PacketsSentCount,sentOctets=session.OctetsSentCount,lastSequence=session.LastSeqNum,lastTimestamp=session.LastRtpTimestampSent,
+                            lastNtp=session.LastNtpTimestampSent.ToString("x16"),received=session.PacketsReceivedCount,receivedOctets=session.OctetsReceivedCount,
+                            receptionSource=reception==null?(uint?)null:reception.SSRC,closed=session.IsClosed});
+                    }
+                    return new {ok=true,cname=session.Cname,created,trace};
+                } finally {session.Close("fixture_complete");}
+            }
+            case "timer-failure": {
+                var session=new RTCPSession(SDPMediaTypesEnum.audio,9);
+                bool late=input.GetProperty("late").GetBoolean();int events=0;
+                bool closeInside=input.TryGetProperty("closeInside",out var closeValue)&&closeValue.GetBoolean();
+                var trace=new List<object>();
+                session.OnReportReadyToSend+=(_,report)=>{
+                    trace.Add(new {sender=report.SenderReport!=null,bye=report.Bye!=null});
+                    if(report.Bye!=null)return;
+                    events++;
+                    if(closeInside)session.Close("phone_media_closed");
+                    else if(late)((Timer)typeof(RTCPSession).GetField("m_rtcpReportTimer",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(session)).Dispose();
+                    else throw new InvalidOperationException("Synthetic report observer failure");
+                };
+                try {
+                    byte[] data=new byte[172];data[0]=128;data[11]=9;
+                    session.RecordRtpPacketSend(new RTPPacket(data));
+                    typeof(RTCPSession).GetMethod("SendReportTimerCallback",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(session,new object[]{null});
+                    bool after=session.GetRtcpReport().SenderReport!=null;
+                    session.RecordRtpPacketSend(new RTPPacket(data));
+                    return new {ok=true,late,closeInside,events,after,closed=session.IsClosed,started=session.StartedAt!=DateTime.MinValue,afterNewSend=session.GetRtcpReport().SenderReport!=null,trace=trace.ToArray()};
+                } finally {session.Close("fixture_complete");}
+            }
+            case "missing-destination": {
+                var session=new SipMediaSession(new CodecSettings(new[] { "PCMU" }),new ClosedAudio(),IPAddress.Loopback);
+                try {
+                    var before=JsonSerializer.SerializeToElement(session.Diagnostics);
+                    session.SendRtcpReport(SDPMediaTypesEnum.audio,session.AudioRtcpSession.GetRtcpReport());
+                    var after=JsonSerializer.SerializeToElement(session.Diagnostics);
+                    session.Close("fixture_complete");
+                    var closed=JsonSerializer.SerializeToElement(session.Diagnostics);
+                    return new {ok=true,before=before.GetProperty("rtcp").Clone(),after=after.GetProperty("rtcp").Clone(),closed=closed.GetProperty("rtcp").Clone()};
+                } finally {session.DisposeAsync().AsTask().GetAwaiter().GetResult();}
+            }
+            case "clock": {
+                var trace = new List<object>();
+                foreach (var tick in input.GetProperty("utcTicks").EnumerateArray()) {
+                    var utc = new DateTime(long.Parse(tick.GetString(),CultureInfo.InvariantCulture),DateTimeKind.Utc);
+                    var local = utc.ToLocalTime();
+                    foreach (var value in new[] { utc, local, DateTime.SpecifyKind(local,DateTimeKind.Unspecified) }) {
+                        trace.Add(new { kind=value.Kind.ToString(),localTicks=value.Ticks.ToString(),utcTicks=value.ToUniversalTime().Ticks.ToString(),
+                            ntp=RTCPSession.DateTimeToNtpTimestamp(value).ToString("x16"), ntp32=RTCPSession.DateTimeToNtpTimestamp32(value) });
+                    }
+                }
+                var casts = new List<object>();
+                foreach(var item in input.GetProperty("casts").EnumerateArray()) {
+                    double v=item.GetDouble();casts.Add(new { value=v, uint32=unchecked((uint)v),uint64=unchecked((ulong)v).ToString() });
+                }
+                var before=DateTime.Now;var middle=DateTime.Now;var after=DateTime.Now;
+                return new {ok=true,zone=TimeZoneInfo.Local.Id,trace,casts,live=new {before=before.ToUniversalTime().Ticks.ToString(),after=after.ToUniversalTime().Ticks.ToString(),
+                    local=middle.Ticks.ToString(),utc=middle.ToUniversalTime().Ticks.ToString(),ntp=RTCPSession.DateTimeToNtpTimestamp(middle).ToString("x16")}};
+            }
             case "statistics": {
                 var report = new ReceptionReport(input.GetProperty("source").GetUInt32());
                 var record = typeof(ReceptionReport).GetMethod("RtpPacketReceived", BindingFlags.NonPublic | BindingFlags.Instance);

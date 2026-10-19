@@ -25,6 +25,8 @@ mod resampler;
 mod rtcp;
 #[path = "phone_rtcp_owner.rs"]
 mod rtcp_owner;
+#[path = "phone_rtcp_session.rs"]
+mod rtcp_session;
 #[path = "phone_rtcp_state.rs"]
 mod rtcp_state;
 #[path = "phone_rtp_transport.rs"]
