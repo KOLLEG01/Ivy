@@ -1,4 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[path = "chat-main-cases.rs"]
+mod main;
 use ivy_chat_bridge::{
     admission::ChatAdmission,
     native_driver::{ChatNativeDriver, NativeOrigin, native_path},

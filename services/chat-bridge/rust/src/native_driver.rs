@@ -76,6 +76,19 @@ impl<'a> ChatNativeDriver<'a> {
         )
     }
 
+    pub fn admission(&self) -> &ChatAdmission {
+        self.admission
+    }
+
+    pub fn resolve_plan(&self) -> IvyResult<Json> {
+        resolve_chat_plan(
+            self.store,
+            self.catalogs,
+            self.admission.definition().required("nativePlan")?,
+            self.instructions,
+        )
+    }
+
     pub async fn verify_owner(&self) -> IvyResult<()> {
         let node = connection_owner(self.store.client.as_ref(), &self.service_node_id).await?;
         if node.get("principalId") != self.admission.definition().get("principalId")

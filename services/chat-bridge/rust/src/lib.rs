@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod cancel_worker;
 pub mod cancellation;
+pub mod chat_main;
 pub mod collection_reads;
 pub mod collector;
 pub mod diagnostic_notifications;
