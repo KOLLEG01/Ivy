@@ -4,13 +4,16 @@ use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
     category_projection::{CategoryLocale, CategoryProjection},
+    engine_admission::{AdmissionRuntime, EngineAdmission, EngineOwner},
     engine_execution::{
         CachedExecution, ExecutionCategories, ExecutionComponents, ExecutionProgram,
-        ExecutionProofs,
+        ExecutionProofs, ExecutionQueue,
     },
+    engine_invocations::EngineInvocations,
     engine_publication::{
         CreationChecks, EnginePublisher, PublicationRoutes, RootPublicationChecks,
     },
+    engine_read::ReadContext,
     engine_validation::{ActionValidation, ActionValidationChecks, check_aggregate},
     journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
@@ -27,8 +30,8 @@ use std::{
     collections::HashMap,
     future::{Future, poll_fn},
     pin::Pin,
-    sync::atomic::{AtomicBool, Ordering},
-    task::Poll,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    task::{Poll, Waker},
 };
 
 fn clock() -> String {
@@ -96,6 +99,7 @@ impl Contracts for ContractsBinding {
 }
 #[derive(Default)]
 struct NoRpc {
+    owner_checks: AtomicUsize,
     fail_notice: AtomicBool,
     notices: Mutex<HashMap<JsString, Json>>,
     notice_calls: Mutex<Vec<Json>>,
@@ -103,7 +107,16 @@ struct NoRpc {
 impl RpcClient for NoRpc {
     fn request<'a>(&'a self, method: &'a str, args: Json, _: RequestOptions) -> RequestFuture<'a> {
         Box::pin(async move {
-            if method == "system.status" {
+            if method == "serviceNodes.get" {
+                assert_eq!(args, Json::object([("serviceNodeId", "board-node".into())]));
+                self.owner_checks.fetch_add(1, Ordering::SeqCst);
+                Ok(Json::object([
+                    ("principalId", "board".into()),
+                    ("serviceName", "task-board".into()),
+                    ("connected", true.into()),
+                    ("synced", true.into()),
+                ]))
+            } else if method == "system.status" {
                 Ok(Json::object([(
                     "runtimeEpoch",
                     "11111111-1111-4111-8111-111111111111".into(),
@@ -190,10 +203,16 @@ impl CategoryLocale for Locale {
     }
 }
 #[derive(Default)]
-struct Executor<'a>(RefCell<VecDeque<Pin<Box<dyn Future<Output = ()> + 'a>>>>);
+struct Executor<'a>(
+    RefCell<VecDeque<Pin<Box<dyn Future<Output = ()> + 'a>>>>,
+    RefCell<Option<Waker>>,
+);
 impl<'a> ReconcileExecutor<'a> for Executor<'a> {
     fn spawn(&self, work: Pin<Box<dyn Future<Output = ()> + 'a>>) {
         self.0.borrow_mut().push_back(work);
+        if let Some(waiter) = self.1.borrow().as_ref() {
+            waiter.wake_by_ref();
+        }
     }
 }
 impl Executor<'_> {
@@ -201,6 +220,7 @@ impl Executor<'_> {
         let mut work = Box::pin(work);
         let mut result = None;
         poll_fn(|cx| {
+            *self.1.borrow_mut() = Some(cx.waker().clone());
             if result.is_none() {
                 if let Poll::Ready(value) = work.as_mut().poll(cx) {
                     result = Some(value);
@@ -567,7 +587,19 @@ async fn check_comment_recovery(question: bool) {
             checks: &checks,
         };
         let unused = Unused;
-        let settings = Json::object([("phoneTarget", Json::Null)]);
+        let settings = Json::object([
+            ("principalId", "board".into()),
+            ("rootObjectId", "root".into()),
+            (
+                "scheduler",
+                Json::object([
+                    ("enabled", true.into()),
+                    ("intervalMs", Json::Number(1000.0)),
+                    ("pageSize", Json::Number(50.0)),
+                ]),
+            ),
+            ("phoneTarget", Json::Null),
+        ]);
         let actions = TaskActions {
             store: &operations.store,
             settings: &settings,
@@ -594,7 +626,41 @@ async fn check_comment_recovery(question: bool) {
             principal_id: &principal,
             services: &components,
         };
-        let result = cached.run(operation).await;
+        let execution_executor = Executor::default();
+        let execution = ExecutionQueue::new(&cached, &execution_executor);
+        let runtime = AdmissionRuntime {
+            client: client.clone(),
+            contracts: &journal.contracts,
+            catalogs: &catalogs,
+        };
+        let owner = EngineOwner {
+            service_node_id: node.clone(),
+            generation: 1.0,
+        };
+        let engine =
+            EngineAdmission::new(&operations, &settings, &owner, &runtime, &execution).unwrap();
+        let invocation_executor = Executor::default();
+        let invocations = EngineInvocations::new(&invocation_executor);
+        let caller = JsString::from("caller");
+        let check_cancelled = || Ok(());
+        let context = ReadContext {
+            caller_principal_id: &caller,
+            operation_id: s(&operation.value, "operationId"),
+            generation: 1.0,
+            check_cancelled: &check_cancelled,
+        };
+        // The accepted Operation and all replayed effects live in the real
+        // SQLite journal. Every public retry traverses admission and both
+        // retained queues, including after the final notice reply was lost.
+        let reply = invocations
+            .invoke(&engine, f(&operation.value, "request"), &context)
+            .unwrap();
+        let result = invocation_executor
+            .drive(execution_executor.drive(reply))
+            .await;
+        invocation_executor.drive(invocations.stop()).await;
+        execution_executor.drive(execution.settled()).await;
+        assert_eq!(client.owner_checks.load(Ordering::SeqCst), round + 1);
         let saved = operations
             .store
             .read(
