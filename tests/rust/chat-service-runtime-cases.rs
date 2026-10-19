@@ -86,25 +86,23 @@ async fn until(mut predicate: impl FnMut() -> bool, label: &str) {
 }
 fn oracle() -> &'static Json {
     static CORPUS: OnceLock<Json> = OnceLock::new();
-    CORPUS.get_or_init(|| {
-        let out = Command::new("node")
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .args([
-                "tests/rust/fixtures/chat-service-runtime-peer.mjs",
-                "oracle",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if let Some(path) = std::env::var_os("IVY_CHAT_RUNTIME_ORACLE_CAPTURE") {
-            std::fs::write(path, &out.stdout).unwrap();
-        }
-        parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap()
-    })
+    CORPUS.get_or_init(|| read_oracle("oracle", "IVY_CHAT_RUNTIME_ORACLE_CAPTURE"))
+}
+fn read_oracle(mode: &str, capture: &str) -> Json {
+    let out = Command::new("node")
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .args(["tests/rust/fixtures/chat-service-runtime-peer.mjs", mode])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if let Some(path) = std::env::var_os(capture) {
+        std::fs::write(path, &out.stdout).unwrap();
+    }
+    parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap()
 }
 struct Peer {
     child: Child,

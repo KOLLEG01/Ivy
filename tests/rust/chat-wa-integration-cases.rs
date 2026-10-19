@@ -1,6 +1,6 @@
 //! Concrete generation/session/commands/listener assembly with a synthetic Hive
 //! socket and explicit account/Host boundaries. No WhatsApp protocol is emulated.
-use super::{Fixed, Peer, field, oracle, text};
+use super::{Fixed, Peer, field, read_oracle, text};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
@@ -35,12 +35,17 @@ use ivy_sdk::{
 use std::{
     path::Path,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::sync::watch;
+
+fn oracle() -> &'static Json {
+    static CORPUS: OnceLock<Json> = OnceLock::new();
+    CORPUS.get_or_init(|| read_oracle("whatsapp-oracle", "IVY_CHAT_WA_RUNTIME_ORACLE_CAPTURE"))
+}
 
 // Compile the canonical Host module at the required filesystem boundary.
 #[allow(dead_code)]

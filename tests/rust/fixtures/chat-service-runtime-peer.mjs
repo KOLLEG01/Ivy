@@ -13,7 +13,10 @@ const result=async f=>{try{return{value:await f()??null};}catch(e){return{error:
 const until=async(f,label)=>{for(let i=0;i<2000;i++){const value=await f();if(value)return value;await delay(5);}throw Error('Timed out: '+label);};
 let selected,sockets=new Map(),pending=new Map(),requestId=0;
 const cases=Object.keys(starting).filter(v=>/^0\./.test(v)).map(version=>({label:'catalog-'+version,version,transport:version!=='0.154.0'}));
-for(const label of ['initial-health-failure','queued-health-failure','diagnostic-read-failure','transport-close-failure','held-idempotent-close','control-close','reconnect-held-retirement','held-ready-health','held-control-poll','transport-attach-failure'])cases.push({label,version:'0.154.0',transport:true});
+// Assembly checks consume only the first original seed, not the unrelated
+// service-lifecycle differential cases. The normal oracle still runs all cases.
+if(process.argv[2]==='whatsapp-oracle')cases.splice(1);
+else for(const label of ['initial-health-failure','queued-health-failure','diagnostic-read-failure','transport-close-failure','held-idempotent-close','control-close','reconnect-held-retirement','held-ready-health','held-control-poll','transport-attach-failure'])cases.push({label,version:'0.154.0',transport:true});
 const corpus={now,instructions,noticeInstructions,cases,boundary:'Unchanged original main.ts, actual ServiceClient start/stop/reconnect, SDK registry/provider dispatch, SQLite, worker and diagnostic owners execute. Only Host configuration/health and account transport lifecycle are probed. Concurrent pure RPC ordering/counts are not compared: exact request/response sets, distinct heartbeat observations and ordered handshakes/health writes are. No Host-file, native WhatsApp account, installed or cross-platform acceptance.'};
 const wss=new WebSocketServer({host:'127.0.0.1',port:0,perMessageDeflate:false,maxPayload:32*1024*1024});
 await once(wss,'listening');
