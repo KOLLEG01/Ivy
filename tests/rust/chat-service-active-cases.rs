@@ -81,7 +81,16 @@ async fn state_until(peer: &mut Peer, predicate: impl Fn(&Json) -> bool, label: 
         if predicate(&value) {
             return;
         }
-        assert!(Instant::now() < deadline, "{label}");
+        if Instant::now() >= deadline {
+            let failure = peer.command(command("failure")).await;
+            if let Some(path) = std::env::var_os("IVY_CHAT_ACTIVE_RUNTIME_FAILURE_CAPTURE") {
+                std::fs::write(path, canonical(&failure, usize::MAX).unwrap()).unwrap();
+            }
+            panic!(
+                "{label}; readiness observations: {}",
+                canonical(field(field(&failure, "report"), "heartbeats"), usize::MAX).unwrap()
+            );
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

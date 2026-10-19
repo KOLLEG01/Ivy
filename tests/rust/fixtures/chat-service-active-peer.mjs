@@ -2,7 +2,7 @@
 import{starting,now,instructions,noticeInstructions,key,startChatBridge,IvyError,toolDefinitionHash,canonical}from'./chat-service-runtime-loader.mjs';
 import{environment,clone}from'./chat-main-oracle.mjs';
 import{extension as deliveryExtension}from'./chat-delivery-oracle.mjs';
-import{readFileSync}from'node:fs';
+import{readFileSync,existsSync}from'node:fs';
 import{once}from'node:events';
 import{createInterface}from'node:readline';
 import{setTimeout as delay}from'node:timers/promises';
@@ -51,6 +51,7 @@ async function invoke(name,args){
 async function command(c){
  if(c.action==='begin')return open(c.spec);
  if(c.action==='summary')return summary();
+ if(c.action==='failure')return{report:summary(),snapshot:await scope.env.snapshot(null),files:['chat-bridge.sqlite','chat-bridge.sqlite-wal','chat-bridge.sqlite-shm'].filter(n=>existsSync(scope.env.root+'/'+n)).map(name=>({name,value:readFileSync(scope.env.root+'/'+name).toString('base64')})),root:scope.env.root};
  if(c.action==='state')return{main:(await scope.env.main.find())?.value??null,inputs:scope.context.records.filter(r=>r.object.contractKey==='chat-bridge/input').map(r=>r.content.value),collections:scope.observer.prepare("SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/collection'").all().map(r=>JSON.parse(r.value_json)),reads:scope.reads};
  if(c.action==='quiet'){await quiet();return summary();}
  if(c.action==='invoke')return invoke(c.name,c.arguments);
@@ -63,8 +64,11 @@ async function command(c){
  }
  if(c.action==='release'){const hold=scope.hold;scope.hold=null;hold.release();return null;}
  if(c.action==='end'){
-  await quiet();const snapshot=await scope.env.snapshot(c.output),database=readFileSync(scope.env.file).toString('base64'),report=summary();
-  scope.observer.close();scope.env.close();scope=null;return{snapshot,database,report};
+  await quiet();const snapshot=await scope.env.snapshot(c.output),report=summary();
+  // Close the final fixture-owned handles before exporting the complete file;
+  // copying only the main DB while its WAL is live omits committed changes.
+  scope.observer.close();const database=scope.env.exportSeed().database;
+  scope.env.close();scope=null;return{snapshot,database,report};
  }
  throw Error('Unexpected active fixture command '+c.action);
 }
