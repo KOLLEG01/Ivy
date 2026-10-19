@@ -4,7 +4,7 @@ fn operation(method: &str, params: Value) -> Value {
     v["op"] = json!("discovery");
     v
 }
-fn binding(
+pub(super) fn binding(
     name: &str,
     qualified: &str,
     input: Value,
@@ -18,7 +18,7 @@ fn binding(
     }
     json!({"qualifiedName":qualified,"definition":definition,"definitionHash":format!("sha256:{}","a".repeat(64)),"serviceName":if node.is_some(){"sample"}else{"hive"},"provider":node.map(|n|json!({"serviceNodeId":n,"hostId":format!("host-{n}"),"available":true})),"guideMarkdown":"Synthetic guide."})
 }
-fn input(kind: &str) -> Value {
+pub(super) fn input(kind: &str) -> Value {
     json!({"type":"object","properties":{"value":{"type":kind}},"required":["value"],"additionalProperties":false})
 }
 fn descriptors(bindings: Vec<Value>) -> Value {
@@ -30,7 +30,7 @@ fn call(bindings: Vec<Value>, args: Value) -> Value {
 fn bundle(entries: Vec<Value>) -> Value {
     operation("mcpBundle", json!({"entries":entries}))
 }
-fn ready(s: &mut Vec<Value>, id: &str, tools: Vec<Value>) {
+pub(super) fn ready(s: &mut Vec<Value>, id: &str, tools: Vec<Value>) {
     let mut c = catalog("fixture");
     c["namespaces"][0]["tools"] = json!(tools);
     for mut step in [
@@ -42,7 +42,7 @@ fn ready(s: &mut Vec<Value>, id: &str, tools: Vec<Value>) {
         push(s, step);
     }
 }
-fn defined(name: &str, mcp: &str, surface: &str, kind: &str, read: bool) -> Value {
+pub(super) fn defined(name: &str, mcp: &str, surface: &str, kind: &str, read: bool) -> Value {
     json!({"namespace":"fixture","name":name,"interfaceVersion":"1.0.0","description":"Synthetic registered tool.","inputSchema":input(kind),"outputSchema":{"type":kind},"annotations":{"readOnlyHint":read},"discovery":{"mcp":{"name":mcp,"surface":surface}}})
 }
 

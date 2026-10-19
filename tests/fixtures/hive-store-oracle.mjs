@@ -27,7 +27,7 @@ if(identityStart<0||identityEnd<identityStart)throw Error('Original worker ident
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
-let store,registry,discovery,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess;
+let store,registry,discovery,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
 const registryTrace=input.steps.some(step=>['registry','inventory','discovery'].includes(step.op));
 const inventoryTrace=input.steps.some(step=>step.op==='inventory');
 const discoveryTrace=input.steps.some(step=>step.op==='discovery');
@@ -40,6 +40,7 @@ if(discoveryTrace){
  ({Discovery}=await import('../../services/hive/src/discovery.ts'));
  ({directDescriptors,directCall,hasStructuredOutput}=await import('../../services/hive/src/mcp-catalog.ts'));
  ({McpSchemaBundle}=await import('../../services/hive/src/mcp-schema.ts'));
+ ({request:mcpRequest}=await import('./hive-mcp-handlers.mjs'));
  const facade=readFileSync(new URL('../../services/hive/src/mcp.ts',import.meta.url),'utf8');
  const surfaceStart=facade.indexOf('export function mcpSurfaceBindings('),surfaceEnd=facade.indexOf('type CursorAccess = ',surfaceStart),successStart=facade.indexOf('export function mcpSuccess('),successEnd=facade.indexOf('function failure(',successStart);
  if(surfaceStart<0||surfaceEnd<surfaceStart||successStart<0||successEnd<successStart)throw Error('Original MCP projection slices changed');
@@ -220,6 +221,7 @@ try {
             case 'toolSchema':value=discovery.toolSchema(params);break;
             case 'mcpSurface':value=mcpSurfaceBindings(params.bindings??discovery.mcpCatalog(params.name),params.surface);break;
             case 'mcpSuccess':value=mcpSuccess(params.result,params.structured);break;
+            case 'mcpRequest':value=await mcpRequest(params,{store,discovery,hashJson,IvyError,requireThat,directCall,directDescriptors,hasStructuredOutput});break;
             case 'directDescriptors':case 'directCall':case 'hasStructuredOutput':{
               let bindings=params.bindings??discovery.mcpCatalog(params.name);
               if(params.surface)bindings=bindings.filter(b=>b.definition.discovery?.mcp?.surface===params.surface);

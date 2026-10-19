@@ -222,7 +222,9 @@ pub fn has_structured_output(bindings: &[IvyJson]) -> IvyResult<bool> {
         ) {
             return Ok(true);
         }
-        require(!schema.is_null(), "internal_error", "Internal error.")?;
+        if schema.is_null() {
+            return Err(IvyError::internal());
+        }
         if !is_text(schema.get("type"), "null")
             && schema.get("const") != Some(&IvyJson::Null)
             && !empty_object(schema)

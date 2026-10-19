@@ -15,6 +15,8 @@ mod discovery;
 mod inventory;
 #[path = "hive_mcp.rs"]
 mod mcp;
+#[path = "hive_mcp_request.rs"]
+mod mcp_request;
 
 fn units(value: &Value) -> JsString {
     JsString(
@@ -269,6 +271,9 @@ impl Trace {
                     parameters.get("result").ok_or_else(IvyError::internal)?,
                     parameters.get("structured") == Some(&IvyJson::Bool(true)),
                 ),
+                "mcpRequest" => {
+                    mcp_request::execute(store, registry, discovery, runtime, &parameters, now)
+                }
                 "directDescriptors" | "directCall" | "hasStructuredOutput" => {
                     let mut bindings = match parameters.get("bindings") {
                         Some(v) => v.as_array().ok_or_else(IvyError::internal)?.to_vec(),
