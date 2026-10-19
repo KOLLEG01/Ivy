@@ -40,13 +40,14 @@ fn validate(name: &str, v: &Json) -> IvyResult<()> {
 }
 struct Policy {
     task: Json,
+    local_task: bool,
 }
 impl Contracts for Policy {
     fn version(&self, _: &str) -> IvyResult<String> {
         Ok("1.0.0".into())
     }
     fn local(&self, k: &str) -> IvyResult<bool> {
-        Ok(k != "task-board/task")
+        Ok(k != "task-board/task" || self.local_task)
     }
     fn readable_version(&self, _: &str, v: &JsString) -> IvyResult<bool> {
         Ok(v == &JsString::from("1.0.0"))
@@ -226,7 +227,10 @@ async fn retained_lifecycle_survives_actual_partial_publication_reopen_and_repla
                 root_object_id: Some("root".into()),
             },
             client: client.clone(),
-            contracts: Policy { task: task.clone() },
+            contracts: Policy {
+                task: task.clone(),
+                local_task: true,
+            },
             limits: HistoryLimits::default(),
             now: clock as fn() -> String,
             new_id: fresh_id as fn() -> JsString,
@@ -494,7 +498,10 @@ async fn lifecycle_metadata_preserves_current_head_archive_flags_cache_and_exact
             root_object_id: Some("root".into()),
         },
         client: client.clone(),
-        contracts: Policy { task },
+        contracts: Policy {
+            task,
+            local_task: false,
+        },
         limits: HistoryLimits::default(),
         now: clock as fn() -> String,
         new_id: fresh_id as fn() -> JsString,
