@@ -3,6 +3,8 @@ import {existsSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import crypto from 'node:crypto';
+import {join,relative} from 'node:path';
+import {setup as uiFileSetup,tree as uiFileTree} from './hive-ui-files-fixture.mjs';
 registerHooks({resolve(specifier,context,next){
   if(specifier.startsWith('.')&&specifier.endsWith('.js')&&context.parentURL){const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(source)))return next(source.href,context);}
   return next(specifier,context);
@@ -19,6 +21,9 @@ const {pruneObjectRevisions}=await import('../../services/hive/src/object-retent
 const {Registry}=await import('../../services/hive/src/registry.ts');
 const {Inventory}=await import('../../services/hive/src/inventory.ts');
 const {Configurations}=await import('../../services/hive/src/configurations.ts');
+const {UiFiles}=await import('../../services/hive/src/ui-files.ts');
+const {assetPath}=await import('../../services/hive/src/uis.ts');
+const {uiContentPolicy}=await import('../../services/hive/src/ui-security.ts');
 const {wikiHandlers}=await import('../../services/hive/src/wiki.ts');
 const {validateInput,validateOutput}=await import('../../packages/contracts/src/core-validation.ts');
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
@@ -231,6 +236,37 @@ try {
       }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;syncBuiltinESMExports();}
       break;
     }
+    case 'uiFiles':{
+      const root=input.path.replace(/\.[^.\\/]+$/,'')+'.files',files=new UiFiles(join(root,'private'));
+      const params=structuredClone(step.params??{});
+      for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...codeUnits));
+      const path=value=>relative(root,value).replaceAll('\\','/');
+      if(step.prepareSql)store.db.exec(step.prepareSql);
+      switch(step.method){
+        case 'fixture':uiFileSetup(root,params.actions);break;
+        case 'assetPath':value=assetPath(params.path);break;
+        case 'contentPolicy':value=uiContentPolicy(params.path);break;
+        case 'directory':value=path(files.directory(params.uiId,params.releaseId));break;
+        case 'path':value=path(files.path(params.uiId,params.releaseId,params.path));break;
+        case 'available':value=files.available(params.uiId,params.releaseId,params.asset);break;
+        case 'check':value=files.check(params.uiId,params.releaseId,params.asset);break;
+        case 'stage':files.stage(params.uiId,params.releaseId,params.asset,Buffer.from(params.data,'base64'));break;
+        case 'promote':files.promote(params.uiId,params.releaseId,params.assets);break;
+        case 'read':value=(await files.read(params.uiId,params.releaseId,params.asset)).toString('base64');break;
+        case 'install':await files.install(join(root,'bundle'),params.uiId,params.releaseId,params.assets);break;
+        case 'collect':files.collect(params.uiId,new Set(params.retained??[]),step.now);break;
+        case 'collectTemporary':files.collectTemporary(step.now);break;
+        case 'collectAll':{
+          const realNow=Date.now;let call=0;Date.now=()=>step.clock?.[call++]??step.now;
+          try{files.collectAll(new Map(Object.entries(params.retained??{}).map(([id,ids])=>[id,new Set(ids)])));}finally{Date.now=realNow;}
+          break;
+        }
+        case 'migrateLegacy':files.migrateLegacy(store);break;
+        default:throw Error('Unknown UI file method');
+      }
+      if(step.lossless)value={encoded:JSON.stringify(value)};
+      break;
+    }
     case 'configurations':{
       const RealDate=Date,realUUID=crypto.randomUUID;
       const params=structuredClone(step.params??{});
@@ -373,10 +409,11 @@ try {
    }
   }catch(e){error=IvyError.from(e).toWire();}
   const state=snapshot(step.compactEvents??false,step.compactDiagnostics??false);
+  if(step.op==='uiFiles')state.appAssets=store.all('SELECT * FROM app_assets ORDER BY app_id,release_id,path');
   if(inventoryTrace){state.inventorySets=store.all('SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind');state.inventory=step.compactInventory?tableHash('inventory','record_id,node_id,namespace,kind,native_id,schema_version,summary,observed_at'):store.all('SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id');}
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
-  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{})});
+  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(step.op==='uiFiles'?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{})});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");

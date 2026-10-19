@@ -28,6 +28,8 @@ mod registry;
 mod retention;
 #[path = "hive_search.rs"]
 mod search;
+#[path = "hive_ui_files.rs"]
+mod ui_files;
 #[path = "hive_wiki.rs"]
 mod wiki;
 use rusqlite::types::ValueRef;
@@ -135,6 +137,7 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
         };
         let mut wiki_calls = vec![];
         let outcome = match step["op"].as_str().unwrap() {
+            "uiFiles" => ui_files::execute(&mut store, step, path).map(wire),
             "wiki" => {
                 let (result, calls) = wiki::execute(
                     &mut store,
@@ -457,6 +460,13 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
             ),
         };
         let mut row = json!({"value":value,"error":error,"state":snapshot(&store,step)});
+        if step["op"] == "uiFiles" {
+            row["fileTree"] = ui_files::tree(&path.with_extension("files"));
+            row["state"]["appAssets"] = rows(
+                &store,
+                "SELECT * FROM app_assets ORDER BY app_id,release_id,path",
+            );
+        }
         if inventory_trace {
             row["state"]["inventorySets"] = rows(
                 &store,
