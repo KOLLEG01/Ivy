@@ -48,7 +48,12 @@ struct ReadRecord {
     metadata: Option<Json>,
 }
 
-type CacheEntries = Rc<RefCell<Vec<(Json, ReadRecord)>>>;
+#[derive(Clone)]
+struct CachedRecord {
+    object_id: Json,
+    document: Option<ReadRecord>,
+}
+type CacheEntries = Rc<RefCell<Vec<(Json, CachedRecord)>>>;
 enum CacheBinding {
     Fixed(CacheEntries),
     Scoped(RefCell<Option<CacheEntries>>),
@@ -387,7 +392,12 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         });
         let cache = self.cache.and_then(ReadCache::entries);
         if let (Some(cache), Some(cache_key)) = (&cache, &cache_key) {
-            if let Some((_, document)) = cache.borrow().iter().find(|(key, _)| key == cache_key) {
+            if let Some(document) = cache
+                .borrow()
+                .iter()
+                .find(|(key, _)| key == cache_key)
+                .and_then(|(_, entry)| entry.document.as_ref())
+            {
                 return Ok(document.clone());
             }
         }
@@ -458,10 +468,14 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 <= 65536.0
                 && entries.len() < 256
             {
+                let cached = CachedRecord {
+                    object_id: record.document.pin.required("objectId")?.clone(),
+                    document: Some(record.clone()),
+                };
                 if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == &cache_key) {
-                    *existing = record.clone();
+                    *existing = cached;
                 } else {
-                    entries.push((cache_key, record.clone()));
+                    entries.push((cache_key, cached));
                 }
             }
         }
@@ -756,7 +770,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
         if let Some(cache) = self.cache.and_then(ReadCache::entries) {
             let id = result.required("object")?.required("id")?;
             let mut entries = cache.borrow_mut();
-            entries.retain(|(_, record)| record.document.pin.get("objectId") != Some(id));
+            entries.retain(|(_, record)| &record.object_id != id);
             if result
                 .required("revision")?
                 .required("byteLength")?
@@ -766,25 +780,17 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 && entries.len() < 256
             {
                 let object = result.required("object")?;
-                let revision = result.required("revision")?;
                 // The original write key omits includeArchived. It consumes a
                 // bounded slot but pinned reads use a different key; preserve it.
                 let primary =
                     object.get("parentId") == Some(&nullable(self.journal.root_object_id.as_ref()));
                 entries.push((
                     Json::Array(vec![key.into(), pin(&result)?, primary.into()]),
-                    ReadRecord {
-                        document: Document {
-                            pin: pin(&result)?,
-                            value: value.clone(),
-                            parent_id: object.required("parentId")?.as_js_string().cloned(),
-                            content_hash: revision.required("contentHash")?.as_str()?,
-                        },
-                        archived: object
-                            .get("effectivelyArchived")
-                            .and_then(Json::as_bool)
-                            .unwrap_or(false),
-                        metadata: Some(object.clone()),
+                    CachedRecord {
+                        object_id: id.clone(),
+                        // No read can select the original unmatched seed. Only
+                        // its identity and bounded-slot accounting are observed.
+                        document: None,
                     },
                 ));
             }
