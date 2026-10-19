@@ -76,7 +76,8 @@ fn s<'a>(v: &'a Json, k: &str) -> IvyResult<&'a JsString> {
     v.required(k)?.as_js_string().ok_or_else(IvyError::internal)
 }
 fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
-    v.get(k).unwrap_or(&Json::Null)
+    static NULL: Json = Json::Null;
+    v.get(k).unwrap_or(&NULL)
 }
 fn array(v: &Json) -> &[Json] {
     v.as_array().unwrap_or(&[])
