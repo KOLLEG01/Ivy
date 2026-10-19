@@ -301,8 +301,9 @@ impl MediaCodec {
             }
         }
         self.decode(&packet.payload, Some(packet.generation))?;
-        if self.audio.state() == self.observed
-            && self.observed.open
+        let current = self.audio.state();
+        if current.open
+            && current.generation == self.observed.generation
             && self.observed.generation == packet.generation
         {
             self.next_receive_timestamp = Some(packet.timestamp.wrapping_add(duration as u32));
