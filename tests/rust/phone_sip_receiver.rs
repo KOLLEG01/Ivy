@@ -494,18 +494,16 @@ async fn cancelled_close_waiter_does_not_abandon_an_active_callback_or_original_
         receiver: Mutex<Option<SipRtpReceiver>>,
         was_pending: AtomicBool,
         returned: AtomicBool,
+        application: bool,
     }
-    impl SipReceiveEvents for Closing {
-        fn digit(&self, _: char, _: InputSource) {}
-        fn failed(&self) {
-            panic!("Unexpected media failure");
-        }
-        fn rtcp(&self, _: SocketAddr, _: &[u8]) {
+    impl Closing {
+        fn notify(&self) {
             use std::{
                 future::Future,
                 task::{Context, Waker},
             };
             let receiver = self.receiver.lock().unwrap().take().unwrap();
+            let _ = receiver.observation(); // The callback must run outside the state lock.
             let mut close = Box::pin(receiver.close());
             // This callback is still active. Close must request cancellation
             // without waiting synchronously for this very callback to return.
@@ -520,44 +518,73 @@ async fn cancelled_close_waiter_does_not_abandon_an_active_callback_or_original_
             self.returned.store(true, Ordering::SeqCst);
         }
     }
-    let events = Arc::new(Closing {
-        receiver: Mutex::new(None),
-        was_pending: AtomicBool::new(false),
-        returned: AtomicBool::new(false),
-    });
-    let receiver = SipRtpReceiver::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        41200,
-        41298,
-        20,
-        Arc::new(Audio::new(true)),
-        None,
-        events.clone(),
-    )
-    .unwrap();
-    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let control = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    configure(
-        &receiver,
-        peer.local_addr().unwrap(),
-        control.local_addr().unwrap(),
-        false,
-    );
-    *events.receiver.lock().unwrap() = Some(receiver.clone());
-    let local = receiver.observation().transport;
-    control
-        .send_to(&[0x80, 201, 0, 1, 0, 0, 0, 9], local.local_rtcp)
-        .await
+    impl SipReceiveEvents for Closing {
+        fn digit(&self, _: char, _: InputSource) {}
+        fn failed(&self) {
+            panic!("Unexpected media failure");
+        }
+        fn rtcp(&self, _: SocketAddr, _: &[u8]) {
+            if !self.application {
+                self.notify();
+            }
+        }
+        fn report(&self, _: SocketAddr, _: &ivy_phone_bridge::media::RtcpReceiveObservation) {
+            if self.application {
+                self.notify();
+            }
+        }
+    }
+    for application in [false, true] {
+        let events = Arc::new(Closing {
+            receiver: Mutex::new(None),
+            was_pending: AtomicBool::new(false),
+            returned: AtomicBool::new(false),
+            application,
+        });
+        let receiver = SipRtpReceiver::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            41200,
+            41298,
+            20,
+            Arc::new(Audio::new(true)),
+            None,
+            events.clone(),
+        )
         .unwrap();
-    wait(|| events.returned.load(Ordering::SeqCst) && receiver.observation().cleanup_confirmed)
-        .await;
-    assert!(
-        events.was_pending.load(Ordering::SeqCst),
-        "Close returned before its active callback completed"
-    );
-    assert!(receiver.observation().cleanup_confirmed);
-    let _rtp = std::net::UdpSocket::bind(local.local_rtp).unwrap();
-    let _rtcp = std::net::UdpSocket::bind(local.local_rtcp).unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let control = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        configure(
+            &receiver,
+            peer.local_addr().unwrap(),
+            control.local_addr().unwrap(),
+            false,
+        );
+        *events.receiver.lock().unwrap() = Some(receiver.clone());
+        receiver.set_local_source(9).unwrap();
+        let local = receiver.observation().transport;
+        let data = if application {
+            ivy_phone_bridge::media::RtcpReportBuilder::new(9, "fixture")
+                .unwrap()
+                .receiver(&[])
+                .unwrap()
+        } else {
+            vec![0x80, 201, 0, 1, 0, 0, 0, 9]
+        };
+        control.send_to(&data, local.local_rtcp).await.unwrap();
+        wait(|| events.returned.load(Ordering::SeqCst) && receiver.observation().cleanup_confirmed)
+            .await;
+        assert!(
+            events.was_pending.load(Ordering::SeqCst),
+            "Close returned before its active callback completed"
+        );
+        assert!(receiver.observation().cleanup_confirmed);
+        assert_eq!(
+            receiver.observation().rtcp.reports_received,
+            u64::from(application)
+        );
+        let _rtp = std::net::UdpSocket::bind(local.local_rtp).unwrap();
+        let _rtcp = std::net::UdpSocket::bind(local.local_rtcp).unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]

@@ -696,6 +696,7 @@ async fn source_learning_event_selection_and_accepted_sdp_replacement_match_actu
     assert_eq!(old.get("ok").unwrap().as_bool(), Some(true), "{old:?}");
     let old_snaps = old.get("snapshots").unwrap().as_array().unwrap();
     let (receiver, audio, events, peer, socket) = setup(42400, false, false).await;
+    audio.set(true, 1); // A bare header must also be ignored by an open PCM queue.
     receiver.set_local_source(17).unwrap();
     assert!(receiver.set_local_source(18).is_err());
     let mut actual = Vec::new();
@@ -780,6 +781,7 @@ async fn source_learning_event_selection_and_accepted_sdp_replacement_match_actu
             *expected.get("declaredSources").unwrap()
         );
         actual.push(snapshot(&current, events.reports()));
+        assert!(!receiver.observation().failed);
         audio.set(false, index as u64 + 2);
     }
     receiver.close().await;
