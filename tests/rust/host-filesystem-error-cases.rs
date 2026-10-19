@@ -184,7 +184,7 @@ fn filesystem_error_messages_match_actual_node_io_and_path_boundaries() {
 }
 
 #[cfg(windows)]
-struct DeniedDirectory(PathBuf);
+pub(super) struct DeniedDirectory(PathBuf);
 #[cfg(windows)]
 impl DeniedDirectory {
     fn command(&self, args: &[&str]) {
@@ -196,7 +196,7 @@ impl DeniedDirectory {
             "Owned fixture ACL operation failed"
         );
     }
-    fn new(path: PathBuf) -> Self {
+    pub(super) fn new(path: PathBuf) -> Self {
         let owned = Self(path);
         owned.command(&["/deny", "*S-1-1-0:(RD)"]);
         owned

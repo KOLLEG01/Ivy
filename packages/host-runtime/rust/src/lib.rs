@@ -30,6 +30,7 @@ pub mod executor_lock;
 pub mod executor;
 pub mod filesystem;
 pub mod filesystem_error;
+pub mod filesystem_remove;
 pub mod exec_file;
 pub mod health;
 pub mod host_config;
