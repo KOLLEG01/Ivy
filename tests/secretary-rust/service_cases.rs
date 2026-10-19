@@ -171,6 +171,48 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
         let path = state.join("instance.json");
         write(&path, &config);
         let node = fixture_data.required("node").unwrap().as_str().unwrap();
+        if !reference {
+            let mut import = Command::new(env!("CARGO_BIN_EXE_ivy-secretary"));
+            import
+                .args([
+                    "import",
+                    "--operation-id",
+                    "fixture-epoch:1800000000000:startup-import",
+                    "--config",
+                ])
+                .arg(&path)
+                .current_dir(&root)
+                .env("IVY_NODE_EXECUTABLE", &node);
+            hidden(&mut import);
+            let output = import.output().unwrap();
+            assert!(
+                output.status.success(),
+                "Explicit retained-data import: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let result = parse(
+                std::str::from_utf8(&output.stdout).unwrap(),
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+            assert_eq!(result.get("complete"), Some(&true.into()));
+            let imported = trace(&observer).await;
+            assert!(
+                imported.iter().all(|row| !matches!(
+                    row.get("method").and_then(|v| v.as_str().ok()).as_deref(),
+                    Some("objects.write" | "tools.call")
+                )),
+                "This empty retained fixture must not initialize domain workers or providers"
+            );
+            observer
+                .request(
+                    "fixture.reset",
+                    IvyJson::object(Vec::<(String, IvyJson)>::new()),
+                    RequestOptions::default(),
+                )
+                .await
+                .unwrap();
+        }
         let mut command = if reference {
             let mut command = Command::new(&node);
             command.arg(

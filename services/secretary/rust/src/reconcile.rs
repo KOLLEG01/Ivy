@@ -9,7 +9,7 @@ use crate::{
     generation::{GenerationExit, ReconciledGeneration, ServiceEvent},
     inbox_evidence::InboxEvidence,
     inbox_recovery::RecoveryScan,
-    journal::{Journal, Limits},
+    journal::Limits,
     service_handlers::{Invocation, SecretaryHandlers, invoke},
     store::Store,
 };
@@ -319,9 +319,10 @@ impl Reconciliation {
     ) -> IvyResult<GenerationExit> {
         let config = &self.config;
         validate_settings(&config.settings)?;
-        let journal = Journal::open(
+        let journal = crate::import_state::runtime_journal(
             &config.data_root.join("secretary.sqlite"),
             Limits::default(),
+            &crate::import_state::import_identity(&config.settings, &config.service_node_id)?,
         )?;
         let store = Store {
             client: client.clone(),

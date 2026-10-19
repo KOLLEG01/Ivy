@@ -188,7 +188,16 @@ async fn lifecycle_case(gated: bool, failures: usize, stop_initializing: bool) {
     );
     std::fs::create_dir(&data.0).unwrap();
     {
-        let journal = Journal::open(&data.0.join("secretary.sqlite"), Limits::default()).unwrap();
+        let journal = ivy_secretary::import_state::runtime_journal(
+            &data.0.join("secretary.sqlite"),
+            Limits::default(),
+            &ivy_secretary::import_state::import_identity(
+                fixture.required("settings").unwrap(),
+                &"fixture.secretary".into(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         journal.db.execute_batch("PRAGMA user_version=37;CREATE TABLE retained_fixture(value BLOB);INSERT INTO retained_fixture VALUES(x'00ff00d8');").unwrap();
     }
     let readiness = ReadinessState::default();

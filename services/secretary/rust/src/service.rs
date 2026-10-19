@@ -130,6 +130,17 @@ fn connection_diagnostic(code: JsString) {
         eprintln!("{line}");
     }
 }
+pub(crate) fn service_identity(value: &IvyJson) -> IvyResult<IvyJson> {
+    Ok(IvyJson::object([
+        ("serviceNodeId", value.required("serviceNodeId")?.clone()),
+        ("serviceName", "secretary".into()),
+        ("instanceMode", "singleton".into()),
+        ("hostId", value.required("hostId")?.clone()),
+        ("version", value.required("version")?.clone()),
+        ("buildId", value.required("buildId")?.clone()),
+        ("hiveProtocol", IvyJson::Number(1.0)),
+    ]))
+}
 async fn shutdown_owner(
     service: ServiceClient,
     actor: JoinHandle<()>,
@@ -227,15 +238,7 @@ async fn start_configured(
             notification_policy: load_notification_policy(&config.artifact_root().join("dist"))?,
         },
     };
-    let identity = IvyJson::object([
-        ("serviceNodeId", value.required("serviceNodeId")?.clone()),
-        ("serviceName", "secretary".into()),
-        ("instanceMode", "singleton".into()),
-        ("hostId", value.required("hostId")?.clone()),
-        ("version", value.required("version")?.clone()),
-        ("buildId", value.required("buildId")?.clone()),
-        ("hiveProtocol", IvyJson::Number(1.0)),
-    ]);
+    let identity = service_identity(value)?;
     let credential = value.required("credential")?.as_str()?;
     let endpoint = value.required("publicBaseUrl")?.as_str()?;
     let health = Arc::new(HealthFile::new(config));

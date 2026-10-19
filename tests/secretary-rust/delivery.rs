@@ -98,6 +98,8 @@ mod execution_import_cases;
 mod follow_up_cases;
 #[path = "generation_cases.rs"]
 mod generation_cases;
+#[path = "import_admission_cases.rs"]
+mod import_admission_cases;
 #[path = "inbox_evidence_cases.rs"]
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
@@ -114,6 +116,8 @@ mod notices_cases;
 mod reconcile_cases;
 #[path = "registry_cases.rs"]
 mod registry_cases;
+#[path = "retained_import_cases.rs"]
+mod retained_import_cases;
 #[path = "service_cases.rs"]
 mod service_cases;
 #[path = "service_handlers_cases.rs"]
