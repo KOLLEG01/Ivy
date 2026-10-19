@@ -10,6 +10,7 @@ use ivy_task_board::{
     engine_publication::{
         CreationChecks, EnginePublisher, PublicationRoutes, RootPublicationChecks,
     },
+    engine_validation::{ActionValidation, ActionValidationChecks, check_aggregate},
     journal_store::{Contracts, JournalStore},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_journal::{LocalJournal, initialize},
