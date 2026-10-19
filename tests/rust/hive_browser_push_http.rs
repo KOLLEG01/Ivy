@@ -1,4 +1,6 @@
 use super::*;
+#[path = "hive_oauth_http.rs"]
+mod oauth_http;
 use ivy_hive::{
     admission::{RequestBudget, RequestBudgetOptions},
     browser_push_http::{Handler, Headers, Wake},
