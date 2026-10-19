@@ -33,9 +33,21 @@ pub struct FileResult {
 }
 fn empty(failure: FileFailure) -> FileResult { FileResult { stdout: "".into(), stderr: "".into(), exit_code: None, signal: None, failure: Some(failure) } }
 
+pub(crate) struct FileExecution {
+    pub result: FileResult,
+    pub spawn_error: Option<std::io::Error>,
+}
+impl From<FileResult> for FileExecution {
+    fn from(result: FileResult) -> Self { Self { result, spawn_error: None } }
+}
+
 /// Detached ownership ensures a dropped waiter cannot leave a live process
 /// without timeout/cancellation/retirement handling. Failure retains both streams.
 pub async fn exec_file(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions) -> IvyResult<FileResult> {
+    Ok(exec_file_detailed(command, bootstrap_root, options).await?.result)
+}
+
+pub(crate) async fn exec_file_detailed(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions) -> IvyResult<FileExecution> {
     if command.timeout_ms == 0 || command.timeout_ms > 3_600_000 || command.maximum_buffer_bytes > 64 * 1024 * 1024 {
         return Err(IvyError::new("invalid_arguments", "Exec-file requires bounded time and output limits."));
     }
@@ -45,7 +57,7 @@ pub async fn exec_file(command: FileCommand, bootstrap_root: PathBuf, options: F
 /// Source's original spawnSync closes stdin and counts raw bytes across both
 /// streams. Keep that private policy separate from public execFile semantics.
 pub(crate) async fn source_output(command: FileCommand, bootstrap_root: PathBuf) -> IvyResult<FileResult> {
-    tokio::spawn(run(command, bootstrap_root, FileOptions::default(), true)).await.map_err(|_| IvyError::internal())
+    Ok(tokio::spawn(run(command, bootstrap_root, FileOptions::default(), true)).await.map_err(|_| IvyError::internal())?.result)
 }
 
 async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: OutputStream, overflow: mpsc::Sender<OutputStream>, stop_capture: CancellationToken, text: Arc<Mutex<Vec<u16>>>, combined: Option<Arc<std::sync::atomic::AtomicUsize>>) -> std::io::Result<()> {
@@ -76,18 +88,18 @@ async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: Outp
     Ok(())
 }
 
-async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions, synchronous_input: bool) -> FileResult {
-    if options.cancellation.is_cancelled() { return empty(FileFailure::Cancelled) }
+async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions, synchronous_input: bool) -> FileExecution {
+    if options.cancellation.is_cancelled() { return empty(FileFailure::Cancelled).into() }
     let environment = options.environment.unwrap_or_else(|| std::env::vars_os().collect());
     let (command,environment,resolved) = match tokio::task::spawn_blocking(move || {
         let resolved=resolve(&command,&environment);(command,environment,resolved)
-    }).await {Ok(value)=>value,Err(_)=>return empty(FileFailure::Unknown)};
-    let resolved = match resolved { Ok(value) => value, Err(_) => return empty(FileFailure::Spawn) };
-    if options.cancellation.is_cancelled() { return empty(FileFailure::Cancelled) }
+    }).await {Ok(value)=>value,Err(_)=>return empty(FileFailure::Unknown).into()};
+    let resolved = match resolved { Ok(value) => value, Err(error) => return FileExecution { result: empty(FileFailure::Spawn), spawn_error: Some(error) } };
+    if options.cancellation.is_cancelled() { return empty(FileFailure::Cancelled).into() }
     let launch = LaunchContext { raw_output: true, job_launcher: options.job_launcher, ..Default::default() };
     let deadline = tokio::time::Instant::now() + Duration::from_millis(command.timeout_ms as u64);
-    let mut child = match process::spawn_resolved(resolved, &bootstrap_root, launch, Some(environment), Some(command.executable.clone())).await {
-        Ok(value) => value, Err(error) => return empty(if error.outcome == ivy_contracts::Outcome::Unknown { FileFailure::Unknown } else { FileFailure::Spawn }),
+    let mut child = match process::spawn_resolved_detailed(resolved, &bootstrap_root, launch, Some(environment), Some(command.executable.clone())).await {
+        Ok(value) => value, Err(error) => return FileExecution { result: empty(if error.error.outcome == ivy_contracts::Outcome::Unknown { FileFailure::Unknown } else { FileFailure::Spawn }), spawn_error: error.source },
     };
     // execFile leaves stdin open; spawnSync's absent input is immediate EOF.
     if synchronous_input { drop(child.stdin.take()); }
@@ -115,10 +127,10 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
     let stdout=JsString(std::mem::take(&mut *out.lock().unwrap_or_else(|p|p.into_inner())));
     let stderr=JsString(std::mem::take(&mut *err.lock().unwrap_or_else(|p|p.into_inner())));
     if failure.is_none() { failure = exceeded.try_recv().ok().map(FileFailure::MaxBuffer); }
-    let Some(result) = result else { return FileResult { stdout, stderr, exit_code: None, signal: None, failure: Some(FileFailure::Unknown) } };
+    let Some(result) = result else { return FileResult { stdout, stderr, exit_code: None, signal: None, failure: Some(FileFailure::Unknown) }.into() };
     if result.error_code.is_some() { failure = Some(FileFailure::Unknown); }
     else if failure.is_none() && (result.exit_code != Some(0) || result.signal.is_some()) { failure = Some(FileFailure::Exit); }
-    FileResult { stdout, stderr, exit_code: result.exit_code, signal: result.signal.clone(), failure }
+    FileResult { stdout, stderr, exit_code: result.exit_code, signal: result.signal.clone(), failure }.into()
 }
 
 fn resolve(command: &FileCommand, environment: &BTreeMap<OsString, OsString>) -> std::io::Result<ResolvedCommand> {

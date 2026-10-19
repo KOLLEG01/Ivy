@@ -1,4 +1,5 @@
 import {promisify} from 'node:util';
+import {execFile as nativeExecFile} from 'node:child_process';
 const state=globalThis.__ivyLinuxFixture;
 if(!state)throw Error('Linux fixture I/O is not initialized');
 const failure=code=>Object.assign(Error('Explicit simulated boundary failure'),{code});
@@ -27,9 +28,14 @@ export async function open(path,flags,mode){
   async close(){event({op:'close',path});},
  };
 }
+export async function rename(from,to){event({op:'rename',from,to});if(!state.files[from])throw failure('ENOENT');state.files[to]=state.files[from];delete state.files[from];}
+export async function unlink(path){event({op:'unlink',path});if(!state.files[path])throw failure('ENOENT');delete state.files[path];}
+export function randomUUID(){return state.model.uuid??'11111111-2222-4333-8444-555555555555';}
 export function execFile(){throw Error('Only the explicitly promisified simulated command is available');}
 execFile[promisify.custom]=async (file,args,options)=>{
  event({op:'command',file,args,timeoutMs:options.timeout,maxBuffer:options.maxBuffer});
+ if(state.model.systemdAdapter&&state.model.nativeCommands)return await promisify(nativeExecFile)(file,args,options);
+ if(state.model.systemdAdapter){const result=state.model.commands?.[state.commandIndex++]??{};if(Object.hasOwn(result,'error'))throw Object.assign(failure(result.error),{stderr:result.stderr??''});return {stdout:result.stdout??'',stderr:result.stderr??''};}
  if(!['/usr/bin/id','/usr/bin/setfacl','/usr/bin/chown','/usr/sbin/useradd','/usr/bin/systemctl'].includes(file))throw Error('Unlisted simulated command');
  const result=state.model.commands?.[state.commandIndex++]??{};
  if(result.error)throw failure(result.error);

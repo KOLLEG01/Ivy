@@ -342,6 +342,28 @@ pub(crate) async fn spawn_resolved(
     exact_environment: Option<BTreeMap<OsString, OsString>>,
     argv0: Option<OsString>,
 ) -> IvyResult<OwnedProcess> {
+    spawn_resolved_detailed(resolved, root, context, exact_environment, argv0)
+        .await
+        .map_err(|failure| failure.error)
+}
+
+pub(crate) struct SpawnFailure {
+    pub error: IvyError,
+    pub source: Option<std::io::Error>,
+}
+impl From<IvyError> for SpawnFailure {
+    fn from(error: IvyError) -> Self { Self { error, source: None } }
+}
+
+/// Retain the native spawn failure for execFile consumers without changing the
+/// public process error or the shared process-tree owner.
+pub(crate) async fn spawn_resolved_detailed(
+    resolved: ResolvedCommand,
+    root: &Path,
+    context: LaunchContext,
+    exact_environment: Option<BTreeMap<OsString, OsString>>,
+    argv0: Option<OsString>,
+) -> Result<OwnedProcess, SpawnFailure> {
     let maximum = context.maximum_output_bytes.unwrap_or(65536);
     let use_job = cfg!(windows) && !context.without_job;
     if context
@@ -351,7 +373,7 @@ pub(crate) async fn spawn_resolved(
     {
         return Err(invalid(
             "A named process job requires the Windows job launcher.",
-        ));
+        ).into());
     }
     #[cfg(windows)]
     let launch_listener = if use_job {
@@ -430,7 +452,9 @@ pub(crate) async fn spawn_resolved(
     }
     let mut child = process
         .spawn()
-        .map_err(|_| IvyError::new("spawn_failed", "Command could not start."))?;
+        .map_err(|source| SpawnFailure {
+            error: IvyError::new("spawn_failed", "Command could not start."), source: Some(source),
+        })?;
     let pid = child.id().expect("spawned process has an identity");
     // The launch handshake races acknowledgement against Child::wait(), which
     // closes any stdin still held by Child. Retain the caller's pipe first.
@@ -446,7 +470,7 @@ pub(crate) async fn spawn_resolved(
                     "spawn_failed",
                     "Command launch acknowledgement failed.",
                 )
-                .with_outcome(Outcome::Unknown));
+                .with_outcome(Outcome::Unknown).into());
             }
         }
     } else {

@@ -1,12 +1,312 @@
-//! Exact unit identity, direct launch rendering and systemctl state decoding.
+//! Systemd ownership, bounded commands, definition replacement and launch units.
+use crate::linux_host::FileMetadata;
 use crate::{
     IvyError, IvyJson, IvyResult, bootstrap,
     linux_host::trimmed,
     linux_resources::{installation_identity, validate_linux_resource_scope},
     linux_service_identity::linux_process_user,
 };
+use futures_util::future::BoxFuture;
 use ivy_contracts::{JsString, hash::hash_json, json};
 use std::collections::BTreeMap;
+use std::{io, path::PathBuf, sync::Arc};
+mod host;
+pub use host::NativeSystemdHost;
+
+pub trait UnitFile: Send {
+    fn write<'a>(&'a mut self, bytes: Vec<u8>) -> BoxFuture<'a, io::Result<()>>;
+    fn sync(&mut self) -> BoxFuture<'_, io::Result<()>>;
+    fn close(self: Box<Self>) -> BoxFuture<'static, io::Result<()>>;
+}
+
+/// Files, commands and clocks are explicit OS boundaries. Administrative policy
+/// remains in SystemdAdapter for both the native host and injected hosts.
+pub trait SystemdHost: Send + Sync {
+    fn platform(&self) -> &str;
+    fn user_id(&self) -> Option<u32>;
+    fn metadata(&self, path: JsString) -> BoxFuture<'static, io::Result<FileMetadata>>;
+    fn read(&self, path: JsString) -> BoxFuture<'static, io::Result<Vec<u8>>>;
+    fn open(
+        &self,
+        path: JsString,
+        exclusive_write: bool,
+    ) -> BoxFuture<'static, io::Result<Box<dyn UnitFile>>>;
+    fn rename(&self, from: JsString, to: JsString) -> BoxFuture<'static, io::Result<()>>;
+    fn unlink(&self, path: JsString) -> BoxFuture<'static, io::Result<()>>;
+    fn execute(
+        &self,
+        executable: JsString,
+        args: Vec<JsString>,
+    ) -> BoxFuture<'static, IvyResult<JsString>>;
+    fn uuid(&self) -> String;
+    fn now_ms(&self) -> f64;
+    fn sleep(&self, milliseconds: u64) -> BoxFuture<'static, ()>;
+}
+pub trait SystemdCommand: Send + Sync {
+    fn run(&self, config: IvyJson, args: Vec<JsString>) -> BoxFuture<'static, IvyResult<JsString>>;
+}
+impl<F> SystemdCommand for F
+where
+    F: Fn(IvyJson, Vec<JsString>) -> BoxFuture<'static, IvyResult<JsString>> + Send + Sync,
+{
+    fn run(&self, config: IvyJson, args: Vec<JsString>) -> BoxFuture<'static, IvyResult<JsString>> {
+        self(config, args)
+    }
+}
+
+#[derive(Clone)]
+pub struct SystemdAdapter {
+    host: Arc<dyn SystemdHost>,
+    command: Option<Arc<dyn SystemdCommand>>,
+}
+impl SystemdAdapter {
+    pub fn new(bootstrap_root: PathBuf) -> Self {
+        Self::with_host(Arc::new(NativeSystemdHost::new(bootstrap_root)))
+    }
+    pub fn with_host(host: Arc<dyn SystemdHost>) -> Self {
+        Self {
+            host,
+            command: None,
+        }
+    }
+    pub fn with_command(host: Arc<dyn SystemdHost>, command: Arc<dyn SystemdCommand>) -> Self {
+        Self {
+            host,
+            command: Some(command),
+        }
+    }
+    async fn command(&self, config: &IvyJson, args: Vec<JsString>) -> IvyResult<JsString> {
+        if let Some(command) = &self.command {
+            return command.run(config.clone(), args).await;
+        }
+        require(
+            self.host.platform() == "linux",
+            "unsupported_runtime",
+            "Systemd is only available on Linux.",
+        )?;
+        let executables = config.required("executables")?;
+        if matches!(executables, IvyJson::Null) {
+            return Err(IvyError::internal());
+        }
+        let executable = match executables
+            .get("systemctl")
+            .filter(|value| !matches!(value, IvyJson::Null))
+        {
+            Some(value) => text(value)?,
+            None => "/usr/bin/systemctl".into(),
+        };
+        require(
+            executable.0.first() == Some(&47) && !executable.0.iter().any(|unit| *unit <= 31),
+            "invalid_arguments",
+            "Systemd executable must be an absolute path.",
+        )?;
+        self.host.execute(executable, args).await
+    }
+    async fn state(&self, config: &IvyJson, unit: &JsString) -> IvyResult<SystemdState> {
+        require_unit(unit)?;
+        let output = self
+            .command(
+                config,
+                vec![
+                    "show".into(),
+                    "--no-pager".into(),
+                    "--property=LoadState,ActiveState,SubState,MainPID".into(),
+                    unit.clone(),
+                ],
+            )
+            .await?;
+        let state = parse_systemd_state(&output);
+        require(
+            state.load_state == JsString::from("loaded")
+                || state.load_state == JsString::from("not-found"),
+            "target_conflict",
+            "Systemd reported an unexpected unit load state.",
+        )?;
+        Ok(state)
+    }
+    pub async fn inspect_unit(&self, config: IvyJson, unit: JsString) -> IvyResult<SystemdState> {
+        let adapter = self.clone();
+        tokio::spawn(async move { adapter.state(&config, &unit).await })
+            .await
+            .map_err(|_| IvyError::internal())?
+    }
+    pub async fn read_unit(&self, _config: IvyJson, unit: JsString) -> IvyResult<Option<JsString>> {
+        let adapter = self.clone();
+        tokio::spawn(async move {
+            require_unit(&unit)?;
+            let path = definition_path(&unit);
+            let metadata = match adapter.host.metadata(path.clone()).await {
+                Ok(value) => value,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(_) => return Err(IvyError::internal()),
+            };
+            require(
+                metadata.is_file
+                    && !metadata.is_symlink
+                    && metadata.uid == Some(0)
+                    && metadata.mode & 0o022 == 0
+                    && metadata.size <= 65_536,
+                "target_conflict",
+                "Systemd unit must be a bounded administrator-owned regular file.",
+            )?;
+            match adapter.host.read(path).await {
+                Ok(bytes) => Ok(Some(JsString(
+                    crate::process_output::Utf8Decoder::preserving_bom().decode(&bytes, true),
+                ))),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err(IvyError::internal()),
+            }
+        })
+        .await
+        .map_err(|_| IvyError::internal())?
+    }
+    pub async fn stop_unit(
+        &self,
+        config: IvyJson,
+        unit: JsString,
+        timeout_ms: f64,
+    ) -> IvyResult<SystemdState> {
+        let adapter = self.clone();
+        tokio::spawn(async move {
+            require(
+                timeout_ms.is_finite()
+                    && timeout_ms.fract() == 0.0
+                    && (0.0..=120_000.0).contains(&timeout_ms),
+                "invalid_arguments",
+                "Systemd stop timeout is invalid.",
+            )?;
+            require_unit(&unit)?;
+            let current = adapter.state(&config, &unit).await?;
+            if stopped(&current) {
+                return Ok(current);
+            }
+            adapter
+                .command(&config, vec!["stop".into(), unit.clone()])
+                .await?;
+            let deadline = adapter.host.now_ms() + timeout_ms;
+            let mut observed = adapter.state(&config, &unit).await?;
+            while !stopped(&observed) && adapter.host.now_ms() < deadline {
+                adapter.host.sleep(100).await;
+                observed = adapter.state(&config, &unit).await?;
+            }
+            if !stopped(&observed) {
+                return Err(IvyError::new(
+                    "outcome_unknown",
+                    "Systemd did not establish a stopped unit outcome.",
+                )
+                .with_outcome(ivy_contracts::Outcome::Unknown));
+            }
+            Ok(observed)
+        })
+        .await
+        .map_err(|_| IvyError::internal())?
+    }
+    pub async fn replace_unit(
+        &self,
+        _config: IvyJson,
+        unit: JsString,
+        content: JsString,
+    ) -> IvyResult<()> {
+        let adapter = self.clone();
+        tokio::spawn(async move {
+            require_unit(&unit)?;
+            let bytes = String::from_utf16_lossy(&content.0).into_bytes();
+            require(
+                !content.0.is_empty() && bytes.len() <= 65_536 && !content.0.contains(&0),
+                "invalid_arguments",
+                "Systemd unit content is invalid or unbounded.",
+            )?;
+            require(
+                adapter.host.platform() == "linux" && adapter.host.user_id() == Some(0),
+                "unsupported_runtime",
+                "Systemd unit replacement needs the systemd administrator.",
+            )?;
+            let path = definition_path(&unit);
+            let mut temporary = path.0.clone();
+            temporary.extend(format!(".{}.tmp", adapter.host.uuid()).encode_utf16());
+            let temporary = JsString(temporary);
+            let mut file = adapter
+                .host
+                .open(temporary.clone(), true)
+                .await
+                .map_err(|_| IvyError::internal())?;
+            let written = async {
+                file.write(bytes).await?;
+                file.sync().await
+            }
+            .await;
+            // Node's finally-close replaces an earlier write/sync error. The
+            // original leaves this temporary file on those early failures.
+            file.close().await.map_err(|_| IvyError::internal())?;
+            written.map_err(|_| IvyError::internal())?;
+            let installed: io::Result<()> = async {
+                adapter.host.rename(temporary.clone(), path).await?;
+                let mut directory = adapter
+                    .host
+                    .open("/etc/systemd/system".into(), false)
+                    .await?;
+                let synced = directory.sync().await;
+                directory.close().await?;
+                synced
+            }
+            .await;
+            if installed.is_err() {
+                let _ = adapter.host.unlink(temporary).await;
+                return Err(IvyError::internal());
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| IvyError::internal())?
+    }
+    pub async fn reload(&self, config: IvyJson) -> IvyResult<()> {
+        let adapter = self.clone();
+        tokio::spawn(async move {
+            adapter
+                .command(&config, vec!["daemon-reload".into()])
+                .await?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| IvyError::internal())?
+    }
+    pub async fn start_unit(&self, config: IvyJson, unit: JsString) -> IvyResult<SystemdState> {
+        let adapter = self.clone();
+        tokio::spawn(async move {
+            require_unit(&unit)?;
+            adapter
+                .command(&config, vec!["start".into(), unit.clone()])
+                .await?;
+            adapter.state(&config, &unit).await
+        })
+        .await
+        .map_err(|_| IvyError::internal())?
+    }
+}
+fn stopped(state: &SystemdState) -> bool {
+    state.active_state == JsString::from("inactive")
+        || state.active_state == JsString::from("failed")
+}
+fn require_unit(unit: &JsString) -> IvyResult<()> {
+    let value = &unit.0;
+    require(
+        value.len() == 42
+            && value.starts_with(&JsString::from("ivy-next-").0)
+            && value[21] == 45
+            && value.ends_with(&JsString::from(".service").0)
+            && value[9..21]
+                .iter()
+                .chain(&value[22..34])
+                .all(|unit| matches!(*unit, 48..=57 | 97..=102)),
+        "target_conflict",
+        "Systemd unit is outside the Ivy installation.",
+    )
+}
+fn definition_path(unit: &JsString) -> JsString {
+    let mut path = JsString::from("/etc/systemd/system/").0;
+    path.extend_from_slice(&unit.0);
+    JsString(path)
+}
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
