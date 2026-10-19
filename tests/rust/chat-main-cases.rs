@@ -7,10 +7,10 @@ use ivy_chat_bridge::{
     notice_input::NoticeInstructions,
     notices::ChatNotices,
     operations::ChatOperations,
-    store::{ChatStore, Destination, Reference},
+    store::{ChatStore, Destination},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString,
+    IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts,
     hash::digest,
     json::{canonical, parse},
@@ -22,10 +22,22 @@ use ivy_sdk::{
 };
 use std::{
     collections::VecDeque,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
+
+fn progress(value: &str) {
+    if let Some(path) = std::env::var_os("IVY_CHAT_MAIN_TRACE_CAPTURE") {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{value}").unwrap();
+    }
+}
 
 fn oracle() -> &'static Json {
     static ORACLE: OnceLock<Json> = OnceLock::new();
@@ -417,7 +429,9 @@ fn notice_asset() -> NoticeInstructions {
 
 #[tokio::test]
 async fn original_main_creation_recovery_and_live_claims() {
+    progress("start");
     let oracle = oracle();
+    progress("original corpus parsed");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let catalogs = CheckedNativeContracts::new(root);
     let bytes = STANDARD.decode(text(oracle, "instructions")).unwrap();
@@ -431,6 +445,7 @@ async fn original_main_creation_recovery_and_live_claims() {
     let mut steps = 0;
     let mut errors = 0;
     for case in field(oracle, "cases").as_array().unwrap() {
+        progress(&format!("case {}", text(case, "label")));
         let seed = field(field(oracle, "seeds"), &text(case, "seed"));
         let path = std::env::temp_dir().join(format!("ivy-rust-main-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
@@ -455,6 +470,11 @@ async fn original_main_creation_recovery_and_live_claims() {
                 .unwrap(),
         );
         for (index, action) in field(case, "steps").as_array().unwrap().iter().enumerate() {
+            progress(&format!(
+                "{} step {index} {}",
+                text(case, "label"),
+                text(action, "action")
+            ));
             let expected = &field(case, "expected").as_array().unwrap()[index];
             client.begin(field(expected, "transport"));
             let name = text(action, "action");
@@ -546,6 +566,7 @@ async fn original_main_creation_recovery_and_live_claims() {
     assert!(field(oracle, "cases").as_array().unwrap().len() >= 40);
     assert!(steps >= 150);
     assert!(errors >= 15);
+    progress(&format!("complete steps={steps} expectedErrors={errors}"));
     eprintln!(
         "Original Main: {} workflows, {steps} steps, {errors} expected errors, twelve exact original checkpoint copies.",
         field(oracle, "cases").as_array().unwrap().len()
