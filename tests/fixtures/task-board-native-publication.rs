@@ -55,7 +55,7 @@ fn outcome(v: IvyResult<Json>) -> Json {
         )]),
     }
 }
-fn data() -> &'static Json {
+pub(crate) fn data() -> &'static Json {
     static D: OnceLock<Json> = OnceLock::new();
     D.get_or_init(|| {
         let p = Command::new("node")

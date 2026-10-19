@@ -18,6 +18,8 @@ use ivy_task_board::{
 use std::{cmp::Ordering, path::PathBuf};
 #[path = "task-board-engine-factory-native.rs"]
 mod native;
+#[path = "task-board-engine-factory-retirement.rs"]
+mod retirement;
 
 fn clock() -> String {
     "2026-01-02T03:04:05.006Z".to_owned()
@@ -41,6 +43,7 @@ struct Fixture {
     notice_generations: RefCell<Vec<u64>>,
     refusal: bool,
     native: Option<native::Scenario>,
+    retirement: Option<retirement::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -61,6 +64,7 @@ impl Fixture {
             notice_generations: RefCell::default(),
             refusal,
             native: None,
+            retirement: None,
         }
     }
     fn database(&self) -> Connection {
@@ -126,6 +130,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         }
         if let Some(native) = &self.native {
             native.seed(&policy.context)?;
+        }
+        if let Some(retirement) = &self.retirement {
+            retirement.bind(&policy.context)?;
         }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
@@ -216,6 +223,9 @@ impl TaskNoticePolicy for Policies<'_> {
         if let Some(native) = &self.fixture.native {
             return native.notice(self.context.owner.generation, task, operation);
         }
+        if let Some(retirement) = &self.fixture.retirement {
+            return retirement.notice(self.context.owner.generation, task, operation);
+        }
         // An applied first Task step with an uncertain observation must retain
         // its original prepared write and reserved gate for the next owner.
         if self.context.owner.generation == 1.0 {
@@ -244,6 +254,11 @@ impl LifecyclePages for Policies<'_> {
                 native.inputs_ready.wait().await;
             }
         }
+        if let Some(retirement) = &self.fixture.retirement {
+            if key == "task-board/run" && self.context.owner.generation == 1.0 {
+                retirement.ready.wait().await;
+            }
+        }
         if self.context.owner.generation == 1.0 && options.get("select").is_some() {
             self.fixture.page_waiting.set(true);
             self.fixture.page_held.wait().await;
@@ -262,7 +277,9 @@ impl LifecyclePages for Policies<'_> {
             if let Some(filter) = options.get("where") {
                 if filter.get("op") == Some(&"and".into()) {
                     assert_eq!(key, "task-board/task");
-                    if self.fixture.native.is_some() {
+                    if self.fixture.retirement.is_some() {
+                        assert_eq!(value.get("workflowState"), Some(&"review".into()));
+                    } else if self.fixture.native.is_some() {
                         assert_eq!(value.get("workflowState"), Some(&"in_progress".into()));
                     } else {
                         assert_eq!(

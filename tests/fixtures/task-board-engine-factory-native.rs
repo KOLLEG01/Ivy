@@ -12,7 +12,7 @@ fn f<'a>(v: &'a Json, key: &str) -> &'a Json {
 fn pin(id: &str) -> Json {
     Json::object([("objectId", id.into()), ("revision", Json::Number(1.0))])
 }
-fn baseline() -> (Json, Json) {
+pub(super) fn baseline() -> (Json, Json) {
     let owner = json(
         r#"{"principalId":"fixture-principal","serviceNodeId":"fixture-task-board","generation":7,"source":"user"}"#,
     );

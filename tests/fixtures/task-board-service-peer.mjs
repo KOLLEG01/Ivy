@@ -15,7 +15,8 @@ const {toolDefinitionHash}=await import('../../packages/contracts/src/tool-defin
 // An explicit isolated catalog, not the accepted TaskBoard registry/contract overlay.
 const definition={namespace:'task-board',name:'workspace',description:'Isolated owner invocation.',interfaceVersion:'1.0.0',inputSchema:{},outputSchema:{}};
 const actionDefinition={...definition,name:'update',description:'Isolated retained action invocation.'};
-const factory=process.argv.includes('--factory');
+const retirement=process.argv.includes('--factory-retirement');
+const factory=process.argv.includes('--factory')||retirement;
 const registry={namespaces:[{namespace:'task-board',description:'Fixture',guideMarkdown:'',tools:[definition,...(process.argv.includes('--engine')||factory?[actionDefinition]:[])],topics:[],inventoryKinds:[]}],contracts:[],requiredContracts:[]};
 const wss=new WebSocketServer({host:'127.0.0.1',port:0,perMessageDeflate:false,maxPayload:32*1024*1024});
 await once(wss,'listening');
@@ -49,6 +50,13 @@ wss.on('connection',(socket,request)=>{
     else if(factory&&method==='test.inputs'){nativeInputs=structuredClone(params.items);reply(id,{});}
     else if(factory&&method==='tools.list'){
       const name=params.namePrefix;
+      // Retired unstarted Runs use their saved allocation when an optional
+      // read-only workspace refresh is unavailable. No native call is bound.
+      if(retirement){
+        if(name!=='resolveWorkspace')throw Error('Unexpected retired-run tool '+name);
+        send({jsonrpc:'2.0',id,error:{code:-32000,message:'Finite saved allocation boundary.',data:{code:'service_unavailable',outcome:'not_executed',details:{scope:'retained-workspace'}}}});
+        return;
+      }
       if(!['inputs','status'].includes(name))throw Error('Unbound finite native tool '+name);
       const nativeDefinition={namespace:'agent',name,interfaceVersion:'1.0.0',annotations:{readOnlyHint:true},inputSchema:{},outputSchema:{}};
       reply(id,{provider:{node:{serviceNodeId:'native-agent'}},items:[{qualifiedName:'agent.'+name,definition:nativeDefinition,definitionHash:toolDefinitionHash(nativeDefinition),catalogHash:'sha256:'+'b'.repeat(64)}],nextCursor:null});
