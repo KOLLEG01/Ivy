@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {mkdtemp,realpath,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join,dirname,basename} from 'node:path';
+import {join,dirname,basename,resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {load,owner as secretaryOwner,rootId,itemId,accepted as baseAccepted} from './inbox-fixtures.mjs';
 import {outlookNativeCorpus} from './outlook-native-oracle.mjs';
 const {SecretaryStore}=await load('services/secretary/src/store.js');
@@ -13,12 +14,12 @@ const {contractVersion}=await load('services/secretary/src/schema.js');
 const {canonical,digest,hashJson,deriveOperationId,IvyError,parseOperationId}=await load('packages/sdk/src/node.js');
 const template=outlookNativeCorpus.rows.find(row=>row.input.label==='original evidence reconstructs all calls').input;
 const clone=structuredClone,at=new Date(outlookNativeCorpus.time).toISOString(),hash=value=>'sha256:'+value.repeat(64),rows=[];
-const wall=outlookNativeCorpus.wall,previousNow=Date.now;Date.now=()=>wall;
+const wall=outlookNativeCorpus.wall,previousNow=Date.now;
 
 async function add(label,c={}){
  const settings=clone(template.settings),configuration=clone(template.configuration),definition=settings.sources[0],principal=settings.identity.principalId;
  const source={schemaVersion:1,definition:clone(definition),definitionHash:hashJson(definition),cursor:null,checkpointOperation:null,updatedAt:null};
- const message={...clone(template.documents.find(row=>row.key==='secretary/outlook-evidence').value.page.messages[0]),attachments:'expected',...(c.inline?{nativeRevision:'outlook-inline-content:original'}:{})};
+ const message={...clone(c.message??template.documents.find(row=>row.key==='secretary/outlook-evidence').value.page.messages[0]),attachments:'expected',...(c.inline?{nativeRevision:'outlook-inline-content:original'}:{})};
  const item={schemaVersion:1,sourceId:'mail',message,identityHash:identityHash('mail',message),messageHash:messageHash(message),media:[],decision:null,notice:null};
  const captureId='fixture-epoch:'+wall+':media-original-capture',itemPin={objectId:itemId,revision:1};
  const request={action:'capture',operationId:captureId,expectedScope:settings.identity.scope,sourceId:'mail',message};
@@ -103,7 +104,12 @@ async function add(label,c={}){
   spool?.close();store.close();const actual=await realpath(directory);assert.equal(dirname(actual),parent);assert(basename(actual).startsWith('secretary-media-native-reference-'));await rm(actual,{recursive:true});
  }
 }
-try{
+export async function outlookMediaNativeCase(label, options={}) {
+ const before=Date.now;Date.now=()=>wall;
+ try { await add(label,options);return rows.pop(); } finally { Date.now=before; }
+}
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))try{
+ Date.now=()=>wall;
  await add('acquire once then publish after both account gates',{verify:true});
  await add('two complete original acquisitions publish distinct manifests',{files:2,attempts:4,verify:true});
  await add('all thirty-two attachment slots finish before profile and cleanup',{files:32,attempts:34,verify:true});
