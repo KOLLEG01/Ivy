@@ -365,7 +365,9 @@ pub(crate) async fn spawn_resolved(
         .map_err(|failure| failure.error)
 }
 
-pub(crate) struct SpawnFailure {
+/// Launch failure keeps native OS evidence separate from an unconfirmed launch.
+#[derive(Debug)]
+pub struct SpawnFailure {
     pub error: IvyError,
     pub source: Option<std::io::Error>,
 }
@@ -381,6 +383,28 @@ pub(crate) async fn spawn_resolved_detailed(
     context: LaunchContext,
     exact_environment: Option<BTreeMap<OsString, OsString>>,
     argv0: Option<OsString>,
+) -> Result<OwnedProcess, SpawnFailure> {
+    spawn_resolved_with_stdio(resolved, root, context, exact_environment, argv0, false).await
+}
+
+/// The same process-tree owner with null devices instead of caller/capture pipes.
+pub(crate) async fn spawn_resolved_ignored(
+    resolved: ResolvedCommand,
+    root: &Path,
+    context: LaunchContext,
+    environment: BTreeMap<OsString, OsString>,
+    argv0: OsString,
+) -> Result<OwnedProcess, SpawnFailure> {
+    spawn_resolved_with_stdio(resolved, root, context, Some(environment), Some(argv0), true).await
+}
+
+async fn spawn_resolved_with_stdio(
+    resolved: ResolvedCommand,
+    root: &Path,
+    context: LaunchContext,
+    exact_environment: Option<BTreeMap<OsString, OsString>>,
+    argv0: Option<OsString>,
+    ignored_stdio: bool,
 ) -> Result<OwnedProcess, SpawnFailure> {
     let maximum = context.maximum_output_bytes.unwrap_or(65536);
     let use_job = cfg!(windows) && !context.without_job;
@@ -447,9 +471,9 @@ pub(crate) async fn spawn_resolved_detailed(
         .env_clear()
         .kill_on_drop(true)
         .envs(exact_environment.unwrap_or_else(|| runtime_environment(&context.environment)))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdin(if ignored_stdio { std::process::Stdio::null() } else { std::process::Stdio::piped() })
+        .stdout(if ignored_stdio { std::process::Stdio::null() } else { std::process::Stdio::piped() })
+        .stderr(if ignored_stdio { std::process::Stdio::null() } else { std::process::Stdio::piped() });
     #[cfg(windows)]
     {
         process.creation_flags(0x08000000);
@@ -505,7 +529,7 @@ pub(crate) async fn spawn_resolved_detailed(
     let stdout_capture = make_capture();
     let stderr_capture = make_capture();
     let mut readers = Vec::new();
-    if !context.raw_output {
+    if !ignored_stdio && !context.raw_output {
         readers.push(capture_pipe(
             stdout.take().unwrap(),
             stdout_capture.clone(),

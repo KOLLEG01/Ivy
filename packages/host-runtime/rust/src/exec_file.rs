@@ -21,6 +21,51 @@ pub struct FileOptions {
     pub job_launcher: Option<PathBuf>,
     pub cancellation: CancellationToken,
 }
+
+/// Direct, hidden launch with ignored stdin/stdout/stderr and no shell.
+pub struct SpawnCommand {
+    pub executable: OsString,
+    pub args: Vec<OsString>,
+    /// None inherits the executing process's working directory.
+    pub cwd: Option<PathBuf>,
+}
+#[derive(Default)]
+pub struct SpawnOptions {
+    /// None inherits the complete executing process environment, without filtering.
+    pub environment: Option<BTreeMap<OsString, OsString>>,
+    pub job_launcher: Option<PathBuf>,
+}
+impl SpawnOptions {
+    /// Select the Job helper from the caller's already admitted immutable artifact.
+    /// Target and legacy layouts are explicit; a missing helper never falls back.
+    pub fn for_component(artifact_root: &Path, layout: crate::portable_native_files::NativeHelperLayout) -> IvyResult<Self> {
+        #[cfg(windows)]
+        let job_launcher = Some(crate::portable_native_files::component_native_helper(artifact_root, "ivy-job.exe", layout)?);
+        #[cfg(not(windows))]
+        let job_launcher = { let _ = (artifact_root, layout); None };
+        Ok(Self { job_launcher, ..Default::default() })
+    }
+}
+
+/// Node executable/cwd lookup and exact argv share execFile's resolver. All three
+/// streams are actual null devices, so no pipe/capture or stdin writer is created.
+/// The caller owns its deadline/domain errors; retain OwnedProcess and await its
+/// completion/stop plus owned_process_tree_stopped before claiming retirement.
+/// Dropping OwnedProcess requests tree retirement; dropping a completion observer
+/// alone does not. On Windows bootstrap_root supplies the legacy helper default;
+/// production component callers should use SpawnOptions::for_component.
+pub async fn spawn_ignored(command: SpawnCommand, bootstrap_root: PathBuf, options: SpawnOptions) -> Result<process::OwnedProcess, process::SpawnFailure> {
+    let environment = options.environment.unwrap_or_else(|| std::env::vars_os().collect());
+    let (command, environment, resolved) = tokio::task::spawn_blocking(move || {
+        let resolved = resolve_parts(&command.executable, &command.args, command.cwd.as_deref(), &environment);
+        (command, environment, resolved)
+    }).await.map_err(|_| process::SpawnFailure::from(IvyError::internal()))?;
+    let resolved = resolved.map_err(|source| process::SpawnFailure {
+        error: IvyError::new("spawn_failed", "Command could not start."), source: Some(source),
+    })?;
+    let launch = LaunchContext { raw_output: true, job_launcher: options.job_launcher, ..Default::default() };
+    process::spawn_resolved_ignored(resolved, &bootstrap_root, launch, environment, command.executable).await
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileFailure { Spawn, Exit, Timeout, Cancelled, MaxBuffer(OutputStream), Unknown }
 #[derive(Debug)]
@@ -134,12 +179,16 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
 }
 
 fn resolve(command: &FileCommand, environment: &BTreeMap<OsString, OsString>) -> std::io::Result<ResolvedCommand> {
+    resolve_parts(&command.executable, &command.args, command.cwd.as_deref(), environment)
+}
+
+fn resolve_parts(file: &std::ffi::OsStr, args: &[OsString], cwd: Option<&Path>, environment: &BTreeMap<OsString, OsString>) -> std::io::Result<ResolvedCommand> {
     let paths = node_path::Context::current()?;
-    let cwd = command.cwd.as_deref().unwrap_or(Path::new("."));
+    let cwd = cwd.unwrap_or(Path::new("."));
     let cwd = node_path::to_native(&paths.resolve(&[node_path::from_native(cwd)]));
     if !cwd.is_dir() { return Err(std::io::Error::from(std::io::ErrorKind::NotFound)) }
-    let executable = resolve_executable(&command.executable, &cwd, environment)?;
-    Ok(ResolvedCommand { executable, cwd, args: command.args.clone() })
+    let executable = resolve_executable(file, &cwd, environment)?;
+    Ok(ResolvedCommand { executable, cwd, args: args.to_vec() })
 }
 
 #[cfg(unix)]

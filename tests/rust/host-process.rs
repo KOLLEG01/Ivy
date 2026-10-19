@@ -8,6 +8,8 @@ mod process_path_cases;
 mod process_tree_cases;
 #[path="host-raw-process-cases.rs"]
 mod raw_process_cases;
+#[path="host-ignored-stdio-cases.rs"]
+mod ignored_stdio_cases;
 
 // Exercise the private retained-handle failure paths through this selected target.
 #[cfg(windows)]
