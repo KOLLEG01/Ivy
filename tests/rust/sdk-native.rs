@@ -192,7 +192,7 @@ impl NativeAbsentHandler for Handler {
         })
     }
 }
-async fn reconciliation(input: &IvyJson) -> IvyJson {
+async fn reconciliation(input: &IvyJson, local: bool) -> IvyJson {
     let scenario = field(input, "scenario");
     let trace = Trace::default();
     let owner = Owner {
@@ -249,15 +249,39 @@ async fn reconciliation(input: &IvyJson) -> IvyJson {
         .map(IvyJson::as_str)
         .transpose()
         .unwrap();
-    let result = match reconcile_native_operation(
-        &owner,
-        &call,
-        journal,
-        on_absent,
-        code.as_deref(),
-    )
-    .await
-    {
+    let reconciled = if local {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(0));
+        reconcile_native_operation_local(
+            &owner,
+            &call,
+            journal,
+            on_absent.map(|handler| {
+                move |call, absence: IvyJson| {
+                    let state = state.clone();
+                    async move {
+                        tokio::task::yield_now().await;
+                        *state.borrow_mut() += 1;
+                        handler.on_absent(call, &absence).await
+                    }
+                }
+            }),
+            code.as_deref(),
+        )
+        .await
+    } else {
+        fn send<F: std::future::Future + Send>(future: F) -> F {
+            future
+        }
+        send(reconcile_native_operation(
+            &owner,
+            &call,
+            journal,
+            on_absent,
+            code.as_deref(),
+        ))
+        .await
+    };
+    let result = match reconciled {
         Ok(NativeReconciliation::Observed { value, observation }) => success(IvyJson::object([
             ("kind", "observed".into()),
             ("value", IvyJson::Number(value as f64)),
@@ -300,7 +324,14 @@ async fn native_evidence_and_reconciliation_match_typescript() {
         let expected = parse(row["result"].as_str().unwrap(), 40_000_000).unwrap();
         let kind = field(&input, "kind").as_str().unwrap();
         let result = if kind == "reconcile" {
-            reconciliation(&input).await
+            let original = reconciliation(&input, false).await;
+            assert_eq!(
+                reconciliation(&input, true).await,
+                original,
+                "local reconciliation: {}",
+                row["input"]
+            );
+            original
         } else {
             let value = field(&input, "value");
             let other = field(&input, "other");
