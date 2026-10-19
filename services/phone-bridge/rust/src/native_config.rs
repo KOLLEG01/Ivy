@@ -31,25 +31,7 @@ type Result<T> = std::result::Result<T, NativeConfigError>;
 static NULL: IvyJson = IvyJson::Null;
 use NativeConfigError::{InvalidRequest, OutcomeUnknown};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Codec {
-    G722,
-    Pcma,
-    Pcmu,
-    Opus,
-    Evs,
-}
-impl Codec {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::G722 => "G722",
-            Self::Pcma => "PCMA",
-            Self::Pcmu => "PCMU",
-            Self::Opus => "OPUS",
-            Self::Evs => "EVS",
-        }
-    }
-}
+pub use crate::media::Codec;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeCodecSettings {
     preferences: Vec<Codec>,
@@ -58,6 +40,12 @@ pub struct NativeCodecSettings {
 impl NativeCodecSettings {
     pub fn preferences(&self) -> &[Codec] {
         &self.preferences
+    }
+    pub fn formats(&self) -> Vec<crate::media::AudioFormat> {
+        self.preferences
+            .iter()
+            .flat_map(|codec| codec.offered_formats())
+            .collect()
     }
     pub fn packet_ms(&self) -> u8 {
         20
