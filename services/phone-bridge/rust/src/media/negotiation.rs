@@ -115,6 +115,8 @@ pub struct AudioNegotiation {
     receive: Vec<AudioFormat>,
     offered_events: Vec<u8>,
     remote_events: Vec<TelephoneEventFormat>,
+    remote_sources: Vec<u32>,
+    selected_event: u8,
 }
 impl AudioNegotiation {
     pub fn sender(&self) -> &AudioFormat {
@@ -128,6 +130,12 @@ impl AudioNegotiation {
     }
     pub fn remote_event_formats(&self) -> &[TelephoneEventFormat] {
         &self.remote_events
+    }
+    pub fn remote_sources(&self) -> &[u32] {
+        &self.remote_sources
+    }
+    pub fn selected_event_payload(&self) -> u8 {
+        self.selected_event
     }
 }
 
@@ -415,6 +423,8 @@ impl AudioNegotiator {
             receive,
             offered_events,
             remote_events: event_formats(&remote),
+            remote_sources: track.sources(),
+            selected_event: self.event_payload,
         });
         self.local = agreed;
         self.remote = Some(remote);

@@ -18,7 +18,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-struct Audio {
+pub(crate) struct Audio {
     state: Mutex<(PcmAudioState, Vec<Vec<f32>>)>,
     revoke: AtomicBool,
 }
@@ -35,7 +35,7 @@ impl Audio {
             revoke: AtomicBool::new(false),
         }
     }
-    fn set(&self, open: bool, generation: u64) {
+    pub(crate) fn set(&self, open: bool, generation: u64) {
         self.state.lock().unwrap().0 = PcmAudioState { open, generation };
     }
     fn frames(&self) -> usize {
@@ -73,12 +73,21 @@ impl PcmAudioPort for Audio {
     }
 }
 #[derive(Default)]
-struct Events {
+pub(crate) struct Events {
     digits: Mutex<Vec<(char, InputSource)>>,
     controls: Mutex<Vec<Vec<u8>>>,
+    reports: Mutex<Vec<ivy_phone_bridge::media::RtcpReceiveObservation>>,
     failures: AtomicUsize,
     panic_report: AtomicBool,
     panic_failure: AtomicBool,
+}
+impl Events {
+    pub(crate) fn controls(&self) -> usize {
+        self.controls.lock().unwrap().len()
+    }
+    pub(crate) fn reports(&self) -> usize {
+        self.reports.lock().unwrap().len()
+    }
 }
 impl SipReceiveEvents for Events {
     fn digit(&self, digit: char, source: InputSource) {
@@ -98,8 +107,11 @@ impl SipReceiveEvents for Events {
         );
         self.controls.lock().unwrap().push(bytes.to_vec());
     }
+    fn report(&self, _: SocketAddr, report: &ivy_phone_bridge::media::RtcpReceiveObservation) {
+        self.reports.lock().unwrap().push(report.clone());
+    }
 }
-async fn wait(mut condition: impl FnMut() -> bool) {
+pub(crate) async fn wait(mut condition: impl FnMut() -> bool) {
     timeout(Duration::from_secs(4), async {
         while !condition() {
             sleep(Duration::from_millis(1)).await;
@@ -112,7 +124,7 @@ fn description(port: u16, opus: bool) -> SdpDocument {
     SdpDocument::parse(&format!("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {port} RTP/AVP {} 101 110\r\n{}a=rtpmap:101 telephone-event/8000\r\na=rtpmap:110 telephone-event/48000\r\na=sendrecv\r\n",
         if opus {"111"} else {"0 8"}, if opus {"a=rtpmap:111 opus/48000/2\r\n"} else {"a=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\n"})).unwrap()
 }
-fn configure(receiver: &SipRtpReceiver, rtp: SocketAddr, rtcp: SocketAddr, opus: bool) {
+pub(crate) fn configure(receiver: &SipRtpReceiver, rtp: SocketAddr, rtcp: SocketAddr, opus: bool) {
     let mut negotiator = AudioNegotiator::new(if opus {
         &[Codec::Opus]
     } else {
@@ -129,7 +141,7 @@ fn configure(receiver: &SipRtpReceiver, rtp: SocketAddr, rtcp: SocketAddr, opus:
         )
         .unwrap();
 }
-async fn send(
+pub(crate) async fn send(
     socket: &UdpSocket,
     destination: SocketAddr,
     sequence: u16,
@@ -150,7 +162,7 @@ async fn send(
     socket.send_to(&packet, destination).await.unwrap();
     packet.fill(0);
 }
-async fn setup(
+pub(crate) async fn setup(
     first: u16,
     open: bool,
     opus: bool,

@@ -1,5 +1,7 @@
 //! Bounded report decoding. Nothing is published until the complete datagram
 //! validates; unsupported types advance by their declared, checked length.
+//! Legacy TWCC chunk semantics retain SIPSorcery 10.0.15 behavior (Aaron
+//! Clauson); its full notice is in native/phone-runtime/licenses/SIPSorcery-10.0.15.md.
 use super::{MediaError, RtcpReportBlock, RtcpSenderInfo};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +46,10 @@ pub struct RtcpCompound<'a> {
     /// interpretation and session effects, separately from frame validation.
     pub sdes_packet: Option<&'a [u8]>,
     pub bye_packet: Option<&'a [u8]>,
+    /// Preserve the two original feedback categories and their routing fields.
+    /// No feedback control action or value reinterpretation is performed here.
+    pub feedback_packet: Option<&'a [u8]>,
+    pub twcc_packet: Option<&'a [u8]>,
     pub packet_count: usize,
 }
 impl<'a> RtcpCompound<'a> {
@@ -112,6 +118,14 @@ impl<'a> RtcpCompound<'a> {
                     bye(body, count)?;
                     result.bye_packet = Some(packet);
                 }
+                205 | 206 => {
+                    feedback(body, count)?;
+                    if packet[1] == 205 && count == 15 {
+                        result.twcc_packet = Some(packet);
+                    } else {
+                        result.feedback_packet = Some(packet);
+                    }
+                }
                 // Other packet types have no SR/RR diagnostic fields. Their
                 // framing still validates, including tail padding and progress.
                 _ => {}
@@ -131,6 +145,80 @@ impl<'a> RtcpCompound<'a> {
             .map(|r| r.blocks)
             .or_else(|| self.receiver.map(|r| r.blocks))
     }
+}
+fn feedback(bytes: &[u8], format: usize) -> Result<(), MediaError> {
+    if bytes.len() < 12 {
+        return Err(MediaError::InvalidPacket);
+    }
+    if bytes[1] == 205 {
+        if format == 15 {
+            return twcc(bytes);
+        }
+        if format != 5 && bytes.len() < 16 {
+            return Err(MediaError::InvalidPacket);
+        }
+    } else if format == 15 {
+        let id = bytes.get(12..16).ok_or(MediaError::InvalidPacket)?;
+        if id.eq_ignore_ascii_case(b"REMB") {
+            let count = usize::from(*bytes.get(16).ok_or(MediaError::InvalidPacket)?);
+            bytes
+                .get(..20 + count * 4)
+                .ok_or(MediaError::InvalidPacket)?;
+        }
+    }
+    Ok(())
+}
+// Validate the original TWCC chunk meanings without publishing new feedback
+// values. Bounded chunks and complete deltas are required before any effects.
+fn twcc(bytes: &[u8]) -> Result<(), MediaError> {
+    if bytes.len() < 20 {
+        return Err(MediaError::InvalidPacket);
+    }
+    let mut remaining = usize::from(u16::from_be_bytes([bytes[14], bytes[15]]));
+    let mut offset = 20;
+    let mut deltas = 0usize;
+    while remaining > 0 {
+        let value = bytes
+            .get(offset..offset + 2)
+            .ok_or(MediaError::InvalidPacket)?;
+        let chunk = u16::from_be_bytes([value[0], value[1]]);
+        offset += 2;
+        match chunk >> 14 {
+            0 => {
+                let count = usize::from(chunk & 4095).min(remaining);
+                deltas += count
+                    * match (chunk >> 12) & 3 {
+                        0 => 0,
+                        3 => 2,
+                        _ => 1,
+                    };
+                remaining -= count;
+            }
+            2 => {
+                let count = remaining.min(7);
+                for i in 0..count {
+                    deltas += match (chunk >> (12 - i * 2)) & 3 {
+                        1 => 1,
+                        2 => 2,
+                        _ => 0,
+                    };
+                }
+                remaining -= count;
+            }
+            3 => {
+                let count = remaining.min(14);
+                for i in 0..count {
+                    deltas += usize::from((chunk >> (13 - i)) & 1);
+                }
+                remaining -= count;
+            }
+            _ => (),
+        }
+    }
+    bytes
+        .get(offset..offset + deltas)
+        .ok_or(MediaError::InvalidPacket)?;
+    Ok(())
 }
 fn read32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())

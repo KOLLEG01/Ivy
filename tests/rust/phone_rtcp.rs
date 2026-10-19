@@ -670,7 +670,7 @@ fn original_parser_and_actual_application_event_traces_keep_unknown_exceptions_s
             ("fields", fields),
             ("projection", projected_fields(parsed)),
             ("unknownProgressException", (*exception).into()),
-            ("reportEventOwnerIntegrated", false.into()),
+            ("reportEventOwnerExercised", false.into()),
         ]));
     }
     // A known tail is newly reachable; the unsupported packet itself is valid.

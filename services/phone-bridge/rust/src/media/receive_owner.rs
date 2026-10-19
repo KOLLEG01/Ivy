@@ -1,10 +1,12 @@
 //! SIP receive composition. The call retains SDP, sender, RTCP scheduling and
 //! owned audio disposal; this owner retains its actual RTP pair and gap pump.
 use super::receive_analysis::ReceiveAnalysis;
+use super::rtcp_owner::RtcpReceiveOwner;
 use super::{
     AudioFormat, AudioNegotiation, CodecError, EvsLibrary, MediaCodec, MediaError, PcmAudioPort,
-    PcmAudioState, RtcpCompound, RtpAudioPacket, RtpDatagramSink, RtpPacket, RtpPeer,
-    RtpReceiveQueue, RtpReceiveStatus, RtpTransport, RtpTransportError, RtpTransportObservation,
+    PcmAudioState, RtcpCompound, RtcpReceiveObservation, RtpAudioPacket, RtpDatagramSink,
+    RtpPacket, RtpPeer, RtpReceiveQueue, RtpReceiveStatus, RtpTransport, RtpTransportError,
+    RtpTransportObservation,
 };
 use crate::dtmf::{InputSource, RtpEventTracker, rtp_event_digit};
 use std::{
@@ -13,7 +15,7 @@ use std::{
         Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -49,9 +51,10 @@ pub trait SipReceiveEvents: Send + Sync + 'static {
     fn digit(&self, digit: char, source: InputSource);
     fn failed(&self);
     /// Original negotiated RTCP channel, independent of the PCM permit. The
-    /// whole datagram has validated. The call still owns stream/report-event
-    /// admission, counting, time and projection; raw control is not that event.
+    /// whole datagram has validated. Raw control is distinct from an admitted
+    /// application report; BYE or unknown-only controls may publish only here.
     fn rtcp(&self, source: SocketAddr, compound: &[u8]);
+    fn report(&self, _source: SocketAddr, _report: &RtcpReceiveObservation) {}
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -70,11 +73,14 @@ pub struct SipReceiveObservation {
     pub failed: bool,
     pub failure: Option<ReceiveError>,
     pub cleanup_confirmed: bool,
+    pub rtcp: RtcpReceiveObservation,
 }
 struct State {
     peer: Option<RtpPeer>,
     formats: Vec<AudioFormat>,
     event_payloads: Vec<u8>,
+    selected_event: u8,
+    rtcp: RtcpReceiveOwner,
     queue: RtpReceiveQueue,
     receiver: Option<MediaCodec>,
     observed: Option<PcmAudioState>,
@@ -198,6 +204,18 @@ impl Inner {
             state.queue.reject_peer();
             return Ok(Vec::new());
         }
+        // The original media channel ignores exactly the bare twelve-byte
+        // header. Keep framing acceptance separate from application admission.
+        if packet.payload.is_empty()
+            && packet.contributing_sources.is_empty()
+            && packet.extension.is_none()
+            && packet.padding == 0
+        {
+            return Ok(Vec::new());
+        }
+        if state.selected_event == 0 || packet.header.payload_type != state.selected_event {
+            state.rtcp.learn(packet.header.source);
+        }
         if state.event_payloads.contains(&packet.header.payload_type) {
             state.event_packets += 1;
             if let Some(digit) = packet
@@ -298,22 +316,32 @@ impl RtpDatagramSink for Sink {
     }
     fn rtcp(&self, source: SocketAddr, compound: &[u8]) {
         if let Some(inner) = self.0.upgrade() {
-            if RtcpCompound::parse(compound).is_err() {
+            let Ok(report) = RtcpCompound::parse(compound) else {
                 return;
-            }
-            let accepted = {
-                let state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
-                !inner.closed.load(Ordering::Acquire)
+            };
+            let notification = {
+                let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+                let accepted = !inner.closed.load(Ordering::Acquire)
                     && state.peer.is_some_and(|peer| {
                         peer.rtcp().port() == source.port()
                             && crate::sip::same_ip(peer.rtcp(), source)
-                    })
+                    });
+                if !accepted {
+                    return;
+                }
+                if compound.len() > 12 && state.rtcp.receive(report, SystemTime::now()) {
+                    Some(state.rtcp.observation())
+                } else {
+                    None
+                }
             };
-            if accepted
-                && std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    inner.events.rtcp(source, compound)
-                }))
-                .is_err()
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(report) = notification {
+                    inner.events.report(source, &report);
+                }
+                inner.events.rtcp(source, compound)
+            }))
+            .is_err()
             {
                 inner.fail(ReceiveError::Codec(CodecError::Failed));
             }
@@ -329,7 +357,7 @@ impl Drop for Handle {
 
 /// A running SIP audio receiver with one actual socket pair and bounded gap
 /// wakeups. It does not own the call's audio route, sender, SIP dialog or RTCP
-/// report state. Final call disposal must additionally revoke/close that route.
+/// transmission/timers. Final call disposal must additionally revoke/close that route.
 #[derive(Clone)]
 pub struct SipRtpReceiver {
     handle: Arc<Handle>,
@@ -350,6 +378,8 @@ impl SipRtpReceiver {
                 peer: None,
                 formats: Vec::new(),
                 event_payloads: Vec::new(),
+                selected_event: 101,
+                rtcp: RtcpReceiveOwner::default(),
                 queue,
                 receiver: None,
                 observed: None,
@@ -439,6 +469,20 @@ impl SipRtpReceiver {
         state.peer = Some(peer);
         state.formats = plan.receive_formats().to_vec();
         state.event_payloads = plan.offered_event_payloads().to_vec();
+        state.selected_event = plan.selected_event_payload();
+        state.rtcp.configure(plan.remote_sources());
+        Ok(())
+    }
+    /// The call supplies the same immutable local source as its SDP/sender.
+    pub fn set_local_source(&self, source: u32) -> Result<(), ReceiveError> {
+        let inner = &self.handle.0;
+        let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        if inner.closed.load(Ordering::Acquire) {
+            return Err(ReceiveError::Closed);
+        }
+        if !state.rtcp.set_local_source(source) {
+            return Err(ReceiveError::InvalidPlan);
+        }
         Ok(())
     }
     pub fn observation(&self) -> SipReceiveObservation {
@@ -459,6 +503,7 @@ impl SipRtpReceiver {
             failed: state.failure.is_some(),
             failure: state.failure,
             cleanup_confirmed: inner.completed.get().is_some(),
+            rtcp: state.rtcp.observation(),
         }
     }
     /// The call updates this when its access/command policy changes. Analysis

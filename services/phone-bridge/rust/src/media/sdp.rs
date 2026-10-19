@@ -295,6 +295,21 @@ impl SdpMedia {
     pub(super) fn set_ssrc(&mut self, source: u32, cname: &str) {
         self.ssrc = vec![format!("a=ssrc:{source} cname:{cname}")];
     }
+    pub(super) fn sources(&self) -> Vec<u32> {
+        let mut result = Vec::new();
+        for source in &self.ssrc {
+            if let Some(source) = source
+                .strip_prefix("a=ssrc:")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok())
+            {
+                if !result.contains(&source) {
+                    result.push(source);
+                }
+            }
+        }
+        result
+    }
     pub(super) fn evs_packet_time(&mut self) {
         if self.kind == SdpMediaKind::Audio
             && self.formats.iter().any(|format| {
