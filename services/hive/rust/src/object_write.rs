@@ -300,8 +300,11 @@ fn write_revision(
     )?;
     let version = string(parameters, "contractVersion")?;
     let contract = store.contract(key, version)?;
-    let hive_owned =
-        contract.get("owner").and_then(|owner| owner.get("kind")) == Some(&"hive".into());
+    let owner = contract
+        .get("owner")
+        .filter(|owner| !owner.is_null())
+        .ok_or_else(IvyError::internal)?;
+    let hive_owned = owner.get("kind") == Some(&"hive".into());
     require(
         allow_hive || !hive_owned,
         "forbidden",
@@ -362,11 +365,13 @@ fn write_revision(
         let (path, depth) = super::navigation::path(parent.as_ref(), &name)?;
         super::navigation::ensure_name(store, parent_id, &name, None)?;
         let owner = create.get("ownerObjectId").ok_or_else(IvyError::internal)?;
-        let owned = contract
+        let object_retention = contract
             .get("retention")
+            .filter(|retention| !retention.is_null())
             .and_then(|r| r.get("objects"))
-            .and_then(|r| r.get("mode"))
-            == Some(&"owned".into());
+            .filter(|objects| !objects.is_null())
+            .ok_or_else(IvyError::internal)?;
+        let owned = object_retention.get("mode") == Some(&"owned".into());
         if !owned {
             require(
                 owner.is_null(),

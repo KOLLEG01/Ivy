@@ -10,22 +10,12 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 struct Root(PathBuf);
 impl Root {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!(
-            "ivy-storage-read-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&p).unwrap();
-        Self(p)
+        Self(super::temporary_directory("ivy-storage-read"))
     }
 }
 impl Drop for Root {

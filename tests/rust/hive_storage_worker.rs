@@ -20,16 +20,21 @@ use std::{
 };
 
 struct TemporaryDirectory(PathBuf);
+fn temporary_directory(prefix: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("{prefix}-{}-{nonce}-{serial}", std::process::id()));
+    fs::create_dir(&path).unwrap();
+    path
+}
 impl TemporaryDirectory {
     fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("ivy-hive-worker-{}-{nonce}", std::process::id()));
-        fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(temporary_directory("ivy-hive-worker"))
     }
 }
 impl Drop for TemporaryDirectory {

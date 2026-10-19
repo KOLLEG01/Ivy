@@ -575,6 +575,49 @@ fn prepared_hive_creation_replay_precedes_preparation_and_contract_keys_keep_sql
     raw["parameterUnits"] = json!({"/create/contractKey":[0xd800]});
     let raw_key = steps.len();
     steps.push(raw);
+    let mut legacy_errors = vec![];
+    for (index, member) in [
+        "owner-missing",
+        "owner-null",
+        "retention-missing",
+        "retention-null",
+        "objects-missing",
+        "objects-null",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let version = format!("{}.0.0", 20 + index);
+        let mut definition = super::definition("fixture/json", &version, "application/json", false)
+            ["definition"]
+            .clone();
+        match *member {
+            "owner-missing" => {
+                definition.as_object_mut().unwrap().remove("owner");
+            }
+            "owner-null" => definition["owner"] = Value::Null,
+            "retention-missing" => {
+                definition.as_object_mut().unwrap().remove("retention");
+            }
+            "retention-null" => definition["retention"] = Value::Null,
+            "objects-missing" => {
+                definition["retention"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("objects");
+            }
+            "objects-null" => definition["retention"]["objects"] = Value::Null,
+            _ => unreachable!(),
+        }
+        steps.push(super::sql(format!(
+            "INSERT INTO contracts VALUES('fixture/json','{version}','{}');",
+            definition.to_string().replace('\'', "''")
+        )));
+        let mut step = create(member, member, "fixture/json");
+        step["params"]["contractVersion"] = version.into();
+        legacy_errors.push(steps.len());
+        steps.push(step);
+    }
     let result = compare(&steps);
     assert!(result["rows"][first]["error"].is_null());
     assert_eq!(
@@ -586,4 +629,11 @@ fn prepared_hive_creation_replay_precedes_preparation_and_contract_keys_keep_sql
         result["rows"][raw_key]["value"]["object"]["contractKey"],
         "�"
     );
+    for index in legacy_errors {
+        assert_eq!(code(&result, index), "internal_error");
+        assert_eq!(
+            result["rows"][index]["state"],
+            result["rows"][index - 1]["state"]
+        );
+    }
 }
