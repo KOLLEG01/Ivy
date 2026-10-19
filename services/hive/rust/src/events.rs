@@ -143,7 +143,7 @@ pub fn publish(
         require(declared,"registry_invalid","Topic is not in this node's current registry.")?;
         let definition=decode(&definition.unwrap().1)?;
         let payload=field(parameters,"payload")?;
-        store.validators().validate(field(&definition,"payloadSchema")?,payload,MANAGEMENT_FRAME_BYTES)?;
+        store.validators().validate(field(&definition,"payloadSchema")?,payload,1024*1024)?;
         let payload=canonical(payload,4096)?;
         store.admit_event(false)?;
         store.connection().execute(

@@ -141,6 +141,41 @@ fn value(rows: &Value, index: usize) -> &Value {
 }
 
 #[test]
+fn event_payload_default_byte_admission_precedes_schema_and_journal_limits() {
+    let mut steps = setup();
+    let before = steps.len() - 1;
+    let mut oversized = publish("oversized-invalid-schema", 1);
+    oversized["params"]["payload"] = json!({"extra":"x".repeat(1024*1024)});
+    let too_large = steps.len();
+    steps.push(oversized);
+    let mut invalid = publish("smaller-invalid-schema", 1);
+    invalid["params"]["payload"] = json!({"extra":"x".repeat(8000)});
+    let bad_schema = steps.len();
+    steps.push(invalid);
+    let mut larger = publish("larger-valid-schema", 1);
+    larger["params"]["payload"] = json!({"n":1,"extra":"x".repeat(8000)});
+    // A retained permissive topic isolates the later 4096-byte journal gate.
+    steps.push(sql("DROP TRIGGER topics_immutable_update; UPDATE topics SET definition='{\"topic\":\"fixture.changed\",\"version\":\"1.0.0\",\"payloadSchema\":true}' WHERE topic='fixture.changed';"));
+    let journal_limit = steps.len();
+    steps.push(larger);
+    let rows = compare(&steps);
+    assert_eq!(
+        rows["rows"][too_large]["error"]["data"]["code"],
+        "content_too_large"
+    );
+    assert_eq!(
+        rows["rows"][bad_schema]["error"]["data"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        rows["rows"][journal_limit]["error"]["data"]["code"],
+        "content_too_large"
+    );
+    assert_eq!(state(&rows, too_large), state(&rows, before));
+    assert_eq!(state(&rows, bad_schema), state(&rows, before));
+}
+
+#[test]
 fn topic_registration_and_service_publication_preserve_schema_ownership_registry_and_receipt_order()
 {
     for (encoded, expected) in [
