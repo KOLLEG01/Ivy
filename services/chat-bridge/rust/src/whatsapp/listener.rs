@@ -1036,7 +1036,7 @@ impl WhatsAppListener {
         if let Some(client) = item.get("clientId").and_then(Json::as_js_string) {
             if truthy(&self.0.main.is_notice_input(client).await?) {
                 self.0.journal.set(
-                    &format!("notice-turn:{}:{}", bid.to_utf8()?, turn.to_utf8()?),
+                    &sql_key(&key(&[&"notice-turn:".into(), bid, &":".into(), turn])),
                     &true.into(),
                 )?;
             }

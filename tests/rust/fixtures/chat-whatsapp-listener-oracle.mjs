@@ -45,6 +45,14 @@ for(const method of ['item/agentMessage/delta','unrelated','turn/started','turn/
 for(const item of [null,[],0,{type:'tool'},{type:{toString:null}},{type:['agentMessage'],id:'x',text:'array type'}, {...agent,id:0},{...agent,text:null}])add('notification-filter-'+JSON.stringify(item),[notify(user),notify(item)]);
 add('wrong-thread-no-source',[{op:'notification',event:event('item/completed',{threadId:'other',turnId:'turn',item:user})},notify(agent)]);
 add('notice-input-not-mirrored',[notify({...user,clientId:'notice-input'}),notify(agent),tick()],{fresh:true,noticeInputs:['notice-input'],pages:[page([turn('turn',[{...user,clientId:'notice-input'},agent])])]});
+add('notice-input-and-turn-UTF16-SQL-binding',[
+ {op:'notification',event:event('item/completed',{turnId:'\ud800',item:{...user,clientId:'\udfff'}})},
+ {op:'notification',event:event('item/completed',{turnId:'\ud800',item:agent})},tick(),
+],{fresh:true,noticeInputs:['\udfff'],pages:[page([turn('\ud800',[{...user,clientId:'\udfff'},agent])])]});
+add('UTF16-turn-and-body-retain-original-message-identity',[
+ {op:'notification',event:event('item/completed',{turnId:'\ud800',item:user})},
+ {op:'notification',event:event('item/completed',{turnId:'\ud800',item:{...agent,text:'Answer \udfff'}})},tick(),
+],{fresh:true,pages:[page([turn('\ud800',[user,{...agent,text:'Answer \udfff'}])])]});
 for(const value of [{status:'failed',error:{message:' model failed '}},{status:'failed',error:{message:'Refresh token has expired'}},{status:'interrupted'},{status:'completed'}])add('terminal-'+value.status+'-'+JSON.stringify(value.error),[tick(),tick(),{op:'mark'},tick()],{fresh:true,pages:[page([turn('turn',[],value)])]});
 add('empty-agent-does-not-synthesize-terminal',[tick()],{fresh:true,pages:[page([turn('turn',[{...agent,text:'   '}])])]});
 add('legacy-text-hash',[tick(),notify(user),notify(agent)],{fresh:true,kv:{'message:binding:turn:answer:channel':{text:'Answer',ids:[],suppressed:false}}});

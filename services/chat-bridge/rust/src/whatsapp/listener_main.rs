@@ -60,7 +60,7 @@ impl ListenerMain for ChatGenerationLease {
         Box::pin(async move {
             Ok(self
                 .store()
-                .is_notice_input(&id.to_utf8()?)
+                .is_notice_input(&String::from_utf16_lossy(&id.0))
                 .await
                 .map_err(|e| e.into_ivy())?
                 .into())
