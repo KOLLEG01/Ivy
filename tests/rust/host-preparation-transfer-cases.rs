@@ -376,6 +376,9 @@ async fn file_copy_phase_retains_source_and_does_not_create_destination_parents(
 fn relative_link(target: &str, destination: &Path, directory: bool) -> std::io::Result<()> {
     #[cfg(windows)]
     {
+        // The Windows reparse target uses native separators. A slash-spelled
+        // target can be read verbatim yet fail when copyFile follows it.
+        let target = target.replace('/', "\\");
         if directory {
             std::os::windows::fs::symlink_dir(target, destination)
         } else {
@@ -434,6 +437,10 @@ async fn directory_copy_uses_absolute_link_targets_and_keeps_existing_target_gua
             true,
         )
         .unwrap();
+        assert_eq!(
+            fs::read(fixture.root(label).join("payload/file-link")).unwrap(),
+            b"outside link target remains"
+        );
     }
     succeeds(
         &operation("copyPayload", &fixture, "payload", "published", true, true)
