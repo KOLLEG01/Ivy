@@ -21,21 +21,20 @@ use ivy_task_board::{
     generation::{GenerationRuntime, generation},
     journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
+    local_executor::LocalExecutor,
     local_journal::{LocalJournal, initialize},
     local_retention::HistoryLimits,
     native_lifecycle::LifecyclePublication,
     publication_coordination::PublicationCoordination,
-    reconciler::ReconcileExecutor,
     task_written::{TaskCommentNotices, TaskWriteObserver},
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     cmp::Ordering as SortOrder,
     collections::HashMap,
-    future::{Future, poll_fn},
+    future::Future,
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    task::{Poll, Waker},
 };
 
 fn clock() -> String {
@@ -250,47 +249,6 @@ impl CategoryLocale for Locale {
     fn compare_default(&self, left: &JsString, right: &JsString) -> SortOrder {
         assert!(left.to_utf8().unwrap().is_ascii() && right.to_utf8().unwrap().is_ascii());
         left.cmp(right)
-    }
-}
-#[derive(Default)]
-struct Executor<'a>(
-    RefCell<VecDeque<Pin<Box<dyn Future<Output = ()> + 'a>>>>,
-    RefCell<Option<Waker>>,
-);
-impl<'a> ReconcileExecutor<'a> for Executor<'a> {
-    fn spawn(&self, work: Pin<Box<dyn Future<Output = ()> + 'a>>) {
-        self.0.borrow_mut().push_back(work);
-        if let Some(waiter) = self.1.borrow().as_ref() {
-            waiter.wake_by_ref();
-        }
-    }
-}
-impl Executor<'_> {
-    async fn drive<F: Future>(&self, work: F) -> F::Output {
-        let mut work = Box::pin(work);
-        let mut result = None;
-        poll_fn(|cx| {
-            *self.1.borrow_mut() = Some(cx.waker().clone());
-            if result.is_none() {
-                if let Poll::Ready(value) = work.as_mut().poll(cx) {
-                    result = Some(value);
-                }
-            }
-            let mut jobs = std::mem::take(&mut *self.0.borrow_mut());
-            let mut pending = VecDeque::new();
-            while let Some(mut job) = jobs.pop_front() {
-                if job.as_mut().poll(cx).is_pending() {
-                    pending.push_back(job);
-                }
-            }
-            self.0.borrow_mut().extend(pending);
-            if result.is_some() && self.0.borrow().is_empty() {
-                Poll::Ready(result.take().unwrap())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await
     }
 }
 struct Policy {
@@ -567,7 +525,7 @@ async fn check_comment_recovery(question: bool) {
             now: &operations.now,
         };
         let locale = Locale;
-        let executor = Executor::default();
+        let executor = LocalExecutor::default();
         let projection = CategoryProjection::new(&operations.store, &principal, &locale, &executor);
         executor.drive(projection.categories()).await.unwrap();
         if round > 0 {
@@ -659,7 +617,7 @@ async fn check_comment_recovery(question: bool) {
             principal_id: &principal,
             services: &components,
         };
-        let execution_executor = Executor::default();
+        let execution_executor = LocalExecutor::default();
         let execution = ExecutionQueue::new(&cached, &execution_executor);
         let runtime = AdmissionRuntime {
             client: client.clone(),
@@ -689,7 +647,7 @@ async fn check_comment_recovery(question: bool) {
             runtime: &dispatch_runtime,
             categories: &projection,
         };
-        let invocation_executor = Executor::default();
+        let invocation_executor = LocalExecutor::default();
         let invocations = EngineInvocations::new(&invocation_executor);
         let handler = RetainedService {
             handler: &facade,

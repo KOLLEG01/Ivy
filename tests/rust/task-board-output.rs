@@ -38,6 +38,8 @@ mod read_scopes;
 mod task_written;
 #[path = "../fixtures/task-board-service.rs"]
 mod service;
+#[path = "../fixtures/task-board-local-executor.rs"]
+mod local_executor;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {

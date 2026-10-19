@@ -6,8 +6,11 @@ use ivy_sdk::{
 };
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
+    engine_invocations::EngineInvocations,
+    engine_service::RetainedService,
     generation::GenerationRuntime,
     journal_store::Contracts,
+    local_executor::LocalExecutor,
     local_journal::{LocalJournal, initialize},
     service::{GenerationFactory, GenerationLaunch, ServiceSetup, service as make_service},
     service_bridge::LocalHandler,
@@ -370,6 +373,12 @@ impl GenerationFactory for Factory {
             connection: &connection,
             stopping: Cell::new(false),
         };
+        let jobs = LocalExecutor::default();
+        let invocations = EngineInvocations::new(&jobs);
+        let handler = RetainedService {
+            handler: &public,
+            invocations: &invocations,
+        };
         assert_eq!(
             activation
                 .settings()
@@ -378,14 +387,15 @@ impl GenerationFactory for Factory {
                 .get("intervalMs"),
             Some(&Json::Number(1000.0))
         );
-        let result = activation
-            .run(
+        let result = jobs
+            .drive(activation.run(
                 &control,
                 generation,
-                &public,
+                &handler,
                 &runtime,
                 &SystemClock,
                 async {
+                    invocations.stop().await;
                     self.event(number, "drain");
                     plan.drain.wait().await;
                     self.event(number, "drain.done");
@@ -395,8 +405,11 @@ impl GenerationFactory for Factory {
                         Ok(())
                     }
                 },
-            )
+            ))
             .await;
+        drop(handler);
+        drop(invocations);
+        drop(jobs);
         drop(public);
         drop(journal);
         database.close().unwrap();
