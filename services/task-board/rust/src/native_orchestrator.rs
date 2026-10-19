@@ -491,7 +491,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         if !truthy(field(value, "turnId")) {
             for slot in [NativeSlot::Thread, NativeSlot::Turn] {
                 if self.unresolved(run, slot).await? {
-                    let result = async {
+                    let result: IvyResult<()> = async {
                         if slot == NativeSlot::Thread
                             && self.services.recover_uncertain_resume(id).await?
                         {
