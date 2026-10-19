@@ -1,6 +1,7 @@
 pub mod configuration;
 pub mod allocation;
 pub mod coordination;
+pub mod deliveries;
 pub mod evidence_bytes;
 pub mod full_turn_evidence;
 pub mod inspection_journal;
