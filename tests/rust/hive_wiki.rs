@@ -1,6 +1,6 @@
 use super::{
-    AuthContext, AuthenticatedContext, IvyError, IvyJson, JsString, Root, Store, native,
-    object_write, oracle,
+    AuthContext, AuthenticatedContext, IvyError, IvyJson, JsString, Root, Store,
+    native_with_runtime, object_write, oracle,
 };
 use ivy_contracts::{
     IvyResult,
@@ -12,13 +12,14 @@ use ivy_hive::{
     wiki::{self, Action, Requests},
 };
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 struct Backend<'a> {
     store: &'a mut Store,
     context: AuthenticatedContext,
     step: &'a Value,
     calls: Vec<IvyJson>,
+    characters: &'a HashMap<u32, bool>,
 }
 fn field<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a IvyJson> {
     value.get(key).ok_or_else(IvyError::internal)
@@ -78,12 +79,9 @@ impl Requests for Backend<'_> {
             "objects.archive" => {
                 objects::archive(self.store, &self.context, None, params, clock, &now)
             }
-            // Search routing is a callback-boundary check, not search backend qualification.
-            "objects.search" => IvyJson::from_serde(
-                self.step
-                    .get("searchResponse")
-                    .expect("Explicit search callback response"),
-            ),
+            "objects.search" => objects::search(self.store, params, &|point| {
+                super::search::classified(self.characters, point)
+            }),
             _ => panic!("Unexpected Wiki request"),
         }?;
         validate_output(method, &result)?;
@@ -122,7 +120,11 @@ impl Requests for Backend<'_> {
         )
     }
 }
-pub(super) fn execute(store: &mut Store, step: &Value) -> (IvyResult<IvyJson>, Vec<IvyJson>) {
+pub(super) fn execute(
+    store: &mut Store,
+    step: &Value,
+    profile: &Value,
+) -> (IvyResult<IvyJson>, Vec<IvyJson>) {
     let mut calls = vec![];
     let result = (|| {
         let method = step["method"].as_str().unwrap();
@@ -148,6 +150,7 @@ pub(super) fn execute(store: &mut Store, step: &Value) -> (IvyResult<IvyJson>, V
             "wiki.archive" => Action::Archive,
             _ => panic!("Known Wiki action"),
         };
+        let characters = super::search::characters(profile);
         let result = store.with_budget_mut(
             if step["overdue"] == true {
                 Duration::ZERO
@@ -160,6 +163,7 @@ pub(super) fn execute(store: &mut Store, step: &Value) -> (IvyResult<IvyJson>, V
                     context,
                     step,
                     calls: vec![],
+                    characters: &characters,
                 };
                 let value = wiki::execute(&mut inner, action, &params);
                 calls = inner.calls;
@@ -227,7 +231,13 @@ fn raw_create(nonce: &str, name: &str, key: &str, version: &str) -> Value {
 }
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
-    let actual = native(&root.0.join("native.sqlite"), steps);
+    // Only the Unicode predicate is observed; native policy computes the search.
+    let observed = oracle(&root.0.join("observed.sqlite"), steps);
+    let actual = native_with_runtime(
+        &root.0.join("native.sqlite"),
+        steps,
+        Some(&observed["searchRuntime"]),
+    );
     let mut reference = steps.to_vec();
     for (index, step) in reference.iter_mut().enumerate() {
         if step["op"] == "write" || step["method"] == "wiki.create" {
@@ -475,13 +485,11 @@ fn wiki_page_parent_version_and_dependency_failure_guards_and_search_routing_mat
     }
     let mut search = operation(
         "search",
-        json!({"text":"exact query","rootId":null,"includeArchived":true,"limit":7,"cursor":"opaque"}),
+        json!({"text":"Synthetic","rootId":null,"includeArchived":true,"limit":7}),
     );
     bind(&mut search, page, "/params/rootId");
-    search["searchResponse"] = json!({"items":[],"nextCursor":null});
     let search = push(&mut s, search);
-    let mut global = operation("search", json!({"text":"global"}));
-    global["searchResponse"] = json!({"items":[],"nextCursor":null});
+    let global = operation("search", json!({"text":"Synthetic"}));
     let global = push(&mut s, global);
     let r = compare(&s);
     for i in rejected {
@@ -501,7 +509,9 @@ fn wiki_page_parent_version_and_dependency_failure_guards_and_search_routing_mat
         success(&r, i);
     }
     assert_eq!(calls(&r, search)[1]["params"]["contractKey"], "wiki/page");
-    assert_eq!(calls(&r, search)[1]["params"]["cursor"], "opaque");
+    assert_eq!(calls(&r, search)[1]["params"]["includeArchived"], true);
+    assert_eq!(value(&r, search)["items"].as_array().unwrap().len(), 1);
+    assert_eq!(value(&r, global)["items"].as_array().unwrap().len(), 2);
     assert_eq!(calls(&r, global).as_array().unwrap().len(), 1);
 }
 

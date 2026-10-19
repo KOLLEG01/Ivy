@@ -52,6 +52,8 @@ if(discoveryTrace){
 }
 const lowercase=new Map();
 const localeStrings=new Set();
+const searchWordCharacters=new Map();
+const observeSearch=params=>{if(typeof params.text==='string')for(const character of params.text)searchWordCharacters.set(character.codePointAt(0),/[\p{L}\p{N}]/u.test(character));};
 const units=value=>Array.from({length:String(value).length},(_,i)=>String(value).charCodeAt(i));
 const collectStrings=value=>{
  if(typeof value==='string')localeStrings.add(value);
@@ -200,6 +202,13 @@ try {
       }finally{globalThis.Date=RealDate;}
       break;
     }
+    case 'search':{
+      const params=structuredClone(step.params??{});
+      for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...codeUnits));
+      if(step.method==='cursor')value=store.cursor(params.identity,params.boundary);
+      else{observeSearch(params);value=store.withBudget(()=>new Objects(store).search(params),step.overdue?-1:10000);}
+      break;
+    }
     case 'wiki':{
       const RealDate=Date,realUUID=crypto.randomUUID;
       const params=structuredClone(step.params??{});
@@ -212,9 +221,8 @@ try {
         const called=(method,params)=>{wikiCalls.push({method,params:structuredClone(params)});if(step.failAt===wikiCalls.length)throw new IvyError('fixture_failure','Requested Wiki dependency failure.');};
         const request=(method,params)=>{
           called(method,params);validateInput(method,params);
-          // Search uses an explicit callback response; this does not qualify its backend.
-          if(method==='objects.search'&&!Object.hasOwn(step,'searchResponse'))throw Error('Explicit search callback response required');
-          const result=method==='objects.search'?step.searchResponse:method==='objects.query'?queryObjects(store,params):method==='objects.write'?objects.write(context,params):method==='objects.move'?objects.move(context,params):method==='objects.archive'?objects.archive(context,params):objects[method.slice(8)](params);
+          if(method==='objects.search')observeSearch(params);
+          const result=method==='objects.query'?queryObjects(store,params):method==='objects.write'?objects.write(context,params):method==='objects.move'?objects.move(context,params):method==='objects.archive'?objects.archive(context,params):objects[method.slice(8)](params);
           validateOutput(method,result);return result;
         };
         const update=params=>{called('wiki.updateContent',params);return objects.write(context,{mutationId:params.mutationId,objectId:params.objectId,expectedRevision:params.expectedRevision,contractVersion:'1.0.0',references:{},content:{encoding:'text',value:params.markdown}},true);};
@@ -374,6 +382,7 @@ try {
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");
  const topics=store.all('SELECT * FROM topics ORDER BY topic,version');
  const runtime=input.steps.some(step=>['retention','pruneRevisions'].includes(step.op))?{retentionRuntime:Object.fromEntries(Object.entries(retentionRuntime).map(([key,map])=>[key,[...map]]))}:{};
+ if(input.steps.some(step=>['search','wiki'].includes(step.op)))runtime.searchRuntime={wordCharacters:[...searchWordCharacters]};
  if(registryTrace){
   const sorted=[...localeStrings].sort((a,b)=>a.localeCompare(b));let rank=0;
   const localeOrder=sorted.map((value,index)=>{if(index&&value.localeCompare(sorted[index-1])!==0)rank++;return [units(value),rank];});

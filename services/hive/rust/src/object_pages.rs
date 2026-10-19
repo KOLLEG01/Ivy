@@ -9,7 +9,7 @@ fn argument<T>(value: Option<T>) -> IvyResult<T> {
 fn text(value: &JsString) -> String {
     String::from_utf16_lossy(&value.0)
 }
-fn identity(method: &str, params: &IvyJson) -> IvyResult<IvyJson> {
+pub(super) fn identity(method: &str, params: &IvyJson) -> IvyResult<IvyJson> {
     let mut identity = IvyJson::object([("method", IvyJson::from(method))]);
     for (key, value) in argument(params.as_object())? {
         if key != &JsString::from("cursor") {
@@ -18,19 +18,19 @@ fn identity(method: &str, params: &IvyJson) -> IvyResult<IvyJson> {
     }
     Ok(identity)
 }
-fn cursor<'a>(params: &'a IvyJson) -> Option<&'a JsString> {
+pub(super) fn cursor<'a>(params: &'a IvyJson) -> Option<&'a JsString> {
     params
         .get("cursor")
         .and_then(IvyJson::as_js_string)
         .filter(|s| !s.0.is_empty())
 }
-fn limit(params: &IvyJson, default: usize) -> usize {
+pub(super) fn limit(params: &IvyJson, default: usize) -> usize {
     params
         .get("limit")
         .and_then(IvyJson::as_f64)
         .unwrap_or(default as f64) as usize
 }
-fn archived(params: &IvyJson) -> bool {
+pub(super) fn archived(params: &IvyJson) -> bool {
     params.get("includeArchived").and_then(IvyJson::as_bool) == Some(true)
 }
 fn exists(store: &Store, id: &JsString) -> IvyResult<()> {

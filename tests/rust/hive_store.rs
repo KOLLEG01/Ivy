@@ -26,6 +26,8 @@ mod query;
 mod registry;
 #[path = "hive_retention.rs"]
 mod retention;
+#[path = "hive_search.rs"]
+mod search;
 #[path = "hive_wiki.rs"]
 mod wiki;
 use rusqlite::types::ValueRef;
@@ -134,10 +136,20 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
         let mut wiki_calls = vec![];
         let outcome = match step["op"].as_str().unwrap() {
             "wiki" => {
-                let (result, calls) = wiki::execute(&mut store, step);
+                let (result, calls) = wiki::execute(
+                    &mut store,
+                    step,
+                    runtime.expect("Search Unicode observations"),
+                );
                 wiki_calls = calls;
                 result.map(wire)
             }
+            "search" => search::execute(
+                &mut store,
+                step,
+                runtime.expect("Search Unicode observations"),
+            )
+            .map(wire),
             "registry" | "inventory" | "discovery" | "configurations" => registry
                 .execute(
                     &mut store,

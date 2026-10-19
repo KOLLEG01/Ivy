@@ -11,6 +11,9 @@ pub enum Location<'a> {
 #[path = "object_pages.rs"]
 mod pages;
 pub use pages::{history, list, tree};
+#[path = "object_search.rs"]
+mod searching;
+pub use searching::search;
 #[path = "object_mutations.rs"]
 mod mutations;
 pub use mutations::{archive, reorder};
