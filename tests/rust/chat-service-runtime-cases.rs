@@ -540,7 +540,38 @@ async fn service_start_reconnect_health_control_and_close_match_original_main() 
                     "held health close",
                 );
             } else {
-                app.service().wait_ready(None).await.unwrap();
+                // Observe cold contract validation without changing the SDK's
+                // dependency deadline or any expected generation/health/RPC.
+                let ready = app
+                    .service()
+                    .wait_ready(Some(ivy_sdk::rpc::RequestOptions {
+                        timeout: Duration::from_secs(120),
+                        ..Default::default()
+                    }))
+                    .await;
+                if let Err(error) = ready {
+                    let report = peer
+                        .command(Json::object([("action", "summary".into())]))
+                        .await;
+                    let failure = Json::object([
+                        ("label", label.clone().into()),
+                        ("root", dir.to_string_lossy().as_ref().into()),
+                        ("error", result(Err(error.clone()))),
+                        ("peer", report),
+                        ("health", Json::Array(probe.health.lock().unwrap().clone())),
+                        ("events", Json::Array(probe.events.lock().unwrap().clone())),
+                    ]);
+                    if let Some(path) =
+                        std::env::var_os("IVY_CHAT_SERVICE_READINESS_FAILURE_CAPTURE")
+                    {
+                        std::fs::write(path, canonical(&failure, usize::MAX).unwrap()).unwrap();
+                    }
+                    let _ = tokio::time::timeout(Duration::from_secs(30), app.close()).await;
+                    panic!(
+                        "Service readiness failed: {}",
+                        canonical(&failure, usize::MAX).unwrap()
+                    );
+                }
                 let mut reconciled = false;
                 for _ in 0..2000 {
                     let snapshot = peer

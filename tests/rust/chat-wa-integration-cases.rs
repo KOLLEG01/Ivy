@@ -225,8 +225,6 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
     .await
     .unwrap();
     c.set_generation(7);
-    c.set_registry(&ivy_chat_bridge::registry::chat_registry().unwrap())
-        .unwrap();
     c.set_ready(true);
     let generation = ChatGeneration::with_clock(config.clone(), c.clone(), clock.clone())
         .await
