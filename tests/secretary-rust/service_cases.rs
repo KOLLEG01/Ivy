@@ -467,8 +467,45 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
         canonical(&results[2], 4 * 1024 * 1024).unwrap(),
         canonical(&results[0], 4 * 1024 * 1024).unwrap()
     );
+    #[cfg(windows)]
+    {
+        // A valid old-layout helper cannot rescue a missing admitted payload.
+        // Exercise the actual Node dispatcher and Rust entrypoint, not only the
+        // selector called by the in-process preflight adapter.
+        let helper = package.required("job").unwrap().as_str().unwrap();
+        std::fs::copy(&helper, artifact.join("dist/native/ivy-job.exe")).unwrap();
+        std::fs::remove_file(helper).unwrap();
+        observer
+            .request(
+                "fixture.reset",
+                IvyJson::object(Vec::<(String, IvyJson)>::new()),
+                RequestOptions::default(),
+            )
+            .await
+            .unwrap();
+        let state = directory.0.join("packaged");
+        let stderr = state.join("missing-helper.log");
+        let mut command = Command::new(&node);
+        command
+            .arg(package.required("main").unwrap().as_str().unwrap())
+            .arg("--config")
+            .arg(state.join("instance.json"))
+            .current_dir(&artifact)
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&stderr).unwrap());
+        hidden(&mut command);
+        let mut child = Process(command.spawn().unwrap());
+        until(|| child.0.try_wait().unwrap().is_some()).await;
+        assert_eq!(child.0.wait().unwrap().code(), Some(1));
+        let error = read(&stderr).expect("Structured native startup failure");
+        assert_eq!(error.get("code"), Some(&"artifact_missing".into()));
+        assert!(
+            trace(&observer).await.is_empty(),
+            "Missing payload must fail before service connection"
+        );
+    }
     println!(
-        "v1 Secretary launch: original/direct Rust/real legacy dispatch import,registry,ready+registration-bound health,foreign/invalid control,shutdown and retained SQLite bytes agree; incomplete advertised matrix refuses before staging"
+        "v1 Secretary launch: original/direct Rust/real legacy dispatch import,registry,ready+registration-bound health,foreign/invalid control,shutdown and retained SQLite bytes agree; incomplete advertised matrix refuses before staging; missing current-target helper fails before connection despite valid legacy helper"
     );
     observer.close();
 }

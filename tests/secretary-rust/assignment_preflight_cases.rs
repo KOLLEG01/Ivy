@@ -33,8 +33,23 @@ async fn original_preflight_with_the_paired_host_process_adapter() {
 struct ProcessRoot(std::path::PathBuf);
 impl Drop for ProcessRoot {
     fn drop(&mut self) {
-        assert_eq!(self.0.parent(), Some(std::env::temp_dir().as_path()));
-        let _ = std::fs::remove_dir_all(&self.0);
+        let actual = std::fs::canonicalize(&self.0).unwrap();
+        assert_eq!(
+            actual.parent(),
+            Some(
+                std::fs::canonicalize(std::env::temp_dir())
+                    .unwrap()
+                    .as_path()
+            )
+        );
+        assert!(
+            actual
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("secretary-preflight-")
+        );
+        let _ = std::fs::remove_dir_all(actual);
     }
 }
 async fn compare_preflight(real_process: bool) {
@@ -43,6 +58,35 @@ async fn compare_preflight(real_process: bool) {
         std::env::temp_dir().join(format!("secretary-preflight-{}", uuid::Uuid::new_v4())),
     );
     std::fs::create_dir(&process_root.0).unwrap();
+    let artifact = process_root.0.join("artifact");
+    std::fs::create_dir(&artifact).unwrap();
+    #[cfg(windows)]
+    if real_process {
+        let platform = if cfg!(target_arch = "aarch64") {
+            "win32-arm64"
+        } else {
+            "win32-x64"
+        };
+        let native = artifact.join("dist/native");
+        let target = native.join(platform);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::copy(
+            std::env::var_os("IVY_SECRETARY_JOB_HELPER")
+                .expect("Qualified Host Job helper is required"),
+            target.join("ivy-job.exe"),
+        )
+        .unwrap();
+        std::fs::write(
+            native.join("ivy-job.exe"),
+            b"invalid legacy helper must never be selected",
+        )
+        .unwrap();
+    }
+    let job_launcher = if real_process {
+        ivy_secretary::service::packaged_job_launcher(&artifact).unwrap()
+    } else {
+        None
+    };
     #[cfg(windows)]
     if real_process {
         use std::os::windows::ffi::OsStringExt;
@@ -195,16 +239,9 @@ async fn compare_preflight(real_process: bool) {
             } else {
                 None
             };
-            #[cfg(windows)]
-            let helper = Some(
-                std::env::var_os("CARGO_TARGET_DIR")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| root.join("target"))
-                    .join("debug/ivy-job.exe"),
-            );
-            #[cfg(not(windows))]
-            let helper = None;
-            let result = preflight.execute(current, &root, helper).await;
+            let result = preflight
+                .execute(current, &artifact, job_launcher.clone())
+                .await;
             if let Some(abort) = abort {
                 abort.await.unwrap();
             }
@@ -317,6 +354,12 @@ async fn compare_preflight(real_process: bool) {
             canonical(&expected, 32 * 1024 * 1024).unwrap(),
             "Case {index}: {:?}",
             input.get("label")
+        );
+    }
+    if real_process {
+        println!(
+            "{} original preflight comparisons through the packaged helper; invalid legacy helper ignored, including timeout/cancellation retirement",
+            rows.len()
         );
     }
 }

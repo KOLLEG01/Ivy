@@ -10,6 +10,7 @@ const native=join(dist,'native',platform);mkdirSync(native,{recursive:true});
 const programs=[['ivy-secretary',service],['ivy-health',health],...(process.platform==='win32'?[['ivy-job',job]]:[])];
 const identity={schemaVersion:1,...JSON.parse(readFileSync(join(dist,'build-info.json'),'utf8'))};
 for(const [name,source]of programs)copyFileSync(source,join(native,name+suffix));
+if(process.platform==='win32')writeFileSync(join(dist,'native/ivy-job.exe'),'invalid legacy helper must never be selected');
 writeFileSync(join(native,'build-info.json'),JSON.stringify(identity));
 // This is a local launch fixture. It cannot be mistaken for a universal release:
 // the unchanged real plan must refuse the three missing target payloads first.
@@ -19,4 +20,4 @@ const record=(component,names)=>({component,target,platform,identity,outputDirec
 const blocked=join(root,'universal-must-refuse');
 assert.throws(()=>stageNativePayloads({component:'secretary',root,outputRoot:blocked,identity,payloads:[record('secretary',['ivy-secretary']),record('host-executor',programs.slice(1).map(([name])=>name))],requiredBinaries:{win32:['ivy-job']}}),/Every advertised target requires/);
 assert.equal(existsSync(blocked),false);
-console.log(JSON.stringify({main:join(dist,'services/secretary/src/main.js'),health:join(dist,'packages/host-runtime/src/health.js'),platform,missingMatrixRefused:true,files:result.files.map(path=>({path,sha256:createHash('sha256').update(readFileSync(path)).digest('hex')}))}));
+console.log(JSON.stringify({main:join(dist,'services/secretary/src/main.js'),health:join(dist,'packages/host-runtime/src/health.js'),job:process.platform==='win32'?join(native,'ivy-job.exe'):null,platform,missingMatrixRefused:true,files:result.files.map(path=>({path,sha256:createHash('sha256').update(readFileSync(path)).digest('hex')}))}));

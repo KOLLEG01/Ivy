@@ -40,6 +40,27 @@ pub fn retained_native_contracts(
     ivy_contracts::checked_native_contract::CheckedNativeContracts::new(artifact_root.join("dist"))
 }
 
+/// The Rust entrypoint belongs to the v1 current-target payload. An admitted
+/// legacy caller supplies its helper explicitly through start_with_runtime.
+pub fn packaged_job_launcher(artifact_root: &Path) -> IvyResult<Option<PathBuf>> {
+    #[cfg(windows)]
+    {
+        use ivy_host_runtime::portable_native_files::{
+            NativeHelperLayout, component_native_helper,
+        };
+        Ok(Some(component_native_helper(
+            artifact_root,
+            "ivy-job.exe",
+            NativeHelperLayout::Target,
+        )?))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = artifact_root;
+        Ok(None)
+    }
+}
+
 enum HealthUpdate {
     Write {
         ready: bool,
@@ -192,7 +213,9 @@ async fn shutdown_owner(
 /// Node workload executable; it never starts the previous service backend.
 pub async fn start(path: impl Into<PathBuf>) -> IvyResult<SecretaryService> {
     let node = NodeRuntime::discover(None).await?;
-    start_with_runtime(path, &node, None).await
+    let config = instance_config(path, &node).await?;
+    let job_launcher = packaged_job_launcher(config.artifact_root())?;
+    start_configured(config, job_launcher).await
 }
 /// Existing hosts may supply an already discovered Node runtime and Job path.
 /// This changes neither the public configuration nor the v1 package manifest.

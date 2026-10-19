@@ -11,6 +11,7 @@ pub mod node_path;
 pub mod node_runtime;
 pub mod package_requirements;
 pub mod paths;
+pub mod portable_native_files;
 pub mod platform;
 pub mod process;
 pub mod process_output;
