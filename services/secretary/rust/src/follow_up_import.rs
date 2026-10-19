@@ -60,6 +60,6 @@ pub async fn import_pending_context(
     let mut value = before.value.clone();
     value.insert("start", call_json(&start));
     value.insert("createdFor", name.into());
-    let after = journal.amend_technical(CONTEXT_KEY, &before.pin, &value)?;
+    let after = journal.import_technical_revision(CONTEXT_KEY, &before.pin, &value)?;
     Ok(Some(ImportedFollowUpContext { before, after }))
 }

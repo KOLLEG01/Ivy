@@ -35,7 +35,7 @@ fn iso(value: f64) -> SchedulerResult<JsString> {
     // A failed Date.toISOString is an ordinary JavaScript exception.
     date_to_iso(value).map_err(SchedulerFailure::uncoded)
 }
-fn written_at(document: &IvyJson, fallback: &str) -> SchedulerResult<JsString> {
+pub(crate) fn written_at(document: &IvyJson, fallback: &str) -> SchedulerResult<JsString> {
     match document.get("writtenAt").filter(|v| !v.is_null()) {
         Some(value) => value
             .as_js_string()
@@ -162,45 +162,26 @@ impl SchedulerAssignments {
                         "secretary-assignment-{}",
                         &hash_json(&IvyJson::String(key.clone()))?[7..48]
                     );
-                    let legacy = store.journal.named(
-                        "secretary/event-subscription",
-                        &String::from_utf16_lossy(&key.0),
-                        true,
-                    )?;
-                    let mut names = vec![IvyJson::from(name)];
-                    if let Some(legacy) = &legacy {
-                        let selected = legacy.value.required("name")?;
-                        if !names.contains(selected) {
-                            names.push(selected.clone());
-                        }
-                    }
-                    for selected in names {
-                        let mutation_id = scheduler
-                            .operation(vec![
-                                "retire-assignment-subscription".into(),
-                                IvyJson::String(object_id.clone()),
-                                IvyJson::String(retirement.clone()),
-                                selected.clone(),
-                            ])
-                            .await?;
-                        store
-                            .client
-                            .request(
-                                "events.unsubscribe",
-                                IvyJson::object([
-                                    ("name", selected),
-                                    ("mutationId", IvyJson::String(mutation_id)),
-                                ]),
-                                RequestOptions::default(),
-                            )
-                            .await?;
-                    }
-                    if let Some(legacy) = legacy {
-                        store.journal.delete_technical(
-                            "secretary/event-subscription",
-                            &legacy.pin.object_id,
-                        )?;
-                    }
+                    let selected = IvyJson::from(name);
+                    let mutation_id = scheduler
+                        .operation(vec![
+                            "retire-assignment-subscription".into(),
+                            IvyJson::String(object_id.clone()),
+                            IvyJson::String(retirement.clone()),
+                            selected.clone(),
+                        ])
+                        .await?;
+                    store
+                        .client
+                        .request(
+                            "events.unsubscribe",
+                            IvyJson::object([
+                                ("name", selected),
+                                ("mutationId", IvyJson::String(mutation_id)),
+                            ]),
+                            RequestOptions::default(),
+                        )
+                        .await?;
                     self.retired.insert(object_id.clone(), retirement);
                     let assignment_issue =
                         format!("assignment:{}", String::from_utf16_lossy(&key.0));
@@ -369,32 +350,8 @@ impl AssignmentScheduler<'_, '_, '_> {
         let mut saved = if let Some(saved) = store.named(Record::ScheduleProgress, &name).await? {
             saved
         } else {
-            let legacy = store.journal.named(
-                "secretary/schedule-cursor",
-                &String::from_utf16_lossy(&assignment_id.0),
-                true,
-            )?;
-            let current = legacy
-                .as_ref()
-                .is_some_and(|l| l.value.get("updatedAt") == value.get("updatedAt"));
-            let original = if current {
-                assignment.clone()
-            } else {
-                store.original(Record::Assignment, assignment).await?
-            };
-            let checked_at = if (current
-                || pin.get("revision").and_then(IvyJson::as_f64) == Some(1.0))
-                && legacy.is_some()
-            {
-                legacy
-                    .as_ref()
-                    .unwrap()
-                    .value
-                    .required("checkedAt")?
-                    .clone()
-            } else {
-                IvyJson::String(written_at(&original, "createdAt")?)
-            };
+            let original = store.original(Record::Assignment, assignment).await?;
+            let checked_at = IvyJson::String(written_at(&original, "createdAt")?);
             let progress = IvyJson::object([
                 ("schemaVersion", IvyJson::Number(1.0)),
                 ("assignmentId", IvyJson::String(assignment_id.clone())),
@@ -409,15 +366,9 @@ impl AssignmentScheduler<'_, '_, '_> {
                     IvyJson::String(assignment_id.clone()),
                 ])
                 .await?;
-            let saved = store
+            store
                 .create(Record::ScheduleProgress, &name, &progress, &operation)
-                .await?;
-            if let Some(legacy) = legacy {
-                store
-                    .journal
-                    .delete_technical("secretary/schedule-cursor", &legacy.pin.object_id)?;
-            }
-            saved
+                .await?
         };
         let progress = saved.required("value")?;
         need(

@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {schemaSamples} from '../fixtures/schema-samples.mjs';
 import {load,settings,owner,rootId,at} from './inbox-fixtures.mjs';
+import {importEventGap} from './assignment-import-reference.mjs';
 const {AssignmentScheduler}=await load('services/secretary/src/assignment-scheduler.js');
 const {SecretaryEngine}=await load('services/secretary/src/engine.js');
 const {SecretaryStore}=await load('services/secretary/src/store.js');
@@ -91,12 +92,13 @@ async function add(label,c={}){
  const recoveryIssues=new Map(c.issues??[]);
  const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:caseSettings,owner:{serviceNodeId:'fixture.secretary'},signal:controller.signal,recoveryIssues,now:()=>{const time=c.clockTimes?.[Math.min(nowIndex++,c.clockTimes.length-1)]??seconds(120);nowSamples.push(Date.parse(time));return new Date(time);}});
  const scheduler=new AssignmentScheduler(engine,c.noFallback?null:target);scheduler.cursor=c.cursor;
+ const gapImports=documents.filter(d=>d.key==='secretary/event-gap'&&!Object.hasOwn(d.value,'relevant')).map(d=>assignments.find(a=>a.value.assignmentId===d.name));
  const outcomes=[],snapshots=[];
  for(tickIndex=0;tickIndex<(c.ticks??1);tickIndex++){
-  try{await scheduler.tick();outcomes.push({value:null});}catch(e){const error=IvyError.from(e);outcomes.push({code:error.code,message:error.message,outcome:error.outcome});}
+  try{for(const a of gapImports)await importEventGap(scheduler,a);await scheduler.tick();outcomes.push({value:null});}catch(e){const error=IvyError.from(e);outcomes.push({code:error.code,message:error.message,outcome:error.outcome});}
   snapshots.push({cursor:scheduler.cursor??null,retired:[...scheduler.retiredAssignments],issues:[...recoveryIssues],technical:store.db.prepare('SELECT key,name,current_revision,value_json FROM technical_documents ORDER BY key,name').all().map(r=>({key:r.key,name:r.name,revision:r.current_revision,value:JSON.parse(r.value_json)}))});
  }
- rows.push({input:{label,settings:caseSettings,documents,issues:c.issues??[],ticks:c.ticks??1,cancel:c.cancel??false,cancelAfter:c.cancelAfter??null,cursor:c.cursor??null,fallback:c.noFallback?null:target,clockTimes:(c.clockTimes??[seconds(120)]).map(Date.parse),steps},expected:{outcomes,snapshots,trace,nowSamples},serverRecords:[...records].map(([id,r])=>({id,...r})),subscribeCounts});store.close();
+ rows.push({input:{label,settings:caseSettings,documents,gapImports,issues:c.issues??[],ticks:c.ticks??1,cancel:c.cancel??false,cancelAfter:c.cancelAfter??null,cursor:c.cursor??null,fallback:c.noFallback?null:target,clockTimes:(c.clockTimes??[seconds(120)]).map(Date.parse),steps},expected:{outcomes,snapshots,trace,nowSamples},serverRecords:[...records].map(([id,r])=>({id,...r})),subscribeCounts});store.close();
 }
 await add('empty-assignment-page',{n:0});
 await add('ordinary-event-assignment');

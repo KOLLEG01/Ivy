@@ -7,10 +7,7 @@ use crate::{
     store::Record,
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
-use ivy_sdk::{
-    clock::{date_to_iso, parse_date},
-    rpc::RequestOptions,
-};
+use ivy_sdk::clock::date_to_iso;
 use std::cell::RefCell;
 
 fn text(value: &IvyJson, key: &str) -> SchedulerResult<JsString> {
@@ -75,61 +72,7 @@ impl SchedulerAssignments {
                     .journal
                     .named("secretary/event-gap", &assignment_name, true)?;
                 if let Some(gap) = gap {
-                    if gap.value.get("relevant").is_none() {
-                        let first = store
-                            .client
-                            .request(
-                                "events.read",
-                                IvyJson::object([
-                                    (
-                                        "afterSequence",
-                                        gap.value.required("prunedThroughSequence")?.clone(),
-                                    ),
-                                    ("filter", IvyJson::Object(vec![])),
-                                    ("limit", IvyJson::Number(1.0)),
-                                ]),
-                                RequestOptions::default(),
-                            )
-                            .await?;
-                        let original = store.original(Record::Assignment, &assignment).await?;
-                        let written = original
-                            .get("writtenAt")
-                            .filter(|v| !v.is_null())
-                            .unwrap_or(original.required("value")?.required("createdAt")?);
-                        let first_event = first
-                            .required("items")?
-                            .as_array()
-                            .ok_or(SchedulerFailure::Uncoded)?
-                            .first();
-                        let before_assignment = first.get("gap").is_none_or(IvyJson::is_null)
-                            && first_event.is_some_and(|event| {
-                                event
-                                    .get("occurredAt")
-                                    .and_then(IvyJson::as_js_string)
-                                    .is_some_and(|at| {
-                                        parse_date(at)
-                                            < written
-                                                .as_js_string()
-                                                .map(parse_date)
-                                                .unwrap_or(f64::NAN)
-                                    })
-                            });
-                        if before_assignment {
-                            store
-                                .journal
-                                .delete_technical("secretary/event-gap", &gap.pin.object_id)?;
-                            issues.clear(&gap_issue);
-                        } else {
-                            let mut value = gap.value.clone();
-                            value.insert("relevant", true.into());
-                            store.journal.amend_technical(
-                                "secretary/event-gap",
-                                &gap.pin,
-                                &value,
-                            )?;
-                            issues.issue(&gap_issue, "secretary_event_gap");
-                        }
-                    } else if gap.value.get("relevant") == Some(&IvyJson::Bool(true)) {
+                    if gap.value.get("relevant") == Some(&IvyJson::Bool(true)) {
                         issues.issue(&gap_issue, "secretary_event_gap");
                     }
                 }

@@ -57,6 +57,8 @@ mod assignment_driver_cases;
 mod assignment_events_cases;
 #[path = "assignment_execution_cases.rs"]
 mod assignment_execution_cases;
+#[path = "assignment_import_cases.rs"]
+mod assignment_import_cases;
 #[path = "assignment_native_cases.rs"]
 mod assignment_native_cases;
 #[path = "assignment_preflight_cases.rs"]

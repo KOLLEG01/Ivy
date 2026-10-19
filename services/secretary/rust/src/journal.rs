@@ -12,6 +12,9 @@ use ivy_store::{
 };
 use std::{collections::HashSet, path::Path, time::Duration};
 
+#[path = "journal_import.rs"]
+mod import;
+
 const FRAME: usize = 33_554_432;
 const SOURCE: &str = "secretary/source";
 const OPERATION: &str = "secretary/operation";

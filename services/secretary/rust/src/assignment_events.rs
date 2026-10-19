@@ -10,9 +10,13 @@ use crate::{
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::try_js_string};
 use ivy_sdk::{
     clock::{date_to_iso, parse_date},
-    operation_ids::new_operation_id,
     rpc::RequestOptions,
 };
+
+pub(crate) struct EventScan {
+    pub complete: bool,
+    pub ready_to_retire: bool,
+}
 
 fn need(ok: bool, code: &str, message: &str) -> SchedulerResult<()> {
     if ok {
@@ -136,6 +140,37 @@ impl AssignmentScheduler<'_, '_, '_> {
         budget: usize,
         issues: &dyn RecoveryIssues,
     ) -> SchedulerResult<bool> {
+        let value = assignment.required("value")?;
+        let progress_name = JsString::from(format!(
+            "event-{}",
+            &hash_json(value.required("assignmentId")?)?[7..]
+        ));
+        let progress = self
+            .evidence
+            .store
+            .named(Record::EventProgress, &progress_name)
+            .await?;
+        if progress.is_none()
+            && assignment.required("pin")?.get("revision") == Some(&IvyJson::Number(1.0))
+            && value.required("trigger")?.get("kind") == Some(&"schedule".into())
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .process_events_inner(assignment, configuration, budget, issues, progress)
+            .await?
+            .complete)
+    }
+    /// Current event processing shared by the runtime and explicit import. The
+    /// caller supplies the current durable progress; no legacy lookup occurs.
+    pub(crate) async fn process_events_inner(
+        &self,
+        assignment: &IvyJson,
+        configuration: &IvyJson,
+        budget: usize,
+        issues: &dyn RecoveryIssues,
+        mut progress: Option<IvyJson>,
+    ) -> SchedulerResult<EventScan> {
         let store = self.evidence.store;
         let value = assignment.required("value")?;
         let key = text(value, "assignmentId")?;
@@ -144,13 +179,7 @@ impl AssignmentScheduler<'_, '_, '_> {
         let hash = hash_json(&IvyJson::String(key.clone()))?;
         let name = JsString::from(format!("secretary-assignment-{}", &hash[7..48]));
         let progress_name = JsString::from(format!("event-{}", &hash[7..]));
-        let mut progress = store.named(Record::EventProgress, &progress_name).await?;
-        if progress.is_none()
-            && assignment.required("pin")?.get("revision") == Some(&IvyJson::Number(1.0))
-            && value.required("trigger")?.get("kind") == Some(&"schedule".into())
-        {
-            return Ok(true);
-        }
+        let mut ready_to_retire = false;
         for page in 0..budget {
             let batch = store
                 .client
@@ -430,36 +459,19 @@ impl AssignmentScheduler<'_, '_, '_> {
                 .request("events.ack", ack, RequestOptions::default())
                 .await?;
             if page == 0 {
-                if let Some(legacy) =
-                    store
-                        .journal
-                        .named("secretary/event-subscription", &key_text, true)?
-                {
-                    if legacy.value.get("name") != Some(&IvyJson::String(name.clone())) {
-                        let mutation_id = new_operation_id(store.client.clone(), None).await?;
-                        store
-                            .client
-                            .request(
-                                "events.unsubscribe",
-                                IvyJson::object([
-                                    ("name", legacy.value.required("name")?.clone()),
-                                    ("mutationId", IvyJson::String(mutation_id)),
-                                ]),
-                                RequestOptions::default(),
-                            )
-                            .await?;
-                        store.journal.delete_technical(
-                            "secretary/event-subscription",
-                            &legacy.pin.object_id,
-                        )?;
-                    }
-                }
+                ready_to_retire = true;
             }
             if batch.get("hasMore") != Some(&IvyJson::Bool(true)) {
-                return Ok(true);
+                return Ok(EventScan {
+                    complete: true,
+                    ready_to_retire,
+                });
             }
         }
-        Ok(false)
+        Ok(EventScan {
+            complete: false,
+            ready_to_retire,
+        })
     }
 }
 

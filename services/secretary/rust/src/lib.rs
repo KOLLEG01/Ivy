@@ -28,6 +28,7 @@ pub mod inbox_evidence;
 pub mod inbox_recovery;
 pub mod engine;
 pub mod execution_import;
+pub mod assignment_import;
 mod engine_assignments;
 mod engine_inbox;
 pub mod follow_up;

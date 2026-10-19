@@ -2,6 +2,7 @@ use super::*;
 use ivy_contracts::{json::canonical, operation::parse_operation_id_js};
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
+    assignment_import::{SubscriptionAssignment, import_event_subscription},
     assignment_scheduler::AssignmentScheduler,
     inbox_evidence::InboxEvidence,
     inbox_recovery::RecoveryScan,
@@ -173,15 +174,39 @@ async fn original_event_matching_revision_rebase_and_durable_ack_order() {
                     .await
                     .map(|v| v.unwrap_or(IvyJson::Null))
             } else {
-                scheduler
-                    .events(
-                        input.required("assignment").unwrap(),
-                        input.required("configuration").unwrap(),
-                        input.required("budget").unwrap().as_f64().unwrap() as usize,
-                        &mut issues,
-                    )
-                    .await
-                    .map(IvyJson::Bool)
+                async {
+                    if input
+                        .required("documents")?
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|d| d.get("key") == Some(&"secretary/event-subscription".into()))
+                    {
+                        if import_event_subscription(
+                            &scheduler,
+                            SubscriptionAssignment::Active {
+                                assignment: input.required("assignment")?,
+                                configuration: input.required("configuration")?,
+                            },
+                            &mut issues,
+                        )
+                        .await?
+                        .is_some_and(|v| !v.completed)
+                        {
+                            return Ok(IvyJson::Bool(false));
+                        }
+                    }
+                    scheduler
+                        .events(
+                            input.required("assignment").unwrap(),
+                            input.required("configuration").unwrap(),
+                            input.required("budget").unwrap().as_f64().unwrap() as usize,
+                            &mut issues,
+                        )
+                        .await
+                        .map(IvyJson::Bool)
+                }
+                .await
             };
             outcomes.push(match result {
                 Ok(value) => IvyJson::object([("value", value)]),

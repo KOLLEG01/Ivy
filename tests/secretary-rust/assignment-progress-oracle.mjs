@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {schemaSamples} from '../fixtures/schema-samples.mjs';
-import {load,settings,rootId,at} from './inbox-fixtures.mjs';
+import {load,settings,owner,rootId,at} from './inbox-fixtures.mjs';
+import {importScheduleProgress,importEventSubscription,useCurrentAssignmentRecords} from './assignment-import-reference.mjs';
 const {AssignmentScheduler}=await load('services/secretary/src/assignment-scheduler.js');
 const {SecretaryEngine}=await load('services/secretary/src/engine.js');
 const {SecretaryStore}=await load('services/secretary/src/store.js');
@@ -52,6 +53,7 @@ async function add(label,c={}){
   const fault=c.faults?.find(f=>f.method===method&&f.n===counts[method]);let result,error;
   if(c.fail===method||fault)error={code:fault?.code??'fixture_failure',message:'Fixture failure.',outcome:fault?.outcome??'unknown'};
   else if(method==='system.status')result={runtimeEpoch:'fixture'};
+  else if(method==='serviceNodes.get')result=owner;
   else if(method==='events.unsubscribe')result={removed:true};
   else if(method==='objects.query'){
    if(p.contractKey==='secretary/assignment'&&p.select)result=c.pages?.[queries++]??{items:[scanRow()],nextCursor:null};
@@ -72,16 +74,20 @@ async function add(label,c={}){
  }};
  store=new SecretaryStore(client,rootId);for(const doc of technicalBefore)store.technicalCreate(doc.key,doc.name,doc.value);
  const recoveryIssues=new Map(c.issues??[]);
- const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:caseSettings,signal:controller.signal,recoveryIssues,now:()=>new Date(c.now??minutes(180))});
+ const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:caseSettings,owner:{serviceNodeId:'fixture.secretary'},signal:controller.signal,recoveryIssues,now:()=>new Date(c.now??minutes(180))});
  const scheduler=new AssignmentScheduler(engine);scheduler.cursor=c.cursor;scheduler.retiredAssignments=new Map(c.retired??[]);
+ const archiveImportRow=technicalBefore.some(d=>d.key==='secretary/event-subscription')?c.pages?.flatMap(p=>p.items).find(r=>r.values['object.effectivelyArchived']):null;
  let result;
  try{
+  if(archiveImportRow)await importEventSubscription(scheduler,{archived:archiveImportRow});
+  if(action==='schedules'&&technicalBefore.some(d=>d.key==='secretary/schedule-cursor'))await importScheduleProgress(scheduler,assignment,Date.parse(c.now??minutes(180)));
+  useCurrentAssignmentRecords(store);
   if(action==='assignments'){const values=[];for(let i=0;i<(c.scans??1);i++)values.push(await scheduler.assignments());result={value:values};}
   else {for(let i=0;i<(c.scans??1);i++)await scheduler.schedules(assignment,configuration,new Date(c.now??minutes(180)));result={value:null};}
  }catch(e){result=errorResult(e);}
  const technical=[...new Set(technicalBefore.map(d=>d.key))].flatMap(key=>store.technicalList(key).map(d=>({key,name:d.name,value:d.value}))).sort((a,b)=>a.name.localeCompare(b.name));
  const state={cursor:scheduler.cursor??null,retired:[...scheduler.retiredAssignments],issues:[...recoveryIssues]};
- rows.push({input:{label,action,settings:caseSettings,configuration,assignment,time:Date.parse(c.now??minutes(180)),scans:c.scans??1,cursor:c.cursor??null,retired:c.retired??[],issues:c.issues??[],cancel:c.cancel??false,technical:technicalBefore,steps},expected:{result,trace,state,technical},serverRecords:[...records].map(([id,r])=>({id,...r}))});
+ rows.push({input:{label,action,settings:caseSettings,configuration,assignment,archiveImportRow:archiveImportRow??null,time:Date.parse(c.now??minutes(180)),scans:c.scans??1,cursor:c.cursor??null,retired:c.retired??[],issues:c.issues??[],cancel:c.cancel??false,technical:technicalBefore,steps},expected:{result,trace,state,technical},serverRecords:[...records].map(([id,r])=>({id,...r}))});
  store.close();
 }
 await add('new-progress-original');

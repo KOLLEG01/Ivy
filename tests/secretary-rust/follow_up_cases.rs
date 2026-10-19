@@ -283,6 +283,19 @@ async fn original_follow_up_contexts_calls_recovery_and_authorization() {
                         .expect("Legacy copied context must be converted");
                     assert_eq!(imported.before.pin.object_id, imported.after.pin.object_id);
                     assert_eq!(
+                        journal
+                            .read(
+                                "secretary/follow-up-context",
+                                &imported.before.pin.object_id,
+                                Some(imported.before.pin.revision),
+                                true
+                            )
+                            .unwrap()
+                            .value,
+                        imported.before.value,
+                        "Explicit import retains the original context revision"
+                    );
+                    assert_eq!(
                         imported.after.pin.revision,
                         imported.before.pin.revision + 1
                     );

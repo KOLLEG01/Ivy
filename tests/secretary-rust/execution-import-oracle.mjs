@@ -6,6 +6,7 @@ import {createRequire} from 'node:module';
 import {schemaSamples} from '../fixtures/schema-samples.mjs';
 import {load,rootId,itemId,settings,owner,at} from './inbox-fixtures.mjs';
 import {importExecutionDelivery} from './execution-import-reference.mjs';
+import {snapshot,seedRetainedValues} from './import-core-fixtures.mjs';
 const {SecretaryStore}=await load('services/secretary/src/store.js');
 const {SecretaryEngine}=await load('services/secretary/src/engine.js');
 const {IvyError,hashJson,canonical,parseOperationId}=await load('packages/sdk/src/node.js');
@@ -22,17 +23,6 @@ const channel={adapter:'whatsapp',accountId:'fixture',channelId:'recipient'};
 const handoff={executionId:base.executionId,resultHash:hash,operationId:'retained-main-operation',target:{serviceNodeId:'fixture.chat',channel},request:null,state:'queued',reason:'retained\ud800reason',evidence:null,expiresAt:null};
 const voice={executionId:base.executionId,resultHash:hash,source:pin,target:{serviceNodeId:'fixture.phone',recipientId:'recipient',requestDefinitionHash:'sha256:'+'a'.repeat(64)},request:{operationId:'retained-voice-operation',recipientId:'recipient',route:'voice',voicePrompt:'retained prompt\udc00'},callId:'retained-call',state:'outcome_unknown',reason:'retained\ud800reason',expiresAt:null};
 const directory=mkdtempSync(join(tmpdir(),'secretary-import-reference-'));
-const quote=value=>'"'+value.replaceAll('"','""')+'"';
-export function snapshot(db){
- const schema=db.prepare("SELECT type,name,tbl_name AS tableName,sql FROM sqlite_master ORDER BY type,name").all();
- const tables=schema.filter(row=>row.type==='table').map(row=>{
-  const columns=db.prepare('PRAGMA table_info('+quote(row.name)+')').all().map(column=>column.name);
-  const selected=['rowid',...columns].flatMap((column,i)=>['typeof('+quote(column)+') AS t'+i,'hex(CAST('+quote(column)+' AS BLOB)) AS b'+i]);
-  const data=db.prepare('SELECT '+selected.join(',')+' FROM '+quote(row.name)+' ORDER BY rowid').all();
-  return{name:row.name,columns,rows:data.map(value=>['rowid',...columns].flatMap((_,i)=>[value['t'+i],value['b'+i]]))};
- });
- return{schema,tables};
-}
 const rows=[];
 async function add(label,options={}){
  const location=join(directory,String(rows.length));mkdirSync(location);
@@ -63,14 +53,7 @@ async function add(label,options={}){
   steps.push({method,value:structuredClone(value)});return structuredClone(value);
  }};
  store=new SecretaryStore(client,rootId,original);
- store.db.exec("PRAGMA user_version=37;CREATE TABLE retained_unknown(text_value TEXT,integer_value INTEGER,real_value REAL,blob_value BLOB);INSERT INTO retained_unknown VALUES('unrelated',42,0.25,x'00ff00d800');");
- store.db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run('retained-document','retained/unknown','retained',2,100,null,'{ "value": "\\ud800", "revision": 2 }');
- store.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run('retained-document',1,'{ "value": "\\udc00", "revision": 1 }');
- store.db.prepare('INSERT INTO revisions VALUES(?,?,?)').run('retained-document',2,'{ "value": "\\ud800", "revision": 2 }');
- store.db.prepare('INSERT INTO technical_blobs VALUES(?,?,?,?)').run('retained-blob','retained/bytes','name',Buffer.from([0,255,0,216,0]));
- store.db.prepare('INSERT INTO technical_cleanup VALUES(?,?)').run('unrelated-root',1800000000000);
- store.db.prepare('INSERT INTO journal_state VALUES(?,?)').run('retained-unknown','{ "raw":"\\ud800" }');
- store.db.prepare('INSERT INTO retired_operations VALUES(?,?)').run('retained:1800000000000:operation',1800000000000);
+ seedRetainedValues(store);
  const legacy={...options.main?{delivery:{...structuredClone(handoff),...options.main}}:{},...options.voice?{voice:{...structuredClone(voice),...options.voice}}:{}};
  for(const [field,value] of Object.entries(legacy)){
   const id='legacy-'+field,record=field==='delivery'?'secretary/assignment-handoff':'secretary/assignment-voice';

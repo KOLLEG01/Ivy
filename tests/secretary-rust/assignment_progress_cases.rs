@@ -2,6 +2,9 @@ use super::*;
 use ivy_contracts::{json::canonical, operation::parse_operation_id_js};
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
+    assignment_import::{
+        SubscriptionAssignment, import_event_subscription, import_schedule_progress,
+    },
     assignment_progress::SchedulerAssignments,
     assignment_scheduler::AssignmentScheduler,
     inbox_evidence::InboxEvidence,
@@ -182,6 +185,25 @@ async fn original_assignment_retirement_and_durable_schedule_progress() {
                 .collect(),
         };
         let result: Result<IvyJson, IvyError> = async {
+            if let Some(row) = input.get("archiveImportRow").filter(|v| !v.is_null()) {
+                import_event_subscription(
+                    &scheduler,
+                    SubscriptionAssignment::Archived(row),
+                    &mut issues,
+                )
+                .await?;
+            }
+            if input.get("action") != Some(&"assignments".into())
+                && input
+                    .required("technical")?
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|d| d.get("key") == Some(&"secretary/schedule-cursor".into()))
+            {
+                import_schedule_progress(&scheduler, input.required("assignment")?, clock.0)
+                    .await?;
+            }
             let mut results = Vec::new();
             for _ in 0..input.required("scans")?.as_f64().unwrap() as usize {
                 if input.get("action") == Some(&"assignments".into()) {

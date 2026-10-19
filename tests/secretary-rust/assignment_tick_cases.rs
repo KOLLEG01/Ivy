@@ -2,6 +2,7 @@ use super::*;
 use ivy_contracts::{IvyResult, json::canonical, operation::parse_operation_id_js};
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
+    assignment_import::import_event_gap,
     assignment_progress::SchedulerAssignments,
     assignment_scheduler::AssignmentScheduler,
     inbox_evidence::InboxEvidence,
@@ -219,7 +220,12 @@ async fn original_scheduler_tick_composition_and_catch_site_diagnostics() {
         let mut outcomes = Vec::new();
         let mut snapshots = Vec::new();
         for _ in 0..input.required("ticks").unwrap().as_f64().unwrap() as usize {
-            let mut work = Box::pin(state.tick_shared(&scheduler, &issues));
+            let mut work = Box::pin(async {
+                for assignment in input.required("gapImports")?.as_array().unwrap() {
+                    import_event_gap(&scheduler, assignment, &issues).await?;
+                }
+                state.tick_shared(&scheduler, &issues).await
+            });
             let result: IvyResult<()> = loop {
                 tokio::select! {
                     result = &mut work => break result,

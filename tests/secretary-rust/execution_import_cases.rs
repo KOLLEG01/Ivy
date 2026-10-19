@@ -20,7 +20,7 @@ impl Drop for Directory {
 fn quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
-fn snapshot(db: &Connection) -> IvyJson {
+pub(super) fn snapshot(db: &Connection) -> IvyJson {
     let schema = db
         .prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")
         .unwrap()

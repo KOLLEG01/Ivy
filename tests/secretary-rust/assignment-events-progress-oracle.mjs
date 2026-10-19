@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {schemaSamples} from '../fixtures/schema-samples.mjs';
-import {load,settings,rootId,at} from './inbox-fixtures.mjs';
+import {load,settings,owner,rootId,at} from './inbox-fixtures.mjs';
+import {importEventSubscription,useCurrentAssignmentRecords} from './assignment-import-reference.mjs';
 const {AssignmentScheduler}=await load('services/secretary/src/assignment-scheduler.js');
 const {SecretaryEngine}=await load('services/secretary/src/engine.js');
 const {SecretaryStore}=await load('services/secretary/src/store.js');
@@ -43,6 +44,7 @@ async function add(label,c={}){
   const fault=c.faults?.find(f=>f.method===method&&f.n===counts[method]);let result,error;
   if(fault&&!fault.commit)error={code:fault.code??'fixture_failure',message:'Fixture failure.',outcome:fault.outcome??'unknown'};
   else if(method==='system.status')result={runtimeEpoch:'fixture'};
+  else if(method==='serviceNodes.get')result=owner;
   else if(method==='events.subscribe')result=structuredClone(c.batches?.[subscribe++]??batch());
   else if(method==='events.ack'||method==='events.unsubscribe')result={ok:true};
   else if(method==='objects.query'){
@@ -64,10 +66,12 @@ async function add(label,c={}){
  store=new SecretaryStore(client,rootId);
  for(const d of documents){const encoded=canonical(d.value);store.db.prepare('INSERT INTO technical_documents VALUES(?,?,?,?,?)').run(d.id,d.key,d.name,1,encoded);store.db.prepare('INSERT INTO technical_revisions VALUES(?,?,?)').run(d.id,1,encoded);}
  const recoveryIssues=new Map(c.issues??[]);
- const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings,recoveryIssues,signal:new AbortController().signal,now:()=>new Date(c.times?.[callIndex]??seconds(120))});
+ const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings,owner:{serviceNodeId:'fixture.secretary'},recoveryIssues,signal:new AbortController().signal,now:()=>new Date(c.times?.[callIndex]??seconds(120))});
  const scheduler=new AssignmentScheduler(engine),outcomes=[],snapshots=[];
+ useCurrentAssignmentRecords(store);
  for(callIndex=0;callIndex<(c.calls??1);callIndex++){
-  try{const value=action==='revisionAt'?await scheduler.revisionAt(assignment,c.at??at):await scheduler.events(assignment,configuration,c.budget??2);outcomes.push({value});}
+  try{const imported=action!=='revisionAt'&&documents.some(d=>d.key==='secretary/event-subscription')?await importEventSubscription(scheduler,{active:assignment,configuration}):null;
+   const value=action==='revisionAt'?await scheduler.revisionAt(assignment,c.at??at):imported&&!imported.completed?false:await scheduler.events(assignment,configuration,c.budget??2);outcomes.push({value});}
   catch(cause){const e=IvyError.from(cause);outcomes.push(cause.code==='secretary_execution_unconfigured'?{code:cause.code,message:cause.message}:{code:e.code,message:e.message,outcome:e.outcome});}
   snapshots.push({issues:[...recoveryIssues],technical:store.db.prepare('SELECT key,name,current_revision,value_json FROM technical_documents ORDER BY key,name').all().map(r=>({key:r.key,name:r.name,revision:r.current_revision,value:JSON.parse(r.value_json)}))});
  }
