@@ -108,6 +108,8 @@ mod inbox_recovery_cases;
 mod journal_import_cases;
 #[path = "media_store_cases.rs"]
 mod media_store_cases;
+#[path = "microsoft_store_cases.rs"]
+mod microsoft_store_cases;
 #[path = "notice_evidence_cases.rs"]
 mod notice_evidence_cases;
 #[path = "notice_scan_cases.rs"]

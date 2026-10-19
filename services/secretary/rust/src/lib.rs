@@ -45,6 +45,8 @@ pub mod media_input;
 pub mod media_schema;
 pub mod media_spool;
 pub mod media_store;
+pub mod microsoft_schema;
+pub mod microsoft_store;
 pub mod notice_scan;
 pub mod notice_evidence;
 pub mod notices;
