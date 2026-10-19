@@ -8,7 +8,7 @@ use ivy_chat_bridge::{
     notice_input::NoticeInstructions,
     runtime::ChatTransport,
     whatsapp::{
-        commands::DesktopCommands,
+        desktop::{DesktopHost, DesktopInvocation, WhatsAppDesktop},
         journal::Inbox,
         journal_io::JournalIo,
         journal_owner::Journal,
@@ -127,10 +127,49 @@ impl MediaDependencies for MediaAdapter {
         })
     }
 }
-struct Desktop;
-impl DesktopCommands for Desktop {
-    fn run<'a>(&'a self, _: &'a JsString, _: &'a str) -> RequestFuture<'a> {
-        Box::pin(async { panic!("No desktop action in this fixture") })
+struct DesktopIo {
+    journal: std::path::PathBuf,
+    calls: Mutex<Vec<Json>>,
+}
+impl DesktopHost for DesktopIo {
+    fn platform(&self) -> &'static str {
+        "win32"
+    }
+    fn run(&self, invocation: DesktopInvocation) -> ServiceFuture<()> {
+        // Inspect the physical writer's commit before accepting the OS effect.
+        let db = rusqlite::Connection::open(&self.journal).unwrap();
+        let saved: String = db
+            .query_row(
+                "SELECT value FROM kv WHERE key='desktop:desktop-command'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            parse(&saved, 1000).unwrap(),
+            Json::object([("attempted", true.into())])
+        );
+        assert_eq!(invocation.executable, "powershell.exe");
+        assert_eq!(
+            &invocation.arguments[..3],
+            &[
+                JsString::from("-NoProfile"),
+                "-NonInteractive".into(),
+                "-EncodedCommand".into()
+            ]
+        );
+        assert_eq!(invocation.timeout_ms, 30000);
+        assert!(invocation.windows_hide && invocation.ignored_stdio && !invocation.shell);
+        self.calls.lock().unwrap().push(Json::object([
+            ("executable", invocation.executable.into()),
+            (
+                "arguments",
+                Json::Array(invocation.arguments.into_iter().map(Json::String).collect()),
+            ),
+            ("timeoutMs", Json::Number(invocation.timeout_ms as f64)),
+            ("physicalAttemptCommitted", true.into()),
+        ]));
+        Box::pin(async { Ok(()) })
     }
 }
 struct Factory {
@@ -304,12 +343,20 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         Translator::new(None),
         clock.clone(),
     ));
+    let desktop_io = Arc::new(DesktopIo {
+        journal: root.join("whatsapp-journal.sqlite"),
+        calls: Mutex::new(vec![]),
+    });
     let factory = Arc::new(Factory {
         inner: RuntimeAssembly {
             journal: journal.clone(),
             config: wa_config.clone(),
             media: media.clone(),
-            desktop: Arc::new(Desktop),
+            desktop: Arc::new(WhatsAppDesktop::new(
+                journal.clone(),
+                desktop_io.clone(),
+                Translator::default(),
+            )),
             translator: Translator::new(None),
         },
         refuse: AtomicBool::new(false),
@@ -393,6 +440,38 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
             .to_utf8()
             .unwrap()
     );
+    journal
+        .access(|j| {
+            j.accept(
+                "desktop-command",
+                "alice",
+                "15555550201@s.whatsapp.net",
+                r#"{"message":{"conversation":"/desktop ensure"}}"#,
+                1001,
+            )
+        })
+        .unwrap();
+    runtime.run(RuntimeWork::Control);
+    quiet(&runtime).await;
+    let desktop_result = Translator::default()
+        .translate("desktop.ensure", None)
+        .unwrap();
+    let desktop_output = journal
+        .access(|j| {
+            assert!(j.pending()?.is_empty());
+            Ok(j.outgoing()?)
+        })
+        .unwrap();
+    assert_eq!(desktop_output.len(), 2);
+    assert_eq!(desktop_output[1].text, desktop_result.to_utf8().unwrap());
+    assert_eq!(
+        journal.get("desktop:desktop-command").unwrap(),
+        Json::object([
+            ("attempted", true.into()),
+            ("result", Json::String(desktop_result)),
+        ])
+    );
+    assert_eq!(desktop_io.calls.lock().unwrap().len(), 1);
     let mut payloads = Vec::new();
     {
         let lease = generation.accept().unwrap();
@@ -547,6 +626,11 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         ("generations", Json::Number(3.0)),
         ("failedReplacement", Json::String(rejected.code_js())),
         ("helpOutputs", Json::Number(1.0)),
+        ("desktopOutputs", Json::Number(1.0)),
+        (
+            "desktopCalls",
+            Json::Array(desktop_io.calls.lock().unwrap().clone()),
+        ),
         ("oldOwnerRetainedOnFailure", true.into()),
         ("detachReleasedStore", true.into()),
         ("cancelledCloseObserver", true.into()),
