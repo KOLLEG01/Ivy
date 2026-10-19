@@ -79,6 +79,7 @@ impl ReadCache {
 pub struct ReadScopes {
     cache: ReadCache,
 }
+pub(crate) struct CapturedReadScope(Option<CacheEntries>);
 impl Default for ReadScopes {
     fn default() -> Self {
         Self {
@@ -101,9 +102,19 @@ impl ReadScopes {
     /// Capture at submission time when work is moved to the owner executor.
     /// Work submitted outside an action keeps an absent context, not a new map.
     pub fn inherit<F: Future>(&self, work: F) -> ReadScopeFuture<'_, F> {
+        self.resume(self.capture(), work)
+    }
+    pub(crate) fn capture(&self) -> CapturedReadScope {
+        CapturedReadScope(self.cache.entries())
+    }
+    pub(crate) fn resume<F: Future>(
+        &self,
+        context: CapturedReadScope,
+        work: F,
+    ) -> ReadScopeFuture<'_, F> {
         ReadScopeFuture {
             scopes: self,
-            entries: self.cache.entries(),
+            entries: context.0,
             work: Box::pin(work),
         }
     }

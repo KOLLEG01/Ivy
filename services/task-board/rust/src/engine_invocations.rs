@@ -3,7 +3,7 @@
 use crate::{
     engine_admission::{AdmissionExecution, EngineAdmission},
     engine_read::ReadContext,
-    journal_store::Contracts,
+    journal_store::{CapturedReadScope, Contracts, ReadScopes},
     operations::Store,
     reconciler::ReconcileExecutor,
 };
@@ -15,6 +15,7 @@ use std::{
     rc::Rc,
     task::{Context, Poll, Waker},
 };
+use tokio::sync::mpsc;
 
 #[derive(Default)]
 struct Completion {
@@ -48,6 +49,49 @@ impl Future for InvocationRequest {
 struct Accepted {
     state: Rc<RefCell<State>>,
     completion: Rc<RefCell<Completion>>,
+}
+fn accept(state: &Rc<RefCell<State>>) -> IvyResult<(InvocationRequest, Accepted)> {
+    check_open(state)?;
+    let completion = Rc::new(RefCell::new(Completion::default()));
+    state.borrow_mut().active += 1;
+    Ok((
+        InvocationRequest {
+            completion: completion.clone(),
+        },
+        Accepted {
+            state: state.clone(),
+            completion,
+        },
+    ))
+}
+fn check_open(state: &RefCell<State>) -> IvyResult<()> {
+    if state.borrow().stopped {
+        Err(IvyError::new(
+            "service_not_ready",
+            "TaskBoard has no reconciled current connection generation.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+async fn settled(state: &RefCell<State>) {
+    poll_fn(|cx| {
+        let mut state = state.borrow_mut();
+        if state.active == 0 {
+            Poll::Ready(())
+        } else {
+            if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
+                state.waiters.push(cx.waker().clone());
+            }
+            Poll::Pending
+        }
+    })
+    .await
+}
+async fn complete(accepted: Accepted, work: impl Future<Output = IvyResult<Json>>) {
+    let result = work.await;
+    accepted.completion.borrow_mut().result = Some(result);
+    drop(accepted);
 }
 impl Drop for Accepted {
     fn drop(&mut self) {
@@ -90,14 +134,7 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
         }
     }
     fn check_open(&self) -> IvyResult<()> {
-        if self.state.borrow().stopped {
-            Err(IvyError::new(
-                "service_not_ready",
-                "TaskBoard has no reconciled current connection generation.",
-            ))
-        } else {
-            Ok(())
-        }
+        check_open(&self.state)
     }
     /// Retain the entire handler, including any pre-Operation RPC or write.
     /// Do not coalesce here: Operations must compare each original request.
@@ -105,19 +142,9 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
         &self,
         work: impl Future<Output = IvyResult<Json>> + 'a,
     ) -> IvyResult<InvocationRequest> {
-        self.check_open()?;
-        let completion = Rc::new(RefCell::new(Completion::default()));
-        self.state.borrow_mut().active += 1;
-        let accepted = Accepted {
-            state: self.state.clone(),
-            completion: completion.clone(),
-        };
-        self.executor.spawn(Box::pin(async move {
-            let result = work.await;
-            accepted.completion.borrow_mut().result = Some(result);
-            drop(accepted);
-        }));
-        Ok(InvocationRequest { completion })
+        let (observer, accepted) = accept(&self.state)?;
+        self.executor.spawn(Box::pin(complete(accepted, work)));
+        Ok(observer)
     }
     /// Own the input and identity, so the caller's stack is not the lifetime of
     /// admission. The source checks cancellation once, before its first await.
@@ -204,21 +231,162 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
         self.state.borrow_mut().stopped = true;
     }
     pub async fn settled(&self) {
-        poll_fn(|cx| {
-            let mut state = self.state.borrow_mut();
-            if state.active == 0 {
-                Poll::Ready(())
-            } else {
-                if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
-                    state.waiters.push(cx.waker().clone());
-                }
-                Poll::Pending
-            }
-        })
-        .await
+        settled(&self.state).await
     }
     pub fn stop(&self) -> impl Future<Output = ()> + '_ {
         self.stop_admissions();
         self.settled()
+    }
+    /// Construct native/scheduler callbacks before their execution graph. The
+    /// receiver binds the actual engine after construction on this same owner.
+    /// Both paths reserve the same invocation gate at synchronous submission.
+    pub fn internal_calls<'s>(
+        &self,
+        scopes: &'s ReadScopes,
+    ) -> (InternalCalls<'s>, InternalOwner<'s, 'x, X>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (
+            InternalCalls {
+                state: self.state.clone(),
+                sender,
+                scopes,
+            },
+            InternalOwner {
+                state: self.state.clone(),
+                receiver,
+                executor: self.executor,
+                scopes,
+            },
+        )
+    }
+}
+
+enum InternalAction {
+    NativeUpdate(Json),
+    NativeComment(Json),
+    Schedule(Json),
+    RecoverOperation(ivy_contracts::JsString),
+    RecoverPublication,
+}
+struct InternalCall {
+    action: InternalAction,
+    context: CapturedReadScope,
+    accepted: Accepted,
+}
+/// A local callback handle containing no reference to the cyclic engine graph.
+#[derive(Clone)]
+pub struct InternalCalls<'s> {
+    state: Rc<RefCell<State>>,
+    sender: mpsc::UnboundedSender<InternalCall>,
+    scopes: &'s ReadScopes,
+}
+impl InternalCalls<'_> {
+    fn submit(&self, action: InternalAction) -> IvyResult<InvocationRequest> {
+        let (observer, accepted) = accept(&self.state)?;
+        // A lost receiver drops Accepted, retaining the existing unknown reply.
+        let _ = self.sender.send(InternalCall {
+            action,
+            context: self.scopes.capture(),
+            accepted,
+        });
+        Ok(observer)
+    }
+    pub fn native_update(&self, request: &Json) -> IvyResult<InvocationRequest> {
+        self.submit(InternalAction::NativeUpdate(request.clone()))
+    }
+    pub fn native_comment(&self, request: &Json) -> IvyResult<InvocationRequest> {
+        self.submit(InternalAction::NativeComment(request.clone()))
+    }
+    pub fn schedule(&self, request: &Json) -> IvyResult<InvocationRequest> {
+        self.submit(InternalAction::Schedule(request.clone()))
+    }
+    pub fn recover_operation(
+        &self,
+        object_id: &ivy_contracts::JsString,
+    ) -> IvyResult<InvocationRequest> {
+        self.submit(InternalAction::RecoverOperation(object_id.clone()))
+    }
+    pub fn recover_publication(&self) -> IvyResult<InvocationRequest> {
+        self.submit(InternalAction::RecoverPublication)
+    }
+}
+/// Drive alongside the generation root using the existing owner executor.
+/// Releasing this receiver closes all admission; queued calls report unknown.
+pub struct InternalOwner<'s, 'x, X> {
+    state: Rc<RefCell<State>>,
+    receiver: mpsc::UnboundedReceiver<InternalCall>,
+    executor: &'x X,
+    scopes: &'s ReadScopes,
+}
+impl<X> Drop for InternalOwner<'_, '_, X> {
+    fn drop(&mut self) {
+        self.state.borrow_mut().stopped = true;
+    }
+}
+impl<'s, X> InternalOwner<'s, '_, X> {
+    /// Already accepted calls dispatch even after retirement closes the shared
+    /// gate. Drain them and all nested execution before releasing the graph.
+    /// The generation root still owns public/tick/reconciler retirement.
+    pub async fn run<
+        'a,
+        S: crate::publication_coordination::CoordinationStore + 'a,
+        C: Fn() -> String + 'a,
+        P: Contracts + 'a,
+        E: AdmissionExecution + 'a,
+        F: Future,
+    >(
+        mut self,
+        engine: &'a EngineAdmission<'a, S, C, P, E>,
+        root: F,
+    ) -> F::Output
+    where
+        's: 'a,
+        X: ReconcileExecutor<'a>,
+    {
+        let mut root = Box::pin(root);
+        let mut open = true;
+        let result = loop {
+            tokio::select! {
+                result = &mut root => break result,
+                call = self.receiver.recv(), if open => match call {
+                    Some(call) => self.dispatch(engine, call),
+                    None => open = false,
+                }
+            }
+        };
+        self.state.borrow_mut().stopped = true;
+        self.receiver.close();
+        while let Some(call) = self.receiver.recv().await {
+            self.dispatch(engine, call);
+        }
+        settled(&self.state).await;
+        result
+    }
+    fn dispatch<
+        'a,
+        S: crate::publication_coordination::CoordinationStore + 'a,
+        C: Fn() -> String + 'a,
+        P: Contracts + 'a,
+        E: AdmissionExecution + 'a,
+    >(
+        &self,
+        engine: &'a EngineAdmission<'a, S, C, P, E>,
+        call: InternalCall,
+    ) where
+        's: 'a,
+        X: ReconcileExecutor<'a>,
+    {
+        self.executor.spawn(Box::pin(self.scopes.resume(
+            call.context,
+            complete(call.accepted, async move {
+                match call.action {
+                    InternalAction::NativeUpdate(v) => engine.native_update(&v).await,
+                    InternalAction::NativeComment(v) => engine.native_comment(&v).await,
+                    InternalAction::Schedule(v) => engine.schedule(&v).await,
+                    InternalAction::RecoverOperation(id) => engine.recover_operation(&id).await,
+                    InternalAction::RecoverPublication => engine.recover_publication().await,
+                }
+            }),
+        )));
     }
 }

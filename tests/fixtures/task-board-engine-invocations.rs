@@ -10,6 +10,8 @@ use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
 };
+#[path = "task-board-internal-calls.rs"]
+mod internal;
 
 #[derive(Default)]
 pub(super) struct Executor<'a> {
