@@ -17,7 +17,6 @@ use std::{
     future::Future,
     path::Path,
     process::Stdio,
-    rc::Rc,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -90,7 +89,7 @@ impl Peer {
             .unwrap()
             .iter()
             .filter(|v| n(v, "generation") == generation)
-            .filter_map(|v| v.get("method").and_then(Json::as_str))
+            .filter_map(|v| v.get("method").and_then(|value| value.as_str().ok()))
             .collect()
     }
     async fn finish(mut self) {
@@ -126,7 +125,7 @@ impl Contracts for Admission {
         } else {
             assert_eq!(
                 value.get("scheduler").unwrap().get("intervalMs"),
-                Some(&1000.0.into())
+                Some(&Json::Number(1000.0))
             );
             Ok(())
         }
@@ -148,7 +147,10 @@ fn setup(peer: &Peer, root: bool) -> ServiceSetup {
         version: "1.0.0".into(),
         build_id: format!("sha256:{}", "a".repeat(64)).into(),
         settings: Json::object([
-            ("scheduler", Json::object([("intervalMs", 1000.0.into())])),
+            (
+                "scheduler",
+                Json::object([("intervalMs", Json::Number(1000.0))]),
+            ),
             (
                 "rootObjectId",
                 if root {
@@ -324,7 +326,7 @@ impl LocalHandler for Public<'_> {
         self.factory.event(self.generation, "write");
         Ok(Json::object([
             ("args", args),
-            ("generation", (self.generation as f64).into()),
+            ("generation", Json::Number(self.generation as f64)),
             ("caller", Json::String(context.caller_principal_id)),
             ("operation", Json::String(context.operation_id.unwrap())),
         ]))
@@ -367,7 +369,7 @@ impl GenerationFactory for Factory {
                 .get("scheduler")
                 .unwrap()
                 .get("intervalMs"),
-            Some(&1000.0.into())
+            Some(&Json::Number(1000.0))
         );
         let result = activation
             .run(
