@@ -212,15 +212,21 @@ impl Store {
         Ok(())
     }
 
-    /// Preserve a callback's named error through SQLite's error boundary.
-    pub fn query_error(&self, _: rusqlite::Error) -> IvyError {
-        self.query_state
-            .0
-            .lock()
-            .unwrap()
-            .error
-            .take()
-            .unwrap_or_else(IvyError::internal)
+    /// Preserve a callback's named error through SQLite's error boundary. Raw
+    /// SQLite causes are observed only by an explicitly scoped local journal.
+    pub fn query_error(&self, cause: rusqlite::Error) -> IvyError {
+        let named = self.query_state.0.lock().unwrap().error.take();
+        self.failure.record(|| {
+            if let Some(error) = &named {
+                return error.message_js();
+            }
+            match &cause {
+                rusqlite::Error::SqliteFailure(_, Some(message))
+                | rusqlite::Error::SqlInputError { msg: message, .. } => message.as_str().into(),
+                _ => cause.to_string().into(),
+            }
+        });
+        named.unwrap_or_else(IvyError::internal)
     }
 
     pub fn check_budget(&self) -> IvyResult<()> {

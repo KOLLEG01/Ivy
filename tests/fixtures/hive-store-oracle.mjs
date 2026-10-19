@@ -325,7 +325,10 @@ try {
           if(step.method==='recordFailure'){
             const message=step.messageUnits?String.fromCharCode(...step.messageUnits):step.message;
             retention.recordFailure(new Error(message),step.now);
-          }else value=retention[step.method](step.now);
+          }else {
+            try{value=retention[step.method](step.now);}
+            catch(error){if(step.journalFailure)retention.recordFailure(error,step.now);throw error;}
+          }
         }
       }finally{globalThis.Date=RealDate;}
       break;

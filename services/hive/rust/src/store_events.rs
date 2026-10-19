@@ -8,7 +8,7 @@ pub const EVENT_MAX_COUNT: i64 = 10_000;
 const SECRETARY_EVENT_RESERVE: i64 = 1_024;
 impl Store {
     pub fn durable_event_boundary(&self) -> IvyResult<Option<i64>> {
-        self.db.query_row("SELECT MIN(s.acknowledged_sequence) FROM subscriptions s JOIN durable_subscriptions d ON d.node_id=s.node_id AND d.name=s.name",[],|r|r.get(0)).map_err(sql_error)
+        self.db.query_row("SELECT MIN(s.acknowledged_sequence) FROM subscriptions s JOIN durable_subscriptions d ON d.node_id=s.node_id AND d.name=s.name",[],|r|r.get(0)).map_err(|e| self.query_error(e))
     }
     pub fn prune_event_journal_for_capacity(&self) -> IvyResult<()> {
         let count = self

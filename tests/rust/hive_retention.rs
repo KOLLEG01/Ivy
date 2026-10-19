@@ -5,7 +5,7 @@ use super::{
 use ivy_contracts::IvyResult;
 use ivy_hive::retention::{self, Runtime};
 use serde_json::{Value, json};
-use std::{cmp::Ordering, time::Duration};
+use std::{cmp::Ordering, path::Path, time::Duration};
 
 // Exact Node runtime observations are fixture inputs, never retention decisions.
 // Production Shared clock/default-locale binding remains a separate integration.
@@ -105,7 +105,21 @@ pub(super) fn native_retention(
             } else {
                 None
             };
-            retention::collect(store, &runtime, now, callback)
+            if step["journalFailure"] == true {
+                let (result, cause) = store
+                    .capture_failure(|store| retention::collect(store, &runtime, now, callback));
+                if let Err(error) = &result {
+                    retention::record_failure(
+                        store,
+                        &runtime,
+                        &cause.unwrap_or_else(|| error.message_js()),
+                        now,
+                    )?;
+                }
+                result
+            } else {
+                retention::collect(store, &runtime, now, callback)
+            }
         }
         "recordFailure" => {
             let message = if let Some(units) = step["messageUnits"].as_array() {
@@ -748,4 +762,180 @@ fn byte_prefix_collection_and_pinned_ui_assets_keep_cleanup_atomic() {
     success(&rows, accepted);
     assert_eq!(value(&rows, accepted)["events"]["count"], 0);
     assert_eq!(state(&rows, accepted)["releases"], json!([]));
+}
+
+fn journaled_collect() -> Value {
+    let mut step = action("collect");
+    step["journalFailure"] = true.into();
+    step
+}
+fn metadata_at<'a>(rows: &'a Value, index: usize, key: &str) -> &'a str {
+    state(rows, index)["metadata"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["key"] == key)
+        .unwrap()["value"]
+        .as_str()
+        .unwrap()
+}
+#[test]
+fn retention_failure_journal_preserves_raw_sql_named_and_commit_causes_without_wire_disclosure() {
+    let mut steps = setup();
+    for key in ["fixture/a", "fixture/z"] {
+        steps.push(contract(
+            key,
+            "1.0.0",
+            json!({"mode":"retain"}),
+            json!({"mode":"current"}),
+        ));
+    }
+    steps.push(seed_sql(
+        history("large", "fixture/a", 5) + &history("small", "fixture/z", 3),
+    ));
+    let initial = steps.len();
+    steps.push(journaled_collect());
+    let long = format!("{}🙂private tail", "x".repeat(511));
+    let mut checks = vec![];
+    for (trigger, message) in [
+        (format!("CREATE TRIGGER cause_failure BEFORE INSERT ON retention_families WHEN NEW.contract_key='fixture/z' BEGIN SELECT RAISE(ABORT,'{long}'); END;"), long.clone()),
+        ("CREATE TRIGGER cause_failure BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'raw event cleanup cause'); END;".into(), "raw event cleanup cause".into()),
+        ("CREATE TRIGGER cause_failure BEFORE DELETE ON app_releases BEGIN SELECT RAISE(ABORT,'raw UI SQL cleanup cause'); END;".into(), "raw UI SQL cleanup cause".into()),
+        ("CREATE TRIGGER cause_failure BEFORE UPDATE ON metadata WHEN NEW.key='retention_last_success' BEGIN SELECT RAISE(ABORT,'raw success metadata cause'); END;".into(), "raw success metadata cause".into()),
+        ("CREATE TABLE cause_deferred(value TEXT REFERENCES metadata(key) DEFERRABLE INITIALLY DEFERRED) STRICT; CREATE TRIGGER cause_failure AFTER UPDATE ON metadata WHEN NEW.key='retention_last_success' BEGIN INSERT INTO cause_deferred VALUES('missing'); END;".into(), "FOREIGN KEY constraint failed".into()),
+    ] {
+        steps.push(sql("INSERT INTO events(topic,topic_version,source,occurred_at,mutation_id,payload) VALUES('hive.object.changed','1.0.0','hive','2026-01-01','journal-old','{}'); INSERT OR IGNORE INTO apps VALUES('fixture','{}',NULL,NULL); INSERT OR IGNORE INTO app_releases VALUES('fixture','old','{}');"));
+        steps.push(sql(trigger));
+        let failed = steps.len();
+        steps.push(journaled_collect());
+        steps.push(sql("DROP TRIGGER cause_failure;"));
+        let recovered = steps.len();
+        steps.push(journaled_collect());
+        checks.push((failed, recovered, message));
+    }
+    let prepared = steps.len();
+    let mut parse_failure = journaled_collect();
+    parse_failure["diagnosticSql"] = "SELECT * FROM missing_retention_table".into();
+    steps.push(parse_failure);
+    let named = steps.len();
+    let mut named_failure = journaled_collect();
+    named_failure["diagnosticFail"] = true.into();
+    steps.push(named_failure);
+    steps.push(sql("UPDATE metadata SET value='prior journal' WHERE key='retention_last_failure'; CREATE TRIGGER cause_failure BEFORE UPDATE ON metadata WHEN NEW.key='retention_last_failure' BEGIN SELECT RAISE(ABORT,'failure journal unavailable'); END;"));
+    let journal_failed = steps.len();
+    let mut failure = journaled_collect();
+    failure["diagnosticSql"] = "SELECT * FROM another_missing_table".into();
+    steps.push(failure);
+    steps.push(sql("DROP TRIGGER cause_failure;"));
+    let recovered = steps.len();
+    steps.push(journaled_collect());
+    let result = compare(&steps);
+    success(&result, initial);
+    for (failed, recovered, message) in checks {
+        let error = &result["rows"][failed]["error"];
+        assert_eq!(error["message"], "The operation failed internally.");
+        assert_eq!(error["data"]["outcome"], "unknown");
+        let units = message.encode_utf16().take(512).collect::<Vec<_>>();
+        let expected = ivy_contracts::json::canonical(
+            &IvyJson::object([
+                ("at", "2027-01-15T08:00:00.000Z".into()),
+                ("message", IvyJson::String(JsString(units))),
+            ]),
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(
+            metadata_at(&result, failed, "retention_last_failure"),
+            expected
+        );
+        assert_eq!(
+            metadata_at(&result, failed, "retention_last_success"),
+            metadata_at(&result, failed - 1, "retention_last_success")
+        );
+        assert_eq!(summary(&result, failed, "fixture/a")["revisionCount"], 1);
+        success(&result, recovered);
+        assert_eq!(
+            metadata_at(&result, recovered, "retention_last_failure"),
+            ""
+        );
+        assert_eq!(value(&result, recovered)["lastFailure"], Value::Null);
+    }
+    for (index, message) in [
+        (prepared, "no such table: missing_retention_table"),
+        (named, "Diagnostic collection requested failure."),
+    ] {
+        let failure: Value =
+            serde_json::from_str(metadata_at(&result, index, "retention_last_failure")).unwrap();
+        assert_eq!(failure["message"], message);
+    }
+    assert_eq!(
+        result["rows"][prepared]["error"]["data"]["code"],
+        "internal_error"
+    );
+    assert_eq!(
+        result["rows"][named]["error"]["data"]["code"],
+        "fixture_failure"
+    );
+    assert_eq!(
+        result["rows"][journal_failed]["error"]["data"]["code"],
+        "internal_error"
+    );
+    assert_eq!(
+        metadata_at(&result, journal_failed, "retention_last_failure"),
+        "prior journal"
+    );
+    success(&result, recovered);
+}
+
+#[test]
+fn database_failure_capture_is_local_nested_and_restored_after_unwinding() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let mut store = Store::open(Path::new(":memory:")).unwrap();
+    let fail = |store: &mut Store, table: &str| -> IvyResult<()> {
+        store
+            .connection()
+            .execute_batch(&format!("SELECT * FROM {table}"))
+            .map_err(|e| store.query_error(e))
+    };
+    let (result, cause) = store.capture_failure(|store| fail(store, "outer_failure"));
+    assert_eq!(
+        cause.unwrap(),
+        JsString::from("no such table: outer_failure")
+    );
+    assert_eq!(
+        result.unwrap_err().to_wire().get("message"),
+        Some(&IvyJson::from("The operation failed internally."))
+    );
+    let (result, cause) = store.capture_failure(|store| {
+        let (_, cause) = store.capture_failure(|store| fail(store, "inner_failure"));
+        assert_eq!(
+            cause.unwrap(),
+            JsString::from("no such table: inner_failure")
+        );
+        Err::<(), _>(IvyError::new(
+            "storage_invalid",
+            "Named failure after the inner capture.",
+        ))
+    });
+    assert_eq!(result.unwrap_err().code, "storage_invalid");
+    assert!(cause.is_none());
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| store.capture_failure(
+            |store| -> IvyResult<()> {
+                let _ = fail(store, "unwinding_failure");
+                panic!("Fixture unwinding");
+            }
+        )))
+        .is_err()
+    );
+    let (result, cause) = store
+        .capture_failure(|_| Err::<(), _>(IvyError::new("storage_invalid", "Later operation.")));
+    assert_eq!(result.unwrap_err().message, "Later operation.");
+    assert!(cause.is_none());
+    let (result, cause) = store.capture_failure(|store| {
+        let _ = fail(store, "handled_failure");
+        Ok(())
+    });
+    result.unwrap();
+    assert!(cause.is_none());
 }

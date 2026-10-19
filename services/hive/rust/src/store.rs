@@ -24,6 +24,8 @@ mod cursor;
 #[path = "store_query.rs"]
 mod query;
 pub use query::QueryRuntime;
+#[path = "store_failure.rs"]
+mod failure;
 
 const SCHEMA: &str = include_str!("schema.sql");
 const IMMUTABLE: &[&str] = &[
@@ -68,6 +70,7 @@ pub struct Store {
     changes: Vec<JsString>,
     cursor_secret: String,
     query_state: query::QueryState,
+    failure: failure::FailureCause,
     validators: ivy_contracts::schema::SchemaValidators,
 }
 impl Store {
@@ -91,6 +94,7 @@ impl Store {
             changes: vec![],
             cursor_secret: String::new(),
             query_state: Default::default(),
+            failure: Default::default(),
             validators: ivy_contracts::schema::SchemaValidators::new(),
         };
         store.initialize()?;
@@ -248,13 +252,13 @@ impl Store {
     pub fn metadata(&self, key: &str) -> IvyResult<Option<String>> {
         self.db
             .prepare_cached("SELECT value FROM metadata WHERE key=?")
-            .map_err(sql_error)?
+            .map_err(|e| self.query_error(e))?
             .query_row([key], |r| r.get(0))
             .optional()
-            .map_err(sql_error)
+            .map_err(|e| self.query_error(e))
     }
     pub fn set_metadata(&self, key: &str, value: &str) -> IvyResult<()> {
-        self.db.execute("INSERT INTO metadata VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[key,value]).map_err(sql_error)?;
+        self.db.execute("INSERT INTO metadata VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[key,value]).map_err(|e| self.query_error(e))?;
         Ok(())
     }
     pub fn changes(&self) -> &[JsString] {
@@ -278,14 +282,18 @@ impl Store {
         let previous = self.changes.clone();
         self.db
             .execute_batch("BEGIN IMMEDIATE")
-            .map_err(sql_error)?;
+            .map_err(|e| self.query_error(e))?;
         let result = work(self).and_then(|value| {
-            self.db.execute_batch("COMMIT").map_err(sql_error)?;
+            self.db
+                .execute_batch("COMMIT")
+                .map_err(|e| self.query_error(e))?;
             Ok(value)
         });
         if result.is_err() {
             if !self.db.is_autocommit() {
-                self.db.execute_batch("ROLLBACK").map_err(sql_error)?;
+                self.db
+                    .execute_batch("ROLLBACK")
+                    .map_err(|e| self.query_error(e))?;
             }
             self.changes = previous;
         }

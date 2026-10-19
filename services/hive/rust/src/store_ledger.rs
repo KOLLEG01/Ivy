@@ -73,7 +73,7 @@ impl Store {
         let mut count = self
             .db
             .query_row("SELECT COUNT(*) FROM mutations", [], |r| r.get::<_, i64>(0))
-            .map_err(sql_error)? as f64;
+            .map_err(|e| self.query_error(e))? as f64;
         let mut bytes = self.mutation_receipt_bytes()?;
         let mut expired = self.metadata_number("mutations_expired_before")?;
         let maximum_count = MUTATION_RECEIPT_COUNT as f64 - reserved_count as f64;
@@ -92,7 +92,7 @@ impl Store {
                 .prepare_cached(
                     "SELECT rowid,issued_at_ms,receipt_bytes FROM mutations ORDER BY rowid LIMIT ?",
                 )
-                .map_err(sql_error)?
+                .map_err(|e| self.query_error(e))?
                 .query_map([limit], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
@@ -100,9 +100,9 @@ impl Store {
                         r.get::<_, f64>(2)?,
                     ))
                 })
-                .map_err(sql_error)?
+                .map_err(|e| self.query_error(e))?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(sql_error)?;
+                .map_err(|e| self.query_error(e))?;
             require(
                 !oldest.is_empty(),
                 "storage_invalid",
@@ -124,7 +124,7 @@ impl Store {
             }
             self.db
                 .execute("DELETE FROM mutations WHERE rowid<=?", [boundary])
-                .map_err(sql_error)?;
+                .map_err(|e| self.query_error(e))?;
         }
         self.set_metadata(
             "mutation_receipt_bytes",
@@ -231,7 +231,7 @@ impl Store {
       ) WHERE contract_key=?
         AND json_type(summary_json,'$.objectCount')='integer'
         AND json_type(summary_json,'$.revisionCount')='integer'
-        AND json_type(summary_json,'$.byteLength')='integer'",params![objects,revisions,bytes,text(key)]).map_err(sql_error)?;
+        AND json_type(summary_json,'$.byteLength')='integer'",params![objects,revisions,bytes,text(key)]).map_err(|e| self.query_error(e))?;
         Ok(())
     }
 }
