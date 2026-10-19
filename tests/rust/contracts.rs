@@ -269,9 +269,12 @@ fn native_frame_bounds_match_the_existing_contract() {
 
 #[test]
 fn url_projection_matches_node_constructor_fields_and_failures() {
-    use ivy_contracts::whatwg_url::{clear_url_credentials, parse_url};
+    use ivy_contracts::whatwg_url::{
+        clear_url_credentials, parse_url, parse_url_with_base, url_components,
+    };
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    for mode in ["projection", "credentials"] {
+    let mut mismatches = Vec::new();
+    for mode in ["projection", "credentials", "components", "relative"] {
         let output = std::process::Command::new("node")
             .args([
                 "--experimental-transform-types",
@@ -301,8 +304,30 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
                         IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
                     }
                 }
+            } else if mode == "components" {
+                match url_components(input.as_js_string().unwrap()) {
+                    Ok(u) => IvyJson::object([
+                        ("ok", true.into()),
+                        (
+                            "value",
+                            IvyJson::object([
+                                ("origin", u.origin.into()),
+                                ("pathname", u.pathname.into()),
+                            ]),
+                        ),
+                    ]),
+                    Err(error) => {
+                        IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
+                    }
+                }
             } else {
-                match parse_url(input.as_js_string().unwrap()) {
+                let result = if mode == "relative" {
+                    let base = parse(row["base"].as_str().unwrap(), 100_000).unwrap();
+                    parse_url_with_base(input.as_js_string().unwrap(), base.as_js_string().unwrap())
+                } else {
+                    parse_url(input.as_js_string().unwrap())
+                };
+                match result {
                     Ok(u) => IvyJson::object([
                         ("ok", true.into()),
                         (
@@ -322,9 +347,23 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
                     }
                 }
             };
-            assert_eq!(actual, expected, "URL input: {}", row["input"]);
+            if actual != expected {
+                mismatches.push(format!(
+                    "URL mode: {mode}, input: {}, base: {}, actual: {}, expected: {}",
+                    row["input"],
+                    row["base"],
+                    stringify(&actual, 100_000).unwrap(),
+                    stringify(&expected, 100_000).unwrap()
+                ));
+            }
         }
     }
+    assert!(
+        mismatches.is_empty(),
+        "{} URL mismatches: {:#?}",
+        mismatches.len(),
+        &mismatches[..mismatches.len().min(20)]
+    );
 }
 
 #[test]
