@@ -6,6 +6,7 @@ mod negotiation;
 mod packet;
 mod permit;
 mod queue;
+mod resample;
 mod rtp;
 mod sdp;
 mod startup;
@@ -13,6 +14,7 @@ mod transport;
 
 pub use permit::AudioPermit;
 pub use queue::AudioQueue;
+pub use resample::PcmResampler;
 pub use rtp::{RtpAudioPacket, RtpReceiveQueue, RtpReceiveStatus};
 pub use sdp::{
     SDP_UNITS, SdpConnection, SdpDirection, SdpDocument, SdpError, SdpFormat, SdpMedia,

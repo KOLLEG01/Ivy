@@ -7,6 +7,8 @@ use std::sync::Arc;
 mod media_format;
 #[path = "phone_pcm_codec.rs"]
 mod pcm_codec;
+#[path = "phone_resampler.rs"]
+mod resampler;
 #[path = "phone_rtp_transport.rs"]
 mod rtp_transport;
 #[path = "phone_sdp.rs"]
