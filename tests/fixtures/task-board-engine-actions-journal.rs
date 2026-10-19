@@ -124,9 +124,10 @@ impl RpcClient for NoRpc {
                 assert_eq!(f(&args, "topicVersion"), &Json::from("1.0.0"));
                 static NOTICE: OnceLock<SchemaBundle> = OnceLock::new();
                 let schema = NOTICE.get_or_init(|| {
-                    SchemaBundle::new(&[&format!(
-                        r#"{{"$id":"https://ivy.invalid/test/task-board-notice","allOf":[{}]}}"#,
-                        include_str!("../../specs/schemas/browser-notice.schema.json")
+                    SchemaBundle::new(&[concat!(
+                        r#"{"$id":"https://ivy.invalid/test/task-board-notice","allOf":["#,
+                        include_str!("../../specs/schemas/browser-notice.schema.json"),
+                        "]}"
                     )])
                     .unwrap()
                 });
@@ -518,8 +519,8 @@ async fn check_comment_recovery(question: bool) {
             principal_id: &principal,
             now: &operations.now,
         };
-        let executor = Executor::default();
         let locale = Locale;
+        let executor = Executor::default();
         let projection = CategoryProjection::new(&operations.store, &principal, &locale, &executor);
         executor.drive(projection.categories()).await.unwrap();
         if round > 0 {
