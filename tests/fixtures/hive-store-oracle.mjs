@@ -37,8 +37,17 @@ if(identityStart<0||identityEnd<identityStart)throw Error('Original worker ident
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
-let store,registry,discovery,configurations,packageCatalog,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
-const packageTrace=input.steps.some(step=>step.op==='packageCatalog');
+let store,registry,discovery,configurations,packageCatalog,packageKernel,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
+const packageTrace=input.steps.some(step=>['packageCatalog','packageKernel'].includes(step.op));
+let createKernelCatalog,kernelPackageAction;
+if(input.steps.some(step=>step.op==='packageKernel')){
+ const kernelSource=readFileSync(new URL('../../services/hive/src/kernel.ts',import.meta.url),'utf8');
+ const start=kernelSource.indexOf('    this.packageCatalog = new PackageCatalogObject('),end=kernelSource.indexOf('    this.registerHandlers();',start);
+ const actionStart=workerSource.indexOf('    case "package.catalog":'),actionEnd=workerSource.indexOf('    case "protocol.diagnostic":',actionStart);
+ if(start<0||end<start||actionStart<0||actionEnd<actionStart)throw Error('Original package kernel boundaries changed');
+ createKernelCatalog=new Function('PackageCatalogObject',stripTypeScriptTypes('function construct(){'+kernelSource.slice(start,end)+'return this.packageCatalog;}',{mode:'strip'})+'return construct;')(PackageCatalogObject);
+ kernelPackageAction=new Function('kernel','requireThat','message',stripTypeScriptTypes('function execute(){switch(message.action){'+workerSource.slice(actionStart,actionEnd)+'}}',{mode:'strip'})+'return execute();');
+}
 const registryTrace=input.steps.some(step=>['registry','inventory','discovery','configurations','uis'].includes(step.op));
 const inventoryTrace=input.steps.some(step=>step.op==='inventory');
 const discoveryTrace=input.steps.some(step=>step.op==='discovery');
@@ -113,6 +122,25 @@ try {
   let value=null,error=null,wikiCalls=[];
   try {
    switch(step.op){
+    case 'packageKernel':{
+      const RealDate=Date,realUUID=crypto.randomUUID,realGlobalUUID=globalThis.crypto.randomUUID;
+      globalThis.Date=retentionDate(RealDate,step.now);let offset=0;
+      if(step.uuids){const next=()=>{if(offset>=step.uuids.length)throw Error('Unobserved kernel catalog entropy');return step.uuids[offset++];};crypto.randomUUID=next;globalThis.crypto.randomUUID=next;syncBuiltinESMExports();}
+      try{
+       if(!packageKernel||step.method==='constructor'){
+        packageKernel={store,registry:new Registry(store),objects:new Objects(store),options:{buildId:step.buildId??'kernel-build',credentials:[]}};
+        createKernelCatalog.call(packageKernel);
+       }
+       switch(step.method){
+        case 'constructor':break;
+        case 'protected':value=[...packageKernel.packageCatalog.protectedBuilds()].filter(v=>typeof v==='string').sort();break;
+        case 'save':packageKernel.registry.save(step.params.node,step.params.notify??true);break;
+        case 'worker':packageKernel.options.credentials=(step.params.principals??[]).map(principalId=>({principalId}));value=kernelPackageAction(packageKernel,requireThat,step.params.message);break;
+        default:throw Error('Unknown package kernel fixture method');
+       }
+      }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;globalThis.crypto.randomUUID=realGlobalUUID;syncBuiltinESMExports();}
+      break;
+    }
     case 'packageCatalog':{
       const RealDate=Date,realUUID=crypto.randomUUID,realGlobalUUID=globalThis.crypto.randomUUID;
       const params=structuredClone(step.params);
@@ -439,7 +467,7 @@ try {
     case 'sql':store.db.exec(step.sql);break;
     case 'invalidate':store.invalidate(step.scope);break;
     case 'transaction':store.transaction(()=>{store.db.exec(step.sql);store.invalidate(step.scope);if(step.fail)throw new IvyError('fixture_failure','Rollback requested.');});break;
-    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;discovery=undefined;configurations=undefined;packageCatalog=undefined;break;
+    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;discovery=undefined;configurations=undefined;packageCatalog=undefined;packageKernel=undefined;break;
     case 'reorder':case 'archive':case 'delete':case 'move':{
       const RealDate=Date;
       if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
@@ -480,7 +508,7 @@ try {
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");
  const topics=store.all('SELECT * FROM topics ORDER BY topic,version');
- const runtime=input.steps.some(step=>['retention','pruneRevisions'].includes(step.op))?{retentionRuntime:Object.fromEntries(Object.entries(retentionRuntime).map(([key,map])=>[key,[...map]]))}:{};
+ const runtime=input.steps.some(step=>['retention','pruneRevisions','packageKernel'].includes(step.op))?{retentionRuntime:Object.fromEntries(Object.entries(retentionRuntime).map(([key,map])=>[key,[...map]]))}:{};
  if(input.steps.some(step=>['search','wiki'].includes(step.op)))runtime.searchRuntime={wordCharacters:[...searchWordCharacters]};
  if(registryTrace){
   const sorted=[...localeStrings].sort((a,b)=>a.localeCompare(b));let rank=0;

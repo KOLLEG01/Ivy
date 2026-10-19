@@ -22,6 +22,8 @@ mod object_write;
 mod online_backup;
 #[path = "hive_package_catalog.rs"]
 mod package_catalog;
+#[path = "hive_package_kernel.rs"]
+mod package_kernel;
 #[path = "hive_packages.rs"]
 mod packages;
 #[path = "hive_query.rs"]
@@ -117,8 +119,11 @@ fn native(path: &Path, steps: &[Value]) -> Value {
 fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) -> Value {
     let mut store = Store::open(path).unwrap();
     let mut result = vec![];
-    let package_trace = steps.iter().any(|step| step["op"] == "packageCatalog");
+    let package_trace = steps
+        .iter()
+        .any(|step| step["op"] == "packageCatalog" || step["op"] == "packageKernel");
     let mut package_catalog = package_catalog::Trace::default();
+    let mut package_kernel = package_kernel::Trace::default();
     let registry_trace = steps.iter().any(|step| {
         step["op"] == "registry"
             || step["op"] == "inventory"
@@ -145,6 +150,13 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
         let mut wiki_calls = vec![];
         let outcome = match step["op"].as_str().unwrap() {
             "packageCatalog" => package_catalog.execute(&mut store, step).map(wire),
+            "packageKernel" => package_kernel
+                .execute(
+                    &mut store,
+                    step,
+                    runtime.expect("Package kernel runtime primitives"),
+                )
+                .map(wire),
             "uiFiles" => ui_files::execute(&mut store, step, path).map(wire),
             "wiki" => {
                 let (result, calls) = wiki::execute(
@@ -306,6 +318,7 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
             }),
             "reopen" => {
                 package_catalog.reset();
+                package_kernel.reset();
                 drop(store);
                 store = Store::open(path).unwrap();
                 registry.reset_owner();

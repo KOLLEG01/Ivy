@@ -32,7 +32,7 @@ fn units(value: &Value) -> JsString {
             .collect(),
     )
 }
-struct ObservedRuntime {
+pub(super) struct ObservedRuntime {
     dates: HashMap<JsString, f64>,
     iso: HashMap<i64, JsString>,
     locale: HashMap<JsString, i64>,
@@ -43,7 +43,7 @@ struct ObservedRuntime {
     uppercase: HashMap<JsString, JsString>,
 }
 impl ObservedRuntime {
-    fn new(profile: &Value) -> Self {
+    pub(super) fn new(profile: &Value) -> Self {
         Self {
             dates: profile["dates"]
                 .as_array()
