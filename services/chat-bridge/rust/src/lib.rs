@@ -1,4 +1,5 @@
 pub mod admission;
+pub mod bridge;
 pub mod cancel_worker;
 pub mod cancellation;
 pub mod chat_main;

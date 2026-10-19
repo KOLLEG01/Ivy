@@ -833,3 +833,6 @@ async fn original_main_creation_recovery_and_live_claims() {
 
 #[path = "chat-delivery-cases.rs"]
 mod delivery;
+
+#[path = "chat-provider-cases.rs"]
+mod provider;

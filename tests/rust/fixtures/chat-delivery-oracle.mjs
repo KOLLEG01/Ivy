@@ -1,4 +1,5 @@
 import {environment,now,instructions,noticeInstructions,starting,operation,clone,at,result} from './chat-main-oracle.mjs';
+import {pathToFileURL} from 'node:url';
 const {ChatDelivery}=await import('../../../services/chat-bridge/src/delivery.ts');
 const {ChatWorker}=await import('../../../services/chat-bridge/src/worker.ts');
 const {ChatNotices}=await import('../../../services/chat-bridge/src/notices.ts');
@@ -7,7 +8,7 @@ const {hashJson,digest}=await import('../../../packages/contracts/src/canonical.
 const {IvyError}=await import('../../../packages/contracts/src/errors.ts');
 const {resolveChatPlan}=await import('../../../services/chat-bridge/src/native-plan.ts');
 
-function extension(){
+export function extension(){
  let delivery,worker,reads=0,turns=0;
  const thread=(c,id)=>({cliVersion:c.source.catalog.version,createdAt:1788690000,cwd:c.controls.readCwd??'/synthetic/project',ephemeral:c.controls.readEphemeral??false,id:c.controls.readThreadId??id,modelProvider:'openai',preview:'Synthetic Main',projectId:null,sessionId:id,source:'appServer',status:{type:c.controls.threadStatus??'idle',...(c.controls.threadStatus==='active'?{activeFlags:[]}: {})},turns:[],updatedAt:1788690000,canAcceptDirectInput:c.controls.directInput??true,name:'Synthetic'});
  const firstInput=async c=>{const m=await c.main.find();return c.store.read('chat-bridge/input',m.value.queue[0].inputId);};
@@ -104,6 +105,7 @@ function extension(){
   },
  };
 }
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
 const seeds={},cases=[],versions=Object.keys(starting);
 for(const version of versions){
  for(const kind of ['completed','queued']){
@@ -165,3 +167,4 @@ for(const c of cases.filter(c=>c.label.startsWith('extra-')&&!c.label.includes('
  if(faults.length!==1||faults[0].params.create.contractKey!=='chat-bridge/result'||faults[0].result.error?.code!=='outcome_unknown'||c.expected.at(-1).output.value!==null||c.expected.at(-1).records.filter(r=>r.object.contractKey==='chat-bridge/result').length!==2)throw Error('Original explicit Result fault was not recovered exactly');
 }
 process.stdout.write(JSON.stringify({now,instructions,noticeInstructions,seeds,cases,boundary:'Only synthetic owner/Hive replies and clock are controlled. Original Main, Delivery, Worker, Collector, Publisher and CancelWorker execute unchanged; no approval exception is exercised by these explicit-binding sends.'}));
+}

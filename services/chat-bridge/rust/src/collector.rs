@@ -125,6 +125,11 @@ impl<'a> ChatCollector<'a> {
     fn store(&self) -> &ChatStore {
         self.operations.store
     }
+    /// Provider retries use the original request-local collector, independently
+    /// of the worker's retained collection cache.
+    pub(crate) fn fresh(&self) -> Self {
+        Self::new(self.operations, self.evidence, self.runtime, self.catalogs)
+    }
     fn clear(&self) {
         *self.cache.lock().unwrap() = None;
     }
