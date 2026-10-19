@@ -277,9 +277,9 @@ impl GenerationFactory for EngineFactory {
                 },
             )))
             .await;
-        drop(public);
         drop(invocations);
         drop(invocation_jobs);
+        drop(public);
         drop(execution);
         drop(execution_jobs);
         let mut statement = database.prepare("SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision ORDER BY d.id").unwrap();
