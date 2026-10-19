@@ -6,7 +6,6 @@ use ivy_contracts::{
 use ivy_task_board::{
     engine_actions::{ActionPolicies, ActionRestore, ActionStore, TaskActions},
     engine_publication::{ExistingTaskPublication, empty_outcome},
-    native_lifecycle::LifecyclePublication,
     native_lifecycle::{LifecycleDocument, LifecycleStore},
     operations::{Document, Operations, Store},
     publication::Publication,
@@ -306,14 +305,14 @@ async fn existing_task_actions_match_original_reservation_dispatch_comments_and_
             policies: &bindings,
             lifecycle: &bindings,
         };
-        let callback = |pin: Json, task: Json| {
-            let replay = replay.clone();
-            Box::pin(async move { replay.call("taskWritten", [pin, task]).map(|_| ()) })
-                as std::pin::Pin<Box<dyn std::future::Future<Output = IvyResult<()>>>>
-        };
         let mut outcomes = vec![];
         for call in f(row, "calls").as_array().unwrap() {
             let operation = document(f(call, "operation"));
+            let callback = |pin: Json, task: Json| {
+                let replay = replay.clone();
+                Box::pin(async move { replay.call("taskWritten", [pin, task]).map(|_| ()) })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = IvyResult<()>>>>
+            };
             let mut steps = Publication {
                 operations: &operations,
                 operation: &operation,
@@ -346,3 +345,6 @@ async fn existing_task_actions_match_original_reservation_dispatch_comments_and_
         );
     }
 }
+
+#[path = "task-board-engine-actions-journal.rs"]
+mod journal;
