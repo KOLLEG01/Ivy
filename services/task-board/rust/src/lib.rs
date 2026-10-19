@@ -4,6 +4,7 @@ pub mod category_projection;
 pub mod coordination;
 pub mod deliveries;
 pub mod engine_admission;
+pub mod engine_actions;
 pub mod engine_publication;
 pub mod engine_read;
 pub mod engine_execution;

@@ -26,6 +26,8 @@ mod engine_execution;
 mod engine_admission;
 #[path = "../fixtures/task-board-engine-publication.rs"]
 mod engine_publication;
+#[path = "../fixtures/task-board-engine-actions.rs"]
+mod engine_actions;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {
