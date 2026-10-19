@@ -116,6 +116,8 @@ mod notice_evidence_cases;
 mod notice_scan_cases;
 #[path = "notices_cases.rs"]
 mod notices_cases;
+#[path = "outlook_media_native_cases.rs"]
+mod outlook_media_native_cases;
 #[path = "outlook_native_cases.rs"]
 mod outlook_native_cases;
 #[path = "outlook_projection_cases.rs"]

@@ -4,7 +4,7 @@ use crate::{
     engine::SecretaryEngine,
     inbox_evidence::{identity_hash, message_hash, truthy},
     media_schema::{MediaSchema, validate_media},
-    media_spool::{SpoolJournal, Validation},
+    media_spool::{Attempt, SpoolJournal, Validation},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_contracts::{
@@ -371,6 +371,11 @@ impl MediaStore<'_, '_, '_, '_> {
         operation_id: &JsString,
     ) -> IvyResult<IvyJson> {
         let (attempt, bytes) = spool.payload(operation_id)?;
+        self.publish_acquired(attempt, bytes).await
+    }
+    /// Snapshot the complete acquired payload before async publication so the
+    /// caller need not retain a local spool borrow across Hive requests.
+    pub async fn publish_acquired(&self, attempt: Attempt, bytes: Vec<u8>) -> IvyResult<IvyJson> {
         let intent = &attempt.intent;
         check(attempt.evidence.is_some())?;
         let evidence = attempt.evidence.unwrap();
