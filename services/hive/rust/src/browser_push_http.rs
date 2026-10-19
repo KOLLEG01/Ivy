@@ -37,12 +37,7 @@ impl Handler<'_> {
         lease: Option<&mut RequestLease>,
         response: &mut impl Response,
     ) -> IvyResult<()> {
-        if headers.origin.and_then(IvyJson::as_js_string) != Some(self.canonical_origin) {
-            return Err(IvyError::new(
-                "unauthenticated",
-                "Browser action requires the exact Hive origin.",
-            ));
-        }
+        crate::http_auth::same_origin(self.canonical_origin, headers.origin)?;
         let bytes = self
             .buffers
             .read(body, headers.content_length, 8192, lease)

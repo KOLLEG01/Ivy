@@ -8,6 +8,8 @@ use std::{
     sync::Mutex,
 };
 use tokio::sync::{mpsc, oneshot};
+#[path = "hive_http_auth.rs"]
+mod authentication;
 #[path = "hive_browser_push_http.rs"]
 mod http;
 
@@ -142,6 +144,46 @@ fn actor(input: &Value) -> Option<mpsc::UnboundedSender<Posted>> {
         let mut store = store;
         while let Some((request, reply)) = receive.recv().await {
             let result = match request.get("action").unwrap().as_str().unwrap().as_str() {
+                "authenticate" => {
+                    let context = request.get("context").unwrap();
+                    store
+                        .authenticate(&ivy_hive::store::AuthContext {
+                            credential_digest: context
+                                .get("credentialDigest")
+                                .unwrap()
+                                .as_js_string()
+                                .unwrap()
+                                .clone(),
+                            session_digest: context
+                                .get("sessionDigest")
+                                .and_then(IvyJson::as_js_string)
+                                .cloned(),
+                        })
+                        .map(|principal| {
+                            IvyJson::object([
+                                ("principalId", IvyJson::String(principal.principal_id)),
+                                (
+                                    "credentialDigest",
+                                    IvyJson::String(principal.credential_digest),
+                                ),
+                            ])
+                        })
+                }
+                "session.resolve" => ivy_hive::worker_identity::resolve_session(
+                    &store,
+                    request
+                        .get("sessionDigest")
+                        .unwrap()
+                        .as_js_string()
+                        .unwrap(),
+                ),
+                "fixture.sql" => {
+                    store
+                        .connection()
+                        .execute_batch(&request.get("sql").unwrap().as_str().unwrap())
+                        .unwrap();
+                    Ok(IvyJson::Null)
+                }
                 "browserPush.request" => push.request(
                     &mut store,
                     request.get("context").unwrap(),

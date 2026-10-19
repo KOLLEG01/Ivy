@@ -7,6 +7,7 @@ pub mod configurations;
 pub mod discovery;
 pub mod events;
 mod filesystem;
+pub mod http_auth;
 pub mod http_body;
 pub mod http_response;
 pub mod inventory;
