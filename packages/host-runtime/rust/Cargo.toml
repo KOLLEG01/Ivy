@@ -43,6 +43,7 @@ name = "host-logs"
 path = "../../../tests/rust/host-logs.rs"
 
 [dependencies]
+async-compression.workspace = true
 base64.workspace = true
 reqwest.workspace = true
 flate2.workspace = true
@@ -53,7 +54,7 @@ ivy-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
 tokio-tungstenite.workspace = true
 uuid.workspace = true
 chrono.workspace = true

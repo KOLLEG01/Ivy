@@ -41,6 +41,8 @@ libc = "=0.2.191"
 tar = { version = "=0.4.46", default-features = false }
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 
+async-compression = { version = "=0.4.51", default-features = false, features = ["tokio", "gzip", "zlib", "deflate", "brotli", "zstd"] }
+
 [profile.release]
 lto = "thin"
 strip = "debuginfo"
