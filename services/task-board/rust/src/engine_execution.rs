@@ -439,6 +439,43 @@ struct State {
     active: HashMap<JsString, Rc<RefCell<Completion>>>,
     waiters: Vec<Waker>,
 }
+struct ActiveExecution {
+    id: JsString,
+    state: Rc<RefCell<State>>,
+    completion: Rc<RefCell<Completion>>,
+}
+impl Drop for ActiveExecution {
+    fn drop(&mut self) {
+        let replies = {
+            let mut completion = self.completion.borrow_mut();
+            completion.result.get_or_insert_with(|| {
+                Err(
+                    IvyError::new("internal_error", "Service invocation failed.")
+                        .with_outcome(Outcome::Unknown),
+                )
+            });
+            std::mem::take(&mut completion.waiters)
+        };
+        let drained = {
+            let mut state = self.state.borrow_mut();
+            if state
+                .active
+                .get(&self.id)
+                .is_some_and(|c| Rc::ptr_eq(c, &self.completion))
+            {
+                state.active.remove(&self.id);
+            }
+            if state.active.is_empty() {
+                std::mem::take(&mut state.waiters)
+            } else {
+                vec![]
+            }
+        };
+        for waiter in replies.into_iter().chain(drained) {
+            waiter.wake();
+        }
+    }
+}
 pub struct ExecutionRequest {
     completion: Rc<RefCell<Completion>>,
 }
@@ -482,30 +519,18 @@ impl<'a, 'x, P: ExecutionProgram + 'a, X: ReconcileExecutor<'a>> ExecutionQueue<
             .borrow_mut()
             .active
             .insert(id.clone(), completion.clone());
-        let state = self.state.clone();
-        let c = completion.clone();
+        // Create the guard before spawning, so an owner interruption before
+        // the first poll also releases the in-memory identity and observers.
+        let active = ActiveExecution {
+            id,
+            state: self.state.clone(),
+            completion: completion.clone(),
+        };
         let program = self.program;
         self.executor.spawn(Box::pin(async move {
             let result = program.run(operation).await;
-            let drained = {
-                let mut state = state.borrow_mut();
-                if state.active.get(&id).is_some_and(|v| Rc::ptr_eq(v, &c)) {
-                    state.active.remove(&id);
-                }
-                if state.active.is_empty() {
-                    std::mem::take(&mut state.waiters)
-                } else {
-                    vec![]
-                }
-            };
-            let waiters = {
-                let mut c = c.borrow_mut();
-                c.result = Some(result);
-                std::mem::take(&mut c.waiters)
-            };
-            for w in waiters.into_iter().chain(drained) {
-                w.wake()
-            }
+            active.completion.borrow_mut().result = Some(result);
+            drop(active);
         }));
         Ok(ExecutionRequest { completion })
     }
