@@ -289,6 +289,56 @@ async fn wire_events_and_private_inband_analysis_work_while_pcm_is_closed_and_rt
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn whole_control_datagrams_validate_before_raw_publication_and_following_packets_recover() {
+    let (receiver, audio, events, _, control) = setup(41800, false, false).await;
+    let local = receiver.observation().transport;
+    let valid = ivy_phone_bridge::media::RtcpReportBuilder::new(9, "fixture")
+        .unwrap()
+        .receiver(&[])
+        .unwrap();
+    for (index, (name, bytes)) in crate::rtcp::invalid_compounds().into_iter().enumerate() {
+        // The same serial control socket carries the following valid packet as
+        // a completion barrier. A valid prefix in the bad packet publishes no
+        // callback or retained projection before that barrier.
+        control.send_to(&bytes, local.local_rtcp).await.unwrap();
+        control.send_to(&valid, local.local_rtcp).await.unwrap();
+        wait(|| events.controls.lock().unwrap().len() >= index + 1).await;
+        let controls = events.controls.lock().unwrap();
+        assert_eq!(controls.len(), index + 1, "{name}");
+        assert_eq!(controls[index], valid, "{name}");
+        assert!(!receiver.observation().failed, "{name}");
+        drop(controls);
+        audio.set(false, index as u64 + 2); // Control admission is independent of PCM generation.
+    }
+    let before = events.controls.lock().unwrap().len();
+    let unknown = [0x80, 207, 0, 1, 0, 0, 0, 9];
+    let compound = [
+        unknown.to_vec(),
+        valid.clone(),
+        unknown.to_vec(),
+        valid.clone(),
+    ]
+    .concat();
+    control.send_to(&compound, local.local_rtcp).await.unwrap();
+    wait(|| events.controls.lock().unwrap().len() == before + 1).await;
+    let controls = events.controls.lock().unwrap();
+    assert_eq!(controls.last().unwrap(), &compound);
+    let parsed = ivy_phone_bridge::media::RtcpCompound::parse(controls.last().unwrap()).unwrap();
+    assert_eq!(parsed.packet_count, 6);
+    assert_eq!(parsed.receiver.unwrap().source, 9);
+    assert_eq!(parsed.cname, Some(&b"fixture"[..]));
+    drop(controls);
+    assert_eq!(audio.frames(), 0);
+    receiver.close().await;
+    let frozen = events.controls.lock().unwrap().len();
+    control.send_to(&valid, local.local_rtcp).await.unwrap();
+    assert_eq!(events.controls.lock().unwrap().len(), frozen);
+    assert!(receiver.observation().cleanup_confirmed);
+    let _rtp = std::net::UdpSocket::bind(local.local_rtp).unwrap();
+    let _rtcp = std::net::UdpSocket::bind(local.local_rtcp).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn codec_and_notification_failures_close_original_workers_even_when_the_failure_callback_panics()
  {
     for panic in [false, true] {

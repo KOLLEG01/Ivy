@@ -2,11 +2,32 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
+using System.Threading;
+using Ivy.PhoneBridge;
 using SIPSorcery.Net;
+using SIPSorcery.SIP.App;
 
 // Public APIs of the sealed original assembly; synthetic byte arrays only.
 public static class PhoneRtcpOracle {
+    static (UdpClient, UdpClient) Pair() {
+        for (int i = 0; i < 32; i++) {
+            var rtp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+            int port = ((IPEndPoint)rtp.Client.LocalEndPoint).Port;
+            try { if (port < 65535) return (rtp, new UdpClient(new IPEndPoint(IPAddress.Loopback, port + 1))); }
+            catch (SocketException) { }
+            rtp.Dispose();
+        }
+        throw new InvalidOperationException("Owned loopback pair unavailable");
+    }
+    sealed class ClosedAudio : IPcmAudioPort {
+        public bool IsOpen => false;
+        public long Generation => 1;
+        public int ReadCaptured(Span<float> output) { output.Clear(); return 0; }
+        public void WriteReceived(ReadOnlySpan<float> input) { }
+    }
     static object Block(ReceptionReportSample value) => new {
         source=value.SSRC, fraction=value.FractionLost, lost=value.PacketsLost,
         highest=value.ExtendedHighestSequenceNumber, jitter=value.Jitter,
@@ -21,6 +42,47 @@ public static class PhoneRtcpOracle {
     }
     static object RunCase(JsonElement input) {
         switch (input.GetProperty("op").GetString()) {
+            case "receive": {
+                // Actual original application callback/projection, not a
+                // reimplementation. Only owned loopback sockets and zero PCM;
+                // no device, account, route, real call or service is used.
+                var pair = Pair();
+                using var rtp = pair.Item1;
+                using var control = pair.Item2;
+                using var rawControl = new AutoResetEvent(false);
+                using var seeded = new ManualResetEventSlim(false);
+                var session = new SipMediaSession(new CodecSettings(new[] { "PCMU" }), new ClosedAudio(), IPAddress.Loopback);
+                int events = 0;
+                var snapshots = new List<object>();
+                try {
+                    session.OnReceiveReport += (_, media, _) => { if (media == SDPMediaTypesEnum.audio) Interlocked.Increment(ref events); };
+                    session.OnRtpPacketReceived += (_, media, packet) => { if (media == SDPMediaTypesEnum.audio && packet.Header.SyncSource == 9) seeded.Set(); };
+                    var offer = session.CreateOffer(IPAddress.Loopback);
+                    int local = offer.Media.Single(value => value.Media == SDPMediaTypesEnum.audio).Port;
+                    int peer = ((IPEndPoint)rtp.Client.LocalEndPoint).Port;
+                    int peerControl = ((IPEndPoint)control.Client.LocalEndPoint).Port;
+                    string answer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n" +
+                        $"m=audio {peer} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=rtcp:{peerControl}\r\na=sendrecv\r\n";
+                    if (session.SetRemoteDescription(SdpType.answer, SDP.ParseSDPDescription(answer)) != SetDescriptionResultEnum.OK)
+                        throw new InvalidOperationException("Synthetic answer refused");
+                    session.Start().GetAwaiter().GetResult();
+                    session.AudioStream.GetRTPChannel().OnControlDataReceived += (_, _, _) => rawControl.Set();
+                    if (!input.TryGetProperty("seed", out var seed) || seed.GetBoolean()) {
+                        byte[] first = new byte[172]; first[0] = 128; first[3] = 1; first[11] = 9;
+                        rtp.Send(first, new IPEndPoint(IPAddress.Loopback, local));
+                        if (!seeded.Wait(1000)) throw new InvalidOperationException("Original media did not receive the owned RTP seed");
+                    }
+                    foreach (var value in input.GetProperty("datagrams").EnumerateArray()) {
+                        string hex = value.GetString(); byte[] bytes = Convert.FromHexString(hex);
+                        if (bytes.Length > 8192) throw new ArgumentException("Bounded fixture datagram required");
+                        control.Send(bytes, new IPEndPoint(IPAddress.Loopback, local + 1));
+                        if (!rawControl.WaitOne(1000)) throw new InvalidOperationException("Original control channel did not receive the owned datagram");
+                        var diagnostics = JsonSerializer.SerializeToElement(session.Diagnostics);
+                        snapshots.Add(new { hex, events = Volatile.Read(ref events), rtcp = diagnostics.GetProperty("rtcp").Clone(), failed = session.Failed });
+                    }
+                } finally { session.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+                return new { ok = true, started = true, seeded = seeded.IsSet, snapshots };
+            }
             case "parse": {
                 byte[] bytes=Convert.FromHexString(input.GetProperty("hex").GetString());
                 bool ok=RTCPCompoundPacket.TryParse(bytes.AsSpan(),out var value,out int consumed);

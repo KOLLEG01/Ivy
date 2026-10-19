@@ -60,8 +60,8 @@ pub struct RtcpSenderInfo {
     pub octet_count: u32,
 }
 
-/// One report origin and its original call's CNAME. UTF-8 is truncated at a
-/// character boundary to 255 bytes, matching the original outbound writer.
+/// One report origin and its original call's CNAME. Preserve the original
+/// 255-byte UTF-16 prefix, including replacement of a split surrogate pair.
 pub struct RtcpReportBuilder {
     source: u32,
     cname: String,
@@ -73,7 +73,7 @@ impl RtcpReportBuilder {
         }
         Ok(Self {
             source,
-            cname: bounded_text(cname).into(),
+            cname: bounded_text(cname),
         })
     }
     pub fn source(&self) -> u32 {
@@ -144,7 +144,8 @@ impl RtcpReportBuilder {
         bytes
     }
     pub fn bye_packet(&self, reason: &str) -> Vec<u8> {
-        let reason = bounded_text(reason).as_bytes();
+        let bounded = bounded_text(reason);
+        let reason = bounded.as_bytes();
         let size = if reason.is_empty() {
             8
         } else {
@@ -161,12 +162,21 @@ impl RtcpReportBuilder {
         bytes
     }
 }
-fn bounded_text(text: &str) -> &str {
-    let mut length = text.len().min(255);
-    while !text.is_char_boundary(length) {
-        length -= 1;
+fn bounded_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len().min(255));
+    for value in text.chars() {
+        if output.len() + value.len_utf8() <= 255 {
+            output.push(value);
+        } else {
+            // The sealed writer bounds a UTF-16 prefix. Three remaining bytes
+            // admit the high surrogate's UTF-8 replacement, but not its pair.
+            if value.len_utf16() == 2 && output.len() == 252 {
+                output.push('\u{fffd}');
+            }
+            break;
+        }
     }
-    &text[..length]
+    output
 }
 fn word(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_be_bytes());

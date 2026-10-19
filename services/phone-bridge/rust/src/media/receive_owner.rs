@@ -3,8 +3,8 @@
 use super::receive_analysis::ReceiveAnalysis;
 use super::{
     AudioFormat, AudioNegotiation, CodecError, EvsLibrary, MediaCodec, MediaError, PcmAudioPort,
-    PcmAudioState, RtpAudioPacket, RtpDatagramSink, RtpPacket, RtpPeer, RtpReceiveQueue,
-    RtpReceiveStatus, RtpTransport, RtpTransportError, RtpTransportObservation,
+    PcmAudioState, RtcpCompound, RtpAudioPacket, RtpDatagramSink, RtpPacket, RtpPeer,
+    RtpReceiveQueue, RtpReceiveStatus, RtpTransport, RtpTransportError, RtpTransportObservation,
 };
 use crate::dtmf::{InputSource, RtpEventTracker, rtp_event_digit};
 use std::{
@@ -49,7 +49,8 @@ pub trait SipReceiveEvents: Send + Sync + 'static {
     fn digit(&self, digit: char, source: InputSource);
     fn failed(&self);
     /// Original negotiated RTCP channel, independent of the PCM permit. The
-    /// call's report owner parses and counts this compound before publication.
+    /// whole datagram has validated. The call still owns stream/report-event
+    /// admission, counting, time and projection; raw control is not that event.
     fn rtcp(&self, source: SocketAddr, compound: &[u8]);
 }
 
@@ -297,6 +298,9 @@ impl RtpDatagramSink for Sink {
     }
     fn rtcp(&self, source: SocketAddr, compound: &[u8]) {
         if let Some(inner) = self.0.upgrade() {
+            if RtcpCompound::parse(compound).is_err() {
+                return;
+            }
             let accepted = {
                 let state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
                 !inner.closed.load(Ordering::Acquire)

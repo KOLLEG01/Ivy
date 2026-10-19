@@ -13,6 +13,7 @@ mod receive_owner;
 mod resample;
 mod rtp;
 mod rtcp;
+mod rtcp_receive;
 mod send_clock;
 mod sdp;
 mod startup;
@@ -24,6 +25,9 @@ pub use receive_owner::{ReceiveError, SipReceiveEvents, SipReceiveObservation, S
 pub use resample::PcmResampler;
 pub use rtp::{RtpAudioPacket, RtpReceiveQueue, RtpReceiveStatus};
 pub use rtcp::{RtcpReportBlock, RtcpReportBuilder, RtcpSenderInfo, RtcpTransmitCounters};
+pub use rtcp_receive::{
+    RtcpBye, RtcpCompound, RtcpReceiverReport, RtcpReportBlocks, RtcpSenderReport,
+};
 pub use send_clock::RtpSendClock;
 pub use sdp::{
     SDP_UNITS, SdpConnection, SdpDirection, SdpDocument, SdpError, SdpFormat, SdpMedia,
