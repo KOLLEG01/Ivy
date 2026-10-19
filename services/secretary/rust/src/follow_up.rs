@@ -282,19 +282,36 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             "Only an admitted Main or Voice caller may request a Secretary follow-up.",
         ))
     }
-    fn context(&self, name: &str, request: &IvyJson) -> IvyResult<Option<Document>> {
+    fn context(&self, saved: &Document) -> IvyResult<Option<Document>> {
         let journal = self.engine.evidence.store.journal;
-        match journal.named(CONTEXT_KEY, name, true)? {
-            Some(saved) => Ok(Some(saved)),
-            None => journal.named(CONTEXT_KEY, &sql_name(&text(request, "itemId")?), true),
+        if let Some(id) = saved
+            .value
+            .get("contextObjectId")
+            .filter(|id| !id.is_null())
+        {
+            return match journal.read(CONTEXT_KEY, &id.as_str()?, None, true) {
+                Ok(context) => Ok(Some(context)),
+                Err(error) if error.code == "not_found" => Ok(None),
+                Err(error) => Err(error),
+            };
         }
+        journal.named(
+            CONTEXT_KEY,
+            &sql_name(&text(saved.value.required("request")?, "itemId")?),
+            true,
+        )
     }
-    async fn new_context(&self, request: &IvyJson, name: &str) -> IvyResult<IvyJson> {
+    async fn new_context(
+        &self,
+        request: &IvyJson,
+        name: &str,
+        retained: Option<Document>,
+    ) -> IvyResult<Document> {
         let engine = self.engine;
         let evidence = engine.evidence;
         let store = evidence.store;
         let journal = store.journal;
-        let mut saved = match self.context(name, request)? {
+        let mut saved = match retained {
             Some(saved) => saved,
             None => {
                 let id = request.required("itemId")?;
@@ -421,7 +438,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             }
         };
         if truthy(field(&saved.value, "threadId")) {
-            return Ok(saved.value);
+            return Ok(saved);
         }
         let owner = self.owner(saved.value.required("target")?)?;
         // Legacy pending starts are converted by the explicit one-time importer.
@@ -468,7 +485,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         next.insert("start", IvyJson::Null);
         next.insert("createdFor", IvyJson::Null);
         saved = journal.amend_technical(CONTEXT_KEY, &saved.pin, &next)?;
-        Ok(saved.value)
+        Ok(saved)
     }
     fn result(value: &IvyJson) -> IvyResult<IvyJson> {
         let request = value.required("request")?;
@@ -648,7 +665,7 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
         let evidence = engine.evidence;
         let journal = evidence.store.journal;
         let request = saved.value.required("request")?.clone();
-        let retained = self.context(name, &request)?;
+        let retained = self.context(saved)?;
         let available = retained.as_ref().is_some_and(|r| {
             field(&r.value, "expiresAt")
                 .as_f64()
@@ -668,10 +685,12 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
                 journal.delete_technical(CONTEXT_KEY, &retained.pin.object_id)?;
             }
         }
-        let context = match retained.filter(|r| available && truthy(field(&r.value, "threadId"))) {
-            Some(retained) => retained.value,
-            None => self.new_context(&request, name).await?,
+        let context = match retained.filter(|_| available) {
+            Some(retained) if truthy(field(&retained.value, "threadId")) => retained,
+            retained => self.new_context(&request, name, retained).await?,
         };
+        let context_id = context.pin.object_id;
+        let context = context.value;
         need(
             context.get("itemId") == request.get("itemId"),
             "secretary_follow_up_context_missing",
@@ -692,6 +711,9 @@ impl<'a, 'engine, 'journal> SecretaryFollowUp<'a, 'engine, 'journal> {
             )?;
             let mut next = saved.value.clone();
             next.insert("threadId", IvyJson::String(thread_id.clone()));
+            if saved.value.get("contextObjectId").is_some() {
+                next.insert("contextObjectId", context_id.into());
+            }
             next.insert("expiresAt", context.required("expiresAt")?.clone());
             *saved = journal.amend_technical(FOLLOW_UP_KEY, &saved.pin, &next)?;
         }

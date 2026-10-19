@@ -4,7 +4,7 @@ use ivy_sdk::clock::Clock;
 use ivy_secretary::{
     engine::SecretaryEngine,
     follow_up::{SecretaryFollowUp, follow_up_prompt},
-    follow_up_import::import_pending_context,
+    follow_up_import::{import_context_link, import_pending_context},
     inbox_evidence::InboxEvidence,
     inbox_recovery::RecoveryScan,
     journal::{Journal, Limits},
@@ -101,7 +101,7 @@ async fn original_follow_up_contexts_calls_recovery_and_authorization() {
     )
     .unwrap();
     let rows = corpus.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 106);
+    assert_eq!(rows.len(), 109);
     for row in rows {
         let input = row.required("input").unwrap();
         let label = sql_text(input.required("label").unwrap());
@@ -276,7 +276,16 @@ async fn original_follow_up_contexts_calls_recovery_and_authorization() {
                 "run" => worker.run(args, &who).await,
                 "read" => worker.read(&js_text(operation_id), &who).await,
                 "advance" => worker.advance(&selected_name).await.map(|_| IvyJson::Null),
+                "importLinkAndAdvance" => {
+                    import_context_link(&journal, &selected_name)
+                        .unwrap()
+                        .unwrap();
+                    worker.advance(&selected_name).await.map(|_| IvyJson::Null)
+                }
                 "importAndAdvance" => {
+                    import_context_link(&journal, &selected_name)
+                        .unwrap()
+                        .unwrap();
                     let imported = import_pending_context(&worker, &selected_name)
                         .await
                         .unwrap()

@@ -284,6 +284,100 @@ fn unknown_and_reachable_technical_work_is_not_evicted_for_space() {
 }
 
 #[test]
+fn current_checkpoint_completion_and_acknowledgements_commit_atomically() {
+    let journal = memory(Limits::default());
+    let accepted = journal
+        .create_local(
+            "secretary/operation",
+            "checkpoint",
+            &operation(8, "checkpoint", "accepted"),
+            1,
+        )
+        .unwrap();
+    let mut completed = operation(8, "checkpoint", "succeeded");
+    completed.insert(
+        "checkpointCaptures",
+        IvyJson::Array(
+            ["first", "refuse"]
+                .into_iter()
+                .map(|id| {
+                    IvyJson::object([
+                        ("objectId", IvyJson::from(id)),
+                        ("revision", IvyJson::Number(2.0)),
+                    ])
+                })
+                .collect(),
+        ),
+    );
+    journal.db.execute_batch("CREATE TRIGGER refuse_checkpoint_ack BEFORE INSERT ON capture_acknowledgements WHEN NEW.capture_id='refuse' BEGIN SELECT RAISE(ABORT,'fixture acknowledgement refusal'); END;").unwrap();
+    assert_eq!(
+        journal
+            .amend_local("secretary/operation", &accepted, &completed, 2)
+            .unwrap_err()
+            .code,
+        "storage_unavailable"
+    );
+    assert_eq!(
+        journal
+            .read("secretary/operation", &accepted.object_id, None, false)
+            .unwrap()
+            .pin,
+        accepted
+    );
+    assert_eq!(
+        journal
+            .db
+            .query_row("SELECT COUNT(*) FROM capture_acknowledgements", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        journal
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM revisions WHERE id=?",
+                [&accepted.object_id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    journal
+        .db
+        .execute_batch("DROP TRIGGER refuse_checkpoint_ack")
+        .unwrap();
+    let saved = journal
+        .amend_local("secretary/operation", &accepted, &completed, 2)
+        .unwrap();
+    assert_eq!(saved.revision, 2);
+    assert_eq!(
+        journal
+            .db
+            .query_row("SELECT COUNT(*) FROM capture_acknowledgements", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        journal
+            .amend_local("secretary/operation", &accepted, &completed, 3)
+            .unwrap_err()
+            .code,
+        "revision_conflict"
+    );
+    assert_eq!(
+        journal
+            .read("secretary/operation", &saved.object_id, None, false)
+            .unwrap()
+            .pin,
+        saved
+    );
+}
+
+#[test]
 fn fallible_receipt_inspection_rolls_back_prior_cleanup_and_fences() {
     for technical in [false, true] {
         let mut journal = memory(Limits::default());

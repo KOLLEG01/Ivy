@@ -15,7 +15,3 @@ PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TRIGGER IF NOT EXISTS retired_technical_operation_insert BEFORE INSERT ON technical_documents
         WHEN EXISTS(SELECT 1 FROM retired_operations WHERE operation_id=COALESCE(json_extract(NEW.value_json,'$.operationId'),json_extract(NEW.value_json,'$.request.operationId')))
         BEGIN SELECT RAISE(ABORT,'operation_expired'); END;
-      INSERT OR IGNORE INTO capture_acknowledgements SELECT json_extract(c.value,'$.objectId')
-        FROM documents d,json_each(d.value_json,'$.checkpointCaptures') c
-        WHERE d.key='secretary/operation' AND json_extract(d.value_json,'$.action')='checkpoint'
-          AND json_extract(d.value_json,'$.phase')='succeeded';

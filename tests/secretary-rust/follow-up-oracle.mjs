@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {schemaSamples} from '../fixtures/schema-samples.mjs';
 import {load,settings,owner,rootId,itemId,item,source,sourceId,at} from './inbox-fixtures.mjs';
+import {importContextLink,useCurrentFollowUpContexts} from './follow-up-import-reference.mjs';
 const {SecretaryFollowUp,followUpPrompt}=await load('services/secretary/src/follow-up.js');
 const {SecretaryEngine,sourceName}=await load('services/secretary/src/engine.js');
 const {SecretaryStore}=await load('services/secretary/src/store.js');
@@ -29,7 +30,7 @@ async function add(label,c={}){
  const context={...structuredClone(baseContext),...c.context};
  const record={request,callerPrincipalId:caller,threadId:null,turnId:null,phase:'prepared',calls:null,answer:null,errorCode:null,expiresAt:time+90*86400000,...c.saved};
  const documents=[];
- if(!c.newContext)documents.push({id:'context',key:contextKey,name:c.namedContext?name:request.itemId,value:context});
+ if(!c.newContext)documents.push({id:'context',key:contextKey,name:c.contextName??(c.namedContext?name:request.itemId),value:context});
  if(c.preparedContext){const method='thread/start',params={cwd:'/original',projectId:'original-project',permissions:':read-only',approvalPolicy:'never'};documents[0].value={...context,threadId:null,start:{operationId:deriveOperationId(request.operationId,'start-secretary-follow-up-context'),method,params,definitionHash:digest('b')},createdFor:name};}
  if(c.legacy)documents[0]={id:'context',key:contextKey,name,value:{...context,threadId:''}};
  if(c.saved)documents.push({id:'question',key,name,value:record});
@@ -92,7 +93,8 @@ async function add(label,c={}){
  const issues=new Map(c.issues??[]);
  let clockCalls=0;
  const engine=Object.assign(Object.create(SecretaryEngine.prototype),{client,store,settings:config,owner:{serviceNodeId:'fixture.secretary'},signal:control.signal,now:()=>new Date((c.time??time)+(clockCalls++)*(c.clockStep??0)),epoch:Promise.resolve('fixture-epoch'),recoveryIssues:issues});
- const worker=new SecretaryFollowUp(engine),actions=c.actions??[{method:'run'},{method:c.legacy?'importAndAdvance':'advance'},{method:'read'}];
+ const worker=new SecretaryFollowUp(engine),actions=c.actions??[{method:'run'},{method:c.legacy?'importAndAdvance':c.namedContext?'importLinkAndAdvance':'advance'},{method:'read'}];
+ useCurrentFollowUpContexts(worker);
  const results=[];
  for(const action of actions){
   try{
@@ -101,7 +103,10 @@ async function add(label,c={}){
    else if(action.method==='read')value=await worker.read(operationId,who);
    else if(action.method==='tick')value=await worker.tick();
    else if(action.method==='prompt')value=followUpPrompt(args.itemId,args.question);
-   else if(action.method==='advance'||action.method==='importAndAdvance')value=await worker.advance(action.name??name);
+   else if(['importAndAdvance','importLinkAndAdvance'].includes(action.method)){
+    const selected=action.name??name;importContextLink(store,selected);value=await worker.advance(selected);
+   }
+   else if(action.method==='advance')value=await worker.advance(action.name??name);
    else assert.fail(action.method);
    results.push({value:value??null});
   }catch(cause){const e=IvyError.from(cause);results.push({code:e.code,message:e.message,outcome:e.outcome});}
@@ -117,6 +122,9 @@ await add('context-uses-one-retention-clock',{newContext:true,clockStep:37});
 await add('prepared-context',{preparedContext:true});
 await add('explicit-legacy-import',{legacy:true});
 await add('named-context',{namedContext:true});
+await add('ordinary-worker-ignores-request-context',{namedContext:true,actions:[{method:'run'},{method:'advance'},{method:'read'}]});
+await add('current-link-survives-context-name-change',{contextName:'retained-name',saved:{contextObjectId:'context'},extra:[{id:'old-name-decoy',key:contextKey,name:'follow-up-'+principal+'-'+id,value:{...baseContext,threadId:'wrong-thread',target:{...target,serviceNodeId:'wrong-target'}}}]});
+await add('missing-current-link-refuses-shared-decoy',{saved:{contextObjectId:'absent-original',threadId:'context-thread',turnId:'original-turn',phase:'running'}});
 for(const model of [null,'','original-model'])await add('model-'+model,{context:{model}});
 for(const phase of ['prepared','running','outcome_unknown','succeeded','failed'])await add('saved-'+phase,{saved:{phase},actions:[{method:'run'},{method:'advance'},{method:'read'}]});
 await add('replay-expired-id',{saved:{},request:{operationId:'other:1:expired'},expiredBefore:wall});

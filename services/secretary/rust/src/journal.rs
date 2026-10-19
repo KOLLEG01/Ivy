@@ -14,6 +14,7 @@ use std::{collections::HashSet, path::Path, time::Duration};
 
 #[path = "journal_import.rs"]
 mod import;
+pub use import::ImportedCaptureAcknowledgements;
 
 const FRAME: usize = 33_554_432;
 const SOURCE: &str = "secretary/source";

@@ -102,6 +102,8 @@ mod generation_cases;
 mod inbox_evidence_cases;
 #[path = "inbox_recovery_cases.rs"]
 mod inbox_recovery_cases;
+#[path = "journal_import_cases.rs"]
+mod journal_import_cases;
 #[path = "notice_evidence_cases.rs"]
 mod notice_evidence_cases;
 #[path = "notice_scan_cases.rs"]
