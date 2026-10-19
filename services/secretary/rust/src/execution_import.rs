@@ -41,12 +41,12 @@ pub async fn import_execution_delivery(
 ) -> IvyResult<ImportedExecution> {
     evidence.verify_owner().await?;
     let store = evidence.store;
-    let before = store
-        .read(
-            Record::Execution,
-            execution.required("pin")?.required("objectId")?,
-        )
-        .await?;
+    let before = crate::import_record::read(
+        store,
+        Record::Execution,
+        execution.required("pin")?.required("objectId")?,
+    )
+    .await?;
     let value = before.required("value")?;
     if value.get("executionId") != execution.required("value")?.get("executionId") {
         return Err(IvyError::new(
@@ -100,7 +100,7 @@ pub async fn import_execution_delivery(
     }
     // The Store validates the combined execution at its write boundary. An
     // invalid later mapping cannot leave an earlier mapping half imported.
-    let after = store.amend(&before, Record::Execution, &next).await?;
+    let after = crate::import_record::amend(store, &before, Record::Execution, &next).await?;
     Ok(ImportedExecution {
         before,
         after,

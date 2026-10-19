@@ -10,7 +10,7 @@ use crate::{
     execution_import::import_execution_delivery,
     follow_up::SecretaryFollowUp,
     follow_up_import::{import_context_link, import_pending_context},
-    import_rpc,
+    import_archive, import_record, import_rpc,
     import_state::{self, RUN},
     inbox_evidence::InboxEvidence,
     inbox_recovery::RecoveryScan,
@@ -57,22 +57,22 @@ pub struct ImportProgress {
     pub complete: bool,
     pub advanced: bool,
 }
-fn failure(message: &str) -> IvyError {
+pub(crate) fn failure(message: &str) -> IvyError {
     IvyError::new("secretary_import_incomplete", message)
 }
-fn pin(document: &Document) -> IvyJson {
+pub(crate) fn pin(document: &Document) -> IvyJson {
     IvyJson::object([
         ("objectId", document.pin.object_id.clone().into()),
         ("revision", IvyJson::Number(document.pin.revision as f64)),
     ])
 }
-fn map_prefix(state: &IvyJson) -> IvyResult<String> {
+pub(crate) fn map_prefix(state: &IvyJson) -> IvyResult<String> {
     Ok(format!(
         "secretary/import/map/{}/",
         &hash_json(state.required("operationId")?)?[7..]
     ))
 }
-fn source_local(source: &Connection, id: &str) -> IvyResult<IvyJson> {
+pub(crate) fn source_local(source: &Connection, id: &str) -> IvyResult<IvyJson> {
     let row: Option<(String, String, i64, String)> = source
         .query_row(
             "SELECT key,name,current_revision,value_json FROM technical_documents WHERE id=?",
@@ -97,14 +97,21 @@ fn source_local(source: &Connection, id: &str) -> IvyResult<IvyJson> {
         ("rawHash", digest(json.as_bytes()).into()),
     ]))
 }
-fn mapped(ctx: &ImportContext<'_>, state: &IvyJson, id: &str, target: IvyJson) -> IvyResult<()> {
+pub(crate) fn mapped(
+    ctx: &ImportContext<'_>,
+    state: &IvyJson,
+    id: &str,
+    target: IvyJson,
+) -> IvyResult<()> {
     let key = format!("{}{}", map_prefix(state)?, id);
     let source = source_local(ctx.source, id)?;
-    import_state::save(
-        ctx.journal,
-        &key,
-        &IvyJson::object([("source", source), ("target", target)]),
-    )
+    let mut saved = import_state::read(ctx.journal, &key)?
+        .unwrap_or_else(|| IvyJson::object([("source", source.clone())]));
+    if saved.get("source") != Some(&source) {
+        return Err(failure("The sealed source mapping changed."));
+    }
+    saved.insert("target", target);
+    import_state::save(ctx.journal, &key, &saved)
 }
 fn local_page(
     journal: &Journal,
@@ -147,7 +154,7 @@ async fn query(
 ) -> IvyResult<IvyJson> {
     let mut request = IvyJson::object([
         ("contractKey", key.key().into()),
-        ("includeArchived", (key == Record::Assignment).into()),
+        ("includeArchived", true.into()),
         ("limit", IvyJson::Number(ctx.page_size as f64)),
         (
             "where",
@@ -252,6 +259,20 @@ async fn page(
     let stage = state.required("stage")?.as_str()?;
     let after = cursor(state)?;
     match stage.as_str() {
+        "history-heads" => {
+            if let Some(next) = import_archive::heads(ctx, state, after.as_deref())? {
+                advance(state, "history-heads", Some(next.into()));
+            } else {
+                advance(state, "history", None);
+            }
+        }
+        "history" => {
+            if let Some(next) = import_archive::history(ctx, state)? {
+                advance(state, "history", Some(next.into()));
+            } else {
+                advance(state, "follow-up", None);
+            }
+        }
         "follow-up" => {
             let issues = RefCell::new(RecoveryScan::default());
             let engine = SecretaryEngine::new(
@@ -280,6 +301,7 @@ async fn page(
                     IvyJson::object([
                         ("kind", "context-link".into()),
                         ("pin", pin(&link.after)),
+                        ("hash", hash_json(&link.after.value)?.into()),
                         (
                             "contextObjectId",
                             link.after.value.required("contextObjectId")?.clone(),
@@ -347,6 +369,7 @@ async fn page(
                 }
                 if assignments {
                     if values.get("object.effectivelyArchived") == Some(&true.into()) {
+                        import_archive::archived_assignment(ctx, state, &scheduler, row).await?;
                         if let Some(imported) = import_event_subscription(
                             &scheduler,
                             SubscriptionAssignment::Archived(row),
@@ -462,9 +485,9 @@ async fn page(
                         }
                     }
                 } else {
-                    let selected = store
-                        .read(Record::Execution, row.required("objectId")?)
-                        .await?;
+                    let selected =
+                        import_record::read(&store, Record::Execution, row.required("objectId")?)
+                            .await?;
                     let id = selected
                         .required("value")?
                         .required("executionId")?
@@ -547,6 +570,38 @@ async fn page(
                     Some(rows[ctx.page_size - 1].0.clone().into()),
                 );
             } else {
+                advance(state, "reference-documents", None);
+            }
+        }
+        "reference-documents" | "reference-technical" => {
+            let technical = stage == "reference-technical";
+            if let Some(next) = import_archive::references(ctx, state, technical, after.as_deref())?
+            {
+                advance(state, &stage, Some(next.into()));
+            } else {
+                advance(
+                    state,
+                    if technical {
+                        "archive"
+                    } else {
+                        "reference-technical"
+                    },
+                    None,
+                );
+            }
+        }
+        "archive" => {
+            let (rows, more) = local_page(journal, None, after.as_deref(), ctx.page_size)?;
+            for row in &rows {
+                import_archive::archive(ctx, state, &evidence, row).await?;
+            }
+            if more {
+                advance(
+                    state,
+                    "archive",
+                    Some(rows.last().unwrap().pin.object_id.clone().into()),
+                );
+            } else {
                 advance(state, "verify-local", None);
             }
         }
@@ -575,7 +630,7 @@ async fn page(
                         journal,
                         &format!("{}{}", map_prefix(state)?, row.pin.object_id),
                     )?
-                    .is_none()
+                    .is_none_or(|map| map.get("archive").is_none())
                 {
                     return Err(failure(
                         "A retained legacy record has no verified target mapping; its original history remains intact.",

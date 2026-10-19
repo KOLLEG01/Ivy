@@ -351,7 +351,7 @@ pub fn prepare(
         ("operationId", IvyJson::String(operation.clone())),
         ("source", source),
         ("at", IvyJson::Number(now as f64)),
-        ("stage", "follow-up".into()),
+        ("stage", "history-heads".into()),
         ("cursor", IvyJson::Null),
     ]);
     save(&journal, RUN, &state)?;

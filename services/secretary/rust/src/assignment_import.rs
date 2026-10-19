@@ -1,9 +1,13 @@
 //! One-time schedule and subscription conversion. Call only while the selected
 //! journal's normal workers are stopped. Original local records stay readable.
 use crate::{
-    assignment_events::EventScan, assignment_progress::written_at,
-    assignment_scheduler::AssignmentScheduler, assignment_schema::assignment_name,
-    inbox_recovery::{RecoveryIssues, RecoveryScan}, journal::Document, store::Record,
+    assignment_events::EventScan,
+    assignment_progress::written_at,
+    assignment_scheduler::AssignmentScheduler,
+    assignment_schema::assignment_name,
+    inbox_recovery::{RecoveryIssues, RecoveryScan},
+    journal::Document,
+    store::Record,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
@@ -61,12 +65,12 @@ pub async fn import_schedule_progress(
     let evidence = scheduler.evidence;
     evidence.verify_owner().await?;
     let store = evidence.store;
-    let latest = store
-        .read(
-            Record::Assignment,
-            assignment.required("pin")?.required("objectId")?,
-        )
-        .await?;
+    let latest = crate::import_record::read(
+        store,
+        Record::Assignment,
+        assignment.required("pin")?.required("objectId")?,
+    )
+    .await?;
     let value = latest.required("value")?;
     let id = text(value, "assignmentId")?;
     identity(
@@ -94,7 +98,7 @@ pub async fn import_schedule_progress(
         let original = if current {
             latest.clone()
         } else {
-            store.original(Record::Assignment, &latest).await?
+            crate::import_record::original(store, Record::Assignment, &latest).await?
         };
         let checked_at =
             if current || latest.required("pin")?.get("revision") == Some(&IvyJson::Number(1.0)) {
@@ -149,12 +153,12 @@ pub async fn import_event_gap(
 ) -> IvyResult<Option<ImportedEventGap>> {
     scheduler.evidence.verify_owner().await?;
     let store = scheduler.evidence.store;
-    let latest = store
-        .read(
-            Record::Assignment,
-            assignment.required("pin")?.required("objectId")?,
-        )
-        .await?;
+    let latest = crate::import_record::read(
+        store,
+        Record::Assignment,
+        assignment.required("pin")?.required("objectId")?,
+    )
+    .await?;
     let id = text(latest.required("value")?, "assignmentId")?;
     identity(
         Some(id)
@@ -185,7 +189,7 @@ pub async fn import_event_gap(
             RequestOptions::default(),
         )
         .await?;
-    let original = store.original(Record::Assignment, &latest).await?;
+    let original = crate::import_record::original(store, Record::Assignment, &latest).await?;
     let written = written_at(&original, "createdAt").map_err(IvyError::from)?;
     let before_assignment = first.get("gap").is_none_or(IvyJson::is_null)
         && first

@@ -37,6 +37,8 @@ pub mod generation;
 pub mod journal;
 pub mod import_state;
 mod import_rpc;
+mod import_record;
+mod import_archive;
 pub mod retained_import;
 pub mod import_command;
 pub mod media_input;

@@ -15,6 +15,7 @@ const ajv=new Ajv2020({strict:false,validateFormats:false,ownProperties:true});a
 const sample=name=>JSON.parse(schemaSamples(ajv,[schema]).find(r=>r.valid&&r.reference.endsWith('#/$defs/'+name)).input);
 const assignment={...sample('Assignment'),assignmentId:'retained-assignment',rules:{},enabled:true,trigger:{kind:'schedule',cadence:'interval',timeZone:'UTC',intervalMinutes:60,localTime:null,weekdays:[]},createdAt:at,updatedAt:at};
 const assignmentId='00000000-0000-4000-8000-000000000003',archiveId='00000000-0000-4000-8000-000000000004',configurationId='00000000-0000-4000-8000-000000000099';
+const archivedAssignment='archived\ud800';
 const execution={...sample('Execution'),assignment:{objectId:assignmentId,revision:1},assignmentSnapshot:assignment};
 execution.executionId=hashJson([assignment.assignmentId,execution.trigger.key]);execution.result=JSON.stringify({schemaVersion:1,urgency:'critical',notification:'voice',text:'retained notice',reason:'original'});delete execution.delivery;delete execution.voice;
 const target={serviceNodeId:'fixture.agent',threadCwd:'/workspace',model:null,effort:'medium',permissions:':read-only'},configuration=defaultConfiguration(settings,at,target);
@@ -29,7 +30,9 @@ const source=new SecretaryStore({},rootId,location);seedRetainedValues(source);
 for(const [id,key,name,value] of [
  ['schedule','secretary/schedule-cursor',assignment.assignmentId,{updatedAt:at,checkedAt:at}],
  ['subscription','secretary/event-subscription',assignment.assignmentId,{name:'obsolete-active'}],
- ['archived-subscription','secretary/event-subscription','archived',{name:'obsolete-archived'}],
+ ['archived-subscription','secretary/event-subscription',archivedAssignment,{name:'obsolete-archived'}],
+ ['archived-schedule','secretary/schedule-cursor',archivedAssignment,{updatedAt:at,checkedAt:at}],
+ ['archived-gap','secretary/event-gap',archivedAssignment,{prunedThroughSequence:0}],
  ['gap','secretary/event-gap',assignment.assignmentId,{prunedThroughSequence:0}],
  ['main','secretary/assignment-handoff',execution.executionId,main],
  ['voice','secretary/assignment-voice',execution.executionId,voice],
@@ -49,12 +52,12 @@ const before=snapshot(source.db);source.close();
 const bytes=readFileSync(join(location,'secretary.sqlite'));
 const initial=[
  [assignmentId,{key:'secretary/assignment',name:assignmentName(assignment.assignmentId),versions:[{revision:1,value:assignment}]}],
- [archiveId,{key:'secretary/assignment',name:assignmentName('archived'),archived:true,versions:[{revision:1,value:{...assignment,assignmentId:'archived'}}]}],
+ [archiveId,{key:'secretary/assignment',name:assignmentName(archivedAssignment),archived:true,versions:[{revision:1,value:{...assignment,assignmentId:archivedAssignment}}]}],
  [itemId,{key:'secretary/execution',name:executionName(assignment.assignmentId,execution.trigger.key),versions:[{revision:1,value:{...execution,phase:'queued'}},{revision:2,value:execution}]}],
  [configurationId,{key:'secretary/configuration',name:'configuration',versions:[{revision:1,value:configuration}]}],
 ];
 let records,cached,expired,trace,options,epoch,counter,fired;
-function reset(value={}){records=new Map(structuredClone(initial));cached=new Map();expired=new Set();trace=[];options=value;epoch=0;counter=20;fired=false;}
+function reset(value={}){records=new Map(structuredClone(initial));cached=new Map();expired=new Set();trace=[];options=value;epoch=0;counter=20;fired=false;if(options.archivedExecution)records.get(itemId).archived=true;if(options.shadowedVoice)records.get(itemId).versions.at(-1).value.voice={...voice,request:{...voice.request,operationId:'current-voice-operation'}};if(options.missingExecution)records.delete(itemId);}
 reset();
 function raw(id,revision){
  const r=records.get(id);assert(r,'Missing fixture object '+id);const v=revision?r.versions.find(v=>v.revision===revision):r.versions.at(-1);assert(v);
@@ -66,6 +69,7 @@ const matches=(id,r,where)=>where.op==='and'?where.args.every(w=>matches(id,r,w)
 async function request(method,p){
  if(method==='fixture.reset'){reset(p);return{};}
  if(method==='fixture.resume'){epoch++;if(p.expire)for(const id of cached.keys())expired.add(id);return{};}
+ if(method==='fixture.changeTarget'){const record=records.get(itemId),value=structuredClone(record.versions.at(-1).value);value.delivery.operationId='changed-original-operation';record.versions.push({revision:record.versions.length+1,value});return{};}
  if(method==='fixture.state')return{trace,records:[...records],cached:[...cached.keys()]};
  trace.push({method,params:structuredClone(p)});
  if(method==='service.connect')return{generation:7};if(method==='registry.sync')return{};if(method==='service.heartbeat')return{ready:false};

@@ -100,7 +100,7 @@ fn retained_admission_requires_sealed_backup_original_identity_and_completed_imp
     )
     .unwrap();
     let state = prepared.state.as_ref().unwrap();
-    assert_eq!(state.get("stage"), Some(&"follow-up".into()));
+    assert_eq!(state.get("stage"), Some(&"history-heads".into()));
     assert!(!import_state::current(&prepared.journal, &original).unwrap());
     let name = state
         .required("source")

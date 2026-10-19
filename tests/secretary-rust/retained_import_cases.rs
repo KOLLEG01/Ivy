@@ -63,7 +63,29 @@ async fn request(client: &ServiceConnection, method: &str, params: IvyJson) -> I
         .await
         .unwrap()
 }
-fn retained(before: &IvyJson, after: &IvyJson) {
+fn source_map<'a>(receipts: &'a IvyJson, id_hex: &str) -> &'a IvyJson {
+    receipts
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r.get("value"))
+        .find(|m| {
+            m.get("source")
+                .and_then(|s| s.get("pin"))
+                .and_then(|p| p.get("objectId"))
+                .and_then(|v| v.as_str().ok())
+                .is_some_and(|id| {
+                    id.as_bytes()
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<String>()
+                        == id_hex
+                })
+        })
+        .expect("Every archived original must have its sealed source mapping")
+}
+fn retained(before: &IvyJson, after: &IvyJson, receipts: &IvyJson) {
+    let mut missing = std::collections::HashMap::<String, usize>::new();
     for row in before.required("schema").unwrap().as_array().unwrap() {
         assert!(
             after
@@ -92,14 +114,29 @@ fn retained(before: &IvyJson, after: &IvyJson) {
                 let current = rows
                     .iter()
                     .find(|r| r.as_array().unwrap()[3] == original[3])
-                    .unwrap()
-                    .as_array()
-                    .unwrap();
-                assert_eq!(
-                    &original[..8],
-                    &current[..8],
-                    "Original local ID/key/name changed"
-                );
+                    .map(|r| r.as_array().unwrap());
+                if let Some(current) = current {
+                    assert_eq!(
+                        &original[..8],
+                        &current[..8],
+                        "Original local ID/key/name changed"
+                    );
+                } else {
+                    assert_eq!(
+                        source_map(receipts, &original[3].as_str().unwrap())
+                            .required("archive")
+                            .unwrap()
+                            .get("mode"),
+                        Some(&"sealed-source".into()),
+                        "Only mapped obsolete heads may leave the working quota"
+                    );
+                }
+            } else if table.get("name") == Some(&"technical_revisions".into())
+                && !rows.contains(row)
+            {
+                *missing
+                    .entry(row.as_array().unwrap()[3].as_str().unwrap())
+                    .or_default() += 1;
             } else {
                 assert!(
                     rows.contains(row),
@@ -109,6 +146,19 @@ fn retained(before: &IvyJson, after: &IvyJson) {
             }
         }
     }
+    for (id, count) in missing {
+        assert!(
+            source_map(receipts, &id)
+                .required("history")
+                .unwrap()
+                .required("count")
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                >= count as f64,
+            "Each removed raw revision remains in the sealed source and its transaction receipt"
+        );
+    }
 }
 async fn attempt(
     path: &Path,
@@ -117,6 +167,7 @@ async fn attempt(
     cancellation: RequestOptions,
     abort_marker: bool,
     pause_uncertain: bool,
+    control: &str,
 ) -> Attempt {
     let node: JsString = "fixture.secretary".into();
     let settings = data.required("settings").unwrap();
@@ -124,7 +175,18 @@ async fn attempt(
     let operation = "fixture:1800000000000:whole-import".into();
     let prepared = import_state::prepare(
         path,
-        Limits::default(),
+        Limits {
+            count: data
+                .get("journalCountLimit")
+                .and_then(IvyJson::as_f64)
+                .map(|v| v as i64)
+                .unwrap_or(10_000),
+            bytes: data
+                .get("journalByteLimit")
+                .and_then(IvyJson::as_f64)
+                .map(|v| v as i64)
+                .unwrap_or(256 * 1024 * 1024),
+        },
         &identity,
         &operation,
         data.required("at").unwrap().as_f64().unwrap() as i64,
@@ -157,6 +219,9 @@ async fn attempt(
     if abort_marker {
         prepared.journal.db.execute_batch("CREATE TRIGGER abort_import_marker BEFORE INSERT ON journal_state WHEN NEW.key='secretary/current-format' BEGIN SELECT RAISE(ABORT,'fixture_marker_abort'); END;").unwrap();
     }
+    if control == "archive-abort" {
+        prepared.journal.db.execute_batch("CREATE TRIGGER abort_archive BEFORE DELETE ON technical_documents WHEN OLD.id='main' BEGIN SELECT RAISE(ABORT,'fixture_archive_abort'); END;").unwrap();
+    }
     let contracts = CheckedNativeContracts::new(path.parent().unwrap().join("contracts"));
     let ctx = ImportContext {
         journal: &prepared.journal,
@@ -170,10 +235,22 @@ async fn attempt(
     };
     let mut stages = vec![];
     let mut error = None;
-    for _ in 0..100 {
+    let mut changed = false;
+    for _ in 0..200 {
         let result = step(&ctx, &mut state).await;
         match result {
             Ok(progress) => {
+                if control == "changed-target" && progress.stage == "archive" && !changed {
+                    request(client, "fixture.changeTarget", empty()).await;
+                    changed = true;
+                }
+                if control == "restart-archive"
+                    && progress.stage == "archive"
+                    && state.get("cursor").is_some_and(|v| !v.is_null())
+                {
+                    error = Some("fixture_interrupted".into());
+                    break;
+                }
                 stages.push(IvyJson::object([
                     ("stage", progress.stage.into()),
                     ("advanced", progress.advanced.into()),
@@ -221,15 +298,17 @@ async fn attempt(
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-        if saved.get("stage") == Some(&"follow-up".into()) {
+        if matches!(
+            saved.required("stage").unwrap().as_str().unwrap().as_str(),
+            "history-heads" | "history" | "follow-up" | "acknowledgements"
+        ) {
             0
         } else {
             1
         }
     );
     let snapshot = super::execution_import_cases::snapshot(&prepared.journal.db);
-    retained(data.required("before").unwrap(), &snapshot);
-    let rows = prepared
+    let rows: Vec<IvyJson> = prepared
         .journal
         .db
         .prepare(
@@ -246,6 +325,70 @@ async fn attempt(
             ])
         })
         .collect();
+    let receipts = IvyJson::Array(rows);
+    retained(data.required("before").unwrap(), &snapshot, &receipts);
+    if current {
+        let initial = data
+            .required("before")
+            .unwrap()
+            .required("tables")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("name") == Some(&"technical_revisions".into()))
+            .unwrap()
+            .required("rows")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len();
+        let active = prepared
+            .journal
+            .db
+            .query_row("SELECT COUNT(*) FROM technical_revisions", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert!(
+            active < initial as i64,
+            "Archived original histories must free the active journal budget"
+        );
+    }
+    if control == "archive-abort" {
+        assert_eq!(
+            prepared
+                .journal
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM technical_documents WHERE id='main'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert!(
+            read_state(
+                &prepared.journal,
+                &format!(
+                    "secretary/import/map/{}/main",
+                    &ivy_contracts::hash::hash_json(&IvyJson::from(
+                        "fixture:1800000000000:whole-import"
+                    ))
+                    .unwrap()[7..]
+                )
+            )
+            .unwrap()
+            .get("archive")
+            .is_none()
+        );
+        prepared
+            .journal
+            .db
+            .execute_batch("DROP TRIGGER abort_archive")
+            .unwrap();
+    }
     if abort_marker {
         prepared
             .journal
@@ -259,7 +402,7 @@ async fn attempt(
         error,
         stages,
         snapshot,
-        receipts: IvyJson::Array(rows),
+        receipts,
     }
 }
 fn writes(state: &IvyJson, method: &str) -> Vec<IvyJson> {
@@ -402,6 +545,16 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
         "cancelled",
         "orphan",
         "marker-abort",
+        "archived-execution",
+        "absent-cursor",
+        "referenced-main",
+        "quota-full",
+        "quota-bytes",
+        "changed-target",
+        "archive-abort",
+        "restart-archive",
+        "missing-execution",
+        "shadowed-voice",
     ] {
         let mut options = empty();
         match name {
@@ -423,6 +576,15 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
             "foreign-owner" => {
                 options.insert("ownerChanged", true.into());
             }
+            "archived-execution" => {
+                options.insert("archivedExecution", true.into());
+            }
+            "missing-execution" => {
+                options.insert("missingExecution", true.into());
+            }
+            "shadowed-voice" => {
+                options.insert("shadowedVoice", true.into());
+            }
             _ => {}
         }
         request(&observer, "fixture.reset", options).await;
@@ -430,6 +592,43 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
         std::fs::create_dir(&folder).unwrap();
         let path = folder.join("secretary.sqlite");
         std::fs::write(&path, &bytes).unwrap();
+        if matches!(name, "absent-cursor" | "referenced-main" | "quota-bytes") {
+            let db = ivy_store::rusqlite::Connection::open(&path).unwrap();
+            if name == "absent-cursor" {
+                let value = data
+                    .required("assignment")
+                    .unwrap()
+                    .required("createdAt")
+                    .unwrap()
+                    .clone();
+                let raw = canonical(
+                    &IvyJson::object([("updatedAt", value.clone()), ("checkedAt", value)]),
+                    1024,
+                )
+                .unwrap();
+                db.execute("INSERT INTO technical_documents VALUES('absent-cursor','secretary/schedule-cursor','unavailable-assignment',1,?)",[&raw]).unwrap();
+                db.execute(
+                    "INSERT INTO technical_revisions VALUES('absent-cursor',1,?)",
+                    [&raw],
+                )
+                .unwrap();
+            }
+            if name == "referenced-main" {
+                db.execute_batch("INSERT INTO technical_documents VALUES('live-reference','retained/unknown','references-main',1,'{\"originalId\":\"main\"}'); INSERT INTO technical_revisions VALUES('live-reference',1,'{\"originalId\":\"main\"}');").unwrap();
+            }
+            if name == "quota-bytes" {
+                let raw = canonical(
+                    &IvyJson::object([("retainedPadding", "x".repeat(262_144).into())]),
+                    1024 * 1024,
+                )
+                .unwrap();
+                db.execute(
+                    "UPDATE technical_revisions SET value_json=? WHERE id='main' AND revision=1",
+                    [raw],
+                )
+                .unwrap();
+            }
+        }
         if name == "orphan" {
             let db = ivy_store::rusqlite::Connection::open(&path).unwrap();
             db.execute("INSERT INTO technical_documents VALUES('orphan','secretary/schedule-cursor','unavailable-assignment',1,'{}')",[]).unwrap();
@@ -440,9 +639,28 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
             .unwrap();
         }
         let mut case_data = data.clone();
-        if name == "orphan" {
+        if matches!(
+            name,
+            "orphan" | "absent-cursor" | "referenced-main" | "quota-bytes"
+        ) {
             let db = ivy_store::rusqlite::Connection::open(&path).unwrap();
             case_data.insert("before", super::execution_import_cases::snapshot(&db));
+        }
+        if matches!(name, "quota-full" | "quota-bytes") {
+            let journal = ivy_secretary::journal::Journal::open(&path, Limits::default()).unwrap();
+            let usage = journal.usage().unwrap();
+            if name == "quota-full" {
+                case_data.insert("journalCountLimit", IvyJson::Number(usage.count as f64));
+            } else {
+                case_data.insert("journalByteLimit", IvyJson::Number(usage.bytes as f64));
+            }
+        }
+        if name == "shadowed-voice" {
+            let mut voice = case_data.required("voice").unwrap().clone();
+            let mut request = voice.required("request").unwrap().clone();
+            request.insert("operationId", "current-voice-operation".into());
+            voice.insert("request", request);
+            case_data.insert("voice", voice);
         }
         let cancellation = RequestOptions::default();
         if name == "cancelled" {
@@ -456,14 +674,77 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
             cancellation,
             name == "marker-abort",
             matches!(name, "unknown-applied-write" | "expired-write"),
+            name,
         )
         .await;
         let before = request(&observer, "fixture.state", empty()).await;
         assert_no_effects(&before);
-        if name == "complete" {
+        if matches!(
+            name,
+            "complete"
+                | "archived-execution"
+                | "absent-cursor"
+                | "referenced-main"
+                | "quota-full"
+                | "quota-bytes"
+                | "shadowed-voice"
+        ) {
             assert!(first.error.is_none(), "{name}: {:?}", first.error);
             assert!(first.current);
-            complete_state(&data, &path, &before);
+            complete_state(&case_data, &path, &before);
+            let map = |id: &str| {
+                source_map(
+                    &first.receipts,
+                    &id.as_bytes()
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<String>(),
+                )
+                .clone()
+            };
+            if name == "referenced-main" {
+                assert_eq!(map("main").get("referenced"), Some(&true.into()));
+                assert_eq!(
+                    map("main").required("archive").unwrap().get("mode"),
+                    Some(&"current-head".into())
+                );
+            }
+            if name == "shadowed-voice" {
+                assert_eq!(
+                    map("voice")
+                        .required("archive")
+                        .unwrap()
+                        .get("unresolvedShadow"),
+                    Some(&true.into())
+                );
+                assert_eq!(
+                    map("voice").required("archive").unwrap().get("mode"),
+                    Some(&"current-head".into())
+                );
+            }
+            if name == "absent-cursor" {
+                assert_eq!(
+                    map("absent-cursor").required("target").unwrap().get("kind"),
+                    Some(&"absent-assignment".into())
+                );
+            }
+            if name == "archived-execution" {
+                assert_eq!(
+                    before
+                        .required("records")
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|r| r.as_array().unwrap()[1].get("key")
+                            == Some(&"secretary/execution".into()))
+                        .unwrap()
+                        .as_array()
+                        .unwrap()[1]
+                        .get("archived"),
+                    Some(&true.into())
+                );
+            }
         } else {
             assert!(
                 !first.current,
@@ -488,7 +769,10 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
             assert!(writes(&before, "objects.write").is_empty());
             assert!(writes(&before, "events.unsubscribe").is_empty());
         }
-        if name == "foreign-root" || name == "orphan" {
+        if matches!(
+            name,
+            "foreign-root" | "orphan" | "changed-target" | "missing-execution"
+        ) {
             assert_eq!(first.error.as_deref(), Some("secretary_import_incomplete"));
         }
         if matches!(
@@ -498,6 +782,8 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
                 | "unknown-unsubscribe"
                 | "expired-write"
                 | "marker-abort"
+                | "archive-abort"
+                | "restart-archive"
         ) {
             client.close();
             request(
@@ -514,6 +800,7 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
                 RequestOptions::default(),
                 false,
                 false,
+                "",
             )
             .await;
             let after = request(&observer, "fixture.state", empty()).await;
@@ -535,7 +822,7 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
             } else {
                 assert!(second.error.is_none(), "{name}: {:?}", second.error);
                 assert!(second.current);
-                complete_state(&data, &path, &after);
+                complete_state(&case_data, &path, &after);
             }
             let method = if name == "unknown-unsubscribe" {
                 "events.unsubscribe"
@@ -544,7 +831,13 @@ async fn bounded_whole_import_reopens_original_core_and_reconciles_original_hive
             };
             let original = writes(&before, method);
             let attempted = writes(&after, method);
-            if name != "marker-abort" {
+            if matches!(
+                name,
+                "unknown-before-write"
+                    | "unknown-applied-write"
+                    | "unknown-unsubscribe"
+                    | "expired-write"
+            ) {
                 // The fixture faults the first request; Store can recover it
                 // and finish other writes in that same bounded page.
                 let id = original.first().unwrap().required("mutationId").unwrap();
