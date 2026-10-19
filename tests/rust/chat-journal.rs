@@ -11,6 +11,8 @@ use rusqlite::types::Value;
 mod commands;
 #[path = "chat-desktop-cases.rs"]
 mod desktop;
+#[path = "chat-desktop-host-cases.rs"]
+mod desktop_host;
 #[path = "chat-listener-cases.rs"]
 mod listener;
 #[path = "chat-session-cases.rs"]

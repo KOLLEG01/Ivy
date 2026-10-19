@@ -4,6 +4,7 @@ pub mod command_native;
 pub mod commands;
 pub mod config;
 pub mod desktop;
+pub mod desktop_host;
 pub mod identity;
 pub mod journal;
 pub mod journal_io;
