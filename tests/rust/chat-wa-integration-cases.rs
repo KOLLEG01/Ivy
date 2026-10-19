@@ -759,11 +759,7 @@ async fn remote_image_sdk_publication_reuses_immutable_mutation_after_reply_loss
             "objectId",
         )
         .clone();
-        expected_parent = lease
-            .store()
-            .root_object_id
-            .clone()
-            .map_or(Json::Null, Json::from);
+        expected_parent = lease.store().root_object_id.clone().map(Json::from);
         let lost = RuntimeMedia::payload(&media, &row, &lease, false)
             .await
             .unwrap_err();
@@ -825,7 +821,7 @@ async fn remote_image_sdk_publication_reuses_immutable_mutation_after_reply_loss
     let request = field(writes[0], "params");
     let create = field(request, "create");
     assert_eq!(field(create, "ownerObjectId"), &expected_owner);
-    assert_eq!(field(create, "parentId"), &expected_parent);
+    assert_eq!(create.get("parentId"), expected_parent.as_ref());
     assert_eq!(
         field(create, "contractKey"),
         &Json::from("chat-bridge/image-png")
