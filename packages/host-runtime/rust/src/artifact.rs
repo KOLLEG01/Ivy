@@ -2,10 +2,8 @@
 use crate::{IvyError, IvyJson, IvyResult, config::{path_value, read_json, FileError, CONFIGURATION_BYTES}, node_runtime::NodeRuntime, paths::{inside, realpath}};
 use ivy_contracts::{JsString, core_schema::validate_host};
 use std::{fs, path::{Path, PathBuf}};
-#[path="artifact/file_hash.rs"]
-mod streaming_hash;
-pub use streaming_hash::file_hash;
-use streaming_hash::hash_file;
+pub use crate::streaming_hash::file_hash;
+use crate::streaming_hash::hash_file;
 
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> { value.map_err(|_| IvyError::internal()) }
 fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {

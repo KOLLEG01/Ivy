@@ -43,6 +43,8 @@ pub mod portable_dependencies;
 pub mod portable_http;
 pub mod policy_import;
 pub mod process;
+#[path="artifact/file_hash.rs"]
+pub mod streaming_hash;
 pub mod process_fence;
 pub mod process_output;
 mod protected_config;

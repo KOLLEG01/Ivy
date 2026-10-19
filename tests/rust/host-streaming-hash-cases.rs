@@ -1,4 +1,4 @@
-use ivy_host_runtime::{IvyJson,node_path,artifact};
+use ivy_host_runtime::{IvyJson,node_path,streaming_hash};
 use ivy_contracts::json;
 use std::{fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},time::{SystemTime,UNIX_EPOCH}};
 struct Fixture(PathBuf);
@@ -9,7 +9,7 @@ async fn compare(path:&Path)->IvyJson{
     let input=IvyJson::object([("path",IvyJson::String(node_path::from_native(path)))]);
     let mut child=Command::new("node").args(["--experimental-transform-types","--disable-warning=ExperimentalWarning","tests/fixtures/host-streaming-hash-oracle.mjs"]).current_dir(root()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(json::stringify(&input,usize::MAX).unwrap().as_bytes()).unwrap();
-    let actual=match artifact::file_hash(path).await{Ok(hash)=>IvyJson::object([("ok",true.into()),("value",hash.into())]),Err(error)=>IvyJson::object([("ok",false.into()),("error",error.to_wire())])};
+    let actual=match streaming_hash::file_hash(path).await{Ok(hash)=>IvyJson::object([("ok",true.into()),("value",hash.into())]),Err(error)=>IvyJson::object([("ok",false.into()),("error",error.to_wire())])};
     let output=child.wait_with_output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));let expected=json::parse(std::str::from_utf8(&output.stdout).unwrap(),usize::MAX).unwrap();
     if let Some(corpus)=std::env::var_os("IVY_HOST_STREAMING_HASH_CORPUS"){writeln!(fs::OpenOptions::new().create(true).append(true).open(corpus).unwrap(),"{}",json::stringify(&IvyJson::object([("input",input),("actual",actual.clone()),("expected",expected.clone())]),usize::MAX).unwrap()).unwrap();}
     assert_eq!(actual,expected);actual
