@@ -40,6 +40,28 @@ try {
       value={kind,data:result.byteLength<=1024?(kind==='text'?result.data:Buffer.from(result.data).toString('base64')):null,contentHash:result.contentHash,byteLength:result.byteLength};
       break;
     }
+    case 'write':{
+      const RealDate=Date;
+      if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
+      globalThis.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[step.now]));}static now(){return step.now;}};
+      try{
+        const context=store.authenticate(step.context),objects=new Objects(store);
+        const contentUnits=params=>{if(step.contentUnits)params.content.value=String.fromCharCode(...step.contentUnits);return params;};
+        const changes=step.watchChanges?Number(store.get('SELECT total_changes() AS n').n):0;
+        value=store.withBudget(()=>{
+          if(step.mode==='prepared')return objects.writeHivePrepared(context,step.method,step.params,()=>{
+            store.db.exec(step.prepareSql??'');
+            if(step.prepareFail)throw new IvyError('fixture_failure','Preparation requested failure.');
+            return contentUnits(structuredClone(step.preparedParams));
+          });
+          const params=contentUnits(structuredClone(step.params));
+          return step.mode==='hive'?objects.writeHive(context,step.method,params):objects.write(context,params,step.mode==='preserve');
+        },step.overdue?-1:10000);
+        if(step.watchChanges)value={result:value,changes:Number(store.get('SELECT total_changes() AS n').n)-changes};
+      }finally{globalThis.Date=RealDate;}
+      break;
+    }
+    case 'readObject':value=new Objects(store).read({objectId:step.objectId,revision:step.revision});break;
     case 'configure':store.configureCredentials(step.credentials);break;
     case 'authenticate':value=store.authenticate(step.context);break;
     case 'sql':store.db.exec(step.sql);break;

@@ -10,6 +10,8 @@ mod ledger;
 mod object_delete;
 #[path = "hive_object_mutations.rs"]
 mod object_mutations;
+#[path = "hive_object_write.rs"]
+mod object_write;
 #[path = "hive_online_backup.rs"]
 mod online_backup;
 #[path = "hive_query.rs"]
@@ -163,6 +165,13 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                     json!({"kind":kind,"data":data,"byteLength":result.byte_length,"contentHash":result.content_hash})
                 })
             }
+            "write" => object_write::native_write(&mut store, step).map(wire),
+            "readObject" => ivy_hive::objects::read(
+                &store,
+                ivy_hive::objects::Location::Id(&step["objectId"].as_str().unwrap().into()),
+                step["revision"].as_u64(),
+            )
+            .map(wire),
             "configure" => store
                 .configure_credentials(
                     &step["credentials"]
