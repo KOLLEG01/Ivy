@@ -15,7 +15,8 @@ use ivy_task_board::{
     engine_publication::{
         CreationChecks, EnginePublisher, PublicationRoutes, RootPublicationChecks,
     },
-    engine_read::ReadContext,
+    engine_read::{EngineReads, ReadRuntime},
+    engine_service::{EngineService, RetainedService, ServiceRuntime},
     engine_validation::ActionValidation,
     journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
@@ -24,6 +25,7 @@ use ivy_task_board::{
     native_lifecycle::LifecyclePublication,
     publication_coordination::PublicationCoordination,
     reconciler::ReconcileExecutor,
+    service_bridge::service_bridge,
     task_written::{TaskCommentNotices, TaskWriteObserver},
 };
 use std::{
@@ -38,6 +40,25 @@ use std::{
 
 fn clock() -> String {
     "2026-01-02T03:04:05.006Z".into()
+}
+#[derive(Default)]
+struct DispatchRuntime {
+    changes: Cell<usize>,
+    kicks: Cell<usize>,
+}
+impl ServiceRuntime for DispatchRuntime {
+    fn recovered(&self) -> bool {
+        true
+    }
+    fn observed_at(&self) -> JsString {
+        clock().into()
+    }
+    fn task_changed(&self) {
+        self.changes.set(self.changes.get() + 1);
+    }
+    fn kick(&self) {
+        self.kicks.set(self.kicks.get() + 1);
+    }
 }
 fn admission(name: &str, value: &Json) -> IvyResult<()> {
     static B: OnceLock<SchemaBundle> = OnceLock::new();
@@ -624,27 +645,56 @@ async fn check_comment_recovery(question: bool) {
         };
         let engine =
             EngineAdmission::new(&operations, &settings, &owner, &runtime, &execution).unwrap();
+        let read_runtime = ReadRuntime {
+            client: client.as_ref(),
+            contracts: &journal.contracts,
+            principal_id: &principal,
+            service_node_id: &node,
+            generation: 1.0,
+        };
+        let dispatch_runtime = DispatchRuntime::default();
+        let facade = EngineService {
+            admission: &engine,
+            reads: EngineReads {
+                operations: &operations,
+                runtime: &read_runtime,
+            },
+            runtime: &dispatch_runtime,
+            categories: &projection,
+        };
         let invocation_executor = Executor::default();
         let invocations = EngineInvocations::new(&invocation_executor);
-        let caller = JsString::from("caller");
-        let check_cancelled = || Ok(());
-        let context = ReadContext {
-            caller_principal_id: &caller,
-            operation_id: s(&operation.value, "operationId"),
-            generation: 1.0,
-            check_cancelled: &check_cancelled,
+        let handler = RetainedService {
+            handler: &facade,
+            invocations: &invocations,
+        };
+        let context = ivy_sdk::service_connection::InvocationContext {
+            caller_principal_id: "caller".into(),
+            operation_id: Some(s(&operation.value, "operationId").clone()),
+            generation: 1,
+            signal: RequestOptions::default().cancellation,
         };
         // The accepted Operation and all replayed effects live in the real
-        // SQLite journal. Every public retry traverses admission and both
-        // retained queues, including after the final notice reply was lost.
-        let reply = invocations
-            .invoke(&engine, f(&operation.value, "request"), &context)
+        // SQLite journal. Every public retry enters an actual Send SDK handler,
+        // local mailbox, public facade and both retained queues.
+        let (bridge, local) = service_bridge(1);
+        let reply = bridge.handler("comment")(f(&operation.value, "request").clone(), context);
+        let retired = bridge.retire();
+        executor
+            .drive(
+                invocation_executor.drive(execution_executor.drive(local.run(&handler, async {
+                    invocations.stop().await;
+                    execution.settled().await;
+                    projection.settled().await;
+                    Ok(())
+                }))),
+            )
+            .await
             .unwrap();
-        let result = invocation_executor
-            .drive(execution_executor.drive(reply))
-            .await;
-        invocation_executor.drive(invocations.stop()).await;
-        execution_executor.drive(execution.settled()).await;
+        retired.await.unwrap();
+        let result = reply.await;
+        assert_eq!(dispatch_runtime.changes.get(), usize::from(result.is_ok()));
+        assert_eq!(dispatch_runtime.kicks.get(), usize::from(result.is_ok()));
         assert_eq!(client.owner_checks.load(Ordering::SeqCst), round + 1);
         let saved = operations
             .store

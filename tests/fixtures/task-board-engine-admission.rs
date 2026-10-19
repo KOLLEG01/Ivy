@@ -20,6 +20,8 @@ use std::{
 };
 #[path = "task-board-engine-invocations.rs"]
 mod invocations;
+#[path = "task-board-engine-service.rs"]
+mod service;
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(k).unwrap_or(&NULL)

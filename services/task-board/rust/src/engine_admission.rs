@@ -118,6 +118,50 @@ impl<'a, S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>
         )
         .await
     }
+    pub fn settings(&self) -> &Json {
+        self.settings
+    }
+    pub fn owner(&self) -> &EngineOwner {
+        self.owner
+    }
+    pub async fn archive(&self, request: &Json, context: &ReadContext<'_>) -> IvyResult<Json> {
+        self.runtime
+            .contracts
+            .validate_definition("ArchiveRequest", request)?;
+        self.verify_owner().await?;
+        (context.check_cancelled)()?;
+        require(
+            context.generation == self.owner.generation
+                && f(request, "operationId").as_js_string() == Some(context.operation_id),
+            "task_board_identity_conflict",
+            "The archive request must retain the live caller operation identity.",
+        )?;
+        let workspace = f(request, "expectedWorkspace");
+        if truthy(workspace) {
+            require(
+                f(workspace, "principalId") == f(self.settings, "principalId")
+                    && f(workspace, "rootObjectId") == f(self.settings, "rootObjectId")
+                    && f(workspace, "callerPrincipalId").as_js_string()
+                        == Some(context.caller_principal_id),
+                "task_board_workspace_changed",
+                "The original caller or workflow owner changed. This request was not admitted.",
+            )?;
+        }
+        let outcome = self
+            .execution
+            .execute(
+                self.operations
+                    .begin(request, &self.actor(context.caller_principal_id, "user"))
+                    .await?,
+            )
+            .await?;
+        require(
+            truthy(f(&outcome, "archive")),
+            "task_board_contract_mismatch",
+            "The archive action must retain its exact metadata outcome.",
+        )?;
+        Ok(f(&outcome, "archive").clone())
+    }
     fn actor(&self, principal_id: &JsString, source: &str) -> Json {
         Json::object([
             ("principalId", Json::String(principal_id.clone())),
