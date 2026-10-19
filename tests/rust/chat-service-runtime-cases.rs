@@ -25,6 +25,8 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command as AsyncCommand},
     sync::watch,
 };
+#[path = "chat-service-active-cases.rs"]
+mod active;
 fn field<'a>(v: &'a Json, key: &str) -> &'a Json {
     v.required(key).unwrap()
 }
@@ -107,9 +109,12 @@ struct Peer {
 }
 impl Peer {
     async fn start() -> Self {
+        Self::fixture("tests/rust/fixtures/chat-service-runtime-peer.mjs").await
+    }
+    async fn fixture(path: &str) -> Self {
         let mut child = AsyncCommand::new("node")
             .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-            .args(["tests/rust/fixtures/chat-service-runtime-peer.mjs", "peer"])
+            .args([path, "peer"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
