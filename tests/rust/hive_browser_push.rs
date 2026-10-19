@@ -162,6 +162,10 @@ fn cursor(result: &Value, i: usize) -> f64 {
 fn browser_push_subscription_guards_ownership_normalization_and_late_completion_match_original() {
     let mut steps = setup();
     let keys = ok(&mut steps, action(json!({"action":"browserPush.keys"})));
+    let status = ok(
+        &mut steps,
+        request("session-one", json!({"action":"status"})),
+    );
     let mut missing = request(
         "session-one",
         json!({"action":"subscribe","subscription":{}}),
@@ -286,6 +290,12 @@ fn browser_push_subscription_guards_ownership_normalization_and_late_completion_
     let restarted_keys = ok(&mut steps, action(json!({"action":"browserPush.keys"})));
     let restarted_queue = ok(&mut steps, next());
     let result = compare(&steps);
+    assert!(
+        result["rows"][status]["encodedValue"]
+            .as_str()
+            .unwrap()
+            .starts_with("{\"publicKey\":")
+    );
     assert_eq!(value(&result, restarted_keys), value(&result, keys));
     assert_eq!(value(&result, restarted_queue), value(&result, after));
     error(&result, forbidden, "forbidden");

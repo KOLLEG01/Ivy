@@ -584,7 +584,7 @@ try {
   if(kernelTrace)state.deploymentReports=store.all('SELECT * FROM deployment_reports ORDER BY host_id,deployment_id');
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
-  rows.push({value,error,state,...mirror,...(step.op==='worker'?{notifications:workerNotifications}:{}),...(step.op==='wiki'?{wikiCalls}:{}),...(kernelTrace||['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{}) ,...(packageTrace||workerTrace?{catalogMutations:store.all('SELECT mutation_id FROM mutations ORDER BY rowid')}:{})});
+  rows.push({value,error,state,...mirror,...(pushTrace?{encodedValue:error===null?JSON.stringify(value):null}:{}),...(step.op==='worker'?{notifications:workerNotifications}:{}),...(step.op==='wiki'?{wikiCalls}:{}),...(kernelTrace||['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{}) ,...(packageTrace||workerTrace?{catalogMutations:store.all('SELECT mutation_id FROM mutations ORDER BY rowid')}:{})});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");

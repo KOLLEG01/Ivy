@@ -88,6 +88,7 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
     let mut worker: Option<ivy_hive::worker_actions::WorkerActions> = None;
     let mut observations = vec![];
     let worker_trace = steps.iter().any(|step| step["op"] == "worker");
+    let push_trace = steps.iter().any(|step| step["browserPush"] == true);
     let inventory_trace = steps.iter().any(|step| {
         step["request"]["method"]
             .as_str()
@@ -255,6 +256,16 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                 )
                 .unwrap();
         }
+        let encoded_value = if push_trace {
+            match &result {
+                Ok(value) => {
+                    Value::String(ivy_contracts::json::stringify(value, usize::MAX).unwrap())
+                }
+                Err(_) => Value::Null,
+            }
+        } else {
+            Value::Null
+        };
         let (value, error) = match result {
             Ok(v) => (wire(v), Value::Null),
             Err(e) => (Value::Null, wire(e.to_wire())),
@@ -279,7 +290,7 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                 "SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id",
             );
         }
-        if steps.iter().any(|v| v["browserPush"] == true) {
+        if push_trace {
             state["push"] = rows(
                 &kernel.parts.store,
                 "SELECT * FROM browser_push ORDER BY endpoint",
@@ -300,6 +311,9 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
         let mut observation = json!({"value":value,"error":error,"state":state,"fileTree":ui_files::tree(&path.with_extension("files")),
             "registry":{"changedNodes":registry.changed_nodes().iter().map(|v|&v.0).collect::<Vec<_>>(),
             "changedGenerations":registry.changed_generations().iter().map(|(id,g)|json!([id.0,wire(IvyJson::Number(*g))])).collect::<Vec<_>>()}});
+        if push_trace {
+            observation["encodedValue"] = encoded_value;
+        }
         if step["op"] == "worker" {
             observation["notifications"] = json!(notifications);
         }

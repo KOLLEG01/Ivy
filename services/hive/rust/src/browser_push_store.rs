@@ -238,17 +238,16 @@ impl BrowserPushStore {
             if keys.is_null() {
                 return Err(IvyError::internal());
             }
-            let mut value = IvyJson::object([
-                ("subscribed", row.is_some().into()),
-                (
-                    "lastError",
-                    row.flatten().map(IvyJson::from).unwrap_or(IvyJson::Null),
-                ),
-            ]);
+            let mut fields = vec![];
             if let Some(key) = keys.get("publicKey") {
-                value.insert("publicKey", key.clone());
+                fields.push(("publicKey", key.clone()));
             }
-            return Ok(value);
+            fields.push(("subscribed", row.is_some().into()));
+            fields.push((
+                "lastError",
+                row.flatten().map(IvyJson::from).unwrap_or(IvyJson::Null),
+            ));
+            return Ok(IvyJson::object(fields));
         }
         if action == Some(&IvyJson::from("subscribe")) {
             let subscription = push_subscription(
