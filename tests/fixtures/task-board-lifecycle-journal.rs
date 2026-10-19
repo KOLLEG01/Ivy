@@ -6,7 +6,7 @@ use ivy_task_board::{
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_journal::{self, LocalJournal},
     local_retention::HistoryLimits,
-    native_lifecycle::{LifecycleDocument, LifecycleRuntime},
+    native_lifecycle::LifecycleRuntime,
     operations::Operations,
     publication::{Publication, TaskWritten},
 };
@@ -332,15 +332,12 @@ async fn retained_lifecycle_survives_actual_partial_publication_reopen_and_repla
                 ("history", Json::Null),
                 ("archive", Json::Null),
             ]);
-            assert_eq!(
-                subject
-                    .publish(&operation, &mut steps, initial.clone())
-                    .await
-                    .err()
-                    .unwrap()
-                    .code,
-                "fixture_failed"
-            );
+            let failure = subject
+                .publish(&operation, &mut steps, initial.clone())
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(failure.code, "fixture_failed", "{failure:?}");
             let current = store
                 .journal
                 .read("task-board/task", &Json::String(id(100)), true)
