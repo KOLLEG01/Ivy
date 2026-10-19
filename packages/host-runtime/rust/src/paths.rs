@@ -39,6 +39,17 @@ pub fn inside(root: &Path, path: &Path) -> io::Result<bool> {
     Ok(Context::current()?.inside(&node_path::from_native(root), &node_path::from_native(path)))
 }
 
+/// Existing native payload admission, shared with helper selection.
+pub(crate) fn direct_native_file(root:&Path,relative:&str)->IvyResult<PathBuf>{
+    let missing=||IvyError::new("artifact_missing","Native launch needs its complete contained runtime payload.");
+    let mut local=root.to_owned();let parts=relative.split('/').collect::<Vec<_>>();
+    for(index,part)in parts.iter().enumerate(){
+        local.push(part);let metadata=std::fs::symlink_metadata(&local).map_err(|_|missing())?;
+        if metadata.file_type().is_symlink()||!if index+1==parts.len(){metadata.is_file()&&metadata.len()>0}else{metadata.is_dir()} {return Err(IvyError::new("artifact_missing","Native launch needs direct regular payload files and directories."));}
+    }
+    if !inside(root,&realpath(&local).map_err(|_|missing())?).map_err(|_|missing())? {return Err(IvyError::new("artifact_missing","Native runtime payload leaves its candidate root."));}Ok(local)
+}
+
 #[derive(Debug)]
 struct NoAncestor;
 impl std::fmt::Display for NoAncestor {

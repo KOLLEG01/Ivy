@@ -1,7 +1,8 @@
 //! Static preflight for the approved v1 native shims. Candidate JavaScript is
 //! never evaluated. Ordinary nonmatching TypeScript entries retain their path.
-use crate::{IvyError,IvyJson,IvyResult,config::{read_json,FileError,CONFIGURATION_BYTES},paths};
-use std::{fs,io::Read,path::{Path,PathBuf}};
+use crate::{IvyError,IvyJson,IvyResult,config::{read_json,FileError,CONFIGURATION_BYTES}};
+use crate::paths::direct_native_file as direct_file;
+use std::{fs,io::Read,path::Path};
 
 fn require(value:bool,code:&str,message:&str)->IvyResult<()>{if value{Ok(())}else{Err(IvyError::new(code,message))}}
 fn command_path(command:Option<&IvyJson>)->Option<String>{
@@ -25,15 +26,6 @@ fn matches(path:&Path,expected:&[u8])->bool{
     let Ok(metadata)=fs::metadata(path)else{return false};if !metadata.is_file()||metadata.len()!=expected.len() as u64{return false}
     let Ok(file)=fs::File::open(path)else{return false};let mut bytes=Vec::new();file.take(expected.len() as u64+1).read_to_end(&mut bytes).is_ok()&&bytes==expected
 }
-fn direct_file(root:&Path,relative:&str)->IvyResult<PathBuf>{
-    let missing=||IvyError::new("artifact_missing","Native launch needs its complete contained runtime payload.");
-    let mut local=root.to_owned();let parts=relative.split('/').collect::<Vec<_>>();
-    for(index,part)in parts.iter().enumerate(){
-        local.push(part);let metadata=fs::symlink_metadata(&local).map_err(|_|missing())?;
-        require(!metadata.file_type().is_symlink()&&if index+1==parts.len(){metadata.is_file()&&metadata.len()>0}else{metadata.is_dir()},"artifact_missing","Native launch needs direct regular payload files and directories.")?;
-    }
-    require(paths::inside(root,&paths::realpath(&local).map_err(|_|missing())?).map_err(|_|missing())?,"artifact_missing","Native runtime payload leaves its candidate root.")?;Ok(local)
-}
 pub(crate) fn verify(candidate:&IvyJson,root:&Path,manifest:&IvyJson)->IvyResult<()>{
     let component=manifest.required("componentId")?.as_str()?;
     if !component.bytes().next().is_some_and(|c|c.is_ascii_lowercase())||!component.bytes().all(|c|c.is_ascii_lowercase()||c.is_ascii_digit()||c==b'-'){return Ok(())}
@@ -50,8 +42,7 @@ pub(crate) fn verify(candidate:&IvyJson,root:&Path,manifest:&IvyJson)->IvyResult
         require(matches(&direct_file(root,&path)?,&source),"artifact_changed","Native dispatch shim differs from its exact v1 package.")?;
     }
     direct_file(root,"dist/native/dispatch.mjs")?;
-    let os=if cfg!(windows){"win32"}else{std::env::consts::OS};let arch=match std::env::consts::ARCH{"x86_64"=>"x64","aarch64"=>"arm64",value=>value};let platform=format!("{os}-{arch}");
-    require(["win32-x64","win32-arm64","linux-x64","linux-arm64"].contains(&platform.as_str()),"unsupported_platform","Native package does not support this host target.")?;
+    let platform=crate::portable_native_files::native_platform()?;
     let suffix=if cfg!(windows){".exe"}else{""};
     for name in [format!("ivy-{component}"),"ivy-health".into()]{direct_file(root,&format!("dist/native/{platform}/{name}{suffix}"))?;}
     let stamp=direct_file(root,&format!("dist/native/{platform}/build-info.json"))?;let info=read_json(&stamp,CONFIGURATION_BYTES).map_err(FileError::error)?;
