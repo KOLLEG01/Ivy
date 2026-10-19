@@ -74,13 +74,15 @@ try {
     case 'invalidate':store.invalidate(step.scope);break;
     case 'transaction':store.transaction(()=>{store.db.exec(step.sql);store.invalidate(step.scope);if(step.fail)throw new IvyError('fixture_failure','Rollback requested.');});break;
     case 'reopen':store.close();store=new HiveStore(input.path);break;
-    case 'reorder':case 'archive':case 'delete':{
+    case 'reorder':case 'archive':case 'delete':case 'move':{
       const RealDate=Date;
       if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
       globalThis.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[step.now]));}static now(){return step.now;}};
       try{
         const context={...store.authenticate(step.context),serviceNodeId:step.context.serviceNodeId};
-        value=store.withBudget(()=>new Objects(store)[step.op](context,step.params),step.overdue?-1:10000);
+        const params=structuredClone(step.params);
+        for(const [pointer,units]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...units));
+        value=store.withBudget(()=>new Objects(store)[step.op](context,params),step.overdue?-1:10000);
       }finally{globalThis.Date=RealDate;}
       break;
     }

@@ -25,8 +25,11 @@ mod writing;
 pub use writing::{
     ExistingObjectWrite, write, write_existing_revision, write_hive, write_hive_prepared,
 };
+#[path = "object_move.rs"]
+mod moving;
 #[path = "object_navigation.rs"]
 mod navigation;
+pub use moving::move_object;
 fn value(row: &Row<'_>, name: &str) -> rusqlite::Result<IvyJson> {
     Ok(match row.get_ref(name)? {
         ValueRef::Null => IvyJson::Null,

@@ -41,7 +41,7 @@ pub(super) fn native_write(store: &mut Store, step: &Value) -> IvyResult<IvyJson
     let mut request = parameters.clone();
     // Ordinary writes include the original content in their receipt hash.
     if mode != "prepared" {
-        content_units(&mut request, step);
+        apply_units(&mut request, step);
     }
     let changes = store.connection().total_changes();
     let result = store.with_budget_mut(
@@ -71,7 +71,7 @@ pub(super) fn native_write(store: &mut Store, step: &Value) -> IvyResult<IvyJson
                             ));
                         }
                         let mut prepared = IvyJson::from_serde(&step["preparedParams"]).unwrap();
-                        content_units(&mut prepared, step);
+                        apply_units(&mut prepared, step);
                         Ok(prepared)
                     },
                 )
@@ -108,7 +108,7 @@ pub(super) fn native_write(store: &mut Store, step: &Value) -> IvyResult<IvyJson
         result
     })
 }
-fn content_units(parameters: &mut IvyJson, step: &Value) {
+pub(super) fn apply_units(parameters: &mut IvyJson, step: &Value) {
     fn set(value: &mut IvyJson, fields: &[&str], next: IvyJson) {
         if fields.len() == 1 {
             value.insert(fields[0], next);
@@ -153,7 +153,7 @@ fn definition(key: &str, version: &str, media: &str, hive: bool) -> Value {
     }
     json!({"op":"register","owner":value["owner"],"definition":value})
 }
-fn setup() -> Vec<Value> {
+pub(super) fn setup() -> Vec<Value> {
     let mut steps = vec![
         sql("UPDATE metadata SET value='epoch' WHERE key='runtime_epoch';"),
         json!({"op":"configure","credentials":[{"principalId":"alpha","digest":format!("sha256:{}","a".repeat(64))},{"principalId":"beta","digest":format!("sha256:{}","b".repeat(64))}]}),

@@ -8,6 +8,8 @@ mod contracts;
 mod ledger;
 #[path = "hive_object_delete.rs"]
 mod object_delete;
+#[path = "hive_object_move.rs"]
+mod object_move;
 #[path = "hive_object_mutations.rs"]
 mod object_mutations;
 #[path = "hive_object_write.rs"]
@@ -212,7 +214,7 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                 store = Store::open(path).unwrap();
                 Ok(Value::Null)
             }
-            "reorder" | "archive" | "delete" => {
+            "reorder" | "archive" | "delete" | "move" => {
                 let c = &step["context"];
                 store
                     .authenticate(&AuthContext {
@@ -225,7 +227,10 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                             credential_digest: principal.credential_digest,
                         };
                         let node = c["serviceNodeId"].as_str().map(JsString::from);
-                        let params = IvyJson::from_serde(&step["params"]).unwrap();
+                        let mut params = IvyJson::from_serde(&step["params"]).unwrap();
+                        if step["op"] == "move" {
+                            object_write::apply_units(&mut params, step);
+                        }
                         let now: JsString = step["nowText"].as_str().unwrap().into();
                         store.with_budget_mut(
                             if step["overdue"] == true {
@@ -234,7 +239,15 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                                 std::time::Duration::from_secs(10)
                             },
                             |store| {
-                                if step["op"] == "reorder" {
+                                if step["op"] == "move" {
+                                    ivy_hive::objects::move_object(
+                                        store,
+                                        &context,
+                                        &params,
+                                        step["now"].as_u64().unwrap(),
+                                        &now,
+                                    )
+                                } else if step["op"] == "reorder" {
                                     ivy_hive::objects::reorder(
                                         store,
                                         &context,

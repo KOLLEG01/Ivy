@@ -92,7 +92,7 @@ fn references(store: &Store, source: &JsString, value: &IvyJson) -> IvyResult<St
     }
     canonical(value, 128 * 1024)
 }
-fn update_search(store: &Store, id: &str, name: &str, text: &str) -> IvyResult<()> {
+pub(super) fn update_search(store: &Store, id: &str, name: &str, text: &str) -> IvyResult<()> {
     let search_id: i64 = store
         .connection()
         .query_row("SELECT search_id FROM objects WHERE id=?", [id], |row| {
