@@ -237,7 +237,7 @@ impl AdmissionExecution for Bindings {
 #[tokio::test(flavor = "current_thread")]
 async fn public_admission_matches_original_identity_plan_and_recovery_boundaries() {
     let catalogs = CheckedNativeContracts::new(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../specs/native"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."),
     );
     for row in data().as_array().unwrap() {
         let replay = Arc::new(Replay {
