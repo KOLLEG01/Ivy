@@ -1,10 +1,12 @@
 mod evs;
 mod format;
 mod g711;
+mod packet;
 mod permit;
 mod queue;
 mod rtp;
 mod startup;
+mod transport;
 
 pub use permit::AudioPermit;
 pub use queue::AudioQueue;
@@ -38,3 +40,8 @@ pub use evs::{
 };
 pub use format::{AudioFormat, Codec, FormatError};
 pub use g711::G711Codec;
+pub use packet::{RtpExtension, RtpHeader, RtpPacket};
+pub use transport::{
+    RtpDatagramSink, RtpPeer, RtpTransport, RtpTransportCounters, RtpTransportError,
+    RtpTransportObservation,
+};
