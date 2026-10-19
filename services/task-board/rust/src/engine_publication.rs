@@ -16,7 +16,7 @@ use crate::{
         NativePublisher, VerifiedPublicationTranscript,
     },
     native_turn_evidence::Transcript,
-    operations::{Document, Operations, Store},
+    operations::{Document, Operations},
     publication::{Publication, TaskWritten},
     task_keys,
 };
@@ -236,7 +236,7 @@ pub fn history(
     detail: &JsString,
 ) -> Json {
     Json::object([
-        ("schemaVersion", 1.0.into()),
+        ("schemaVersion", Json::Number(1.0)),
         ("taskId", Json::String(task.clone())),
         ("operationId", f(&operation.value, "operationId").clone()),
         ("actor", f(&operation.value, "actor").clone()),
@@ -429,7 +429,7 @@ impl<S: RootPublicationStore, C: Fn() -> String, P: RootPublicationChecks, H>
                 .execution_options(&submitted, unavailable)
                 .await?;
             let mut initial = Json::object([
-                ("schemaVersion", 1.0.into()),
+                ("schemaVersion", Json::Number(1.0)),
                 (
                     "taskKey",
                     Json::String(
@@ -466,7 +466,7 @@ impl<S: RootPublicationStore, C: Fn() -> String, P: RootPublicationChecks, H>
                 initial.insert(key, Json::Null);
             }
             for key in ["attemptCount", "agentCommentCount", "workRevision"] {
-                initial.insert(key, 0.0.into());
+                initial.insert(key, Json::Number(0.0));
             }
             for key in ["comments", "commentDeliveries", "attachments"] {
                 initial.insert(key, Json::Array(vec![]));
@@ -513,7 +513,7 @@ impl<S: RootPublicationStore, C: Fn() -> String, P: RootPublicationChecks, H>
                     .create(
                         "task-board/result",
                         &Json::object([
-                            ("schemaVersion", 1.0.into()),
+                            ("schemaVersion", Json::Number(1.0)),
                             ("taskId", f(&pin, "objectId").clone()),
                             ("run", Json::Null),
                             ("kind", "final".into()),
@@ -572,10 +572,15 @@ impl<S: RootPublicationStore, C: Fn() -> String, P: RootPublicationChecks, H>
         H: PublicationRoutes<T>,
     {
         let request = operation.value.required("request")?;
+        let written = |pin,
+                       task|
+         -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = IvyResult<()>> + '_>,
+        > { Box::pin(async move { (self.task_written)(pin, task).await }) };
         let mut steps = Publication {
             operations: self.operations,
             operation,
-            task_written: Some(self.task_written),
+            task_written: Some(&written),
             index: 0.0,
         };
         let outcome = empty_outcome(s(request, "operationId")?);

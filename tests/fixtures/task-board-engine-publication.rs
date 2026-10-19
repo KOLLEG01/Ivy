@@ -19,6 +19,8 @@ use std::{
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
+#[path = "task-board-engine-publication-journal.rs"]
+mod journal;
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(k).unwrap_or(&NULL)
