@@ -18,6 +18,8 @@ mod executor_cases;
 mod executor_runtime_cases;
 #[path = "host-node-filesystem-cases.rs"]
 mod node_filesystem_cases;
+#[path = "host-filesystem-error-cases.rs"]
+mod filesystem_error_cases;
 #[path = "host-package-archive-cases.rs"]
 mod package_archive_cases;
 #[path = "host-filesystem-cases.rs"]
