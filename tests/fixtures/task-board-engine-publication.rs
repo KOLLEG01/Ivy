@@ -128,8 +128,14 @@ impl Store for World {
     fn root_object_id(&self) -> Option<JsString> {
         self.root.clone()
     }
-    fn contract_version(&self, _: &str) -> IvyResult<String> {
-        Ok("1.8.0".into())
+    fn contract_version(&self, key: &str) -> IvyResult<String> {
+        Ok(match key {
+            "task-board/task" => "1.8.0",
+            "task-board/configuration" => "1.2.0",
+            "task-board/run" | "task-board/delivery" => "1.1.0",
+            _ => "1.0.0",
+        }
+        .into())
     }
     fn retired_operation(&self, c: &JsString, id: &JsString) -> IvyResult<bool> {
         Ok(self

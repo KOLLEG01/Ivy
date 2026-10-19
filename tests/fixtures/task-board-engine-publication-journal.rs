@@ -42,10 +42,10 @@ fn admission(name: &str, value: &Json) -> IvyResult<()> {
 struct ContractsBinding;
 impl Contracts for ContractsBinding {
     fn version(&self, key: &str) -> IvyResult<String> {
-        Ok(if key == "task-board/task" {
-            "1.8.0"
-        } else {
-            "1.0.0"
+        Ok(match key {
+            "task-board/task" => "1.8.0",
+            "task-board/configuration" => "1.2.0",
+            _ => "1.0.0",
         }
         .into())
     }
