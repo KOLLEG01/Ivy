@@ -1,7 +1,7 @@
 use super::*;
 use ivy_task_board::{
     journal_store::ReadScopes,
-    native_driver::{DriverRuntime, NativeDriverRuntime},
+    native_driver::DriverRuntime,
     native_orchestrator::{OrchestrationEngine, OrchestrationPolicies, OrchestrationRuntime},
 };
 
@@ -98,6 +98,7 @@ use std::cell::{Cell, RefCell};
 struct PeerContracts {
     values: Vec<Json>,
     reads: Cell<usize>,
+    local: bool,
 }
 impl Contracts for PeerContracts {
     fn version(&self, key: &str) -> IvyResult<String> {
@@ -106,7 +107,7 @@ impl Contracts for PeerContracts {
     }
     fn local(&self, key: &str) -> IvyResult<bool> {
         assert_eq!(key, "task-board/task");
-        Ok(true)
+        Ok(self.local)
     }
     fn readable_version(&self, key: &str, version: &JsString) -> IvyResult<bool> {
         Ok(version == &JsString::from(self.version(key)?))
@@ -219,6 +220,7 @@ async fn peer_state_reads_the_paged_sqlite_revision_even_after_a_later_workspace
         contracts: PeerContracts {
             values: vec![old.clone(), newer.clone()],
             reads: Cell::new(0),
+            local: true,
         },
         limits: HistoryLimits::default(),
         now: || "2026-01-02T00:00:00.000Z".to_owned(),
@@ -321,6 +323,53 @@ impl OrchestrationPolicies for CurrentPolicies {
         Ok(())
     }
 }
+struct PublicPeer {
+    values: [Json; 2],
+    calls: Mutex<Vec<Json>>,
+}
+impl RpcClient for PublicPeer {
+    fn request<'a>(&'a self, method: &'a str, args: Json, _: RequestOptions) -> RequestFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(method, "objects.read");
+            assert_eq!(f(&args, "objectId"), &Json::from("peer"));
+            self.calls.lock().unwrap().push(args.clone());
+            let revision = args.get("revision").and_then(Json::as_f64).unwrap_or(2.0);
+            assert!([1.0, 2.0].contains(&revision));
+            let value = &self.values[revision as usize - 1];
+            Ok(Json::object([
+                (
+                    "object",
+                    Json::object([
+                        ("id", "peer".into()),
+                        ("contractKey", "task-board/task".into()),
+                        ("parentId", "root".into()),
+                        ("effectivelyArchived", false.into()),
+                    ]),
+                ),
+                (
+                    "revision",
+                    Json::object([
+                        ("revision", Json::Number(revision)),
+                        ("contractVersion", "1.8.0".into()),
+                        ("mediaType", "application/json".into()),
+                        ("contentHash", hash_json(value)?.into()),
+                        (
+                            "byteLength",
+                            Json::Number(
+                                ivy_contracts::json::canonical(value, MANAGEMENT_FRAME_BYTES)?.len()
+                                    as f64,
+                            ),
+                        ),
+                    ]),
+                ),
+                (
+                    "content",
+                    Json::object([("encoding", "json".into()), ("value", value.clone())]),
+                ),
+            ]))
+        })
+    }
+}
 #[tokio::test(flavor = "current_thread")]
 async fn orchestration_runtime_isolates_interleaved_journal_actions_and_keeps_current_policy_refusals()
  {
@@ -338,10 +387,14 @@ async fn orchestration_runtime_isolates_interleaved_journal_actions_and_keeps_cu
             connection: &db,
             root_object_id: Some("root".into()),
         },
-        client: Arc::new(NoRemote),
+        client: Arc::new(PublicPeer {
+            values: [old.clone(), newer.clone()],
+            calls: Mutex::default(),
+        }),
         contracts: PeerContracts {
             values: vec![old.clone(), newer.clone()],
             reads: Cell::new(0),
+            local: false,
         },
         limits: HistoryLimits::default(),
         now: || "2026-01-02T00:00:00.000Z".to_owned(),
@@ -349,17 +402,7 @@ async fn orchestration_runtime_isolates_interleaved_journal_actions_and_keeps_cu
         cache: Some(scopes.cache()),
     };
     let at = JsString::from("2026-01-02T00:00:00.000Z");
-    let pin = journal
-        .journal
-        .create(
-            "task-board/task",
-            &"Peer".into(),
-            Some(&"root".into()),
-            &old,
-            &at,
-            &"peer".into(),
-        )
-        .unwrap();
+    let pin = Json::object([("objectId", "peer".into()), ("revision", Json::Number(1.0))]);
     let pages = Snapshot {
         pin: RefCell::new(pin.clone()),
         calls: Cell::new(0),
@@ -418,10 +461,6 @@ async fn orchestration_runtime_isolates_interleaved_journal_actions_and_keeps_cu
     })
     .await;
     assert_eq!(journal.contracts.reads.get(), 1);
-    journal
-        .journal
-        .update("task-board/task", &"peer".into(), 1.0, &newer, &at)
-        .unwrap();
     let written_changes = db.total_changes();
     let second = runtime
         .with_read_cache(async {
@@ -447,6 +486,15 @@ async fn orchestration_runtime_isolates_interleaved_journal_actions_and_keeps_cu
     assert_eq!(journal.contracts.reads.get(), 3);
     store.read("task-board/task", &address, true).await.unwrap();
     assert_eq!(journal.contracts.reads.get(), 4);
+    assert_eq!(
+        *journal.client.calls.lock().unwrap(),
+        vec![
+            address.clone(),
+            address.clone(),
+            Json::object([("objectId", "peer".into())]),
+            address,
+        ]
+    );
 
     let run = JsString(vec![0x0072, 0xdfff]);
     let error = runtime.run_handoff(&old, &run).unwrap_err();
