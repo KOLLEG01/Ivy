@@ -1,5 +1,6 @@
 //! Durable media acquisition state. The runtime owns the checked directory and
 //! exclusive owner connection; this module owns the unchanged media.sqlite format.
+use crate::media_schema::{MediaSchema, validate_media};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     hash::hash_json,
@@ -10,7 +11,6 @@ use ivy_store::{
     sqlite,
 };
 use std::collections::HashSet;
-use crate::media_schema::{MediaSchema, validate_media};
 
 const FRAME: usize = 32 * 1024 * 1024;
 pub const MAXIMUM_BYTES: i64 = 32 * 1024 * 1024;
@@ -94,8 +94,18 @@ pub struct SpoolJournal<V> {
     pub db: Connection,
     validation: V,
     active: HashSet<JsString>,
+    // Fields drop in declaration order: media.sqlite closes before owner.sqlite.
+    _owner: Option<Connection>,
 }
 impl<V: Validation> SpoolJournal<V> {
+    /// Open the original protected spool and retain its exclusive owner
+    /// transaction until this journal closes or its process exits.
+    pub fn open(root: &std::path::Path, owner: &IvyJson, validation: V) -> IvyResult<Self> {
+        let (db, lock) = crate::media_spool_owner::open(root)?;
+        let mut journal = Self::from_owned_connection(db, owner, validation)?;
+        journal._owner = Some(lock);
+        Ok(journal)
+    }
     /// Caller must hold the original exclusive owner.sqlite transaction and
     /// validate direct files/permissions before opening this media connection.
     pub fn from_owned_connection(
@@ -138,6 +148,7 @@ impl<V: Validation> SpoolJournal<V> {
             db,
             validation,
             active: HashSet::new(),
+            _owner: None,
         })
     }
     fn row(&self, operation_id: &JsString) -> IvyResult<Option<Row>> {

@@ -2,8 +2,12 @@
 use crate::{
     journal::Pin,
     media_input::{Prepared, REQUEST_BYTES},
+    media_spool::Validation,
+    outlook_media_source::{OutlookMediaContext, OutlookMediaSource},
+    triage_native::{TriageFuture, TriageMediaContext, TriageMediaResolver},
+    triage_store::{pin as read_pin, pin_value, text},
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::canonical};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::hash_json, json::canonical};
 use std::future::Future;
 
 const MEDIA_BYTES: usize = REQUEST_BYTES - 512 * 1024;
@@ -44,6 +48,94 @@ pub struct Context {
 pub struct Inputs {
     pub media: IvyJson,
     pub inputs: Vec<IvyJson>,
+}
+
+/// Snapshot only the descriptor. Each input still goes through the original
+/// context's current-coverage, manifest, native-evidence and payload checks.
+pub struct OutlookTriageMedia<'context, 'a, 'source, 'engine, 'store, 'journal, V> {
+    original: OutlookMediaContext<'context, 'a, 'source, 'engine, 'store, 'journal, V>,
+    descriptor: Context,
+}
+pub fn outlook_triage_media<'context, 'a, 'source, 'engine, 'store, 'journal, V>(
+    original: OutlookMediaContext<'context, 'a, 'source, 'engine, 'store, 'journal, V>,
+) -> IvyResult<OutlookTriageMedia<'context, 'a, 'source, 'engine, 'store, 'journal, V>> {
+    let coverage = original.coverage.required("value")?;
+    let optional = |value: &IvyJson, key| -> IvyResult<Option<JsString>> {
+        let value = value.required(key)?;
+        if value.is_null() {
+            Ok(None)
+        } else {
+            value
+                .as_js_string()
+                .cloned()
+                .map(Some)
+                .ok_or_else(IvyError::internal)
+        }
+    };
+    let attachments = coverage
+        .required("attachments")?
+        .as_array()
+        .ok_or_else(IvyError::internal)?
+        .iter()
+        .map(|entry| {
+            let attachment = entry.required("attachment")?;
+            let manifest = entry.required("manifest")?;
+            Ok(Attachment {
+                name: optional(attachment, "name")?,
+                media_type: optional(attachment, "mediaType")?,
+                manifest: if manifest.is_null() {
+                    None
+                } else {
+                    Some(read_pin(manifest)?)
+                },
+                error_code: optional(entry, "errorCode")?,
+                representation: Representation::OriginalBytes,
+            })
+        })
+        .collect::<IvyResult<Vec<_>>>()?;
+    let descriptor = Context {
+        coverage: read_pin(original.coverage.required("pin")?)?,
+        coverage_contract: "secretary/media-coverage".into(),
+        coverage_hash: hash_json(coverage)?,
+        item: read_pin(&original.item)?,
+        source_id: text(coverage.required("admission")?, "sourceId")?,
+        gap: optional(coverage, "gap")?,
+        attachments,
+    };
+    Ok(OutlookTriageMedia {
+        original,
+        descriptor,
+    })
+}
+impl<V: Validation> TriageMediaContext for OutlookTriageMedia<'_, '_, '_, '_, '_, '_, V> {
+    fn context(&self) -> &Context {
+        &self.descriptor
+    }
+    fn input(&self, index: usize, maximum: usize) -> TriageFuture<'_, Option<Prepared>> {
+        Box::pin(self.original.input(index as f64, maximum as f64))
+    }
+}
+impl<V: Validation> TriageMediaResolver for OutlookMediaSource<'_, '_, '_, '_, '_, V> {
+    fn resolve<'a>(
+        &'a self,
+        source_id: &'a JsString,
+        item: &'a Pin,
+    ) -> TriageFuture<'a, Option<Box<dyn TriageMediaContext + 'a>>> {
+        Box::pin(async move {
+            if self.native.source.native.configuration.get("sourceId")
+                != Some(&IvyJson::String(source_id.clone()))
+            {
+                return Ok(None);
+            }
+            let selected = pin_value(item);
+            let Some(original) = self.context(&selected).await? else {
+                return Ok(None);
+            };
+            Ok(Some(
+                Box::new(outlook_triage_media(original)?) as Box<dyn TriageMediaContext>
+            ))
+        })
+    }
 }
 fn mismatch() -> IvyError {
     IvyError::new(

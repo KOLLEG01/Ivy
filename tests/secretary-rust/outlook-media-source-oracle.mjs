@@ -12,6 +12,8 @@ const {OutlookMediaSource}=await load('services/secretary/src/outlook-media-sour
 const {MediaSpool}=await load('services/secretary/src/media-spool.js');
 const {outlookPage}=await load('services/secretary/src/outlook-projection.js');
 const {prepareMediaInput}=await load('services/secretary/src/media-input.js');
+const {outlookTriageMedia,triageMedia}=await load('services/secretary/src/triage-media.js');
+const {validateTriage}=await load('services/secretary/src/triage-schema.js');
 const {contractVersion}=await load('services/secretary/src/schema.js');
 const {need,same}=await load('services/secretary/src/schema.js');
 const {canonical,digest,hashJson,IvyError}=await load('packages/sdk/src/node.js');
@@ -111,7 +113,25 @@ async function add(label,c={}){
     worker=createWorker();
    }
   }
-  if(c.context!==false){
+  if(c.triage){
+   const selected={...input.plan.item,revision:c.staleItem?1:records.get(itemId).currentRevision},sourceId=c.foreignSource?'other':'mail';
+   if(c.mutation==='owner')mutation={key:'secretary/media-coverage',raw:'object.ownerObjectId',value:'foreign'};
+   if(c.mutation==='source')mutation={key:'secretary/media-coverage',path:'content.value.admission.sourceId',value:'foreign'};
+   if(c.mutation==='linkHash')mutation={key:'secretary/item',path:'content.value.media.0.contentHash',value:'sha256:'+'f'.repeat(64)};
+   if(c.mutation==='encoding')mutation={key:'secretary/media-coverage',raw:'content.encoding',value:'base64'};
+   input.actions.push({method:'triage',sourceId,item:selected});
+   try{
+    const original=sourceId===input.configuration.sourceId?await worker.context(selected):null;
+    if(!original)results.push({value:null});
+    else{
+     const context=outlookTriageMedia(original);
+     if(c.mutation==='changedCoverage')mutation={key:'secretary/media-coverage',path:'content.value.observedAt',value:'2026-09-08T09:00:00.001Z'};
+     if(c.mutation==='manifestIdentity')mutation={key:'secretary/media-manifest',path:'content.value.evidence.attachment.name',value:'foreign'};
+     if(c.mutation==='bytes')mutation={key:'secretary/media-chunk',path:'content.value',value:'AQIDBA=='};
+     const value=await triageMedia(context,selected,sourceId);validateTriage('TriageMedia',value.media);results.push({value});
+    }
+   }catch(cause){results.push(outcome(cause));}
+  }else if(c.context!==false){
    if(c.mutation==='owner')mutation={key:'secretary/media-coverage',raw:'object.ownerObjectId',value:'foreign'};
    if(c.mutation==='source')mutation={key:'secretary/media-coverage',path:'content.value.admission.sourceId',value:'foreign'};
    if(c.mutation==='linkHash')mutation={key:'secretary/item',path:'content.value.media.0.contentHash',value:'sha256:'+'f'.repeat(64)};
@@ -134,6 +154,22 @@ async function add(label,c={}){
  }finally{spool?.close();store.close();const actual=await realpath(directory);assert.equal(dirname(actual),parent);assert(basename(actual).startsWith('secretary-media-source-reference-'));await rm(actual,{recursive:true});}
 }
 try{
+ if(process.argv.includes('--triage')){
+  await add('triage resolves complete original bytes after retirement',{triage:true,attempts:2});
+  await add('triage reopens retired core and spool without another GET',{triage:true,restart:true,restartAt:1});
+  await add('triage preserves two-file order and native input offsets',{triage:true,files:2,attempts:4});
+  await add('triage preserves unsupported attachment evidence',{triage:true,unsupported:true});
+  await add('triage preserves inline gap without a manifest',{triage:true,inline:true});
+  await add('triage waits for pending original materialization',{triage:true,pending:4,attempts:2});
+  await add('triage resolver does not read another source',{triage:true,foreignSource:true});
+  await add('triage refuses a superseded selected item revision',{triage:true,staleItem:true});
+  for(const mutation of ['owner','source','linkHash','encoding','changedCoverage','manifestIdentity','bytes'])await add('triage refuses '+mutation,{triage:true,mutation});
+  const complete=rows[0];assert.equal(complete.expected.retained.spool.plans,0);assert.equal(complete.input.downloads.length,1);assert.equal(complete.expected.results.at(-1).value.media.attachments[0].kind,'text');
+  assert.equal(rows[1].input.downloads.length,1);assert.deepEqual(rows[2].expected.results.at(-1).value.media.attachments.map(a=>a.inputIndex),[2,4]);
+  assert.equal(rows[5].expected.results.at(-1).value,null);assert.equal(rows[6].expected.results.at(-1).value,null);
+  assert(rows.slice(7).every(row=>row.expected.results.at(-1).code));
+  console.log(JSON.stringify({rootId,nodeId:native.nodeId,time:native.time,wall:native.wall,rows}));
+ }else{
  await add('save attach verify retire and read complete original input',{attempts:2});
  await add('retained pending acquisition reopens without replacement GET',{restart:true});
  await add('retired spool reopens and original context remains readable',{restart:true,restartAt:1});
@@ -170,4 +206,5 @@ try{
  const corrected=rows.find(row=>row.input.label==='approved recovery links saved coverage before retirement');assert.equal(corrected.expected.retained.spool.plans,0);assert(corrected.expected.results.at(-1).value);assert.equal(corrected.input.downloads.length,1);assert.equal(corrected.expected.retained.core.filter(row=>row.value.action==='attach').length,1);
  for(const row of rows.filter(row=>/refusal|never retires|ongoing unapplied/.test(row.input.label))){if(!row.input.options.owner)assert.equal(row.expected.retained.spool.plans,1,row.input.label);assert(row.input.downloads.length<=1,row.input.label);}
  console.log(JSON.stringify({rootId,nodeId:native.nodeId,time:native.time,wall:native.wall,rows,fairScanOriginal,unchangedDefect,faultAdapter:'Only the injected TEMP-trigger SQLite error is normalized to the shared Rust storage_unavailable/unknown mapping; archivePublished itself executes and rolls back.',approvedCorrection:'TASK-0072 seq446 / root answer task0072-outlook-retirement-root-answer-256-v1; only saved coverage plus retained old plan, exact returned coverage/current link before retirement'}));
+ }
 }finally{Date.now=beforeNow;}

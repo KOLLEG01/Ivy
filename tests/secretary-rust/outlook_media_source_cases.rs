@@ -1,13 +1,13 @@
 use super::microsoft_store_cases::seed;
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use ivy_contracts::{IvyResult, hash::hash_json, json::canonical};
+use ivy_contracts::{IvyResult, json::canonical};
 use ivy_sdk::clock::Clock;
 use ivy_secretary::{
     engine::SecretaryEngine,
     inbox_evidence::InboxEvidence,
     inbox_recovery::RecoveryScan,
-    journal::{Journal, Limits},
+    journal::{Journal, Limits, Pin},
     media_input::{self, AcquiredMediaPreparer, PrepareFuture, Source},
     media_spool::SpoolJournal,
     outlook_media_native::{
@@ -16,8 +16,10 @@ use ivy_secretary::{
     outlook_media_source::OutlookMediaSource,
     outlook_source::OutlookSource,
     store::Store,
+    triage_media,
+    triage_native::TriageMediaResolver,
 };
-use ivy_store::rusqlite::{Connection, params};
+use ivy_store::rusqlite::params;
 use std::{cell::RefCell, path::Path, process::Command, rc::Rc};
 
 struct Directory(std::path::PathBuf);
@@ -352,8 +354,8 @@ fn seed_core(journal: &Journal, input: &IvyJson) {
 }
 fn open_spool(path: &Path, input: &IvyJson) -> Rc<RefCell<SpoolJournal<MediaNativeValidation>>> {
     Rc::new(RefCell::new(
-        SpoolJournal::from_owned_connection(
-            Connection::open(path).unwrap(),
+        SpoolJournal::open(
+            path.parent().unwrap(),
             input.required("spoolOwner").unwrap(),
             MediaNativeValidation,
         )
@@ -391,11 +393,14 @@ fn seed_spool(spool: &SpoolJournal<MediaNativeValidation>, input: &IvyJson) {
             .unwrap();
     }
 }
-fn corpus() -> IvyJson {
+fn selected_corpus(triage: bool) -> IvyJson {
     let mut command = Command::new("node");
     command
         .arg("tests/secretary-rust/outlook-media-source-oracle.mjs")
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    if triage {
+        command.arg("--triage");
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -414,6 +419,9 @@ fn corpus() -> IvyJson {
         32 * 1024 * 1024,
     )
     .unwrap()
+}
+fn corpus() -> IvyJson {
+    selected_corpus(false)
 }
 async fn segment(
     journal: &Journal,
@@ -464,7 +472,15 @@ async fn segment(
     let mut worker = OutlookMediaSource::new(&source, spool, downloader, preparer);
     let split = actions
         .iter()
-        .position(|action| action.get("method") == Some(&"context".into()))
+        .position(|action| {
+            matches!(
+                action
+                    .get("method")
+                    .and_then(|v| v.as_str().ok())
+                    .as_deref(),
+                Some("context" | "triage")
+            )
+        })
         .unwrap_or(actions.len());
     for action in &actions[..split] {
         assert_eq!(action.get("method"), Some(&"step".into()));
@@ -481,7 +497,37 @@ async fn segment(
             ),
         ]));
     }
-    let Some(_) = actions.get(split) else { return };
+    let Some(action) = actions.get(split) else {
+        return;
+    };
+    if action.get("method") == Some(&"triage".into()) {
+        let selected = action.required("item").unwrap();
+        let selected = Pin {
+            object_id: selected.required("objectId").unwrap().as_str().unwrap(),
+            revision: selected.required("revision").unwrap().as_f64().unwrap() as i64,
+        };
+        let source_id = action.required("sourceId").unwrap().as_js_string().unwrap();
+        let assembled = async {
+            let Some(context) = worker.resolve(source_id, &selected).await? else {
+                return Ok(IvyJson::Null);
+            };
+            let inputs = triage_media::assemble(
+                context.context(),
+                &selected,
+                source_id,
+                |index, maximum| context.input(index, maximum),
+            )
+            .await?;
+            Ok(IvyJson::object([
+                ("media", inputs.media),
+                ("inputs", IvyJson::Array(inputs.inputs)),
+            ]))
+        }
+        .await;
+        results.push(result(assembled));
+        assert_eq!(split + 1, actions.len());
+        return;
+    }
     let context = worker
         .context(input.required("plan").unwrap().required("item").unwrap())
         .await;
@@ -873,6 +919,29 @@ async fn compare_case(corpus: &IvyJson, row: &IvyJson, fair: u8) {
     }
     SPOOL.with(|slot| *slot.borrow_mut() = None);
     spool.borrow().ensure_idle().unwrap();
+}
+#[tokio::test]
+async fn outlook_triage_resolver_retains_verified_source_provenance_and_gaps() {
+    let corpus = selected_corpus(true);
+    let rows = corpus.required("rows").unwrap().as_array().unwrap();
+    assert_eq!(rows.len(), 15);
+    for row in rows {
+        compare_case(&corpus, row, 0).await;
+    }
+    println!(
+        "outlook-triage resolver original comparisons: {} cases / {} actions",
+        rows.len(),
+        rows.iter()
+            .map(|row| row
+                .required("input")
+                .unwrap()
+                .required("actions")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len())
+            .sum::<usize>()
+    );
 }
 #[tokio::test]
 async fn original_media_source_selection_publication_retirement_and_context() {
