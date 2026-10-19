@@ -13,6 +13,8 @@ registerHooks({resolve(specifier,context,next){
 const {HiveStore}=await import('../../services/hive/src/store.ts');
 const {Objects}=await import('../../services/hive/src/objects.ts');
 const {Events}=await import('../../services/hive/src/events.ts');
+const {Retention}=await import('../../services/hive/src/retention.ts');
+const {pruneObjectRevisions}=await import('../../services/hive/src/object-retention.ts');
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
 const {canonical,digest}=await import('../../packages/contracts/src/canonical.ts');
 // Invoke the unchanged worker functions in isolation with the actual HiveStore.
@@ -24,8 +26,25 @@ const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,ident
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
 let store;
+// Observe only the runtime primitives. Rust executes retention policy and SQL
+// independently; these values do not supply selected candidates or results.
+const retentionRuntime={dates:new Map(),iso:new Map(),comparisons:new Map()};
+function retentionDate(RealDate,now){
+  const remember=value=>{retentionRuntime.dates.set(value,RealDate.parse(value));};
+  for(const row of store.all('SELECT created_at,updated_at FROM objects')){remember(row.created_at);remember(row.updated_at);}
+  for(const row of store.all('SELECT created_at FROM revisions'))remember(row.created_at);
+  const keys=[];
+  for(const row of store.all('SELECT definition FROM contracts')){try{const key=JSON.parse(row.definition)?.key;if(typeof key==='string')keys.push(key);}catch{}}
+  for(const a of keys)for(const b of keys)retentionRuntime.comparisons.set(JSON.stringify([a,b]),Math.sign(a.localeCompare(b)));
+  return class extends RealDate{
+    constructor(...args){super(...(args.length?args:[now]));}
+    static now(){return now;}
+    static parse(value){remember(value);return RealDate.parse(value);}
+    toISOString(){const result=super.toISOString();retentionRuntime.iso.set(this.getTime(),result);return result;}
+  };
+}
 const tableHash=(table,columns)=>'sha256:'+createHash('sha256').update(store.get(`SELECT json_group_array(json_array(${columns})) AS encoded FROM (SELECT rowid AS record_id,* FROM ${table} ORDER BY rowid)`).encoded).digest('hex');
-const snapshot=()=>({contracts:tableHash('contracts','key,version,definition'),families:store.all('SELECT * FROM contract_families ORDER BY key'),objects:store.all('SELECT * FROM objects ORDER BY id'),fts:store.all('SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid'),revisions:tableHash('revisions',"record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),references:store.all('SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name'),principals:store.all('SELECT * FROM principals ORDER BY id'),credentials:store.all('SELECT * FROM credentials ORDER BY digest'),nodes:store.all('SELECT * FROM service_nodes ORDER BY id'),sessions:store.all('SELECT * FROM browser_sessions ORDER BY digest'),subscriptions:store.all('SELECT * FROM subscriptions ORDER BY node_id,name'),durable:store.all('SELECT * FROM durable_subscriptions ORDER BY node_id,name'),changes:[...store.changes],mutations:tableHash('mutations','record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes'),events:tableHash('events','sequence,topic,topic_version,source,occurred_at,mutation_id,payload'),metadata:store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),retention:store.all('SELECT * FROM retention_families ORDER BY contract_key')});
+const snapshot=(compactEvents=false)=>({contracts:tableHash('contracts','key,version,definition'),families:store.all('SELECT * FROM contract_families ORDER BY key'),objects:store.all('SELECT * FROM objects ORDER BY id'),fts:store.all('SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid'),revisions:tableHash('revisions',"record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),references:store.all('SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name'),principals:store.all('SELECT * FROM principals ORDER BY id'),credentials:store.all('SELECT * FROM credentials ORDER BY digest'),nodes:store.all('SELECT * FROM service_nodes ORDER BY id'),sessions:store.all('SELECT * FROM browser_sessions ORDER BY digest'),subscriptions:store.all('SELECT * FROM subscriptions ORDER BY node_id,name'),durable:store.all('SELECT * FROM durable_subscriptions ORDER BY node_id,name'),changes:[...store.changes],mutations:tableHash('mutations','record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes'),events:tableHash('events',compactEvents?'sequence,topic,topic_version,source,occurred_at,mutation_id,length(CAST(payload AS BLOB))':'sequence,topic,topic_version,source,occurred_at,mutation_id,payload'),metadata:store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),retention:store.all('SELECT * FROM retention_families ORDER BY contract_key'),apps:store.all('SELECT * FROM apps ORDER BY app_id'),releases:store.all('SELECT * FROM app_releases ORDER BY app_id,release_id'),diagnostics:store.all('SELECT * FROM diagnostics ORDER BY identity')});
 const rows=[];
 try {
  store=new HiveStore(input.path);
@@ -115,6 +134,24 @@ try {
       break;
     }
     case 'readObject':value=new Objects(store).read({objectId:step.objectId,revision:step.revision});break;
+    case 'pruneRevisions':case 'retention':{
+      const RealDate=Date;
+      globalThis.Date=retentionDate(RealDate,step.now);
+      try{
+        if(step.op==='pruneRevisions'){
+          const context={...store.authenticate(step.context),serviceNodeId:step.context.serviceNodeId,generation:1};
+          value=store.withBudget(()=>pruneObjectRevisions(store,context,step.params),step.overdue?-1:10000);
+        }else{
+          const diagnostics=step.diagnosticSql||step.diagnosticFail?{collectDiagnostics(){store.db.exec(step.diagnosticSql??'');if(step.diagnosticFail)throw new IvyError('fixture_failure','Diagnostic collection requested failure.');}}:undefined;
+          const retention=new Retention(store,diagnostics);
+          if(step.method==='recordFailure'){
+            const message=step.messageUnits?String.fromCharCode(...step.messageUnits):step.message;
+            retention.recordFailure(new Error(message),step.now);
+          }else value=retention[step.method](step.now);
+        }
+      }finally{globalThis.Date=RealDate;}
+      break;
+    }
     case 'configure':store.configureCredentials(step.credentials);break;
     case 'authenticate':value=store.authenticate(step.context);break;
     case 'sql':store.db.exec(step.sql);break;
@@ -151,10 +188,11 @@ try {
     default:throw Error('Unknown trace action');
    }
   }catch(e){error=IvyError.from(e).toWire();}
-  rows.push({value,error,state:snapshot()});
+  rows.push({value,error,state:snapshot(step.compactEvents??false)});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");
  const topics=store.all('SELECT * FROM topics ORDER BY topic,version');
- process.stdout.write(JSON.stringify({rows,definitions,metadata,topics}));
+ const runtime=input.steps.some(step=>['retention','pruneRevisions'].includes(step.op))?{retentionRuntime:Object.fromEntries(Object.entries(retentionRuntime).map(([key,map])=>[key,[...map]]))}:{};
+ process.stdout.write(JSON.stringify({rows,definitions,metadata,topics,...runtime}));
 }finally{store?.close();}

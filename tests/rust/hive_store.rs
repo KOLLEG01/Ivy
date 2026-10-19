@@ -22,6 +22,8 @@ mod object_write;
 mod online_backup;
 #[path = "hive_query.rs"]
 mod query;
+#[path = "hive_retention.rs"]
+mod retention;
 use rusqlite::types::ValueRef;
 use serde_json::{Value, json};
 use std::{
@@ -69,12 +71,12 @@ fn rows(store: &Store, sql: &str) -> Value {
         .unwrap();
     json!(values)
 }
-fn snapshot(store: &Store) -> Value {
+fn snapshot(store: &Store, compact_events: bool) -> Value {
     let table_hash = |table: &str, columns: &str| {
         let encoded:String=store.connection().query_row(&format!("SELECT json_group_array(json_array({columns})) FROM (SELECT rowid AS record_id,* FROM {table} ORDER BY rowid)"),[],|r|r.get(0)).unwrap();
         ivy_contracts::hash::digest(encoded)
     };
-    json!({"contracts":table_hash("contracts","key,version,definition"),"families":rows(store,"SELECT * FROM contract_families ORDER BY key"),"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"fts":rows(store,"SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events","sequence,topic,topic_version,source,occurred_at,mutation_id,payload"),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key")})
+    json!({"contracts":table_hash("contracts","key,version,definition"),"families":rows(store,"SELECT * FROM contract_families ORDER BY key"),"objects":rows(store,"SELECT * FROM objects ORDER BY id"),"fts":rows(store,"SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid"),"revisions":table_hash("revisions","record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),"references":rows(store,"SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name"),"principals":rows(store,"SELECT * FROM principals ORDER BY id"),"credentials":rows(store,"SELECT * FROM credentials ORDER BY digest"),"nodes":rows(store,"SELECT * FROM service_nodes ORDER BY id"),"sessions":rows(store,"SELECT * FROM browser_sessions ORDER BY digest"),"subscriptions":rows(store,"SELECT * FROM subscriptions ORDER BY node_id,name"),"durable":rows(store,"SELECT * FROM durable_subscriptions ORDER BY node_id,name"),"changes":store.changes().iter().map(|s|s.to_utf8().unwrap()).collect::<Vec<_>>(),"mutations":table_hash("mutations","record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes"),"events":table_hash("events",if compact_events{"sequence,topic,topic_version,source,occurred_at,mutation_id,length(CAST(payload AS BLOB))"}else{"sequence,topic,topic_version,source,occurred_at,mutation_id,payload"}),"metadata":rows(store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"retention":rows(store,"SELECT * FROM retention_families ORDER BY contract_key"),"apps":rows(store,"SELECT * FROM apps ORDER BY app_id"),"releases":rows(store,"SELECT * FROM app_releases ORDER BY app_id,release_id"),"diagnostics":rows(store,"SELECT * FROM diagnostics ORDER BY identity")})
 }
 fn context(value: &Value) -> AuthenticatedContext {
     AuthenticatedContext {
@@ -86,6 +88,9 @@ fn wire(value: IvyJson) -> Value {
     serde_json::from_str(&stringify(&value, 1 << 26).unwrap()).unwrap()
 }
 fn native(path: &Path, steps: &[Value]) -> Value {
+    native_with_runtime(path, steps, None)
+}
+fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) -> Value {
     let mut store = Store::open(path).unwrap();
     let mut result = vec![];
     for step in steps {
@@ -103,6 +108,12 @@ fn native(path: &Path, steps: &[Value]) -> Value {
             step
         };
         let outcome = match step["op"].as_str().unwrap() {
+            "retention" | "pruneRevisions" => retention::native_retention(
+                &mut store,
+                step,
+                runtime.expect("Retention runtime observations"),
+            )
+            .map(wire),
             "register" => {
                 let mut definition = IvyJson::from_serde(&step["definition"]).unwrap();
                 if let Some(fields) = step["definitionUnits"].as_object() {
@@ -389,7 +400,7 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                 serde_json::from_str(&stringify(&e.to_wire(), 1 << 20).unwrap()).unwrap(),
             ),
         };
-        result.push(json!({"value":value,"error":error,"state":snapshot(&store)}));
+        result.push(json!({"value":value,"error":error,"state":snapshot(&store,step["compactEvents"]==true)}));
     }
     json!({"rows":result,"definitions":rows(&store,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name"),"metadata":rows(&store,"SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),"topics":rows(&store,"SELECT * FROM topics ORDER BY topic,version")})
 }
