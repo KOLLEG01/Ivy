@@ -7,6 +7,8 @@ use std::sync::Arc;
 mod media_format;
 #[path = "phone_rtp_transport.rs"]
 mod rtp_transport;
+#[path = "phone_sdp.rs"]
+mod sdp;
 #[path = "phone_native_config.rs"]
 mod native_config;
 #[path = "phone_native_dispatch.rs"]

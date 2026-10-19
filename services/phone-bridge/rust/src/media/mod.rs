@@ -1,16 +1,22 @@
 mod evs;
 mod format;
 mod g711;
+mod negotiation;
 mod packet;
 mod permit;
 mod queue;
 mod rtp;
+mod sdp;
 mod startup;
 mod transport;
 
 pub use permit::AudioPermit;
 pub use queue::AudioQueue;
 pub use rtp::{RtpAudioPacket, RtpReceiveQueue, RtpReceiveStatus};
+pub use sdp::{
+    SDP_UNITS, SdpConnection, SdpDirection, SdpDocument, SdpError, SdpFormat, SdpMedia,
+    SdpMediaKind, SdpOrigin, bounded_sdp, valid_sdp,
+};
 pub use startup::RtpStartupGate;
 
 pub const SAMPLE_RATE: usize = 48_000;
@@ -40,6 +46,9 @@ pub use evs::{
 };
 pub use format::{AudioFormat, Codec, FormatError};
 pub use g711::G711Codec;
+pub use negotiation::{
+    AudioNegotiation, AudioNegotiator, NegotiationError, SdpIdentity, SdpType, TelephoneEventFormat,
+};
 pub use packet::{RtpExtension, RtpHeader, RtpPacket};
 pub use transport::{
     RtpDatagramSink, RtpPeer, RtpTransport, RtpTransportCounters, RtpTransportError,

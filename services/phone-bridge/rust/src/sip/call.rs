@@ -35,7 +35,9 @@ pub trait DelayedInviteMedia: Send + Sync + 'static {
     fn is_closed(&self) -> bool;
     fn failed(&self) -> bool;
     fn negotiate_offer(&self, offer: &str) -> Option<String>;
-    fn rejected_answer(&self, offer: &str) -> Option<String>;
+    fn rejected_answer(&self, offer: &str) -> Option<String> {
+        crate::media::SdpDocument::rejected_answer(offer)
+    }
     fn start(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
 }
 
@@ -861,11 +863,8 @@ impl CallActor {
     }
 }
 
-fn bounded_sdp(offer: &str) -> bool {
-    !offer.trim().is_empty() && offer.encode_utf16().count() <= 65_536
-}
+use crate::media::bounded_sdp;
 fn valid_offer(response: &Response) -> bool {
     let offer = String::from_utf8_lossy(&response.body);
-    bounded_sdp(&offer)
-        && response.headers.iter().any(|header| matches!(header, Header::ContentType(value) if value.value().split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/sdp")))
+    response.headers.iter().any(|header| matches!(header, Header::ContentType(value) if crate::media::valid_sdp(Some(value.value()), &offer)))
 }
