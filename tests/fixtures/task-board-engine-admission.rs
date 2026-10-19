@@ -100,36 +100,10 @@ impl Replay {
         }
     }
 }
-struct Client {
-    replay: Arc<Replay>,
-    aliases: Mutex<Vec<JsString>>,
-}
+struct Client(Arc<Replay>);
 impl RpcClient for Client {
     fn request<'a>(&'a self, m: &'a str, a: Json, _: RequestOptions) -> RequestFuture<'a> {
-        Box::pin(async move {
-            let mut a = a;
-            if m == "tools.call" {
-                let id = s(&a, "operationId").clone();
-                let units = id.to_utf8().unwrap();
-                let parts: Vec<_> = units.split(':').collect();
-                assert_eq!(parts.len(), 3);
-                assert_eq!(parts[0].len(), 36);
-                assert!(parts[1].parse::<u64>().is_ok());
-                assert_eq!(parts[2].len(), 36);
-                let mut aliases = self.aliases.lock().unwrap();
-                let index = if let Some(i) = aliases.iter().position(|a| a == &id) {
-                    i
-                } else {
-                    aliases.push(id);
-                    aliases.len() - 1
-                };
-                a.insert(
-                    "operationId",
-                    format!("project-operation-{}", index + 1).into(),
-                );
-            }
-            self.replay.call("rpc", [m.into(), a])
-        })
+        Box::pin(async move { self.0.call("rpc", [m.into(), a]) })
     }
 }
 struct Bindings(Arc<Replay>);
@@ -277,10 +251,7 @@ async fn public_admission_matches_original_identity_plan_and_recovery_boundaries
             ),
             name: s(row, "name").clone(),
         });
-        let client = Arc::new(Client {
-            replay: replay.clone(),
-            aliases: Mutex::new(vec![]),
-        });
+        let client = Arc::new(Client(replay.clone()));
         let bindings = Bindings(replay.clone());
         let owner = EngineOwner {
             service_node_id: "task-node".into(),
