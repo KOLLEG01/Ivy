@@ -468,6 +468,9 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
     pub fn recovered(&self) -> bool {
         self.shared.state.borrow().recovering.is_none()
     }
+    pub async fn verify_owner(&self) -> IvyResult<()> {
+        self.shared.engine.verify_owner().await
+    }
     pub fn task_changed(&self) {
         let mut st = self.shared.state.borrow_mut();
         st.task_changes = st.task_changes.wrapping_add(1);
@@ -507,8 +510,11 @@ impl<'a, 'x, S: ReconcileStore + 'a, E: ReconcileEngine + 'a, X: ReconcileExecut
         })
         .await;
     }
-    pub async fn stop(&self) {
+    pub fn stop_admissions(&self) {
         self.shared.state.borrow_mut().stopped = true;
+    }
+    pub async fn stop(&self) {
+        self.stop_admissions();
         self.settled().await;
     }
     fn start(&self, key: JsString, l: Lane, id: JsString, gate: bool) {

@@ -18,6 +18,7 @@ use ivy_task_board::{
     engine_read::{EngineReads, ReadRuntime},
     engine_service::{EngineService, RetainedService, ServiceRuntime},
     engine_validation::ActionValidation,
+    generation::{GenerationRuntime, generation},
     journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_journal::{LocalJournal, initialize},
@@ -25,7 +26,6 @@ use ivy_task_board::{
     native_lifecycle::LifecyclePublication,
     publication_coordination::PublicationCoordination,
     reconciler::ReconcileExecutor,
-    service_bridge::service_bridge,
     task_written::{TaskCommentNotices, TaskWriteObserver},
 };
 use std::{
@@ -45,6 +45,7 @@ fn clock() -> String {
 struct DispatchRuntime {
     changes: Cell<usize>,
     kicks: Cell<usize>,
+    stopped: Cell<bool>,
 }
 impl ServiceRuntime for DispatchRuntime {
     fn recovered(&self) -> bool {
@@ -58,6 +59,32 @@ impl ServiceRuntime for DispatchRuntime {
     }
     fn kick(&self) {
         self.kicks.set(self.kicks.get() + 1);
+    }
+}
+impl GenerationRuntime for DispatchRuntime {
+    fn recovered(&self) -> bool {
+        true
+    }
+    fn diagnostics(&self) -> Vec<Json> {
+        vec![]
+    }
+    fn task_changed(&self) {
+        self.changes.set(self.changes.get() + 1);
+    }
+    fn notification(&self, _: &Json) -> bool {
+        panic!("No native notification in this recovery case")
+    }
+    async fn verify_owner(&self) -> IvyResult<()> {
+        panic!("No readiness request in this recovery case")
+    }
+    async fn tick(&self) {
+        panic!("Retired generation must not start an autonomous tick")
+    }
+    fn stop_admissions(&self) {
+        self.stopped.set(true);
+    }
+    async fn stop(&self) {
+        assert!(self.stopped.get());
     }
 }
 fn admission(name: &str, value: &Json) -> IvyResult<()> {
@@ -677,17 +704,22 @@ async fn check_comment_recovery(question: bool) {
         // The accepted Operation and all replayed effects live in the real
         // SQLite journal. Every public retry enters an actual Send SDK handler,
         // local mailbox, public facade and both retained queues.
-        let (bridge, local) = service_bridge(1);
+        let (bridge, local) = generation(1, 1000.0);
         let reply = bridge.handler("comment")(f(&operation.value, "request").clone(), context);
         let retired = bridge.retire();
         executor
             .drive(
-                invocation_executor.drive(execution_executor.drive(local.run(&handler, async {
-                    invocations.stop().await;
-                    execution.settled().await;
-                    projection.settled().await;
-                    Ok(())
-                }))),
+                invocation_executor.drive(execution_executor.drive(local.run(
+                    &handler,
+                    &dispatch_runtime,
+                    &ivy_sdk::clock::SystemClock,
+                    async {
+                        invocations.stop().await;
+                        execution.settled().await;
+                        projection.settled().await;
+                        Ok(())
+                    },
+                ))),
             )
             .await
             .unwrap();
@@ -695,6 +727,7 @@ async fn check_comment_recovery(question: bool) {
         let result = reply.await;
         assert_eq!(dispatch_runtime.changes.get(), usize::from(result.is_ok()));
         assert_eq!(dispatch_runtime.kicks.get(), usize::from(result.is_ok()));
+        assert!(dispatch_runtime.stopped.get());
         assert_eq!(client.owner_checks.load(Ordering::SeqCst), round + 1);
         let saved = operations
             .store

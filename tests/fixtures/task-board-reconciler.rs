@@ -22,6 +22,8 @@ use std::{
 };
 #[path = "task-board-reconciler-journal.rs"]
 mod journal;
+#[path = "task-board-generation.rs"]
+mod generation;
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(k).unwrap_or(&NULL)
