@@ -138,7 +138,6 @@ pub struct SdpFormat {
     pub(super) payload: u8,
     pub(super) rtpmap: String,
     pub(super) parameters: Option<String>,
-    feedback: Vec<String>,
     video: bool,
 }
 impl SdpFormat {
@@ -173,7 +172,6 @@ impl SdpFormat {
             payload,
             rtpmap,
             parameters,
-            feedback: vec!["transport-cc".into()],
             video: matches!(payload, 24 | 26 | 28 | 31..=34),
         }
     }
@@ -181,6 +179,7 @@ impl SdpFormat {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SdpMediaKind {
+    Invalid,
     Audio,
     Video,
     Application,
@@ -193,6 +192,7 @@ pub enum SdpMediaKind {
 impl SdpMediaKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Invalid => "invalid",
             Self::Audio => "audio",
             Self::Video => "video",
             Self::Application => "application",
@@ -205,6 +205,7 @@ impl SdpMediaKind {
     }
     fn parse(text: &str) -> Result<Self, SdpError> {
         [
+            Self::Invalid,
             Self::Audio,
             Self::Video,
             Self::Application,
@@ -423,7 +424,7 @@ impl SdpMedia {
                     .push(("a=rtpmap:".into(), value.into()));
                 return Ok(());
             }
-            if matches!(self.kind, SdpMediaKind::Message | SdpMediaKind::Image) {
+            if !self.kind.rtp() {
                 return Ok(());
             }
             let (id, map) = split_field(value);
@@ -438,6 +439,7 @@ impl SdpMedia {
                     .find(|format| format.payload == payload)
                 {
                     format.rtpmap = map.into();
+                    format.video = self.kind == SdpMediaKind::Video;
                 } else {
                     let mut format = SdpFormat::new(payload, map.into(), None);
                     format.video = self.kind == SdpMediaKind::Video;
@@ -452,7 +454,11 @@ impl SdpMedia {
                 self.attributes.known.push(("a=fmtp:".into(), value.into()));
                 return Ok(());
             }
-            if matches!(self.kind, SdpMediaKind::Message | SdpMediaKind::Image) {
+            if self.kind == SdpMediaKind::Video {
+                self.attributes.extra.push(text.into());
+                return Ok(());
+            }
+            if !self.kind.rtp() {
                 return Ok(());
             }
             let (id, parameters) = split_field(value);
@@ -461,22 +467,11 @@ impl SdpMedia {
                     format.parameters = Some(parameters.into());
                 }
             }
-        } else if self.kind == SdpMediaKind::Video && text.starts_with("a=rtcp-fb:") {
-            let (id, feedback) = split_field(&text[10..]);
-            for format in &mut self.formats {
-                if id == "*" || id.parse::<u8>().ok() == Some(format.payload) {
-                    if !format.feedback.iter().any(|value| value == feedback) {
-                        format.feedback.push(feedback.into());
-                    }
-                }
-            }
         } else if let Some(value) = text.strip_prefix("a=crypto:") {
             // Only retain valid declarations, as the original SDP parser does.
             // This is metadata, never activation of SRTP on the plain RTP session.
-            if valid_crypto(value) {
-                self.attributes
-                    .known
-                    .push(("a=crypto:".into(), value.into()));
+            if let Some(value) = normalize_crypto(value)? {
+                self.attributes.known.push(("a=crypto:".into(), value));
             }
         } else if let Some(key) = [
             "a=sctpmap:",
@@ -549,9 +544,10 @@ impl SdpMedia {
                 }
             }
             if format.video {
-                for feedback in &format.feedback {
-                    line(output, &format!("a=rtcp-fb:{} {feedback}", format.payload));
-                }
+                line(
+                    output,
+                    &format!("a=rtcp-fb:{} transport-cc", format.payload),
+                );
             }
         }
         self.attributes.write(output, &["a=rtpmap:", "a=fmtp:"]);
@@ -781,31 +777,74 @@ fn split_field(value: &str) -> (&str, &str) {
         .map(|index| (&value[..index], value[index..].trim()))
         .unwrap_or((value, ""))
 }
-fn valid_crypto(value: &str) -> bool {
+fn normalize_crypto(value: &str) -> Result<Option<String>, SdpError> {
     let fields: Vec<_> = value.split_whitespace().collect();
-    if fields.len() < 3
-        || fields[0]
-            .parse::<u32>()
-            .ok()
-            .filter(|tag| *tag > 0)
-            .is_none()
-    {
-        return false;
+    if fields.len() < 3 {
+        return Ok(None);
     }
+    let tag = fields[0]
+        .parse::<u32>()
+        .ok()
+        .filter(|tag| (1..=999_999_999).contains(tag))
+        .ok_or(SdpError::Invalid)?;
     let length = match fields[1] {
-        "AES_CM_128_HMAC_SHA1_80" | "AES_CM_128_HMAC_SHA1_32" => 40,
-        "AES_256_CM_HMAC_SHA1_80" | "AES_256_CM_HMAC_SHA1_32" => 64,
-        _ => return false,
+        "AES_CM_128_HMAC_SHA1_80" | "AES_CM_128_HMAC_SHA1_32" => 30,
+        "AES_256_CM_HMAC_SHA1_80" | "AES_256_CM_HMAC_SHA1_32" => 46,
+        _ => return Ok(None),
     };
-    fields[2]
-        .strip_prefix("inline:")
-        .and_then(|key| key.split('|').next())
-        .is_some_and(|key| {
-            key.len() == length
-                && key
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
-        })
+    let Some(key) = fields[2].strip_prefix("inline:") else {
+        return Ok(None);
+    };
+    let (key, suffix) = key
+        .split_once('|')
+        .map(|(key, tail)| (key, format!("|{tail}")))
+        .unwrap_or((key, String::new()));
+    let Some(key) = base64_prefix(key, length) else {
+        return Ok(None);
+    };
+    let extra = if fields.len() > 3 {
+        format!(" {}", fields[3..].join(" "))
+    } else {
+        String::new()
+    };
+    Ok(Some(format!(
+        "{tag} {} inline:{key}{suffix}{extra}",
+        fields[1]
+    )))
+}
+fn base64_prefix(value: &str, count: usize) -> Option<String> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    let padding = bytes.iter().rev().take_while(|&&byte| byte == b'=').count();
+    if padding > 2
+        || bytes[..bytes.len() - padding]
+            .iter()
+            .any(|byte| !ALPHABET.contains(byte))
+        || bytes.len() / 4 * 3 - padding < count
+    {
+        return None;
+    }
+    let mut output = bytes[..count.div_ceil(3) * 4].to_vec();
+    match count % 3 {
+        1 => {
+            let index = output.len() - 3;
+            let bits = ALPHABET.iter().position(|byte| *byte == output[index])?;
+            output[index] = ALPHABET[bits & 0x30];
+            output[index + 1] = b'=';
+            output[index + 2] = b'=';
+        }
+        2 => {
+            let index = output.len() - 2;
+            let bits = ALPHABET.iter().position(|byte| *byte == output[index])?;
+            output[index] = ALPHABET[bits & 0x3c];
+            output[index + 1] = b'=';
+        }
+        _ => {}
+    }
+    String::from_utf8(output).ok()
 }
 // RFC 3551's static RTP/AVP declarations, including the original parser's use
 // of that table for payloads appearing on any audio/video RTP media line.

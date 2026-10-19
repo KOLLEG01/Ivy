@@ -61,6 +61,9 @@ fn parser_cases() -> Vec<IvyJson> {
         )));
     }
     for kind in [
+        "invalid",
+        "data",
+        "control",
         "audio",
         "AUDIO",
         "video",
@@ -177,6 +180,31 @@ fn parser_cases() -> Vec<IvyJson> {
             "{PREFIX}a={direction}\r\nm=audio 31000 RTP/AVP 0\r\n"
         )));
     }
+    for name in ["H264", "H265", "VP9", "AV1", "unknown"] {
+        cases.push(parse_case(format!("{PREFIX}m=video 31000 RTP/AVP 96\r\na=rtpmap:96 {name}/90000\r\na=fmtp:96 profile-level-id=42e01f;packetization-mode=1\r\na=rtcp-fb:96 nack pli\r\n")));
+    }
+    cases.push(parse_case(format!(
+        "{PREFIX}m=video 31000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
+    )));
+    for suite in [
+        "AES_CM_128_HMAC_SHA1_80",
+        "AES_CM_128_HMAC_SHA1_32",
+        "AES_256_CM_HMAC_SHA1_80",
+        "AES_256_CM_HMAC_SHA1_32",
+    ] {
+        for key in [
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
+            cases.push(parse_case(format!(
+                "{PREFIX}m=audio 31000 RTP/AVP 0\r\na=crypto:1 {suite} inline:{key}\r\n"
+            )));
+        }
+    }
+    for tag in [0, 1, 999_999_999, 1_000_000_000, 2_147_483_647] {
+        cases.push(parse_case(format!("{PREFIX}m=audio 31000 RTP/AVP 0\r\na=crypto:{tag} AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n")));
+    }
     for ending in ["\r\n", "\n", "\r"] {
         cases.push(parse_case(
             format!("{PREFIX}m=audio 31000 RTP/AVP 0\r\n").replace("\r\n", ending),
@@ -218,6 +246,16 @@ fn parser_cases() -> Vec<IvyJson> {
 fn session_cases() -> Vec<IvyJson> {
     let preferences = [Codec::Opus, Codec::G722, Codec::Pcma, Codec::Pcmu];
     let mut cases = Vec::new();
+    for payload in [24, 26, 31, 34, 96, 127] {
+        for map in ["PCMU/8000", "opus/48000/2"] {
+            cases.push(session(
+                &preferences,
+                vec![offer(&format!(
+                    "m=audio 31000 RTP/AVP {payload}\r\na=rtpmap:{payload} {map}\r\n"
+                ))],
+            ));
+        }
+    }
     for (id, map) in [
         (0, None),
         (8, None),
