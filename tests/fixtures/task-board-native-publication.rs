@@ -401,11 +401,12 @@ async fn native_publication_matches_original_saved_observations_and_ordered_effe
             replay.name,
             f(row, "expected")
         );
+        let pending = replay.steps.lock().unwrap();
         assert!(
-            replay.steps.lock().unwrap().is_empty(),
+            pending.is_empty(),
             "{:?}: unconsumed effects {:?}",
             replay.name,
-            replay.steps.lock().unwrap().front()
+            pending.front()
         );
     }
 }

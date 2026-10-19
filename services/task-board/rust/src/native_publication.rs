@@ -226,7 +226,7 @@ impl<S: Store + ReadEvidenceStore + TurnEvidenceStore, P: TaskPrompts> NativePub
                 catalogs: self.catalogs,
                 principal_id: self.principal_id,
             }
-            .completion(r, s, o)
+            .completion(r, s, Some(o))
             .await?,
         ))
     }
