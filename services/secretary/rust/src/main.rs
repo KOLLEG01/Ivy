@@ -22,6 +22,13 @@ async fn signal() -> IvyResult<()> {
 }
 async fn run() -> IvyResult<bool> {
     let mut arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|value| value == "--document-worker")
+    {
+        ivy_secretary::document_worker::run(&arguments[1..])?;
+        return Ok(true);
+    }
     let importing = arguments.first().is_some_and(|v| v == "import");
     let operation =
         if importing {

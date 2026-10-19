@@ -107,7 +107,7 @@ impl Prepared {
 }
 
 // MIME selection uses ECMAScript trim, including BOM but excluding NEL.
-fn mime(source: &Source) -> String {
+pub(crate) fn mime(source: &Source) -> String {
     let units = source
         .media_type
         .as_ref()
