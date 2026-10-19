@@ -9,6 +9,7 @@ use ivy_task_board::{
         GenerationClock, GenerationRuntime, GenerationServiceRuntime, NativeNotifications,
         ReconcilerRuntime, TickSchedule, generation,
     },
+    local_executor::LocalExecutor,
     service_bridge::LocalHandler,
 };
 use std::future::poll_fn;
@@ -153,11 +154,10 @@ fn ready() -> ServiceState {
         phase: None,
     }
 }
-async fn pump_pending<F: Future>(work: Pin<&mut F>, tasks: &Tasks<'_>) {
+async fn pump_pending<F: Future>(work: Pin<&mut F>) {
     let mut work = work;
     poll_fn(|cx| {
         for _ in 0..12 {
-            tasks.pump(cx);
             assert!(work.as_mut().poll(cx).is_pending());
         }
         Poll::Ready(())
@@ -174,7 +174,7 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
         ("pausePage", true.into()),
     ]);
     let world = World::new(&input);
-    let tasks = Tasks::default();
+    let tasks = LocalExecutor::default();
     let reconciler = Reconciler::new(&world, &world, &tasks);
     let native = Native::default();
     let runtime = ReconcilerRuntime {
@@ -194,21 +194,21 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
     let drain = Gate::default();
     let drain_entered = Cell::new(false);
     let closed = Cell::new(false);
-    let mut work = Box::pin(driver.run(&public, &runtime, &clock, async {
+    let mut work = Box::pin(tasks.drive(driver.run(&public, &runtime, &clock, async {
         drain_entered.set(true);
         drain.wait().await;
         closed.set(true);
         Ok(())
-    }));
+    })));
     // Readiness is a retained local request even before autonomous tick start.
     let readiness = control.readiness(context());
-    pump_pending(work.as_mut(), &tasks).await;
+    pump_pending(work.as_mut()).await;
     assert_eq!(
         readiness.await.unwrap(),
         Json::object([("ready", true.into()), ("diagnostics", Json::Array(vec![]))])
     );
     control.state(&ready());
-    pump_pending(work.as_mut(), &tasks).await;
+    pump_pending(work.as_mut()).await;
     assert_eq!(world.holds.borrow().len(), 1);
     world.release(None);
     // Complete startup Operation scan, then empty Run scan, using the real
@@ -216,7 +216,7 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
     for _ in 0..2 {
         clock.advance(250.0);
         control.kick();
-        pump_pending(work.as_mut(), &tasks).await;
+        pump_pending(work.as_mut()).await;
     }
     assert!(runtime.recovered());
     let now = || "2026-01-02T00:00:00.000Z".into();
@@ -236,14 +236,14 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
     for _ in 0..3 {
         clock.advance(250.0);
         service.kick();
-        pump_pending(work.as_mut(), &tasks).await;
+        pump_pending(work.as_mut()).await;
     }
     assert!(world.page_paused.get());
     assert_eq!(world.holds.borrow().len(), 1);
     let reply = control.handler("public")(Json::object([("accepted", true.into())]), context());
     control.notification(&Json::object([("matched", false.into())]));
     control.notification(&Json::object([("matched", true.into())]));
-    pump_pending(work.as_mut(), &tasks).await;
+    pump_pending(work.as_mut()).await;
     assert_eq!(public.entered.get(), 1);
     assert_eq!(native.0.get(), 2);
     assert_eq!(
@@ -265,7 +265,7 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
             .code,
         "service_not_ready"
     );
-    pump_pending(work.as_mut(), &tasks).await;
+    pump_pending(work.as_mut()).await;
     assert!(!drain_entered.get());
     assert!(!closed.get());
     poll_fn(|cx| {
@@ -274,13 +274,13 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
     })
     .await;
     world.page_gate.release();
-    pump_pending(work.as_mut(), &tasks).await;
+    pump_pending(work.as_mut()).await;
     assert!(
         !drain_entered.get(),
         "An active public call still retains the owner."
     );
     call_gate.release();
-    pump_pending(work.as_mut(), &tasks).await;
+    pump_pending(work.as_mut()).await;
     assert_eq!(
         reply.await.unwrap(),
         Json::object([("accepted", true.into())])
@@ -290,7 +290,7 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
         "The admitted recovery job must finish too."
     );
     world.release(None);
-    pump_pending(work.as_mut(), &tasks).await;
+    pump_pending(work.as_mut()).await;
     assert!(drain_entered.get());
     assert!(!closed.get());
     assert!(
@@ -302,15 +302,11 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
         "Retirement must prevent a new claim after the retained page returns."
     );
     drain.release();
-    poll_fn(|cx| {
-        tasks.pump(cx);
-        work.as_mut().poll(cx)
-    })
-    .await
-    .unwrap();
+    work.as_mut().await.unwrap();
     retired.await.unwrap();
     assert!(closed.get());
-    assert!(tasks.0.borrow().is_empty());
+    drop(work);
+    tasks.drive(async {}).await;
 }
 #[tokio::test(flavor = "current_thread")]
 async fn generation_control_loss_and_readiness_failure_drain_without_success_fabrication() {
@@ -328,7 +324,7 @@ async fn generation_control_loss_and_readiness_failure_drain_without_success_fab
             );
         }
         let world = World::new(&input);
-        let tasks = Tasks::default();
+        let tasks = LocalExecutor::default();
         let reconciler = Reconciler::new(&world, &world, &tasks);
         let native = Native::default();
         let runtime = ReconcilerRuntime {
@@ -350,11 +346,11 @@ async fn generation_control_loss_and_readiness_failure_drain_without_success_fab
             drop(control.retire());
         }
         drop(control);
-        driver
-            .run(&public, &runtime, &clock, async {
+        tasks
+            .drive(driver.run(&public, &runtime, &clock, async {
                 drained.set(true);
                 Ok(())
-            })
+            }))
             .await
             .unwrap();
         assert!(drained.get());
