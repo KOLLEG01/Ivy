@@ -4,6 +4,8 @@ use std::{collections::BTreeMap, ffi::OsString, io::Write, path::PathBuf, time::
 mod exec_file_cases;
 #[path="host-process-path-cases.rs"]
 mod process_path_cases;
+#[path="host-process-tree-cases.rs"]
+mod process_tree_cases;
 
 // Exercise the private retained-handle failure paths through this selected target.
 #[cfg(windows)]
