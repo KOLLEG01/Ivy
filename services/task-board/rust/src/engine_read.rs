@@ -313,7 +313,7 @@ pub async fn peer_state<S: LifecycleStore>(
         cursor = page
             .get("nextCursor")
             .and_then(Json::as_js_string)
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.0.is_empty())
             .cloned();
         if cursor.is_none() {
             break;
