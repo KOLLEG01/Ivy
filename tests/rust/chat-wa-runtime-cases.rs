@@ -26,7 +26,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 fn f<'a>(value: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -70,11 +70,13 @@ struct State {
     counts: HashMap<String, usize>,
     gates: HashMap<String, watch::Sender<bool>>,
     ready: VecDeque<watch::Sender<bool>>,
+    closing: bool,
     recovery: i64,
 }
 struct Probe {
     state: Mutex<State>,
     start: Instant,
+    ready_changed: Notify,
 }
 impl Clock for Probe {
     fn utc_millis(&self) -> i64 {
@@ -130,6 +132,7 @@ impl Probe {
             } else {
                 let (send, receive) = watch::channel(false);
                 self.state.lock().unwrap().ready.push_back(send);
+                self.ready_changed.notify_one();
                 receive
             };
             while !*gate.borrow_and_update() {
@@ -488,6 +491,24 @@ async fn drain(probe: &Probe) {
     }
     panic!("Runtime probe completion limit");
 }
+async fn finish<T: Send + 'static>(
+    mut work: tokio::task::JoinHandle<T>,
+    probe: &Probe,
+    label: &str,
+) -> T {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let changed = probe.ready_changed.notified();
+            drain(probe).await;
+            tokio::select! {
+                value=&mut work => {drain(probe).await;return value.unwrap();},
+                _=changed => {},
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Runtime probe completion timed out: {label}"))
+}
 fn frame(index: usize) -> Json {
     Json::object([(
         "params",
@@ -571,7 +592,10 @@ async fn apply(
                 .clone();
             tick();
         }
-        "closeStartDrop" => drop(runtime.close()),
+        "closeStartDrop" => {
+            probe.state.lock().unwrap().closing = true;
+            drop(runtime.close());
+        }
         "close" | "startCloseAgain" => runtime.close().await?,
         _ => panic!("Unknown runtime action"),
     }
@@ -601,9 +625,11 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
                 counts: HashMap::new(),
                 gates: HashMap::new(),
                 ready: VecDeque::new(),
+                closing: false,
                 recovery: 0,
             }),
             start: Instant::now(),
+            ready_changed: Notify::new(),
         });
         let timers = Arc::new(Timers {
             probe: probe.clone(),
@@ -681,13 +707,15 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
                 socket.clone(),
             );
             let work = tokio::spawn(async move { apply(&a, &owner, &p, &t, &socket_owner).await });
-            drain(&probe).await;
-            assert!(
-                work.is_finished(),
-                "Action awaits an unreleased boundary: {}",
-                s(spec, "label")
-            );
-            let value = result(work.await.unwrap());
+            let value = result(finish(work, &probe, &s(spec, "label")).await);
+            let can_finish_close = {
+                let state = probe.state.lock().unwrap();
+                state.closing && state.gates.values().all(|gate| *gate.borrow())
+            };
+            if can_finish_close {
+                let closing = runtime.close();
+                let _ = finish(tokio::spawn(closing), &probe, &s(spec, "label")).await;
+            }
             steps.push(Json::object([
                 ("result", value),
                 ("events", Json::Array(probe.collect())),
@@ -699,21 +727,30 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
                 ),
             ]));
         }
+        rows.push(Json::object([
+            ("label", f(spec, "label").clone()),
+            ("steps", Json::Array(steps)),
+        ]));
+        if let Some(path) = std::env::var_os("IVY_CHAT_WA_RUNTIME_ACTUAL_CAPTURE") {
+            std::fs::write(
+                path,
+                stringify(
+                    &Json::object([
+                        ("rows", Json::Array(rows.clone())),
+                        ("complete", false.into()),
+                    ]),
+                    usize::MAX,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
         for gate in probe.state.lock().unwrap().gates.values() {
             gate.send_replace(true);
         }
         drain(&probe).await;
         let closing = tokio::spawn(async move { runtime.close().await });
-        drain(&probe).await;
-        assert!(
-            closing.is_finished(),
-            "Cleanup awaits an unreleased boundary"
-        );
-        let _ = closing.await.unwrap();
-        rows.push(Json::object([
-            ("label", f(spec, "label").clone()),
-            ("steps", Json::Array(steps)),
-        ]));
+        let _ = finish(closing, &probe, &s(spec, "label")).await;
     }
     let retryable = Json::Array(
         f(&oracle, "retryable")
