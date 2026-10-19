@@ -9,6 +9,8 @@ use ivy_contracts::{
 use rusqlite::types::Value;
 #[path = "chat-command-cases.rs"]
 mod commands;
+#[path = "chat-desktop-cases.rs"]
+mod desktop;
 #[path = "chat-listener-cases.rs"]
 mod listener;
 #[path = "chat-session-cases.rs"]

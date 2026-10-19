@@ -3,6 +3,7 @@ pub mod auth;
 pub mod command_native;
 pub mod commands;
 pub mod config;
+pub mod desktop;
 pub mod identity;
 pub mod journal;
 pub mod journal_io;
