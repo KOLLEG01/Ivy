@@ -12,6 +12,8 @@ mod receive_analysis;
 mod receive_owner;
 mod resample;
 mod rtp;
+mod rtcp;
+mod send_clock;
 mod sdp;
 mod startup;
 mod transport;
@@ -21,6 +23,8 @@ pub use queue::AudioQueue;
 pub use receive_owner::{ReceiveError, SipReceiveEvents, SipReceiveObservation, SipRtpReceiver};
 pub use resample::PcmResampler;
 pub use rtp::{RtpAudioPacket, RtpReceiveQueue, RtpReceiveStatus};
+pub use rtcp::{RtcpReportBlock, RtcpReportBuilder, RtcpSenderInfo, RtcpTransmitCounters};
+pub use send_clock::RtpSendClock;
 pub use sdp::{
     SDP_UNITS, SdpConnection, SdpDirection, SdpDocument, SdpError, SdpFormat, SdpMedia,
     SdpMediaKind, SdpOrigin, bounded_sdp, valid_sdp,
@@ -37,6 +41,7 @@ pub enum MediaError {
     InvalidReorderDelay,
     InvalidPacket,
     ClockWentBackwards,
+    ClockOverflow,
     InvalidPermitAge,
     StaleObservation,
     Revoked,
