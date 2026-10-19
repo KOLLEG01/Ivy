@@ -1,8 +1,23 @@
 use super::{AuthContext, AuthenticatedContext, IvyError, IvyJson, JsString, Store};
 use ivy_contracts::IvyResult;
-use ivy_hive::objects::{ExistingObjectWrite, write_existing_revision};
+use ivy_hive::objects;
 use serde_json::{Value, json};
 use std::time::Duration;
+#[path = "hive_object_create.rs"]
+mod creation;
+
+pub(super) fn bind(step: &mut Value, rows: &[Value]) {
+    for binding in step["bindings"].as_array().unwrap().clone() {
+        let id = rows[binding["from"].as_u64().unwrap() as usize]["value"]["object"]["id"].clone();
+        assert!(
+            id.is_string(),
+            "Binding must refer to a successful Object write"
+        );
+        *step
+            .pointer_mut(binding["at"].as_str().unwrap())
+            .expect("Existing binding destination") = id;
+    }
+}
 
 pub(super) fn native_write(store: &mut Store, step: &Value) -> IvyResult<IvyJson> {
     let principal = store.authenticate(&AuthContext {
@@ -36,14 +51,15 @@ pub(super) fn native_write(store: &mut Store, step: &Value) -> IvyResult<IvyJson
             Duration::from_secs(10)
         },
         |store| {
-            store.mutate(
-                &context,
-                &method.into(),
-                &request,
-                step["now"].as_u64().unwrap(),
-                |store, principal| {
-                    let mut prepared;
-                    let parameters = if mode == "prepared" {
+            if mode == "prepared" {
+                objects::write_hive_prepared(
+                    store,
+                    &context,
+                    &method.into(),
+                    &request,
+                    step["now"].as_u64().unwrap(),
+                    &now,
+                    |store| {
                         store
                             .connection()
                             .execute_batch(step["prepareSql"].as_str().unwrap_or(""))
@@ -54,24 +70,30 @@ pub(super) fn native_write(store: &mut Store, step: &Value) -> IvyResult<IvyJson
                                 "Preparation requested failure.",
                             ));
                         }
-                        prepared = IvyJson::from_serde(&step["preparedParams"]).unwrap();
+                        let mut prepared = IvyJson::from_serde(&step["preparedParams"]).unwrap();
                         content_units(&mut prepared, step);
-                        &prepared
-                    } else {
-                        &request
-                    };
-                    write_existing_revision(
-                        store,
-                        principal,
-                        ExistingObjectWrite::from_parameters(parameters).expect(
-                            "This fixture selects only unchanged-name, existing-object writes",
-                        ),
-                        matches!(mode, "hive" | "prepared"),
-                        mode == "preserve",
-                        &now,
-                    )
-                },
-            )
+                        Ok(prepared)
+                    },
+                )
+            } else if mode == "hive" {
+                objects::write_hive(
+                    store,
+                    &context,
+                    &method.into(),
+                    &request,
+                    step["now"].as_u64().unwrap(),
+                    &now,
+                )
+            } else {
+                objects::write(
+                    store,
+                    &context,
+                    &request,
+                    mode == "preserve",
+                    step["now"].as_u64().unwrap(),
+                    &now,
+                )
+            }
         },
     )?;
     Ok(if step["watchChanges"] == true {
@@ -87,6 +109,29 @@ pub(super) fn native_write(store: &mut Store, step: &Value) -> IvyResult<IvyJson
     })
 }
 fn content_units(parameters: &mut IvyJson, step: &Value) {
+    fn set(value: &mut IvyJson, fields: &[&str], next: IvyJson) {
+        if fields.len() == 1 {
+            value.insert(fields[0], next);
+        } else {
+            let mut child = value.get(fields[0]).unwrap().clone();
+            set(&mut child, &fields[1..], next);
+            value.insert(fields[0], child);
+        }
+    }
+    for (pointer, units) in step["parameterUnits"].as_object().into_iter().flatten() {
+        set(
+            parameters,
+            &pointer.split('/').skip(1).collect::<Vec<_>>(),
+            IvyJson::String(JsString(
+                units
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_u64().unwrap() as u16)
+                    .collect(),
+            )),
+        );
+    }
     if let Some(units) = step["contentUnits"].as_array() {
         let mut content = parameters.get("content").unwrap().clone();
         content.insert(

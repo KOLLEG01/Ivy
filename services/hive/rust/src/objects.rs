@@ -22,7 +22,11 @@ mod contracts;
 pub use contracts::{ContentData, DecodedContent, decode, get_contract, register, register_agent};
 #[path = "object_write.rs"]
 mod writing;
-pub use writing::{ExistingObjectWrite, write_existing_revision};
+pub use writing::{
+    ExistingObjectWrite, write, write_existing_revision, write_hive, write_hive_prepared,
+};
+#[path = "object_navigation.rs"]
+mod navigation;
 fn value(row: &Row<'_>, name: &str) -> rusqlite::Result<IvyJson> {
     Ok(match row.get_ref(name)? {
         ValueRef::Null => IvyJson::Null,

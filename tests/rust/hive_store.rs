@@ -93,6 +93,14 @@ fn native(path: &Path, steps: &[Value]) -> Value {
     let mut store = Store::open(path).unwrap();
     let mut result = vec![];
     for step in steps {
+        let mut bound;
+        let step = if step["bindings"].is_array() {
+            bound = step.clone();
+            object_write::bind(&mut bound, &result);
+            &bound
+        } else {
+            step
+        };
         let outcome = match step["op"].as_str().unwrap() {
             "register" => {
                 let mut definition = IvyJson::from_serde(&step["definition"]).unwrap();

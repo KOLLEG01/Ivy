@@ -1,9 +1,9 @@
-//! The immutable content-write branch for an existing Object with an unchanged name.
+//! Immutable Object creation, content updates and renaming.
 use super::{
     ContentData, Location, complete_object, complete_revision, decode, raw_object, read,
     revision_row, stat,
 };
-use crate::store::{LedgerResult, Principal, Store};
+use crate::store::{AuthenticatedContext, LedgerResult, Principal, Store};
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString,
     json::{canonical, compare_versions, object_entries},
@@ -13,8 +13,7 @@ use std::cmp::Ordering;
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
-/// Select this branch without inventing a wire error for creation or renaming.
-/// The complete Object dispatcher must handle those branches separately.
+/// Select an existing Object with an unchanged name for callers with that scope.
 pub struct ExistingObjectWrite<'a> {
     parameters: &'a IvyJson,
 }
@@ -139,30 +138,153 @@ pub fn write_existing_revision(
     preserve_references: bool,
     now: &JsString,
 ) -> IvyResult<LedgerResult> {
-    let parameters = request.parameters;
-    let existing = raw_object(store, Location::Id(string(parameters, "objectId")?))?;
-    let current = existing
-        .get("currentRevision")
-        .ok_or_else(IvyError::internal)?;
-    require(
-        parameters.get("expectedRevision") == Some(current),
-        "revision_conflict",
-        "Object content changed; read the current revision.",
-    )?;
-    require(
-        parameters
-            .get("expectedArchived")
-            .is_none_or(|expected| existing.get("effectivelyArchived") == Some(expected)),
-        "revision_conflict",
-        "Object archive state changed; read the current state.",
-    )?;
-    let id = string(&existing, "id")?;
+    write_revision(
+        store,
+        principal,
+        request.parameters,
+        allow_hive,
+        preserve_references,
+        now,
+    )
+}
+
+/// The request's clocks are supplied by admitted dispatch, never its parameters.
+pub fn write(
+    store: &mut Store,
+    context: &AuthenticatedContext,
+    parameters: &IvyJson,
+    preserve_references: bool,
+    now_ms: u64,
+    now: &JsString,
+) -> IvyResult<IvyJson> {
+    let method = if preserve_references {
+        "objects.updateContent"
+    } else {
+        "objects.write"
+    };
+    write_as(
+        store,
+        context,
+        &method.into(),
+        parameters,
+        false,
+        preserve_references,
+        now_ms,
+        now,
+    )
+}
+pub fn write_hive(
+    store: &mut Store,
+    context: &AuthenticatedContext,
+    operation: &JsString,
+    parameters: &IvyJson,
+    now_ms: u64,
+    now: &JsString,
+) -> IvyResult<IvyJson> {
+    write_as(
+        store, context, operation, parameters, true, false, now_ms, now,
+    )
+}
+fn write_as(
+    store: &mut Store,
+    context: &AuthenticatedContext,
+    operation: &JsString,
+    parameters: &IvyJson,
+    allow_hive: bool,
+    preserve_references: bool,
+    now_ms: u64,
+    now: &JsString,
+) -> IvyResult<IvyJson> {
+    store.mutate(
+        context,
+        operation,
+        parameters,
+        now_ms,
+        |store, principal| {
+            write_revision(
+                store,
+                principal,
+                parameters,
+                allow_hive,
+                preserve_references,
+                now,
+            )
+        },
+    )
+}
+pub fn write_hive_prepared(
+    store: &mut Store,
+    context: &AuthenticatedContext,
+    operation: &JsString,
+    request: &IvyJson,
+    now_ms: u64,
+    now: &JsString,
+    prepare: impl FnOnce(&mut Store) -> IvyResult<IvyJson>,
+) -> IvyResult<IvyJson> {
+    store.mutate(context, operation, request, now_ms, |store, principal| {
+        let parameters = prepare(store)?;
+        write_revision(store, principal, &parameters, true, false, now)
+    })
+}
+fn optional_id(value: &IvyJson) -> IvyResult<Option<&JsString>> {
+    if value.is_null() {
+        Ok(None)
+    } else {
+        value
+            .as_js_string()
+            .map(Some)
+            .ok_or_else(IvyError::internal)
+    }
+}
+fn write_revision(
+    store: &mut Store,
+    principal: &Principal,
+    parameters: &IvyJson,
+    allow_hive: bool,
+    preserve_references: bool,
+    now: &JsString,
+) -> IvyResult<LedgerResult> {
+    let create = parameters.get("create").filter(|value| match value {
+        IvyJson::Null => false,
+        IvyJson::Bool(value) => *value,
+        IvyJson::Number(value) => *value != 0.0 && !value.is_nan(),
+        IvyJson::String(value) => !value.0.is_empty(),
+        _ => true,
+    });
+    let existing = if create.is_some() {
+        None
+    } else {
+        Some(raw_object(
+            store,
+            Location::Id(string(parameters, "objectId")?),
+        )?)
+    };
+    if let Some(existing) = &existing {
+        require(
+            parameters.get("expectedRevision") == existing.get("currentRevision"),
+            "revision_conflict",
+            "Object content changed; read the current revision.",
+        )?;
+        require(
+            parameters
+                .get("expectedArchived")
+                .is_none_or(|expected| existing.get("effectivelyArchived") == Some(expected)),
+            "revision_conflict",
+            "Object archive state changed; read the current state.",
+        )?;
+    }
     let retained;
-    let revision_references = if preserve_references {
+    let revision_references = if preserve_references && existing.is_some() {
+        let existing = existing.as_ref().unwrap();
         retained = read(
             store,
-            Location::Id(id),
-            Some(current.as_f64().unwrap() as u64),
+            Location::Id(string(existing, "id")?),
+            Some(
+                existing
+                    .get("currentRevision")
+                    .and_then(IvyJson::as_f64)
+                    .unwrap() as u64,
+            ),
         )?;
         retained
             .get("revision")
@@ -170,7 +292,12 @@ pub fn write_existing_revision(
     } else {
         parameters.get("references")
     };
-    let key = string(&existing, "contractKey")?;
+    let key = string(
+        create
+            .or(existing.as_ref())
+            .ok_or_else(IvyError::internal)?,
+        "contractKey",
+    )?;
     let version = string(parameters, "contractVersion")?;
     let contract = store.contract(key, version)?;
     let hive_owned =
@@ -185,18 +312,31 @@ pub fn write_existing_revision(
         "contract_owner_mismatch",
         "Internal Hive writes require a Hive-owned contract.",
     )?;
-    let metadata = complete_object(store, existing.clone())?;
-    require(
-        compare_versions(
-            &String::from_utf16_lossy(&version.0),
-            &string(&metadata, "contractVersion")?.to_utf8()?,
-        )? != Ordering::Less,
-        "contract_version_conflict",
-        "Object contract version cannot be decreased.",
-    )?;
+    if let Some(existing) = &existing {
+        let metadata = complete_object(store, existing.clone())?;
+        require(
+            compare_versions(
+                &String::from_utf16_lossy(&version.0),
+                &string(&metadata, "contractVersion")?.to_utf8()?,
+            )? != Ordering::Less,
+            "contract_version_conflict",
+            "Object contract version cannot be decreased.",
+        )?;
+    }
     let content = parameters.get("content").ok_or_else(IvyError::internal)?;
     let decoded = decode(store, &contract, content)?;
-    let revision = current.as_f64().unwrap() + 1.0;
+    let id = existing
+        .as_ref()
+        .map(|existing| string(existing, "id").cloned())
+        .transpose()?
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string().into());
+    let revision = existing.as_ref().map_or(1.0, |existing| {
+        existing
+            .get("currentRevision")
+            .and_then(IvyJson::as_f64)
+            .unwrap()
+            + 1.0
+    });
     require(
         revision.is_finite() && revision.fract() == 0.0 && revision <= MAX_SAFE_INTEGER,
         "limit_exceeded",
@@ -204,18 +344,95 @@ pub fn write_existing_revision(
     )?;
     let revision = revision as i64;
     let id_text = id.to_utf8()?;
-    let key_text = key.to_utf8()?;
-    let name = string(&existing, "name")?.to_utf8()?;
+    let key_text = String::from_utf16_lossy(&key.0);
     let now_text = String::from_utf16_lossy(&now.0);
-    store
-        .connection()
-        .execute(
-            "UPDATE objects SET name=?,current_revision=?,updated_at=? WHERE id=?",
-            params![name, revision, now_text, id_text],
-        )
-        .map_err(|e| store.query_error(e))?;
+    let name;
+    if let Some(create) = create {
+        name = super::navigation::name(string(create, "name")?)?;
+        let parent_id = optional_id(create.get("parentId").ok_or_else(IvyError::internal)?)?;
+        let parent = super::navigation::parent(store, parent_id)?;
+        if let Some(parent) = &parent {
+            require(
+                super::navigation::object_mode(store, &parent.contract_key)?.as_deref()
+                    == Some("retain"),
+                "invalid_arguments",
+                "Owned artifacts cannot be navigation parents.",
+            )?;
+        }
+        let (path, depth) = super::navigation::path(parent.as_ref(), &name)?;
+        super::navigation::ensure_name(store, parent_id, &name, None)?;
+        let owner = create.get("ownerObjectId").ok_or_else(IvyError::internal)?;
+        let owned = contract
+            .get("retention")
+            .and_then(|r| r.get("objects"))
+            .and_then(|r| r.get("mode"))
+            == Some(&"owned".into());
+        if !owned {
+            require(
+                owner.is_null(),
+                "invalid_arguments",
+                "Domain Objects cannot have a lifecycle owner.",
+            )?;
+        } else {
+            require(
+                !owner.is_null() && owner.as_js_string() != Some(&id),
+                "invalid_arguments",
+                "Owned Objects require an existing lifecycle owner.",
+            )?;
+            let owner = raw_object(
+                store,
+                Location::Id(owner.as_js_string().ok_or_else(IvyError::internal)?),
+            )?;
+            require(
+                super::navigation::object_mode(store, string(&owner, "contractKey")?)?.as_deref()
+                    == Some("retain"),
+                "invalid_arguments",
+                "The lifecycle owner must be a retained Object.",
+            )?;
+        }
+        let position = super::navigation::next_position(store, parent_id)?;
+        let icon = super::navigation::icon(
+            create
+                .get("icon")
+                .filter(|value| !value.is_null())
+                .map(|value| value.as_js_string().ok_or_else(IvyError::internal))
+                .transpose()?,
+        )?;
+        store.connection().execute(
+            "INSERT INTO objects(id,parent_id,owner_object_id,name,path,position,icon,depth,contract_key,current_revision,archived_at,effective_archive,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,1,NULL,?,?,?)",
+            params![id_text, parent_id.map(|id| String::from_utf16_lossy(&id.0)), optional_id(owner)?.map(|id| String::from_utf16_lossy(&id.0)), name, path, position, icon, depth, key_text, parent.as_ref().map_or(0, |parent| parent.archived), now_text, now_text],
+        ).map_err(|e| store.query_error(e))?;
+    } else {
+        let existing = existing.as_ref().unwrap();
+        name = match parameters.get("name") {
+            Some(value) => {
+                super::navigation::name(value.as_js_string().ok_or_else(IvyError::internal)?)?
+            }
+            None => string(existing, "name")?.to_utf8()?,
+        };
+        let renamed = &JsString::from(name.as_str()) != string(existing, "name")?;
+        if renamed {
+            super::navigation::ensure_name(
+                store,
+                optional_id(existing.get("parentId").unwrap())?,
+                &name,
+                Some(&id),
+            )?;
+        }
+        store
+            .connection()
+            .execute(
+                "UPDATE objects SET name=?,current_revision=?,updated_at=? WHERE id=?",
+                params![name, revision, now_text, id_text],
+            )
+            .map_err(|e| store.query_error(e))?;
+        if renamed {
+            super::mutations::refresh_navigation(store, &id)?;
+            store.invalidate("objects".into());
+        }
+    }
     let revision_references = revision_references.ok_or_else(IvyError::internal)?;
-    let encoded_references = references(store, id, revision_references)?;
+    let encoded_references = references(store, &id, revision_references)?;
     let data = match decoded.data {
         ContentData::Text(value) => SqlValue::Text(value),
         ContentData::Bytes(value) => SqlValue::Blob(value),
@@ -239,7 +456,12 @@ pub fn write_existing_revision(
             ],
         )
         .map_err(|e| store.query_error(e))?;
-    store.adjust_retention_usage(key, 0, 1, decoded.byte_length as i64)?;
+    store.adjust_retention_usage(
+        key,
+        i64::from(create.is_some()),
+        1,
+        decoded.byte_length as i64,
+    )?;
     for (name, target) in object_entries(revision_references) {
         store
             .connection()
@@ -262,7 +484,7 @@ pub fn write_existing_revision(
     update_search(store, &id_text, &name, text)?;
     store.append_core_event(
         principal,
-        id,
+        &id,
         revision as u64,
         &"write".into(),
         string(parameters, "mutationId")?,
@@ -277,7 +499,7 @@ pub fn write_existing_revision(
             revision_row,
         )
         .map_err(|e| store.query_error(e))?;
-    let object = stat(store, Location::Id(id))?;
+    let object = stat(store, Location::Id(&id))?;
     let saved_revision = complete_revision(store, &saved_key, saved_revision)?;
     Ok(LedgerResult::snapshot(IvyJson::object([
         ("object", object),

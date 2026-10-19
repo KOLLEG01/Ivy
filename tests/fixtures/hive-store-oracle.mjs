@@ -1,7 +1,8 @@
-import {registerHooks,stripTypeScriptTypes} from 'node:module';
+import {registerHooks,stripTypeScriptTypes,syncBuiltinESMExports} from 'node:module';
 import {existsSync,readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import crypto from 'node:crypto';
 registerHooks({resolve(specifier,context,next){
   if(specifier.startsWith('.')&&specifier.endsWith('.js')&&context.parentURL){const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(source)))return next(source.href,context);}
   return next(specifier,context);
@@ -19,7 +20,10 @@ const snapshot=()=>({contracts:tableHash('contracts','key,version,definition'),f
 const rows=[];
 try {
  store=new HiveStore(input.path);
- for(const step of input.steps){
+ for(const original of input.steps){
+  const step=original.bindings?structuredClone(original):original;
+  const set=(value,pointer,next)=>{const fields=pointer.split('/').slice(1).map(s=>s.replaceAll('~1','/').replaceAll('~0','~'));for(const field of fields.slice(0,-1))value=value[field];value[fields.at(-1)]=next;};
+  for(const binding of step.bindings??[])set(step,binding.at,rows[binding.from].value.object.id);
   let value=null,error=null;
   try {
    switch(step.op){
@@ -42,11 +46,13 @@ try {
     }
     case 'write':{
       const RealDate=Date;
+      const realUUID=crypto.randomUUID;
+      if(step.createdId){crypto.randomUUID=()=>step.createdId;syncBuiltinESMExports();}
       if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
       globalThis.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[step.now]));}static now(){return step.now;}};
       try{
         const context=store.authenticate(step.context),objects=new Objects(store);
-        const contentUnits=params=>{if(step.contentUnits)params.content.value=String.fromCharCode(...step.contentUnits);return params;};
+        const contentUnits=params=>{if(step.contentUnits)params.content.value=String.fromCharCode(...step.contentUnits);for(const [pointer,units]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...units));return params;};
         const changes=step.watchChanges?Number(store.get('SELECT total_changes() AS n').n):0;
         value=store.withBudget(()=>{
           if(step.mode==='prepared')return objects.writeHivePrepared(context,step.method,step.params,()=>{
@@ -58,7 +64,7 @@ try {
           return step.mode==='hive'?objects.writeHive(context,step.method,params):objects.write(context,params,step.mode==='preserve');
         },step.overdue?-1:10000);
         if(step.watchChanges)value={result:value,changes:Number(store.get('SELECT total_changes() AS n').n)-changes};
-      }finally{globalThis.Date=RealDate;}
+      }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;syncBuiltinESMExports();}
       break;
     }
     case 'readObject':value=new Objects(store).read({objectId:step.objectId,revision:step.revision});break;
