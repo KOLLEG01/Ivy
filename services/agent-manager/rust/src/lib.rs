@@ -36,6 +36,7 @@ pub mod native_management;
 pub mod notifications;
 pub mod notice_policy;
 pub mod project_policy;
+pub mod process_evidence;
 pub mod project_repository;
 pub mod project_locations;
 pub mod project_management;

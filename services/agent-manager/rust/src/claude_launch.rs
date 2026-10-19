@@ -1,18 +1,19 @@
 //! Existing pinned Claude adapter admission. This does not implement its provider loop.
-use crate::native_launch::{NativeFileHash, native_realpath, require};
+use crate::native_launch::{native_realpath, require};
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::parse};
-use ivy_host_runtime::node_path::{self, Context};
+use ivy_host_runtime::{
+    node_path::{self, Context},
+    streaming_hash::file_hash,
+};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 pub async fn checked_claude_adapter(
     root: &JsString,
     expected_hash: &JsString,
     paths: &Context,
-    file_hash: &Arc<NativeFileHash>,
 ) -> IvyResult<PathBuf> {
     require(
         node_path::is_absolute(paths.style, root),
@@ -62,7 +63,7 @@ pub async fn checked_claude_adapter(
         manifest.extend_from_slice(String::from_utf16_lossy(&name.0).as_bytes());
         manifest.push(0);
         let hash = file_hash(path).await?;
-        // The required Host file hasher returns its ordinary sha256: digest.
+        // The Host file hasher returns its ordinary sha256: digest.
         manifest.extend_from_slice(hash.as_bytes().get(7..).ok_or_else(IvyError::internal)?);
         manifest.push(0);
     }

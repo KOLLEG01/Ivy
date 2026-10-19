@@ -2,10 +2,9 @@
 use crate::{
     claude_launch::{assert_claude_subscription_config, checked_claude_adapter},
     environment_manager::ManagedEnvironment,
-    native_connection::{
-        AgentNativeConnection, NativeConnectionSettings, NativeStopEvidence, connect_agent_native,
-    },
+    native_connection::{AgentNativeConnection, NativeConnectionSettings, connect_agent_native},
     native_handshake::NativeMode,
+    process_evidence::OwnedProcessEvidence,
 };
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, agent_schema::validate_agent,
@@ -22,12 +21,12 @@ use ivy_host_runtime::{
     node_path::{self, Context},
     paths, process,
     process_fence::require_clear_process_stop_fence,
+    streaming_hash::file_hash,
 };
 use ivy_sdk::{rpc::RpcClient, service::ServiceFuture};
 use std::{collections::BTreeMap, ffi::OsString, future::Future, path::PathBuf, sync::Arc};
 use tokio::sync::oneshot;
 
-pub type NativeFileHash = dyn Fn(PathBuf) -> ServiceFuture<String> + Send + Sync;
 pub type BeforeNativeLaunch = dyn Fn(JsString) -> ServiceFuture<()> + Send + Sync;
 pub type BeginNativeEpoch = dyn Fn(JsString) -> IvyResult<Events> + Send + Sync;
 /// A snapshot of the executing account's inputs, never a substituted instance
@@ -59,8 +58,6 @@ pub struct NativeProcessOptions {
     pub home_inputs: NativeHomeInputs,
     pub before_launch: Option<Arc<BeforeNativeLaunch>>,
     pub begin_epoch: Arc<BeginNativeEpoch>,
-    pub file_hash: Arc<NativeFileHash>,
-    pub record_stop: Arc<NativeStopEvidence>,
 }
 pub fn managed_environment_before_launch(
     environment: ManagedEnvironment,
@@ -250,7 +247,7 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
         .and_then(|claude| claude.get("nodeExecutableHash"))
         .unwrap_or(settings.required("nativeExecutableHash")?);
     require(
-        expected_hash == &IvyJson::from((options.file_hash)(executable.clone()).await?),
+        expected_hash == &IvyJson::from(file_hash(executable.clone()).await?),
         "native_build_mismatch",
         "Configured native executable bytes differ from their generated schema build.",
     )?;
@@ -260,7 +257,6 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
                 text(claude, "adapterRoot")?,
                 text(settings, "nativeExecutableHash")?,
                 paths,
-                &options.file_hash,
             )
             .await?,
         )
@@ -280,9 +276,7 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
                     .map_err(|_| IvyError::internal())?
                     .is_file()
                 && claude.get("claudeExecutableHash")
-                    == Some(&IvyJson::from(
-                        (options.file_hash)(executable.clone()).await?,
-                    )),
+                    == Some(&IvyJson::from(file_hash(executable.clone()).await?)),
             "native_build_mismatch",
             "Claude CLI differs from the configured executable identity.",
         )?;
@@ -607,7 +601,8 @@ async fn start(options: NativeProcessOptions) -> IvyResult<AgentNativeConnection
             windows_shell,
             socket_path: socket,
             daemon,
-            record_stop: options.record_stop,
+            record_stop: OwnedProcessEvidence::new(node_path::filesystem_path(&options.data_root))
+                .callback(),
         },
         events,
     )

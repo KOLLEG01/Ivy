@@ -4,7 +4,6 @@ use ivy_agent_manager::{
 };
 use ivy_contracts::{
     IvyError, IvyJson, JsString,
-    hash::digest,
     json::{canonical, parse, stringify},
 };
 use ivy_host_runtime::{codex_rpc::NativeRpc, node_path, paths};
@@ -107,12 +106,6 @@ fn options(
         },
         before_launch: Some(before),
         begin_epoch: Arc::new(|_| panic!("No CLI probe or native launch belongs to this fixture")),
-        // Only small pinned fixture files reach this hasher. Production requires the
-        // Host streaming primitive; this corpus does not qualify that dependency.
-        file_hash: Arc::new(|path| {
-            Box::pin(async move { Ok(digest(tokio::fs::read(path).await.unwrap())) })
-        }),
-        record_stop: Arc::new(|_, _, _, _| panic!("No native process belongs to this fixture")),
     }
 }
 #[tokio::test]

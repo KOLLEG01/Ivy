@@ -15,6 +15,10 @@ mod environment_defaults_cases;
 // probe. They do not replay the separate native-launch qualification target.
 #[path = "agent-native-owner.rs"]
 mod native_owner_cases;
+#[path = "agent-process-evidence.rs"]
+mod process_evidence_cases;
+#[path = "host-streaming-hash-cases.rs"]
+mod streaming_hash_cases;
 #[path = "agent-environment-conflicts.rs"]
 mod environment_conflict_cases;
 #[path = "agent-environment-text.rs"]
