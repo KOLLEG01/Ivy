@@ -23,7 +23,9 @@ try {
    $unused=[Text.Json.JsonElement]::new()
    if($task93Parameters.TryGetProperty('micro',[ref]$unused)){$fields.Add('micro')}
    $value=$task93Read.Invoke($null,[object[]]@($task93Parameters,[string[]]$fields.ToArray()))
-   if($null -eq $value.Binding -or $null -eq $value.Codecs -or $null -eq $value.IncomingPeers -or $value.IncomingPeers.Length -gt 32 -or [Linq.Enumerable]::Distinct([string[]]$value.IncomingPeers,[StringComparer]::Ordinal).Count -ne $value.IncomingPeers.Length){throw [ArgumentException]::new('Invalid configuration')}
+   $peerNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+   foreach($peerName in $value.IncomingPeers){$null=$peerNames.Add($peerName)}
+   if($null -eq $value.Binding -or $null -eq $value.Codecs -or $null -eq $value.IncomingPeers -or $value.IncomingPeers.Length -gt 32 -or $peerNames.Count -ne $value.IncomingPeers.Length){throw [ArgumentException]::new('Invalid configuration')}
    $peers=@($value.IncomingPeers | Where-Object {$_ -cne 'registered'} | ForEach-Object {[Net.IPAddress]::Parse($_)})
    $endpoint=$value.Binding.Endpoint()
    $value.Codecs.Validate()

@@ -744,11 +744,11 @@ fn native_socket_text(address: SocketAddr) -> String {
     };
     let segments = address.ip().segments();
     let first_four_zero = segments[..4].iter().all(|n| *n == 0);
-    let embedded = segments[6] != 0
-        && ((first_four_zero
-            && ((segments[4] == 0 && matches!(segments[5], 0 | 0xffff))
-                || (segments[4] == 0xffff && segments[5] == 0)))
-            || (matches!(segments[4], 0 | 0x0200) && segments[5] == 0x5efe));
+    let embedded = (segments[6] != 0
+        && first_four_zero
+        && ((segments[4] == 0 && matches!(segments[5], 0 | 0xffff))
+            || (segments[4] == 0xffff && segments[5] == 0)))
+        || (matches!(segments[4], 0 | 0x0200) && segments[5] == 0x5efe);
     let hex = if embedded {
         &segments[..6]
     } else {
@@ -804,10 +804,13 @@ fn parse_proxy(value: &str, expected: Transport) -> Result<SocketAddr> {
     let mut pieces = value.split(';');
     let mut address = pieces.next().unwrap();
     let mut protocol = Transport::Udp;
+    let mut fixed_protocol = false;
     for (prefix, transport) in [
         ("udp:", Transport::Udp),
         ("tcp:", Transport::Tcp),
         ("tls:", Transport::Tls),
+        ("ws:", Transport::Ws),
+        ("wss:", Transport::Wss),
         ("sip:", Transport::Udp),
         ("sips:", Transport::Tls),
     ] {
@@ -817,23 +820,23 @@ fn parse_proxy(value: &str, expected: Transport) -> Result<SocketAddr> {
         {
             address = &address[prefix.len()..];
             protocol = transport;
+            fixed_protocol = prefix != "sip:";
             break;
         }
     }
     for parameter in pieces {
         if let Some((key, value)) = parameter.split_once('=') {
-            if key.eq_ignore_ascii_case("transport") {
+            if !fixed_protocol && key.eq_ignore_ascii_case("transport") {
                 protocol = match value.to_ascii_lowercase().as_str() {
                     "udp" => Transport::Udp,
                     "tcp" => Transport::Tcp,
                     "tls" => Transport::Tls,
-                    _ => return Err(OutcomeUnknown),
+                    "ws" => Transport::Ws,
+                    "wss" => Transport::Wss,
+                    _ => Transport::Udp,
                 };
             }
         }
-    }
-    if protocol != expected {
-        return Err(InvalidRequest);
     }
     if let Some((_, host)) = address.rsplit_once('@') {
         address = host;
@@ -852,6 +855,9 @@ fn parse_proxy(value: &str, expected: Transport) -> Result<SocketAddr> {
         None | Some("") => 0,
         Some(port) => port.parse::<u16>().map_err(|_| OutcomeUnknown)?,
     };
+    if protocol != expected {
+        return Err(InvalidRequest);
+    }
     ip.set_port(if port == 0 {
         if protocol == Transport::Tls {
             5061
