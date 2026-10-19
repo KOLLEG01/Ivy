@@ -23,6 +23,11 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+// Compile the canonical Host module at the required filesystem boundary.
+#[allow(dead_code)]
+#[path = "../../packages/host-runtime/rust/src/node_path.rs"]
+mod host_node_path;
+
 fn field<'a>(v: &'a Json, key: &str) -> &'a Json {
     v.required(key).unwrap()
 }
@@ -132,17 +137,7 @@ impl MediaStream for Stream {
 struct Dependencies(Arc<Probe>);
 impl MediaDependencies for Dependencies {
     fn filesystem_path(&self, logical: &ivy_contracts::JsString) -> IvyResult<PathBuf> {
-        // Explicit synthetic Host boundary. Production must supply its owner API.
-        let s = String::from_utf16_lossy(&logical.0);
-        #[cfg(windows)]
-        let s = if s.starts_with(r"\\?\") {
-            s
-        } else if let Some(rest) = s.strip_prefix(r"\\") {
-            format!(r"\\?\UNC\{rest}")
-        } else {
-            format!(r"\\?\{s}")
-        };
-        Ok(s.into())
+        host_node_path::node_filesystem_path(logical).map_err(|_| IvyError::internal())
     }
     fn download<'a>(
         &'a self,

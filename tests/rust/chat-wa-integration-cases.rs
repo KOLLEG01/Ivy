@@ -42,6 +42,11 @@ use std::{
 };
 use tokio::sync::watch;
 
+// Compile the canonical Host module at the required filesystem boundary.
+#[allow(dead_code)]
+#[path = "../../packages/host-runtime/rust/src/node_path.rs"]
+mod host_node_path;
+
 #[derive(Default)]
 struct MediaIo {
     calls: Mutex<Vec<Json>>,
@@ -67,7 +72,7 @@ impl TranscriptionResponse for MediaResponse {
 struct MediaAdapter(Arc<MediaIo>);
 impl MediaDependencies for MediaAdapter {
     fn filesystem_path(&self, logical: &JsString) -> IvyResult<std::path::PathBuf> {
-        Ok(String::from_utf16_lossy(&logical.0).into())
+        host_node_path::node_filesystem_path(logical).map_err(|_| IvyError::internal())
     }
     fn download<'a>(
         &'a self,
