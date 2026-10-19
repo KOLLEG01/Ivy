@@ -239,11 +239,22 @@ fn stopped_backup_matches_original_and_copies_exact_retained_sql_rows() {
     let db = Connection::open(&invalid).unwrap();
     db.execute_batch("PRAGMA user_version=99;").unwrap();
     drop(db);
-    let inputs = vec![
+    let mut inputs = vec![
         json!({"action":"backup","source":source,"destination":native_path}),
         json!({"action":"backup","source":"relative.sqlite","destination":root.0.join("never.sqlite")}),
         json!({"action":"backup","source":invalid,"destination":root.0.join("future-output.sqlite")}),
     ];
+    if cfg!(windows) {
+        let fixture = json!({"action":"fixture","root":root.0,"actions":[{"kind":"mkdir","path":"target"},{"kind":"junction","path":"dangling","target":"target"},{"kind":"remove","path":"target"}]});
+        assert_eq!(oracle(&[fixture]), vec![json!({"value":null})]);
+        inputs.push(
+            json!({"action":"backup","source":invalid,"destination":root.0.join("dangling")}),
+        );
+        inputs.push(json!({"action":"backup","source":root.0.join("dangling"),"destination":root.0.join("dangling-output.sqlite")}));
+        let absolute = invalid.to_str().unwrap();
+        assert_eq!(&absolute[1..2], ":");
+        inputs.push(json!({"action":"backup","source":&absolute[2..],"destination":root.0.join("rooted-output.sqlite")}));
+    }
     let expected = oracle(&inputs);
     for (input, expected) in inputs.iter().zip(expected) {
         assert_eq!(native(input), expected);

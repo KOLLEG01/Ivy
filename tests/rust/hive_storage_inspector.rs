@@ -84,6 +84,18 @@ fn admitted_offline_inspector_process_matches_original_arguments_domains_errors_
             json!(["--contracts", requirements.to_string()]),
         ));
     }
+    #[cfg(windows)]
+    {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let fixture = json!({"action":"fixture","root":root.0,"actions":[{"kind":"write","path":"data. /hive.sqlite","data":STANDARD.encode(&before)}]});
+        assert_eq!(oracle(&[fixture]), vec![json!({"value":null})]);
+        let mut namespaced = config.clone();
+        namespaced["dataRoot"] = json!(root.0.join("data. "));
+        inputs.push(action(
+            &namespaced,
+            json!(["--contracts", json!([{"key":"fixture/value"}]).to_string()]),
+        ));
+    }
     let results = compare(&inputs);
     assert_eq!(results[0]["status"], 0);
     assert_eq!(results[1]["status"], 0);
@@ -100,6 +112,19 @@ fn admitted_offline_inspector_process_matches_original_arguments_domains_errors_
     assert_eq!(fs::read(path).unwrap(), before);
     assert!(!root.0.join("missing").exists());
     assert!(!root.0.join("hive.sqlite-wal").exists());
+    #[cfg(windows)]
+    {
+        use ivy_host_runtime::node_path::{from_native, node_filesystem_path};
+        assert_eq!(results.last().unwrap()["status"], 0);
+        assert_eq!(
+            fs::read(
+                node_filesystem_path(&from_native(&root.0.join("data. /hive.sqlite"))).unwrap()
+            )
+            .unwrap(),
+            before
+        );
+        assert!(!root.0.join("data").exists());
+    }
 }
 
 #[test]

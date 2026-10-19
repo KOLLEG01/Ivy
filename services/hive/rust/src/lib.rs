@@ -3,6 +3,7 @@ pub mod admission;
 pub mod configurations;
 pub mod discovery;
 pub mod events;
+mod filesystem;
 pub mod inventory;
 pub mod kernel;
 pub mod mcp;

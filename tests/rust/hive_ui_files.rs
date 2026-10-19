@@ -6,6 +6,9 @@ use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
 };
+#[cfg(windows)]
+#[path = "hive_filesystem.rs"]
+mod filesystem;
 
 fn string<'a>(value: &'a IvyJson, key: &str) -> IvyResult<&'a JsString> {
     value
@@ -47,13 +50,21 @@ pub(super) fn fixture(root: &Path, actions: &Value) {
 }
 pub(super) fn tree(root: &Path) -> Value {
     fn walk(root: &Path, directory: &Path, result: &mut Vec<Value>) {
-        if !directory.exists() {
+        let native_directory = ivy_host_runtime::node_path::node_filesystem_path(
+            &ivy_host_runtime::node_path::from_native(directory),
+        )
+        .unwrap();
+        if !native_directory.exists() {
             return;
         }
-        for entry in fs::read_dir(directory).unwrap() {
+        for entry in fs::read_dir(native_directory).unwrap() {
             let entry = entry.unwrap();
-            let path = entry.path();
-            let kind = fs::symlink_metadata(&path).unwrap().file_type();
+            let path = directory.join(entry.file_name());
+            let native_path = ivy_host_runtime::node_path::node_filesystem_path(
+                &ivy_host_runtime::node_path::from_native(&path),
+            )
+            .unwrap();
+            let kind = fs::symlink_metadata(&native_path).unwrap().file_type();
             let relative = path
                 .strip_prefix(root)
                 .unwrap()
@@ -66,7 +77,7 @@ pub(super) fn tree(root: &Path) -> Value {
                 result.push(json!({"path":relative,"kind":"directory"}));
                 walk(root, &path, result);
             } else if kind.is_file() {
-                result.push(json!({"path":relative,"kind":"file","data":STANDARD.encode(fs::read(path).unwrap())}));
+                result.push(json!({"path":relative,"kind":"file","data":STANDARD.encode(fs::read(native_path).unwrap())}));
             } else {
                 panic!("Unexpected fixture file type");
             }
@@ -256,8 +267,15 @@ fn push(steps: &mut Vec<Value>, step: Value) -> usize {
 }
 fn compare(steps: &[Value]) -> Value {
     let root = Root::new();
-    let actual = native(&root.0.join("native.sqlite"), steps);
-    let expected = oracle(&root.0.join("reference.sqlite"), steps);
+    compare_at(
+        &root.0.join("native.sqlite"),
+        &root.0.join("reference.sqlite"),
+        steps,
+    )
+}
+fn compare_at(native_path: &Path, reference_path: &Path, steps: &[Value]) -> Value {
+    let actual = native(native_path, steps);
+    let expected = oracle(reference_path, steps);
     for (index, (a, b)) in actual["rows"]
         .as_array()
         .unwrap()

@@ -281,9 +281,20 @@ impl AsyncRead for Body {
     }
 }
 fn compare(steps: &[Value]) -> Value {
+    compare_roots(steps, false)
+}
+fn compare_roots(steps: &[Value], namespaced: bool) -> Value {
     let root = Root::new();
-    let files = root.0.join("native-files");
-    let reference = root.0.join("reference-files");
+    let files = root.0.join(if namespaced {
+        "native-files. "
+    } else {
+        "native-files"
+    });
+    let reference = root.0.join(if namespaced {
+        "reference-files. "
+    } else {
+        "reference-files"
+    });
     let mut dates = steps
         .iter()
         .flat_map(|s| {
@@ -464,6 +475,10 @@ fn compare(steps: &[Value]) -> Value {
         }
     }
     assert_eq!(definitions, expected["definitions"]);
+    if namespaced {
+        assert!(!root.0.join("native-files").exists());
+        assert!(!root.0.join("reference-files").exists());
+    }
     expected
 }
 fn step(method: &str) -> Value {
@@ -524,6 +539,46 @@ fn upload(grant: usize, package: &Value) -> Value {
     upload["chunks"] = json!([package["bytesBase64"]]);
     upload["requireSuccess"] = true.into();
     upload
+}
+
+#[cfg(windows)]
+#[test]
+fn package_registry_namespaced_root_preserves_logical_staging_cleanup_and_incoming_collection() {
+    let mut steps = setup();
+    let grant = push(
+        &mut steps,
+        authorize(authorization("fixture", "1.0.0", "service", b"abc")),
+    );
+    let mut staged = headers("stage", grant);
+    staged["chunks"] = json!([STANDARD.encode(b"abc")]);
+    staged["label"] = "staged".into();
+    staged["requireSuccess"] = true.into();
+    let staged = push(&mut steps, staged);
+    let cleaned = push(
+        &mut steps,
+        json!({"method":"dropStage","label":"staged","requireSuccess":true}),
+    );
+    let old = "incoming/00000000-0000-4000-8000-000000000001.tar.gz";
+    steps.push(fixture(vec![
+        write(old, b"old"),
+        json!({"kind":"mtime","path":old,"ms":0}),
+    ]));
+    let collected = push(
+        &mut steps,
+        json!({"method":"collect","now":172800000,"requireSuccess":true}),
+    );
+    let result = compare_roots(&steps, true);
+    let staged_path = result["rows"][staged]["value"]["archive"].as_str().unwrap();
+    let has = |index: usize, path: &str| {
+        result["rows"][index]["fileTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == path)
+    };
+    assert!(has(staged, staged_path));
+    assert!(!has(cleaned, staged_path));
+    assert!(!has(collected, old));
 }
 
 #[test]

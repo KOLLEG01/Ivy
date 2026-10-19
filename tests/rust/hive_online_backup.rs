@@ -318,7 +318,7 @@ fn online_backup_destination_errors_match_original_without_stricter_path_or_clea
             let mut cases = vec![];
             let mut native = vec![];
             let mut paths = vec![];
-            for index in 0..11 {
+            for index in 0..13 {
                 let source = root.0.join(format!("rust-{index}.sqlite"));
                 fs::copy(&base, &source).unwrap();
                 let node = root.0.join(format!("node-{index}.sqlite"));
@@ -388,6 +388,16 @@ fn online_backup_destination_errors_match_original_without_stricter_path_or_clea
                         node_dest = uri(&node_target);
                         item["inspect"] = json!(node_target);
                     }
+                    11 | 12 => {
+                        let suffix = if index == 11 { "tail.." } else { "space. " };
+                        dest = destination(&root.0.join(format!("snapshot-{suffix}")));
+                        node_dest = root
+                            .0
+                            .join(format!("node-copy-{suffix}"))
+                            .to_str()
+                            .unwrap()
+                            .into();
+                    }
                     _ => unreachable!(),
                 }
                 item["destination"] = node_dest.into();
@@ -440,7 +450,7 @@ fn online_backup_destination_errors_match_original_without_stricter_path_or_clea
                 ] {
                     assert_eq!(actual.get(key), node.get(key), "Case {index}, {key}");
                 }
-                if index == 9 {
+                if index == 9 || index >= 11 && result["error"].is_null() {
                     assert!(result["error"].is_null());
                     assert_eq!(result["value"]["bytesHash"], actual["digest"]);
                 } else {

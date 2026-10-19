@@ -74,7 +74,7 @@ impl Store {
     pub fn open(path: &Path) -> IvyResult<Self> {
         if path != Path::new(":memory:") {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).map_err(sql_error)?;
+                std::fs::create_dir_all(crate::filesystem::path(parent)?).map_err(sql_error)?;
             }
         }
         let db = Connection::open(path).map_err(sql_error)?;

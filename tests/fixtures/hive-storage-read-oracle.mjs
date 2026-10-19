@@ -21,6 +21,7 @@ const {snapshotStoppedHive}=await import('../../services/hive/src/offline-backup
 const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const {requireThat}=await import('../../packages/contracts/src/errors.ts');
 const {validateHost}=await import('../../packages/contracts/src/host-validation.ts');
+const {setup}=await import('./hive-ui-files-fixture.mjs');
 const source=readFileSync(new URL('../../services/hive/src/inspect-storage.ts',import.meta.url),'utf8');
 const main=source.indexOf('if (process.argv[1] && fileURLToPath'),start=source.indexOf('{',main)+1,end=source.lastIndexOf('}');
 if(main<0||start<main||end<start)throw Error('Original inspector CLI boundaries changed');
@@ -28,6 +29,7 @@ const originalCli=new Function('instanceConfig','configurationPath','requireThat
 const rows=[];
 for(const input of JSON.parse(readFileSync(0,'utf8'))){
   try {
+    if(input.action==='fixture'){setup(input.root,input.actions);rows.push({value:null});continue;}
     if(input.action==='inspector'){
       const out=[],err=[],process={argv:['node','owner',...(input.args??[])],stdout:{write:value=>out.push(value)},stderr:{write:value=>err.push(value)},exitCode:0};
       // The caller supplies admitted configuration. Generic file/runtime/artifact

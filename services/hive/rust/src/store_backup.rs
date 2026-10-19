@@ -74,7 +74,7 @@ impl Store {
                 // Drop the backup and destination before opening the hash stream,
                 // just as Node finalizes sqlite3_backup before fulfilling backup().
             };
-            let mut input = tokio::fs::File::open(&destination)
+            let mut input = tokio::fs::File::open(crate::filesystem::path(&destination)?)
                 .await
                 .map_err(|_| IvyError::internal())?;
             let mut hash = Sha256::new();
