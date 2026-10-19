@@ -1,9 +1,9 @@
 //! Consume the existing host reset intent before creating any native owner.
 use crate::native_launch::NativeHomeInputs;
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{
     codex_home::resolve_codex_home_json,
-    config::{CONFIGURATION_BYTES, atomic_json, json_file},
+    config::{CONFIGURATION_BYTES, atomic_json, json_file, json_file_if_present},
     filesystem::remove_force,
     node_path, paths,
 };
@@ -61,33 +61,6 @@ fn valid_marker(value: &IvyJson) -> IvyResult<()> {
     native_instant(at, None).map_err(|_| invalid_marker())?;
     Ok(())
 }
-async fn marker(path: PathBuf) -> IvyResult<Option<IvyJson>> {
-    // Keep ENOENT on either stat or read distinct from every other error.
-    // The host's public json_file currently erases that errno distinction.
-    tokio::task::spawn_blocking(move || {
-        let metadata = match fs::metadata(&path) {
-            Ok(value) => value,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(IvyError::internal()),
-        };
-        if !metadata.is_file() || metadata.len() > CONFIGURATION_BYTES as u64 {
-            return Err(IvyError::new(
-                "invalid_arguments",
-                "Configuration must be a bounded regular file.",
-            ));
-        }
-        match fs::read(&path) {
-            Ok(bytes) => parse(&String::from_utf8_lossy(&bytes), usize::MAX)
-                .map(Some)
-                .map_err(|_| IvyError::internal()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(IvyError::internal()),
-        }
-    })
-    .await
-    .map_err(|_| IvyError::internal())?
-}
-
 /// Preserve the existing explicit-home scope, including an explicit shared
 /// home. Selecting a different reset ownership policy needs a separate decision.
 /// Admission is eager: abandoning the waiter never interrupts an accepted reset
@@ -130,7 +103,10 @@ async fn apply(
             "runtime-reset.json".into(),
         ],
     ));
-    let Some(mut marker) = marker(marker_path).await?.filter(truthy) else {
+    let Some(mut marker) = json_file_if_present(marker_path, CONFIGURATION_BYTES)
+        .await?
+        .filter(truthy)
+    else {
         return Ok(());
     };
     valid_marker(&marker)?;

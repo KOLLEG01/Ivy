@@ -1,13 +1,13 @@
 //! Original native stop records. A completed process alone is never tree proof.
 use crate::{native_connection::NativeStopEvidence, native_handshake::NativeMode};
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{
-    config::atomic_json,
+    config::{atomic_json, json_file_if_present},
     process::{OwnedProcess, ProcessResult, owned_process_tree_stopped},
     process_fence::record_process_stop_fence,
 };
 use ivy_sdk::clock::parse_date;
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 fn stop_date(value: &JsString) -> Option<i64> {
     let millis = parse_date(value);
@@ -42,34 +42,11 @@ impl OwnedProcessEvidence {
         Self { root, clock }
     }
     pub async fn stops(&self) -> IvyResult<Vec<IvyJson>> {
-        let path = self.root.join("owned-process-stops.json");
-        // This is the original stat/read guard, including ENOENT on either
-        // operation. Unlike ownership files, this reader follows existing links.
-        let saved = tokio::task::spawn_blocking(move || {
-            let metadata = match fs::metadata(&path) {
-                Ok(value) => value,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(IvyJson::Array(Vec::new()));
-                }
-                Err(_) => return Err(IvyError::internal()),
-            };
-            if !metadata.is_file() || metadata.len() > 64 * 1024 {
-                return Err(IvyError::new(
-                    "invalid_arguments",
-                    "Configuration must be a bounded regular file.",
-                ));
-            }
-            match fs::read(&path) {
-                Ok(bytes) => parse(&String::from_utf8_lossy(&bytes), usize::MAX)
-                    .map_err(|_| IvyError::internal()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(IvyJson::Array(Vec::new()))
-                }
-                Err(_) => Err(IvyError::internal()),
-            }
-        })
-        .await
-        .map_err(|_| IvyError::internal())??;
+        // Only ENOENT on the original stat/read guard is absence. Unlike
+        // ownership files, this reader follows existing links.
+        let saved = json_file_if_present(self.root.join("owned-process-stops.json"), 64 * 1024)
+            .await?
+            .unwrap_or_else(|| IvyJson::Array(Vec::new()));
         let invalid = || {
             IvyError::new(
                 "native_stop_evidence_invalid",
