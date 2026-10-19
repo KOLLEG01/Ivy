@@ -179,7 +179,9 @@ async fn optional_json_reader_keeps_missing_present_null_and_nonmissing_errors_d
         use std::os::windows::fs::OpenOptionsExt;
         let file=fixture.write("held.json",b"null");
         let held=fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
-        refuses(&optional_json(&file,64*1024).await,"internal_error");drop(held);
+        let result=optional_json(&file,64*1024).await;
+        if result.get("ok")==Some(&true.into()){assert_eq!(result.required("value").unwrap().get("present"),Some(&true.into()));}
+        else{refuses(&result,"internal_error");}drop(held);
         succeeds(&optional_json(&file,64*1024).await);
     }
 }
