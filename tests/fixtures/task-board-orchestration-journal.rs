@@ -183,19 +183,19 @@ impl RpcClient for Client {
                             .clone(),
                     ),
                     ("epoch", "epoch".into()),
-                    ("pid", 42.0.into()),
+                    ("pid", Json::Number(42.0)),
                     ("state", "ready".into()),
                     ("observedAt", Json::String(s(data(), "time").clone())),
                     ("code", Json::Null),
                     ("initialized", Json::Object(vec![])),
-                    ("pendingInputs", 0.0.into()),
+                    ("pendingInputs", Json::Number(0.0)),
                     (
                         "operations",
                         Json::object([
-                            ("retained", 0.0.into()),
-                            ("maximum", 100.0.into()),
-                            ("bytes", 0.0.into()),
-                            ("maximumBytes", 1048576.0.into()),
+                            ("retained", Json::Number(0.0)),
+                            ("maximum", Json::Number(100.0)),
+                            ("bytes", Json::Number(0.0)),
+                            ("maximumBytes", Json::Number(1048576.0)),
                         ]),
                     ),
                     ("observedMethods", Json::Array(vec![])),
@@ -245,7 +245,10 @@ impl RpcClient for Client {
                                 self.row.required("turns")?.required("reply")?.clone()
                             }
                             "thread/items/list" => {
-                                assert_eq!(a.required("params")?.get("limit"), Some(&1.0.into()));
+                                assert_eq!(
+                                    a.required("params")?.get("limit"),
+                                    Some(&Json::Number(1.0))
+                                );
                                 assert_eq!(
                                     a.required("params")?.get("sortDirection"),
                                     Some(&"desc".into())
@@ -254,7 +257,7 @@ impl RpcClient for Client {
                                     Json::object([(
                                         "error",
                                         Json::object([
-                                            ("code", (-32601.0).into()),
+                                            ("code", Json::Number(-32601.0)),
                                             ("message", "unsupported".into()),
                                         ]),
                                     )])
