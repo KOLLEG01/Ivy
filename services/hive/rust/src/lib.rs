@@ -4,6 +4,7 @@ pub mod configurations;
 pub mod discovery;
 pub mod events;
 pub mod inventory;
+pub mod kernel;
 pub mod mcp;
 pub mod mcp_request;
 pub mod mcp_schema;

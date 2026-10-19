@@ -26,8 +26,8 @@ const {Uis,assetPath}=await import('../../services/hive/src/uis.ts');
 const {uiContentPolicy}=await import('../../services/hive/src/ui-security.ts');
 const {PackageCatalogObject}=await import('../../services/hive/src/package-catalog-object.ts');
 const {wikiHandlers}=await import('../../services/hive/src/wiki.ts');
-const {validateInput,validateOutput}=await import('../../packages/contracts/src/core-validation.ts');
-const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
+const {operations,validateRequest,validateInput,validateOutput,validateShared}=await import('../../packages/contracts/src/core-validation.ts');
+const {IvyError,requireThat,fail}=await import('../../packages/contracts/src/errors.ts');
 const {canonical,digest,hashJson}=await import('../../packages/contracts/src/canonical.ts');
 // Invoke the unchanged worker functions in isolation with the actual HiveStore.
 // No complete kernel, transport or startup lifecycle is supplied by this fixture.
@@ -37,7 +37,8 @@ if(identityStart<0||identityEnd<identityStart)throw Error('Original worker ident
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
-let store,registry,discovery,configurations,packageCatalog,packageKernel,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
+let store,registry,discovery,configurations,packageCatalog,packageKernel,kernelExecution,KernelExecution,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
+const kernelTrace=input.steps.some(step=>step.op==='kernel');
 const packageTrace=input.steps.some(step=>['packageCatalog','packageKernel'].includes(step.op));
 let createKernelCatalog,kernelPackageAction;
 if(input.steps.some(step=>step.op==='packageKernel')){
@@ -48,9 +49,9 @@ if(input.steps.some(step=>step.op==='packageKernel')){
  createKernelCatalog=new Function('PackageCatalogObject',stripTypeScriptTypes('function construct(){'+kernelSource.slice(start,end)+'return this.packageCatalog;}',{mode:'strip'})+'return construct;')(PackageCatalogObject);
  kernelPackageAction=new Function('kernel','requireThat','message',stripTypeScriptTypes('function execute(){switch(message.action){'+workerSource.slice(actionStart,actionEnd)+'}}',{mode:'strip'})+'return execute();');
 }
-const registryTrace=input.steps.some(step=>['registry','inventory','discovery','configurations','uis'].includes(step.op));
+const registryTrace=kernelTrace||input.steps.some(step=>['registry','inventory','discovery','configurations','uis'].includes(step.op));
 const inventoryTrace=input.steps.some(step=>step.op==='inventory');
-const discoveryTrace=input.steps.some(step=>step.op==='discovery');
+const discoveryTrace=kernelTrace||input.steps.some(step=>step.op==='discovery');
 const plainLowercase=new Map(),uppercase=new Map(),englishStrings=new Set(),wordCharacters=new Map();
 const realPlainLower=String.prototype.toLowerCase,realUpper=String.prototype.toUpperCase,realCompare=String.prototype.localeCompare;
 if(discoveryTrace){
@@ -65,6 +66,17 @@ if(discoveryTrace){
  const surfaceStart=facade.indexOf('export function mcpSurfaceBindings('),surfaceEnd=facade.indexOf('type CursorAccess = ',surfaceStart),successStart=facade.indexOf('export function mcpSuccess('),successEnd=facade.indexOf('function failure(',successStart);
  if(surfaceStart<0||surfaceEnd<surfaceStart||successStart<0||successEnd<successStart)throw Error('Original MCP projection slices changed');
  ({mcpSurfaceBindings,mcpSuccess}=new Function(stripTypeScriptTypes(facade.slice(surfaceStart,surfaceEnd).replace('export function','function')+facade.slice(successStart,successEnd).replace('export function','function'),{mode:'strip'})+';return {mcpSurfaceBindings,mcpSuccess};')());
+}
+if(kernelTrace){
+ const source=readFileSync(new URL('../../services/hive/src/kernel.ts',import.meta.url),'utf8');
+ const start=source.indexOf('  private add<P>('),end=source.indexOf('\nexport function rpcFailure',start);
+ if(start<0||end<start)throw Error('Original kernel execution boundaries changed');
+ const {catalogPage,utc}=await import('../../services/hive/src/paging.ts');
+ const {storageInspection}=await import('../../services/hive/src/inspect-storage.ts');
+ const {STORAGE_FORMAT}=await import('../../services/hive/src/storage-schema.ts');
+ const resetBootstrapMethods=new Set(['uis.inspect','uis.stageAsset','contracts.register','objects.write','objects.read','uis.deploy']);
+ const dependencies={operations,requireThat,fail,validateRequest,validateInput,validateOutput,validateShared,resetBootstrapMethods,wikiHandlers,STORAGE_FORMAT,storageInspection,catalogPage,utc,hashJson,canonical,pruneObjectRevisions,queryObjects};
+ KernelExecution=new Function(...Object.keys(dependencies),stripTypeScriptTypes('class KernelExecution{'+source.slice(start,end),{mode:'strip'})+';return KernelExecution;')(...Object.values(dependencies));
 }
 const lowercase=new Map();
 const localeStrings=new Set();
@@ -122,6 +134,34 @@ try {
   let value=null,error=null,wikiCalls=[];
   try {
    switch(step.op){
+    case 'kernel':{
+      const RealDate=Date,realUUID=crypto.randomUUID,realGlobalUUID=globalThis.crypto.randomUUID;
+      registryStrings({...step,params:step.request?.params??step.params});globalThis.Date=retentionDate(RealDate,step.now);
+      if(step.createdId){crypto.randomUUID=()=>step.createdId;globalThis.crypto.randomUUID=()=>step.createdId;syncBuiltinESMExports();}
+      try{
+       if(step.method==='reopen'){store.close();store=new HiveStore(input.path);kernelExecution=undefined;}
+       if(!kernelExecution||step.method==='constructor'){
+        registry=new Registry(store);discovery=new Discovery(registry);configurations=new Configurations(store,new Objects(store));
+        kernelExecution=Object.assign(new KernelExecution(),{store,registry,discovery,configurations,objects:new Objects(store),events:new Events(store),handlers:new Map(),connectionGeneration:0,options:{version:'1.0.0',buildId:'sha256:'+'a'.repeat(64),publicBaseUrl:'https://example.invalid/base',...step.options}});
+        kernelExecution.registerHandlers();
+       }
+       if(step.options)Object.assign(kernelExecution.options,step.options);
+       switch(step.method){
+        case 'constructor':case 'reopen':break;
+        case 'execute':{
+         const request=structuredClone(step.request);
+         for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(request,pointer,String.fromCharCode(...codeUnits));
+         value=kernelExecution.execute(step.context,request);break;
+        }
+        case 'register':kernelExecution.add(step.name,()=>{store.setMetadata('kernel-handler-effect','written');return false;});break;
+        case 'registerSlow':kernelExecution.add(step.name,()=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1100);store.checkBudget();return null;});break;
+        case 'binding':value=discovery.describe({serviceName:'hive',tools:[step.name]}).items[0];break;
+        case 'node':value=registry.node(step.id);break;
+        default:throw Error('Unknown kernel execution fixture method');
+       }
+      }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;globalThis.crypto.randomUUID=realGlobalUUID;syncBuiltinESMExports();}
+      break;
+    }
     case 'packageKernel':{
       const RealDate=Date,realUUID=crypto.randomUUID,realGlobalUUID=globalThis.crypto.randomUUID;
       globalThis.Date=retentionDate(RealDate,step.now);let offset=0;

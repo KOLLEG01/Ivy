@@ -8,6 +8,8 @@ mod contracts;
 mod events;
 #[path = "hive_worker_identity.rs"]
 mod identity;
+#[path = "hive_kernel.rs"]
+mod kernel;
 #[path = "hive_ledger.rs"]
 mod ledger;
 #[path = "hive_object_delete.rs"]
