@@ -212,6 +212,11 @@ impl Peer {
             .await
             .unwrap();
         assert_eq!(field(&r, "remaining").as_f64(), Some(expected as f64));
+        equal(
+            field(&r, "mismatches"),
+            &Json::Array(vec![]),
+            "RPC errors cannot conceal a request mismatch",
+        );
     }
     async fn finish(mut self) {
         self.child.kill().await.unwrap();
