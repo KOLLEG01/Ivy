@@ -15,8 +15,9 @@ const {Objects}=await import('../../services/hive/src/objects.ts');
 const {Events}=await import('../../services/hive/src/events.ts');
 const {Retention}=await import('../../services/hive/src/retention.ts');
 const {pruneObjectRevisions}=await import('../../services/hive/src/object-retention.ts');
+const {Registry}=await import('../../services/hive/src/registry.ts');
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
-const {canonical,digest}=await import('../../packages/contracts/src/canonical.ts');
+const {canonical,digest,hashJson}=await import('../../packages/contracts/src/canonical.ts');
 // Invoke the unchanged worker functions in isolation with the actual HiveStore.
 // No kernel/transport/startup behavior is supplied by this auth-only fixture.
 const workerSource=readFileSync(new URL('../../services/hive/src/worker.ts',import.meta.url),'utf8');
@@ -25,7 +26,31 @@ if(identityStart<0||identityEnd<identityStart)throw Error('Original worker ident
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
-let store;
+let store,registry;
+const registryTrace=input.steps.some(step=>step.op==='registry');
+const localeStrings=new Set();
+const units=value=>Array.from({length:String(value).length},(_,i)=>String(value).charCodeAt(i));
+const collectStrings=value=>{
+ if(typeof value==='string')localeStrings.add(value);
+ else if(Array.isArray(value))for(const child of value)collectStrings(child);
+ else if(value&&typeof value==='object')for(const child of Object.values(value))collectStrings(child);
+};
+const diagnosticString=value=>{
+ collectStrings(value);
+ try{localeStrings.add(hashJson({code:value.code,resource:value.resource,source:value.source}));}catch{}
+};
+function registryStrings(step){
+ collectStrings(step.params);collectStrings(step.context);
+ for(const row of store.all('SELECT identity,diagnostic_json FROM diagnostics')){
+  localeStrings.add(row.identity);try{diagnosticString(JSON.parse(row.diagnostic_json));}catch{}
+ }
+ for(const row of store.all('SELECT status_json FROM service_nodes')){try{
+  const value=JSON.parse(row.status_json);collectStrings(value);
+  diagnosticString({code:'registry_invalid',resource:{serviceNodeId:value.serviceNodeId},source:'hive'});
+ }catch{}}
+ if(step.method==='diagnostic')diagnosticString(step.params);
+ if(step.method==='heartbeat')for(const value of step.params?.diagnostics??[])diagnosticString({...value,source:'service:'+step.id});
+}
 // Observe only the runtime primitives. Rust executes retention policy and SQL
 // independently; these values do not supply selected candidates or results.
 const retentionRuntime={dates:new Map(),iso:new Map(),comparisons:new Map()};
@@ -34,17 +59,17 @@ function retentionDate(RealDate,now){
   for(const row of store.all('SELECT created_at,updated_at FROM objects')){remember(row.created_at);remember(row.updated_at);}
   for(const row of store.all('SELECT created_at FROM revisions'))remember(row.created_at);
   const keys=[];
-  for(const row of store.all('SELECT definition FROM contracts')){try{const key=JSON.parse(row.definition)?.key;if(typeof key==='string')keys.push(key);}catch{}}
+  for(const row of store.all('SELECT definition FROM contracts')){try{const key=JSON.parse(row.definition)?.key;if(typeof key==='string'){keys.push(key);if(registryTrace)localeStrings.add(key);}}catch{}}
   for(const a of keys)for(const b of keys)retentionRuntime.comparisons.set(JSON.stringify([a,b]),Math.sign(a.localeCompare(b)));
   return class extends RealDate{
-    constructor(...args){super(...(args.length?args:[now]));}
+    constructor(...args){super(...(args.length?args:[now]));if(typeof args[0]==='string')remember(args[0]);}
     static now(){return now;}
     static parse(value){remember(value);return RealDate.parse(value);}
     toISOString(){const result=super.toISOString();retentionRuntime.iso.set(this.getTime(),result);return result;}
   };
 }
 const tableHash=(table,columns)=>'sha256:'+createHash('sha256').update(store.get(`SELECT json_group_array(json_array(${columns})) AS encoded FROM (SELECT rowid AS record_id,* FROM ${table} ORDER BY rowid)`).encoded).digest('hex');
-const snapshot=(compactEvents=false)=>({contracts:tableHash('contracts','key,version,definition'),families:store.all('SELECT * FROM contract_families ORDER BY key'),objects:store.all('SELECT * FROM objects ORDER BY id'),fts:store.all('SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid'),revisions:tableHash('revisions',"record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),references:store.all('SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name'),principals:store.all('SELECT * FROM principals ORDER BY id'),credentials:store.all('SELECT * FROM credentials ORDER BY digest'),nodes:store.all('SELECT * FROM service_nodes ORDER BY id'),sessions:store.all('SELECT * FROM browser_sessions ORDER BY digest'),subscriptions:store.all('SELECT * FROM subscriptions ORDER BY node_id,name'),durable:store.all('SELECT * FROM durable_subscriptions ORDER BY node_id,name'),changes:[...store.changes],mutations:tableHash('mutations','record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes'),events:tableHash('events',compactEvents?'sequence,topic,topic_version,source,occurred_at,mutation_id,length(CAST(payload AS BLOB))':'sequence,topic,topic_version,source,occurred_at,mutation_id,payload'),metadata:store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),retention:store.all('SELECT * FROM retention_families ORDER BY contract_key'),apps:store.all('SELECT * FROM apps ORDER BY app_id'),releases:store.all('SELECT * FROM app_releases ORDER BY app_id,release_id'),diagnostics:store.all('SELECT * FROM diagnostics ORDER BY identity')});
+const snapshot=(compactEvents=false,compactDiagnostics=false)=>({contracts:tableHash('contracts','key,version,definition'),families:store.all('SELECT * FROM contract_families ORDER BY key'),objects:store.all('SELECT * FROM objects ORDER BY id'),fts:store.all('SELECT rowid,object_id,name,text FROM object_fts ORDER BY rowid'),revisions:tableHash('revisions',"record_id,object_id,revision,contract_key,contract_version,encoding,CASE WHEN typeof(content)='blob' THEN hex(content) ELSE content END,content_hash,byte_length,created_at,references_json"),references:store.all('SELECT * FROM revision_references ORDER BY source_object_id,source_revision,name'),principals:store.all('SELECT * FROM principals ORDER BY id'),credentials:store.all('SELECT * FROM credentials ORDER BY digest'),nodes:store.all('SELECT * FROM service_nodes ORDER BY id'),sessions:store.all('SELECT * FROM browser_sessions ORDER BY digest'),subscriptions:store.all('SELECT * FROM subscriptions ORDER BY node_id,name'),durable:store.all('SELECT * FROM durable_subscriptions ORDER BY node_id,name'),changes:[...store.changes],mutations:tableHash('mutations','record_id,principal_id,mutation_id,request_hash,issued_at_ms,completed_at_ms,result_kind,result_json,receipt_bytes'),events:tableHash('events',compactEvents?'sequence,topic,topic_version,source,occurred_at,mutation_id,length(CAST(payload AS BLOB))':'sequence,topic,topic_version,source,occurred_at,mutation_id,payload'),metadata:store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key"),retention:store.all('SELECT * FROM retention_families ORDER BY contract_key'),apps:store.all('SELECT * FROM apps ORDER BY app_id'),releases:store.all('SELECT * FROM app_releases ORDER BY app_id,release_id'),diagnostics:compactDiagnostics?tableHash('diagnostics','record_id,identity,diagnostic_json'):store.all('SELECT * FROM diagnostics ORDER BY identity'),connections:store.all('SELECT * FROM service_connections ORDER BY node_id'),managed:store.all('SELECT * FROM managed_nodes ORDER BY node_id'),hosts:store.all('SELECT * FROM host_reports ORDER BY host_id'),registries:store.all('SELECT * FROM registries ORDER BY node_id'),inventorySchemas:store.all('SELECT * FROM inventory_schemas ORDER BY namespace,kind,version'),toolDefinitions:store.all('SELECT * FROM tool_definitions ORDER BY hash')});
 const rows=[];
 try {
  store=new HiveStore(input.path);
@@ -152,12 +177,51 @@ try {
       }finally{globalThis.Date=RealDate;}
       break;
     }
+    case 'registry':{
+      const RealDate=Date;
+      const params=step.params===undefined?{}:step.params;
+      for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...codeUnits));
+      if(step.idUnits)step.id=String.fromCharCode(...step.idUnits);
+      registryStrings({...step,params});
+      globalThis.Date=retentionDate(RealDate,step.now);
+      try{
+        if(step.method==='constructor'||!registry)registry=new Registry(store);
+        const context={...(step.context?store.authenticate(step.context):{}),serviceNodeId:step.id,generation:step.generation};
+        switch(step.method){
+          case 'constructor':break;
+          case 'connect':value=registry.connect({...context,sessionDigest:step.context?.sessionDigest},params);break;
+          case 'disconnect':registry.disconnect(step.id);break;
+          case 'node':value=registry.node(step.id);break;
+          case 'nodes':value=registry.nodes();break;
+          case 'save':registry.save(params,step.notify??true);break;
+          case 'sync':value=registry.sync(context,params);break;
+          case 'heartbeat':value=registry.heartbeat(context,params);break;
+          case 'diagnostic':registry.diagnostic(params);break;
+          case 'diagnostics':value=registry.diagnostics(params.status);break;
+          case 'collectDiagnostics':registry.collectDiagnostics(step.now);break;
+          case 'checkRequirements':registry.checkRequirements(params.requirements,{allowUnregistered:params.allowUnregistered});break;
+          case 'getRegistry':value=registry.getRegistry(step.id);break;
+          case 'namespace':value=registry.namespace(step.id,params.namespace);break;
+          case 'select':value=registry.select(params.namespace,params.target);break;
+          case 'snapshot':value=registry.snapshot(params.namespace,params.target);break;
+          case 'bindings':value=registry.bindings(step.id,params.namespace);break;
+          case 'liveCatalog':value=registry.liveCatalog(step.id);break;
+          case 'reportHost':value=registry.reportHost(context,params);break;
+          case 'hostObservations':value=registry.hostObservations(params.hostId);break;
+          case 'clearHints':registry.changedNodes.clear();registry.changedGenerations.clear();store.changes.clear();break;
+          case 'collectRetention':value=new Retention(store,registry).collect(step.now);break;
+          default:throw Error('Unknown registry method');
+        }
+        if(step.lossless)value={encoded:JSON.stringify(value)};
+      }finally{globalThis.Date=RealDate;registryStrings({...step,params});}
+      break;
+    }
     case 'configure':store.configureCredentials(step.credentials);break;
     case 'authenticate':value=store.authenticate(step.context);break;
     case 'sql':store.db.exec(step.sql);break;
     case 'invalidate':store.invalidate(step.scope);break;
     case 'transaction':store.transaction(()=>{store.db.exec(step.sql);store.invalidate(step.scope);if(step.fail)throw new IvyError('fixture_failure','Rollback requested.');});break;
-    case 'reopen':store.close();store=new HiveStore(input.path);break;
+    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;break;
     case 'reorder':case 'archive':case 'delete':case 'move':{
       const RealDate=Date;
       if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
@@ -188,11 +252,19 @@ try {
     default:throw Error('Unknown trace action');
    }
   }catch(e){error=IvyError.from(e).toWire();}
-  rows.push({value,error,state:snapshot(step.compactEvents??false)});
+  const state=snapshot(step.compactEvents??false,step.compactDiagnostics??false);
+  if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
+  const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
+  rows.push({value,error,state,...mirror});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");
  const topics=store.all('SELECT * FROM topics ORDER BY topic,version');
  const runtime=input.steps.some(step=>['retention','pruneRevisions'].includes(step.op))?{retentionRuntime:Object.fromEntries(Object.entries(retentionRuntime).map(([key,map])=>[key,[...map]]))}:{};
+ if(registryTrace){
+  const sorted=[...localeStrings].sort((a,b)=>a.localeCompare(b));let rank=0;
+  const localeOrder=sorted.map((value,index)=>{if(index&&value.localeCompare(sorted[index-1])!==0)rank++;return [units(value),rank];});
+  runtime.registryRuntime={dates:[...retentionRuntime.dates].map(([value,date])=>[units(value),date]),iso:[...retentionRuntime.iso],localeOrder};
+ }
  process.stdout.write(JSON.stringify({rows,definitions,metadata,topics,...runtime}));
 }finally{store?.close();}

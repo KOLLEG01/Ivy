@@ -4,6 +4,7 @@ pub mod events;
 pub mod objects;
 pub mod paging;
 pub mod query;
+pub mod registry;
 pub mod retention;
 pub mod storage_read;
 pub mod store;

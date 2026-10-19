@@ -8,6 +8,47 @@ use ivy_contracts::{
 
 pub const PAGE_BYTES: usize = 2 * 1024 * 1024 - 8192;
 
+/// Hive's exact UTC calendar admission; date parsing/formatting belongs to the
+/// bound runtime rather than an alternative service-local date implementation.
+pub fn utc(value: &IvyJson, runtime: &dyn crate::retention::Runtime) -> IvyResult<IvyJson> {
+    let string = try_js_string(value)?;
+    let bytes = &string.0;
+    let shape = (bytes.len() == 20 || bytes.len() == 24)
+        && bytes.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == 45,
+            10 => *c == 84,
+            13 | 16 => *c == 58,
+            19 if bytes.len() == 24 => *c == 46,
+            19 | 23 if i == bytes.len() - 1 => *c == 90,
+            _ => (48..=57).contains(c),
+        });
+    if !shape {
+        return Err(IvyError::new(
+            "invalid_arguments",
+            "Expected a UTC RFC 3339 timestamp.",
+        ));
+    }
+    let milliseconds = runtime.parse_date(&string);
+    let normalize = |mut value: JsString| {
+        if value
+            .0
+            .ends_with(&".000Z".encode_utf16().collect::<Vec<_>>())
+        {
+            value.0.truncate(value.0.len() - 5);
+            value.0.push(90);
+        }
+        value
+    };
+    if !milliseconds.is_finite() || normalize(runtime.iso_date(milliseconds)?) != normalize(string)
+    {
+        return Err(IvyError::new(
+            "invalid_arguments",
+            "Invalid UTC calendar date.",
+        ));
+    }
+    Ok(value.clone())
+}
+
 pub fn page(items: Vec<IvyJson>, next_cursor: Option<String>) -> IvyJson {
     IvyJson::object([
         ("items", IvyJson::Array(items)),
