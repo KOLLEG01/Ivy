@@ -23,6 +23,8 @@ mod publication;
 mod recovery;
 #[path = "../fixtures/task-board-keys.rs"]
 mod task_keys;
+#[path = "../fixtures/task-board-lifecycle.rs"]
+mod lifecycle;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()

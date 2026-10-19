@@ -37,6 +37,7 @@ pub trait Contracts {
 struct ReadRecord {
     document: Document,
     archived: bool,
+    metadata: Option<Json>,
 }
 
 /// Create a new cache per action, sharing it only with nested work in that action.
@@ -111,6 +112,26 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             .record(key, address, primary, include_archived)
             .await?
             .document)
+    }
+
+    /// Preserve the observed Object metadata for lifecycle membership fences.
+    /// Local reads obtain it only when requested; ordinary reads stay unchanged.
+    pub async fn read_with_metadata(
+        &self,
+        key: &str,
+        address: &Json,
+        primary: bool,
+        include_archived: bool,
+    ) -> IvyResult<(Document, Json)> {
+        let record = self.record(key, address, primary, include_archived).await?;
+        let metadata = match record.metadata {
+            Some(metadata) => metadata,
+            None => self.journal.metadata(
+                string(&record.document.pin, "objectId")?,
+                &self.contracts.version(key)?,
+            )?,
+        };
+        Ok((record.document, metadata))
     }
 
     pub async fn write_attachment(
@@ -262,6 +283,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             return Ok(ReadRecord {
                 document,
                 archived: false,
+                metadata: None,
             });
         }
         let cache_key = address.as_js_string().is_none().then(|| {
@@ -333,6 +355,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 content_hash: revision.required("contentHash")?.as_str()?,
             },
             archived,
+            metadata: Some(object.clone()),
         };
         if let (Some(cache), Some(cache_key)) = (self.cache, cache_key) {
             let mut entries = cache.0.borrow_mut();

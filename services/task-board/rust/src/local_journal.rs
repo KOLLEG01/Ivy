@@ -70,6 +70,19 @@ pub struct LocalArtifact {
 }
 
 impl LocalJournal<'_> {
+    pub fn metadata(&self, id: &JsString, version: &str) -> IvyResult<Json> {
+        self.connection.query_row(
+            "SELECT key,parent_id,name,current_revision,created_at,updated_at FROM documents WHERE id=?",
+            [text(id)],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,String>(2)?,count_column(row,3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?)),
+        ).map_err(error).map(|(key,parent,name,revision,created,updated)| Json::object([
+            ("id",Json::String(id.clone())),("parentId",parent.map(Json::from).unwrap_or(Json::Null)),
+            ("ownerObjectId",Json::Null),("name",name.into()),("path","".into()),("position",Json::Number(0.0)),
+            ("icon",Json::Null),("contractKey",key.into()),("currentRevision",Json::Number(revision as f64)),
+            ("contractVersion",version.into()),("archivedAt",Json::Null),("effectivelyArchived",false.into()),
+            ("createdAt",created.into()),("updatedAt",updated.into()),
+        ]))
+    }
     pub fn name(&self, id: &JsString) -> IvyResult<JsString> {
         self.connection
             .query_row("SELECT name FROM documents WHERE id=?", [text(id)], |row| {
