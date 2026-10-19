@@ -2,12 +2,28 @@ import { Circle, CircleCheck, CircleDashed, CircleDot, CircleEllipsis, CirclePau
 import { tr, type TaskBoard } from './runtime';
 
 export const boardColumns = [
-  { id: 'todo', title: 'Todo', states: ['todo'] },
+  { id: 'waiting', title: tr('Wartend', 'Waiting'), states: ['todo', 'waiting'] },
   { id: 'in_progress', title: 'In progress', states: ['in_progress'] },
-  { id: 'waiting', title: 'Blocked', states: ['waiting'] },
   { id: 'review', title: 'Review', states: ['review'] },
   { id: 'done', title: 'Done', states: ['done', 'cancelled'] },
 ];
+export const waitingGroups = [
+  { id: 'user', title: tr('Nutzer', 'User') },
+  { id: 'dependency', title: tr('Abhängigkeit', 'Dependency') },
+  { id: 'runtime', title: tr('Laufzeit', 'Runtime') },
+  { id: 'time', title: tr('Zeit', 'Time') },
+  { id: 'ready', title: tr('Bereit', 'Ready') },
+  { id: 'unscheduled', title: tr('Ohne Wiederanlauf', 'Unscheduled') },
+] as const;
+export function waitingGroup(task: TaskBoard.TaskCard, condition: TaskBoard.ExecutionCondition, dependency: boolean, now = Date.now()) {
+  if (task.openQuestionCount || task.questionWait || task.waiting?.reason === 'user' || task.claim?.phase === 'waiting_input') return 'user';
+  if (dependency || task.blocker || task.waiting?.reason === 'dependency') return 'dependency';
+  if (['blocked_environment', 'outcome_unknown', 'recovering', 'workflow_attention'].includes(condition.state)) return 'runtime';
+  if (task.fields.nextReviewAt && Date.parse(task.fields.nextReviewAt) > now) return 'time';
+  if (task.workflowState === 'todo' && task.fields.control === 'user' && !task.waiting) return 'user';
+  // Ready Todo has no invented wait; a wait without a real restart date is explicitly unscheduled.
+  return task.workflowState === 'todo' && !task.waiting ? 'ready' : 'unscheduled';
+}
 /** Matches TaskBoard: after any attempt, claim, Run or native context the host and project are fixed. */
 export const taskStarted = (task: TaskBoard.Task) =>
   task.attemptCount > 0 || !!task.claim || !!task.lastRun || !!task.primaryResourceRef;

@@ -32,7 +32,7 @@ import { checkConfiguration, configurationName, configurationView } from './conf
 import { TaskBoardNativeLifecycle } from './native-lifecycle.js';
 import { unstartedArchivedContext } from './native-recovery.js';
 import { failedRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
-import { openQuestions, queuedTaskEdits, queuedUserInput } from './conversation.js';
+import { crossAgentComment, openQuestions, queuedTaskEdits, queuedUserInput, unreadComments } from './conversation.js';
 import { retryScheduledCheck, scheduledCheckDue } from './handoff.js';
 import { operationReceipt } from './operation-receipt.js';
 import { executionMode, missingHandoff, nextExecutionMode } from './execution-mode.js';
@@ -394,7 +394,7 @@ export class TaskBoardEngine {
   private async unreadAgentComments(
     document: Document<"task-board/task">,
     principalId: string,
-  ): Promise<number> {
+  ): Promise<Pick<TaskBoard.TaskView, 'unreadAgentComments' | 'unreadDirectAgentComments'>> {
     const state = await this.store.named(
       "task-board/comment-read-state",
       this.readStateName(principalId, document.pin.objectId),
@@ -406,11 +406,7 @@ export class TaskBoardEngine {
         "task_board_identity_conflict",
         "Comment read state belongs to another user or Task.",
       );
-    return Math.max(
-      0,
-      document.value.agentCommentCount -
-        (state?.value.readAgentCommentCount ?? 0),
-    );
+    return unreadComments(document.value, document.pin.objectId, state?.value);
   }
   async task(
     query: TaskBoard.TaskQuery,
@@ -421,7 +417,7 @@ export class TaskBoardEngine {
       object: document.pin,
       task: document.value,
       executionCondition: this.condition(document.value),
-      unreadAgentComments: await this.unreadAgentComments(
+      ...await this.unreadAgentComments(
         document,
         principalId,
       ),
@@ -495,13 +491,15 @@ export class TaskBoardEngine {
           "task_board_identity_conflict",
           "Comment read state belongs to another user or Task.",
         );
-      if (current && current.value.readAgentCommentCount >= task.value.agentCommentCount)
-        return { task: task.pin, readState: current.pin, unreadAgentComments: 0 };
+      const unread = unreadComments(task.value, request.taskId, current?.value);
+      if (current && (request.includeCrossAgent === false ? !unread.unreadDirectAgentComments : !unread.unreadAgentComments))
+        return { task: task.pin, readState: current.pin, ...unread };
       const value: TaskBoard.CommentReadState = {
         schemaVersion: 1,
         principalId: context.callerPrincipalId,
         taskId: request.taskId,
-        readAgentCommentCount: task.value.agentCommentCount,
+        readAgentCommentCount: request.includeCrossAgent === false ? current?.value.readAgentCommentCount ?? 0 : task.value.agentCommentCount,
+        readDirectAgentCommentCount: task.value.comments.filter(comment => comment.authorKind === 'agent' && !crossAgentComment(comment, request.taskId)).length,
         updatedAt: now,
       };
       try {
@@ -516,7 +514,7 @@ export class TaskBoardEngine {
               }
             : { create: { parentId: this.store.rootObjectId, name } },
         );
-        return { task: task.pin, readState, unreadAgentComments: 0 };
+        return { task: task.pin, readState, ...unreadComments(task.value, request.taskId, value) };
       } catch (error) {
         if (
           error instanceof IvyError &&

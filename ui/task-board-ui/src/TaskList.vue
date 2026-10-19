@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import {
   Alert,
   AlertDescription,
@@ -13,10 +13,10 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetTitle,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
   useRemote,
 } from "@ivy/ui";
 import { ListFilter, Plus, Search, SlidersHorizontal, X } from "@lucide/vue";
@@ -234,6 +234,17 @@ const selected = computed({
     if (!value) location.hash = link({ id: "", panel: "", run: "" });
   },
 });
+let returnFocus: HTMLElement | null = null;
+const originalOverflow = document.documentElement.style.overflow;
+watch(selected, async (open, previous) => {
+  if (open && !previous) returnFocus = document.activeElement as HTMLElement | null;
+  document.documentElement.style.overflow = open ? 'hidden' : originalOverflow;
+  if (!open) {
+    await nextTick();
+    (returnFocus?.isConnected ? returnFocus : document.getElementById('main-content'))?.focus({ preventScroll: true });
+  }
+}, { immediate: true });
+onBeforeUnmount(() => { document.documentElement.style.overflow = originalOverflow; });
 const disabled = computed(
   () => !props.available || preparing.value || action.locked.value,
 );
@@ -365,7 +376,8 @@ const dropAction = (column: string): BoardTransition | undefined => {
       backlog: "backlog",
       todo: "todo",
       in_progress: "in_progress",
-      waiting: "waiting",
+      // Waiting contains several reasons; dropping here only queues Todo, never invents a blocker.
+      waiting: "todo",
       done: "done",
     } as Record<string, BoardTransition>
   )[column];
@@ -383,7 +395,9 @@ const drop = (column: string) => {
 };
 </script>
 <template>
+  <div data-slot="task-board-background" :inert="selected" :aria-hidden="selected || undefined">
   <PageHeader
+    v-if="!selected"
     title="Task board"
     :loading="counts.loading.value"
     :updated-at="counts.updatedAt.value"
@@ -639,14 +653,14 @@ const drop = (column: string) => {
       swimlane="none"
     />
   </Disclosure>
-  <Sheet v-model:open="selected"
-    ><SheetContent
-      class="w-full gap-0 overflow-y-auto p-0 sm:max-w-3xl xl:max-w-5xl [&>button]:hidden"
-      @open-auto-focus.prevent
-      ><SheetTitle class="sr-only">Task details</SheetTitle
-      ><SheetDescription class="sr-only"
+  </div>
+  <Dialog v-model:open="selected" :modal="false"
+    ><DialogContent variant="workspace" :show-close-button="false"
+      @interact-outside.prevent @close-auto-focus.prevent
+      ><DialogTitle class="sr-only">Task details</DialogTitle
+      ><DialogDescription class="sr-only"
         >Review and update the selected task. Close to return to the same
-        board.</SheetDescription
+        board.</DialogDescription
       ><TaskDetail
         v-if="query.get('id')"
         :key="query.get('id')!"
@@ -654,9 +668,9 @@ const drop = (column: string) => {
         :workspace="workspace"
         :available="available"
         :query="query"
-        sheet
-        @changed="refresh" @deleted="selected = false; refresh()" /></SheetContent
-  ></Sheet>
+        @close="selected = false"
+        @changed="refresh" @deleted="selected = false; refresh()" /></DialogContent
+  ></Dialog>
 </template>
 <style scoped>
 .task-board {

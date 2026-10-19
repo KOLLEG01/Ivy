@@ -63,18 +63,16 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
         fields: { ...legacy.fields, title: 'Legacy watch ' + index, priority: 2, nextReviewAt: null } } },
     });
     await f.open('#/tasks?node=browser-task-board');
-    const blocked = f.page.getByRole('region', { name: 'Blocked', exact: true });
+    const blocked = f.page.getByRole('region', { name: 'Waiting', exact: true });
     const currentCard = blocked.getByRole('article').filter({ hasText: 'Approval watch' });
-    await expect(blocked.getByRole('article')).toHaveCount(20);
-    await expect(currentCard.getByText('Needs you', { exact: true })).toBeVisible();
+    await expect(blocked.getByRole('article')).toHaveCount(22);
+    await expect(blocked.locator('[data-waiting-group=user]').getByRole('article')).toHaveCount(22);
+    await expect(currentCard.getByText('Needs you', { exact: true })).toHaveCount(0);
     await expect(currentCard.getByText('Check failed', { exact: true })).toBeVisible();
-    await expect(blocked.getByRole('article').filter({ hasText: 'Legacy watch' })).toHaveCount(19);
-    for (const name of ['Todo', 'In progress', 'Review', 'Done'])
+    await expect(blocked.getByRole('article').filter({ hasText: 'Legacy watch' })).toHaveCount(21);
+    for (const name of ['In progress', 'Review', 'Done'])
       await expect(f.page.getByRole('region', { name, exact: true }).getByText('No tasks', { exact: true })).toBeVisible();
-    await blocked.getByRole('button', { name: 'Next', exact: true }).click();
-    await expect(blocked.getByRole('article')).toHaveCount(2);
-    await expect(blocked.getByText('Check failed', { exact: true })).toHaveCount(0);
-    await blocked.getByRole('button', { name: 'Previous', exact: true }).click();
+    await expect(blocked.getByRole('button', { name: 'Next', exact: true })).toHaveCount(0);
     await expect(currentCard.getByText('Check failed', { exact: true })).toBeVisible();
     await f.page.goto(f.url + '#/tasks?node=browser-task-board&q=Approval');
     await expect(blocked.getByRole('article')).toHaveCount(1);

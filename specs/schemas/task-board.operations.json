@@ -234,7 +234,7 @@
     },
     "read": {
       "input": "#/$defs/TaskQuery",
-      "output": "#/$defs/TaskView",
+      "output": "#/$defs/ReadResult",
       "mutation": false
     },
     "list": {

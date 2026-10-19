@@ -1644,6 +1644,11 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "readDirectAgentCommentCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "updatedAt": {
           "type": "string",
           "minLength": 24,
@@ -1657,6 +1662,98 @@
         "taskId",
         "readAgentCommentCount",
         "updatedAt"
+      ],
+      "additionalProperties": false
+    },
+    "TaskCardFields": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "control": {
+          "type": "string",
+          "enum": [
+            "user",
+            "agent"
+          ],
+          "description": "user means manual work; agent lets TaskBoard schedule and resume native agent work."
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4,
+          "description": "Scheduling priority: 4 is highest and 0 is lowest."
+        },
+        "executionRequirement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required field. null inherits TaskBoard defaults; automatic selects any eligible PC; host restricts scheduling to that PC."
+        },
+        "nextReviewAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dueAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "maxItems": 256,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "title",
+        "category",
+        "control",
+        "priority",
+        "executionRequirement",
+        "nextReviewAt",
+        "dueAt",
+        "dependencies"
       ],
       "additionalProperties": false
     },
@@ -2811,6 +2908,9 @@
               "additionalProperties": false
             }
           ]
+        },
+        "view": {
+          "const": "card"
         }
       },
       "required": [
@@ -2954,6 +3054,9 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991
+        },
+        "includeCrossAgent": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -2973,13 +3076,21 @@
           "$ref": "#/$defs/ObjectPin"
         },
         "unreadAgentComments": {
-          "const": 0
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unreadDirectAgentComments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
         "task",
         "readState",
-        "unreadAgentComments"
+        "unreadAgentComments",
+        "unreadDirectAgentComments"
       ],
       "additionalProperties": false
     },
@@ -3031,15 +3142,181 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "unreadDirectAgentComments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
         "object",
         "task",
         "executionCondition",
-        "unreadAgentComments"
+        "unreadAgentComments",
+        "unreadDirectAgentComments"
       ],
       "additionalProperties": false
+    },
+    "TaskCard": {
+      "type": "object",
+      "properties": {
+        "taskKey": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "fields": {
+          "$ref": "#/$defs/TaskCardFields"
+        },
+        "workflowState": {
+          "enum": [
+            "backlog",
+            "todo",
+            "in_progress",
+            "waiting",
+            "review",
+            "done",
+            "cancelled"
+          ]
+        },
+        "waiting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Waiting"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Claim"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publication": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latestResult": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openQuestionCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "questionWait": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuestionWait"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blocker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Blocker"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scheduledCheckFailure": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "taskKey",
+        "fields",
+        "workflowState",
+        "waiting",
+        "claim",
+        "publication",
+        "latestResult",
+        "openQuestionCount",
+        "questionWait",
+        "blocker",
+        "scheduledCheckFailure"
+      ],
+      "additionalProperties": false
+    },
+    "TaskCardView": {
+      "type": "object",
+      "properties": {
+        "object": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "task": {
+          "$ref": "#/$defs/TaskCard"
+        },
+        "executionCondition": {
+          "$ref": "#/$defs/ExecutionCondition"
+        },
+        "unreadAgentComments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unreadDirectAgentComments": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "commentCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "directCommentCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "object",
+        "task",
+        "executionCondition",
+        "unreadAgentComments",
+        "unreadDirectAgentComments",
+        "commentCount",
+        "directCommentCount"
+      ],
+      "additionalProperties": false
+    },
+    "ReadResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TaskView"
+        },
+        {
+          "$ref": "#/$defs/TaskCardView"
+        }
+      ]
     },
     "Blocker": {
       "type": "object",

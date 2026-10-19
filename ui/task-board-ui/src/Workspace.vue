@@ -8,16 +8,17 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
   RemoteState,
+  Toggle,
   useRemote,
 } from "@ivy/ui";
-import { Check, ChevronsUpDown, MonitorDot } from "@lucide/vue";
+import { Check, ChevronsUpDown, MonitorDot, MessagesSquare } from "@lucide/vue";
 import UiFrame from "../../../packages/ui-client/src/UiFrame.vue";
 import { nativeRead, serviceNodeLabel } from "../../../packages/ui-client/src/native";
 import { route } from "../../../packages/ui-client/src/runtime";
-import { base, client } from "./runtime";
+import { base, client, tr } from "./runtime";
 import type { Operation, TaskBoard } from "./runtime";
 import TaskList from "./TaskList.vue";
-import TaskDetail from "./TaskDetail.vue";
+import { provideCommentVisibility } from './comment-visibility';
 import TaskEditor from "./TaskEditor.vue";
 import SettingsView from "./SettingsView.vue";
 
@@ -48,6 +49,7 @@ const identity = computed(() =>
       ])
     : "",
 );
+const showCrossAgent = provideCommentVisibility(() => workspace.value.value);
 const switchHref = (node: string) =>
   route(props.section === "settings" ? "settings" : "tasks", { node });
 </script>
@@ -60,8 +62,13 @@ const switchHref = (node: string) =>
     :navigation="[]"
     :settings-href="route('settings', { node })"
   >
-    <template v-if="services.length > 1" #context>
-      <DropdownMenu>
+    <template #context>
+      <Toggle v-model="showCrossAgent" size="sm" :aria-label="tr('Cross-Agent-Kommunikation', 'Cross-agent communication')"
+        :title="tr('Cross-Agent-Kommunikation anzeigen', 'Show cross-agent communication')"
+        :class="showCrossAgent ? 'bg-accent text-accent-foreground' : 'text-muted-foreground opacity-60'">
+        <MessagesSquare aria-hidden="true" />
+      </Toggle>
+      <DropdownMenu v-if="services.length > 1">
         <DropdownMenuTrigger as-child>
           <Button
             variant="ghost"
@@ -120,14 +127,6 @@ const switchHref = (node: string) =>
         :key="identity"
         :workspace="workspace.value.value"
         :available="!workspace.error.value"
-      />
-      <TaskDetail
-        v-else-if="section === 'tasks' && query.get('id') && query.get('panel') !== 'sheet'"
-        :key="identity + query.get('id')"
-        :workspace="workspace.value.value"
-        :available="!workspace.error.value"
-        :task-id="query.get('id')!"
-        :query="query"
       />
       <TaskEditor
         v-else-if="section === 'new'"

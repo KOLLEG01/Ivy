@@ -6,6 +6,7 @@ import { TaskBoardEngine } from '../../../services/task-board/src/runtime/engine
 import { TaskBoardReconciler } from '../../../services/task-board/src/runtime/reconciler.js';
 import { taskBoardRegistry, taskBoardTools } from '../../../services/task-board/src/runtime/registry.js';
 import { TaskBoardStore } from '../../../services/task-board/src/runtime/store.js';
+import { taskCard } from './runtime/task-card.js';
 
 export async function startTaskBoard(path: string) {
   const config = await instanceConfig(path); validateTaskBoard('Settings', config.settings);
@@ -60,7 +61,11 @@ export async function startTaskBoard(path: string) {
     }
     if (tool.name === 'operation' || tool.name === 'operationReceipt') return await engine.operation(String(args['operationId']), context, tool.name === 'operationReceipt') as unknown as Wire.Json;
     if (tool.name === 'configuration') return await engine.configuration() as unknown as Wire.Json;
-    if (tool.name === 'read') { await engine.verifyOwner(); return await engine.task(args as unknown as TaskBoard.TaskQuery, context.callerPrincipalId) as unknown as Wire.Json; }
+    if (tool.name === 'read') {
+      await engine.verifyOwner();
+      const view = await engine.task(args as unknown as TaskBoard.TaskQuery, context.callerPrincipalId);
+      return (args['view'] === 'card' ? taskCard(view) : view) as unknown as Wire.Json;
+    }
     if (tool.name === 'list') { await engine.verifyOwner(); return await engine.list(args as unknown as TaskBoard.TaskListQuery) as unknown as Wire.Json; }
     if (tool.name === 'markCommentsRead') return await engine.markCommentsRead(args as unknown as TaskBoard.MarkCommentsReadRequest, context) as unknown as Wire.Json;
     if (tool.name === 'archive') { const result = await engine.archive(args as unknown as TaskBoard.ArchiveRequest, context); runtime.taskChanged(); return result as unknown as Wire.Json; }

@@ -23,11 +23,11 @@ const descriptions: Record<string, string> = {
   archive: 'Archive a ticket and its Codex tasks, or restore it. Restoration reuses the native task when possible and creates a new one only after confirmed failure.',
   operation: 'Check the original outcome of a TaskBoard action by operationId.',
   operationReceipt: 'Use operationId with receiptOnly=true to read a compact identity-bound outcome even after terminal payload retention. A receipt never authorizes replay.',
-  read: 'Read task content, comments and execution status by object ID or task key.',
+  read: 'Read task content, comments and execution status by object ID or task key. view=card returns compact board facts and filtered comment counts without conversation bodies.',
   list: 'List tasks with pagination and optional workflow status, category or parentTaskId filters. parentTaskId finds delegated children across hosts and worktrees. Use relatedTo=<task object ID> to find peers allocated to the same actual working directory on the same host. Separate worktrees are independent.',
   categories: 'List the task categories used in this workspace.',
   workspace: 'Find the Kanban workspace root, caller role and readiness.',
-  markCommentsRead: 'Mark current agent comments on a task as read for the user, using the observed task revision.',
+  markCommentsRead: 'Mark observed agent comments as read for the user at the task revision. includeCrossAgent=false marks only direct ticket-agent replies and preserves hidden directed communication.',
 };
 export const taskBoardTools: Wire.ToolDefinition[] = Object.entries(catalog.operations).filter(([name]) => !['review', 'saveResult'].includes(name)).map(([name, operation]) => ({
   namespace: 'task-board', name, interfaceVersion: '1.0.0', description: descriptions[name]!,

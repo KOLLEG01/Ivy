@@ -23,6 +23,9 @@ UI requirements: [UI](UI.md).
   child with current-only revisions; immutable comment bodies are stored there once. Ticket
   snapshots select the conversation prefix and preserve mutable delivery, native-input and
   handoff observations. Reads, including historical reads, restore that exact comment view.
+  Comment read markers independently retain the all-agent prefix and direct-agent count;
+  markCommentsRead with includeCrossAgent=false advances only direct-agent visibility.
+  Task reads report both unread totals; hiding directed communication never acknowledges it.
   Storage backfill also covers archived tickets without changing workflow state and retries
   active or conflicting tickets on later passes. Before readiness enables the new policy,
   current-only migration ledgers protect source revisions of legacy unfinished Runs without

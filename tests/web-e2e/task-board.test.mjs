@@ -324,13 +324,13 @@ test("automatic native recovery stays in progress while user input stays blocked
     const progress = f.page.getByRole("region", { name: "In progress", exact: true });
     await expect(progress.getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
     await expect(progress.getByText("Statusabgleich", { exact: true })).toBeVisible();
-    await expect(f.page.getByRole("region", { name: "Blocked", exact: true }).getByRole("link", { name: /Recover the original execution/ })).toHaveCount(0);
+    await expect(f.page.getByRole("region", { name: "Waiting", exact: true }).getByRole("link", { name: /Recover the original execution/ })).toHaveCount(0);
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   thread.status = { type: "active", activeFlags: ["waitingOnUserInput"] };
   await runtime.native.step(runId);
-  await expect(f.page.getByRole("region", { name: "Blocked", exact: true }).getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
-  await expect(f.page.getByRole("region", { name: "Blocked", exact: true }).getByText("Needs you", { exact: true })).toBeVisible();
+  await expect(f.page.getByRole("region", { name: "Waiting", exact: true }).locator('[data-waiting-group=user]').getByRole("link", { name: /Recover the original execution/ })).toBeVisible();
+  await expect(f.page.getByRole("region", { name: "Waiting", exact: true }).getByText("Needs you", { exact: true })).toHaveCount(0);
   const waiting = await f.task(created.task.objectId);
   assert.equal(waiting.workflowState, "waiting");
   assert.equal(waiting.waiting.reason, "user");
@@ -686,7 +686,7 @@ test(
     ).toHaveCount(0);
     await expect(
       f.page
-        .getByRole("region", { name: "Todo", exact: true })
+        .getByRole("region", { name: "Waiting", exact: true })
         .getByRole("heading", { name: "First category task", exact: true }),
     ).toBeVisible();
     const blocked = await f.invoke({
@@ -694,8 +694,8 @@ test(
       fields: { ...fields("Blocked by the first task"), dependencies: [first.task.objectId] },
     });
     await f.page.getByRole("link", { name: /First category task/ }).first().click();
-    await f.page.getByRole("dialog").getByRole("link", { name: "Open full page" }).click();
-    await expect(f.page.getByRole("link", { name: "Back to board" })).toBeVisible();
+    await expect(f.page.getByRole("dialog", { name: "Task details", exact: true })).toBeVisible();
+    await expect(f.page.getByRole("button", { name: "Close", exact: true })).toBeVisible();
     await f.page.getByRole("button", { name: "Edit task", exact: true }).click();
     const blockers = f.page.getByRole("combobox", { name: "Blockers", exact: true });
     await blockers.fill("task");
@@ -744,10 +744,10 @@ test(
     // Other columns follow priority until manual order is chosen; the choice persists in this browser.
     await f.invoke({ action: "create", workflowState: "todo", fields: { ...fields("Calm todo"), priority: 1 } });
     await f.invoke({ action: "create", workflowState: "todo", fields: { ...fields("Urgent todo"), priority: 4 } });
-    const todo = f.page.getByRole("region", { name: "Todo", exact: true });
+    const todo = f.page.getByRole("region", { name: "Waiting", exact: true });
     const todoOrder = () => todo.locator("article h3").allTextContents().then((values) => values.map((value) => value.trim()));
     await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
-    await todo.getByRole("button", { name: "Order Todo by priority", exact: true }).click();
+    await todo.getByRole("button", { name: "Order Waiting by priority", exact: true }).click();
     await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
     await todo.getByRole("button", { name: "Actions for Urgent todo" }).click();
     await f.page.getByRole("menuitem", { name: "Move to top", exact: true }).click();
@@ -757,7 +757,7 @@ test(
     await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
     await f.page.reload();
     await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
-    await todo.getByRole("button", { name: "Order Todo manually", exact: true }).click();
+    await todo.getByRole("button", { name: "Order Waiting manually", exact: true }).click();
     await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
     assert.deepEqual(f.pageErrors, []);
     assert.deepEqual(f.externalRequests, []);

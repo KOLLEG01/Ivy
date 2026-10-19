@@ -88,7 +88,7 @@ Object.assign(defs, {
     deliveryEvidence: nullable(ref('ObjectPin')), code: nullable(id), createdAt: timestamp, updatedAt: timestamp }),
   TaskKeySequence: obj({ schemaVersion: { const: 1 }, nextValue: integer(), updatedAt: timestamp }),
   TaskKeyAllocation: obj({ schemaVersion: { const: 1 }, operationId: id, taskKey: { ...id, pattern: '^TASK-[0-9]{4,}$' }, createdAt: timestamp }),
-  CommentReadState: obj({ schemaVersion: { const: 1 }, principalId: id, taskId: id, readAgentCommentCount: integer(), updatedAt: timestamp }),
+  CommentReadState: obj({ schemaVersion: { const: 1 }, principalId: id, taskId: id, readAgentCommentCount: integer(), readDirectAgentCommentCount: integer(), updatedAt: timestamp }, ['schemaVersion', 'principalId', 'taskId', 'readAgentCommentCount', 'updatedAt']),
 });
 // Conversation metadata does not introduce another ticket workflow.
 Object.assign(defs.Comment.properties, {
@@ -97,6 +97,7 @@ Object.assign(defs.Comment.properties, {
   sourceTaskId: id,
 });
 defs.TaskFields.required = defs.TaskFields.required.filter(key => key !== 'nativeOptions' && key !== 'requiredCapabilities' && key !== 'allowParallel');
+defs.TaskCardFields = obj(Object.fromEntries(['title', 'category', 'control', 'priority', 'executionRequirement', 'nextReviewAt', 'dueAt', 'dependencies'].map(key => [key, defs.TaskFields.properties[key]])));
 defs.TaskFieldsInput = { ...defs.TaskFields, properties: { ...defs.TaskFields.properties,
   userContact: { type: 'string', enum: ['ticket', 'chat', 'phone'],
     description: 'Contact route: ticket records only in the ticket; chat also contacts Main; phone also contacts by voice. Omit on root creation to inherit task_configuration defaults.userContact; delegated creation defaults to ticket and delivers completion to the parent. Omit on edit to preserve the setting.' },
@@ -134,7 +135,7 @@ Object.assign(defs, {
   OperationQuery: obj({ operationId: id }),
   OperationReceiptQuery: obj({ operationId: id, receiptOnly: { const: true } }),
   CategoriesQuery: obj({ categories: { const: true } }), CategoriesResult: obj({ categories: array(str(128, 1), 256) }),
-  TaskQuery: obj({ task: { anyOf: [id, obj({ taskKey: id })] } }),
+  TaskQuery: obj({ task: { anyOf: [id, obj({ taskKey: id })] }, view: { const: 'card' } }, ['task']),
   TaskListQuery: obj({
     parentTaskId: { ...id, description: 'List unarchived tasks delegated by this parent task, including separate worktrees and hosts.' },
     relatedTo: { ...id, description: 'Find other allocated tasks sharing this task canonical working directory and host. Separate worktrees do not match. Read peer tickets before coordinating.' },
@@ -145,10 +146,16 @@ Object.assign(defs, {
     workflowState: { enum: ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'] },
     category: nullable(str(128, 1)) }),
   TaskListResult: obj({ items: array(ref('TaskSummary'), 100), nextCursor: nullable(str(4096, 1)) }),
-  MarkCommentsReadRequest: obj({ operationId: id, taskId: id, expectedTaskRevision: integer(1) }),
-  MarkCommentsReadResult: obj({ task: ref('ObjectPin'), readState: ref('ObjectPin'), unreadAgentComments: { const: 0 } }),
+  MarkCommentsReadRequest: obj({ operationId: id, taskId: id, expectedTaskRevision: integer(1), includeCrossAgent: bool }, ['operationId', 'taskId', 'expectedTaskRevision']),
+  MarkCommentsReadResult: obj({ task: ref('ObjectPin'), readState: ref('ObjectPin'), unreadAgentComments: integer(), unreadDirectAgentComments: integer() }),
   ExecutionCondition: obj({ state: { enum: ['idle', 'queued', 'allocating', 'starting', 'active', 'needs_user', 'deferred', 'blocked_dependency', 'blocked_environment', 'recovering', 'outcome_unknown', 'publishing', 'workflow_attention'] }, detail: str(2048) }),
-  TaskView: obj({ object: ref('ObjectPin'), task: ref('Task'), executionCondition: ref('ExecutionCondition'), unreadAgentComments: integer() }),
+  TaskView: obj({ object: ref('ObjectPin'), task: ref('Task'), executionCondition: ref('ExecutionCondition'), unreadAgentComments: integer(), unreadDirectAgentComments: integer() }),
+  TaskCard: obj({ taskKey: id, fields: ref('TaskCardFields'), workflowState: { enum: workflowStates }, waiting: nullable(ref('Waiting')),
+    claim: nullable(ref('Claim')), publication: nullable(ref('ObjectPin')), latestResult: nullable(ref('ObjectPin')),
+    openQuestionCount: integer(), questionWait: nullable(ref('QuestionWait')), blocker: nullable(ref('Blocker')), scheduledCheckFailure: str(2048) }),
+  TaskCardView: obj({ object: ref('ObjectPin'), task: ref('TaskCard'), executionCondition: ref('ExecutionCondition'),
+    unreadAgentComments: integer(), unreadDirectAgentComments: integer(), commentCount: integer(), directCommentCount: integer() }),
+  ReadResult: { anyOf: [ref('TaskView'), ref('TaskCardView')] },
 });
 defs.CommentActionRequest.required = defs.CommentActionRequest.required.filter(key => key !== 'agentDelivery');
 defs.CreateRequest.properties.parentTaskId = { ...id, description: 'When delegating part of your current task, identify that task as the parent. It owns result review, Done and archival. Omitted userContact defaults to ticket for delegated tasks.' };
@@ -390,7 +397,7 @@ operations.operationReceipt = { input: '#/$defs/OperationReceiptQuery', output: 
 operations.workspace = { input: '#/$defs/WorkspaceQuery', output: '#/$defs/WorkspaceInfo', mutation: false };
 operations.configuration = { input: '#/$defs/ConfigurationQuery', output: '#/$defs/ConfigurationView', mutation: false };
 operations.categories = { input: '#/$defs/CategoriesQuery', output: '#/$defs/CategoriesResult', mutation: false };
-operations.read = { input: '#/$defs/TaskQuery', output: '#/$defs/TaskView', mutation: false };
+operations.read = { input: '#/$defs/TaskQuery', output: '#/$defs/ReadResult', mutation: false };
 operations.list = { input: '#/$defs/TaskListQuery', output: '#/$defs/TaskListResult', mutation: false };
 operations.markCommentsRead = { input: '#/$defs/MarkCommentsReadRequest', output: '#/$defs/MarkCommentsReadResult', mutation: true };
 operations.archive = { input: '#/$defs/ArchiveRequest', output: '#/$defs/ArchiveResult', mutation: true };

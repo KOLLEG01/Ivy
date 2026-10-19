@@ -9,9 +9,9 @@ import { upgradeConfigurationRecord, upgradeTaskRecord } from '../../../../packa
 import { freezePublishedWorkflowSchema, freezeRecoverySchema } from './workflow-schema.js';
 
 export const version = '1.0.0' as const;
-export const contractVersion = (key: ContractKey | 'task-board/comments'): '1.0.0' | '1.1.0' | '1.2.0' | '1.3.0' | '1.12.0' => key === 'task-board/task' ? '1.12.0' : key === 'task-board/run' ? '1.3.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comments' ? '1.1.0' : version;
+export const contractVersion = (key: ContractKey | 'task-board/comments'): '1.0.0' | '1.1.0' | '1.2.0' | '1.3.0' | '1.12.0' => key === 'task-board/task' ? '1.12.0' : key === 'task-board/run' ? '1.3.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comments' || key === 'task-board/comment-read-state' ? '1.1.0' : version;
 export const readableVersions = (key: ContractKey | 'task-board/comments'): string[] => key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0']
-  : key === 'task-board/run' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0'] : key === 'task-board/configuration' ? ['1.0.0', '1.1.0', '1.2.0'] : key === 'task-board/delivery' || key === 'task-board/comments' ? ['1.0.0', '1.1.0'] : [version];
+  : key === 'task-board/run' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0'] : key === 'task-board/configuration' ? ['1.0.0', '1.1.0', '1.2.0'] : key === 'task-board/delivery' || key === 'task-board/comments' || key === 'task-board/comment-read-state' ? ['1.0.0', '1.1.0'] : [version];
 // Before task 1.5.0 and configuration 1.1.0, an execution requirement could name one capability instead of a host.
 const capabilityRequirement = { type: 'object', properties: { kind: { const: 'capability' }, capabilityKey: { $ref: '#/$defs/WireIdentifier' } }, required: ['kind', 'capabilityKey'], additionalProperties: false };
 function withCapabilityRequirement(contract: Wire.DataContract, from: string, to: string, description?: string): Wire.DataContract {
@@ -242,5 +242,11 @@ export function taskBoardContracts(): Wire.DataContract[] {
   recoveryComments.specMarkdown = recoveryComments.specMarkdown.replace('task-board/comments 1.0.0', 'task-board/comments 1.1.0');
   for (const contract of contracts) freezeRecoverySchema(contract.jsonSchema as Record<string, any>);
   contracts.unshift(recoveryTask, recoveryRun, recoveryComments);
+  const readState = contracts.find(value => value.key === 'task-board/comment-read-state')!;
+  const selectiveReadState = structuredClone(readState);
+  selectiveReadState.version = '1.1.0';
+  selectiveReadState.specMarkdown = '# task-board/comment-read-state 1.1.0\n\nIndependent direct-agent and all-agent read counts preserve unread directed communication when it is hidden.';
+  delete (readState.jsonSchema as { properties: Record<string, unknown> }).properties.readDirectAgentCommentCount;
+  contracts.unshift(selectiveReadState);
   return contracts;
 }

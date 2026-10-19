@@ -28,14 +28,18 @@ import {
   StatusBadge,
 } from "@ivy/ui";
 import { usePage } from "../../../packages/ui-client/src/runtime";
-import { text } from "../../../packages/ui-client/src/native";
-import { and, base, client, rootWhere, taskContractVersions, workflowContractVersions } from "./runtime";
+import { nativeRead } from "../../../packages/ui-client/src/native";
+import { mapConcurrent } from '../../../packages/ui-client/src/concurrency';
+import { useCommentVisibility } from './comment-visibility';
+import { and, base, client, taskContractVersions } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
 import {
   conditionLabel,
   conditionTone,
   noteworthyCondition,
+  waitingGroup,
+  waitingGroups,
   priorityLabel,
   shortDate,
   stateColors,
@@ -44,7 +48,6 @@ import {
   transitions,
 } from "./board";
 import type { BoardTransition, Placement, TransitionContext } from "./board";
-import { executionCondition } from "../../../services/task-board/src/runtime/condition";
 const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   query: URLSearchParams;
@@ -86,231 +89,63 @@ const toggleOrder = () => {
 };
 const manual = computed(() => !props.archived && order.value === "manual");
 const ranked = computed(() => manual.value && props.workspace.role === "user");
+const showCrossAgent = useCommentVisibility();
 const pages = usePage(async (signal, cursor) => {
-    const result = await client.request(
-      "objects.query",
-      {
-        contractKey: "task-board/task",
-        contractVersions: taskContractVersions,
-        where: and(
-          taskFilter(props.workspace.rootObjectId, props.query),
-          props.archived
-            ? { op: "eq", field: "object.effectivelyArchived", value: true }
-            : { op: "in", field: "data:/workflowState", value: props.column.states },
-        ),
-        ...(props.archived ? { includeArchived: true } : {}),
-        select: [
-          "data:/taskKey",
-          "data:/fields/title",
-          "data:/fields/category",
-          "data:/fields/control",
-          "data:/fields/priority",
-          "data:/fields/executionRequirement/kind",
-          "data:/fields/executionRequirement/hostId",
-          "data:/fields/nextReviewAt",
-          "data:/fields/dueAt",
-          "data:/workflowState",
-          "data:/waiting/reason",
-          "data:/waiting/detail",
-          "data:/claim/phase",
-          "data:/claim/target/hostId",
-          "data:/publication",
-          "data:/latestResult",
-          "data:/agentCommentCount",
-        ],
-        orderBy: props.archived
-          ? [
-              { field: "object.updatedAt", direction: "desc" },
-              { field: "object.id", direction: "asc" },
-            ]
-          : manual.value
-            ? [
-                ...(props.swimlane === "category"
-                  ? [{ field: "data:/fields/category", direction: "asc" as const }]
-                  : []),
-                { field: "object.position", direction: "asc" },
-                { field: "object.id", direction: "asc" },
-              ]
-          : props.swimlane === "category"
-            ? [
-                { field: "data:/fields/category", direction: "asc" },
-                { field: "data:/fields/priority", direction: "desc" },
-                { field: "object.id", direction: "asc" },
-              ]
-            : [
-                { field: "data:/fields/priority", direction: "desc" },
-                { field: "object.createdAt", direction: "desc" },
-                { field: "object.id", direction: "asc" },
-              ],
-        limit: 20,
-        ...(cursor ? { cursor } : {}),
-      },
-      { signal },
-    );
-    const ids = result.items.map((item) => item.objectId),
-      readCounts = new Map<string, number>(),
-      checkFacts = new Map<string, { openQuestionCount: number; failure: string; issue?: string; question?: boolean }>();
-    if (ids.length) {
-      // New scalars are admitted only by 1.9.0. Enrich this page in one batch
-      // without changing the shared query's ordering, filters or cursor.
-      const checkIds = result.items.filter((item) => item.contractVersion === "1.9.0").map((item) => item.objectId);
-      const workflowIds = result.items.filter(item => workflowContractVersions.includes(item.contractVersion)).map(item => item.objectId);
-      const [reads, checks, workflow] = await Promise.all([client.request(
-        "objects.query",
-        {
-          contractKey: "task-board/comment-read-state",
-          contractVersions: ["1.0.0"],
-          where: and(
-            rootWhere(props.workspace.rootObjectId),
-            {
-              op: "eq",
-              field: "data:/principalId",
-              value: props.workspace.callerPrincipalId,
-            },
-            { op: "in", field: "data:/taskId", value: ids },
-          ),
-          select: ["data:/taskId", "data:/readAgentCommentCount"],
-          limit: 100,
-        },
-        { signal },
-      ), checkIds.length ? client.request(
-        "objects.query",
-        {
-          contractKey: "task-board/task",
-          contractVersions: ["1.9.0"],
-          where: and(
-            rootWhere(props.workspace.rootObjectId),
-            { op: "in", field: "object.id", value: checkIds },
-          ),
-          ...(props.archived ? { includeArchived: true } : {}),
-          select: ["data:/openQuestionCount", "data:/scheduledCheck/failure/detail"],
-          limit: 20,
-        },
-        { signal },
-      ) : null, workflowIds.length ? client.request('objects.query', {
-        contractKey: 'task-board/task', contractVersions: workflowContractVersions,
-        where: and(rootWhere(props.workspace.rootObjectId), { op: 'in', field: 'object.id', value: workflowIds }),
-        ...(props.archived ? { includeArchived: true } : {}),
-        select: ['data:/openQuestionCount', 'data:/scheduledCheck/failure/detail', 'data:/completionIssue/detail', 'data:/questionWait/taskId'], limit: 20,
-      }, { signal }) : null]);
-      for (const item of reads.items)
-        readCounts.set(
-          text(item.values["data:/taskId"]),
-          Number(item.values["data:/readAgentCommentCount"] ?? 0),
-        );
-      for (const item of checks?.items ?? [])
-        checkFacts.set(item.objectId, {
-          openQuestionCount: Number(item.values["data:/openQuestionCount"] ?? 0),
-          failure: text(item.values["data:/scheduledCheck/failure/detail"]),
-        });
-      for (const item of workflow?.items ?? []) checkFacts.set(item.objectId, {
-        openQuestionCount: Number(item.values['data:/openQuestionCount'] ?? 0),
-        failure: text(item.values['data:/scheduledCheck/failure/detail']), issue: text(item.values['data:/completionIssue/detail']),
-        question: !!item.values['data:/questionWait/taskId'],
-      });
-    }
+  const waiting = props.column.id === 'waiting' && !props.archived;
+  const load = (cursor: string | null) => client.request('objects.query', {
+    contractKey: 'task-board/task', contractVersions: taskContractVersions,
+    where: and(taskFilter(props.workspace.rootObjectId, props.query), props.archived
+      ? { op: 'eq', field: 'object.effectivelyArchived', value: true }
+      : { op: 'in', field: 'data:/workflowState', value: props.column.states }),
+    ...(props.archived ? { includeArchived: true } : {}),
+    select: ['data:/taskKey'],
+    orderBy: props.archived ? [{ field: 'object.updatedAt', direction: 'desc' }, { field: 'object.id', direction: 'asc' }]
+      : [...(props.swimlane === 'category' ? [{ field: 'data:/fields/category', direction: 'asc' as const }] : []),
+        ...(manual.value ? [{ field: 'object.position', direction: 'asc' as const }]
+          : [{ field: 'data:/fields/priority', direction: 'desc' as const }, { field: 'object.createdAt', direction: 'desc' as const }]),
+        { field: 'object.id', direction: 'asc' }],
+    limit: waiting ? 200 : 20, ...(cursor ? { cursor } : {}),
+  }, { signal });
+  const result = await load(cursor ?? null);
+  // Fetch the entire Waiting lane so a lower-priority User wait never hides behind another group's page.
+  const cursors = new Set<string>();
+  while (waiting && result.nextCursor) {
+    if (cursors.has(result.nextCursor)) throw new Error('Waiting groups could not finish. Refresh the board.');
+    cursors.add(result.nextCursor);
+    const page = await load(result.nextCursor);
+    result.items.push(...page.items); result.nextCursor = page.nextCursor;
+  }
+  const dependencies = new Map<string, Promise<boolean>>();
+  const dependencyDone = (id: string) => {
+    if (!dependencies.has(id)) dependencies.set(id, nativeRead(client, props.workspace.serviceNodeId, 'task-board.read', { task: id, view: 'card' }, signal)
+      .then(value => (value as TaskBoard.TaskCardView).task.workflowState === 'done').catch(() => { signal.throwIfAborted(); return false; }));
+    return dependencies.get(id)!;
+  };
+  const items = await mapConcurrent(result.items, async item => {
+    const view = await nativeRead(client, props.workspace.serviceNodeId, 'task-board.read', { task: item.objectId, view: 'card' }, signal) as TaskBoard.TaskCardView;
+    const task = view.task, fields = task.fields;
+    const dependency = waiting && (await Promise.all(fields.dependencies.map(dependencyDone))).some(done => !done);
     return {
-      nextCursor: result.nextCursor,
-      items: result.items.map((item) => {
-        const workflowState = text(
-            item.values["data:/workflowState"],
-          ) as TaskBoard.Task["workflowState"],
-          waiting = text(item.values["data:/waiting/reason"]);
-        const waitingDetail = text(item.values["data:/waiting/detail"]),
-          claimPhase = text(item.values["data:/claim/phase"]),
-          resolvedHost = text(item.values["data:/claim/target/hostId"]);
-        const requirementKind = text(
-          item.values["data:/fields/executionRequirement/kind"],
-        );
-        const requestedEnvironment =
-          requirementKind === "host"
-            ? text(item.values["data:/fields/executionRequirement/hostId"])
-            : "";
-        const requirement =
-          requirementKind === "host"
-            ? { kind: "host" as const, hostId: requestedEnvironment }
-            : null;
-        const derived = executionCondition({
-          workflowState,
-          control: text(
-            item.values["data:/fields/control"],
-          ) as TaskBoard.TaskFields["control"],
-          publication: !!item.values["data:/publication"],
-          claim: claimPhase
-            ? {
-                phase: claimPhase as TaskBoard.Claim["phase"],
-                hostId: resolvedHost,
-              }
-            : null,
-          waiting: waiting
-            ? {
-                reason: waiting as TaskBoard.Waiting["reason"],
-                detail: waitingDetail,
-              }
-            : null,
-          executionRequirement: requirement,
-          openQuestionCount: checkFacts.get(item.objectId)?.openQuestionCount ?? 0,
-          scheduledCheckFailure: checkFacts.get(item.objectId)?.failure ?? "",
-          completionIssue: checkFacts.get(item.objectId)?.issue,
-          questionWait: checkFacts.get(item.objectId)?.question,
-        });
-        return {
-          id: item.objectId,
-          taskKey: text(item.values["data:/taskKey"]),
-          title: text(item.values["data:/fields/title"]),
-          category: text(item.values["data:/fields/category"]),
-          priority: item.values["data:/fields/priority"],
-          control: text(
-            item.values["data:/fields/control"],
-          ) as TaskBoard.TaskFields["control"],
-          requestedEnvironment,
-          resolvedHost,
-          condition: derived.state,
-          conditionDetail: derived.detail,
-          openQuestionCount: checkFacts.get(item.objectId)?.openQuestionCount ?? 0,
-          checkFailure: checkFacts.get(item.objectId)?.failure ?? "",
-          nextReviewAt: text(item.values["data:/fields/nextReviewAt"]),
-          dueAt: text(item.values["data:/fields/dueAt"]),
-          unreadAgentComments: Math.max(
-            0,
-            Number(item.values["data:/agentCommentCount"] ?? 0) -
-              (readCounts.get(item.objectId) ?? 0),
-          ),
-          context: {
-            workflowState,
-            control: text(
-              item.values["data:/fields/control"],
-            ) as TaskBoard.TaskFields["control"],
-            claimed: !!claimPhase,
-            waiting,
-            hasResult: !!item.values["data:/latestResult"],
-            publishing: !!item.values["data:/publication"],
-          },
-        };
-      }),
+      id: item.objectId, taskKey: task.taskKey, title: fields.title, category: fields.category ?? '',
+      priority: fields.priority, control: fields.control,
+      requestedEnvironment: fields.executionRequirement?.kind === 'host' ? fields.executionRequirement.hostId : '',
+      resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
+      conditionDetail: view.executionCondition.detail, openQuestionCount: task.openQuestionCount ?? 0,
+      checkFailure: task.scheduledCheckFailure, nextReviewAt: fields.nextReviewAt ?? '', dueAt: fields.dueAt ?? '',
+      commentCount: showCrossAgent.value ? view.commentCount : view.directCommentCount,
+      unreadAgentComments: showCrossAgent.value ? view.unreadAgentComments : view.unreadDirectAgentComments,
+      group: waiting ? waitingGroup(task, view.executionCondition, dependency) : '',
+      context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,
+        waiting: task.waiting?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
     };
-  }, 15000, () =>
-    "ivy.task-board.column:" +
-    base.href +
-    ":" +
-    order.value +
-    ":" +
-    props.workspace.serviceNodeId +
-    ":" +
-    props.workspace.callerPrincipalId +
-    ":" +
-    props.column.id +
-    ":" +
-    !!props.archived +
-    ":" +
-    props.swimlane +
-    ":" +
-    JSON.stringify(
-      ["q", "status", "control", "host", "category", "project"].map((key) =>
-        props.query.get(key),
-      ),
-    ), ["objects/task-board/task"]);
-type Item = { id: string; category: string; context: TransitionContext };
+  }, signal);
+  if (waiting) items.sort((a, b) => waitingGroups.findIndex(group => group.id === a.group) - waitingGroups.findIndex(group => group.id === b.group));
+  return { nextCursor: result.nextCursor, items };
+}, 15000, () => 'ivy.task-board.column:' + JSON.stringify([base.href, order.value, props.workspace.serviceNodeId,
+  props.workspace.callerPrincipalId, props.column.id, !!props.archived, props.swimlane, showCrossAgent.value,
+  ['q', 'status', 'control', 'host', 'category', 'project'].map(key => props.query.get(key))]), ['objects/task-board/task']);
+
+type Item = { id: string; category: string; group: string; context: TransitionContext };
 const dragging = ref<Item | null>(null),
   marker = ref<{ id: string; after: boolean } | null>(null);
 const startDrag = (event: DragEvent, item: Item) => {
@@ -330,9 +165,12 @@ const endDrag = () => {
 };
 const lane = (category: string) => category || "Uncategorized";
 const items = computed(() => (pages.value.value?.items ?? []) as Item[]);
+const groups = computed(() => props.column.id === 'waiting' && !props.archived
+  ? waitingGroups.map(group => ({ ...group, items: (pages.value.value?.items ?? []).filter(item => item.group === group.id) }))
+  : [{ id: '', title: '', items: pages.value.value?.items ?? [] }]);
 // Neighbours within the same swimlane, so ranking never jumps across categories.
 const sameLane = (a: Item, b: Item | undefined) =>
-  !!b && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
+  !!b && a.group === b.group && (props.swimlane !== "category" || lane(a.category) === lane(b.category));
 const previous = (index: number) =>
   sameLane(items.value[index]!, items.value[index - 1]) ? items.value[index - 1] : undefined;
 const next = (index: number) =>
@@ -435,16 +273,20 @@ defineExpose({ refresh: pages.refresh });
           : 'flex flex-col gap-2'
       "
     >
+      <section v-for="group in groups" :key="group.id" :aria-label="group.title || undefined"
+        :data-waiting-group="group.id || undefined" class="flex flex-col gap-2"
+        :class="group.id === 'user' ? 'rounded-lg border-2 border-amber-500/70 p-2' : ''">
+      <h3 v-if="group.title" class="px-1.5 pt-2 text-xs font-semibold text-muted-foreground">{{ group.title }} <span class="font-normal">{{ group.items.length }}</span></h3>
       <template
-        v-for="(task, index) in pages.value.value?.items ?? []"
+        v-for="task in group.items"
         :key="task.id"
         ><h3
           v-if="
             swimlane === 'category' &&
             !archived &&
-            (index === 0 ||
+            (group.items.indexOf(task) === 0 ||
               lane(task.category) !==
-                lane(pages.value.value!.items[index - 1]!.category))
+                lane(pages.value.value!.items[items.indexOf(task) - 1]!.category))
           "
           class="px-1.5 pt-2 text-xs font-medium text-muted-foreground"
           :class="{ 'border-b bg-muted/40 px-3 py-1.5': layout === 'list' }"
@@ -540,15 +382,17 @@ defineExpose({ refresh: pages.refresh });
               }}</span
             >
             <span
-              v-if="task.unreadAgentComments"
-              class="inline-flex items-center gap-1 font-medium text-foreground"
+              v-if="task.commentCount"
+              class="inline-flex items-center gap-1"
+              :class="task.unreadAgentComments ? 'font-medium text-foreground' : ''"
+              :title="task.commentCount + ' comments'"
               :aria-label="
                 task.unreadAgentComments +
                 ' unread agent comment' +
                 (task.unreadAgentComments === 1 ? '' : 's')
               "
               ><MessageSquare class="size-3.5" aria-hidden="true" />{{
-                task.unreadAgentComments
+                task.commentCount
               }}</span
             >
             <span
@@ -566,14 +410,13 @@ defineExpose({ refresh: pages.refresh });
             >
           </div>
           <StatusBadge
-            v-if="noteworthyCondition(task.condition)"
+            v-if="noteworthyCondition(task.condition) && !['blocked_dependency', 'blocked_environment', 'needs_user', 'deferred'].includes(task.condition)"
             class="relative"
             :class="layout === 'list' ? 'shrink-0' : 'mt-2'"
             :label="conditionLabel(task.condition)"
             :tone="conditionTone(task.condition)"
             :title="task.conditionDetail"
           />
-          <StatusBadge v-if="task.openQuestionCount && task.condition !== 'needs_user'" label="Needs you" tone="warning" class="mt-2" />
           <StatusBadge v-if="task.checkFailure" label="Check failed" tone="bad" class="mt-2" :title="task.checkFailure" />
           <DropdownMenu
             ><DropdownMenuTrigger as-child
@@ -595,22 +438,22 @@ defineExpose({ refresh: pages.refresh });
                 >{{ item.label }}</DropdownMenuItem
               ><template v-if="ranked"
                 ><DropdownMenuSeparator /><DropdownMenuItem
-                  v-if="previous(index) || pages.page.value > 1"
+                  v-if="previous(items.indexOf(task)) || pages.page.value > 1"
                   :disabled="taskDisabled(task.id)"
                   @select="emit('reorder', task.id, { top: column.states })"
                   >Move to top</DropdownMenuItem
                 ><DropdownMenuItem
-                  v-if="previous(index)"
+                  v-if="previous(items.indexOf(task))"
                   :disabled="taskDisabled(task.id)"
-                  @select="emit('reorder', task.id, { before: previous(index)!.id })"
+                  @select="emit('reorder', task.id, { before: previous(items.indexOf(task))!.id })"
                   >Move up</DropdownMenuItem
                 ><DropdownMenuItem
-                  v-if="next(index)"
+                  v-if="next(items.indexOf(task))"
                   :disabled="taskDisabled(task.id)"
-                  @select="emit('reorder', task.id, { after: next(index)!.id })"
+                  @select="emit('reorder', task.id, { after: next(items.indexOf(task))!.id })"
                   >Move down</DropdownMenuItem
                 ><DropdownMenuItem
-                  v-if="moreBelow(index)"
+                  v-if="moreBelow(items.indexOf(task))"
                   :disabled="taskDisabled(task.id)"
                   @select="emit('reorder', task.id, { before: null })"
                   >Move to bottom</DropdownMenuItem
@@ -625,6 +468,7 @@ defineExpose({ refresh: pages.refresh });
           >
         </article></template
       >
+      </section>
       <p
         v-if="pages.value.value?.items.length === 0"
         class="px-3 py-6 text-center text-xs text-muted-foreground"

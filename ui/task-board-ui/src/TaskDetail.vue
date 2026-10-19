@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { openQuestions } from '../../../services/task-board/src/runtime/conversation';
+import { crossAgentComment, openQuestions } from '../../../services/task-board/src/runtime/conversation';
 import {
   Alert,
   AlertDescription,
@@ -23,7 +23,6 @@ import {
   PropertyItem,
   PropertyList,
   RemoteState,
-  SheetClose,
   StatusBadge,
   Tabs,
   TabsContent,
@@ -37,14 +36,12 @@ import {
 import type { UploadedAttachment } from "@ivy/ui";
 import {
   ArrowDown,
-  ArrowLeft,
   ArrowUp,
   Link2,
   Bot,
   CircleAlert,
   ExternalLink,
   Info,
-  Maximize2,
   MessageSquare,
   MonitorDot,
   MoreHorizontal,
@@ -54,7 +51,6 @@ import {
   User,
   X,
 } from "@lucide/vue";
-import { route } from "../../../packages/ui-client/src/runtime";
 import {
   base,
   client,
@@ -82,6 +78,8 @@ import ActionState from "./ActionState.vue";
 import TaskEditor from "./TaskEditor.vue";
 import { useExecutionDefaults } from "./execution-defaults";
 import { useCommentPreferences } from "./comment-preferences";
+import { useCommentVisibility } from './comment-visibility';
+import { useOptimisticComment } from './optimistic-comment';
 import TaskHistory from "./TaskHistory.vue";
 import NativeInput from "../../../packages/ui-client/src/NativeInput.vue";
 import TaskAttachment from "./TaskAttachment.vue";
@@ -103,9 +101,8 @@ const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   available: boolean;
   query: URLSearchParams;
-  sheet?: boolean;
 }>();
-const emit = defineEmits<{ changed: []; deleted: [] }>();
+const emit = defineEmits<{ changed: []; deleted: []; close: [] }>();
 // A ticket shows Details, Chat and the agent task as tabs; the conversation opens by default.
 type TaskTab = "details" | "chat" | "agent";
 const tab = ref<TaskTab>(
@@ -118,9 +115,13 @@ const followWidth = (event: MediaQueryListEvent) => { wide.value = event.matches
 wideQuery.addEventListener("change", followWidth);
 onBeforeUnmount(() => wideQuery.removeEventListener("change", followWidth));
 const { preferences: commentPreferences } = useCommentPreferences(() => props.workspace);
+const showCrossAgent = useCommentVisibility();
+const detailRoute = (id: string, values: Record<string, string> = {}) => taskRoute(props.workspace.serviceNodeId, id,
+  { ...Object.fromEntries(['q', 'status', 'control', 'host', 'category', 'project'].flatMap(key => props.query.has(key) ? [[key, props.query.get(key)!]] : [])), ...values });
 const task = useRemote((signal) =>
     readDocument("task", props.taskId, props.workspace.rootObjectId, signal), 15000, ["objects/task-board/task"]);
-const displayComments = computed(() => [...(task.value.value?.value.comments ?? [])].sort((a, b) =>
+const displayComments = computed(() => [...(task.value.value?.value.comments ?? []), ...(optimistic.message.value ? [optimistic.message.value] : [])]
+  .filter(comment => showCrossAgent.value || !crossAgentComment(comment, props.taskId)).sort((a, b) =>
   commentPreferences.value.order === "newest-first" ? b.sequence - a.sequence : a.sequence - b.sequence,
 ));
 const pendingQuestions = computed(() => openQuestions({ comments: task.value.value?.value.comments ?? [] }));
@@ -244,19 +245,21 @@ const unresolvedApprovals = computed(() => {
     .filter((item) => !answered.has(item.request.requestId));
 });
 // Agent comments that were unread when the ticket opened start after a "New" divider.
-const unreadAtOpen = ref<number | null>(null);
-const markedRevisions = new Set<number>();
+const unreadAtOpen = ref<{ all: number; direct: number } | null>(null);
+const markedRevisions = new Set<string>();
 watch(
-  () => taskView.value.value,
-  async (view) => {
-    if (view && unreadAtOpen.value === null) unreadAtOpen.value = view.unreadAgentComments;
+  [() => taskView.value.value, showCrossAgent, tab],
+  async ([view, includeCrossAgent, currentTab]) => {
+    const count = view ? includeCrossAgent ? view.unreadAgentComments : view.unreadDirectAgentComments : 0;
+    if (view && unreadAtOpen.value === null) unreadAtOpen.value = { all: view.unreadAgentComments, direct: view.unreadDirectAgentComments };
+    const marker = view ? view.object.revision + ':' + includeCrossAgent : '';
     if (
-      !view?.unreadAgentComments ||
+      !view || !count || currentTab !== 'chat' ||
       props.workspace.role !== "user" ||
-      markedRevisions.has(view.object.revision)
+      markedRevisions.has(marker)
     )
       return;
-    markedRevisions.add(view.object.revision);
+    markedRevisions.add(marker);
     try {
       const binding = await discover(client, "task-board.markCommentsRead", {
         serviceNodeId: props.workspace.serviceNodeId,
@@ -269,20 +272,22 @@ watch(
           operationId,
           taskId: props.taskId,
           expectedTaskRevision: view.object.revision,
+          includeCrossAgent,
         },
         operationId,
       );
       void taskView.refresh();
+      emit('changed');
     } catch {
-      markedRevisions.delete(view.object.revision);
+      markedRevisions.delete(marker);
     }
   },
   { immediate: true },
 );
 const firstUnreadId = computed(() => {
-  const count = unreadAtOpen.value ?? 0;
+  const count = (showCrossAgent.value ? unreadAtOpen.value?.all : unreadAtOpen.value?.direct) ?? 0;
   if (!count) return null;
-  const agentComments = (task.value.value?.value.comments ?? [])
+  const agentComments = displayComments.value
     .filter((comment) => comment.authorKind === "agent")
     .sort((a, b) => a.sequence - b.sequence);
   return agentComments.at(-count)?.commentId ?? null;
@@ -303,7 +308,7 @@ watch(() => sourceTaskIds.value.join(), () => void sourceTasks.refresh());
 const sourceTask = (id: string) => sourceTasks.value.value?.[id] ?? null;
 type ChatKind = "event" | "user" | "reply" | "external";
 const chatKind = (comment: TaskBoard.Comment): ChatKind =>
-  comment.sourceTaskId ? "external" : comment.authorKind === "user" ? "user" : comment.authorKind === "agent" ? "reply" : "event";
+  crossAgentComment(comment, props.taskId) ? "external" : comment.authorKind === "user" ? "user" : comment.authorKind === "agent" ? "reply" : "event";
 const senderName = (comment: TaskBoard.Comment) => {
   const kind = chatKind(comment);
   return kind === "external"
@@ -356,6 +361,8 @@ const refresh = () => {
   void task.refresh();
   void taskView.refresh();
 };
+const optimistic = useOptimisticComment(() => props.workspace, props.taskId, action,
+  () => task.value.value?.value, () => { refresh(); emit('changed'); });
 const perform = async (label: string, body: ExistingAction) => {
   if (!writable.value || !task.value.value) return null;
   error.value = null;
@@ -394,19 +401,18 @@ const transition = (
     detail,
   });
 const submitComment = async () => {
-  if (!commentBody.value.trim() || uploading.value) return;
-  const draft = commentBody.value;
-  const outcome = await perform("Add task comment", {
+  if (!writable.value || !commentBody.value.trim() || uploading.value || optimistic.pending.value) return;
+  const accepted = optimistic.submit({
     action: "comment",
     commentId: crypto.randomUUID(),
     body: commentBody.value.trim(),
     moveToTodo: moveToTodo.value,
     requests: [],
     responses: [],
-    attachments: pendingAttachments.value,
+    attachments: [...pendingAttachments.value],
     replyTo: replyTarget.value,
   });
-  if (outcome && commentBody.value === draft) {
+  if (accepted) {
     commentBody.value = "";
     replyTarget.value = null;
     moveToTodo.value = false;
@@ -488,7 +494,7 @@ watch([imagePreviewOpen, previewSource, imagePreviewAttempt], async ([open, sour
 });
 // Files added to a comment are uploaded to the Task at once and listed with the comment when it is sent.
 const uploadFile = async (file: File): Promise<UploadedAttachment> => {
-  if (!writable.value) throw new Error("This task cannot be changed right now.");
+  if (!writable.value || optimistic.pending.value) throw new Error("This task cannot be changed right now.");
   uploading.value = true;
   try {
     const current = await readDocument("task", props.taskId, props.workspace.rootObjectId);
@@ -523,9 +529,6 @@ watch([() => action.saved.value?.phase, action.busy, uploading], async ([phase, 
       if (commentInput.value[0]) commentInput.value[0].insertMarkdown(markdown, false);
       else commentBody.value += '\n' + markdown;
     }
-  } else if (request.action === 'comment' && commentBody.value.trim() === request.body &&
-      pendingAttachments.value.every(value => request.attachments.some(attachment => attachment.attachmentId === value.attachmentId))) {
-    commentBody.value = ''; replyTarget.value = null; moveToTodo.value = false; pendingAttachments.value = [];
   }
   refresh(); emit('changed');
 });
@@ -639,7 +642,7 @@ watch([tab, () => task.value.value?.value.comments.length], async () => {
 const arrived = ref<TaskBoard.Comment | null>(null);
 let knownSequence = 0;
 watch(() => task.value.value?.value.comments, async (comments) => {
-  const newest = comments?.reduce<TaskBoard.Comment | undefined>((latest, comment) =>
+  const newest = comments?.filter(comment => showCrossAgent.value || !crossAgentComment(comment, props.taskId)).reduce<TaskBoard.Comment | undefined>((latest, comment) =>
     !latest || comment.sequence > latest.sequence ? comment : latest, undefined);
   if (!newest) return;
   const isNew = knownSequence > 0 && newest.sequence > knownSequence;
@@ -649,6 +652,7 @@ watch(() => task.value.value?.value.comments, async (comments) => {
   const top = commentElement(newest.commentId)?.getBoundingClientRect().top;
   if (top !== undefined && top > innerHeight) arrived.value = newest;
 });
+watch(showCrossAgent, visible => { if (!visible && arrived.value && crossAgentComment(arrived.value, props.taskId)) arrived.value = null; });
 const showArrived = () => {
   commentElement(arrived.value?.commentId)?.scrollIntoView({ block: "start", behavior: "smooth" });
   arrived.value = null;
@@ -656,26 +660,9 @@ const showArrived = () => {
 </script>
 
 <template>
-  <Tabs v-model="tab" :class="sheet ? 'px-5 pb-8 sm:px-8' : 'mx-auto w-full max-w-6xl'">
-    <component
-      :is="sheet ? 'div' : ToolbarContent"
-      :class="
-        sheet
-          ? 'sticky top-0 z-10 -mx-5 flex h-14 items-center gap-2 border-b bg-background px-5 sm:-mx-8 sm:px-8'
-          : undefined
-      "
-    >
+  <Tabs v-model="tab" class="mx-auto w-full max-w-6xl pb-8">
+    <ToolbarContent>
       <div class="flex min-w-0 flex-1 items-center gap-2">
-        <Button
-          v-if="!sheet"
-          variant="ghost"
-          size="icon-sm"
-          as-child
-          ><a
-            :href="route('tasks', { node: workspace.serviceNodeId })"
-            aria-label="Back to board"
-            ><ArrowLeft aria-hidden="true" /></a
-        ></Button>
         <template v-if="task.value.value">
           <component
             :is="stateIcons[task.value.value.value.workflowState] ?? stateIcons.todo"
@@ -687,7 +674,6 @@ const showArrived = () => {
           <h1 v-if="wide" class="min-w-0 truncate text-sm font-semibold">
             <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
           </h1>
-          <span v-else class="min-w-0 truncate text-sm text-muted-foreground">{{ task.value.value.value.taskKey }}</span>
           <StatusBadge
             v-if="task.value.value.read.object.effectivelyArchived"
             label="Archived"
@@ -717,6 +703,7 @@ const showArrived = () => {
         <Button
           v-for="item in primaryActions"
           :key="item.label"
+          v-show="wide"
           size="sm"
           @click="item.run"
           >{{ item.label }}</Button
@@ -736,6 +723,10 @@ const showArrived = () => {
               ><MoreHorizontal aria-hidden="true" /></Button
           ></DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="w-52">
+            <template v-if="!wide">
+              <DropdownMenuItem v-for="item in primaryActions" :key="item.label" @select="item.run">{{ item.label }}</DropdownMenuItem>
+              <DropdownMenuSeparator v-if="primaryActions.length" />
+            </template>
             <DropdownMenuItem @select="copyId">Copy task ID</DropdownMenuItem>
             <DropdownMenuItem @select="copyLink">Copy task link</DropdownMenuItem>
             <template v-if="task.value.value && (writable || canDelete)">
@@ -775,30 +766,17 @@ const showArrived = () => {
             </template>
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button
-          v-if="sheet"
-          variant="ghost"
-          size="icon-sm"
-          as-child
-          ><a
-            :href="taskRoute(workspace.serviceNodeId, taskId)"
-            aria-label="Open full page"
-            title="Open full page"
-            ><Maximize2 aria-hidden="true" /></a
-        ></Button>
-        <SheetClose v-if="sheet" as-child
-          ><Button variant="ghost" size="icon-sm" aria-label="Close"
+        <Button variant="ghost" size="icon-sm" aria-label="Close" @click="emit('close')"
             ><X aria-hidden="true" /></Button
-        ></SheetClose>
+        >
       </div>
-    </component>
+    </ToolbarContent>
     <h1 v-if="!wide && task.value.value" class="mt-3 text-lg font-semibold leading-snug break-words">
       <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
     </h1>
     <div
       v-if="!wide && task.value.value"
-      class="sticky z-10 border-b bg-background py-2"
-      :class="sheet ? 'top-14 -mx-5 px-5 sm:-mx-8 sm:px-8' : 'top-12 -mx-4 px-4'"
+      class="sticky top-0 z-10 -mx-4 border-b bg-background px-4 py-2"
     >
       <TabsList class="grid w-full grid-cols-3">
         <TabsTrigger value="details"><Info aria-hidden="true" />Details</TabsTrigger>
@@ -836,7 +814,7 @@ const showArrived = () => {
         }}</AlertDescription></Alert
       >
       <ActionState
-        v-if="tab !== 'chat' && (action.saved.value?.phase !== 'succeeded' || action.error.value)"
+        v-if="tab !== 'chat' && !optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)"
         :action="action"
         class="mt-4"
         @changed="refresh"
@@ -854,7 +832,7 @@ const showArrived = () => {
         <CircleAlert aria-hidden="true" />
         <AlertTitle>{{ tr('Verknüpfte Nutzerfrage', 'Linked user question') }}</AlertTitle>
         <AlertDescription>
-          <a :href="taskRoute(workspace.serviceNodeId, task.value.value.value.questionWait.taskId, { question: task.value.value.value.questionWait.commentId })" class="underline underline-offset-4">
+          <a :href="detailRoute(task.value.value.value.questionWait.taskId, { question: task.value.value.value.questionWait.commentId })" class="underline underline-offset-4">
             {{ tr('Die offene Frage im verknüpften Ticket ansehen', 'View the open question in the linked ticket') }}
           </a>
         </AlertDescription>
@@ -1144,7 +1122,7 @@ const showArrived = () => {
               <a
                 v-for="item in dependencies.value.value"
                 :key="item.id"
-                :href="taskRoute(workspace.serviceNodeId, item.id)"
+                :href="detailRoute(item.id)"
                 class="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"
                 ><span class="min-w-0 truncate">{{ item.title }}</span
                 ><StatusBadge
@@ -1184,14 +1162,13 @@ const showArrived = () => {
 
       <TabsContent
         value="chat"
-        class="ivy-chat-surface ivy-conversation min-h-[60dvh] px-3 pt-2 pb-4 sm:px-6"
-        :class="sheet ? 'mt-0 -mx-5 sm:-mx-8' : 'mt-4 rounded-xl'"
+        class="ivy-chat-surface ivy-conversation mt-4 min-h-[60dvh] rounded-xl px-3 pt-2 pb-4 sm:px-6"
         aria-label="Conversation"
       >
         <div class="mx-auto flex max-w-3xl flex-col gap-1">
           <template v-for="section in commentSections" :key="section">
             <template v-if="section === 'comments'">
-              <p v-if="!task.value.value.value.comments.length" class="py-8 text-center text-sm text-muted-foreground">
+              <p v-if="!displayComments.length" class="py-8 text-center text-sm text-muted-foreground">
                 {{ tr("Noch keine Nachrichten.", "No messages yet.") }}
               </p>
               <ol v-else class="flex min-w-0 flex-col gap-1" @click="openAttachmentLink">
@@ -1221,13 +1198,19 @@ const showArrived = () => {
                     <template v-if="entry.kind === 'external'" #label>
                       <SquareKanban class="size-3.5 shrink-0" aria-hidden="true" />
                       <a
-                        :href="taskRoute(workspace.serviceNodeId, entry.comment.sourceTaskId!)"
+                        :href="detailRoute(entry.comment.sourceTaskId!)"
                         class="inline-flex min-w-0 items-center gap-1 hover:underline"
                       ><span class="shrink-0 font-semibold text-foreground">{{ senderName(entry.comment) }}</span
                       ><span v-if="sourceTask(entry.comment.sourceTaskId!)" class="truncate">{{ sourceTask(entry.comment.sourceTaskId!)!.title }}</span
                       ><ExternalLink class="size-3 shrink-0" aria-hidden="true" /></a>
                     </template>
                     <div class="min-w-0 space-y-3">
+                      <div v-if="entry.comment.commentId === optimistic.message.value?.commentId && optimistic.issue.value" role="alert" class="space-y-2 text-sm">
+                        <p>{{ optimistic.issue.value }}</p>
+                        <Button size="sm" variant="secondary" :disabled="!available || !editable || optimistic.preparing.value || action.busy.value" @click="optimistic.retry">
+                          {{ tr('Erneut versuchen', 'Retry message') }}
+                        </Button>
+                      </div>
                       <div v-if="!entry.comment.nativeInput && pendingQuestions.some(question => question.commentId === entry.comment.commentId)" class="flex flex-wrap items-center gap-2">
                         <StatusBadge :label="tr('Offene Frage', 'Open question')" tone="warning" />
                         <Button size="sm" variant="outline" :disabled="!writable" @click="answerQuestion(entry.comment.commentId)">{{ tr('Antworten', 'Answer question') }}</Button>
@@ -1333,8 +1316,8 @@ const showArrived = () => {
                 class="space-y-1.5 py-3"
                 :class="commentPreferences.order === 'newest-first' ? '' : 'ivy-chat-surface sticky bottom-0 z-10'"
               >
-                <ActionState v-if="action.saved.value?.phase !== 'succeeded' || action.error.value" :action="action" @changed="refresh" />
-                <Alert v-if="task.value.value.value.publication" role="status">
+                <ActionState v-if="!optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)" :action="action" @changed="refresh" />
+                <Alert v-if="task.value.value.value.publication && !optimistic.pending.value && !optimistic.isComment.value" role="status">
                   <AlertTitle>{{ tr('Änderung wird gespeichert', 'Saving task update') }}</AlertTitle>
                   <AlertDescription>{{ tr('Ein vorheriger Vorgang wird noch abgeschlossen. Dein Text bleibt erhalten.', 'A previous action is still being completed. Your draft is retained.') }}</AlertDescription>
                 </Alert>
@@ -1370,7 +1353,7 @@ const showArrived = () => {
                       size="icon"
                       class="size-9 self-end rounded-full"
                       aria-label="Add comment"
-                      :disabled="!writable || !commentBody.trim() || uploading"
+                      :disabled="!writable || !commentBody.trim() || uploading || !!optimistic.pending.value"
                       @click="submitComment"
                     ><ArrowUp aria-hidden="true" /></Button>
                   </template>

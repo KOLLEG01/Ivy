@@ -7,6 +7,7 @@ import { scopedOperationId } from "../packages/sdk/src/client.js";
 import { TaskBoardCategoryProjection } from "../services/task-board/src/runtime/category-projection.js";
 import type { TaskBoardStore } from "../services/task-board/src/runtime/store.js";
 import { TaskBoardScheduler } from "../services/task-board/src/runtime/scheduler.js";
+import { taskCard } from '../services/task-board/src/runtime/task-card.js';
 import { content, context, fields, taskBoardFixture } from "./fixtures/task-board.js";
 
 const code = (expected: string) => (error: unknown) =>
@@ -98,6 +99,37 @@ test("read markers converge across concurrent callers and exact retries", async 
   assert.deepEqual(await f.first.markCommentsRead(request, context(request.operationId)), first);
   const other = await f.first.markCommentsRead(request, context(request.operationId, "other-user"));
   assert.notEqual(other.readState.objectId, first.readState.objectId);
+});
+
+test('selective read markers preserve hidden cross-agent comments across interleaved reads and users', async t => {
+  const f = taskBoardFixture(t), created = await f.create({ control: 'user' });
+  const saved = await f.worker({ action: 'comment', operationId: 'direct-comment', taskId: created.task!.objectId,
+    expectedRevision: created.task!.revision, commentId: 'direct-1', body: 'Direct answer', attachments: [], requests: [], responses: [], replyTo: null });
+  const document = await f.first.store.read('task-board/task', saved.task!);
+  const original = document.value.comments[0]!;
+  const comments = [original,
+    { ...original, commentId: 'external-1', sourceTaskId: 'other-task', sequence: 2 },
+    { ...original, commentId: 'direct-2', sequence: 3 },
+    { ...original, commentId: 'external-2', sourceTaskId: 'other-task', sequence: 4 }];
+  const pin = await f.first.store.write('task-board/task', { ...document.value, comments, agentCommentCount: 4 }, 'mixed-comments',
+    { objectId: document.pin.objectId, expectedRevision: document.pin.revision });
+  const request = { operationId: 'selective-read', taskId: pin.objectId, expectedTaskRevision: pin.revision, includeCrossAgent: false };
+  const read = await f.first.markCommentsRead(request, context(request.operationId));
+  assert.equal(read.unreadAgentComments, 2);
+  assert.equal(read.unreadDirectAgentComments, 0);
+  assert.deepEqual(await f.first.markCommentsRead(request, context(request.operationId)), read);
+  const view = await f.first.task({ task: pin.objectId }, 'user');
+  assert.equal(view.unreadAgentComments, 2);
+  assert.equal(view.unreadDirectAgentComments, 0);
+  const card = taskCard(view);
+  assert.equal(card.commentCount, 4);
+  assert.equal(card.directCommentCount, 2);
+  assert.equal('comments' in card.task, false);
+  assert.equal('description' in card.task.fields, false);
+  assert.equal((await f.first.task({ task: pin.objectId }, 'other-user')).unreadDirectAgentComments, 2);
+  const all = await f.first.markCommentsRead({ ...request, operationId: 'all-read', includeCrossAgent: true }, context('all-read'));
+  assert.equal(all.unreadAgentComments, 0);
+  assert.equal((await f.first.markCommentsRead(request, context(request.operationId))).unreadAgentComments, 0);
 });
 
 test("invalid attachment input is rejected before reserving a Task", async (t) => {
