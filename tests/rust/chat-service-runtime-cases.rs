@@ -8,7 +8,7 @@ use ivy_chat_bridge::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts,
-    json::{canonical, parse},
+    json::{canonical, parse, stringify},
 };
 use ivy_sdk::{clock::Clock, service::ServiceFuture};
 use std::{
@@ -826,7 +826,7 @@ async fn service_start_reconnect_health_control_and_close_match_original_main() 
         if let Some(path) = std::env::var_os("IVY_CHAT_RUNTIME_ACTUAL_CAPTURE") {
             std::fs::write(
                 path,
-                canonical(&Json::Array(captures.clone()), usize::MAX).unwrap(),
+                stringify(&Json::Array(captures.clone()), usize::MAX).unwrap(),
             )
             .unwrap();
         }
