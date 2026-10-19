@@ -3,6 +3,7 @@ use ivy_contracts::builtin_schema::SchemaBundle;
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
+    category_projection::{CategoryLocale, CategoryProjection},
     engine_execution::{
         CachedExecution, ExecutionCategories, ExecutionComponents, ExecutionProgram,
         ExecutionProofs,
@@ -17,8 +18,18 @@ use ivy_task_board::{
     local_retention::HistoryLimits,
     native_lifecycle::LifecyclePublication,
     publication_coordination::PublicationCoordination,
+    reconciler::ReconcileExecutor,
+    task_written::{TaskCommentNotices, TaskWriteObserver},
 };
-use std::{cell::Cell, future::Future, pin::Pin};
+use std::{
+    cell::{Cell, RefCell},
+    cmp::Ordering as SortOrder,
+    collections::HashMap,
+    future::{Future, poll_fn},
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+    task::Poll,
+};
 
 fn clock() -> String {
     "2026-01-02T03:04:05.006Z".into()
@@ -83,15 +94,63 @@ impl Contracts for ContractsBinding {
         )
     }
 }
-struct NoRpc;
+#[derive(Default)]
+struct NoRpc {
+    fail_notice: AtomicBool,
+    notices: Mutex<HashMap<JsString, Json>>,
+    notice_calls: Mutex<Vec<Json>>,
+}
 impl RpcClient for NoRpc {
-    fn request<'a>(&'a self, method: &'a str, _: Json, _: RequestOptions) -> RequestFuture<'a> {
+    fn request<'a>(&'a self, method: &'a str, args: Json, _: RequestOptions) -> RequestFuture<'a> {
         Box::pin(async move {
             if method == "system.status" {
                 Ok(Json::object([(
                     "runtimeEpoch",
                     "11111111-1111-4111-8111-111111111111".into(),
                 )]))
+            } else if method == "events.head" || method == "events.ack" {
+                Ok(Json::object([("throughSequence", Json::Number(0.0))]))
+            } else if method == "events.subscribe" {
+                Ok(Json::object([
+                    ("items", Json::Array(vec![])),
+                    ("throughSequence", Json::Number(0.0)),
+                    ("gap", Json::Null),
+                ]))
+            } else if method == "events.publish" {
+                assert_eq!(
+                    f(&args, "topic"),
+                    &Json::from("task-board.browser-notification")
+                );
+                assert_eq!(f(&args, "topicVersion"), &Json::from("1.0.0"));
+                static NOTICE: OnceLock<SchemaBundle> = OnceLock::new();
+                let schema = NOTICE.get_or_init(|| {
+                    SchemaBundle::new(&[&format!(
+                        r#"{{"$id":"https://ivy.invalid/test/task-board-notice","allOf":[{}]}}"#,
+                        include_str!("../../specs/schemas/browser-notice.schema.json")
+                    )])
+                    .unwrap()
+                });
+                assert!(schema.matches(
+                    "https://ivy.invalid/test/task-board-notice",
+                    f(&args, "payload")
+                )?);
+                self.notice_calls.lock().unwrap().push(args.clone());
+                let mut notices = self.notices.lock().unwrap();
+                let key = s(&args, "mutationId").clone();
+                if let Some(prior) = notices.get(&key) {
+                    assert_eq!(hash_json(prior)?, hash_json(f(&args, "payload"))?);
+                } else {
+                    notices.insert(key, f(&args, "payload").clone());
+                }
+                drop(notices);
+                if self.fail_notice.swap(false, Ordering::SeqCst) {
+                    return Err(IvyError::new(
+                        "outcome_unknown",
+                        "Lost committed browser notice reply.",
+                    )
+                    .with_outcome(Outcome::Unknown));
+                }
+                Ok(Json::object(Vec::<(&str, Json)>::new()))
             } else {
                 panic!("No external effect allowed: {method}")
             }
@@ -100,8 +159,67 @@ impl RpcClient for NoRpc {
 }
 struct NoPages;
 impl LifecyclePages for NoPages {
-    async fn page(&self, _: &str, _: &Json) -> IvyResult<Json> {
-        panic!("No page scan allowed")
+    async fn page(&self, key: &str, options: &Json) -> IvyResult<Json> {
+        assert_eq!(key, "task-board/task");
+        assert_eq!(
+            f(options, "select"),
+            &Json::Array(vec![
+                "data:/fields/category".into(),
+                "data:/createdAt".into()
+            ])
+        );
+        // Finite empty initial snapshot. Subsequent observations and old-replay
+        // revision fences use the actual CategoryProjection implementation.
+        Ok(Json::object([
+            ("items", Json::Array(vec![])),
+            ("nextCursor", Json::Null),
+        ]))
+    }
+}
+struct Locale;
+impl CategoryLocale for Locale {
+    fn lowercase_default(&self, value: &JsString) -> JsString {
+        let value = value.to_utf8().unwrap();
+        assert!(value.is_ascii());
+        value.to_ascii_lowercase().into()
+    }
+    fn compare_default(&self, left: &JsString, right: &JsString) -> SortOrder {
+        assert!(left.to_utf8().unwrap().is_ascii() && right.to_utf8().unwrap().is_ascii());
+        left.cmp(right)
+    }
+}
+#[derive(Default)]
+struct Executor<'a>(RefCell<VecDeque<Pin<Box<dyn Future<Output = ()> + 'a>>>>);
+impl<'a> ReconcileExecutor<'a> for Executor<'a> {
+    fn spawn(&self, work: Pin<Box<dyn Future<Output = ()> + 'a>>) {
+        self.0.borrow_mut().push_back(work);
+    }
+}
+impl Executor<'_> {
+    async fn drive<F: Future>(&self, work: F) -> F::Output {
+        let mut work = Box::pin(work);
+        let mut result = None;
+        poll_fn(|cx| {
+            if result.is_none() {
+                if let Poll::Ready(value) = work.as_mut().poll(cx) {
+                    result = Some(value);
+                }
+            }
+            let mut jobs = std::mem::take(&mut *self.0.borrow_mut());
+            let mut pending = VecDeque::new();
+            while let Some(mut job) = jobs.pop_front() {
+                if job.as_mut().poll(cx).is_pending() {
+                    pending.push_back(job);
+                }
+            }
+            self.0.borrow_mut().extend(pending);
+            if result.is_some() && self.0.borrow().is_empty() {
+                Poll::Ready(result.take().unwrap())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 }
 struct Checks<'a, S> {
@@ -241,7 +359,7 @@ fn initial_task() -> Json {
                 ("title", "Original title".into()),
                 ("description", "A retained comment".into()),
                 ("acceptanceCriteria", Json::Array(vec![])),
-                ("category", Json::Null),
+                ("category", "Original category".into()),
                 ("control", "agent".into()),
                 ("priority", Json::Number(2.0)),
                 ("executionRequirement", Json::Null),
@@ -287,6 +405,13 @@ fn initial_task() -> Json {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_receipt() {
+    check_comment_recovery(false).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn agent_question_recovery_replays_original_notice_and_preserves_projection_revision() {
+    check_comment_recovery(true).await;
+}
+async fn check_comment_recovery(question: bool) {
     let path = std::env::temp_dir().join(format!(
         "ivy-task-board-comment-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -295,7 +420,8 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     let principal = JsString::from("board");
-    let client = Arc::new(NoRpc);
+    let client = Arc::new(NoRpc::default());
+    client.fail_notice.store(question, Ordering::SeqCst);
     let mut operation_id: Option<JsString> = None;
     let mut original_stages = vec![];
     let mut later_task = Json::Null;
@@ -332,10 +458,16 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
                 .await
                 .unwrap()
         } else {
+            let mut initial = initial_task();
+            if question {
+                let mut fields = f(&initial, "fields").clone();
+                fields.insert("userContact", "chat".into());
+                initial.insert("fields", fields);
+            }
             let task = journal
                 .write(
                     "task-board/task",
-                    &initial_task(),
+                    &initial,
                     "initial-task",
                     &Json::object([(
                         "create",
@@ -350,13 +482,24 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
                 ("taskId", f(&task, "objectId").clone()),
                 ("expectedRevision", Json::Number(1.0)),
                 ("commentId", "comment".into()),
-                ("body", "Please continue the work.".into()),
+                (
+                    "body",
+                    if question {
+                        "Which input is needed?"
+                    } else {
+                        "Please continue the work."
+                    }
+                    .into(),
+                ),
                 ("requests", Json::Array(vec![])),
                 ("responses", Json::Array(vec![])),
                 ("attachments", Json::Array(vec![])),
                 ("replyTo", Json::Null),
-                ("authorKind", "user".into()),
-                ("purpose", "update".into()),
+                ("authorKind", if question { "agent" } else { "user" }.into()),
+                (
+                    "purpose",
+                    if question { "question" } else { "update" }.into(),
+                ),
                 ("agentDelivery", "queue".into()),
                 ("contactUser", false.into()),
             ]);
@@ -364,7 +507,7 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
                 ("principalId", "caller".into()),
                 ("serviceNodeId", "board-node".into()),
                 ("generation", Json::Number(1.0)),
-                ("source", "user".into()),
+                ("source", if question { "worker" } else { "user" }.into()),
             ]);
             let operation = operations.begin(&request, &actor).await.unwrap();
             operation_id = Some(s(&operation.pin, "objectId").clone());
@@ -375,16 +518,36 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
             principal_id: &principal,
             now: &operations.now,
         };
-        let failed = Cell::new(round == 0);
-        let id = s(&operation.pin, "objectId").clone();
-        let callback = |_: Json, task: Json| -> Pin<Box<dyn Future<Output = IvyResult<()>> + '_>> {
-            let gates = &gates;
+        let executor = Executor::default();
+        let locale = Locale;
+        let projection = CategoryProjection::new(&operations.store, &principal, &locale, &executor);
+        executor.drive(projection.categories()).await.unwrap();
+        if round > 0 {
+            projection.observe(
+                s(f(&operation.value, "request"), "taskId"),
+                4.0,
+                &later_task,
+            );
+        }
+        let node = JsString::from("board-node");
+        let notices = TaskCommentNotices;
+        let observer = TaskWriteObserver {
+            projection: &projection,
+            gates: &gates,
+            notices: &notices,
+            client: client.clone(),
+            service_node_id: &node,
+        };
+        let observed_operation = operation.clone();
+        let failed = Cell::new(round == 0 && !question);
+        let callback = |pin: Json,
+                        task: Json|
+         -> Pin<Box<dyn Future<Output = IvyResult<()>> + '_>> {
+            let observer = &observer;
+            let operation = &observed_operation;
             let failed = &failed;
-            let id = &id;
             Box::pin(async move {
-                if f(f(&task, "publication"), "objectId").as_js_string() == Some(id) {
-                    gates.release(id, true).await?;
-                }
+                observer.written(operation, &pin, &task).await?;
                 if f(&task, "publication").is_null() && failed.replace(false) {
                     return Err(
                         IvyError::new("outcome_unknown", "Lost final comment callback.")
@@ -461,19 +624,63 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
             .await
             .unwrap();
         assert_eq!(f(&task.value, "publication"), &Json::Null);
-        assert_eq!(f(&task.value, "workflowState"), &Json::from("todo"));
-        assert_eq!(f(&task.value, "waiting"), &Json::Null);
-        assert_eq!(f(&task.value, "workRevision"), &Json::Number(1.0));
+        assert_eq!(
+            f(&task.value, "workflowState"),
+            &Json::from(if question { "waiting" } else { "todo" })
+        );
+        if question {
+            assert_eq!(f(f(&task.value, "waiting"), "reason"), &Json::from("user"));
+        } else {
+            assert_eq!(f(&task.value, "waiting"), &Json::Null);
+        }
+        assert_eq!(
+            f(&task.value, "workRevision"),
+            &Json::Number(if question { 0.0 } else { 1.0 })
+        );
+        assert_eq!(
+            f(&task.value, "agentCommentCount"),
+            &Json::Number(if question { 1.0 } else { 0.0 })
+        );
         assert_eq!(f(&task.value, "comments").as_array().unwrap().len(), 1);
         assert_eq!(
             f(&task.value, "commentDeliveries")
                 .as_array()
                 .unwrap()
                 .len(),
-            1
+            if question { 0 } else { 1 }
         );
         assert_eq!(f(&task.value, "lastHistory"), f(&writes[1], "outcome"));
         assert_eq!(count(&connection, "active_gates"), 0);
+        let categories = executor.drive(projection.categories()).await.unwrap();
+        assert_eq!(
+            f(&categories, "categories"),
+            &Json::Array(vec![
+                if round == 0 {
+                    "Original category"
+                } else {
+                    "Concurrent category"
+                }
+                .into()
+            ])
+        );
+        assert_eq!(
+            client.notice_calls.lock().unwrap().len(),
+            if question {
+                if round == 0 { 1 } else { 2 }
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            client.notices.lock().unwrap().len(),
+            if question { 1 } else { 0 }
+        );
+        for notice in client.notice_calls.lock().unwrap().iter() {
+            assert_eq!(
+                f(f(notice, "payload"), "title"),
+                &Json::from("Ivy · Original title")
+            );
+        }
         if round == 0 {
             assert_eq!(result.unwrap_err().outcome, Outcome::Unknown);
             assert_eq!(f(&saved.value, "phase"), &Json::from("needs_attention"));
@@ -482,6 +689,7 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
             let mut changed = task.value;
             let mut fields = f(&changed, "fields").clone();
             fields.insert("title", "Concurrent title".into());
+            fields.insert("category", "Concurrent category".into());
             changed.insert("fields", fields);
             // A different writer commits after the final effect but before
             // recovery. Returning the old action receipt must not rewrite it.
@@ -517,5 +725,6 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
             assert_eq!(count(&connection, "revisions"), revisions + 1);
             assert_eq!(count(&connection, "cleanup_roots"), 1);
         }
+        executor.drive(projection.settled()).await;
     }
 }

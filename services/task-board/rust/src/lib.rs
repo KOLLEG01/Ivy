@@ -43,4 +43,5 @@ pub mod reconciler_journal;
 pub mod scheduler;
 pub mod scheduler_journal;
 pub mod task_keys;
+pub mod task_written;
 pub mod turn_output;
