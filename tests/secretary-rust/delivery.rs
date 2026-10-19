@@ -106,6 +106,8 @@ mod inbox_evidence_cases;
 mod inbox_recovery_cases;
 #[path = "journal_import_cases.rs"]
 mod journal_import_cases;
+#[path = "media_store_cases.rs"]
+mod media_store_cases;
 #[path = "notice_evidence_cases.rs"]
 mod notice_evidence_cases;
 #[path = "notice_scan_cases.rs"]
