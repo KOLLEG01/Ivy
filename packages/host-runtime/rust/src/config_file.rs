@@ -2,6 +2,8 @@
 use crate::{IvyError, IvyJson, IvyResult};
 use ivy_contracts::json;
 use std::{fs, path::{Path, PathBuf}};
+#[cfg(windows)]
+use std::ffi::OsString;
 pub const CONFIGURATION_BYTES: usize = 1024 * 1024;
 
 pub(crate) enum FileError { Missing, Invalid(IvyError), Io(std::io::Error), Syntax }
@@ -38,4 +40,12 @@ pub async fn json_file_if_present(path: impl Into<PathBuf>, limit: usize) -> Ivy
         Err(FileError::Missing) => Ok(None),
         Err(error) => Err(error.error()),
     }).await.map_err(|_| IvyError::internal())?
+}
+
+pub(crate) fn path_value(value: &IvyJson) -> IvyResult<PathBuf> {
+    let text = value.as_js_string().ok_or_else(IvyError::internal)?;
+    #[cfg(windows)]
+    { use std::os::windows::ffi::OsStringExt; Ok(OsString::from_wide(&text.0).into()) }
+    #[cfg(not(windows))]
+    { Ok(String::from_utf16_lossy(&text.0).into()) }
 }

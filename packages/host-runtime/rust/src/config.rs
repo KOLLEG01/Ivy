@@ -39,13 +39,7 @@ impl InstanceConfig {
     pub fn data_root(&self) -> &Path { &self.data_root }
     pub fn artifact_root(&self) -> &Path { &self.artifact_root }
 }
-pub(crate) fn path_value(value: &IvyJson) -> IvyResult<PathBuf> {
-    let text = value.as_js_string().ok_or_else(IvyError::internal)?;
-    #[cfg(windows)]
-    { use std::os::windows::ffi::OsStringExt; Ok(OsString::from_wide(&text.0).into()) }
-    #[cfg(not(windows))]
-    { Ok(String::from_utf16_lossy(&text.0).into()) }
-}
+pub(crate) use crate::config_file::path_value;
 fn separate(a: &Path, b: &Path) -> IvyResult<bool> {
     Ok(!inside(a, b).map_err(|_| IvyError::internal())? && !inside(b, a).map_err(|_| IvyError::internal())?)
 }
