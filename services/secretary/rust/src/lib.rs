@@ -47,6 +47,8 @@ pub mod media_spool;
 pub mod media_store;
 pub mod microsoft_schema;
 pub mod microsoft_store;
+pub mod outlook_projection;
+pub mod outlook_media;
 pub mod notice_scan;
 pub mod notice_evidence;
 pub mod notices;
