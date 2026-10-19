@@ -404,8 +404,8 @@ impl AgentRuntime {
     }
 }
 
-/// Called only after the original configuration/runtime-reset and explicit
-/// migration entry has completed. This boundary does not replace those steps.
+/// Called only after the original configuration/runtime-reset entry has
+/// completed. Explicit imports, when needed, run separately before startup.
 /// Startup remains owned if its waiter is dropped; an abandoned successful
 /// startup closes through the same resource owner instead of leaking a service.
 pub fn start_prepared_agent(
@@ -422,21 +422,29 @@ pub fn start_prepared_agent(
     });
     async move { receiver.await.map_err(|_| IvyError::internal())? }
 }
-async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyResult<AgentRuntime> {
+pub(crate) fn validate_agent_config(config: &InstanceConfig) -> IvyResult<()> {
     let value = config.json();
-    let settings = value.required("settings")?.clone();
-    validate_agent("Settings", &settings)?;
+    validate_agent("Settings", value.required("settings")?)?;
     let credential = value
         .get("credential")
         .and_then(IvyJson::as_js_string)
-        .filter(|v| !v.0.is_empty())
-        .cloned();
+        .filter(|v| !v.0.is_empty());
     if value.get("componentId") != Some(&"agent-manager".into()) || credential.is_none() {
         return Err(IvyError::new(
             "invalid_arguments",
             "AgentManager requires its own component identity and Hive credential.",
         ));
     }
+    Ok(())
+}
+async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyResult<AgentRuntime> {
+    validate_agent_config(&config)?;
+    let value = config.json();
+    let settings = value.required("settings")?.clone();
+    let credential = value
+        .get("credential")
+        .and_then(IvyJson::as_js_string)
+        .cloned();
     let service_node = text(value, "serviceNodeId")?;
     let host = text(value, "hostId")?;
     let limits = settings.required("limits")?;

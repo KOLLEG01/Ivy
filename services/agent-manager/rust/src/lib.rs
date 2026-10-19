@@ -48,6 +48,8 @@ pub mod service_work;
 pub mod service_events;
 pub mod service_link;
 pub mod service_kernel;
+pub mod runtime_reset;
+pub mod startup;
 pub mod shutdown;
 pub mod skills;
 pub mod skills_files;

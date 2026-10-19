@@ -38,6 +38,21 @@ pub struct NativeHomeInputs {
     pub cwd: JsString,
     pub account_home: JsString,
 }
+impl Clone for NativeHomeInputs {
+    fn clone(&self) -> Self {
+        Self {
+            paths: Context {
+                style: self.paths.style,
+                cwd: self.paths.cwd.clone(),
+                drive_cwds: self.paths.drive_cwds.clone(),
+            },
+            environment: self.environment.clone(),
+            user_home: self.user_home.clone(),
+            cwd: self.cwd.clone(),
+            account_home: self.account_home.clone(),
+        }
+    }
+}
 impl NativeHomeInputs {
     pub fn context(&self) -> HomeContext<'_> {
         HomeContext {
