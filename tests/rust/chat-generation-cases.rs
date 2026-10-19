@@ -88,8 +88,8 @@ impl Clock for Fixed {
     fn utc_millis(&self) -> i64 {
         self.0
     }
-    fn monotonic(&self) -> Duration {
-        self.1.elapsed()
+    fn monotonic(&self) -> Instant {
+        self.1
     }
 }
 struct Peer {
