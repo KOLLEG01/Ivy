@@ -27,9 +27,17 @@ if(identityStart<0||identityEnd<identityStart)throw Error('Original worker ident
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
-let store,registry;
-const registryTrace=input.steps.some(step=>['registry','inventory'].includes(step.op));
+let store,registry,discovery,Discovery;
+const registryTrace=input.steps.some(step=>['registry','inventory','discovery'].includes(step.op));
 const inventoryTrace=input.steps.some(step=>step.op==='inventory');
+const discoveryTrace=input.steps.some(step=>step.op==='discovery');
+const plainLowercase=new Map(),englishStrings=new Set(),wordCharacters=new Map();
+const realPlainLower=String.prototype.toLowerCase,realCompare=String.prototype.localeCompare;
+if(discoveryTrace){
+ String.prototype.toLowerCase=function(...args){const value=realPlainLower.apply(this,args);plainLowercase.set(String(this),value);for(const char of value)wordCharacters.set(char.codePointAt(0),/[\p{L}\p{N}]/u.test(char));return value;};
+ String.prototype.localeCompare=function(other,...args){if(args[0]==='en'){englishStrings.add(String(this));englishStrings.add(String(other));}return realCompare.call(this,other,...args);};
+ ({Discovery}=await import('../../services/hive/src/discovery.ts'));
+}
 const lowercase=new Map();
 const localeStrings=new Set();
 const units=value=>Array.from({length:String(value).length},(_,i)=>String(value).charCodeAt(i));
@@ -180,7 +188,7 @@ try {
       }finally{globalThis.Date=RealDate;}
       break;
     }
-    case 'registry':case 'inventory':{
+    case 'registry':case 'inventory':case 'discovery':{
       const RealDate=Date;
       const realLower=String.prototype.toLocaleLowerCase;
       const params=step.params===undefined?{}:step.params;
@@ -190,9 +198,23 @@ try {
       globalThis.Date=retentionDate(RealDate,step.now);
       if(step.op==='inventory')String.prototype.toLocaleLowerCase=function(...args){const value=realLower.apply(this,args);lowercase.set(String(this),value);return value;};
       try{
-        if(step.method==='constructor'||!registry)registry=new Registry(store);
+        if((step.method==='constructor'&&step.op!=='discovery')||!registry)registry=new Registry(store);
         const context={...(step.context?store.authenticate(step.context):{}),serviceNodeId:step.id,generation:step.generation};
-        if(step.op==='inventory'){
+        if(step.op==='discovery'){
+          if(!discovery||step.method==='constructor')discovery=new Discovery(registry);
+          switch(step.method){
+            case 'constructor':break;
+            case 'list':value=discovery.list(params,step.mcpOnly??false);break;
+            case 'describe':value=discovery.describe(params,step.mcpOnly??false);break;
+            case 'resolveCall':value=discovery.resolveCall(params);break;
+            case 'mcpCatalog':value=discovery.mcpCatalog(params.name);break;
+            case 'instructions':value=discovery.instructions();break;
+            case 'instructionsPage':value=discovery.instructionsPage(params);break;
+            case 'toolSchema':value=discovery.toolSchema(params);break;
+            case 'cursor':value=store.cursor(params.identity,params.boundary);break;
+            default:throw Error('Unknown discovery method');
+          }
+        }else if(step.op==='inventory'){
           const inventory=new Inventory(store,registry);
           value=store.withBudget(()=>{
             if(step.method==='sync')return inventory.sync(context,params);
@@ -236,7 +258,7 @@ try {
     case 'sql':store.db.exec(step.sql);break;
     case 'invalidate':store.invalidate(step.scope);break;
     case 'transaction':store.transaction(()=>{store.db.exec(step.sql);store.invalidate(step.scope);if(step.fail)throw new IvyError('fixture_failure','Rollback requested.');});break;
-    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;break;
+    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;discovery=undefined;break;
     case 'reorder':case 'archive':case 'delete':case 'move':{
       const RealDate=Date;
       if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
@@ -282,6 +304,10 @@ try {
   const localeOrder=sorted.map((value,index)=>{if(index&&value.localeCompare(sorted[index-1])!==0)rank++;return [units(value),rank];});
   runtime.registryRuntime={dates:[...retentionRuntime.dates].map(([value,date])=>[units(value),date]),iso:[...retentionRuntime.iso],localeOrder};
   if(inventoryTrace)runtime.registryRuntime.lowercase=[...lowercase].map(([value,lower])=>[units(value),units(lower)]);
+  if(discoveryTrace){
+   const sorted=[...englishStrings].sort((a,b)=>realCompare.call(a,b,'en'));let rank=0;
+   runtime.registryRuntime.discovery={lowercase:[...plainLowercase].map(([v,l])=>[units(v),units(l)]),wordCharacters:[...wordCharacters],englishOrder:sorted.map((v,i)=>{if(i&&realCompare.call(v,sorted[i-1],'en')!==0)rank++;return [units(v),rank];})};
+  }
  }
  process.stdout.write(JSON.stringify({rows,definitions,metadata,topics,...runtime}));
-}finally{store?.close();}
+}finally{store?.close();String.prototype.toLowerCase=realPlainLower;String.prototype.localeCompare=realCompare;}

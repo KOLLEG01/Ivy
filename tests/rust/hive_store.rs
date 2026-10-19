@@ -107,9 +107,9 @@ fn native(path: &Path, steps: &[Value]) -> Value {
 fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) -> Value {
     let mut store = Store::open(path).unwrap();
     let mut result = vec![];
-    let registry_trace = steps
-        .iter()
-        .any(|step| step["op"] == "registry" || step["op"] == "inventory");
+    let registry_trace = steps.iter().any(|step| {
+        step["op"] == "registry" || step["op"] == "inventory" || step["op"] == "discovery"
+    });
     let inventory_trace = steps.iter().any(|step| step["op"] == "inventory");
     let mut registry = registry::Trace::default();
     for step in steps {
@@ -127,7 +127,7 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
             step
         };
         let outcome = match step["op"].as_str().unwrap() {
-            "registry" | "inventory" => registry
+            "registry" | "inventory" | "discovery" => registry
                 .execute(
                     &mut store,
                     step,

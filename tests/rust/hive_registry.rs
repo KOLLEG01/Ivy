@@ -9,6 +9,8 @@ use ivy_hive::{
 };
 use serde_json::{Value, json};
 use std::{cmp::Ordering, collections::HashMap, sync::Arc, time::Duration};
+#[path = "hive_discovery.rs"]
+mod discovery;
 #[path = "hive_inventory.rs"]
 mod inventory;
 
@@ -27,6 +29,9 @@ struct ObservedRuntime {
     iso: HashMap<i64, JsString>,
     locale: HashMap<JsString, i64>,
     lowercase: HashMap<JsString, JsString>,
+    discovery_lowercase: HashMap<JsString, JsString>,
+    word_characters: HashMap<u32, bool>,
+    english: HashMap<JsString, i64>,
 }
 impl ObservedRuntime {
     fn new(profile: &Value) -> Self {
@@ -54,7 +59,55 @@ impl ObservedRuntime {
                 .and_then(Value::as_array)
                 .map(|v| v.iter().map(|v| (units(&v[0]), units(&v[1]))).collect())
                 .unwrap_or_default(),
+            discovery_lowercase: profile["discovery"]["lowercase"]
+                .as_array()
+                .map(|v| v.iter().map(|v| (units(&v[0]), units(&v[1]))).collect())
+                .unwrap_or_default(),
+            word_characters: profile["discovery"]["wordCharacters"]
+                .as_array()
+                .map(|v| {
+                    v.iter()
+                        .map(|v| (v[0].as_u64().unwrap() as u32, v[1].as_bool().unwrap()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            english: profile["discovery"]["englishOrder"]
+                .as_array()
+                .map(|v| {
+                    v.iter()
+                        .map(|v| (units(&v[0]), v[1].as_i64().unwrap()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
+    }
+}
+impl ivy_hive::discovery::Runtime for ObservedRuntime {
+    fn lowercase(&self, value: &JsString) -> IvyResult<JsString> {
+        Ok(self
+            .discovery_lowercase
+            .get(value)
+            .unwrap_or_else(|| panic!("Unobserved discovery lowercase {value:?}"))
+            .clone())
+    }
+    fn word_character(&self, code: u32) -> bool {
+        *self
+            .word_characters
+            .get(&code)
+            .unwrap_or_else(|| panic!("Unobserved Unicode word character {code:x}"))
+    }
+    fn compare_english(&self, a: &JsString, b: &JsString) -> Ordering {
+        if a == b {
+            return Ordering::Equal;
+        }
+        self.english
+            .get(a)
+            .unwrap_or_else(|| panic!("Unobserved English collation {a:?}"))
+            .cmp(
+                self.english
+                    .get(b)
+                    .unwrap_or_else(|| panic!("Unobserved English collation {b:?}")),
+            )
     }
 }
 impl ivy_hive::store::QueryRuntime for ObservedRuntime {
@@ -100,10 +153,12 @@ impl Runtime for ObservedRuntime {
 pub(super) struct Trace {
     registry: Option<Registry>,
     runtime: Option<Arc<ObservedRuntime>>,
+    discovery: Option<ivy_hive::discovery::Discovery>,
 }
 impl Trace {
     pub(super) fn reset_owner(&mut self) {
         self.registry = None;
+        self.discovery = None;
     }
     pub(super) fn state(&self) -> Value {
         match self.registry.as_ref() {
@@ -132,10 +187,56 @@ impl Trace {
             .unwrap()
             .unwrap_or_else(|| IvyJson::object(std::iter::empty::<(&str, IvyJson)>()));
         super::object_write::apply_units(&mut parameters, step);
-        if method == "constructor" || self.registry.is_none() {
+        if (method == "constructor" && step["op"] != "discovery") || self.registry.is_none() {
             self.registry = Some(Registry::new(store, runtime, now)?);
         }
         let registry = self.registry.as_mut().unwrap();
+        if step["op"] == "discovery" {
+            if self.discovery.is_none() || method == "constructor" {
+                self.discovery = Some(ivy_hive::discovery::Discovery::new(runtime)?);
+            }
+            let discovery = self.discovery.as_mut().unwrap();
+            return match method {
+                "constructor" => Ok(IvyJson::Null),
+                "list" => discovery.list(
+                    store,
+                    registry,
+                    &parameters,
+                    step["mcpOnly"] == true,
+                    runtime,
+                    now,
+                ),
+                "describe" => discovery.describe(
+                    store,
+                    registry,
+                    &parameters,
+                    step["mcpOnly"] == true,
+                    runtime,
+                    now,
+                ),
+                "resolveCall" => discovery.resolve_call(&parameters),
+                "mcpCatalog" => discovery
+                    .mcp_catalog(
+                        store,
+                        registry,
+                        parameters.get("name").and_then(IvyJson::as_js_string),
+                        runtime,
+                        now,
+                    )
+                    .map(IvyJson::Array),
+                "instructions" => discovery.instructions(store, registry, runtime, now),
+                "instructionsPage" => {
+                    discovery.instructions_page(store, registry, &parameters, runtime, now)
+                }
+                "cursor" => store
+                    .cursor(
+                        parameters.get("identity").ok_or_else(IvyError::internal)?,
+                        parameters.get("boundary").ok_or_else(IvyError::internal)?,
+                    )
+                    .map(IvyJson::from),
+                _ => Err(IvyError::internal()),
+            };
+        }
         if step["op"] == "inventory" {
             store.bind_query_runtime(self.runtime.as_ref().unwrap().clone());
             return store.with_budget_mut(
@@ -382,7 +483,8 @@ fn compare(steps: &[Value]) -> Value {
         if matches!(
             steps[index]["op"].as_str(),
             Some("sql" | "configure" | "register")
-        ) {
+        ) || steps[index]["requireSuccess"] == true
+        {
             assert!(
                 right["error"].is_null(),
                 "Fixture setup failed at {index}: {}",

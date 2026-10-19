@@ -112,7 +112,10 @@ impl Registry {
             sql(store,store.connection().execute("INSERT INTO registries VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET registry_json=excluded.registry_json",params![text(&node_id),encoded(parameters)?]))?;
             let mut updated=node.clone();updated.insert("synced",true.into());updated.insert("lastSuccessfulSyncAt",IvyJson::String(at.clone()));updated.insert("lastContactAt",IvyJson::String(at.clone()));self.save(store,&updated,true)?;
             self.diagnostic(store,&registry_diagnostic(&node_id,&at,true),runtime,now)?;
-            Ok(generation_result(generation,[("syncedAt",IvyJson::String(at))]))
+            let mut result=IvyJson::object(std::iter::empty::<(&str,IvyJson)>());
+            if let Some(generation)=generation {result.insert("generation",IvyJson::Number(generation));}
+            result.insert("syncedAt",IvyJson::String(at));
+            Ok(result)
         });
         match result {
             Ok(result) => {
