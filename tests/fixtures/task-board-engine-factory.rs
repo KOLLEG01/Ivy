@@ -195,7 +195,15 @@ impl NativePublicationPolicies for Policies<'_> {
         }
         panic!("No native handoff")
     }
-    fn retry_at(&self, _: &Json, _: &JsString) -> IvyResult<Json> {
+    fn retry_at(&self, turn: &Json, at: &JsString) -> IvyResult<Json> {
+        if self.fixture.observations.is_some() {
+            assert_eq!(
+                hash_json(turn).unwrap(),
+                hash_json(&json(r#"{"id":"turn","status":"completed"}"#)).unwrap()
+            );
+            assert_eq!(at, &JsString::from(clock()));
+            return Ok(Json::Null);
+        }
         panic!("No native retry")
     }
     fn shared_project(&self, _: &Json, _: &Json) -> IvyResult<bool> {

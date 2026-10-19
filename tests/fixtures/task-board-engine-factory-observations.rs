@@ -407,7 +407,13 @@ async fn started_retained_runs_publish_verified_snapshot_output_and_recover_with
             })
             .await
             {
-                let readiness = bounded(service.control.readiness(&second)).await.unwrap();
+                let readiness = match bounded(service.control.readiness(&second)).await {
+                    Ok(value) => value,
+                    Err(error) => Json::object([
+                        ("code", Json::String(error.code_js())),
+                        ("message", Json::String(error.message_js())),
+                    ]),
+                };
                 let reads: Vec<_> = peer
                     .frames
                     .lock()
