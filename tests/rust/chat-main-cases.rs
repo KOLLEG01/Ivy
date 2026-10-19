@@ -2,17 +2,18 @@ use super::{Fixed, decode, document, equal, field, flag, merge, result, text};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
+    cancellation::ChatCancellation,
     chat_main::ChatMain,
     native_driver::ChatNativeDriver,
     notice_input::NoticeInstructions,
     notices::ChatNotices,
     operations::ChatOperations,
-    store::{ChatStore, Destination},
+    store::{ChatStore, Destination, Pin, Reference, local::LocalStore},
 };
 use ivy_contracts::{
     IvyJson as Json, IvyResult, JsString,
     checked_native_contract::CheckedNativeContracts,
-    hash::digest,
+    hash::{digest, hash_json},
     json::{canonical, parse},
     operation::parse_operation_id,
 };
@@ -166,6 +167,37 @@ impl RpcClient for Client {
                 field(&expected, "params"),
                 "Exact Main RPC arguments",
             );
+            if flag(&expected, "competingMainRevision") {
+                // An independent real SQLite writer commits between selection
+                // and the original Queue CAS. Do not supply a saved outcome.
+                let db = rusqlite::Connection::open(self.path.join("chat-bridge.sqlite")).unwrap();
+                let name: String = db
+                    .query_row(
+                        "SELECT name FROM documents WHERE key='chat-bridge/main'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                drop(db);
+                let mut other = LocalStore::open(Some(&self.path)).unwrap();
+                let current = other
+                    .named("chat-bridge/main", &name, None)
+                    .unwrap()
+                    .unwrap();
+                other
+                    .write(
+                        "chat-bridge/main",
+                        &current.value,
+                        Destination::Update {
+                            object_id: &current.pin.object_id,
+                            expected_revision: current.pin.revision,
+                        },
+                        field(oracle(), "now").as_f64().unwrap() as i64,
+                        &text(&current.value, "updatedAt"),
+                    )
+                    .unwrap();
+                other.close().unwrap();
+            }
             if flag(&expected, "assertClaim") {
                 let db = rusqlite::Connection::open(self.path.join("chat-bridge.sqlite")).unwrap();
                 let id = text(field(&params, "arguments"), "operationId");
@@ -279,7 +311,13 @@ fn creation(main: &ChatMain<'_>, caller: &JsString, label: &str, revision: Json)
         ("reason", "Explicit synthetic Main creation.".into()),
     ])
 }
-async fn step(action: &Json, main: &ChatMain<'_>) -> IvyResult<Json> {
+fn object_pin(value: &Json) -> Pin {
+    Pin {
+        object_id: text(value, "objectId"),
+        revision: field(value, "revision").as_f64().unwrap() as i64,
+    }
+}
+async fn step(action: &Json, main: &ChatMain<'_>, client: &Client) -> IvyResult<Json> {
     let caller = action
         .get("caller")
         .and_then(Json::as_js_string)
@@ -319,7 +357,7 @@ async fn step(action: &Json, main: &ChatMain<'_>) -> IvyResult<Json> {
             main.recover_pending().await?;
             Ok(Json::Null)
         }
-        "send" => {
+        "send" | "claim-send" => {
             let current = main.find().await?;
             let binding = current
                 .as_ref()
@@ -327,40 +365,155 @@ async fn step(action: &Json, main: &ChatMain<'_>) -> IvyResult<Json> {
                 .cloned()
                 .unwrap_or(Json::Null);
             let label = label("main-send");
-            main.queue()
-                .send(
-                    &caller,
-                    &Json::object([
-                        ("action", "send".into()),
-                        ("operationId", operation(&label)),
-                        ("expectedBridge", main.admission().expected(&caller)),
-                        (
-                            "channel",
-                            field(main.admission().definition(), "channels")
-                                .as_array()
-                                .unwrap()[0]
-                                .required("channel")?
-                                .clone(),
-                        ),
-                        ("messageId", label.into()),
-                        (
-                            "expectedBinding",
-                            if flag(action, "auto") {
-                                Json::Null
-                            } else {
-                                binding
-                            },
-                        ),
-                        (
-                            "payload",
-                            Json::object([
-                                ("text", "Original queued input.".into()),
-                                ("images", Json::Array(vec![])),
-                            ]),
-                        ),
+            let request = Json::object([
+                ("action", "send".into()),
+                ("operationId", operation(&label)),
+                ("expectedBridge", main.admission().expected(&caller)),
+                (
+                    "channel",
+                    field(main.admission().definition(), "channels")
+                        .as_array()
+                        .unwrap()[0]
+                        .required("channel")?
+                        .clone(),
+                ),
+                ("messageId", label.into()),
+                (
+                    "expectedBinding",
+                    if flag(action, "auto") {
+                        Json::Null
+                    } else {
+                        binding
+                    },
+                ),
+                (
+                    "payload",
+                    Json::object([
+                        ("text", "Original queued input.".into()),
+                        ("images", Json::Array(vec![])),
                     ]),
+                ),
+            ]);
+            if text(action, "action") == "send" {
+                main.queue().send(&caller, &request).await
+            } else {
+                // Construct a claimed receipt through the actual original
+                // store transitions; useful for hostile/stale retained state.
+                let accepted = main.operations.begin(&caller, &request).await?;
+                let current = current.unwrap();
+                let mut value = current.value.clone();
+                value.insert("pendingAction", accepted.pin.json());
+                value.insert("updatedAt", field(&accepted.value, "createdAt").clone());
+                main.store()
+                    .write(
+                        "chat-bridge/main",
+                        &value,
+                        "fixture-claim-send",
+                        Destination::Update {
+                            object_id: &current.pin.object_id,
+                            expected_revision: current.pin.revision,
+                        },
+                    )
+                    .await
+                    .map_err(|e| e.into_ivy())?;
+                Ok(Json::Null)
+            }
+        }
+        "cancel" => {
+            let request = if flag(action, "replay") {
+                field(
+                    &main
+                        .operations
+                        .find(&caller, operation("main-cancel").as_js_string().unwrap())
+                        .await?
+                        .unwrap()
+                        .value,
+                    "request",
+                )
+                .clone()
+            } else {
+                let input = client
+                    .state
+                    .lock()
+                    .unwrap()
+                    .records
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| {
+                        field(field(r, "object"), "contractKey") == &"chat-bridge/input".into()
+                    })
+                    .unwrap()
+                    .clone();
+                Json::object([
+                    ("action", "cancel".into()),
+                    ("operationId", operation("main-cancel")),
+                    ("expectedBridge", main.admission().expected(&caller)),
+                    ("inputId", field(field(&input, "object"), "id").clone()),
+                    (
+                        "expectedRevision",
+                        field(field(&input, "revision"), "revision").clone(),
+                    ),
+                    ("reason", "Explicit synthetic cancellation.".into()),
+                ])
+            };
+            ChatCancellation::new(main.operations, main, &notice_asset())
+                .cancel(&caller, &request)
+                .await
+        }
+        "patch-pending" => {
+            let current = main.find().await?.unwrap();
+            let saved = main
+                .store()
+                .read(
+                    "chat-bridge/operation",
+                    Reference::Pinned(&object_pin(field(&current.value, "pendingAction"))),
                 )
                 .await
+                .map_err(|e| e.into_ivy())?;
+            let mut value = saved.value.clone();
+            if let Some(patch) = action.get("value") {
+                merge(&mut value, patch);
+            }
+            if let Some(patch) = action.get("requestPatch") {
+                let mut request = field(&value, "request").clone();
+                merge(&mut request, patch);
+                value.insert("request", request);
+            }
+            if flag(action, "useBindingAsNativeCall") {
+                value.insert("nativeCall", field(&current.value, "binding").clone());
+            }
+            if flag(action, "rehash") {
+                value.insert("requestHash", hash_json(field(&value, "request"))?.into());
+            }
+            let saved = main
+                .store()
+                .write(
+                    "chat-bridge/operation",
+                    &value,
+                    "fixture-pending-patch",
+                    Destination::Update {
+                        object_id: &saved.pin.object_id,
+                        expected_revision: saved.pin.revision,
+                    },
+                )
+                .await
+                .map_err(|e| e.into_ivy())?;
+            let mut value = current.value.clone();
+            value.insert("pendingAction", saved.json());
+            main.store()
+                .write(
+                    "chat-bridge/main",
+                    &value,
+                    "fixture-pending-pin",
+                    Destination::Update {
+                        object_id: &current.pin.object_id,
+                        expected_revision: current.pin.revision,
+                    },
+                )
+                .await
+                .map_err(|e| e.into_ivy())?;
+            Ok(Json::Null)
         }
         "notify" => {
             ChatNotices::new(main.operations, main, &notice_asset())
@@ -445,6 +598,9 @@ async fn original_main_creation_recovery_and_live_claims() {
     let mut steps = 0;
     let mut errors = 0;
     for case in field(oracle, "cases").as_array().unwrap() {
+        if flag(case, "referenceOnly") {
+            continue;
+        }
         progress(&format!("case {}", text(case, "label")));
         let seed = field(field(oracle, "seeds"), &text(case, "seed"));
         let path = std::env::temp_dir().join(format!("ivy-rust-main-{}", uuid::Uuid::new_v4()));
@@ -539,7 +695,7 @@ async fn original_main_creation_recovery_and_live_claims() {
                     );
                     main.create(&caller, &request).await
                 } else {
-                    step(action, &main).await
+                    step(action, &main, &client).await
                 }
             };
             let actual = snapshot(&path, &client, result(value));

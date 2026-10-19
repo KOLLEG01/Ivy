@@ -456,6 +456,42 @@ impl<'a> ChatMain<'a> {
                 self.recover_pending().await?;
                 continue;
             }
+            // Only the original pending automatic send may select its already
+            // claimed binding. Prior auto-Main receipts were handled above.
+            if let Some(current) = self.find().await? {
+                if present(&current.value, "binding") && present(&current.value, "pendingAction") {
+                    let accepted = self
+                        .store()
+                        .read(
+                            "chat-bridge/operation",
+                            Reference::Pinned(&pin(current.value.required("pendingAction")?)?),
+                        )
+                        .await
+                        .map_err(|e| e.into_ivy())?;
+                    self.operations.check(&accepted.value)?;
+                    let request = accepted.value.required("request")?;
+                    if state(&accepted.value, "phase", &["accepted"])
+                        && accepted.value.get("nativeCall") == Some(&Json::Null)
+                        && accepted.value.get("callerPrincipalId")
+                            == Some(&Json::String(caller.clone()))
+                        && accepted.value.get("operationId")
+                            == Some(&Json::String(parent_operation_id.clone()))
+                        && request.get("action") == Some(&"send".into())
+                        && request.get("expectedBinding") == Some(&Json::Null)
+                    {
+                        self.native.verify_owner().await?;
+                        return Ok(binding_view(
+                            self.store()
+                                .read(
+                                    "chat-bridge/binding",
+                                    Reference::Pinned(&pin(current.value.required("binding")?)?),
+                                )
+                                .await
+                                .map_err(|e| e.into_ivy())?,
+                        ));
+                    }
+                }
+            }
             self.recover_pending().await?;
             let current = self.find().await?;
             if let Some(binding) = current

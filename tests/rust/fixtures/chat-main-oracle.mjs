@@ -16,6 +16,7 @@ const {checkedNativeContract}=await import('../../../packages/contracts/src/chec
 const {canonical,hashJson,digest}=await import('../../../packages/contracts/src/canonical.ts');
 const {IvyError}=await import('../../../packages/contracts/src/errors.ts');
 const {parseOperationId}=await import('../../../packages/contracts/src/operation-id.ts');
+const {deriveOperationId}=await import('../../../packages/contracts/src/operation-id.ts');
 globalThis[Symbol.for('ivy.test.chat-native-evidence-gate')]=(_kind,_value,run)=>run();
 const clone=v=>structuredClone(v),at=new Date(now).toISOString(),cases=[],starting={};
 const assetRoot=mkdtempSync(join(tmpdir(),'ivy-main-assets-'));let noticeInstructions;
@@ -31,15 +32,22 @@ function matches(record,predicate){
  else if(predicate.field.startsWith('data:/')){value=record.content.value;for(const part of predicate.field.slice(6).split('/'))value=value?.[part.replaceAll('~1','/').replaceAll('~0','~')];}
  return predicate.op==='isNull'?value==null:JSON.stringify(value)===JSON.stringify(predicate.value);
 }
-function environment(seed){
+function environment(seed,approvedAutoSend=false){
  const root=mkdtempSync(join(tmpdir(),'ivy-main-original-')),file=join(root,'chat-bridge.sqlite');writeFileSync(file,Buffer.from(seed.database,'base64'));
  let definition=clone(seed.definition),controls={epoch:'original-epoch',phase:'succeeded',...clone(seed.controls)},starts=seed.starts??0,store,main,ops,crash=null,closed=false;
- const records=clone(seed.records),journal=new Map(clone(seed.journal)),events=[],mutations=new Map(),receipts=new Map(),aliases=new Map();
+ const records=clone(seed.records),journal=new Map(clone(seed.journal)),events=[],mutations=new Map(),receipts=new Map(),aliases=new Map(),selections=[];
  const source=checkedNativeContract(definition.nativePlan.nativeVersion),node={principalId:'chat-service',serviceName:'chat-bridge',connected:true,synced:true};
  const status=()=>({serviceNodeId:'owner',hostId:'synthetic-native',nativeVersion:source.catalog.version,nativeExecutableHash:source.catalog.nativeExecutableHash,catalogHash:source.catalogHash,epoch:controls.epoch,pid:42,state:'ready',observedAt:at,code:null,initialized:{},pendingInputs:0,operations:{retained:journal.size,maximum:100,bytes:0,maximumBytes:33554432},observedMethods:[]});
  const rpc=async(method,p)=>{
   if(method==='system.status')return{runtimeEpoch:'chat'};
-  if(method==='serviceNodes.get'){if(controls.ownerReadBudget!==undefined&&--controls.ownerReadBudget<0)throw new IvyError('fixture_recursion_budget','Bounded synthetic owner outage after original recovery recursion.','unknown');return{...node,...controls.node};}
+  if(method==='serviceNodes.get'){
+   if(controls.ownerReadBudget!==undefined&&--controls.ownerReadBudget<0)throw new IvyError('fixture_recursion_budget','Bounded synthetic owner outage after original recovery recursion.','unknown');
+   if(controls.bumpMainOnOwnerRead!==undefined&&--controls.bumpMainOnOwnerRead===0){
+    const current=await main.find();await store.write('chat-bridge/main',current.value,'fixture-competing-main-revision',{objectId:current.pin.objectId,expectedRevision:current.pin.revision});
+    events.at(-1).competingMainRevision=true;
+   }
+   return{...node,...controls.node};
+  }
   if(method==='objects.query')return{items:records.filter(r=>r.object.contractKey===p.contractKey&&(p.includeArchived||!r.object.effectivelyArchived)&&matches(r,p.where)).map(r=>({objectId:r.object.id,revision:r.revision.revision})),nextCursor:null};
   if(method==='objects.read'||method==='objects.stat'){if(p.objectId==='synthetic-source')return{object:{id:'synthetic-source',effectivelyArchived:false},revision:{revision:1},content:{encoding:'json',value:{synthetic:true}}};const record=records.find(r=>r.object.id===p.objectId);if(!record)throw new IvyError('object_missing','Original public record is unavailable.');return clone(method==='objects.stat'?record.object:record);}
   if(method==='objects.write'){
@@ -87,7 +95,25 @@ function environment(seed){
   }
   try{const value=await rpc(method,params);event.result={value:clone(value)};return value;}catch(e){const err=IvyError.from(e);event.result={error:{...error(err),...(err.details===undefined?{}:{details:err.details})}};throw e;}finally{if(method==='objects.write')event.records=clone(records);}}};
  function open(){store=new ChatStore(client,null,root);closed=false;const write=store.write.bind(store);store.write=async(...args)=>{const saved=await write(...args);if(crash&&crash(args)){crash=null;throw new IvyError('fixture_crash','Original checkpoint committed.','unknown');}return saved;};
-  const admission=new ChatAdmission(definition);ops=new ChatOperations(store,admission);main=new ChatMain(ops,new ChatNativeDriver(store,admission,{serviceNodeId:'chat-provider',generation:7}));}
+  const admission=new ChatAdmission(definition);ops=new ChatOperations(store,admission);main=new ChatMain(ops,new ChatNativeDriver(store,admission,{serviceNodeId:'chat-provider',generation:7}));
+  if(approvedAutoSend){
+   // Explicit approved difference, not an unmodified-original oracle. Only this
+   // test adapter selects the held binding; all subsequent admission, input,
+   // queue/CAS and receipt writes execute the unchanged original implementation.
+   const originalEnsure=main.ensure.bind(main);
+   main.ensure=async(caller,parentOperationId,role='reader')=>{
+    const prior=await ops.find(caller,deriveOperationId(parentOperationId,{action:'chat:auto-main',caller}));
+    if(!prior){const current=await main.find();if(current?.value.binding&&current.value.pendingAction){
+     const accepted=await store.read('chat-bridge/operation',current.value.pendingAction);ops.check(accepted.value);const saved=accepted.value;
+     if(saved.phase==='accepted'&&saved.nativeCall===null&&saved.callerPrincipalId===caller&&saved.operationId===parentOperationId&&saved.request.action==='send'&&saved.request.expectedBinding===null){
+      await main.native.verifyOwner();const binding=await store.read('chat-bridge/binding',current.value.binding);
+      selections.push({caller,parentOperationId});return{object:binding.pin,data:binding.value};
+     }
+    }}
+    return originalEnsure(caller,parentOperationId,role);
+   };
+  }
+ }
  open();
  const createRequest=(label='create',caller='alice',expectedMainRevision=null)=>({action:'createMain',operationId:operation(label),expectedBridge:main.admission.expected(caller),expectedMainRevision,reason:'Explicit synthetic Main creation.'});
  async function snapshot(output){
@@ -112,15 +138,26 @@ function environment(seed){
    case'resume':{const db=new DatabaseSync(file),rows=db.prepare("SELECT d.id,d.current_revision,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/main'").all();db.close();const source=rows.find(r=>JSON.parse(r.value_json).definitionHash!==main.admission.definitionHash);request=createRequest(s.label??'resume',caller);request.resumeMain={objectId:source.id,revision:s.stale?source.current_revision-1:source.current_revision};return main.create(caller,request);}
    case'send':{const binding=(await main.find())?.value.binding;return main.queue.send(caller,{action:'send',operationId:operation(s.label??'main-send'),expectedBridge:main.admission.expected(caller),channel:definition.channels[0].channel,messageId:s.label??'main-send',expectedBinding:s.auto?null:binding,payload:{text:'Original queued input.',images:[]}});}
    case'notify':return new ChatNotices(main).notify(caller,{action:'notify',operationId:operation(s.label??'main-notice'),source:{objectId:'synthetic-source',revision:1},text:'Original private context.'});
-   case'cancel':{const input=records.find(r=>r.object.contractKey==='chat-bridge/input');return new ChatCancellation(main).cancel(caller,{action:'cancel',operationId:operation('main-cancel'),expectedBridge:main.admission.expected(caller),inputId:input.object.id,expectedRevision:input.revision.revision,reason:'Explicit synthetic cancellation.'});}
+   case'cancel':{const input=records.find(r=>r.object.contractKey==='chat-bridge/input'),request=s.replay?clone((await ops.find(caller,operation('main-cancel'))).value.request):{action:'cancel',operationId:operation('main-cancel'),expectedBridge:main.admission.expected(caller),inputId:input.object.id,expectedRevision:input.revision.revision,reason:'Explicit synthetic cancellation.'};return new ChatCancellation(main).cancel(caller,request);}
    case'patch-main':{const selected=await main.find();await store.write('chat-bridge/main',{...selected.value,...clone(s.value)},'fixture-main-patch',{objectId:selected.pin.objectId,expectedRevision:selected.pin.revision});return;}
+   case'claim-send':{
+    const selected=await main.find(),label=s.label??'main-send',request={action:'send',operationId:operation(label),expectedBridge:main.admission.expected(caller),channel:definition.channels[0].channel,messageId:label,expectedBinding:s.auto?null:selected.value.binding,payload:{text:'Original queued input.',images:[]}};
+    const accepted=await ops.begin(caller,request);await store.write('chat-bridge/main',{...selected.value,pendingAction:accepted.pin,updatedAt:accepted.value.createdAt},'fixture-claim-send',{objectId:selected.pin.objectId,expectedRevision:selected.pin.revision});return;
+   }
+   case'patch-pending':{
+    const selected=await main.find(),saved=await store.read('chat-bridge/operation',selected.value.pendingAction),value=clone(saved.value);
+    if(s.value)Object.assign(value,clone(s.value));if(s.requestPatch)Object.assign(value.request,clone(s.requestPatch));
+    if(s.useBindingAsNativeCall)value.nativeCall=selected.value.binding;if(s.rehash)value.requestHash=hashJson(value.request);
+    const pin=await store.write('chat-bridge/operation',value,'fixture-pending-patch',{objectId:saved.pin.objectId,expectedRevision:saved.pin.revision});
+    await store.write('chat-bridge/main',{...selected.value,pendingAction:pin},'fixture-pending-pin',{objectId:selected.pin.objectId,expectedRevision:selected.pin.revision});return;
+   }
    case'constructor-store':{const other=new ChatStore(client,null);try{return new ChatMain(new ChatOperations(other,main.admission),main.native);}finally{other.close();}}
    case'constructor-definition':{const changed=new ChatAdmission({...definition,workspaceId:'foreign'});return new ChatMain(new ChatOperations(store,changed),main.native);}
    default:throw Error('Unknown Main step '+s.action);
   }
  }
  function openWithoutClosing(){store.close();open();}
- return{root,file,run,snapshot,createRequest,get main(){return main;},get store(){return store;},get ops(){return ops;},get definition(){return definition;},setCrash(fn){crash=fn;},exportSeed(){store.close();closed=true;return{database:readFileSync(file).toString('base64'),definition:clone(definition),records:clone(records),journal:clone([...journal]),controls:clone(controls),starts};},close(){if(!closed)store.close();rmSync(root,{recursive:true,force:true});}};
+ return{root,file,run,snapshot,createRequest,selections,get main(){return main;},get store(){return store;},get ops(){return ops;},get definition(){return definition;},setCrash(fn){crash=fn;},exportSeed(){store.close();closed=true;return{database:readFileSync(file).toString('base64'),definition:clone(definition),records:clone(records),journal:clone([...journal]),controls:clone(controls),starts};},close(){if(!closed)store.close();rmSync(root,{recursive:true,force:true});}};
 }
 
 // Re-open exact original states rather than re-enacting a crash with different
@@ -138,6 +175,13 @@ for(const action of ['send','notify','cancel']){
   e.setCrash(([key,value])=>key==='chat-bridge/main'&&value.pendingAction);
   const outcome=await result(()=>e.run({action}));if(outcome.error?.code!=='fixture_crash')throw Error('Original pending action checkpoint not reached '+action+JSON.stringify(outcome));
   starting['pending-'+action]=e.exportSeed();
+ }finally{e.close();}
+}
+{
+ const e=environment(starting['completed-0.154.0']);try{
+  e.setCrash(([key,value])=>key==='chat-bridge/main'&&value.pendingAction);
+  const outcome=await result(()=>e.run({action:'send',auto:true}));if(outcome.error?.code!=='fixture_crash')throw Error('Original automatic send claim not reached');
+  starting['pending-auto-send']=e.exportSeed();
  }finally{e.close();}
 }
 const add=(label,steps,seed='0.154.0')=>cases.push({label,steps,seed});
@@ -168,10 +212,29 @@ add('stale-resumption-refused',[{action:'reconfigure'},{action:'resume',stale:tr
 add('foreign-workspace-resumption',[{action:'reconfigure',value:{workspaceId:'foreign'}},{action:'resume'},{action:'find'}],'completed-0.154.0');
 add('busy-queue-before-replacement',[{action:'send'},{action:'create',label:'busy',current:true},{action:'find'}],'completed-0.154.0');
 add('preserved-auto-send-recovery-recursion',[{action:'state',value:{ownerReadBudget:12}},{action:'send',auto:true},{action:'find'}],'completed-0.154.0');
+cases.at(-1).referenceOnly=true;
 add('real-main-notice-selection',[{action:'notify',caller:'producer'},{action:'find'}],'completed-0.154.0');
 add('constructor-store-scope',[{action:'constructor-store'}]);
 add('constructor-definition-scope',[{action:'constructor-definition'}]);
 
-for(const c of cases){const e=environment(starting[c.seed]);c.expected=[];try{for(const s of c.steps)c.expected.push(await e.snapshot(await result(async()=>await e.run(s)??null)));}finally{e.close();}}
+const approved=(label,steps,seed='pending-auto-send',selection=true)=>{add(label,steps,seed);Object.assign(cases.at(-1),{approvedAutoSend:true,selection});};
+for(const version of Object.keys(seeds))approved('approved-auto-send-replay-'+version,[{action:'send',auto:true},{action:'send',auto:true},{action:'reopen'},{action:'send',auto:true},{action:'find'}],'completed-'+version);
+approved('approved-auto-send-cross-open',[{action:'reopen'},{action:'recover'},{action:'find'},{action:'send',auto:true},{action:'find'}]);
+approved('approved-auto-send-owner-refused',[{action:'state',value:{node:{connected:false}}},{action:'ensure',label:'main-send'},{action:'find'}],'pending-auto-send',false);
+for(const [label,action]of [['wrong-caller',{action:'ensure',caller:'bob',label:'main-send'}],['wrong-id',{action:'ensure',label:'other'}]])approved('approved-auto-send-'+label,[{action:'state',value:{ownerReadBudget:1}},action,{action:'find'}],'pending-auto-send',false);
+for(const phase of ['applying','outcome_unknown'])approved('approved-auto-send-nonaccepted-'+phase,[{action:'patch-pending',value:{phase}},{action:'state',value:{ownerReadBudget:1}},{action:'ensure',label:'main-send'},{action:'find'}],'pending-auto-send',false);
+approved('approved-auto-send-attached-refused',[{action:'patch-pending',useBindingAsNativeCall:true},{action:'state',value:{ownerReadBudget:1}},{action:'ensure',label:'main-send'},{action:'find'}],'pending-auto-send',false);
+approved('approved-auto-send-corrupt-request',[{action:'patch-pending',requestPatch:{payload:{text:'Corrupt retained content.',images:[]}}},{action:'ensure',label:'main-send'},{action:'find'}],'pending-auto-send',false);
+approved('approved-auto-send-mismatched-request-id',[{action:'patch-pending',requestPatch:{operationId:operation('foreign')}},{action:'ensure',label:'main-send'},{action:'find'}],'pending-auto-send',false);
+approved('approved-auto-send-explicit-binding',[{action:'ensure',label:'main-send'},{action:'find'}],'pending-send',false);
+approved('approved-auto-send-receipt-before-newer-binding',[{action:'ensure',label:'main-send'},{action:'create',label:'replacement',caller:'bob',current:true},{action:'claim-send',auto:true},{action:'ensure',label:'main-send'},{action:'recover'},{action:'find'}],'0.154.0',false);
+approved('approved-auto-send-cas-retry',[{action:'state',value:{bumpMainOnOwnerRead:2}},{action:'recover'},{action:'find'},{action:'send',auto:true},{action:'find'}]);
+approved('approved-auto-send-cancellation',[{action:'send',auto:true},{action:'cancel'},{action:'cancel',replay:true},{action:'reopen'},{action:'recover'},{action:'find'}],'completed-0.154.0');
+for(const action of ['notify','cancel'])approved('approved-auto-send-unrelated-'+action,[{action:'ensure',label:'main-send'},{action:'find'}],'pending-'+action,false);
+
+for(const c of cases){const e=environment(starting[c.seed],c.approvedAutoSend);c.expected=[];try{for(const s of c.steps)c.expected.push(await e.snapshot(await result(async()=>await e.run(s)??null)));c.selections=clone(e.selections);}finally{e.close();}
+ if(c.approvedAutoSend&&Boolean(c.selections.length)!==c.selection)throw Error('Wrong approved selection boundary '+c.label+JSON.stringify(c));
+ if(c.approvedAutoSend&&c.selection){const final=c.expected.at(-1),inputs=final.records.filter(r=>r.object.contractKey==='chat-bridge/input'),bindings=final.documents.filter(d=>d.key==='chat-bridge/binding');if(inputs.length!==1||bindings.length!==1||c.expected.some(s=>s.output.error))throw Error('Approved automatic send duplicated or failed '+c.label);}
+}
 for(const c of cases.filter(c=>/^(create-replay-|original-main-replacement-|cross-open-|automatic-first|lost-invoke-reply|resumed-native-|real-main-)/.test(c.label)))if(c.expected.some(s=>s.output.error))throw Error('Successful original Main path failed '+c.label+JSON.stringify(c.expected.map(s=>s.output)));
-process.stdout.write(JSON.stringify({now,instructions,noticeInstructions,seeds:starting,cases}));
+process.stdout.write(JSON.stringify({now,instructions,noticeInstructions,seeds:starting,cases,approvedDifference:{proposal:'6af88af7-cd82-49c2-b43f-1f87e36cf1ce@1',decision:'task0072-chat-main-root-answer-197-v1',referenceOnly:'preserved-auto-send-recovery-recursion',adapter:'Only approvedAutoSend cases wrap the original Main.ensure; unchanged original code performs all later Queue, cancellation, SQLite CAS and receipt transitions.'}}));
