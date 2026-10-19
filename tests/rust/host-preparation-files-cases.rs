@@ -64,7 +64,7 @@ async fn compare(fixture: &ServiceFixture, name: &str, source: &Path, selected: 
     let value = IvyJson::object([("operation", operation(result)), ("tree", if succeeded { inventory(&actual_root) } else { IvyJson::Null })]);
     let input = IvyJson::object([("operation", name.into()), ("source", path(source)), ("destination", path(&expected_root)), ("selected", IvyJson::Array(strings(selected).into_iter().map(IvyJson::String).collect())), ("cache", path(&cache)), ("dist", dist.into())]);
     let mut child = Command::new("node").args(["--experimental-transform-types", "--disable-warning=ExperimentalWarning", "tests/fixtures/host-preparation-files-oracle.mjs"])
-        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        .current_dir(std::env::var_os("IVY_HOST_SOURCE_ROOT").map_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."),PathBuf::from)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(ivy_contracts::json::stringify(&input, usize::MAX).unwrap().as_bytes()).unwrap();
     let output = child.wait_with_output().unwrap(); assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let expected = ivy_contracts::json::parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
