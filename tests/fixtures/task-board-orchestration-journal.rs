@@ -628,7 +628,7 @@ async fn concrete_orchestration_persists_verified_terminal_evidence_reopens_and_
                     principal_id: &"caller".into(),
                 },
             };
-            let mut coordinator = NativeOrchestrator::new(&store, &engine, &services, &catalogs);
+            let coordinator = NativeOrchestrator::new(&store, &engine, &services, &catalogs);
             if round == 0 {
                 coordinator.drain(&id(200)).await.unwrap();
                 assert_eq!(

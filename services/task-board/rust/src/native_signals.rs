@@ -7,11 +7,12 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent, hash::hash_json,
 };
+use std::cell::RefCell;
 
 pub struct NativeSignals<'a, S> {
     pub inspector: NativeInspector<'a, S>,
     // Preserve insertion order: refreshing a key does not move it to the end.
-    cursors: Vec<(JsString, JsString, f64)>,
+    cursors: RefCell<Vec<(JsString, JsString, f64)>>,
 }
 fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -57,25 +58,26 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
     pub fn new(inspector: NativeInspector<'a, S>) -> Self {
         Self {
             inspector,
-            cursors: Vec::new(),
+            cursors: RefCell::default(),
         }
     }
-    fn advance(&mut self, run: &JsString, epoch: &JsString, sequence: f64) {
-        if let Some(entry) = self.cursors.iter_mut().find(|entry| &entry.0 == run) {
+    fn advance(&self, run: &JsString, epoch: &JsString, sequence: f64) {
+        let mut cursors = self.cursors.borrow_mut();
+        if let Some(entry) = cursors.iter_mut().find(|entry| &entry.0 == run) {
             entry.1 = epoch.clone();
             entry.2 = sequence;
             return;
         }
-        if self.cursors.len() >= 1024 {
-            self.cursors.remove(0);
+        if cursors.len() >= 1024 {
+            cursors.remove(0);
         }
-        self.cursors.push((run.clone(), epoch.clone(), sequence));
+        cursors.push((run.clone(), epoch.clone(), sequence));
     }
-    fn forget(&mut self, run: &JsString) {
-        self.cursors.retain(|entry| &entry.0 != run);
+    fn forget(&self, run: &JsString) {
+        self.cursors.borrow_mut().retain(|entry| &entry.0 != run);
     }
 
-    pub async fn step(&mut self, run_id: &JsString) -> IvyResult<Option<Json>> {
+    pub async fn step(&self, run_id: &JsString) -> IvyResult<Option<Json>> {
         let store = self.inspector.store;
         let run = store
             .read_document("task-board/run", &Json::String(run_id.clone()), true)
@@ -128,6 +130,7 @@ impl<'a, S: InspectionStore> NativeSignals<'a, S> {
         };
         let volatile = self
             .cursors
+            .borrow()
             .iter()
             .find(|entry| &entry.0 == run_id && entry.1 == context.epoch)
             .map(|entry| entry.2)

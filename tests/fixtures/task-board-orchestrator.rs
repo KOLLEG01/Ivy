@@ -604,7 +604,7 @@ async fn bounded_orchestration_matches_original_component_order_error_fences_ret
     let rows = data().required("rows").unwrap().as_array().unwrap();
     for row in rows {
         let world = World::new(row);
-        let mut subject = NativeOrchestrator::new(&world, &world, &world, &catalogs);
+        let subject = NativeOrchestrator::new(&world, &world, &world, &catalogs);
         let mut results = vec![];
         for a in row.required("actions").unwrap().as_array().unwrap() {
             let a = a.as_array().unwrap();

@@ -309,7 +309,7 @@ async fn advisory_signals_match_original_context_cursor_checkpoint_and_conflict_
             write_index: RefCell::default(),
             pass: RefCell::default(),
         };
-        let mut subject = NativeSignals::new(NativeInspector {
+        let subject = NativeSignals::new(NativeInspector {
             store: &store,
             catalogs: &catalogs,
         });

@@ -15,7 +15,7 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::native_observations::NativeObservations;
-use std::{collections::HashSet, future::Future};
+use std::{cell::RefCell, collections::HashSet, future::Future};
 
 /// The owning engine must bind its current nativeUpdate, read-cache scope,
 /// handoff/claim/peer policy and comment mirroring. There are no policy defaults.
@@ -115,8 +115,8 @@ pub struct NativeOrchestrator<'a, S, E, V> {
     pub engine: &'a E,
     pub services: &'a V,
     pub catalogs: &'a CheckedNativeContracts,
-    threads: Vec<(JsString, JsString, JsString)>,
-    retries: Vec<(JsString, u8, f64)>,
+    threads: RefCell<Vec<(JsString, JsString, JsString)>>,
+    retries: RefCell<Vec<(JsString, u8, f64)>>,
 }
 fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -170,11 +170,11 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             engine,
             services,
             catalogs,
-            threads: vec![],
-            retries: vec![],
+            threads: RefCell::default(),
+            retries: RefCell::default(),
         }
     }
-    pub fn notification(&mut self, value: &Json) -> bool {
+    pub fn notification(&self, value: &Json) -> bool {
         let params = field(value, "params");
         let event = field(params, "payload");
         let body = field(event, "params");
@@ -189,33 +189,35 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             return false;
         }
         let mut matched = false;
-        for (run, node, thread) in &self.threads {
+        for (run, node, thread) in self.threads.borrow().iter() {
             if params.get("serviceNodeId").and_then(Json::as_js_string) == Some(node)
                 && body.get("threadId").and_then(Json::as_js_string) == Some(thread)
             {
-                self.retries.retain(|r| &r.0 != run);
+                self.retries.borrow_mut().retain(|r| &r.0 != run);
                 matched = true;
             }
         }
         matched
     }
-    fn postpone(&mut self, run: &JsString) {
-        let prior = self.retries.iter().find(|v| &v.0 == run);
+    fn postpone(&self, run: &JsString) {
+        let mut retries = self.retries.borrow_mut();
+        let prior = retries.iter().find(|v| &v.0 == run);
         let count = (prior.map(|v| v.1).unwrap_or(0) + 1).min(5);
-        if self.retries.len() >= 1024 && prior.is_none() {
-            self.retries.remove(0);
+        if retries.len() >= 1024 && prior.is_none() {
+            retries.remove(0);
         }
         let after =
             self.engine.now_millis() + (30000.0 * 2_f64.powi(count as i32 - 1)).min(300000.0);
-        if let Some(entry) = self.retries.iter_mut().find(|v| &v.0 == run) {
+        if let Some(entry) = retries.iter_mut().find(|v| &v.0 == run) {
             *entry = (run.clone(), count, after);
         } else {
-            self.retries.push((run.clone(), count, after));
+            retries.push((run.clone(), count, after));
         }
     }
-    pub async fn drain(&mut self, run: &JsString) -> IvyResult<bool> {
+    pub async fn drain(&self, run: &JsString) -> IvyResult<bool> {
         if self
             .retries
+            .borrow()
             .iter()
             .find(|v| &v.0 == run)
             .map(|v| v.2)
@@ -228,7 +230,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
         engine.with_read_cache(self.drain_pass(run)).await?;
         Ok(true)
     }
-    async fn drain_pass(&mut self, run: &JsString) -> IvyResult<()> {
+    async fn drain_pass(&self, run: &JsString) -> IvyResult<()> {
         for _ in 0..8 {
             let before = self
                 .store
@@ -244,18 +246,19 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
                 .await?;
             let value = &after.value;
             if finished_run(value) {
-                self.threads.retain(|v| &v.0 != run);
-                self.retries.retain(|v| &v.0 != run);
+                self.threads.borrow_mut().retain(|v| &v.0 != run);
+                self.retries.borrow_mut().retain(|v| &v.0 != run);
             } else if truthy(field(value, "primaryResourceRef")) {
-                if self.threads.len() >= 1024 {
-                    self.threads.remove(0);
-                }
                 let node = s(value.required("target")?, "serviceNodeId")?.clone();
                 let thread = s(value.required("primaryResourceRef")?, "nativeId")?.clone();
-                if let Some(entry) = self.threads.iter_mut().find(|v| &v.0 == run) {
+                let mut threads = self.threads.borrow_mut();
+                if threads.len() >= 1024 {
+                    threads.remove(0);
+                }
+                if let Some(entry) = threads.iter_mut().find(|v| &v.0 == run) {
                     *entry = (run.clone(), node, thread);
                 } else {
-                    self.threads.push((run.clone(), node, thread));
+                    threads.push((run.clone(), node, thread));
                 }
             }
             let waiting = if equal(value, "phase", "starting") {
@@ -272,7 +275,7 @@ impl<'a, S: Store, E: OrchestrationEngine, V: OrchestrationServices>
             if equal(value, "phase", "outcome_unknown") || equal(&waiting, "reason", "host") {
                 self.postpone(run);
             } else {
-                self.retries.retain(|v| &v.0 != run);
+                self.retries.borrow_mut().retain(|v| &v.0 != run);
             }
             if !["starting", "publishing_result", "cancel_requested"]
                 .iter()

@@ -100,6 +100,9 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             },
         }
     }
+    pub async fn collect_local(&self) -> IvyResult<()> {
+        self.retention().collect(0, 0, None, None).await
+    }
 
     pub async fn read_record(
         &self,
