@@ -247,6 +247,82 @@ pub async fn workspace_identity<S: Store>(store: &S, task: &Json) -> IvyResult<O
         path,
     ])))
 }
+/// Native continuation observes only the exact revisions returned by the
+/// owner's Task page. Locale sorting and path canonicalization are not added.
+pub async fn peer_state<S: LifecycleStore>(
+    store: &S,
+    task: &Json,
+    task_id: &JsString,
+) -> IvyResult<JsString> {
+    let Some(identity) = workspace_identity(store, task).await? else {
+        return hash_json(&Json::Array(vec![])).map(Into::into);
+    };
+    let mut states = Vec::new();
+    let mut cursor: Option<JsString> = None;
+    loop {
+        let mut query = Json::object([
+            ("limit", Json::Number(100.0)),
+            (
+                "where",
+                Json::object([
+                    ("op", "in".into()),
+                    ("field", "data:/workflowState".into()),
+                    (
+                        "value",
+                        Json::Array(
+                            ["todo", "in_progress", "waiting", "review"]
+                                .into_iter()
+                                .map(Into::into)
+                                .collect(),
+                        ),
+                    ),
+                ]),
+            ),
+        ]);
+        if let Some(cursor) = cursor {
+            query.insert("cursor", Json::String(cursor));
+        }
+        let page = store.page("task-board/task", &query).await?;
+        for item in page
+            .required("items")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+        {
+            let id = s(item, "objectId")?;
+            if id == task_id {
+                continue;
+            }
+            let peer = store
+                .read(
+                    "task-board/task",
+                    &Json::object([
+                        ("objectId", Json::String(id.clone())),
+                        ("revision", item.required("revision")?.clone()),
+                    ]),
+                    true,
+                )
+                .await?;
+            if workspace_identity(store, &peer.value).await?.as_ref() == Some(&identity) {
+                states.push(concat([
+                    id.clone(),
+                    ":".into(),
+                    s(&peer.value, "workflowState")?.clone(),
+                ]));
+            }
+        }
+        cursor = page
+            .get("nextCursor")
+            .and_then(Json::as_js_string)
+            .filter(|s| !s.is_empty())
+            .cloned();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    // Array.prototype.sort compares UTF16 code units and retains duplicates.
+    states.sort();
+    hash_json(&Json::Array(states.into_iter().map(Json::String).collect())).map(Into::into)
+}
 pub fn read_state_name(principal: &JsString, task: &JsString) -> IvyResult<String> {
     Ok(format!(
         "Comment read state {}",

@@ -17,6 +17,8 @@ use std::{
 };
 #[path = "task-board-engine-read-journal.rs"]
 mod journal;
+#[path = "task-board-peer-state.rs"]
+mod peer_state;
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(k).unwrap_or(&NULL)
