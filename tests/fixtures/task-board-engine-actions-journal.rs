@@ -6,8 +6,7 @@ use ivy_task_board::{
     category_projection::{CategoryLocale, CategoryProjection},
     engine_admission::{AdmissionRuntime, EngineAdmission, EngineOwner},
     engine_execution::{
-        CachedExecution, ExecutionCategories, ExecutionComponents, ExecutionProgram,
-        ExecutionProofs, ExecutionQueue,
+        CachedExecution, ExecutionCategories, ExecutionComponents, ExecutionProofs, ExecutionQueue,
     },
     engine_invocations::EngineInvocations,
     engine_publication::{

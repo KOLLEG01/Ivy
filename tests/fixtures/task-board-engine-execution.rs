@@ -516,3 +516,78 @@ async fn pending_owner_work_coalesces_survives_caller_loss_and_drains() {
         }
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn interrupted_execution_releases_identity_and_wakes_reply_and_drain_observers() {
+    use ivy_task_board::engine_execution::ExecutionProgram;
+    use std::cell::Cell;
+    struct Program {
+        panic: Cell<bool>,
+        calls: Cell<usize>,
+    }
+    impl ExecutionProgram for Program {
+        async fn run(&self, operation: Document) -> IvyResult<Json> {
+            self.calls.set(self.calls.get() + 1);
+            assert!(!self.panic.get(), "Interrupted local execution job");
+            Ok(operation.value)
+        }
+    }
+    for poll_before_drop in [false, true] {
+        let program = Program {
+            panic: Cell::new(true),
+            calls: Cell::new(0),
+        };
+        let executor = Executor::default();
+        let queue = ExecutionQueue::new(&program, &executor);
+        let operation = || Document {
+            pin: Json::object([
+                ("objectId", "same-operation".into()),
+                ("revision", Json::Number(1.0)),
+            ]),
+            value: "original operation".into(),
+            content_hash: hash_json(&Json::from("original operation")).unwrap(),
+            parent_id: None,
+        };
+        drop(queue.execute(operation()).unwrap());
+        let mut reply = Box::pin(queue.execute(operation()).unwrap());
+        let mut drain = Box::pin(queue.settled());
+        let mut job = executor.work.borrow_mut().pop_front().unwrap();
+        assert!(
+            executor.work.borrow().is_empty(),
+            "Duplicate stored identity must coalesce"
+        );
+        poll_fn(|cx| {
+            assert!(reply.as_mut().poll(cx).is_pending());
+            assert!(drain.as_mut().poll(cx).is_pending());
+            if poll_before_drop {
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job
+                        .as_mut()
+                        .poll(cx)))
+                    .is_err()
+                );
+            }
+            Poll::Ready(())
+        })
+        .await;
+        drop(job);
+        let result = poll_fn(|cx| Poll::Ready(reply.as_mut().poll(cx))).await;
+        let Poll::Ready(Err(error)) = result else {
+            panic!("Interrupted execution left a stale active identity and pending reply");
+        };
+        assert_eq!(error.code_js(), JsString::from("internal_error"));
+        assert_eq!(error.outcome, Outcome::Unknown);
+        assert_eq!(program.calls.get(), usize::from(poll_before_drop));
+        executor.drive(drain).await;
+        // A later recovery must execute the saved operation again, not observe
+        // the orphaned completion from the interrupted owner job.
+        program.panic.set(false);
+        let recovered = executor
+            .drive(queue.execute(operation()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(recovered, Json::from("original operation"));
+        assert_eq!(program.calls.get(), usize::from(poll_before_drop) + 1);
+        executor.drive(queue.settled()).await;
+    }
+}
