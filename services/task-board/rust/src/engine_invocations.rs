@@ -148,6 +148,56 @@ impl<'a, 'x, X: ReconcileExecutor<'a>> EngineInvocations<'a, 'x, X> {
                 .await
         })
     }
+    /// Internal native/scheduler/recovery calls retain pre-Operation admission
+    /// just like public invocations. Retiring the generation stops new entry;
+    /// dropping an observer cannot cancel an accepted owner check or write.
+    pub fn native_update<S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>(
+        &self,
+        engine: &'a EngineAdmission<'a, S, C, P, E>,
+        request: &Json,
+    ) -> IvyResult<InvocationRequest> {
+        self.check_open()?;
+        let request = request.clone();
+        self.run(async move { engine.native_update(&request).await })
+    }
+    pub fn native_comment<S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>(
+        &self,
+        engine: &'a EngineAdmission<'a, S, C, P, E>,
+        request: &Json,
+    ) -> IvyResult<InvocationRequest> {
+        self.check_open()?;
+        let request = request.clone();
+        self.run(async move { engine.native_comment(&request).await })
+    }
+    pub fn schedule<S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>(
+        &self,
+        engine: &'a EngineAdmission<'a, S, C, P, E>,
+        request: &Json,
+    ) -> IvyResult<InvocationRequest> {
+        self.check_open()?;
+        let request = request.clone();
+        self.run(async move { engine.schedule(&request).await })
+    }
+    pub fn recover_operation<S: Store, C: Fn() -> String, P: Contracts, E: AdmissionExecution>(
+        &self,
+        engine: &'a EngineAdmission<'a, S, C, P, E>,
+        object_id: &ivy_contracts::JsString,
+    ) -> IvyResult<InvocationRequest> {
+        self.check_open()?;
+        let object_id = object_id.clone();
+        self.run(async move { engine.recover_operation(&object_id).await })
+    }
+    pub fn recover_publication<
+        S: crate::publication_coordination::CoordinationStore,
+        C: Fn() -> String,
+        P: Contracts,
+        E: AdmissionExecution,
+    >(
+        &self,
+        engine: &'a EngineAdmission<'a, S, C, P, E>,
+    ) -> IvyResult<InvocationRequest> {
+        self.run(async move { engine.recover_publication().await })
+    }
     /// Call synchronously when retiring the generation, before waiting for any
     /// other owner work. Already accepted handlers can still enter execution.
     pub fn stop_admissions(&self) {

@@ -8,7 +8,7 @@ use ivy_sdk::{
 };
 use ivy_task_board::{
     evidence_bytes::{BlobStore, ChunkKey},
-    native_comments::{NativeCommentStore, sync_native_comments},
+    native_comments::{NativeCommentJournal, sync_native_comments},
     native_inspector::InspectionStore,
     operations::Document,
     read_evidence::ReadEvidenceStore,
@@ -152,8 +152,8 @@ impl InspectionStore for Store {
         unreachable!()
     }
 }
-impl NativeCommentStore for Store {
-    async fn native_comment(&self, request: &Json) -> IvyResult<()> {
+impl Store {
+    async fn publish_comment(&self, request: &Json) -> IvyResult<()> {
         record(&self.trace, ["comment".into(), request.clone()]);
         let mut writes = self.writes.borrow_mut();
         *writes += 1;
@@ -224,9 +224,19 @@ async fn native_comment_mirroring_matches_original_identity_confidentiality_and_
             posted: RefCell::default(),
             writes: RefCell::default(),
         };
+        let store_ref = &store;
+        let journal = NativeCommentJournal {
+            inspection: &store,
+            native_comment: move |request: Json| async move {
+                store_ref
+                    .publish_comment(&request)
+                    .await
+                    .map(|_| Json::Null)
+            },
+        };
         let mut result = Json::Null;
         for _ in 0..input.get("passes").and_then(Json::as_f64).unwrap_or(1.0) as usize {
-            if let Err(error) = sync_native_comments(&store, &"run".into()).await {
+            if let Err(error) = sync_native_comments(&journal, &"run".into()).await {
                 result = Json::object([
                     ("code", error.code.into()),
                     ("message", error.message.into()),
@@ -235,6 +245,7 @@ async fn native_comment_mirroring_matches_original_identity_confidentiality_and_
                 break;
             }
         }
+        drop(journal);
         let actual = Json::object([
             ("result", result),
             ("trace", Json::Array(trace.lock().unwrap().clone())),

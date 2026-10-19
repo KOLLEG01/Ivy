@@ -1,24 +1,19 @@
 use super::*;
 use ivy_contracts::builtin_schema::SchemaBundle;
-use ivy_sdk::{
-    rpc::{RequestFuture, RequestOptions, RpcClient},
-    tools::ToolClients,
-};
+use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
-    evidence_bytes::{BlobStore, ChunkKey},
     inspection_journal::InspectionJournal,
     journal_store::{Contracts, JournalStore, ReadScopes},
     lifecycle_journal::{LifecycleJournal, LifecyclePages},
     local_journal::{self, LocalJournal},
     local_retention::HistoryLimits,
-    native_comments::{NativeCommentStore, sync_native_comments},
+    native_comments::{NativeCommentJournal, sync_native_comments},
     native_driver::{DriverRuntime, NativeDriver},
     native_inspector::{InspectionStore, NativeInspector},
     native_intent::TaskPrompts,
     native_orchestrator::{NativeServices, OrchestrationPolicies, OrchestrationRuntime},
     native_turn_evidence::TurnEvidence,
-    read_evidence::ReadEvidenceStore,
 };
 use std::{
     collections::HashSet,
@@ -296,50 +291,6 @@ impl RpcClient for Client {
         })
     }
 }
-struct Comments<'a, S>(&'a S);
-impl<S: BlobStore<Pin = Json, Error = IvyError>> BlobStore for Comments<'_, S> {
-    type Pin = Json;
-    type Error = IvyError;
-    fn save(&self, k: ChunkKey, n: &str, p: &JsString, b: &[u8]) -> IvyResult<Json> {
-        self.0.save(k, n, p, b)
-    }
-    fn read(&self, k: ChunkKey, p: &Json, r: &JsString) -> IvyResult<Vec<u8>> {
-        self.0.read(k, p, r)
-    }
-}
-impl<S: ReadEvidenceStore> ReadEvidenceStore for Comments<'_, S> {
-    fn validate(&self, n: &str, v: &Json) -> IvyResult<()> {
-        self.0.validate(n, v)
-    }
-    async fn read_document(&self, k: &str, a: &Json, p: bool) -> IvyResult<Document> {
-        self.0.read_document(k, a, p).await
-    }
-    async fn write_document(&self, k: &str, v: &Json, m: &str, d: &Json) -> IvyResult<Json> {
-        self.0.write_document(k, v, m, d).await
-    }
-}
-impl<S: InspectionStore> InspectionStore for Comments<'_, S> {
-    async fn verify_owner(&self) -> IvyResult<()> {
-        self.0.verify_owner().await
-    }
-    async fn named_document(&self, k: &str, n: &str, p: &JsString) -> IvyResult<Option<Document>> {
-        self.0.named_document(k, n, p).await
-    }
-    fn tools(&self) -> &ToolClients {
-        self.0.tools()
-    }
-    fn principal_id(&self) -> JsString {
-        self.0.principal_id()
-    }
-    fn now(&self) -> JsString {
-        self.0.now()
-    }
-}
-impl<S: InspectionStore> NativeCommentStore for Comments<'_, S> {
-    async fn native_comment(&self, _: &Json) -> IvyResult<()> {
-        panic!("Empty native input fixture cannot publish comments")
-    }
-}
 type Journal<'db> = JournalStore<'db, Client, Policy, fn() -> String, fn() -> JsString>;
 type Inspected<'a, 'db> =
     InspectionJournal<'a, 'db, Client, Policy, fn() -> String, fn() -> JsString>;
@@ -454,7 +405,16 @@ impl OrchestrationPolicies for Engine<'_, '_> {
         Ok("in_progress".into())
     }
     async fn sync_native_comments(&self, r: &JsString) -> IvyResult<()> {
-        sync_native_comments(&Comments(self.inspected), r).await
+        sync_native_comments(
+            &NativeCommentJournal {
+                inspection: self.inspected,
+                native_comment: |_: Json| -> std::future::Ready<IvyResult<Json>> {
+                    panic!("Empty native input fixture cannot publish comments")
+                },
+            },
+            r,
+        )
+        .await
     }
 }
 struct NoPeers;

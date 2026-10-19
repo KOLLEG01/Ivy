@@ -304,11 +304,43 @@ async fn public_admission_matches_original_identity_plan_and_recovery_boundaries
                             executor.drive(request).await
                         }
                         "configuration" => engine.configuration().await,
-                        "schedule" => engine.schedule(f(step, "request")).await,
-                        "nativeUpdate" => engine.native_update(f(step, "request")).await,
-                        "nativeComment" => engine.native_comment(f(step, "request")).await,
-                        "recoverOperation" => engine.recover_operation(s(step, "objectId")).await,
-                        "recoverPublication" => engine.recover_publication().await,
+                        "schedule" => {
+                            executor
+                                .drive(invocations.schedule(&engine, f(step, "request")).unwrap())
+                                .await
+                        }
+                        "nativeUpdate" => {
+                            executor
+                                .drive(
+                                    invocations
+                                        .native_update(&engine, f(step, "request"))
+                                        .unwrap(),
+                                )
+                                .await
+                        }
+                        "nativeComment" => {
+                            executor
+                                .drive(
+                                    invocations
+                                        .native_comment(&engine, f(step, "request"))
+                                        .unwrap(),
+                                )
+                                .await
+                        }
+                        "recoverOperation" => {
+                            executor
+                                .drive(
+                                    invocations
+                                        .recover_operation(&engine, s(step, "objectId"))
+                                        .unwrap(),
+                                )
+                                .await
+                        }
+                        "recoverPublication" => {
+                            executor
+                                .drive(invocations.recover_publication(&engine).unwrap())
+                                .await
+                        }
                         m => panic!("Unknown admission scenario {m}"),
                     };
                     outcomes.push(outcome(result));

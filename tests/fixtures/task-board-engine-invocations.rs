@@ -341,3 +341,167 @@ async fn retirement_keeps_parallel_results_errors_and_unwinding_work_separate() 
     assert_eq!(executor.drive(first).await.unwrap(), Json::from("first"));
     executor.drive(stop).await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn internal_admission_retains_original_inputs_through_owner_wait_observer_loss_and_stop() {
+    use ivy_task_board::local_executor::LocalExecutor;
+    for (method, name) in [
+        ("nativeUpdate", "internal nativeUpdate"),
+        ("nativeComment", "internal nativeComment"),
+        ("schedule", "internal schedule"),
+        ("recoverOperation", "recover exact operation"),
+        (
+            "recoverPublication",
+            "pending publication resumes exact operation",
+        ),
+    ] {
+        let row = data()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| s(r, "name") == &JsString::from(name))
+            .unwrap();
+        let replay = Arc::new(Replay {
+            steps: Mutex::new(
+                f(row, "boundaries")
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect(),
+            ),
+            name: s(row, "name").clone(),
+        });
+        let owner_gate = Arc::new(Gate::default());
+        let client = Arc::new(PendingClient {
+            client: Client(replay.clone()),
+            first: AtomicBool::new(true),
+            gate: owner_gate.clone(),
+        });
+        let catalogs =
+            CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+        let bindings = Bindings(replay.clone());
+        let runtime = AdmissionRuntime {
+            client,
+            contracts: &bindings,
+            catalogs: &catalogs,
+        };
+        let owner = EngineOwner {
+            service_node_id: "task-node".into(),
+            generation: 7.0,
+        };
+        let operations = Operations {
+            store: World {
+                replay: replay.clone(),
+                root: f(row, "root").as_js_string().cloned(),
+            },
+            now: || "2026-01-02T03:04:05.006Z".to_owned(),
+        };
+        let execution_gate = Gate::default();
+        let program = Program {
+            bindings: &bindings,
+            gate: &execution_gate,
+            calls: Cell::new(0),
+        };
+        let execution_executor = Executor::default();
+        let execution = ExecutionQueue::new(&program, &execution_executor);
+        let engine = EngineAdmission::new(
+            &operations,
+            f(row, "settings"),
+            &owner,
+            &runtime,
+            &execution,
+        )
+        .unwrap();
+        let executor = LocalExecutor::default();
+        let invocations = EngineInvocations::new(&executor);
+        let step = &f(row, "steps").as_array().unwrap()[0];
+        let mut request = f(step, "request").clone();
+        let mut object_id = f(step, "objectId")
+            .as_js_string()
+            .cloned()
+            .unwrap_or_default();
+        let observer = match method {
+            "nativeUpdate" => invocations.native_update(&engine, &request),
+            "nativeComment" => invocations.native_comment(&engine, &request),
+            "schedule" => invocations.schedule(&engine, &request),
+            "recoverOperation" => invocations.recover_operation(&engine, &object_id),
+            "recoverPublication" => invocations.recover_publication(&engine),
+            _ => unreachable!(),
+        }
+        .unwrap();
+        if matches!(request, Json::Object(_)) {
+            request.insert("reason", "caller changed after acceptance".into());
+        }
+        object_id.0.clear();
+        // stop() closes every internal entry synchronously but retains the
+        // accepted call before its first logical-owner RPC has completed.
+        let stop = invocations.stop();
+        assert_eq!(
+            invocations
+                .native_update(&engine, &Json::Null)
+                .err()
+                .unwrap()
+                .code,
+            "service_not_ready"
+        );
+        assert_eq!(
+            invocations
+                .native_comment(&engine, &Json::Null)
+                .err()
+                .unwrap()
+                .code,
+            "service_not_ready"
+        );
+        assert_eq!(
+            invocations
+                .schedule(&engine, &Json::Null)
+                .err()
+                .unwrap()
+                .code,
+            "service_not_ready"
+        );
+        assert_eq!(
+            invocations
+                .recover_operation(&engine, &"other".into())
+                .err()
+                .unwrap()
+                .code,
+            "service_not_ready"
+        );
+        assert_eq!(
+            invocations.recover_publication(&engine).err().unwrap().code,
+            "service_not_ready"
+        );
+        let mut driver = Box::pin(executor.drive(execution_executor.drive(stop)));
+        poll_fn(|cx| {
+            assert!(driver.as_mut().poll(cx).is_pending());
+            assert_eq!(owner_gate.entered.load(Ordering::SeqCst), 1);
+            assert_eq!(program.calls.get(), 0);
+            Poll::Ready(())
+        })
+        .await;
+        drop(observer);
+        owner_gate.release();
+        poll_fn(|cx| {
+            assert!(driver.as_mut().poll(cx).is_pending());
+            if execution_gate.entered.load(Ordering::SeqCst) == 1 {
+                assert_eq!(program.calls.get(), 1);
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+        execution_gate.release();
+        driver.await;
+        execution.settled().await;
+        assert_eq!(program.calls.get(), 1);
+        assert!(
+            replay.steps.lock().unwrap().is_empty(),
+            "{method}: unused source effects"
+        );
+        assert!(execution_executor.work.borrow().is_empty());
+    }
+}

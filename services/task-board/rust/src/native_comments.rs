@@ -1,18 +1,90 @@
 //! Mirror the native owner's exact request/answer identity into the ticket.
 //! This does not answer native inputs or confer native execution authority.
-use crate::native_inspector::{InspectionStore, management_read};
+use crate::{
+    evidence_bytes::{BlobStore, ChunkKey},
+    native_inspector::{InspectionStore, management_read},
+    operations::Document,
+    read_evidence::ReadEvidenceStore,
+};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     hash::hash_json,
     json::{object_entries, stringify, try_js_string},
     limits::MANAGEMENT_FRAME_BYTES,
 };
+use ivy_sdk::tools::ToolClients;
+use std::future::Future;
 
 #[allow(async_fn_in_trait)]
 pub trait NativeCommentStore: InspectionStore {
     /// The engine supplies normal TaskBoard validation, ownership, durable
     /// operation identity and publication. Uncertain outcomes remain retained.
     async fn native_comment(&self, request: &Json) -> IvyResult<()>;
+}
+/// Keep mirroring reads on the admitted inspection journal and publication on
+/// the current engine's retained native-comment admission path. The callback
+/// must supply that path; it is not a direct store-write or legacy policy default.
+pub struct NativeCommentJournal<'a, S, W> {
+    pub inspection: &'a S,
+    pub native_comment: W,
+}
+impl<S: BlobStore<Pin = Json, Error = IvyError>, W> BlobStore for NativeCommentJournal<'_, S, W> {
+    type Pin = Json;
+    type Error = IvyError;
+    fn save(&self, key: ChunkKey, name: &str, parent: &JsString, bytes: &[u8]) -> IvyResult<Json> {
+        self.inspection.save(key, name, parent, bytes)
+    }
+    fn read(&self, key: ChunkKey, pin: &Json, parent: &JsString) -> IvyResult<Vec<u8>> {
+        self.inspection.read(key, pin, parent)
+    }
+}
+impl<S: ReadEvidenceStore, W> ReadEvidenceStore for NativeCommentJournal<'_, S, W> {
+    fn validate(&self, definition: &str, value: &Json) -> IvyResult<()> {
+        self.inspection.validate(definition, value)
+    }
+    async fn read_document(&self, key: &str, address: &Json, primary: bool) -> IvyResult<Document> {
+        self.inspection.read_document(key, address, primary).await
+    }
+    async fn write_document(
+        &self,
+        key: &str,
+        value: &Json,
+        mutation: &str,
+        destination: &Json,
+    ) -> IvyResult<Json> {
+        self.inspection
+            .write_document(key, value, mutation, destination)
+            .await
+    }
+}
+impl<S: InspectionStore, W> InspectionStore for NativeCommentJournal<'_, S, W> {
+    async fn verify_owner(&self) -> IvyResult<()> {
+        self.inspection.verify_owner().await
+    }
+    async fn named_document(
+        &self,
+        key: &str,
+        name: &str,
+        parent: &JsString,
+    ) -> IvyResult<Option<Document>> {
+        self.inspection.named_document(key, name, parent).await
+    }
+    fn tools(&self) -> &ToolClients {
+        self.inspection.tools()
+    }
+    fn principal_id(&self) -> JsString {
+        self.inspection.principal_id()
+    }
+    fn now(&self) -> JsString {
+        self.inspection.now()
+    }
+}
+impl<S: InspectionStore, W: Fn(Json) -> F, F: Future<Output = IvyResult<Json>>> NativeCommentStore
+    for NativeCommentJournal<'_, S, W>
+{
+    async fn native_comment(&self, request: &Json) -> IvyResult<()> {
+        (self.native_comment)(request.clone()).await.map(|_| ())
+    }
 }
 fn field<'a>(v: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
