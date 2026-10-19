@@ -84,6 +84,52 @@ pub async fn retained_bootstrap_plans(config: IvyJson) -> IvyResult<Vec<IvyJson>
         Ok(plans)
     }).await.map_err(|_| IvyError::internal())?
 }
+pub async fn retain_bootstrap_plan(plan: &IvyJson, job_launcher: std::path::PathBuf) -> IvyResult<()> {
+    validate_host("BootstrapPlan", plan)?;
+    if let Some(scope) = plan.get("linuxResources").filter(|value| truthy(value)) {
+        linux_resources::validate_linux_resource_scope(scope, Some(&plan.required("installationId")?.as_str()?))?;
+    }
+    let root = crate::config::path_value(plan.required("runtimeRoot")?)?.join("bootstrap-plans");
+    let path = root.join(format!("{}.json", &hash_json(plan)?[7..]));
+    if !crate::backup_files::exists(&root).await? { crate::backup_files::private_directory(root, job_launcher).await?; }
+    if crate::backup_files::exists(&path).await? {
+        require(hash_json(&crate::config::json_file(path, crate::config::CONFIGURATION_BYTES).await?)? == hash_json(plan)?, "storage_invalid", "Retained bootstrap plan changed.")
+    } else { crate::config::atomic_json(path, plan.clone()).await }
+}
+
+/// Publish only while all bootstrap owners are stopped. Each protected launch
+/// file selects the same exact release as its OS definition.
+pub async fn publish_bootstrap_instance_configurations(plan: &IvyJson, config: &IvyJson, journal: &crate::journal::HostJournal) -> IvyResult<()> {
+    for process in plan.required("processes")?.as_array().ok_or_else(IvyError::internal)? {
+        let Some(path) = process.get("configPath").filter(|value| truthy(value)) else { continue; };
+        let instance = journal.instance(&process.required("instanceId")?.as_str()?).await?;
+        let candidate = journal.candidate(&process.get("candidateId").filter(|value| !value.is_null()).unwrap_or(plan.required("candidateId")?).as_str()?).await?;
+        let manifest = journal.manifest(&candidate.required("candidateId")?.as_str()?).await?;
+        let paths = crate::layout::service_paths(config, &instance)?;
+        let component = instance.required("componentId")?;
+        let mut settings = instance.required("settings")?.clone();
+        if component == &"agent-manager".into() {
+            let context = crate::host_config::HostContext::current()?;
+            settings = crate::layout::agent_manager_account_settings(&settings, &context.account_home, context.paths.style)?;
+        } else if ["host-executor", "service-manager"].iter().any(|name| component == &IvyJson::from(*name)) {
+            if settings.get("hostConfigPath").is_none_or(|value| value.is_null()) {
+                settings.insert("hostConfigPath", crate::layout::host_configuration_path_for_style(config, Style::native())?);
+            }
+        }
+        let mut value = IvyJson::object([
+            ("schemaVersion", IvyJson::Number(1.0)), ("instanceId", instance.required("instanceId")?.clone()),
+            ("serviceNodeId", instance.required("serviceNodeId")?.clone()), ("componentId", component.clone()),
+            ("hostId", config.required("hostId")?.clone()), ("publicBaseUrl", config.required("publicBaseUrl")?.clone()),
+            ("dataRoot", paths.required("data")?.clone()), ("workRoot", paths.required("work")?.clone()), ("logsRoot", paths.required("logs")?.clone()),
+            ("artifactRoot", candidate.required("artifactRoot")?.clone()), ("buildId", candidate.required("buildId")?.clone()),
+            ("version", manifest.required("version")?.clone()), ("settings", settings),
+        ]);
+        if let Some(credential) = instance.get("credential").filter(|value| truthy(value)) { value.insert("credential", credential.clone()); }
+        validate_host("InstanceConfig", &value)?;
+        crate::config::atomic_json(crate::config::path_value(path)?, value).await?;
+    }
+    Ok(())
+}
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())

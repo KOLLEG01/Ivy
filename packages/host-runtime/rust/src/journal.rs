@@ -92,6 +92,17 @@ impl HostJournal {
         let state = self.state.clone();
         internal(tokio::task::spawn_blocking(move || { internal(state.lock())?.take(); Ok(()) }).await)?
     }
+    // Only a dedicated, unshared maintenance handle may span async OS/file work
+    // with this transaction open. It serializes other SQLite lifecycle writers.
+    pub(crate) async fn begin_maintenance(&self) -> IvyResult<()> {
+        self.with(|s| internal(s.db.execute_batch("BEGIN IMMEDIATE"))).await
+    }
+    pub(crate) async fn commit_maintenance(&self) -> IvyResult<()> {
+        self.with(|s| internal(s.db.execute_batch("COMMIT"))).await
+    }
+    pub(crate) async fn rollback_maintenance(&self) -> IvyResult<()> {
+        self.with(|s| if s.db.is_autocommit() { Ok(()) } else { internal(s.db.execute_batch("ROLLBACK")) }).await
+    }
     pub async fn config(&self) -> IvyResult<IvyJson> { self.with(|s| Ok(s.config.clone())).await }
     pub async fn storage_format(&self) -> IvyResult<f64> {
         self.with(|s| internal(s.db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))).map(|value| value as f64)).await

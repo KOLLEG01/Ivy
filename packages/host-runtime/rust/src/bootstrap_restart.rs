@@ -66,12 +66,13 @@ fn options(job_launcher: PathBuf) -> exec_file::FileOptions {
         ..Default::default()
     }
 }
-impl BootstrapRestartOs for NativeBootstrapRestartOs {
-    fn inspect(
+impl NativeBootstrapRestartOs {
+    pub(crate) fn call(
         &self,
-        plans: Vec<IvyJson>,
+        action: &'static str,
+        data: IvyJson,
         distribution: PathBuf,
-    ) -> BoxFuture<'static, IvyResult<Vec<IvyJson>>> {
+    ) -> BoxFuture<'static, IvyResult<IvyJson>> {
         let helper = self.job_launcher.clone();
         Box::pin(async move {
             let command = exec_file::FileCommand {
@@ -96,10 +97,7 @@ impl BootstrapRestartOs for NativeBootstrapRestartOs {
                 maximum_buffer_bytes: 2 * 1024 * 1024,
             };
             let input = json::stringify(
-                &IvyJson::object([
-                    ("action", "inspect".into()),
-                    ("data", IvyJson::object([("plans", IvyJson::Array(plans))])),
-                ]),
+                &IvyJson::object([("action", action.into()), ("data", data)]),
                 usize::MAX,
             )?
             .into_bytes();
@@ -129,9 +127,24 @@ impl BootstrapRestartOs for NativeBootstrapRestartOs {
                         .ok_or_else(invalid)?,
                 ));
             }
-            result
-                .get("value")
-                .and_then(IvyJson::as_array)
+            Ok(result.get("value").cloned().unwrap_or(IvyJson::Null))
+        })
+    }
+}
+impl BootstrapRestartOs for NativeBootstrapRestartOs {
+    fn inspect(
+        &self,
+        plans: Vec<IvyJson>,
+        distribution: PathBuf,
+    ) -> BoxFuture<'static, IvyResult<Vec<IvyJson>>> {
+        let call = self.call(
+            "inspect",
+            IvyJson::object([("plans", IvyJson::Array(plans))]),
+            distribution,
+        );
+        Box::pin(async move {
+            call.await?
+                .as_array()
                 .map(<[IvyJson]>::to_vec)
                 .ok_or_else(IvyError::internal)
         })

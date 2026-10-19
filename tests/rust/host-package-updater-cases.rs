@@ -117,16 +117,16 @@ impl Clock for Fixed {
         Instant::now()
     }
 }
-fn job() -> PathBuf {
+pub(super) fn job() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ivy-job"))
 }
-fn node() -> NodeRuntime {
+pub(super) fn node() -> NodeRuntime {
     NodeRuntime {
         executable: PathBuf::from("unused-intentional-node"),
         version: "24.18.0".into(),
     }
 }
-fn instance(id: &str, component: &str, enabled: bool) -> J {
+pub(super) fn instance(id: &str, component: &str, enabled: bool) -> J {
     J::object([
         ("instanceId", id.into()),
         ("componentId", component.into()),
@@ -136,17 +136,21 @@ fn instance(id: &str, component: &str, enabled: bool) -> J {
         ("settings", empty()),
     ])
 }
-struct Fixture {
-    root: ServiceFixture,
-    config: J,
-    pairs: Vec<J>,
-    installed: Vec<J>,
-    journal: HostJournal,
+pub(super) struct Fixture {
+    pub(super) root: ServiceFixture,
+    pub(super) config: J,
+    pub(super) pairs: Vec<J>,
+    pub(super) installed: Vec<J>,
+    pub(super) journal: HostJournal,
 }
 impl Fixture {
-    async fn new(instances: Vec<J>) -> Self {
+    pub(super) async fn new(instances: Vec<J>) -> Self {
+        Self::with_node(instances, "fixture-node").await
+    }
+    pub(super) async fn with_node(instances: Vec<J>, executable: &str) -> Self {
         let root = ServiceFixture::new();
         let mut config = host_configuration(&root);
+        config.insert("executables", J::object([("node", executable.into())]));
         config.insert("instances", J::Array(instances));
         config.insert(
             "packageUpdates",
@@ -165,10 +169,10 @@ impl Fixture {
             journal,
         }
     }
-    fn config_path(&self) -> PathBuf {
+    pub(super) fn config_path(&self) -> PathBuf {
         self.root.0.join("host.json")
     }
-    async fn release(&mut self, component: &str, version: &str, seed: &str) -> J {
+    pub(super) async fn release(&mut self, component: &str, version: &str, seed: &str) -> J {
         let build = hash(seed);
         let root = self
             .root
@@ -285,7 +289,7 @@ impl Fixture {
         self.pairs.push(pair.clone());
         pair
     }
-    async fn install(&mut self, instance: &str, pair: &J) -> J {
+    pub(super) async fn install(&mut self, instance: &str, pair: &J) -> J {
         let candidate = pair.required("candidate").unwrap();
         let value = J::object([
             ("instanceId", instance.into()),
@@ -751,7 +755,7 @@ async fn package_updater_replays_partial_acceptance_without_duplicate_or_revised
     );
 }
 
-fn comparator(values: Vec<J>) -> artifact::FileCompare {
+pub(super) fn comparator(values: Vec<J>) -> artifact::FileCompare {
     let sorted = oracle(&J::object([
         ("kind", "collation".into()),
         ("values", J::Array(values)),
