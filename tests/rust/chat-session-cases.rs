@@ -149,7 +149,7 @@ impl Probe {
             {
                 let state = self.state.lock().unwrap();
                 if state.stamp {
-                    turn.insert("completedAt", 11.0.into());
+                    turn.insert("completedAt", Json::Number(11.0));
                 }
                 if let Some(id) = &state.turn {
                     turn.insert("id", Json::String(id.clone()));
@@ -617,7 +617,7 @@ async fn original_bound_session_direct_input_and_verified_history_match() {
         drop(native);
         journal.close().await.unwrap();
     }
-    assert_eq!(actual_rows.len(), 64);
+    assert_eq!(actual_rows.len(), 68);
 }
 
 struct SdkClient {
@@ -697,19 +697,19 @@ impl ivy_sdk::rpc::RpcClient for SdkClient {
                         ("serviceNodeId", "native-agent".into()),
                         ("hostId", "native-host".into()),
                         ("epoch", "epoch".into()),
-                        ("pid", 42.0.into()),
+                        ("pid", Json::Number(42.0)),
                         ("state", "ready".into()),
                         ("observedAt", "2026-01-02T03:04:05.006Z".into()),
                         ("code", Json::Null),
                         ("initialized", Json::Object(vec![])),
-                        ("pendingInputs", 0.0.into()),
+                        ("pendingInputs", Json::Number(0.0)),
                         (
                             "operations",
                             Json::object([
-                                ("retained", 0.0.into()),
-                                ("maximum", 100.0.into()),
-                                ("bytes", 0.0.into()),
-                                ("maximumBytes", 1048576.0.into()),
+                                ("retained", Json::Number(0.0)),
+                                ("maximum", Json::Number(100.0)),
+                                ("bytes", Json::Number(0.0)),
+                                ("maximumBytes", Json::Number(1048576.0)),
                             ]),
                         ),
                         ("observedMethods", Json::Array(vec![])),
@@ -729,7 +729,7 @@ impl ivy_sdk::rpc::RpcClient for SdkClient {
                         ("params", f(args, "params").clone()),
                     ]))?;
                     for (key, value) in [
-                        ("schemaVersion", 1.0.into()),
+                        ("schemaVersion", Json::Number(1.0)),
                         ("serviceNodeId", "native-agent".into()),
                         (
                             "callerPrincipalId",

@@ -713,7 +713,7 @@ impl WhatsAppNative {
         let params = Json::object([
             ("threadId", Json::String(thread_id.clone())),
             ("cursor", cursor),
-            ("limit", 1.0.into()),
+            ("limit", Json::Number(1.0)),
             ("sortDirection", "desc".into()),
             ("itemsView", "notLoaded".into()),
         ]);
@@ -791,19 +791,23 @@ impl WhatsAppNative {
                     .items
                     .into_iter()
                     .map(|item| -> IvyResult<Json> {
+                        let kind = item
+                            .get("type")
+                            .map(try_js_string)
+                            .transpose()?
+                            .unwrap_or_else(|| "undefined".into());
                         if ["userMessage", "steeringUserMessage", "agentMessage"]
                             .iter()
-                            .any(|kind| {
-                                try_js_string(f(&item, "type")).ok().as_ref()
-                                    == Some(&JsString::from(*kind))
-                            })
+                            .any(|expected| kind == JsString::from(*expected))
                         {
                             Ok(item)
                         } else {
-                            Ok(Json::object([
-                                ("id", item.required("id")?.clone()),
-                                ("type", item.required("type")?.clone()),
-                            ]))
+                            let mut projected =
+                                Json::object([("id", item.required("id")?.clone())]);
+                            if let Some(kind) = item.get("type") {
+                                projected.insert("type", kind.clone());
+                            }
+                            Ok(projected)
                         }
                     })
                     .collect::<IvyResult<Vec<_>>>()?,

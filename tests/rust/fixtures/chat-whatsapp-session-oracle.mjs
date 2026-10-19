@@ -83,6 +83,7 @@ add('history-no-completion-time',[{op:'page'},{op:'page'}],{turn:{...turn,comple
 add('history-stamp-change',[{op:'page'},{op:'stamp'},{op:'page'}]);
 add('history-epoch-change',[{op:'page'},{op:'epoch'},{op:'page'}]);
 add('history-item-pages',[{op:'page'}],{itemPages:[{data:[item],nextCursor:'next'},{data:[{id:'assistant',type:'agentMessage',text:'retained text'},{id:'tool',type:'commandExecution',command:'hidden',output:'hidden'}],nextCursor:null}]});
+for(const item of [{id:'no-type',extra:'omit'},{id:'null-type',type:null,extra:'omit'},{id:'array-type',type:['agentMessage'],text:'retained'},{id:'coercion-refused',type:{toString:false}}])add('history-type-'+JSON.stringify(item),[{op:'page'}],{itemPages:[{data:[item],nextCursor:null}]});
 add('history-fallback',[{op:'page'}],{itemReplies:[{error:{code:-32601,message:'unsupported'}}]});
 add('history-fallback-changed',[{op:'page'}],{itemReplies:[{error:{code:-32601,message:'unsupported'}}],fullStatus:'failed'});
 add('history-item-error',[{op:'page'}],{itemReplies:[error('items refused')]});
