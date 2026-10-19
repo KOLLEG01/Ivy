@@ -299,6 +299,7 @@ impl<S, L: CategoryLocale, X> CategoryProjection<'_, '_, S, L, X> {
             },
         );
     }
+    /// Stop admitting owner requests before awaiting this drain during shutdown.
     pub async fn settled(&self) {
         poll_fn(|cx| {
             let mut state = self.state.borrow_mut();

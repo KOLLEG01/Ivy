@@ -16,7 +16,7 @@ use std::{
     pin::Pin,
     process::Command,
     sync::{Arc, Mutex, OnceLock},
-    task::Poll,
+    task::{Poll, Waker},
 };
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -96,10 +96,59 @@ impl Replay {
         }
     }
 }
-struct Client(Arc<Replay>);
+#[derive(Default)]
+struct GateState {
+    started: bool,
+    open: bool,
+    waiters: Vec<Waker>,
+}
+#[derive(Default)]
+struct Gate(Mutex<GateState>);
+impl Gate {
+    fn update(&self, release: bool) {
+        let waiters = {
+            let mut state = self.0.lock().unwrap();
+            state.started = true;
+            state.open |= release;
+            std::mem::take(&mut state.waiters)
+        };
+        for w in waiters {
+            w.wake();
+        }
+    }
+    async fn wait(&self, started: bool) {
+        poll_fn(|cx| {
+            let mut state = self.0.lock().unwrap();
+            if if started { state.started } else { state.open } {
+                Poll::Ready(())
+            } else {
+                if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
+                    state.waiters.push(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+struct Client(Arc<Replay>, Arc<Gate>);
 impl RpcClient for Client {
     fn request<'a>(&'a self, m: &'a str, a: Json, _: RequestOptions) -> RequestFuture<'a> {
-        Box::pin(async move { self.0.call("rpc", [m.into(), a]) })
+        Box::pin(async move {
+            let pause = self
+                .0
+                .steps
+                .lock()
+                .unwrap()
+                .front()
+                .is_some_and(|v| f(v, "pause") == &Json::Bool(true));
+            let reply = self.0.call("rpc", [m.into(), a]);
+            if pause {
+                self.1.update(false);
+                self.1.wait(false).await;
+            }
+            reply
+        })
     }
 }
 struct World<'a> {
@@ -157,6 +206,26 @@ impl<'a> ReconcileExecutor<'a> for Executor<'a> {
 }
 impl Executor<'_> {
     async fn drive<F: Future>(&self, f: F) -> F::Output {
+        self.run(f, true).await
+    }
+    async fn until<F: Future>(&self, f: F) -> F::Output {
+        self.run(f, false).await
+    }
+    async fn drain<F: Future<Output = ()>>(&self, f: F) {
+        let mut f = Box::pin(f);
+        self.drive(poll_fn(|cx| {
+            let result = f.as_mut().poll(cx);
+            if result.is_ready() {
+                assert!(
+                    self.work.borrow().is_empty(),
+                    "Drain resolved before worker exit"
+                );
+            }
+            result
+        }))
+        .await;
+    }
+    async fn run<F: Future>(&self, f: F, drain: bool) -> F::Output {
         let mut f = Box::pin(f);
         let mut output = None;
         poll_fn(|cx| {
@@ -164,6 +233,9 @@ impl Executor<'_> {
                 if let Poll::Ready(v) = f.as_mut().poll(cx) {
                     output = Some(v);
                 }
+            }
+            if output.is_some() && !drain {
+                return Poll::Ready(output.take().unwrap());
             }
             let mut tasks = std::mem::take(&mut *self.work.borrow_mut());
             let mut pending = VecDeque::new();
@@ -196,10 +268,11 @@ async fn category_projection_matches_original_event_snapshot_cache_and_queued_wo
             ),
             name: s(row, "name").clone(),
         });
+        let gate = Arc::new(Gate::default());
         let world = World {
             row,
             root: RefCell::new(f(f(row, "initial"), "root").as_js_string().cloned()),
-            client: Client(replay.clone()),
+            client: Client(replay.clone(), gate.clone()),
             replay: replay.clone(),
         };
         let executor = Executor::default();
@@ -229,7 +302,7 @@ async fn category_projection_matches_original_event_snapshot_cache_and_queued_wo
                 }
                 "set" | "clearOptions" => outcome(Ok(Json::Null)),
                 "restart" => {
-                    executor.drive(projection.settled()).await;
+                    executor.drain(projection.settled()).await;
                     if step.get("root").is_some() {
                         *world.root.borrow_mut() = f(step, "root").as_js_string().cloned();
                     }
@@ -244,8 +317,36 @@ async fn category_projection_matches_original_event_snapshot_cache_and_queued_wo
                     outcome(Ok(Json::Null))
                 }
                 "drain" => {
-                    executor.drive(projection.settled()).await;
+                    executor.drain(projection.settled()).await;
                     outcome(Ok(Json::Null))
+                }
+                "paused" | "pausedDrop" => {
+                    let request = projection.categories();
+                    executor.until(gate.wait(true)).await;
+                    projection.observe(
+                        s(step, "objectId"),
+                        f(step, "revision").as_f64().unwrap(),
+                        f(step, "task"),
+                    );
+                    let denial = outcome(projection.revalidate(&"work".into()).await);
+                    let mut settled = Box::pin(projection.settled());
+                    let drain_pending =
+                        poll_fn(|cx| Poll::Ready(settled.as_mut().poll(cx).is_pending())).await;
+                    assert!(drain_pending, "Drain resolved during pending transport");
+                    let mut fields = vec![
+                        ("denial", denial),
+                        ("drainWasPending", Json::Bool(drain_pending)),
+                    ];
+                    if s(step, "kind") == &JsString::from("pausedDrop") {
+                        drop(request);
+                        gate.update(true);
+                        executor.drain(settled).await;
+                    } else {
+                        gate.update(true);
+                        fields.push(("result", outcome(executor.drive(request).await)));
+                        executor.drain(settled).await;
+                    }
+                    outcome(Ok(Json::object(fields)))
                 }
                 "busy" => {
                     let first = projection.categories();
@@ -279,7 +380,7 @@ async fn category_projection_matches_original_event_snapshot_cache_and_queued_wo
             };
             outcomes.push(r);
         }
-        executor.drive(projection.settled()).await;
+        executor.drain(projection.settled()).await;
         let actual = Json::object([("outcomes", Json::Array(outcomes))]);
         assert_eq!(
             hash_json(&actual).unwrap(),
