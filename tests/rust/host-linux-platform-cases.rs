@@ -19,6 +19,8 @@ use std::{
 use tokio::sync::Notify;
 #[path = "host-systemd-cases.rs"]
 mod systemd_cases;
+#[path = "host-docker-cases.rs"]
+mod docker_cases;
 static CORPUS: Mutex<()> = Mutex::new(());
 fn v(text: &str) -> IvyJson {
     json::parse(text, usize::MAX).unwrap()
