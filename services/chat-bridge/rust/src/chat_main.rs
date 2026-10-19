@@ -485,7 +485,7 @@ impl<'a> ChatMain<'a> {
                     "Automatically create Main for the first incoming message.".into(),
                 ),
             ]);
-            let created = async {
+            let created: IvyResult<Option<Json>> = async {
                 let created = self.create(caller, &request).await?;
                 if state(&created, "phase", &["succeeded"])
                     && null(&created, "outcome").get("action") == Some(&"createMain".into())
