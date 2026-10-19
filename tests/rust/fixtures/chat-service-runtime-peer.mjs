@@ -12,7 +12,7 @@ const result=async f=>{try{return{value:await f()??null};}catch(e){return{error:
 const until=async(f,label)=>{for(let i=0;i<2000;i++){const value=await f();if(value)return value;await delay(5);}throw Error('Timed out: '+label);};
 let selected,sockets=new Map(),pending=new Map(),requestId=0;
 const cases=Object.keys(starting).filter(v=>/^0\./.test(v)).map(version=>({label:'catalog-'+version,version,transport:version!=='0.154.0'}));
-for(const label of ['initial-health-failure','queued-health-failure','diagnostic-read-failure','transport-close-failure','held-idempotent-close','control-close','reconnect-held-retirement','held-ready-health','held-control-poll'])cases.push({label,version:'0.154.0',transport:true});
+for(const label of ['initial-health-failure','queued-health-failure','diagnostic-read-failure','transport-close-failure','held-idempotent-close','control-close','reconnect-held-retirement','held-ready-health','held-control-poll','transport-attach-failure'])cases.push({label,version:'0.154.0',transport:true});
 const corpus={now,instructions,noticeInstructions,cases,boundary:'Unchanged original main.ts, actual ServiceClient start/stop/reconnect, SDK registry/provider dispatch, SQLite, worker and diagnostic owners execute. Only Host configuration/health and account transport lifecycle are probed. Concurrent pure RPC ordering/counts are not compared: exact request/response sets, distinct heartbeat observations and ordered handshakes/health writes are. No Host-file, native WhatsApp account, installed or cross-platform acceptance.'};
 const wss=new WebSocketServer({host:'127.0.0.1',port:0,perMessageDeflate:false,maxPayload:32*1024*1024});
 await once(wss,'listening');
@@ -68,7 +68,7 @@ if(process.argv[2]==='peer'){
  for(const spec of cases){
   begin(spec);const root=mkdtempSync(join(tmpdir(),'ivy-chat-service-original-')),seed=starting[spec.version];
   spec.definition=structuredClone(seed.definition);spec.database=seed.database;writeFileSync(join(root,'chat-bridge.sqlite'),Buffer.from(seed.database,'base64'));
-  const health=[],events=[];let healthFailed=false,control=false,closeCount=0,releaseClose,releaseSettled,releaseReady,releaseControl,controlFinished=0;
+  const health=[],events=[];let healthFailed=false,attachFailed=false,control=false,closeCount=0,releaseClose,releaseSettled,releaseReady,releaseControl,controlFinished=0;
   let closeGate=Promise.resolve(),settledGate=Promise.resolve();
   const readyGate=spec.label==='held-ready-health'?new Promise(resolve=>releaseReady=resolve):Promise.resolve();
   const controlGate=spec.label==='held-control-poll'?new Promise(resolve=>releaseControl=resolve):Promise.resolve();
@@ -76,7 +76,7 @@ if(process.argv[2]==='peer'){
    async write(ready,details,generation){health.push({ready,details,generation:generation??null});if(ready)await readyGate;
     if(!healthFailed&&(spec.label==='initial-health-failure'||spec.label==='queued-health-failure'&&details==='Hive ChatBridge connection is not ready.')){healthFailed=true;throw new IvyError('fixture_health_unavailable','Original health write is unavailable.');}},
    async control(){events.push('control');await controlGate;controlFinished++;return control;},
-   transport:{transport:{state:'fixture-connected'},journal:{set(k,v){events.push({created:k,value:v});}},start(){events.push('start');},attach(v){events.push({attach:v?.main.native.owner.generation??null});},changed(){events.push('changed');},notification(){events.push('notification');},async settled(){events.push('settled');await settledGate;},async close(){closeCount++;events.push('close');await closeGate;if(spec.label==='transport-close-failure')throw new IvyError('fixture_transport_close','Original transport close failed.','unknown');}}
+   transport:{transport:{state:'fixture-connected'},journal:{set(k,v){events.push({created:k,value:v});}},start(){events.push('start');},attach(v){events.push({attach:v?.main.native.owner.generation??null});if(v&&spec.label==='transport-attach-failure'&&!attachFailed){attachFailed=true;throw new IvyError('fixture_transport_attach','Original transport attachment failed.','unknown');}},changed(){events.push('changed');},notification(){events.push('notification');},async settled(){events.push('settled');await settledGate;},async close(){closeCount++;events.push('close');await closeGate;if(spec.label==='transport-close-failure')throw new IvyError('fixture_transport_close','Original transport close failed.','unknown');}}
   };globalThis[key]=probe;
   let app;spec.started=await result(async()=>{app=await startChatBridge('isolated-fixture-config');});
   if(app){

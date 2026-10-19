@@ -71,6 +71,9 @@ for(const failure of ['socketClose','authClose','lockClose'])add('close-failure-
 add('close-auth-failure-overrides-socket-and-skips-lock',[{op:'close'},{op:'close'}],{calls:{socketClose:[err('socket')],authClose:[err('auth')],lockClose:[err('lock')]}});
 add('close-lock-failure-overrides-socket',[{op:'close'}],{calls:{socketClose:[err('socket')],lockClose:[err('lock')]}});
 add('status-socket-error-wins-over-lane-error',[{op:'run',lane:'output'},{op:'status'}],{calls:{flush:[err('lane')]},socket:{errorCode:'socket'}});
+add('immediately-ready-output-burst',[{op:'runMany',lane:'output',count:3}],{calls:{flush:[{ready:true,value:null}]}});
+add('immediately-ready-command-burst',[{op:'runMany',lane:'control',count:3}],{rows:[row('cmd','/help')],calls:{'A.command':[{ready:true,value:null}]}});
+add('immediately-ready-error-recovery',[{op:'runMany',lane:'output',count:3},{op:'status'}],{calls:{flush:[{ready:true,value:err('ready_failure')},{ready:true,value:null}]}});
 
 let ctx;const originalDate=Date;globalThis.Date=class extends originalDate{constructor(...args){super(...(args.length?args:[ctx?.now??1000]));}static now(){return ctx?.now??1000;}};
 globalThis.setInterval=(fn,ms)=>{const name=['control','input','listener','output','status','read-receipts','activity','retention'][ctx.timers.length%8];const timer={name,ms,fn,cleared:false};ctx.timers.push(timer);ctx.emit('timer',name,ms);return timer;};
@@ -84,7 +87,7 @@ for(const spec of specs){
  const unwrap=value=>{if(value?.throw)throw new IvyError(value.throw.code,value.throw.message,value.throw.outcome);return clone(value);};
  const take=(key,fallback)=>{const values=current.calls?.[key]??[fallback],at=counts.get(key)??0;counts.set(key,at+1);return clone(values[Math.min(at,values.length-1)]);};
  const getGate=name=>{let gate=gates.get(name);if(!gate){let release;const promise=new Promise(resolve=>{release=resolve;});gate={promise,release};gates.set(name,gate);}return gate;};
- const call=async(key,args=[],fallback=null)=>{emit(key,...args);const entry=take(key,fallback);if(entry?.gate)await getGate(entry.gate).promise;else await new Promise(resolve=>ready.push(resolve));return unwrap(entry&&Object.hasOwn(entry,'value')?entry.value:entry);};
+ const call=async(key,args=[],fallback=null)=>{emit(key,...args);const entry=take(key,fallback);if(entry?.gate)await getGate(entry.gate).promise;else if(!entry?.ready)await new Promise(resolve=>ready.push(resolve));return unwrap(entry&&Object.hasOwn(entry,'value')?entry.value:entry);};
  // Fully drain language continuations between explicitly ordered I/O completions.
  const drainReady=async()=>{for(let i=0;i<10000;i++){await drain();if(!ready.length)return;ready.shift()();}throw Error('Runtime probe completion limit');};
  const sync=(key,args=[],fallback=null)=>{emit(key,...args);return unwrap(take(key,fallback));};
@@ -109,6 +112,7 @@ for(const spec of specs){
   case'input':await runtime.input();break;case'control':await runtime.control();break;case'activity':await runtime.activity();break;case'status':await runtime.status();break;
   case'retention':await invoke('retention')();break;
   case'run':runtime.run(action.lane,invoke(action.lane));break;
+  case'runMany':for(let i=0;i<action.count;i++)runtime.run(action.lane,invoke(action.lane));break;
   case'notify':runtime.notification(action.frame);break;
   case'notifyMany':for(let i=0;i<action.count;i++)runtime.notification(frame('item/completed',{sequence:i+2,params:{threadId:'thread',index:i}}));break;
   case'attach':runtime.attach(action.id===null?null:make(action.id));break;

@@ -53,7 +53,7 @@ pub struct ChatHealth {
 /// lease; settled/close retain the transport's own journal and socket work.
 pub trait ChatTransport: Send + Sync {
     fn start(&self);
-    fn attach(&self, generation: Option<Arc<ChatGeneration>>);
+    fn attach(&self, generation: Option<Arc<ChatGeneration>>) -> IvyResult<()>;
     fn changed(&self);
     fn notification(&self, frame: &Json);
     fn state(&self) -> JsString;
@@ -306,7 +306,7 @@ impl Core {
         }
         self.retire_after_close(next.clone());
         if let Some(transport) = &self.transport {
-            transport.attach(Some(next.generation.clone()));
+            transport.attach(Some(next.generation.clone()))?;
         }
         Ok(())
     }
@@ -333,7 +333,7 @@ impl Core {
                 };
                 if detached {
                     if let Some(t) = &transport {
-                        t.attach(None);
+                        let _ = t.attach(None);
                     }
                 }
             }
@@ -415,7 +415,7 @@ impl Core {
         }
         if offline {
             if let Some(t) = &self.transport {
-                t.attach(None);
+                let _ = t.attach(None);
             }
             self.health.write(
                 false,

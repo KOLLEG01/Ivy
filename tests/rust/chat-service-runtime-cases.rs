@@ -15,7 +15,7 @@ use std::{
     path::Path,
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -27,6 +27,8 @@ use tokio::{
 };
 #[path = "chat-service-active-cases.rs"]
 mod active;
+#[path = "chat-wa-integration-cases.rs"]
+mod whatsapp;
 fn field<'a>(v: &'a Json, key: &str) -> &'a Json {
     v.required(key).unwrap()
 }
@@ -82,24 +84,27 @@ async fn until(mut predicate: impl FnMut() -> bool, label: &str) {
     }
     panic!("Timed out: {label}");
 }
-fn oracle() -> Json {
-    let out = Command::new("node")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
-        .args([
-            "tests/rust/fixtures/chat-service-runtime-peer.mjs",
-            "oracle",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if let Some(path) = std::env::var_os("IVY_CHAT_RUNTIME_ORACLE_CAPTURE") {
-        std::fs::write(path, &out.stdout).unwrap();
-    }
-    parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap()
+fn oracle() -> &'static Json {
+    static CORPUS: OnceLock<Json> = OnceLock::new();
+    CORPUS.get_or_init(|| {
+        let out = Command::new("node")
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+            .args([
+                "tests/rust/fixtures/chat-service-runtime-peer.mjs",
+                "oracle",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if let Some(path) = std::env::var_os("IVY_CHAT_RUNTIME_ORACLE_CAPTURE") {
+            std::fs::write(path, &out.stdout).unwrap();
+        }
+        parse(std::str::from_utf8(&out.stdout).unwrap(), usize::MAX).unwrap()
+    })
 }
 struct Peer {
     child: Child,
@@ -160,6 +165,7 @@ struct Probe {
     health: Mutex<Vec<Json>>,
     events: Mutex<Vec<Json>>,
     health_failed: AtomicBool,
+    attach_failed: AtomicBool,
     control: AtomicBool,
     closes: AtomicUsize,
     close_gate: Mutex<Option<watch::Receiver<bool>>>,
@@ -182,6 +188,7 @@ impl Probe {
             health: Mutex::new(vec![]),
             events: Mutex::new(vec![]),
             health_failed: AtomicBool::new(false),
+            attach_failed: AtomicBool::new(false),
             control: AtomicBool::new(false),
             closes: AtomicUsize::new(0),
             close_gate: Mutex::new(None),
@@ -244,12 +251,24 @@ impl ChatTransport for Probe {
     fn start(&self) {
         self.events.lock().unwrap().push("start".into());
     }
-    fn attach(&self, g: Option<Arc<ChatGeneration>>) {
+    fn attach(&self, g: Option<Arc<ChatGeneration>>) -> IvyResult<()> {
+        let has_generation = g.is_some();
         self.events.lock().unwrap().push(Json::object([(
             "attach",
             g.map(|g| Json::Number(g.generation() as f64))
                 .unwrap_or(Json::Null),
         )]));
+        if has_generation
+            && self.label == "transport-attach-failure"
+            && !self.attach_failed.swap(true, Ordering::SeqCst)
+        {
+            return Err(IvyError::new(
+                "fixture_transport_attach",
+                "Original transport attachment failed.",
+            )
+            .with_outcome(ivy_contracts::Outcome::Unknown));
+        }
+        Ok(())
     }
     fn changed(&self) {
         self.events.lock().unwrap().push("changed".into());

@@ -122,6 +122,9 @@ impl Probe {
         Box::pin(async move {
             self.emit(&key, args);
             let entry = self.take(&key, fallback);
+            if f(&entry, "ready").as_bool() == Some(true) {
+                return unwrap(entry.get("value").cloned().unwrap_or(entry));
+            }
             let mut gate = if let Some(name) = entry.get("gate") {
                 self.gate(&name.as_str()?)
             } else {
@@ -524,6 +527,11 @@ async fn apply(
         "status" => runtime.status().await?,
         "retention" => runtime.retention().await?,
         "run" => runtime.run(lane(&s(a, "lane"))),
+        "runMany" => {
+            for _ in 0..f(a, "count").as_f64().unwrap() as usize {
+                runtime.run(lane(&s(a, "lane")));
+            }
+        }
         "notify" => runtime.notification(f(a, "frame"))?,
         "notifyMany" => {
             for index in 0..f(a, "count").as_f64().unwrap() as usize {

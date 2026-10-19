@@ -132,13 +132,12 @@ enum Job {
     Work(RuntimeWork),
     PrepareListen(Arc<dyn RuntimeAttached>),
     Outbox(Arc<dyn RuntimeAttached>),
-    Failure(IvyError),
 }
 impl Job {
     fn name(&self) -> &'static str {
         match self {
             Self::Work(w) => w.name(),
-            Self::PrepareListen(_) | Self::Failure(_) => "listener",
+            Self::PrepareListen(_) => "listener",
             Self::Outbox(_) => "chat-outbox",
         }
     }
@@ -365,7 +364,6 @@ impl WhatsAppRuntime {
                 self.run(RuntimeWork::Output);
                 Ok(())
             }
-            Job::Failure(error) => Err(error),
             Job::Work(work) => match work {
                 RuntimeWork::Control => self.control().await,
                 RuntimeWork::Input => self.input().await,
@@ -415,11 +413,18 @@ impl WhatsAppRuntime {
         }
     }
     pub fn attach(&self, attached: Option<Arc<dyn RuntimeAttached>>) {
+        self.reset_notification_source();
+        self.install(attached);
+    }
+    fn reset_notification_source(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        state.errors.retain(|(key, _)| *key != "native-events");
+        state.last_sequence = 0.0;
+        state.last_epoch = None;
+    }
+    fn install(&self, attached: Option<Arc<dyn RuntimeAttached>>) {
         {
             let mut state = self.0.state.lock().unwrap();
-            state.errors.retain(|(key, _)| *key != "native-events");
-            state.last_sequence = 0.0;
-            state.last_epoch = None;
             state.attached = attached.clone();
             if attached.is_none() {
                 state.again.clear();
@@ -987,17 +992,13 @@ impl crate::runtime::ChatTransport for WhatsAppRuntime {
     fn start(&self) {
         WhatsAppRuntime::start(self)
     }
-    fn attach(&self, generation: Option<Arc<ChatGeneration>>) {
-        match generation {
-            None => WhatsAppRuntime::attach(self, None),
-            Some(generation) => match self.0.factory.create(generation) {
-                Ok(a) => WhatsAppRuntime::attach(self, Some(a)),
-                Err(error) => {
-                    WhatsAppRuntime::attach(self, None);
-                    self.run_job(Job::Failure(error));
-                }
-            },
-        }
+    fn attach(&self, generation: Option<Arc<ChatGeneration>>) -> IvyResult<()> {
+        self.reset_notification_source();
+        // Construction must finish before replacing the old attachment. The
+        // original constructor error rejects service reconciliation directly.
+        let attached = generation.map(|g| self.0.factory.create(g)).transpose()?;
+        self.install(attached);
+        Ok(())
     }
     fn changed(&self) {
         WhatsAppRuntime::changed(self)
