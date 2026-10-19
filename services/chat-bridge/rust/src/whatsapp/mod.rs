@@ -7,5 +7,6 @@ pub mod journal;
 pub mod journal_io;
 pub mod journal_owner;
 pub mod messages;
+pub mod native;
 pub mod output_chunks;
 pub mod sender;
