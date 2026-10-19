@@ -2,6 +2,7 @@ import {now,instructions,seeds,error,result} from './chat-native-evidence-oracle
 import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {join,basename} from 'node:path';
 import {tmpdir} from 'node:os';
+import {pathToFileURL} from 'node:url';
 import {DatabaseSync} from 'node:sqlite';
 import {buildInstructions} from '../../../tools/build/build-instructions.mjs';
 const {ChatStore,mutation}=await import('../../../services/chat-bridge/src/store.ts');
@@ -32,13 +33,13 @@ function matches(record,predicate){
  else if(predicate.field.startsWith('data:/')){value=record.content.value;for(const part of predicate.field.slice(6).split('/'))value=value?.[part.replaceAll('~1','/').replaceAll('~0','~')];}
  return predicate.op==='isNull'?value==null:JSON.stringify(value)===JSON.stringify(predicate.value);
 }
-function environment(seed,approvedAutoSend=false){
+export function environment(seed,approvedAutoSend=false,extension=null){
  const root=mkdtempSync(join(tmpdir(),'ivy-main-original-')),file=join(root,'chat-bridge.sqlite');writeFileSync(file,Buffer.from(seed.database,'base64'));
  let definition=clone(seed.definition),controls={epoch:'original-epoch',phase:'succeeded',...clone(seed.controls)},starts=seed.starts??0,store,main,ops,crash=null,closed=false;
  const records=clone(seed.records),journal=new Map(clone(seed.journal)),events=[],mutations=new Map(),receipts=new Map(),aliases=new Map(),selections=[];
  const source=checkedNativeContract(definition.nativePlan.nativeVersion),node={principalId:'chat-service',serviceName:'chat-bridge',connected:true,synced:true};
  const status=()=>({serviceNodeId:'owner',hostId:'synthetic-native',nativeVersion:source.catalog.version,nativeExecutableHash:source.catalog.nativeExecutableHash,catalogHash:source.catalogHash,epoch:controls.epoch,pid:42,state:'ready',observedAt:at,code:null,initialized:{},pendingInputs:0,operations:{retained:journal.size,maximum:100,bytes:0,maximumBytes:33554432},observedMethods:[]});
- const rpc=async(method,p)=>{
+ const baseRpc=async(method,p)=>{
   if(method==='system.status')return{runtimeEpoch:'chat'};
   if(method==='serviceNodes.get'){
    if(controls.ownerReadBudget!==undefined&&--controls.ownerReadBudget<0)throw new IvyError('fixture_recursion_budget','Bounded synthetic owner outage after original recovery recursion.','unknown');
@@ -87,8 +88,11 @@ function environment(seed,approvedAutoSend=false){
   }
   throw Error('Unexpected synthetic Main RPC '+method+' '+JSON.stringify(p));
  };
+ function context(){return{root,file,definition,controls,store,main,ops,records,journal,source,events};}
+ const rpc=(method,p)=>extension?.rpc?extension.rpc(method,p,context(),()=>baseRpc(method,p)):baseRpc(method,p);
  const client={async request(method,params){const event={method,params:clone(params)};events.push(event);
-  if(method==='tools.call'&&params.qualifiedName==='agent.invoke'){
+  const handled=await extension?.beforeRequest?.(method,params,event,context());
+  if(!handled&&method==='tools.call'&&params.qualifiedName==='agent.invoke'){
    const selected=await store.named('chat-bridge/main',mainName(definition));if(!selected?.value.pendingAction)throw Error('No retained Main claim before invoke');
    const op=await store.read('chat-bridge/operation',selected.value.pendingAction.objectId),call=await store.read('chat-bridge/native-call',op.value.nativeCall,op.pin.objectId);
    if(op.value.phase!=='applying'||call.value.operationId!==params.arguments.operationId||selected.value.queue.length)throw Error('Native invoke preceded its durable attachment');event.assertClaim=true;
@@ -113,6 +117,7 @@ function environment(seed,approvedAutoSend=false){
     return originalEnsure(caller,parentOperationId,role);
    };
   }
+  extension?.opened?.(context());
  }
  open();
  const createRequest=(label='create',caller='alice',expectedMainRevision=null)=>({action:'createMain',operationId:operation(label),expectedBridge:main.admission.expected(caller),expectedMainRevision,reason:'Explicit synthetic Main creation.'});
@@ -162,15 +167,17 @@ function environment(seed,approvedAutoSend=false){
    }
    case'constructor-store':{const other=new ChatStore(client,null);try{return new ChatMain(new ChatOperations(other,main.admission),main.native);}finally{other.close();}}
    case'constructor-definition':{const changed=new ChatAdmission({...definition,workspaceId:'foreign'});return new ChatMain(new ChatOperations(store,changed),main.native);}
-   default:throw Error('Unknown Main step '+s.action);
+   default:if(extension?.run)return extension.run(s,context());throw Error('Unknown Main step '+s.action);
   }
  }
  function openWithoutClosing(){store.close();open();}
  return{root,file,run,snapshot,createRequest,selections,get main(){return main;},get store(){return store;},get ops(){return ops;},get definition(){return definition;},setCrash(fn){crash=fn;},exportSeed(){store.close();closed=true;return{database:readFileSync(file).toString('base64'),definition:clone(definition),records:clone(records),journal:clone([...journal]),controls:clone(controls),starts};},close(){if(!closed)store.close();rmSync(root,{recursive:true,force:true});}};
 }
+export {now,instructions,noticeInstructions,starting,operation,clone,at,error,result};
 
 // Re-open exact original states rather than re-enacting a crash with different
 // writes. These copies retain the original IDs and protected aggregate revisions.
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
 for(const version of Object.keys(starting)){
  const e=environment(starting[version]);try{const created=await e.run({action:'create'});if(created.phase!=='succeeded')throw Error('Original seed Main did not complete');starting['completed-'+version]=e.exportSeed();}finally{e.close();}
 }
@@ -254,3 +261,4 @@ for(const c of cases){const e=environment(starting[c.seed],c.approvedAutoSend);c
 }
 for(const c of cases.filter(c=>/^(create-replay-|original-main-replacement-|cross-open-|automatic-first|lost-invoke-reply|resumed-native-|real-main-)/.test(c.label)))if(c.expected.some(s=>s.output.error))throw Error('Successful original Main path failed '+c.label+JSON.stringify(c.expected.map(s=>s.output)));
 process.stdout.write(JSON.stringify({now,instructions,noticeInstructions,seeds:starting,cases,approvedDifference:{proposal:'6af88af7-cd82-49c2-b43f-1f87e36cf1ce@1',decision:'task0072-chat-main-root-answer-197-v1',referenceOnly:'preserved-auto-send-recovery-recursion',adapter:'Only approvedAutoSend cases wrap the original Main.ensure; unchanged original code performs all later Queue, cancellation, SQLite CAS and receipt transitions.'}}));
+}

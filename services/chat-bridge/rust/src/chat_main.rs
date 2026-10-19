@@ -1,5 +1,6 @@
 //! Shared Main creation and replacement. Retain the original claim and native
 //! attachment before I/O; publish its binding and receipt before releasing it.
+use crate::diagnostic_notifications::{DiagnosticMain, MainFuture as DiagnosticFuture};
 use crate::{
     admission::{ChatAdmission, expected_bridge},
     cancellation::ChatCancellation,
@@ -74,6 +75,28 @@ pub struct ChatMain<'a> {
     pub native: &'a ChatNativeDriver<'a>,
     instructions: &'a NoticeInstructions,
 }
+impl DiagnosticMain for ChatMain<'_> {
+    fn find(&self) -> DiagnosticFuture<'_, Option<Document>> {
+        Box::pin(ChatMain::find(self))
+    }
+    fn notify<'a>(&'a self, caller: &'a JsString, request: &'a Json) -> DiagnosticFuture<'a, Json> {
+        Box::pin(async move {
+            ChatNotices::new(self.operations, self, self.instructions)
+                .notify(caller, request)
+                .await
+        })
+    }
+    fn notice<'a>(&'a self, caller: &'a JsString, query: &'a Json) -> DiagnosticFuture<'a, Json> {
+        Box::pin(async move {
+            ChatNotices::new(self.operations, self, self.instructions)
+                .notice(caller, query)
+                .await
+        })
+    }
+    fn ready(&self) -> DiagnosticFuture<'_, ()> {
+        Box::pin(async move { self.native.ready().await.map(|_| ()) })
+    }
+}
 struct Claim {
     main: Document,
     operation: Document,
@@ -104,6 +127,9 @@ impl<'a> ChatMain<'a> {
     }
     pub fn admission(&self) -> &ChatAdmission {
         self.operations.admission
+    }
+    pub(crate) fn notice_instructions(&self) -> &NoticeInstructions {
+        self.instructions
     }
     pub fn queue(&self) -> ChatQueue<'_> {
         ChatQueue::new(self.operations, Some(self))

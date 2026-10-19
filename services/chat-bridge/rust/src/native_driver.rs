@@ -7,6 +7,10 @@ use crate::{
     operations::contention,
     store::{ChatStore, Destination, Document, Pin, Reference, mutation},
 };
+use crate::{
+    cancel_worker::{CancellationGuard, CancellationNative},
+    publisher::PublicationFuture,
+};
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, Outcome, agent_schema::validate_agent,
     checked_native_contract::CheckedNativeContracts, hash::hash_json, js_path::normalize_win32,
@@ -39,6 +43,57 @@ pub struct ChatNativeDriver<'a> {
 pub struct NativeOrigin {
     pub predecessor: Option<Pin>,
     pub prepared_epoch: Option<JsString>,
+}
+
+struct CancellationDispatch<'a> {
+    guard: &'a CancellationGuard<'a>,
+}
+impl NativeDispatchGuard for CancellationDispatch<'_> {
+    fn check(&self) -> GuardFuture<'_> {
+        (self.guard)()
+    }
+}
+impl CancellationNative for ChatNativeDriver<'_> {
+    fn prepare<'a>(
+        &'a self,
+        input_id: &'a str,
+        operation_id: &'a JsString,
+        request: Json,
+    ) -> PublicationFuture<'a, Document> {
+        Box::pin(async move {
+            ChatNativeDriver::prepare(
+                self,
+                input_id,
+                operation_id,
+                &request,
+                NativeOrigin::default(),
+                false,
+            )
+            .await
+        })
+    }
+    fn prevent<'a>(
+        &'a self,
+        input_id: &'a str,
+        selected: &'a Pin,
+        guard: &'a CancellationGuard<'a>,
+    ) -> PublicationFuture<'a, Document> {
+        Box::pin(async move {
+            ChatNativeDriver::prevent(self, input_id, selected, &CancellationDispatch { guard })
+                .await
+        })
+    }
+    fn advance<'a>(
+        &'a self,
+        input_id: &'a str,
+        selected: &'a Pin,
+        guard: &'a CancellationGuard<'a>,
+    ) -> PublicationFuture<'a, Document> {
+        Box::pin(async move {
+            ChatNativeDriver::advance(self, input_id, selected, &CancellationDispatch { guard })
+                .await
+        })
+    }
 }
 
 impl<'a> ChatNativeDriver<'a> {
@@ -78,6 +133,12 @@ impl<'a> ChatNativeDriver<'a> {
 
     pub fn admission(&self) -> &ChatAdmission {
         self.admission
+    }
+    pub(crate) fn catalogs(&self) -> &CheckedNativeContracts {
+        self.catalogs
+    }
+    pub(crate) fn instructions(&self) -> &JsString {
+        self.instructions
     }
 
     pub fn resolve_plan(&self) -> IvyResult<Json> {

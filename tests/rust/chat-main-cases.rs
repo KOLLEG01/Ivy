@@ -205,6 +205,37 @@ impl RpcClient for Client {
                     "Attachment and empty current claim precede native I/O"
                 );
             }
+            if let Some(claim) = expected.get("assertInputClaim") {
+                let db = rusqlite::Connection::open(self.path.join("chat-bridge.sqlite")).unwrap();
+                let args = field(&params, "arguments");
+                let (call_id, parent, body): (String, String, String) = db.query_row("SELECT d.id,d.parent_id,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/native-call' AND json_extract(r.value_json,'$.operationId')=?", [text(args,"operationId")], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+                let main: String = db.query_row("SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='chat-bridge/main'", [], |r|r.get(0)).unwrap();
+                let main = parse(&main, usize::MAX)?;
+                assert!(field(&main, "pendingAction").is_null());
+                assert_eq!(
+                    field(&main, "queue").as_array().unwrap()[0].get("inputId"),
+                    Some(&parent.clone().into())
+                );
+                assert_eq!(parent, text(claim, "inputId"));
+                let input = state
+                    .records
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| field(field(r, "object"), "id") == &parent.clone().into())
+                    .unwrap();
+                let input = field(field(input, "content"), "value");
+                let slot = text(claim, "slot");
+                assert_eq!(
+                    text(field(field(input, "nativeCalls"), &slot), "objectId"),
+                    call_id
+                );
+                assert_eq!(
+                    text(&parse(&body, usize::MAX)?, "operationId"),
+                    text(args, "operationId")
+                );
+                assert_eq!(!field(input, "cancellation").is_null(), slot == "interrupt");
+            }
             let mut reverse: Vec<_> = all
                 .iter()
                 .map(|(raw, alias)| (alias_string(alias, &all), raw.clone()))
@@ -305,7 +336,12 @@ fn object_pin(value: &Json) -> Pin {
         revision: field(value, "revision").as_f64().unwrap() as i64,
     }
 }
-async fn step(action: &Json, main: &ChatMain<'_>, client: &Client) -> IvyResult<Json> {
+async fn step(
+    action: &Json,
+    main: &ChatMain<'_>,
+    client: &Client,
+    notice: &NoticeInstructions,
+) -> IvyResult<Json> {
     let caller = action
         .get("caller")
         .and_then(Json::as_js_string)
@@ -445,7 +481,7 @@ async fn step(action: &Json, main: &ChatMain<'_>, client: &Client) -> IvyResult<
                     ("reason", "Explicit synthetic cancellation.".into()),
                 ])
             };
-            ChatCancellation::new(main.operations, main, &notice_asset())
+            ChatCancellation::new(main.operations, main, notice)
                 .cancel(&caller, &request)
                 .await
         }
@@ -566,7 +602,7 @@ async fn step(action: &Json, main: &ChatMain<'_>, client: &Client) -> IvyResult<
             Ok(Json::Null)
         }
         "notify" => {
-            ChatNotices::new(main.operations, main, &notice_asset())
+            ChatNotices::new(main.operations, main, notice)
                 .notify(
                     &caller,
                     &Json::object([
@@ -744,7 +780,7 @@ async fn original_main_creation_recovery_and_live_claims() {
                     );
                     main.create(&caller, &request).await
                 } else {
-                    step(action, &main, &client).await
+                    step(action, &main, &client, &notice).await
                 }
             };
             let actual = snapshot(&path, &client, result(value));
@@ -776,3 +812,6 @@ async fn original_main_creation_recovery_and_live_claims() {
         "Main: {original_cases} unchanged original workflows, {approved_cases} explicit approved-difference workflows, {steps} steps, {errors} expected errors; twelve exact original checkpoint copies."
     );
 }
+
+#[path = "chat-delivery-cases.rs"]
+mod delivery;
