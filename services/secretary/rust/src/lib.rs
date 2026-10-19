@@ -73,3 +73,7 @@ pub mod triage_prompt;
 pub mod triage_results;
 pub mod triage_schema;
 pub mod voice_target;
+
+pub mod teams_projection;
+pub mod teams_native;
+pub mod teams_source;

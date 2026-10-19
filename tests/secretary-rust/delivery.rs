@@ -290,3 +290,10 @@ async fn original_voice_discovery_and_message_unread_rpc_traces() {
         assert_eq!(&actual, row.required("expected").unwrap(), "case {index}");
     }
 }
+
+#[path = "teams_native_cases.rs"]
+mod teams_native_cases;
+#[path = "teams_projection_cases.rs"]
+mod teams_projection_cases;
+#[path = "teams_source_cases.rs"]
+mod teams_source_cases;
