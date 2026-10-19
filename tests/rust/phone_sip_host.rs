@@ -206,7 +206,7 @@ async fn original_native_setup_is_owned_after_bind_and_before_any_register() {
     let closing = tokio::spawn(async move { closing_host.close().await });
     let (removal, source) = received(&registrar).await;
     assert_eq!(removal.method, Method::Register);
-    assert!(removal.to_string().contains("expires=0"));
+    assert_eq!(removal.expires_header().unwrap().value(), "0");
     send(
         &registrar,
         source,

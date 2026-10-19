@@ -319,6 +319,7 @@ fn configuration_matches_actual_original_record_validators_without_starting_nati
         .map(|params| envelope("configure", Some(OP), params, 1))
         .collect::<Vec<_>>();
     let mut child = Command::new("pwsh")
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .args([
             "-NoProfile",
             "-File",
@@ -334,18 +335,14 @@ fn configuration_matches_actual_original_record_validators_without_starting_nati
         2_000_000,
     )
     .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    let written = child.stdin.take().unwrap().write_all(input.as_bytes());
     let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    written.unwrap();
     let results = parse(std::str::from_utf8(&output.stdout).unwrap(), 2_000_000).unwrap();
     let results = results.as_array().unwrap();
     assert_eq!(results.len(), cases.len());
@@ -364,18 +361,22 @@ fn configuration_matches_actual_original_record_validators_without_starting_nati
         );
         std::fs::write(path, stringify(&records, 2_000_000).unwrap()).unwrap();
     }
+    let mut mismatches = Vec::new();
     for (index, (params, expected)) in cases.iter().zip(results).enumerate() {
         let actual = configuration(params);
         let error = expected.get("error").unwrap();
-        assert_eq!(
-            actual.as_ref().err().map(|error| (*error).to_string()),
-            if error.is_null() {
-                None
-            } else {
-                Some(error.as_str().unwrap())
-            },
-            "Config case {index}: {params}"
-        );
+        let actual_error = actual.as_ref().err().map(|error| (*error).to_string());
+        let expected_error = if error.is_null() {
+            None
+        } else {
+            Some(error.as_str().unwrap())
+        };
+        if actual_error != expected_error {
+            mismatches.push(format!(
+                "Config case {index}: Rust={actual_error:?}, original={expected_error:?}, {params}"
+            ));
+            continue;
+        }
         let Ok(actual) = actual else {
             continue;
         };
@@ -458,12 +459,13 @@ fn configuration_matches_actual_original_record_validators_without_starting_nati
             ),
         ]);
         for (name, value) in snapshot.as_object().unwrap() {
-            assert_eq!(
-                Some(value),
-                expected.get_key(name),
-                "Config case {index}, field {}: {params}",
-                name.to_utf8().unwrap()
-            );
+            if Some(value) != expected.get_key(name) {
+                mismatches.push(format!(
+                    "Config case {index}, field {}: Rust={value:?}, original={:?}; {params}",
+                    name.to_utf8().unwrap(),
+                    expected.get_key(name)
+                ));
+            }
         }
         let mut expected_addresses = expected
             .get("incoming")
@@ -474,11 +476,13 @@ fn configuration_matches_actual_original_record_validators_without_starting_nati
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>();
         expected_addresses.sort();
-        assert_eq!(
-            addresses, expected_addresses,
-            "Config case {index} incoming addresses"
-        );
+        if addresses != expected_addresses {
+            mismatches.push(format!(
+                "Config case {index} incoming: Rust={addresses:?}, original={expected_addresses:?}"
+            ));
+        }
     }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 #[tokio::test]
