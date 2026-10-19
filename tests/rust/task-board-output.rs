@@ -10,6 +10,8 @@ mod inspector;
 mod signals;
 #[path = "../fixtures/task-board-native-comments.rs"]
 mod native_comments;
+#[path = "../fixtures/task-board-orchestrator.rs"]
+mod orchestrator;
 
 #[test]
 fn native_output_helpers_match_original_typescript() {
