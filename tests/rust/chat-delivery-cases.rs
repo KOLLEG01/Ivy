@@ -10,11 +10,11 @@ use ivy_chat_bridge::{
     native_driver::{ChatNativeDriver, NativeOrigin},
     notice_input::NoticeInstructions,
     operations::ChatOperations,
-    store::{ChatStore, Reference, mutation},
+    store::{ChatStore, Reference},
     worker::ChatWorker,
 };
 use ivy_contracts::{
-    IvyJson as Json, IvyResult, JsString,
+    IvyJson as Json, IvyResult,
     checked_native_contract::CheckedNativeContracts,
     hash::{digest, hash_json},
     json::parse,
@@ -338,6 +338,25 @@ async fn step(
                 main,
                 &"producer".into(),
                 &Json::object([("operationId", super::operation("main-notice"))]),
+            )
+            .await
+        }
+        "diagnostic-notify" => {
+            DiagnosticMain::notify(
+                main,
+                &"producer".into(),
+                &Json::object([
+                    ("action", "notify".into()),
+                    ("operationId", super::operation("main-notice")),
+                    (
+                        "source",
+                        Json::object([
+                            ("objectId", "synthetic-source".into()),
+                            ("revision", Json::Number(1.0)),
+                        ]),
+                    ),
+                    ("text", "Original private context.".into()),
+                ]),
             )
             .await
         }

@@ -45,6 +45,10 @@ function extension(){
       else if(args.method==='thread/turns/list')reply={result:{data:[{id:turn,status:phase,itemsView:args.params.itemsView,items:args.params.itemsView==='full'?[{id:'delivery-answer',type:'agentMessage',text:c.controls.answer??'Original delivered reply.\n😀'}]:[]}],nextCursor:null}};
       else throw Error('Unexpected original delivery read '+args.method);
      }
+     if(c.controls.bumpInputOnRead&&args.method==='thread/read'){
+      c.controls.bumpInputOnRead=false;const m=await c.main.find(),id=m.value.queue[0].inputId,record=c.records.find(r=>r.object.id===id);
+      record.revision.revision++;c.events.at(-1).concurrentInputRevision={inputId:id,revision:record.revision.revision};
+     }
      return observed(c,args,reply);
     }
     if(name==='invoke'&&args.method!=='thread/start'){
@@ -73,6 +77,9 @@ function extension(){
     if(c.controls.loseRunningReply&&p.content.encoding==='json'&&p.content.value.state==='running'){
      c.controls.loseRunningReply=false;throw new IvyError('outcome_unknown','Original committed running input reply lost.','unknown');
     }
+    if(c.controls.loseResultReply&&p.create?.contractKey==='chat-bridge/result'){
+     c.controls.loseResultReply=false;c.events.at(-1).lostResultReply=true;throw new IvyError('outcome_unknown','Original committed Result reply lost.','unknown');
+    }
    }
    return value;
   },
@@ -91,12 +98,12 @@ function extension(){
     case'diagnostic-find':{const m=await c.main.find();return m?{pin:m.pin,value:m.value}:null;}
     case'diagnostic-ready':return c.main.native.ready().then(()=>null);
     case'diagnostic-notice':return new ChatNotices(c.main).notice('producer',{operationId:operation('main-notice')});
+    case'diagnostic-notify':return new ChatNotices(c.main).notify('producer',{action:'notify',operationId:operation('main-notice'),source:{objectId:'synthetic-source',revision:1},text:'Original private context.'});
     default:throw Error('Unknown delivery action '+s.action);
    }
   },
  };
 }
-
 const seeds={},cases=[],versions=Object.keys(starting);
 for(const version of versions){
  for(const kind of ['completed','queued']){
@@ -106,6 +113,15 @@ for(const version of versions){
    seeds[kind+'-'+version]=e.exportSeed();
   }finally{e.close();}
  }
+}
+{
+ // The resume identity hashes its original predecessor pin. Re-open the exact
+ // committed original predecessor instead of masking different random hashes.
+ const e=environment(seeds['queued-0.154.0'],false,extension());try{
+  await e.run({action:'state',value:{threadStatus:'notLoaded'}});
+  for(let n=0;n<3;n++)await e.run({action:'worker'});
+  seeds['prepared-original-resume']=e.exportSeed();
+ }finally{e.close();}
 }
 const add=(label,steps,seed='queued-0.154.0')=>cases.push({label,steps,seed});
 const w={action:'worker'},d={action:'delivery'},reopen={action:'reopen'},head={action:'head'},status={action:'worker-status'},state=value=>({action:'state',value}),many=(step,n)=>Array.from({length:n},()=>step);
@@ -117,7 +133,7 @@ for(const v of versions){
 }
 add('busy-before-prepare-and-dispatch',[state({threadStatus:'active'}),w,state({threadStatus:'idle'}),w,state({threadStatus:'active'}),w,state({threadStatus:'idle'}),w,{action:'input'}]);
 add('unloaded-after-turn-prepared',[w,{action:'restart'},...many(w,4),{action:'input'}]);
-add('same-epoch-unloaded-again',[state({threadStatus:'notLoaded'}),...many(w,3),state({threadStatus:'notLoaded'}),...many(w,4),{action:'input'}]);
+add('same-epoch-unloaded-again',[state({threadStatus:'notLoaded'}),...many(w,4),{action:'input'}],'prepared-original-resume');
 add('resume-full-history-keeps-original-request',[{action:'pre-prepare-resume'},state({threadStatus:'notLoaded'}),...many(w,4),{action:'input'}]);
 add('only-exact-unloaded-error-allows-resume',[state({readError:'thread not loaded: unrelated'}),w,state({readError:'own'}),...many(w,4),{action:'input'}]);
 add('lost-original-native-delivery-reply',[w,state({loseDeliveryReply:true}),w,reopen,w,{action:'input'}]);
@@ -136,8 +152,16 @@ add('cancel-attached-original-turn-before-invoke',[w,{action:'cancel-first'},...
 add('cancel-original-running-turn',[w,w,{action:'cancel-first'},...many(w,4),status]);
 add('real-notice-input-delivery',[{action:'notify',caller:'producer'},w,w,status,{action:'diagnostic-notice'}],'completed-0.154.0');
 add('real-diagnostic-main-readiness',[{action:'diagnostic-find'},{action:'diagnostic-ready'}],'completed-0.154.0');
+add('extra-live-input-revision-before-dispatch',[w,state({bumpInputOnRead:true}),w,w,{action:'input'}]);
+add('extra-lost-result-reply',[state({turnPhase:'completed',loseResultReply:true}),{action:'drain'},reopen,{action:'drain'},status,head]);
+add('extra-real-diagnostic-notice-publication',[state({turnPhase:'completed'}),{action:'diagnostic-notify'},{action:'drain'},{action:'diagnostic-notice'},head],'completed-0.154.0');
 
 for(const c of cases){const e=environment(seeds[c.seed],false,extension());c.expected=[];try{for(const s of c.steps)c.expected.push(await e.snapshot(await result(()=>e.run(s))));}finally{e.close();}}
 for(const c of cases.filter(c=>/^(loaded-original-|unloaded-original-|terminal-worker-drain-|full-read-fallback-)/.test(c.label)))if(c.expected.some(s=>s.output.error))throw Error('Successful original delivery path failed '+c.label+JSON.stringify(c.expected.map(s=>s.output)));
 for(const c of cases.filter(c=>/^(busy-|unloaded-after-|same-epoch-|resume-full-|cancel-|image-admission-|drain-|active-turn-|real-diagnostic-)/.test(c.label)))if(c.expected.some(s=>s.output.error))throw Error('Successful original composition failed '+c.label+JSON.stringify(c.expected.map(s=>s.output)));
+for(const c of cases.filter(c=>c.label.startsWith('extra-')&&!c.label.includes('lost-result')))if(c.expected.some(s=>s.output.error))throw Error('Original guard/notice integration failed '+c.label+JSON.stringify(c.expected.map(s=>s.output)));
+{
+ const c=cases.find(c=>c.label==='extra-lost-result-reply'),faults=c.expected.flatMap(s=>s.transport).filter(t=>t.lostResultReply);
+ if(faults.length!==1||faults[0].params.create.contractKey!=='chat-bridge/result'||faults[0].result.error?.code!=='outcome_unknown'||c.expected.at(-1).output.value!==null||c.expected.at(-1).records.filter(r=>r.object.contractKey==='chat-bridge/result').length!==2)throw Error('Original explicit Result fault was not recovered exactly');
+}
 process.stdout.write(JSON.stringify({now,instructions,noticeInstructions,seeds,cases,boundary:'Only synthetic owner/Hive replies and clock are controlled. Original Main, Delivery, Worker, Collector, Publisher and CancelWorker execute unchanged; no approval exception is exercised by these explicit-binding sends.'}));

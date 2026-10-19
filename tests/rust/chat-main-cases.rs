@@ -186,6 +186,24 @@ impl RpcClient for Client {
                     .unwrap();
                 other.close().unwrap();
             }
+            if let Some(change) = expected.get("concurrentInputRevision") {
+                // A synthetic independent Hive writer changes only the public
+                // revision during native observation. The final live guard
+                // must discover it through an actual head read.
+                let id = field(change, "inputId");
+                let Json::Array(records) = &mut state.records else {
+                    unreachable!()
+                };
+                let record = records
+                    .iter_mut()
+                    .find(|r| field(field(r, "object"), "id") == id)
+                    .unwrap();
+                let mut revision = field(record, "revision").clone();
+                let next = field(&revision, "revision").as_f64().unwrap() + 1.0;
+                assert_eq!(field(change, "revision"), &Json::Number(next));
+                revision.insert("revision", Json::Number(next));
+                record.insert("revision", revision);
+            }
             if flag(&expected, "assertClaim") {
                 let db = rusqlite::Connection::open(self.path.join("chat-bridge.sqlite")).unwrap();
                 let id = text(field(&params, "arguments"), "operationId");
