@@ -211,6 +211,9 @@ async fn generation_retires_pending_page_public_call_and_reconciler_before_final
     pump_pending(work.as_mut()).await;
     assert_eq!(world.holds.borrow().len(), 1);
     world.release(None);
+    // Settle the released owner's callback before advancing the independent
+    // manual clock. The production queue follows registered future wakeups.
+    pump_pending(work.as_mut()).await;
     // Complete startup Operation scan, then empty Run scan, using the real
     // Reconciler and owner job queue. Runtime adapter sees the exact readiness.
     for _ in 0..2 {
