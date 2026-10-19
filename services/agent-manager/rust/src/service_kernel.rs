@@ -506,7 +506,7 @@ async fn start(config: InstanceConfig, bindings: AgentRuntimeBindings) -> IvyRes
         let artifact_root = text(value, "artifactRoot")?;
         let data_root = text(value, "dataRoot")?;
         let base_url = text(value, "publicBaseUrl")?;
-        let defaults = load_environment_defaults(&artifact_root, &base_url).await?;
+        let defaults = load_environment_defaults(&artifact_root, &base_url)?;
         let environment = ManagedEnvironment::new(EnvironmentManagerSettings {
             settings: settings.clone(),
             data_root: data_root.clone(),
