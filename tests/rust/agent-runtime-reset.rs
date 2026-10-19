@@ -195,6 +195,15 @@ async fn original_reset_marker_date_idempotency_scope_and_file_effects_are_prese
         String::from_utf8_lossy(&output.stderr)
     );
     let oracle = parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap();
+    let isolation = value(&oracle, "isolation");
+    assert_eq!(value(isolation, "selections").as_array().unwrap().len(), 5);
+    assert_eq!(value(isolation, "prevented").as_array().unwrap().len(), 3);
+    assert_eq!(value(isolation, "effects").as_array().unwrap().len(), 1);
+    assert_eq!(value(isolation, "sentinelPreserved"), &true.into());
+    eprintln!(
+        "Reset fixture isolation: {}",
+        canonical(isolation, usize::MAX).unwrap()
+    );
     let cases = value(&oracle, "cases").as_array().unwrap();
     assert!(cases.len() > 80);
     for case in cases {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {lstatSync,mkdirSync,readFileSync,readdirSync,readlinkSync,symlinkSync,writeFileSync,linkSync,chmodSync} from 'node:fs';
 import {lstat,realpath,rm} from 'node:fs/promises';
-import {isAbsolute,join,parse,relative,resolve,sep} from 'node:path';
+import {basename,dirname,isAbsolute,join,parse,relative,resolve,sep} from 'node:path';
 import {stripTypeScriptTypes} from 'node:module';
 import {atomicJson,jsonFile} from '../../dist/packages/host-runtime/src/config.js';
 import {resolveCodexHome} from '../../dist/packages/host-runtime/src/codex-home.js';
@@ -13,6 +13,45 @@ const source=readFileSync('services/agent-manager/src/runtime-reset.ts','utf8');
 const start=source.indexOf('interface ResetMarker');assert(start>=0);
 const body=stripTypeScriptTypes(source.slice(start).replace(/^export /gm,''),{mode:'transform'});
 const load=new Function('join','parse','resolve','lstat','realpath','rm','atomicJson','jsonFile','resolveCodexHome','requireThat','Date',body+'\nreturn applyAgentRuntimeReset;');
+const strictlyInside=(root,path)=>{
+ const local=relative(root,path);
+ return local!==''&&local!=='..'&&!local.startsWith('..'+sep)&&!isAbsolute(local);
+};
+function guardedRemoval(root,remove=rm){
+ return async(path,options)=>{
+  const target=resolve(path);
+  assert(strictlyInside(resolve(root),target),'Reset oracle removal leaves its lexical fixture');
+  const existing=await lstat(target).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+  const actual=existing?await realpath(target):join(await realpath(dirname(target)),basename(target));
+  assert(strictlyInside(await realpath(root),actual),'Reset oracle removal leaves its resolved fixture');
+  return remove(target,options);
+ };
+}
+// Check the actual original resolver and the same removal guard before any
+// reset function runs. These guard probes only record; they never call rm.
+const isolationRoot=join(input.root,'isolation'),accountHome=join(isolationRoot,'account');
+mkdirSync(join(accountHome,'.codex','sessions'),{recursive:true});
+writeFileSync(join(accountHome,'.codex','sessions','leaf'),'fixture history');
+const sentinel=join(input.root,'isolation-sentinel');mkdirSync(sentinel);writeFileSync(join(sentinel,'leaf'),'must survive');
+symlinkSync(sentinel,join(isolationRoot,'escape'),process.platform==='win32'?'junction':'dir');
+const selections=[];
+for(const settings of [{},{codexHome:null},{nativeHome:join(isolationRoot,'native')},{codexHome:null,nativeHome:join(isolationRoot,'native')},{nativeHome:null}]){
+ try{
+  const selected=resolveCodexHome(settings,{environment:{},userHome:accountHome,cwd:isolationRoot});
+  assert(strictlyInside(resolve(isolationRoot),resolve(selected.path)));
+  selections.push({settings,selected});
+ }catch(error){if(settings.nativeHome!==null)throw error;selections.push({settings,error:IvyError.from(error).toWire()});}
+}
+const effects=[],guard=guardedRemoval(isolationRoot,async(path,options)=>{effects.push({path,options});});
+const prevented=[];
+for(const path of [join(isolationRoot,'..','outside'),parse(resolve(isolationRoot)).root,join(isolationRoot,'escape')]){
+ let blocked=false;try{await guard(path,{recursive:true,force:true});}catch(error){assert(error.code==='ERR_ASSERTION');blocked=true;}
+ assert(blocked);prevented.push(path);
+}
+await guard(join(accountHome,'.codex','sessions'),{recursive:true,force:true});
+assert.equal(effects.length,1);assert.equal(readFileSync(join(sentinel,'leaf'),'utf8'),'must survive');
+const isolation={selections,prevented,effects,sentinelPreserved:true};
+if(input.isolationOnly){console.log(JSON.stringify({isolation}));process.exit(0);}
 const now='2026-10-19T12:34:56.789Z';
 const marker={schemaVersion:1,resetId:'reset',runtimeEpoch:'epoch',completedAt:now};
 const cases=[];
@@ -96,15 +135,10 @@ for(const c of cases){
  }
  let reads=0;
  const FixedDate=class extends OriginalDate{constructor(...args){super(...(args.length?args:[now]));if(!args.length)reads++;}};
- const fixtureRemove=async(path,options)=>{
-  const local=relative(resolve(root),resolve(path));
-  assert(local&&local!=='..'&&!local.startsWith('..'+sep)&&!isAbsolute(local),'Reset oracle removal leaves its fixture');
-  return rm(path,options);
- };
  const fixtureHome=settings=>resolveCodexHome(settings,{environment:{},userHome:accountHome,cwd:root});
- const apply=load(join,parse,resolve,lstat,realpath,fixtureRemove,atomicJson,jsonFile,fixtureHome,requireThat,FixedDate);
+ const apply=load(join,parse,resolve,lstat,realpath,guardedRemoval(root),atomicJson,jsonFile,fixtureHome,requireThat,FixedDate);
  let selected=settings(c.settings,root,c.homeKind==='ancestor-file'?join(home,'nested'):home),reply;
  try{for(let i=0;i<c.repeat;i++)await apply(data,selected);reply={ok:true};}catch(error){reply={ok:false,error:IvyError.from(error).toWire()};}
  c.expected={reply,clockReads:reads,files:snapshot(root)};
 }
-console.log(JSON.stringify({now,cases}));
+console.log(JSON.stringify({now,isolation,cases}));
