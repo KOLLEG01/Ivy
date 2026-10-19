@@ -897,3 +897,17 @@ async fn retained_cache_reader_matches_original_account_sharing_behavior() {
         ("snapshot", snapshot),
     ]));
 }
+
+#[tokio::test]
+async fn cache_validation_ivy_errors_are_ignored_only_by_initial_retention() {
+    let fixture = Fixture::new();
+    fixture.write("source/node_modules/pkg/value", b"installed source bytes");
+    fixture.write("cache/cache.json",br#"{"schemaVersion":3,"key":"fixture-cache-key","externalOnly":true,"workspaceLinks":[{"location":"node_modules/pkg","target":"packages/pkg","extra":1e400}]}"#);
+    refuses(
+        &compare("restore", &fixture, &vec![], "source", "cache").await,
+        "invalid_arguments",
+    );
+    // The original catch includes validCache/hashJson as well as jsonFile.
+    // A later Windows EPERM on replacing the existing directory still applies.
+    compare("retain", &fixture, &vec![], "source", "cache").await;
+}

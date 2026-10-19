@@ -248,9 +248,14 @@ impl PreparationCache {
             Err(error) => return Err(error),
         }
         let path = cache.join("cache.json");
-        match blocking(move || read_metadata(&path)).await {
-            Ok(metadata) if self.valid_metadata(&metadata)? => return Ok(()),
-            Ok(_) => (),
+        let existing = async {
+            let metadata = blocking(move || read_metadata(&path)).await?;
+            self.valid_metadata(&metadata).map_err(Error::from)
+        }
+        .await;
+        match existing {
+            Ok(true) => return Ok(()),
+            Ok(false) => (),
             Err(Error::Ivy(_)) => (),
             Err(error) if error.missing() => (),
             Err(error) => return Err(error),
