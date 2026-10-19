@@ -36,22 +36,14 @@ pub struct RtcpReceiverReport<'a> {
     pub source: u32,
     pub blocks: RtcpReportBlocks<'a>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RtcpBye<'a> {
-    sources: &'a [u8],
-    pub reason: Option<&'a [u8]>,
-}
-impl RtcpBye<'_> {
-    pub fn sources(self) -> impl ExactSizeIterator<Item = u32> {
-        self.sources.chunks_exact(4).map(|b| read32(b, 0))
-    }
-}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RtcpCompound<'a> {
     pub sender: Option<RtcpSenderReport<'a>>,
     pub receiver: Option<RtcpReceiverReport<'a>>,
-    pub cname: Option<&'a [u8]>,
-    pub bye: Option<RtcpBye<'a>>,
+    /// Structurally validated packets. The call owns their legacy field
+    /// interpretation and session effects, separately from frame validation.
+    pub sdes_packet: Option<&'a [u8]>,
+    pub bye_packet: Option<&'a [u8]>,
     pub packet_count: usize,
 }
 impl<'a> RtcpCompound<'a> {
@@ -112,8 +104,14 @@ impl<'a> RtcpCompound<'a> {
                         });
                     }
                 }
-                202 => result.cname = sdes(body, count)?,
-                203 => result.bye = Some(bye(body, count)?),
+                202 => {
+                    sdes(body, count)?;
+                    result.sdes_packet = Some(packet);
+                }
+                203 => {
+                    bye(body, count)?;
+                    result.bye_packet = Some(packet);
+                }
                 // Other packet types have no SR/RR diagnostic fields. Their
                 // framing still validates, including tail padding and progress.
                 _ => {}
@@ -137,10 +135,9 @@ impl<'a> RtcpCompound<'a> {
 fn read32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
-fn sdes(bytes: &[u8], count: usize) -> Result<Option<&[u8]>, MediaError> {
+fn sdes(bytes: &[u8], count: usize) -> Result<(), MediaError> {
     let mut offset = 4usize;
-    let mut cname = None;
-    for chunk in 0..count {
+    for _ in 0..count {
         offset = offset
             .checked_add(4)
             .filter(|&end| end <= bytes.len())
@@ -171,37 +168,31 @@ fn sdes(bytes: &[u8], count: usize) -> Result<Option<&[u8]>, MediaError> {
             if kind == 8 && (value.is_empty() || usize::from(value[0]) >= value.len()) {
                 return Err(MediaError::InvalidPacket);
             }
-            if chunk == 0 && kind == 1 {
-                cname = Some(value);
-            }
             offset = end;
         }
     }
     if offset != bytes.len() {
         return Err(MediaError::InvalidPacket);
     }
-    Ok(cname)
+    Ok(())
 }
-fn bye(bytes: &[u8], count: usize) -> Result<RtcpBye<'_>, MediaError> {
+fn bye(bytes: &[u8], count: usize) -> Result<(), MediaError> {
     let start = count
         .checked_mul(4)
         .and_then(|n| n.checked_add(4))
         .ok_or(MediaError::InvalidPacket)?;
-    let sources = bytes.get(4..start).ok_or(MediaError::InvalidPacket)?;
-    let reason = if start == bytes.len() {
-        None
-    } else {
+    bytes.get(4..start).ok_or(MediaError::InvalidPacket)?;
+    if start != bytes.len() {
         let length = usize::from(bytes[start]);
         let end = (start + 1)
             .checked_add(length)
             .ok_or(MediaError::InvalidPacket)?;
-        let reason = bytes.get(start + 1..end).ok_or(MediaError::InvalidPacket)?;
+        bytes.get(start + 1..end).ok_or(MediaError::InvalidPacket)?;
         if end.checked_add(3).map(|n| n & !3) != Some(bytes.len())
             || bytes[end..].iter().any(|&v| v != 0)
         {
             return Err(MediaError::InvalidPacket);
         }
-        Some(reason)
-    };
-    Ok(RtcpBye { sources, reason })
+    }
+    Ok(())
 }

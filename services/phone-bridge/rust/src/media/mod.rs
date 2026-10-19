@@ -26,7 +26,7 @@ pub use resample::PcmResampler;
 pub use rtp::{RtpAudioPacket, RtpReceiveQueue, RtpReceiveStatus};
 pub use rtcp::{RtcpReportBlock, RtcpReportBuilder, RtcpSenderInfo, RtcpTransmitCounters};
 pub use rtcp_receive::{
-    RtcpBye, RtcpCompound, RtcpReceiverReport, RtcpReportBlocks, RtcpSenderReport,
+    RtcpCompound, RtcpReceiverReport, RtcpReportBlocks, RtcpSenderReport,
 };
 pub use send_clock::RtpSendClock;
 pub use sdp::{

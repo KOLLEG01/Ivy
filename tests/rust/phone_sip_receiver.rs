@@ -326,7 +326,10 @@ async fn whole_control_datagrams_validate_before_raw_publication_and_following_p
     let parsed = ivy_phone_bridge::media::RtcpCompound::parse(controls.last().unwrap()).unwrap();
     assert_eq!(parsed.packet_count, 6);
     assert_eq!(parsed.receiver.unwrap().source, 9);
-    assert_eq!(parsed.cname, Some(&b"fixture"[..]));
+    let sdes = ivy_phone_bridge::media::RtcpReportBuilder::new(9, "fixture")
+        .unwrap()
+        .sdes_packet();
+    assert_eq!(parsed.sdes_packet, Some(&sdes[..]));
     drop(controls);
     assert_eq!(audio.frames(), 0);
     receiver.close().await;

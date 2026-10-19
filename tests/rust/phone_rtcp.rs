@@ -433,11 +433,21 @@ fn rtcp_validation_checks_all_boundaries_before_any_partial_result_is_returned()
         0x82, 202, 0, 5, 0, 0, 0, 9, 1, 1, b'a', 0, 0, 0, 0, 10, 7, 1, b'b', 8, 1, 0, 0, 0,
     ];
     let parsed = RtcpCompound::parse(&multi).unwrap();
-    assert_eq!(parsed.cname, Some(&b"a"[..]));
+    assert_eq!(parsed.sdes_packet, Some(&multi[..]));
     let bye = [0x82, 203, 0, 3, 0, 0, 0, 9, 0, 0, 0, 10, 0, 0, 0, 0];
     let parsed = RtcpCompound::parse(&bye).unwrap();
-    assert_eq!(parsed.bye.unwrap().sources().collect::<Vec<_>>(), [9, 10]);
-    assert_eq!(parsed.bye.unwrap().reason, Some(&b""[..]));
+    assert_eq!(parsed.bye_packet, Some(&bye[..]));
+    for bytes in [
+        unhex("81ca0003000000090201620101610000"),
+        unhex("81ca0003000000090101610101620000"),
+        unhex("81ca00020000000902016200"),
+        unhex("81ca00020000000900000000"),
+        unhex("82ca000400000009020162000000000a01016100"),
+        unhex("82cb0002000000090000000a"),
+        unhex("82cb0004000000090000000a0766697874757265"),
+    ] {
+        assert!(RtcpCompound::parse(&bytes).is_ok());
+    }
     // The maximum word count is bounded by supplied bytes, never a sentinel.
     let mut maximum = vec![0; 262144];
     maximum[..4].copy_from_slice(&[0x80, 207, 255, 255]);
@@ -498,25 +508,7 @@ fn parsed_fields(value: RtcpCompound<'_>) -> IvyJson {
             ])
         })
         .unwrap_or(IvyJson::Null);
-    IvyJson::object([
-        ("sender", sender),
-        ("receiver", receiver),
-        (
-            "cname",
-            value
-                .cname
-                .map(|b| String::from_utf8_lossy(b).into_owned().into())
-                .unwrap_or(IvyJson::Null),
-        ),
-        (
-            "bye",
-            value
-                .bye
-                .and_then(|b| b.reason)
-                .map(|b| String::from_utf8_lossy(b).into_owned().into())
-                .unwrap_or(IvyJson::Null),
-        ),
-    ])
+    IvyJson::object([("sender", sender), ("receiver", receiver)])
 }
 fn projected_fields(value: RtcpCompound<'_>) -> IvyJson {
     IvyJson::Array(
@@ -624,7 +616,7 @@ fn original_parser_and_actual_application_event_traces_keep_unknown_exceptions_s
             "{name}"
         );
         if !exception {
-            for key in ["sender", "receiver", "cname", "bye"] {
+            for key in ["sender", "receiver"] {
                 assert_eq!(fields.get(key), original_parse.get(key), "{name} {key}");
             }
         } else {
