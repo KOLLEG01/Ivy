@@ -3,6 +3,8 @@ pub mod admission;
 pub mod discovery;
 pub mod events;
 pub mod inventory;
+pub mod mcp;
+pub mod mcp_schema;
 pub mod objects;
 pub mod paging;
 pub mod query;

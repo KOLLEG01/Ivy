@@ -27,16 +27,23 @@ if(identityStart<0||identityEnd<identityStart)throw Error('Original worker ident
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
-let store,registry,discovery,Discovery;
+let store,registry,discovery,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess;
 const registryTrace=input.steps.some(step=>['registry','inventory','discovery'].includes(step.op));
 const inventoryTrace=input.steps.some(step=>step.op==='inventory');
 const discoveryTrace=input.steps.some(step=>step.op==='discovery');
-const plainLowercase=new Map(),englishStrings=new Set(),wordCharacters=new Map();
-const realPlainLower=String.prototype.toLowerCase,realCompare=String.prototype.localeCompare;
+const plainLowercase=new Map(),uppercase=new Map(),englishStrings=new Set(),wordCharacters=new Map();
+const realPlainLower=String.prototype.toLowerCase,realUpper=String.prototype.toUpperCase,realCompare=String.prototype.localeCompare;
 if(discoveryTrace){
  String.prototype.toLowerCase=function(...args){const value=realPlainLower.apply(this,args);plainLowercase.set(String(this),value);for(const char of value)wordCharacters.set(char.codePointAt(0),/[\p{L}\p{N}]/u.test(char));return value;};
  String.prototype.localeCompare=function(other,...args){if(args[0]==='en'){englishStrings.add(String(this));englishStrings.add(String(other));}return realCompare.call(this,other,...args);};
+ String.prototype.toUpperCase=function(...args){const value=realUpper.apply(this,args);uppercase.set(String(this),value);return value;};
  ({Discovery}=await import('../../services/hive/src/discovery.ts'));
+ ({directDescriptors,directCall,hasStructuredOutput}=await import('../../services/hive/src/mcp-catalog.ts'));
+ ({McpSchemaBundle}=await import('../../services/hive/src/mcp-schema.ts'));
+ const facade=readFileSync(new URL('../../services/hive/src/mcp.ts',import.meta.url),'utf8');
+ const surfaceStart=facade.indexOf('export function mcpSurfaceBindings('),surfaceEnd=facade.indexOf('type CursorAccess = ',surfaceStart),successStart=facade.indexOf('export function mcpSuccess('),successEnd=facade.indexOf('function failure(',successStart);
+ if(surfaceStart<0||surfaceEnd<surfaceStart||successStart<0||successEnd<successStart)throw Error('Original MCP projection slices changed');
+ ({mcpSurfaceBindings,mcpSuccess}=new Function(stripTypeScriptTypes(facade.slice(surfaceStart,surfaceEnd).replace('export function','function')+facade.slice(successStart,successEnd).replace('export function','function'),{mode:'strip'})+';return {mcpSurfaceBindings,mcpSuccess};')());
 }
 const lowercase=new Map();
 const localeStrings=new Set();
@@ -211,6 +218,17 @@ try {
             case 'instructions':value=discovery.instructions();break;
             case 'instructionsPage':value=discovery.instructionsPage(params);break;
             case 'toolSchema':value=discovery.toolSchema(params);break;
+            case 'mcpSurface':value=mcpSurfaceBindings(params.bindings??discovery.mcpCatalog(params.name),params.surface);break;
+            case 'mcpSuccess':value=mcpSuccess(params.result,params.structured);break;
+            case 'directDescriptors':case 'directCall':case 'hasStructuredOutput':{
+              let bindings=params.bindings??discovery.mcpCatalog(params.name);
+              if(params.surface)bindings=bindings.filter(b=>b.definition.discovery?.mcp?.surface===params.surface);
+              value=step.method==='directDescriptors'?directDescriptors(bindings):step.method==='directCall'?directCall(bindings,params.args):hasStructuredOutput(bindings);break;
+            }
+            case 'mcpBundle':{
+              const bundle=new McpSchemaBundle(),embeds=[];for(const entry of params.entries)embeds.push(bundle.embed(entry.schema,entry.path));
+              value={embeds,finished:bundle.finish(params.root??{type:'object',properties:{}})};break;
+            }
             case 'cursor':value=store.cursor(params.identity,params.boundary);break;
             default:throw Error('Unknown discovery method');
           }
@@ -306,8 +324,8 @@ try {
   if(inventoryTrace)runtime.registryRuntime.lowercase=[...lowercase].map(([value,lower])=>[units(value),units(lower)]);
   if(discoveryTrace){
    const sorted=[...englishStrings].sort((a,b)=>realCompare.call(a,b,'en'));let rank=0;
-   runtime.registryRuntime.discovery={lowercase:[...plainLowercase].map(([v,l])=>[units(v),units(l)]),wordCharacters:[...wordCharacters],englishOrder:sorted.map((v,i)=>{if(i&&realCompare.call(v,sorted[i-1],'en')!==0)rank++;return [units(v),rank];})};
+   runtime.registryRuntime.discovery={lowercase:[...plainLowercase].map(([v,l])=>[units(v),units(l)]),uppercase:[...uppercase].map(([v,l])=>[units(v),units(l)]),wordCharacters:[...wordCharacters],englishOrder:sorted.map((v,i)=>{if(i&&realCompare.call(v,sorted[i-1],'en')!==0)rank++;return [units(v),rank];})};
   }
  }
  process.stdout.write(JSON.stringify({rows,definitions,metadata,topics,...runtime}));
-}finally{store?.close();String.prototype.toLowerCase=realPlainLower;String.prototype.localeCompare=realCompare;}
+}finally{store?.close();String.prototype.toLowerCase=realPlainLower;String.prototype.toUpperCase=realUpper;String.prototype.localeCompare=realCompare;}

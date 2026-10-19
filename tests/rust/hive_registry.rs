@@ -13,6 +13,8 @@ use std::{cmp::Ordering, collections::HashMap, sync::Arc, time::Duration};
 mod discovery;
 #[path = "hive_inventory.rs"]
 mod inventory;
+#[path = "hive_mcp.rs"]
+mod mcp;
 
 fn units(value: &Value) -> JsString {
     JsString(
@@ -32,6 +34,7 @@ struct ObservedRuntime {
     discovery_lowercase: HashMap<JsString, JsString>,
     word_characters: HashMap<u32, bool>,
     english: HashMap<JsString, i64>,
+    uppercase: HashMap<JsString, JsString>,
 }
 impl ObservedRuntime {
     fn new(profile: &Value) -> Self {
@@ -79,7 +82,20 @@ impl ObservedRuntime {
                         .collect()
                 })
                 .unwrap_or_default(),
+            uppercase: profile["discovery"]["uppercase"]
+                .as_array()
+                .map(|v| v.iter().map(|v| (units(&v[0]), units(&v[1]))).collect())
+                .unwrap_or_default(),
         }
+    }
+}
+impl ivy_hive::mcp::Runtime for ObservedRuntime {
+    fn uppercase(&self, value: &JsString) -> IvyResult<JsString> {
+        Ok(self
+            .uppercase
+            .get(value)
+            .unwrap_or_else(|| panic!("Unobserved MCP uppercase {value:?}"))
+            .clone())
     }
 }
 impl ivy_hive::discovery::Runtime for ObservedRuntime {
@@ -227,6 +243,98 @@ impl Trace {
                 "instructions" => discovery.instructions(store, registry, runtime, now),
                 "instructionsPage" => {
                     discovery.instructions_page(store, registry, &parameters, runtime, now)
+                }
+                "toolSchema" => discovery.tool_schema(store, registry, &parameters, runtime, now),
+                "mcpSurface" => {
+                    let bindings = match parameters.get("bindings") {
+                        Some(v) => v.as_array().ok_or_else(IvyError::internal)?.to_vec(),
+                        None => discovery.mcp_catalog(
+                            store,
+                            registry,
+                            parameters.get("name").and_then(IvyJson::as_js_string),
+                            runtime,
+                            now,
+                        )?,
+                    };
+                    ivy_hive::mcp::surface_bindings(
+                        &bindings,
+                        parameters
+                            .get("surface")
+                            .and_then(IvyJson::as_js_string)
+                            .ok_or_else(IvyError::internal)?,
+                    )
+                    .map(IvyJson::Array)
+                }
+                "mcpSuccess" => ivy_hive::mcp::success(
+                    parameters.get("result").ok_or_else(IvyError::internal)?,
+                    parameters.get("structured") == Some(&IvyJson::Bool(true)),
+                ),
+                "directDescriptors" | "directCall" | "hasStructuredOutput" => {
+                    let mut bindings = match parameters.get("bindings") {
+                        Some(v) => v.as_array().ok_or_else(IvyError::internal)?.to_vec(),
+                        None => discovery.mcp_catalog(
+                            store,
+                            registry,
+                            parameters.get("name").and_then(IvyJson::as_js_string),
+                            runtime,
+                            now,
+                        )?,
+                    };
+                    if let Some(surface) = parameters.get("surface") {
+                        bindings.retain(|b| {
+                            b.get("definition")
+                                .and_then(|v| v.get("discovery"))
+                                .and_then(|v| v.get("mcp"))
+                                .and_then(|v| v.get("surface"))
+                                == Some(surface)
+                        });
+                    }
+                    match method {
+                        "directDescriptors" => {
+                            ivy_hive::mcp::direct_descriptors(&bindings, runtime)
+                                .map(IvyJson::Array)
+                        }
+                        "directCall" => ivy_hive::mcp::direct_call(
+                            &bindings,
+                            parameters.get("args").ok_or_else(IvyError::internal)?,
+                            runtime,
+                        ),
+                        _ => ivy_hive::mcp::has_structured_output(&bindings).map(IvyJson::Bool),
+                    }
+                }
+                "mcpBundle" => {
+                    let mut bundle = ivy_hive::mcp_schema::McpSchemaBundle::new();
+                    let mut embeds = vec![];
+                    for entry in parameters
+                        .get("entries")
+                        .and_then(IvyJson::as_array)
+                        .ok_or_else(IvyError::internal)?
+                    {
+                        embeds.push(
+                            bundle.embed(
+                                entry.get("schema").ok_or_else(IvyError::internal)?,
+                                entry
+                                    .get("path")
+                                    .and_then(IvyJson::as_js_string)
+                                    .ok_or_else(IvyError::internal)?,
+                            )?,
+                        );
+                    }
+                    Ok(IvyJson::object([
+                        ("embeds", IvyJson::Array(embeds)),
+                        (
+                            "finished",
+                            bundle.finish(parameters.get("root").cloned().unwrap_or_else(|| {
+                                IvyJson::object([
+                                    ("type", "object".into()),
+                                    (
+                                        "properties",
+                                        IvyJson::object(std::iter::empty::<(&str, IvyJson)>()),
+                                    ),
+                                ])
+                            })),
+                        ),
+                    ]))
                 }
                 "cursor" => store
                     .cursor(

@@ -337,6 +337,53 @@ impl Discovery {
             .insert(qualified.clone(), binding.clone());
         Ok(binding)
     }
+    pub fn tool_schema(
+        &mut self,
+        store: &Store,
+        registry: &mut Registry,
+        params: &IvyJson,
+        runtime: &dyn crate::mcp::Runtime,
+        now: f64,
+    ) -> IvyResult<IvyJson> {
+        let name = string(params, "name")?;
+        let bindings = self
+            .mcp_catalog(store, registry, Some(name), runtime, now)?
+            .into_iter()
+            .filter(|b| {
+                b.get("definition")
+                    .and_then(mcp_name)
+                    .is_some_and(|v| is_text(v.get("surface"), "ivy"))
+            })
+            .collect::<Vec<_>>();
+        let tool = crate::mcp::direct_descriptors(&bindings, runtime)?
+            .into_iter()
+            .find(|t| t.get("name") == params.get("name"))
+            .ok_or_else(|| {
+                IvyError::new(
+                    "not_found",
+                    "Public MCP tool is not in the current catalog.",
+                )
+            })?;
+        let output = tool.get("outputSchema").cloned().unwrap_or(IvyJson::Null);
+        let input = field(&tool, "inputSchema")?.clone();
+        let hash = hash_json(&IvyJson::object([
+            ("inputSchema", input.clone()),
+            ("outputSchema", output.clone()),
+        ]))?;
+        Ok(IvyJson::object([
+            ("name", field(&tool, "name")?.clone()),
+            (
+                "description",
+                tool.get("description")
+                    .cloned()
+                    .unwrap_or_else(|| "".into()),
+            ),
+            ("inputSchema", input),
+            ("outputSchema", output),
+            ("schemaHash", hash.into()),
+            ("complete", true.into()),
+        ]))
+    }
     fn evict(&mut self, id: &JsString) {
         if let Some(i) = self.indexes.iter().position(|(k, _)| k == id) {
             self.index_bytes -= self.indexes.remove(i).1.bytes;
