@@ -40,7 +40,7 @@ use ivy_host_runtime::{
 };
 use ivy_sdk::{
     rpc::{RequestFuture, RequestOptions, RpcClient},
-    service::{InvocationContext, ServiceState},
+    service::{ConnectionOptions, InvocationContext, ServiceConnection, ServiceState},
 };
 use std::{
     collections::BTreeMap,
@@ -252,7 +252,7 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
 {
     for path in field(data(), "catalogs").as_array().unwrap() {
         let root = Root::new();
-        let catalog = catalog(path.as_str().unwrap());
+        let catalog = catalog(&path.as_str().unwrap());
         let config = config(&root, field(&catalog, "version").clone());
         let journal = journal(text(&catalog, "version"));
         journal
@@ -427,6 +427,23 @@ async fn all_seven_native_catalogs_compose_every_management_handler_and_original
         );
         same(&(options.registry)().await.unwrap(), &registry);
         assert_eq!((options.credential)().await.unwrap(), "fixture-only");
+        // Exercise the real Shared provider registry gate over a local socket.
+        // This fixture has no Hive/provider account and launches no process.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(message) = socket.next().await { if message.is_err() { break; } }
+        });
+        let mut connection_options = ConnectionOptions::new("fixture.agent".into());
+        connection_options.handlers = options.handlers.clone();
+        connection_options.json_handlers = options.json_handlers.clone();
+        let connection = ServiceConnection::connect(&base, "fixture-only", connection_options, Default::default()).await.unwrap();
+        connection.prepare_registry(&registry).unwrap();
+        connection.close();
+        tokio::time::timeout(Duration::from_secs(5), peer).await.unwrap().unwrap();
         let context = InvocationContext::detached(
             "caller".into(),
             None,
