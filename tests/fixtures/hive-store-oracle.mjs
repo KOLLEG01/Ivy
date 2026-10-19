@@ -1,11 +1,12 @@
 import {registerHooks,stripTypeScriptTypes,syncBuiltinESMExports} from 'node:module';
 import {existsSync,readFileSync} from 'node:fs';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
 import crypto from 'node:crypto';
 import {join,relative} from 'node:path';
 import {setup as uiFileSetup,tree as uiFileTree} from './hive-ui-files-fixture.mjs';
 registerHooks({resolve(specifier,context,next){
+  if(specifier==='web-push'&&process.env.IVY_HIVE_TEST_WEB_PUSH)return next(pathToFileURL(process.env.IVY_HIVE_TEST_WEB_PUSH).href,context);
   if(specifier.startsWith('.')&&specifier.endsWith('.js')&&context.parentURL){const source=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(source)))return next(source.href,context);}
   return next(specifier,context);
 },load(url,context,next){
@@ -35,7 +36,7 @@ const workerSource=readFileSync(new URL('../../services/hive/src/worker.ts',impo
 const identityStart=workerSource.indexOf('const oauthPrefix = '),identityEnd=workerSource.indexOf('let chain = Promise.resolve();');
 if(identityStart<0||identityEnd<identityStart)throw Error('Original worker identity slice changed');
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
-const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
+const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat','browserPush',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const publishStart=workerSource.indexOf('function publishRoutes('),publishEnd=workerSource.indexOf('parentPort.on(',publishStart);
 if(publishStart<0||publishEnd<publishStart)throw Error('Original worker notification boundaries changed');
 const originalPublisher=new Function('kernel','parentPort','announcedEventSequence',stripTypeScriptTypes(workerSource.slice(publishStart,publishEnd),{mode:'strip'})+';return payload=>{publishRoutes(payload);publishEventsAvailable();};');
@@ -43,7 +44,16 @@ const input=JSON.parse(readFileSync(0,'utf8'));
 let store,registry,discovery,configurations,packageCatalog,packageKernel,kernelExecution,KernelExecution,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
 const workerTrace=input.steps.some(step=>step.op==='worker');
 const kernelTrace=workerTrace||input.steps.some(step=>step.op==='kernel');
-let workerPublisher,workerNotifications;
+let workerPublisher,workerNotifications,browserPush;
+const pushTrace=input.steps.some(step=>step.browserPush);
+let BrowserPushStore,webPush,pushStep;
+const pushRuntime={vapid:[],points:new Map()};
+if(pushTrace){
+ ({BrowserPushStore}=await import('../../services/hive/src/browser-push-store.ts'));({default:webPush}=await import('web-push'));
+ const generate=webPush.generateVAPIDKeys,convert=crypto.ECDH.convertKey;
+ webPush.generateVAPIDKeys=()=>{const keys=pushStep?.vapidKeys?{publicKey:pushStep.vapidKeys.publicKey,privateKey:pushStep.vapidKeys.privateKey}:generate();pushRuntime.vapid.push(keys);return keys;};
+ crypto.ECDH.convertKey=function(bytes,...args){try{const result=convert.call(this,bytes,...args);pushRuntime.points.set(Buffer.from(bytes).toString('base64url'),true);return result;}catch(error){pushRuntime.points.set(Buffer.from(bytes).toString('base64url'),false);throw error;}};
+}
 const packageTrace=input.steps.some(step=>['packageCatalog','packageKernel'].includes(step.op));
 let createKernelCatalog,kernelPackageAction;
 if(workerTrace||input.steps.some(step=>step.op==='packageKernel')){
@@ -138,7 +148,7 @@ try {
   for(const binding of step.bindings??[])set(step,binding.at,rows[binding.from].value.object.id);
   for(const binding of step.identityBindings??[]){let v=rows[binding.from];for(const key of binding.select.split('/').slice(1))v=v[key];set(step,binding.at,binding.digest?digest(v):v);}
   let value=null,error=null,wikiCalls=[];
-  workerNotifications=[];
+  workerNotifications=[];pushStep=step;
   try {
    switch(step.op){
     case 'worker':case 'kernel':{
@@ -159,6 +169,7 @@ try {
         kernelExecution.registerHandlers();
         if(workerTrace){
          kernelExecution.options.credentials=step.credentials??[];store.configureCredentials(kernelExecution.options.credentials);
+         if(step.browserPush)browserPush=new BrowserPushStore(store,new URL(kernelExecution.options.publicBaseUrl));
          createKernelCatalog.call(kernelExecution);
          workerPublisher=originalPublisher(kernelExecution,{postMessage:value=>workerNotifications.push(value)},Number(store.get('SELECT MAX(sequence) AS sequence FROM events').sequence??0));
         }
@@ -167,8 +178,8 @@ try {
        switch(step.method){
         case 'constructor':case 'reopen':break;
         case 'dispatch':{
-         const api=originalIdentity(kernelExecution,canonical,digest,crypto.createHmac,size=>step.sessionBytes?Buffer.from(step.sessionBytes,'base64'):crypto.randomBytes(size),IvyError,requireThat);
-         try{value=await api.handle(step.payload);}finally{workerPublisher(step.payload);}
+         const api=originalIdentity(kernelExecution,canonical,digest,crypto.createHmac,size=>step.sessionBytes?Buffer.from(step.sessionBytes,'base64'):crypto.randomBytes(size),IvyError,requireThat,browserPush);
+         try{value=await api.handle(step.payload);if(step.payload.action==='browserPush.complete'&&value===undefined)value=null;}finally{workerPublisher(step.payload);}
          break;
         }
         case 'execute':{
@@ -569,6 +580,7 @@ try {
   const state=snapshot(step.compactEvents??false,step.compactDiagnostics??false);
   if(kernelTrace||step.op==='uiFiles'||step.op==='uis')state.appAssets=store.all('SELECT * FROM app_assets ORDER BY app_id,release_id,path');
   if(inventoryTrace){state.inventorySets=store.all('SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind');state.inventory=step.compactInventory?tableHash('inventory','record_id,node_id,namespace,kind,native_id,schema_version,summary,observed_at'):store.all('SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id');}
+  if(pushTrace){state.push=store.all('SELECT * FROM browser_push ORDER BY endpoint');state.outbox=store.all('SELECT * FROM browser_push_outbox ORDER BY id');state.pushReceipts=store.all('SELECT * FROM browser_push_receipts ORDER BY tag');state.pushSequence=store.all("SELECT * FROM sqlite_sequence WHERE name='browser_push_outbox'");}
   if(kernelTrace)state.deploymentReports=store.all('SELECT * FROM deployment_reports ORDER BY host_id,deployment_id');
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
@@ -589,5 +601,6 @@ try {
    runtime.registryRuntime.discovery={lowercase:[...plainLowercase].map(([v,l])=>[units(v),units(l)]),uppercase:[...uppercase].map(([v,l])=>[units(v),units(l)]),wordCharacters:[...wordCharacters],englishOrder:sorted.map((v,i)=>{if(i&&realCompare.call(v,sorted[i-1],'en')!==0)rank++;return [units(v),rank];})};
   }
  }
+ if(pushTrace)runtime.browserPushRuntime={vapid:pushRuntime.vapid,points:[...pushRuntime.points]};
  process.stdout.write(JSON.stringify({rows,definitions,metadata,topics,...runtime}));
 }finally{store?.close();String.prototype.toLowerCase=realPlainLower;String.prototype.toUpperCase=realUpper;String.prototype.localeCompare=realCompare;}

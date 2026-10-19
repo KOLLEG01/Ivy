@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+#[path = "hive_browser_push.rs"]
+mod browser_push;
 #[path = "hive_kernel_content.rs"]
 mod content;
 #[path = "hive_kernel_domains.rs"]
@@ -69,6 +71,9 @@ fn slow(call: &mut Call<'_>, _: &IvyJson, _: &IvyJson, _: &str) -> IvyResult<Ivy
     Ok(IvyJson::Null)
 }
 fn update_options(kernel: &mut Kernel, step: &Value) {
+    if let Some(value) = step["options"].get("publicBaseUrl") {
+        kernel.options.public_base_url = value.as_str().unwrap().into();
+    }
     if let Some(value) = step["options"].get("validateMessages") {
         kernel.options.validate_messages = value == true;
     }
@@ -106,7 +111,7 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
         let result = (|| -> IvyResult<IvyJson> {
             match step["op"].as_str().unwrap() {
                 "worker" => match step["method"].as_str().unwrap() {
-                    "constructor" => {
+                    "constructor" | "reopen" => {
                         let credentials = step["credentials"]
                             .as_array()
                             .unwrap()
@@ -117,10 +122,22 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                             })
                             .collect::<Vec<_>>();
                         kernel.parts.store.configure_credentials(&credentials)?;
-                        worker = Some(ivy_hive::worker_actions::WorkerActions::new(
-                            kernel,
-                            &credentials,
-                        )?);
+                        let mut actions =
+                            ivy_hive::worker_actions::WorkerActions::new(kernel, &credentials)?;
+                        if step["browserPush"] == true {
+                            let clock = clock.clone();
+                            actions.bind_browser_push(
+                                ivy_hive::browser_push_store::BrowserPushStore::new(
+                                    &kernel.parts.store,
+                                    &kernel.options.public_base_url,
+                                    Rc::new(browser_push::ObservedCrypto::new(
+                                        &profile["browserPush"],
+                                    )),
+                                    Rc::new(move || clock.get()),
+                                )?,
+                            );
+                        }
+                        worker = Some(actions);
                         Ok(IvyJson::Null)
                     }
                     "dispatch" => worker
@@ -260,6 +277,24 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
             state["inventory"] = rows(
                 &kernel.parts.store,
                 "SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id",
+            );
+        }
+        if steps.iter().any(|v| v["browserPush"] == true) {
+            state["push"] = rows(
+                &kernel.parts.store,
+                "SELECT * FROM browser_push ORDER BY endpoint",
+            );
+            state["outbox"] = rows(
+                &kernel.parts.store,
+                "SELECT * FROM browser_push_outbox ORDER BY id",
+            );
+            state["pushReceipts"] = rows(
+                &kernel.parts.store,
+                "SELECT * FROM browser_push_receipts ORDER BY tag",
+            );
+            state["pushSequence"] = rows(
+                &kernel.parts.store,
+                "SELECT * FROM sqlite_sequence WHERE name='browser_push_outbox'",
             );
         }
         let mut observation = json!({"value":value,"error":error,"state":state,"fileTree":ui_files::tree(&path.with_extension("files")),

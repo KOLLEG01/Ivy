@@ -1,7 +1,8 @@
 //! Worker actions over initialized native domains and their single connection.
-//! Startup, browser push, retention failure journaling, backup and retirement
+//! Startup, retention failure journaling, backup and retirement
 //! remain separate; this module does not substitute policies for those actions.
 use crate::{
+    browser_push_store::BrowserPushStore,
     kernel::Kernel,
     mcp_request,
     package_kernel::{self, KernelCatalog},
@@ -45,6 +46,7 @@ fn head(kernel: &Kernel) -> IvyResult<f64> {
 }
 
 pub struct WorkerActions {
+    browser_push: Option<BrowserPushStore>,
     catalog: KernelCatalog,
     configured_principals: Vec<JsString>,
     announced_event_sequence: f64,
@@ -61,10 +63,16 @@ impl WorkerActions {
             kernel.clock.clone(),
         )?;
         Ok(Self {
+            browser_push: None,
             catalog,
             configured_principals: credentials.iter().map(|v| v.principal_id.clone()).collect(),
             announced_event_sequence: head(kernel)?,
         })
+    }
+    /// Bind the initialized store domain and its explicit cryptographic provider.
+    /// An absent binding leaves these actions unhandled, with no fallback policy.
+    pub fn bind_browser_push(&mut self, push: BrowserPushStore) {
+        self.browser_push = Some(push);
     }
     /// None leaves an action with its other owner. It never fabricates a result
     /// or supplies a replacement policy for an unfinished action.
@@ -81,6 +89,33 @@ impl WorkerActions {
             );
         }
         match action.as_str() {
+            "browserPush.request"
+            | "browserPush.keys"
+            | "browserPush.next"
+            | "browserPush.complete" => {
+                let push = self.browser_push.as_ref()?;
+                Some((|| match action.as_str() {
+                    "browserPush.request" => push.request(
+                        &mut kernel.parts.store,
+                        field(message, "context")?,
+                        field(message, "request")?,
+                    ),
+                    "browserPush.keys" => push.keys(&kernel.parts.store),
+                    "browserPush.next" => push.next(&mut kernel.parts.store),
+                    _ => {
+                        push.complete(
+                            &kernel.parts.store,
+                            field(message, "id")?
+                                .as_f64()
+                                .ok_or_else(IvyError::internal)?,
+                            field(message, "status")?
+                                .as_f64()
+                                .ok_or_else(IvyError::internal)?,
+                        )?;
+                        Ok(IvyJson::Null)
+                    }
+                })())
+            }
             "execute" => Some((|| {
                 let context = field(message, "context")?;
                 worker_identity::check_access_expiry(context, (kernel.clock)() as u64)?;
