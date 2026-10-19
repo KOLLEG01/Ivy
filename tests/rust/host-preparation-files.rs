@@ -5,6 +5,8 @@ use std::{fs, path::PathBuf};
 mod preparation_files_cases;
 #[path = "host-artifact-inventory-cases.rs"]
 mod artifact_inventory_cases;
+#[path = "host-preparation-inputs-cases.rs"]
+mod preparation_inputs_cases;
 
 struct ServiceFixture(PathBuf);
 impl ServiceFixture {

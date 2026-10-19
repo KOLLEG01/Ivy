@@ -52,6 +52,7 @@ pub mod process_output;
 mod protected_config;
 pub mod preparations;
 pub mod preparation_files;
+pub mod preparation_inputs;
 mod preparation_copy;
 pub mod preparation_links;
 pub mod preparation_cache;

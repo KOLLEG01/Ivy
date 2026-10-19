@@ -33,6 +33,12 @@ ${sourceSpan(configSource,'export function inside(','\nexport async function ins
 ${processSource.slice(processStart)}
 `;
 const {runCommand,jsonFile}=await import('data:text/javascript,'+encodeURIComponent(stripTypeScriptTypes(processModule,{mode:'transform'})));
+const resetSource=readFileSync(new URL('../../services/agent-manager/src/runtime-reset.ts',import.meta.url),'utf8');
+// Preserve the owning reset reader's exact ENOENT-only guard. The success
+// envelope distinguishes present JSON null from the missing-file sentinel.
+const optionalCatch=sourceSpan(resetSource,'    (error: NodeJS.ErrnoException) => {','\n  );');
+const optionalJson=new Function('jsonFile','path','limit',stripTypeScriptTypes(
+  'function readOptional(){return jsonFile(path,limit).then(value=>({present:true,value})).catch('+optionalCatch+');}',{mode:'transform'})+'\nreturn readOptional();');
 const common=span('function lockedPackageName(','/** Add the supported OS/architecture');
 const planner=span('async function materializePortableDependencies(','  await mapConcurrent(missing, 4, async value => {')+'  return missing;\n}';
 const policy='async function responsePolicy(value) {\n'+span('    const response = await fetch(value.resolved,','    const key = createHash(\'sha256\').update(value.location)')+'return {byteLength:bytes.length};\n}';
@@ -80,6 +86,7 @@ try{
   else if(input.operation==='listing')value=helpers.listingPolicy({stdout:input.stdout,truncated:input.truncated});
   else if(input.operation==='unlink'){await rm(input.path,{force:true});value=null;}
   else if(input.operation==='jsonFile')value=await jsonFile(input.path,input.limit);
+  else if(input.operation==='optionalJson')value=await optionalJson(jsonFile,input.path,input.limit);
   else if(input.operation==='install'){
     await helpers.materializePortableDependencies({packages:{[input.dependency.location]:{...input.dependency,os:['linux']}}},new Set([input.dependency.location]),input.originalRoot,input.temporaryRoot,input.executables);value=null;
   }else throw Error('Unknown portable fixture operation');

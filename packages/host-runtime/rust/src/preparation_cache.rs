@@ -130,13 +130,23 @@ pub fn dependency_cache_key(
     arch: JsString,
     node: JsString,
 ) -> IvyResult<String> {
+    dependency_cache_key_json(lock_hash, IvyJson::String(package_manager), os, arch, node)
+}
+/// Preserve an admitted package.json value in identity after JS regex coercion.
+pub fn dependency_cache_key_json(
+    lock_hash: JsString,
+    package_manager: IvyJson,
+    os: JsString,
+    arch: JsString,
+    node: JsString,
+) -> IvyResult<String> {
     hash_json(&IvyJson::object([
         ("cacheSchemaVersion", IvyJson::Number(3.0)),
         ("lockHash", IvyJson::String(lock_hash)),
         ("os", IvyJson::String(os)),
         ("arch", IvyJson::String(arch)),
         ("node", IvyJson::String(node)),
-        ("packageManager", IvyJson::String(package_manager)),
+        ("packageManager", package_manager),
     ]))
 }
 impl PreparationCache {

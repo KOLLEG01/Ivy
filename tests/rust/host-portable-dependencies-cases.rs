@@ -149,3 +149,55 @@ async fn bounded_json_reader_preserves_original_regular_file_and_account_sharing
     }
     for file in [fixture.0.join("absent"),fixture.0.clone(),fixture.0.join("invalid\0name")]{compare(IvyJson::object([("operation","jsonFile".into()),("path",path(&file)),("limit",IvyJson::Number(1024.0))]),ivy_host_runtime::config::json_file(&file,1024).await);}
 }
+
+async fn optional_json(file:&Path,limit:usize)->IvyJson{
+    compare(IvyJson::object([("operation","optionalJson".into()),("path",path(file)),("limit",IvyJson::Number(limit as f64))]),
+        ivy_host_runtime::config::json_file_if_present(file,limit).await.map(|value|value.map_or(IvyJson::Null,|value|IvyJson::object([("present",true.into()),("value",value)]))))
+}
+#[tokio::test]
+async fn optional_json_reader_keeps_missing_present_null_and_nonmissing_errors_distinct(){
+    let fixture=Fixture::new();
+    for bytes in [b"null".as_slice(),b"false",b"0",b"[]",br#"{"name":"fixture"}"#,b"{\"name\":\"\xff\"}"]{
+        let file=fixture.write("value.json",bytes);
+        let result=optional_json(&file,bytes.len()).await;succeeds(&result);
+        assert_eq!(result.required("value").unwrap().get("present"),Some(&true.into()));
+        refuses(&optional_json(&file,bytes.len()-1).await,"invalid_arguments");
+    }
+    for bytes in [b"{".as_slice(),b"\xef\xbb\xbfnull"]{
+        let file=fixture.write("syntax.json",bytes);refuses(&optional_json(&file,64*1024).await,"internal_error");
+    }
+    for file in [fixture.0.join("absent"),fixture.0.join("absent/child")]{
+        let result=optional_json(&file,64*1024).await;succeeds(&result);assert_eq!(result.get("value"),Some(&IvyJson::Null));
+    }
+    refuses(&optional_json(&fixture.0,64*1024).await,"invalid_arguments");
+    let parent=fixture.write("parent-file",b"null");
+    let result=optional_json(&parent.join("child"),64*1024).await;
+    #[cfg(windows)]{succeeds(&result);assert_eq!(result.get("value"),Some(&IvyJson::Null));}
+    #[cfg(not(windows))]refuses(&result,"internal_error");
+    refuses(&optional_json(&fixture.0.join("invalid\0name"),64*1024).await,"internal_error");
+    #[cfg(windows)]{
+        use std::os::windows::fs::OpenOptionsExt;
+        let file=fixture.write("held.json",b"null");
+        let held=fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
+        refuses(&optional_json(&file,64*1024).await,"internal_error");drop(held);
+        succeeds(&optional_json(&file,64*1024).await);
+    }
+}
+#[tokio::test]
+async fn optional_json_reader_follows_file_links_and_dangling_links_are_missing(){
+    let fixture=Fixture::new();let target=fixture.write("target.json",b"null");let link=fixture.0.join("link.json");
+    #[cfg(windows)]let created=std::os::windows::fs::symlink_file(&target,&link);
+    #[cfg(unix)]let created=std::os::unix::fs::symlink(&target,&link);
+    if let Err(error)=created{
+        assert_ne!(std::env::var("IVY_REQUIRE_FILE_SYMLINKS").as_deref(),Ok("1"),"required native file link unavailable: {error}");
+        if let Some(file)=std::env::var_os("IVY_HOST_PORTABLE_CORPUS"){
+            let _guard=CORPUS.lock().unwrap();writeln!(fs::OpenOptions::new().create(true).append(true).open(file).unwrap(),"{}",
+                json::stringify(&IvyJson::object([("operation","optionalJsonLinkAvailability".into()),("available",false.into()),("nativeError",error.to_string().into())]),usize::MAX).unwrap()).unwrap();
+        }
+        return;
+    }
+    let result=optional_json(&link,64*1024).await;succeeds(&result);
+    assert_eq!(result.required("value").unwrap().get("present"),Some(&true.into()));
+    fs::remove_file(target).unwrap();
+    let result=optional_json(&link,64*1024).await;succeeds(&result);assert_eq!(result.get("value"),Some(&IvyJson::Null));
+}
