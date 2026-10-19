@@ -23,22 +23,10 @@ use ivy_sdk::{
 };
 use std::{
     collections::VecDeque,
-    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
-
-fn progress(value: &str) {
-    if let Some(path) = std::env::var_os("IVY_CHAT_MAIN_TRACE_CAPTURE") {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        writeln!(file, "{value}").unwrap();
-    }
-}
 
 fn oracle() -> &'static Json {
     static ORACLE: OnceLock<Json> = OnceLock::new();
@@ -515,6 +503,68 @@ async fn step(action: &Json, main: &ChatMain<'_>, client: &Client) -> IvyResult<
                 .map_err(|e| e.into_ivy())?;
             Ok(Json::Null)
         }
+        "patch-binding" => {
+            let current = main.find().await?.unwrap();
+            let saved = main
+                .store()
+                .read(
+                    "chat-bridge/binding",
+                    Reference::Pinned(&object_pin(field(&current.value, "binding"))),
+                )
+                .await
+                .map_err(|e| e.into_ivy())?;
+            let mut value = saved.value.clone();
+            match text(action, "field").as_str() {
+                "project" => {
+                    let mut part = field(&value, "project").clone();
+                    part.insert("nativeId", "foreign-native-project".into());
+                    value.insert("project", part);
+                }
+                "nativePlan" => {
+                    let mut part = field(&value, "nativePlan").clone();
+                    let mut start = field(&part, "threadStart").clone();
+                    let mut params = field(&start, "params").clone();
+                    params.insert("cwd", "/another-project".into());
+                    start.insert("params", params);
+                    part.insert("threadStart", start);
+                    value.insert("nativePlan", part);
+                }
+                "primary" => {
+                    let mut part = field(&value, "primary").clone();
+                    part.insert("serviceNodeId", "foreign-native-owner".into());
+                    value.insert("primary", part);
+                }
+                other => panic!("Unexpected controlled binding rewrite {other}"),
+            }
+            let saved = main
+                .store()
+                .write(
+                    "chat-bridge/binding",
+                    &value,
+                    "fixture-binding-patch",
+                    Destination::Update {
+                        object_id: &saved.pin.object_id,
+                        expected_revision: saved.pin.revision,
+                    },
+                )
+                .await
+                .map_err(|e| e.into_ivy())?;
+            let mut value = current.value.clone();
+            value.insert("binding", saved.json());
+            main.store()
+                .write(
+                    "chat-bridge/main",
+                    &value,
+                    "fixture-binding-pin",
+                    Destination::Update {
+                        object_id: &current.pin.object_id,
+                        expected_revision: current.pin.revision,
+                    },
+                )
+                .await
+                .map_err(|e| e.into_ivy())?;
+            Ok(Json::Null)
+        }
         "notify" => {
             ChatNotices::new(main.operations, main, &notice_asset())
                 .notify(
@@ -582,9 +632,7 @@ fn notice_asset() -> NoticeInstructions {
 
 #[tokio::test]
 async fn original_main_creation_recovery_and_live_claims() {
-    progress("start");
     let oracle = oracle();
-    progress("original corpus parsed");
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let catalogs = CheckedNativeContracts::new(root);
     let bytes = STANDARD.decode(text(oracle, "instructions")).unwrap();
@@ -597,11 +645,17 @@ async fn original_main_creation_recovery_and_live_claims() {
     let clock = Arc::new(Fixed(field(oracle, "now").as_f64().unwrap() as i64));
     let mut steps = 0;
     let mut errors = 0;
+    let mut original_cases = 0;
+    let mut approved_cases = 0;
     for case in field(oracle, "cases").as_array().unwrap() {
         if flag(case, "referenceOnly") {
             continue;
         }
-        progress(&format!("case {}", text(case, "label")));
+        if flag(case, "approvedAutoSend") {
+            approved_cases += 1;
+        } else {
+            original_cases += 1;
+        }
         let seed = field(field(oracle, "seeds"), &text(case, "seed"));
         let path = std::env::temp_dir().join(format!("ivy-rust-main-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
@@ -626,11 +680,6 @@ async fn original_main_creation_recovery_and_live_claims() {
                 .unwrap(),
         );
         for (index, action) in field(case, "steps").as_array().unwrap().iter().enumerate() {
-            progress(&format!(
-                "{} step {index} {}",
-                text(case, "label"),
-                text(action, "action")
-            ));
             let expected = &field(case, "expected").as_array().unwrap()[index];
             client.begin(field(expected, "transport"));
             let name = text(action, "action");
@@ -719,12 +768,11 @@ async fn original_main_creation_recovery_and_live_claims() {
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }
-    assert!(field(oracle, "cases").as_array().unwrap().len() >= 40);
-    assert!(steps >= 150);
+    assert!(original_cases >= 40);
+    assert!(approved_cases >= 20);
+    assert!(steps >= 250);
     assert!(errors >= 15);
-    progress(&format!("complete steps={steps} expectedErrors={errors}"));
     eprintln!(
-        "Original Main: {} workflows, {steps} steps, {errors} expected errors, twelve exact original checkpoint copies.",
-        field(oracle, "cases").as_array().unwrap().len()
+        "Main: {original_cases} unchanged original workflows, {approved_cases} explicit approved-difference workflows, {steps} steps, {errors} expected errors; twelve exact original checkpoint copies."
     );
 }

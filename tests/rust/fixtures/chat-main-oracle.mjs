@@ -151,6 +151,15 @@ function environment(seed,approvedAutoSend=false){
     const pin=await store.write('chat-bridge/operation',value,'fixture-pending-patch',{objectId:saved.pin.objectId,expectedRevision:saved.pin.revision});
     await store.write('chat-bridge/main',{...selected.value,pendingAction:pin},'fixture-pending-pin',{objectId:selected.pin.objectId,expectedRevision:selected.pin.revision});return;
    }
+   case'patch-binding':{
+    const selected=await main.find(),saved=await store.read('chat-bridge/binding',selected.value.binding),value=clone(saved.value);
+    if(s.field==='project')value.project.nativeId='foreign-native-project';
+    else if(s.field==='nativePlan')value.nativePlan.threadStart.params.cwd='/another-project';
+    else if(s.field==='primary')value.primary.serviceNodeId='foreign-native-owner';
+    else throw Error('Unexpected controlled binding rewrite');
+    const pin=await store.write('chat-bridge/binding',value,'fixture-binding-patch',{objectId:saved.pin.objectId,expectedRevision:saved.pin.revision});
+    await store.write('chat-bridge/main',{...selected.value,binding:pin},'fixture-binding-pin',{objectId:selected.pin.objectId,expectedRevision:selected.pin.revision});return;
+   }
    case'constructor-store':{const other=new ChatStore(client,null);try{return new ChatMain(new ChatOperations(other,main.admission),main.native);}finally{other.close();}}
    case'constructor-definition':{const changed=new ChatAdmission({...definition,workspaceId:'foreign'});return new ChatMain(new ChatOperations(store,changed),main.native);}
    default:throw Error('Unknown Main step '+s.action);
@@ -217,7 +226,7 @@ add('real-main-notice-selection',[{action:'notify',caller:'producer'},{action:'f
 add('constructor-store-scope',[{action:'constructor-store'}]);
 add('constructor-definition-scope',[{action:'constructor-definition'}]);
 
-const approved=(label,steps,seed='pending-auto-send',selection=true)=>{add(label,steps,seed);Object.assign(cases.at(-1),{approvedAutoSend:true,selection});};
+const approved=(label,steps,seed='pending-auto-send',selection=true)=>{add(label,steps,seed);Object.assign(cases.at(-1),{approvedAutoSend:true,selection,oneInput:selection});};
 for(const version of Object.keys(seeds))approved('approved-auto-send-replay-'+version,[{action:'send',auto:true},{action:'send',auto:true},{action:'reopen'},{action:'send',auto:true},{action:'find'}],'completed-'+version);
 approved('approved-auto-send-cross-open',[{action:'reopen'},{action:'recover'},{action:'find'},{action:'send',auto:true},{action:'find'}]);
 approved('approved-auto-send-owner-refused',[{action:'state',value:{node:{connected:false}}},{action:'ensure',label:'main-send'},{action:'find'}],'pending-auto-send',false);
@@ -231,10 +240,17 @@ approved('approved-auto-send-receipt-before-newer-binding',[{action:'ensure',lab
 approved('approved-auto-send-cas-retry',[{action:'state',value:{bumpMainOnOwnerRead:2}},{action:'recover'},{action:'find'},{action:'send',auto:true},{action:'find'}]);
 approved('approved-auto-send-cancellation',[{action:'send',auto:true},{action:'cancel'},{action:'cancel',replay:true},{action:'reopen'},{action:'recover'},{action:'find'}],'completed-0.154.0');
 for(const action of ['notify','cancel'])approved('approved-auto-send-unrelated-'+action,[{action:'ensure',label:'main-send'},{action:'find'}],'pending-'+action,false);
+for(const field of ['project','nativePlan','primary']){
+ approved('approved-auto-send-binding-'+field,[{action:'patch-binding',field},{action:'recover'},{action:'find'}]);
+ Object.assign(cases.at(-1),{oneInput:false,refusal:'chat_binding_mismatch'});
+}
+approved('approved-auto-send-sequence-limit',[{action:'patch-main',value:{nextSequence:Number.MAX_SAFE_INTEGER}},{action:'recover'},{action:'find'}]);
+Object.assign(cases.at(-1),{oneInput:false,refusal:'chat_queue_full'});
 
 for(const c of cases){const e=environment(starting[c.seed],c.approvedAutoSend);c.expected=[];try{for(const s of c.steps)c.expected.push(await e.snapshot(await result(async()=>await e.run(s)??null)));c.selections=clone(e.selections);}finally{e.close();}
  if(c.approvedAutoSend&&Boolean(c.selections.length)!==c.selection)throw Error('Wrong approved selection boundary '+c.label+JSON.stringify(c));
- if(c.approvedAutoSend&&c.selection){const final=c.expected.at(-1),inputs=final.records.filter(r=>r.object.contractKey==='chat-bridge/input'),bindings=final.documents.filter(d=>d.key==='chat-bridge/binding');if(inputs.length!==1||bindings.length!==1||c.expected.some(s=>s.output.error))throw Error('Approved automatic send duplicated or failed '+c.label);}
+ if(c.oneInput){const final=c.expected.at(-1),inputs=final.records.filter(r=>r.object.contractKey==='chat-bridge/input'),bindings=final.documents.filter(d=>d.key==='chat-bridge/binding');if(inputs.length!==1||bindings.length!==1||c.expected.some(s=>s.output.error))throw Error('Approved automatic send duplicated or failed '+c.label);}
+ if(c.refusal){const final=c.expected.at(-1);if(final.records.some(r=>r.object.contractKey==='chat-bridge/input')||!c.expected.some(s=>s.output.error?.code===c.refusal||s.revisions.some(r=>r.key==='chat-bridge/operation'&&r.value.phase==='failed'&&r.value.error?.code===c.refusal)))throw Error('Later admission refusal bypassed '+c.label);}
 }
 for(const c of cases.filter(c=>/^(create-replay-|original-main-replacement-|cross-open-|automatic-first|lost-invoke-reply|resumed-native-|real-main-)/.test(c.label)))if(c.expected.some(s=>s.output.error))throw Error('Successful original Main path failed '+c.label+JSON.stringify(c.expected.map(s=>s.output)));
 process.stdout.write(JSON.stringify({now,instructions,noticeInstructions,seeds:starting,cases,approvedDifference:{proposal:'6af88af7-cd82-49c2-b43f-1f87e36cf1ce@1',decision:'task0072-chat-main-root-answer-197-v1',referenceOnly:'preserved-auto-send-recovery-recursion',adapter:'Only approvedAutoSend cases wrap the original Main.ensure; unchanged original code performs all later Queue, cancellation, SQLite CAS and receipt transitions.'}}));
