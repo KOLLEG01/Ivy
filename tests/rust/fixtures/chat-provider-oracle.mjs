@@ -92,13 +92,24 @@ for(const kind of ['queued','replies','failed-collection','notice']){
   seeds[kind]=e.exportSeed();
  }finally{e.close();}
 }
+{
+ // Acknowledge hashes its original offer ID. Copy the exact original offer
+ // checkpoint rather than normalizing different randomly created IDs/hashes.
+ const e=environment(seeds.replies,false,extension());try{
+  const received=await e.run({action:'provider',name:'receive'});
+  if(received.phase!=='succeeded'||received.outcome.replies.length!==2)throw Error('Original two-reply offer was not retained');
+  seeds.offered=e.exportSeed();
+ }finally{e.close();}
+}
 const api=(name,extra={})=>({action:'provider',name,...extra}),reopen={action:'reopen'},state=value=>({action:'state',value}),w={action:'provider-worker'};
 const add=(label,steps,seed='bound-0.154.0')=>cases.push({label,steps,seed});
 for(const version of versions){
- add('all-catalog-create-send-'+version,[api('workspace'),api('createMain'),api('workspace'),api('send'),api('operation'),api('input'),api('history'),reopen,api('send'),api('operation')],'empty-'+version);
+ add('all-catalog-create-'+version,[api('workspace'),api('createMain'),api('workspace'),api('operation',{operationLabel:'provider-createMain'})],'empty-'+version);
+ add('all-catalog-send-'+version,[api('workspace'),api('send'),api('operation'),api('input'),api('history'),reopen,api('send'),api('operation')],'bound-'+version);
  add('all-catalog-notice-'+version,[api('notify',{caller:'producer'}),api('notice',{caller:'producer'}),api('operation',{caller:'producer',operationLabel:'provider-notify'}),reopen,api('notify',{caller:'producer'}),api('notice',{caller:'producer'})],'bound-'+version);
 }
-add('completed-replies-offer-partial-ack-replay',[api('history'),api('receive'),api('acknowledge'),api('history'),reopen,api('receive'),api('acknowledge'),api('operation',{operationLabel:'provider-acknowledge'})],'replies');
+add('completed-replies-new-offer',[api('history'),api('receive'),api('operation',{operationLabel:'provider-receive'})],'replies');
+add('completed-replies-offer-partial-ack-replay',[api('history'),api('receive'),api('acknowledge'),api('history'),reopen,api('receive'),api('acknowledge'),api('operation',{operationLabel:'provider-acknowledge'})],'offered');
 add('notice-reply-and-operation-retain-producer-scope',[api('notice',{caller:'producer'}),api('notice',{caller:'alice'}),api('operation',{caller:'alice',operationLabel:'provider-notify'}),api('operation',{caller:'producer',operationLabel:'provider-notify'}),api('history')],'notice');
 add('queued-cancellation-through-provider',[api('cancel'),api('operation',{operationLabel:'provider-cancel'}),w,w,api('input'),reopen,api('cancel',{replay:true}),api('operation',{operationLabel:'provider-cancel'})],'queued');
 add('failed-original-collection-retry-and-replay',[state({collectionReadError:false,turnPhase:'completed'}),api('retryResult'),api('retryResult',{replay:true}),w,w,w,api('history'),api('input')],'failed-collection');
@@ -124,7 +135,7 @@ add('post-abort-retains-workspace-reason',[api('workspace',{abortAfterRpc:'servi
 
 for(const c of cases){const e=environment(seeds[c.seed],false,extension());c.expected=[];try{for(const s of c.steps)c.expected.push(await e.snapshot(await result(()=>e.run(s))));}finally{e.close();}}
 process.stdout.write(JSON.stringify({now,instructions,noticeInstructions,seeds,cases,boundary:'Original ChatBridge and domain/worker owners execute. Only synthetic Hive/native replies, time and provider context fields/abort are controlled. No account effects or new approval exception.'}));
-for(const c of cases.filter(c=>/^(all-catalog-create-|completed-replies-|queued-cancellation-|failed-original-collection-)/.test(c.label)))if(c.expected.some(s=>s.output.error))throw Error('Original successful provider case failed '+c.label+JSON.stringify(c.expected.map(s=>s.output)));
+for(const c of cases.filter(c=>/^(all-catalog-(create|send)-|completed-replies-|queued-cancellation-|failed-original-collection-)/.test(c.label)))if(c.expected.some(s=>s.output.error))throw Error('Original successful provider case failed '+c.label+JSON.stringify(c.expected.map(s=>s.output)));
 const failed=seeds['failed-collection'];
 if(!failed||!cases.find(c=>c.label==='failed-original-collection-retry-and-replay').expected[1].output.value?.retryAuthorization)throw Error('Original collection retry authorization not exercised');
 if(cases.find(c=>c.label==='workspace-preserves-saved-state-during-native-outage').expected[2].output.value?.nativeOwnerReady!==false)throw Error('Native outage did not preserve saved workspace');
