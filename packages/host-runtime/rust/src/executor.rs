@@ -8,7 +8,11 @@ use tokio_util::sync::CancellationToken;
 
 mod coordinator;
 mod lane;
+mod runtime;
 pub use coordinator::HostExecutor;
+pub use runtime::{
+    NativeActivationRuntime, NativeOfflineHiveInspector, OfflineHiveInspector, OfflineInspection,
+};
 
 pub type ExecutorFuture<'a, T> = Pin<Box<dyn Future<Output = IvyResult<T>> + Send + 'a>>;
 

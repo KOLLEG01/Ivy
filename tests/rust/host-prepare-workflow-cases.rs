@@ -429,6 +429,101 @@ fn advance_service_plan(input: &Inputs) {
     );
 }
 #[tokio::test]
+async fn native_activation_runtime_prepares_real_captured_service_and_registers_immutable_publication()
+ {
+    use ivy_host_runtime::executor::{
+        ActivationRuntime, ExecutorOptions, NativeActivationRuntime, NativeOfflineHiveInspector,
+        OperationContext,
+    };
+    use ivy_host_runtime::portable_native_files::NativeHelperLayout;
+    let fixture = Fixture::new();
+    let tools = tools();
+    let mut input = service_inputs(&fixture, "native-runtime", &tools);
+    input.host.insert(
+        "instances",
+        IvyJson::Array(vec![IvyJson::object([
+            ("instanceId", "fixture".into()),
+            ("serviceNodeId", "fixture".into()),
+            ("componentId", "fixture".into()),
+            ("engine", "process".into()),
+            ("enabled", true.into()),
+            ("settings", IvyJson::object(Vec::<(String, IvyJson)>::new())),
+        ])]),
+    );
+    let journal = HostJournal::open(input.host.clone()).await.unwrap();
+    let entry = journal
+        .accept(
+            IvyJson::object([
+                ("action", "deploy".into()),
+                ("instanceId", "fixture".into()),
+                (
+                    "source",
+                    input.snapshot.required("originalRoot").unwrap().clone(),
+                ),
+                ("operationId", "native-prepare".into()),
+            ]),
+            Some(input.snapshot.clone()),
+        )
+        .await
+        .unwrap();
+    let context = OperationContext::open(
+        &journal,
+        &entry,
+        ExecutorOptions {
+            own_instance_id: Some("independent".into()),
+            account_home: node_path::from_native(&fixture.0),
+            build_id: None,
+        },
+        tokio_util::sync::CancellationToken::new(),
+        Arc::new(ivy_sdk::clock::SystemClock),
+    )
+    .await
+    .unwrap();
+    let preparation = service_runtime(&tools.0, &input);
+    let inspector = NativeOfflineHiveInspector::new(
+        preparation.node.clone(),
+        tools.2.clone(),
+        NativeHelperLayout::Target,
+    );
+    let runtime = NativeActivationRuntime::new(
+        input.bootstrap.clone(),
+        preparation,
+        tools.2.clone(),
+        Arc::new(inspector),
+    )
+    .unwrap();
+    let candidate = runtime
+        .prepare(&context, &input.snapshot, "fixture")
+        .await
+        .unwrap();
+    let artifact = native(candidate.required("artifactRoot").unwrap());
+    assert_eq!(fs::read(artifact.join("dist/cache-hit.txt")).unwrap(), b"0");
+    assert!(artifact.join("node_modules/fixture-dep/index.js").is_file());
+    assert!(!artifact.join("node_modules/development").exists());
+    assert!(!artifact.join("dist/ignored.js.map").exists());
+    let id = candidate.required("candidateId").unwrap().as_str().unwrap();
+    assert_eq!(
+        json::canonical(&journal.candidate(&id).await.unwrap(), usize::MAX).unwrap(),
+        json::canonical(&candidate, usize::MAX).unwrap()
+    );
+    assert_eq!(
+        hash::digest(fs::read(native(candidate.required("archivePath").unwrap())).unwrap()),
+        candidate.required("archiveHash").unwrap().as_str().unwrap()
+    );
+    let manifest = journal.manifest(&id).await.unwrap();
+    assert_eq!(manifest.required("componentId").unwrap(), &"fixture".into());
+    assert_eq!(
+        manifest.required("buildId").unwrap(),
+        candidate.required("buildId").unwrap()
+    );
+    assert_cache_lease_released(&native(input.host.required("stagingRoot").unwrap())).await;
+    assert!(journal.target("fixture").await.unwrap().is_none());
+    assert!(journal.installed("fixture").await.unwrap().is_none());
+    runtime.dispose().await.unwrap();
+    context.journal.close().await.unwrap();
+    journal.close().await.unwrap();
+}
+#[tokio::test]
 async fn service_preparation_uses_the_emitted_lock_closure_and_reuses_dependencies_for_a_new_build()
 {
     let fixture = Fixture::new();

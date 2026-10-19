@@ -14,6 +14,8 @@ mod native_dispatch_cases;
 mod native_helper_cases;
 #[path = "host-executor-cases.rs"]
 mod executor_cases;
+#[path = "host-executor-runtime-cases.rs"]
+mod executor_runtime_cases;
 #[path = "host-node-filesystem-cases.rs"]
 mod node_filesystem_cases;
 #[path = "host-package-archive-cases.rs"]

@@ -36,7 +36,7 @@ fn busy(error: &rusqlite::Error) -> bool {
 }
 
 /// Only an actual SQLITE_BUSY/LOCKED read may use the optional running format.
-/// The executor supplies it only after fresh generation-bound ready evidence.
+/// The executor supplies it only after generation-bound ready evidence.
 /// Opening, corruption and other errors never authorize that fallback.
 pub async fn verify_service_storage(
     config: IvyJson,

@@ -93,6 +93,9 @@ impl HostJournal {
         internal(tokio::task::spawn_blocking(move || { internal(state.lock())?.take(); Ok(()) }).await)?
     }
     pub async fn config(&self) -> IvyResult<IvyJson> { self.with(|s| Ok(s.config.clone())).await }
+    pub async fn storage_format(&self) -> IvyResult<f64> {
+        self.with(|s| internal(s.db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))).map(|value| value as f64)).await
+    }
     pub async fn accepted_configuration(&self, source: PathBuf) -> IvyResult<IvyJson> { self.with(move |s| read_accepted_configuration(&s.config, &source)).await }
     /// None needs an explicit one-time policy import before normal ownership.
     /// Present but invalid evidence is always an error, never a fallback.
