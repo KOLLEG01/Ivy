@@ -439,7 +439,6 @@ impl SdpMedia {
                     .find(|format| format.payload == payload)
                 {
                     format.rtpmap = map.into();
-                    format.video = self.kind == SdpMediaKind::Video;
                 } else {
                     let mut format = SdpFormat::new(payload, map.into(), None);
                     format.video = self.kind == SdpMediaKind::Video;

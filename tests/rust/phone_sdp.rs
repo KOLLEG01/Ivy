@@ -186,6 +186,11 @@ fn parser_cases() -> Vec<IvyJson> {
     cases.push(parse_case(format!(
         "{PREFIX}m=video 31000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n"
     )));
+    for map in ["PCMU/8000", "opus/48000/2"] {
+        cases.push(parse_case(format!(
+            "{PREFIX}m=audio 31000 RTP/AVP 31\r\na=rtpmap:31 {map}\r\n"
+        )));
+    }
     for suite in [
         "AES_CM_128_HMAC_SHA1_80",
         "AES_CM_128_HMAC_SHA1_32",
