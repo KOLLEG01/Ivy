@@ -7,8 +7,7 @@ use crate::{
     operations::{Document, Store, mutation},
 };
 use ivy_contracts::{
-    IvyError, IvyJson as Json, IvyResult, JsString,
-    checked_native_contract::CheckedNativeContracts, hash::hash_json,
+    IvyError, IvyJson as Json, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
 };
 use ivy_sdk::{
     native_plan::{NativePlanKind, save_native_plan, validate_native_plan_draft},
