@@ -725,7 +725,6 @@ async fn real_native_owner_waits_for_disk_commit_and_refuses_failed_writer() {
         std::fs::create_dir(&root).unwrap();
         let root = std::fs::canonicalize(root).unwrap();
         assert!(root.starts_with(&parent) && root != parent);
-        eprintln!("isolated command fence evidence: {}", root.display());
         let path = root.join("whatsapp.sqlite");
         let journal = Journal::new(JournalIo::open(&path).unwrap());
         if reject {
