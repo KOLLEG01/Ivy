@@ -127,7 +127,7 @@ impl Probe {
                 Json::object([("result", self.take("items", f(&self.spec, "itemPages")))])
             };
             if let Some(mut value) = reply.get("result").cloned() {
-                let data = f(value, "data")
+                let data = f(&value, "data")
                     .as_array()
                     .unwrap()
                     .iter()
