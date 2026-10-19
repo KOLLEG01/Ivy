@@ -68,7 +68,7 @@ impl RpcClient for NativeClient {
             ]);
             Ok(merge(
                 &Json::object([
-                    ("schemaVersion", 1.0.into()),
+                    ("schemaVersion", Json::Number(1.0)),
                     ("observationId", "read".into()),
                     ("callerPrincipalId", "workflow-owner".into()),
                     ("serviceNodeId", "native-agent".into()),
@@ -79,7 +79,7 @@ impl RpcClient for NativeClient {
                     ),
                     ("catalogHash", status.required("catalogHash")?.clone()),
                     ("epoch", "new-epoch".into()),
-                    ("requestId", 1.0.into()),
+                    ("requestId", Json::Number(1.0)),
                     ("observedAt", TIME.into()),
                     ("method", arguments.required("method")?.clone()),
                     ("params", arguments.required("params")?.clone()),
