@@ -50,6 +50,7 @@ pub mod microsoft_store;
 pub mod outlook_projection;
 pub mod outlook_media;
 pub mod outlook_native;
+pub mod outlook_source;
 pub mod notice_scan;
 pub mod notice_evidence;
 pub mod notices;

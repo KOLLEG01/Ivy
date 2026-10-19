@@ -120,6 +120,8 @@ mod notices_cases;
 mod outlook_native_cases;
 #[path = "outlook_projection_cases.rs"]
 mod outlook_projection_cases;
+#[path = "outlook_source_cases.rs"]
+mod outlook_source_cases;
 #[path = "reconcile_cases.rs"]
 mod reconcile_cases;
 #[path = "registry_cases.rs"]

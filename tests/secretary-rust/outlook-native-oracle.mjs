@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import {resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {load,settings as base,owner as secretaryOwner,rootId} from './inbox-fixtures.mjs';
 const {OutlookNative,outlookName}=await load('services/secretary/src/outlook-native.js');
 const {SecretaryStore}=await load('services/secretary/src/store.js');
@@ -122,4 +124,5 @@ for(const[path,value]of [['callerPrincipalId','other'],['operationId','other'],[
 await add('original evidence reconstructs all calls',{mode:'evidence',allRetained:true});await add('incompatible saved evidence',{mode:'evidence',allRetained:true,proofChanges:[['observedAt','2026-09-08T09:00:00.001Z']]});
 await add('existing plan prepare only claims matching head',{mode:'prepare'});await add('fresh plan retains exact discovered bindings',{mode:'prepare',noPlan:true});await add('deferred poll remains idle',{mode:'prepare',headChanges:[['nextPollAt','2026-09-08T09:01:00.000Z']]});
 for(const label of ['complete retained original read','all retained receipts need no native polling','confirmed original absence allows guarded dispatch','uncertain dispatch reads original receipt','original evidence reconstructs all calls','fresh plan retains exact discovered bindings'])assert(rows.find(r=>r.input.label===label).expected.results.every(v=>'value'in v),label);
-console.log(JSON.stringify({rootId,nodeId:'fixture.secretary',time:Date.parse(at),wall:1800000000000,rows}));
+export const outlookNativeCorpus={rootId,nodeId:'fixture.secretary',time:Date.parse(at),wall:1800000000000,rows};
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))console.log(JSON.stringify(outlookNativeCorpus));
