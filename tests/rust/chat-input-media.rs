@@ -2,6 +2,8 @@ use ivy_chat_bridge::{admission::ChatAdmission, input_media::admitted_native_inp
 use ivy_contracts::{IvyError, IvyJson as Json, Outcome, json::parse};
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use std::{process::Command, sync::Mutex};
+#[path = "chat-wa-media-cases.rs"]
+mod whatsapp_media;
 
 struct Reader {
     response: Json,

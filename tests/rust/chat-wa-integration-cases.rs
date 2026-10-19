@@ -4,7 +4,7 @@ use super::{Fixed, Peer, field, oracle, text};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::{
     admission::ChatAdmission,
-    generation::{ChatGeneration, ChatGenerationConfig, ChatGenerationLease, settled},
+    generation::{ChatGeneration, ChatGenerationConfig, settled},
     notice_input::NoticeInstructions,
     runtime::ChatTransport,
     whatsapp::{
@@ -12,6 +12,10 @@ use ivy_chat_bridge::{
         journal::Inbox,
         journal_io::JournalIo,
         journal_owner::Journal,
+        media::{
+            MediaDependencies, MediaFuture, MediaStream, TranscriptionRequest,
+            TranscriptionResponse, WhatsAppMedia,
+        },
         messages::Translator,
         runtime::{
             RuntimeAssembly, RuntimeAttached, RuntimeAttachmentFactory, RuntimeCallbacks,
@@ -22,7 +26,7 @@ use ivy_chat_bridge::{
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
-    json::{canonical, parse},
+    json::{canonical, parse, stringify},
 };
 use ivy_sdk::{
     rpc::{RequestFuture, RequestOptions},
@@ -38,29 +42,84 @@ use std::{
 };
 use tokio::sync::watch;
 
-struct Media;
-impl RuntimeMedia for Media {
-    fn command_text(&self, row: &Inbox) -> IvyResult<JsString> {
-        Ok(parse(&row.message, usize::MAX)?
-            .required("message")?
-            .required("conversation")?
-            .as_js_string()
-            .unwrap()
-            .clone())
+#[derive(Default)]
+struct MediaIo {
+    calls: Mutex<Vec<Json>>,
+}
+struct MediaBytes(Option<Vec<u8>>, Arc<MediaIo>);
+impl MediaStream for MediaBytes {
+    fn next(&mut self) -> MediaFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async { Ok(self.0.take()) })
     }
-    fn content(&self, _: &Inbox) -> IvyResult<Json> {
-        panic!("This integration case admits commands only")
+    fn destroy(&mut self) {
+        self.1.calls.lock().unwrap().push("destroy".into());
     }
-    fn payload<'a>(
+}
+struct MediaResponse;
+impl TranscriptionResponse for MediaResponse {
+    fn ok(&self) -> bool {
+        true
+    }
+    fn json(&mut self) -> RequestFuture<'_> {
+        Box::pin(async { Ok(Json::object([("text", "  Fixture voice  ".into())])) })
+    }
+}
+struct MediaAdapter(Arc<MediaIo>);
+impl MediaDependencies for MediaAdapter {
+    fn filesystem_path(&self, logical: &JsString) -> IvyResult<std::path::PathBuf> {
+        Ok(String::from_utf16_lossy(&logical.0).into())
+    }
+    fn download<'a>(
         &'a self,
-        _: &'a Inbox,
-        _: &'a ChatGenerationLease,
-        _: bool,
-    ) -> RequestFuture<'a> {
-        Box::pin(async { panic!("No native input/media dispatch is authorized by this fixture") })
+        _: &'a Json,
+        kind: &'static str,
+        timeout: u64,
+    ) -> MediaFuture<'a, Box<dyn MediaStream>> {
+        Box::pin(async move {
+            assert_eq!(timeout, 60000);
+            self.0
+                .calls
+                .lock()
+                .unwrap()
+                .push(Json::object([("download", kind.into())]));
+            Ok(Box::new(MediaBytes(
+                Some(if kind == "image" {
+                    vec![137, 80, 78, 71, 13, 10, 26, 10]
+                } else {
+                    b"OggS".to_vec()
+                }),
+                self.0.clone(),
+            )) as Box<dyn MediaStream>)
+        })
     }
-    fn prune(&self) -> ServiceFuture<()> {
-        Box::pin(async { panic!("No retention tick in this fixture") })
+    fn voice_wav<'a>(&'a self, bytes: &'a [u8], _: Translator) -> MediaFuture<'a, Vec<u8>> {
+        Box::pin(async move {
+            assert_eq!(bytes, b"OggS");
+            self.0.calls.lock().unwrap().push("voice".into());
+            ivy_chat_bridge::whatsapp::audio_processing::DecodedAudio {
+                channels: &[&[0.0, 0.5, -0.5]],
+                sample_rate: 16000.0,
+            }
+            .encode_mono_pcm16_wav(16000)
+            .map_err(|_| IvyError::internal())
+        })
+    }
+    fn transcribe(
+        &self,
+        request: TranscriptionRequest,
+    ) -> MediaFuture<'_, Box<dyn TranscriptionResponse>> {
+        Box::pin(async move {
+            assert_eq!(
+                request.url,
+                "https://speech.invalid/v1/audio/transcriptions"
+            );
+            assert_eq!(request.timeout_ms, 180000);
+            assert!(request.redirect_error);
+            assert_eq!(&request.wav[..4], b"RIFF");
+            assert_eq!(request.model, JsString::from("fixture-model"));
+            self.0.calls.lock().unwrap().push("transcribe".into());
+            Ok(Box::new(MediaResponse) as Box<dyn TranscriptionResponse>)
+        })
     }
 }
 struct Desktop;
@@ -229,9 +288,17 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
     let generation = ChatGeneration::with_clock(config.clone(), c.clone(), clock.clone())
         .await
         .unwrap();
-    let journal = Journal::new(JournalIo::open(":memory:").unwrap());
-    let wa_config=parse(r#"{"accountId":"account","botPhoneNumber":"+15555550200","senders":[{"phoneNumber":"+15555550201","principalId":"alice","channelId":"channel"}],"since":"2024-01-01T00:00:00Z"}"#,usize::MAX).unwrap();
-    let media = Arc::new(Media);
+    let journal = Journal::new(JournalIo::open(root.join("whatsapp-journal.sqlite")).unwrap());
+    let wa_config=parse(r#"{"accountId":"account","botPhoneNumber":"+15555550200","senders":[{"phoneNumber":"+15555550201","principalId":"alice","channelId":"channel"}],"since":"2024-01-01T00:00:00Z","transcription":{"baseUrl":"https://speech.invalid/v1/","apiKey":"fixture-key","model":"fixture-model"}}"#,usize::MAX).unwrap();
+    let media_io = Arc::new(MediaIo::default());
+    let media = Arc::new(WhatsAppMedia::with_clock(
+        journal.clone(),
+        wa_config.clone(),
+        root.clone(),
+        Arc::new(MediaAdapter(media_io.clone())),
+        Translator::new(None),
+        clock.clone(),
+    ));
     let factory = Arc::new(Factory {
         inner: RuntimeAssembly {
             journal: journal.clone(),
@@ -259,7 +326,7 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
                 state: state.clone(),
                 close,
             }),
-            media,
+            media: media.clone(),
             factory: factory.clone(),
             translator: Translator::new(None),
             resources: RuntimeResources {
@@ -321,6 +388,91 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
             .to_utf8()
             .unwrap()
     );
+    let mut payloads = Vec::new();
+    {
+        let lease = generation.accept().unwrap();
+        for (id, content) in [
+            (
+                "b".repeat(64),
+                Json::object([("conversation", "Actual generation text".into())]),
+            ),
+            (
+                "c".repeat(64),
+                parse(
+                    r#"{"imageMessage":{"fileLength":8,"mimetype":"image/png"}}"#,
+                    usize::MAX,
+                )
+                .unwrap(),
+            ),
+            (
+                "d".repeat(64),
+                parse(
+                    r#"{"audioMessage":{"fileLength":1,"fileSha256":"AA==","seconds":1}}"#,
+                    usize::MAX,
+                )
+                .unwrap(),
+            ),
+        ] {
+            let row = Inbox {
+                id: id.clone(),
+                sender: "alice".into(),
+                jid: "15555550201@s.whatsapp.net".into(),
+                message: stringify(&Json::object([("message", content)]), usize::MAX).unwrap(),
+                state: "pending".into(),
+                request: None,
+                received: 1000,
+            };
+            let payload = RuntimeMedia::payload(media.as_ref(), &row, &lease, true)
+                .await
+                .unwrap();
+            assert_eq!(
+                RuntimeMedia::payload(media.as_ref(), &row, &lease, true)
+                    .await
+                    .unwrap(),
+                payload
+            );
+            assert_eq!(journal.get(&format!("payload:{id}")).unwrap(), payload);
+            payloads.push(payload);
+        }
+    }
+    assert_eq!(
+        field(&payloads[0], "text"),
+        &Json::from("Actual generation text")
+    );
+    assert_eq!(
+        field(&payloads[1], "text"),
+        &Json::String(
+            Translator::new(None)
+                .translate("media.image_caption", None)
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        field(&payloads[2], "text"),
+        &Json::String(
+            Translator::new(None)
+                .translate(
+                    "media.transcription_prefix",
+                    Some(&Json::object([("transcript", "Fixture voice".into())]))
+                )
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        std::fs::read(
+            root.join("whatsapp-media")
+                .join("c".repeat(64))
+                .join("original")
+        )
+        .unwrap(),
+        [137, 80, 78, 71, 13, 10, 26, 10]
+    );
+    assert_eq!(
+        media_io.calls.lock().unwrap().len(),
+        6,
+        "Two downloads/destroys, one decoder and one transcription; cached payloads repeat none"
+    );
+    journal.flush().await.unwrap();
     factory.refuse.store(true, Ordering::SeqCst);
     let rejected = ChatTransport::attach(&runtime, Some(generation.clone())).unwrap_err();
     assert_eq!(rejected.code, "fixture_attachment");
@@ -396,6 +548,12 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         ("closeReleasedStore", true.into()),
         ("lateAttachmentReleasedStore", true.into()),
         ("timersCleared", Json::Number(8.0)),
+        ("mediaPayloads", Json::Array(payloads)),
+        (
+            "mediaCalls",
+            Json::Array(media_io.calls.lock().unwrap().clone()),
+        ),
+        ("physicalTransportJournal", true.into()),
         (
             "statuses",
             Json::Array(state.status.lock().unwrap().clone()),
