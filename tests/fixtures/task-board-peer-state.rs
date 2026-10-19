@@ -199,12 +199,15 @@ async fn peer_state_reads_the_paged_sqlite_revision_even_after_a_later_workspace
         expected
     );
     assert_eq!(
-        store
-            .read("task-board/task", &Json::String(id), true)
-            .await
-            .unwrap()
-            .value,
-        newer
+        hash_json(
+            &store
+                .read("task-board/task", &Json::String(id), true)
+                .await
+                .unwrap()
+                .value
+        )
+        .unwrap(),
+        hash_json(&newer).unwrap()
     );
     assert_eq!(
         peer_state(&store, &own, &"self".into()).await.unwrap(),
@@ -216,12 +219,15 @@ async fn peer_state_reads_the_paged_sqlite_revision_even_after_a_later_workspace
         JsString::from(hash_json(&Json::Array(vec![])).unwrap())
     );
     assert_eq!(
-        store
-            .read("task-board/task", &first, true)
-            .await
-            .unwrap()
-            .value,
-        old
+        hash_json(
+            &store
+                .read("task-board/task", &first, true)
+                .await
+                .unwrap()
+                .value
+        )
+        .unwrap(),
+        hash_json(&old).unwrap()
     );
     assert_eq!(rows(), 2);
     assert_eq!(pages.calls.get(), 3);
