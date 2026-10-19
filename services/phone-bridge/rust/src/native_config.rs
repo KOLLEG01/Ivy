@@ -28,6 +28,7 @@ impl NativeConfigError {
     }
 }
 type Result<T> = std::result::Result<T, NativeConfigError>;
+static NULL: IvyJson = IvyJson::Null;
 use NativeConfigError::{InvalidRequest, OutcomeUnknown};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -437,7 +438,7 @@ impl<'a> Fields<'a> {
         self.value.get(name).ok_or(InvalidRequest)
     }
     fn required_or_null(&self, name: &str) -> &'a IvyJson {
-        self.value.get(name).unwrap_or(&IvyJson::Null)
+        self.value.get(name).unwrap_or(&NULL)
     }
     fn child(&self, name: &str, allowed: &[&str]) -> Result<Fields<'a>> {
         let index = self

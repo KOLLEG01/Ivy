@@ -159,6 +159,108 @@ async fn cancel_observer<F: Future>(future: F) {
 }
 
 #[tokio::test]
+async fn original_native_setup_is_owned_after_bind_and_before_any_register() {
+    let registrar = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let host = SipHost::new();
+    let gate = Arc::new(Semaphore::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let setup_host = host.clone();
+    let setup_gate = gate.clone();
+    let setup_calls = calls.clone();
+    cancel_observer(host.configure_with_setup(
+        configuration(1, Some(registrar.local_addr().unwrap())),
+        move || async move {
+            assert!(setup_host.observation().endpoint.is_some());
+            assert!(setup_host.observation().registration.is_none());
+            setup_calls.fetch_add(1, Ordering::AcqRel);
+            setup_gate.acquire().await.unwrap().forget();
+            Ok(())
+        },
+    ))
+    .await;
+    until(|| calls.load(Ordering::Acquire) == 1).await;
+    let local = host.observation().endpoint.unwrap();
+    let mut buffer = [0; 8192];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), registrar.recv_from(&mut buffer))
+            .await
+            .is_err()
+    );
+    assert!(UdpSocket::bind(local).await.is_err());
+    gate.add_permits(1);
+    let (register, source) = received(&registrar).await;
+    assert_eq!(source, local);
+    send(
+        &registrar,
+        source,
+        &response(&register, 200, "Expires: 60\r\n", ""),
+    )
+    .await;
+    until(|| {
+        host.observation()
+            .registration
+            .is_some_and(|value| value.phase == RegistrationPhase::Registered)
+    })
+    .await;
+    let closing_host = host.clone();
+    let closing = tokio::spawn(async move { closing_host.close().await });
+    let (removal, source) = received(&registrar).await;
+    assert_eq!(removal.method, Method::Register);
+    assert!(removal.to_string().contains("expires=0"));
+    send(
+        &registrar,
+        source,
+        &response(&removal, 200, "Expires: 0\r\n", ""),
+    )
+    .await;
+    closing.await.unwrap().unwrap();
+    assert!(UdpSocket::bind(local).await.is_ok());
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn failed_or_panicking_native_setup_retains_once_latch_and_never_registers() {
+    for panics in [false, true] {
+        let registrar = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let host = SipHost::new();
+        let result = host
+            .configure_with_setup(
+                configuration(1, Some(registrar.local_addr().unwrap())),
+                move || async move {
+                    if panics {
+                        panic!("synthetic setup failure");
+                    }
+                    Err(SipHostError::InvalidRequest)
+                },
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err(if panics {
+                SipHostError::CleanupUnconfirmed
+            } else {
+                SipHostError::InvalidRequest
+            })
+        );
+        let local = host.observation().endpoint.unwrap();
+        assert!(host.observation().registration.is_none());
+        assert!(UdpSocket::bind(local).await.is_err());
+        assert_eq!(
+            host.configure(configuration(1, None)).await,
+            Err(SipHostError::OperationConflict)
+        );
+        let mut buffer = [0; 8192];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), registrar.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
+        host.close().await.unwrap();
+        assert!(UdpSocket::bind(local).await.is_ok());
+    }
+}
+
+#[tokio::test]
 async fn configure_waiter_cannot_erase_the_once_latch_or_original_socket() {
     let host = SipHost::new();
     cancel_observer(host.configure(configuration(1, None))).await;

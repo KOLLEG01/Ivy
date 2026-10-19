@@ -306,6 +306,22 @@ impl SipHost {
         &self,
         configuration: SipHostConfiguration,
     ) -> Result<SocketAddr, SipHostError> {
+        self.configure_with_setup(configuration, || async { Ok(()) })
+            .await
+    }
+    /// Native setup runs after publishing the original binding and before any
+    /// registration traffic. It must own its work without blocking/re-entering
+    /// admission synchronously. Failed setup retains the configured-once latch
+    /// and bound socket until explicit close; cancelled callers cannot retry it.
+    pub async fn configure_with_setup<F, S>(
+        &self,
+        configuration: SipHostConfiguration,
+        setup: S,
+    ) -> Result<SocketAddr, SipHostError>
+    where
+        F: Future<Output = Result<(), SipHostError>> + Send + 'static,
+        S: FnOnce() -> F + Send + 'static,
+    {
         let completion = {
             let mut state = self.shared().lock().unwrap();
             if state.stopping {
@@ -334,11 +350,17 @@ impl SipHost {
                     Transport::Tls => BoundSipTransport::tls(local, EndpointOption::default()),
                     _ => unreachable!(),
                 };
-                let result = bound.map_err(SipHostError::Binding).and_then(|bound| {
+                let result = async {
+                    let bound = bound.map_err(SipHostError::Binding)?;
                     let endpoint = bound.local_addr();
                     let bound = Arc::new(bound);
+                    owner.lock().unwrap().binding = Some(bound.clone());
+                    // Observe a panicking setup without losing the owned
+                    // configure completion or poisoning host serialization.
+                    tokio::spawn(async move { setup().await })
+                        .await
+                        .map_err(|_| SipHostError::CleanupUnconfirmed)??;
                     let mut state = owner.lock().unwrap();
-                    state.binding = Some(bound.clone());
                     let config = state.configuration.as_ref().unwrap();
                     if let Some(plan) = &config.registration {
                         let registration = SipRegistration::start(
@@ -352,7 +374,8 @@ impl SipHost {
                         state.registration = Some(registration);
                     }
                     Ok(endpoint)
-                });
+                }
+                .await;
                 done.finish(result);
             });
             completion
