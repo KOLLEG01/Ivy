@@ -136,31 +136,48 @@ impl Peer {
         release: Arc<Notify>,
     ) -> ServiceConnection {
         let mut options = ConnectionOptions::new("chat-provider".into());
-        options.handlers.insert(
-            "chat.workspace".into(),
-            Arc::new(move |args, context| {
-                let lease = selected
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .filter(|g| g.generation() == context.generation)
-                    .ok_or_else(IvyError::internal)
-                    .and_then(|g| g.accept());
-                let entered = entered.clone();
-                let release = release.clone();
-                Box::pin(async move {
-                    let lease = lease?;
-                    let result = lease.invoke("workspace", &args, &context).await?;
-                    if held {
-                        entered.notify_one();
-                        release.notified().await;
-                    }
-                    // Keep accepted storage ownership through the final handler boundary.
-                    drop(lease);
-                    Ok(result)
-                })
-            }),
-        );
+        for tool in field(
+            &field(row, "registry")
+                .required("namespaces")
+                .unwrap()
+                .as_array()
+                .unwrap()[0],
+            "tools",
+        )
+        .as_array()
+        .unwrap()
+        {
+            let name = text(tool, "name");
+            let selected = selected.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            options.handlers.insert(
+                format!("chat.{name}").into(),
+                Arc::new(move |args, context| {
+                    let lease = selected
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .filter(|g| g.generation() == context.generation)
+                        .ok_or_else(IvyError::internal)
+                        .and_then(|g| g.accept());
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    let name = name.clone();
+                    Box::pin(async move {
+                        let lease = lease?;
+                        let result = lease.invoke(&name, &args, &context).await?;
+                        if held && name == "workspace" {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                        // Keep accepted storage ownership through the final handler boundary.
+                        drop(lease);
+                        Ok(result)
+                    })
+                }),
+            );
+        }
         let c = ServiceConnection::connect(
             &self.url,
             "fixture-token",
