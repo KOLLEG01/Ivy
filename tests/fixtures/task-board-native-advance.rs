@@ -276,9 +276,9 @@ impl RpcClient for Client {
                     .input
                     .get("updatedAt")
                     .map(|s| s.as_str().unwrap())
-                    .unwrap_or("2026-01-02T03:04:05.007Z");
+                    .unwrap_or_else(|| "2026-01-02T03:04:05.007Z".to_owned());
                 return Ok(merge(
-                    &operation(&self.base, &self.slot, phase.as_str()?, at),
+                    &operation(&self.base, &self.slot, &phase.as_str()?, &at),
                     self.input.get("observation"),
                 ));
             }
@@ -501,7 +501,7 @@ async fn reconciliation_and_local_dispatch_match_original_with_actual_journal_ca
                         s(blob, "key").to_utf8().unwrap(),
                         s(blob, "name").to_utf8().unwrap(),
                         s(blob, "parent").to_utf8().unwrap(),
-                        hex(blob.required("hex").unwrap().as_str().unwrap())
+                        hex(&blob.required("hex").unwrap().as_str().unwrap())
                     ],
                 )
                 .unwrap();
@@ -571,7 +571,7 @@ async fn reconciliation_and_local_dispatch_match_original_with_actual_journal_ca
                 }
                 .save(
                     &pin(300, 1.0),
-                    &operation(base, &selected, phase, TIME),
+                    &operation(base, &selected, &phase, TIME),
                     &identity,
                 )
                 .await
@@ -587,7 +587,7 @@ async fn reconciliation_and_local_dispatch_match_original_with_actual_journal_ca
                                 "observed".into()
                             },
                         ),
-                        ("ownerPhase", phase.into()),
+                        ("ownerPhase", phase.as_str().into()),
                         ("observedAt", TIME.into()),
                         (
                             "epoch",
@@ -633,7 +633,7 @@ async fn reconciliation_and_local_dispatch_match_original_with_actual_journal_ca
             }
             if flag(input, "corruptPrevious") {
                 let blob = &row.required("blobs").unwrap().as_array().unwrap()[0];
-                let mut bytes = hex(blob.required("hex").unwrap().as_str().unwrap());
+                let mut bytes = hex(&blob.required("hex").unwrap().as_str().unwrap());
                 bytes[0] ^= 1;
                 db.execute(
                     "UPDATE blobs SET bytes=? WHERE id=?",
