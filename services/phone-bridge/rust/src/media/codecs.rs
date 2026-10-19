@@ -58,6 +58,8 @@ impl G722Decoder {
         self.0.reset();
     }
     pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<i16>, CodecError> {
+        // The final QMF result saturates to i16. Preserve its wide history;
+        // signed narrowing here would invert overloaded output samples.
         if packet.is_empty() || packet.len() > 960 {
             return Err(CodecError::InvalidFrame);
         }

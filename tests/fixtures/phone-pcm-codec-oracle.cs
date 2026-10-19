@@ -20,6 +20,30 @@ public static class PhonePcmCodecOracle {
         for(int i=0;i<pcm.Length;i++){bytes[2*i]=(byte)pcm[i];bytes[2*i+1]=(byte)(pcm[i]>>8);}
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
+    static (short[] original, short[] limited, int[] wide) WideG722(AudioEncoder decoder, SIPSorceryMedia.Abstractions.AudioFormat format, byte[] packet) {
+        // Test-only observation of the sealed original. It still performs all
+        // ADPCM, predictor and history updates. Recompute only the two linear
+        // QMF dot products from its actual history/table, validating every
+        // unmodified signed narrowing before projecting the approved limit.
+        var flags=BindingFlags.Instance|BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic;
+        var field=decoder.GetType().GetField("_g722DecoderState",flags);
+        var coefficients=(int[])typeof(G722Codec).GetField("qmf_coeffs",flags).GetValue(null);
+        var legacy=new short[packet.Length*2];var limited=new short[legacy.Length];var wide=new int[legacy.Length];
+        for(int i=0;i<packet.Length;i++) {
+            var pair=decoder.DecodeAudio(new[]{packet[i]},format);
+            var state=(G722CodecState)field.GetValue(decoder);
+            if(state.ItuTestMode||state.EncodeFrom8000Hz||state.Packed||state.BitsPerSample!=8||pair.Length!=2)throw new InvalidOperationException("Unexpected original QMF mode.");
+            var history=state.QmfSignalHistory;
+            long[] sums=Enumerable.Range(0,2).Select(phase=>Enumerable.Range(0,12).Sum(tap=>(long)history[2*tap+phase]*coefficients[phase==0?tap:11-tap])).ToArray();
+            int[] values={checked((int)(sums[1]>>11)),checked((int)(sums[0]>>11))};
+            for(int channel=0;channel<2;channel++) {
+                int index=2*i+channel, value=values[channel];
+                if(unchecked((short)value)!=pair[channel])throw new InvalidOperationException("Original QMF projection disagrees with its unchanged output.");
+                legacy[index]=pair[channel];wide[index]=value;limited[index]=(short)Math.Clamp(value,short.MinValue,short.MaxValue);
+            }
+        }
+        return (legacy,limited,wide);
+    }
     public static void Run() {
         while(Console.ReadLine() is string line) {
             try {
@@ -41,10 +65,14 @@ public static class PhonePcmCodecOracle {
                     var frames=input.GetProperty("frames").EnumerateArray().ToArray();
                     int[] resets=input.TryGetProperty("resets",out var reset)?reset.EnumerateArray().Select(x=>x.GetInt32()).ToArray():Array.Empty<int>();
                     var output=new string[frames.Length];
+                    var unchanged=new string[frames.Length];var widened=new int[frames.Length][];
                     for(int i=0;i<frames.Length;i++) {
                         if(resets.Contains(i)){original.Dispose();original=new AudioEncoder(includeOpus:codec=="OPUS");decoder?.Dispose();decoder=null;}
                         if(op=="encode") output[i]=Convert.ToHexString(original.EncodeAudio(Samples(frames[i].GetString()),format)).ToLowerInvariant();
-                        else if(codec=="G722") output[i]=Hex(original.DecodeAudio(Convert.FromHexString(frames[i].GetString()),format));
+                        else if(codec=="G722") {
+                            if(op=="decode_wide") {var result=WideG722(original,format,Convert.FromHexString(frames[i].GetString()));output[i]=Hex(result.limited);unchanged[i]=Hex(result.original);widened[i]=result.wide;}
+                            else output[i]=Hex(original.DecodeAudio(Convert.FromHexString(frames[i].GetString()),format));
+                        }
                         else {
                             var frame=frames[i];var packet=Convert.FromHexString(frame.GetProperty("packet").GetString());
                             int maximum=frame.GetProperty("samples").GetInt32();bool fec=frame.GetProperty("fec").GetBoolean();
@@ -53,7 +81,8 @@ public static class PhonePcmCodecOracle {
                             output[i]=Hex(pcm.AsSpan(0,count).ToArray());
                         }
                     }
-                    Reply(new{frames=output});
+                    if(op=="decode_wide") Reply(new{frames=output,originalFrames=unchanged,wideFrames=widened,originalNarrowingVerified=true});
+                    else Reply(new{frames=output});
                 } finally { original.Dispose();decoder?.Dispose(); }
             }catch(Exception error){Reply(new{error=error.GetType().Name});}
         }
