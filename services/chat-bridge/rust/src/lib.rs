@@ -9,6 +9,7 @@ pub mod delivery;
 pub mod diagnostic_notifications;
 pub mod diagnostics;
 pub mod evidence_bytes;
+pub mod generation;
 pub mod input_media;
 pub mod limits;
 pub mod main_context;

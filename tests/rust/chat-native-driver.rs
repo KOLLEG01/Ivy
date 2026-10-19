@@ -3,6 +3,8 @@ use ivy_chat_bridge::{
 };
 #[path = "chat-native-driver-cases.rs"]
 mod durable;
+#[path = "chat-generation-cases.rs"]
+mod generation;
 use ivy_contracts::{
     IvyError, IvyJson as Json, Outcome, checked_native_contract::CheckedNativeContracts,
     json::parse,
