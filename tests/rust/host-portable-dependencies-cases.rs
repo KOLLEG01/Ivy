@@ -3,6 +3,8 @@ use ivy_contracts::{JsString,json};
 use base64::{Engine,engine::general_purpose::STANDARD};
 use sha2::{Digest,Sha512};
 use std::{collections::BTreeMap,fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},sync::Mutex,time::{SystemTime,UNIX_EPOCH}};
+#[path="host-portable-http-cases.rs"]
+mod native_http_cases;
 static CORPUS:Mutex<()>=Mutex::new(());
 struct Fixture(PathBuf);
 impl Fixture {

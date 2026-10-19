@@ -136,3 +136,21 @@ pub async fn install_portable_dependency(value: PortableDependency, bytes: Vec<u
         result
     }).await)?
 }
+
+/// Stop admission on the first failed fetch/install and drain every admitted
+/// operation. Keep the whole owner alive if its caller drops its await handle.
+pub async fn materialize_portable_dependencies(lock: IvyJson, selected: Vec<JsString>, artifact_root: PathBuf,
+    temporary_root: PathBuf, executables: BTreeMap<String, PathBuf>, http: crate::portable_http::PortableHttp) -> IvyResult<()> {
+    internal(tokio::spawn(async move {
+        let missing = portable_dependency_plan(lock, selected, artifact_root.clone()).await?;
+        crate::concurrency::map_concurrent(missing, 4, |value, _| {
+            let http = http.clone(); let artifact_root = artifact_root.clone();
+            let temporary_root = temporary_root.clone(); let executables = executables.clone();
+            async move {
+                let bytes = http.fetch(&value.resolved).await?;
+                install_portable_dependency(value, bytes, artifact_root, temporary_root, executables).await
+            }
+        }).await?;
+        Ok(())
+    }).await)?
+}

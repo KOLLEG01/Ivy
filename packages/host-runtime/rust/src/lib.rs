@@ -40,6 +40,7 @@ pub mod node_path;
 pub mod platform;
 pub mod portable_native_files;
 pub mod portable_dependencies;
+pub mod portable_http;
 pub mod policy_import;
 pub mod process;
 pub mod process_fence;

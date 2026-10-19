@@ -36,16 +36,17 @@ const {runCommand,jsonFile}=await import('data:text/javascript,'+encodeURICompon
 const common=span('function lockedPackageName(','/** Add the supported OS/architecture');
 const planner=span('async function materializePortableDependencies(','  await mapConcurrent(missing, 4, async value => {')+'  return missing;\n}';
 const policy='async function responsePolicy(value) {\n'+span('    const response = await fetch(value.resolved,','    const key = createHash(\'sha256\').update(value.location)')+'return {byteLength:bytes.length};\n}';
+const networkPolicy=policy.replace('responsePolicy','networkPolicy').replace('return {byteLength:bytes.length};','return {byteLength:bytes.length,sha256:createHash(\'sha256\').update(bytes).digest(\'hex\')};');
 const listing='function listingPolicy(listing) {\n'+span('      const entries = listing.stdout.split(','      await mkdir(destination, { recursive: true });')+'return null;\n}';
 const materializer=span('async function materializePortableDependencies(','\nexport async function prepareCandidate(');
 // The policy stages are exact original source spans. The response fixture is
 // deliberately explicit: these cases do not qualify HTTP, TLS or decompression.
 const make=new Function('stat','join','createHash','requireThat','mapConcurrent','fetch','writeFile','runCommand','mkdir','jsonFile','rm',stripTypeScriptTypes(
-  common+planner.replace('materializePortableDependencies','dependencyPlan')+policy+listing+materializer,{mode:'transform'})+'\nreturn {dependencyPlan,responsePolicy,listingPolicy,materializePortableDependencies};');
+  common+planner.replace('materializePortableDependencies','dependencyPlan')+policy+networkPolicy+listing+materializer,{mode:'transform'})+'\nreturn {dependencyPlan,responsePolicy,networkPolicy,listingPolicy,materializePortableDependencies};');
 const input=JSON.parse(readFileSync(0,'utf8'));
 function body(){if(input.bodyFile)return readFileSync(input.bodyFile);if(input.bodyLength!==undefined)return Buffer.alloc(input.bodyLength,input.fill??97);return Buffer.from(input.bodyBase64??'','base64');}
 const fetch=async()=>({ok:input.responseOk!==false,headers:{get:()=>input.declared??null},arrayBuffer:async()=>{const bytes=body();return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);}});
-const helpers=make(stat,join,createHash,requireThat,mapConcurrent,fetch,writeFile,runCommand,mkdir,jsonFile,rm);
+const helpers=make(stat,join,createHash,requireThat,mapConcurrent,['download','materializeDownload'].includes(input.operation)?globalThis.fetch:fetch,writeFile,runCommand,mkdir,jsonFile,rm);
 function tree(root){
   if(!root||!existsSync(root))return null;
   const rows=[];function walk(directory){for(const name of readdirSync(directory).sort()){
@@ -72,6 +73,10 @@ try{
     value=(await helpers.dependencyPlan(input.lock,new Set(input.selected),input.artifactRoot))??[];
   }
   else if(input.operation==='policy')value=await helpers.responsePolicy(input.dependency);
+  else if(input.operation==='download')value=await helpers.networkPolicy(input.dependency);
+  else if(input.operation==='materializeDownload'){
+    await helpers.materializePortableDependencies(input.lock,new Set(input.selected),input.originalRoot,input.temporaryRoot,input.executables);value=null;
+  }
   else if(input.operation==='listing')value=helpers.listingPolicy({stdout:input.stdout,truncated:input.truncated});
   else if(input.operation==='unlink'){await rm(input.path,{force:true});value=null;}
   else if(input.operation==='jsonFile')value=await jsonFile(input.path,input.limit);
