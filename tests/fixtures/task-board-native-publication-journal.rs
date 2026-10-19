@@ -111,9 +111,23 @@ impl Contracts for Policies {
     }
 }
 struct NoRpc;
+struct NoPages;
+impl ivy_task_board::lifecycle_journal::LifecyclePages for NoPages {
+    async fn page(&self, _: &str, _: &Json) -> IvyResult<Json> {
+        panic!("No page scan is permitted")
+    }
+}
 impl RpcClient for NoRpc {
     fn request<'a>(&'a self, m: &'a str, _: Json, _: RequestOptions) -> RequestFuture<'a> {
-        Box::pin(async move { panic!("No external effect permitted: {m}") })
+        Box::pin(async move {
+            if m == "system.status" {
+                return Ok(Json::object([(
+                    "runtimeEpoch",
+                    "11111111-1111-4111-8111-111111111111".into(),
+                )]));
+            }
+            panic!("No external effect permitted: {m}")
+        })
     }
 }
 struct Engine;
@@ -254,7 +268,7 @@ async fn actual_publication_reopen_reuses_records_and_retains_cleanup_dependenci
         let operations = Operations {
             store: LifecycleJournal {
                 journal: &store,
-                pages: &(),
+                pages: &NoPages,
             },
             now: clock as fn() -> String,
         };
