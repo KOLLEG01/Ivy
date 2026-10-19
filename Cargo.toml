@@ -50,6 +50,8 @@ rsipstack = { version = "=0.7.4", default-features = false, features = ["platfor
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-platform-verifier = "=0.7.1"
 
+async-compression = { version = "=0.4.51", default-features = false, features = ["tokio", "gzip", "zlib", "deflate", "brotli", "zstd"] }
+
 [profile.release]
 lto = "thin"
 strip = "debuginfo"
