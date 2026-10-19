@@ -58,7 +58,7 @@ fn inputs(root: &Path) -> NativeHomeInputs {
         environment: BTreeMap::new(),
         user_home: None,
         cwd: node_path::from_native(root),
-        account_home: node_path::from_native(root),
+        account_home: node_path::from_native(&root.join("account")),
     }
 }
 fn link(target: &Path, path: &Path) {
@@ -89,7 +89,25 @@ fn snapshot(root: &Path) -> IvyJson {
         entries.sort_by_key(|entry| node_path::from_native(Path::new(&entry.file_name())));
         for entry in entries {
             let name = entry.file_name().into_string().unwrap();
-            let path = format!("{prefix}{name}");
+            // UUID values differ across real atomic writers. Preserve the
+            // exact temporary-file effect/count/bytes while comparing its name
+            // independently from that intentionally random identity.
+            let temporary = name
+                .strip_prefix("runtime-reset-applied.json.")
+                .and_then(|s| s.strip_suffix(".tmp"))
+                .is_some_and(|s| {
+                    uuid::Uuid::parse_str(s).is_ok_and(|id| {
+                        id.to_string() == s && id.get_version() == Some(uuid::Version::Random)
+                    })
+                });
+            let path = format!(
+                "{prefix}{}",
+                if temporary {
+                    "runtime-reset-applied.json.<uuid>.tmp"
+                } else {
+                    &name
+                }
+            );
             let info = fs::symlink_metadata(entry.path()).unwrap();
             let kind = if info.file_type().is_symlink() {
                 "link"
@@ -241,6 +259,11 @@ async fn original_reset_marker_date_idempotency_scope_and_file_effects_are_prese
             let mut permissions = fs::metadata(&path).unwrap().permissions();
             permissions.set_readonly(true);
             fs::set_permissions(path, permissions).unwrap();
+        }
+        if name == "settings-null-codex" {
+            let sessions = directory.join("account/.codex/sessions");
+            fs::create_dir_all(&sessions).unwrap();
+            fs::write(sessions.join("leaf"), "fixture fallback history").unwrap();
         }
         let home = if kind == "ancestor-file" {
             home.join("nested")

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {lstatSync,mkdirSync,readFileSync,readdirSync,readlinkSync,symlinkSync,writeFileSync,linkSync,chmodSync} from 'node:fs';
 import {lstat,realpath,rm} from 'node:fs/promises';
-import {join,parse,resolve} from 'node:path';
+import {isAbsolute,join,parse,relative,resolve,sep} from 'node:path';
 import {stripTypeScriptTypes} from 'node:module';
 import {atomicJson,jsonFile} from '../../dist/packages/host-runtime/src/config.js';
 import {resolveCodexHome} from '../../dist/packages/host-runtime/src/codex-home.js';
@@ -38,7 +38,7 @@ for(const [name,date]of [
  ['lowercase','2026-10-19t12:34:56.789z'],['unicode','😀'],['nul',now+'\0']
 ])add('date-'+name,{...marker,completedAt:date});
 add('invalid-shape-before-date',{...marker,resetId:1,completedAt:'invalid'});
-add('extra-fields',{...marker,extra:{value:'preserved',number:9007199254740992},appliedAt:'replaced',__proto__:null});
+add('extra-fields',{...marker,extra:{value:'preserved',number:7},appliedAt:'replaced',__proto__:null});
 add('duplicate-property',marker,{markerBytes:Buffer.from('{"schemaVersion":0,"schemaVersion":1,"resetId":"reset","runtimeEpoch":"epoch","completedAt":"'+now+'"}').toString('hex')});
 add('replacement-utf8',marker,{markerBytes:Buffer.concat([Buffer.from(JSON.stringify(marker).slice(0,-1)+',"extra":"'),Buffer.from([255]),Buffer.from('"}')]).toString('hex')});
 const exact=Buffer.from(JSON.stringify(marker));
@@ -52,11 +52,14 @@ for(const [name,settings]of [['native',{nativeHome:'$home'}],['both',{codexHome:
 for(const homeKind of ['missing','file','junction','ancestor-file'])add('home-'+homeKind,marker,{homeKind});
 add('inner-junction');add('readonly');add('idempotent',marker,{repeat:2});
 add('invalid-settings-acknowledged',marker,{settings:null,appliedKind:'file',appliedBytes:Buffer.from(JSON.stringify(marker)).toString('hex')});
+// Retain the known Host atomic-json error-effect mismatch as the last case,
+// so it cannot prevent qualification of the other independent reset cases.
+add('atomic-unsafe-extra',{...marker,extra:{number:9007199254740992}});
 function snapshot(root){
  const result=[];
  function walk(path,relative=''){
   for(const name of readdirSync(path).sort()){
-   const full=join(path,name),entry=relative+name,info=lstatSync(full);
+   const full=join(path,name),entry=relative+name.replace(/^runtime-reset-applied\.json\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/,'runtime-reset-applied.json.<uuid>.tmp'),info=lstatSync(full);
    if(info.isSymbolicLink()){assert(readlinkSync(full));result.push({path:entry,kind:'link'});}
    else if(info.isDirectory()){result.push({path:entry,kind:'directory'});walk(full,entry+'/');}
    else {const bytes=readFileSync(full);result.push({path:entry,kind:'file',bytes:bytes.length,hash:'sha256:'+createHash('sha256').update(bytes).digest('hex')});}
@@ -86,9 +89,20 @@ for(const c of cases){
   await rm(join(home,'sessions'),{recursive:true,force:true});mkdirSync(join(root,'external'));writeFileSync(join(root,'external','leaf'),'preserve link target');symlinkSync(join(root,'external'),join(home,'sessions'),process.platform==='win32'?'junction':'dir');
  }
  if(c.name==='readonly')chmodSync(join(home,'sessions','leaf'),0o400);
+ const accountHome=join(root,'account');
+ if(c.name==='settings-null-codex'){
+  mkdirSync(join(accountHome,'.codex','sessions'),{recursive:true});
+  writeFileSync(join(accountHome,'.codex','sessions','leaf'),'fixture fallback history');
+ }
  let reads=0;
  const FixedDate=class extends OriginalDate{constructor(...args){super(...(args.length?args:[now]));if(!args.length)reads++;}};
- const apply=load(join,parse,resolve,lstat,realpath,rm,atomicJson,jsonFile,resolveCodexHome,requireThat,FixedDate);
+ const fixtureRemove=async(path,options)=>{
+  const local=relative(resolve(root),resolve(path));
+  assert(local&&local!=='..'&&!local.startsWith('..'+sep)&&!isAbsolute(local),'Reset oracle removal leaves its fixture');
+  return rm(path,options);
+ };
+ const fixtureHome=settings=>resolveCodexHome(settings,{environment:{},userHome:accountHome,cwd:root});
+ const apply=load(join,parse,resolve,lstat,realpath,fixtureRemove,atomicJson,jsonFile,fixtureHome,requireThat,FixedDate);
  let selected=settings(c.settings,root,c.homeKind==='ancestor-file'?join(home,'nested'):home),reply;
  try{for(let i=0;i<c.repeat;i++)await apply(data,selected);reply={ok:true};}catch(error){reply={ok:false,error:IvyError.from(error).toWire()};}
  c.expected={reply,clockReads:reads,files:snapshot(root)};
