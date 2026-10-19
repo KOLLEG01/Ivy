@@ -6,6 +6,8 @@ use ivy_hive::store::{
 mod contracts;
 #[path = "hive_events.rs"]
 mod events;
+#[path = "hive_worker_identity.rs"]
+mod identity;
 #[path = "hive_ledger.rs"]
 mod ledger;
 #[path = "hive_object_delete.rs"]
@@ -88,9 +90,14 @@ fn native(path: &Path, steps: &[Value]) -> Value {
     let mut result = vec![];
     for step in steps {
         let mut bound;
-        let step = if step["bindings"].is_array() {
+        let step = if step["bindings"].is_array() || step["identityBindings"].is_array() {
             bound = step.clone();
-            object_write::bind(&mut bound, &result);
+            if bound["bindings"].is_array() {
+                object_write::bind(&mut bound, &result);
+            }
+            if bound["identityBindings"].is_array() {
+                identity::bind(&mut bound, &result);
+            }
             &bound
         } else {
             step
@@ -167,6 +174,7 @@ fn native(path: &Path, steps: &[Value]) -> Value {
                     json!({"kind":kind,"data":data,"byteLength":result.byte_length,"contentHash":result.content_hash})
                 })
             }
+            "identity" => identity::native_identity(&mut store, step).map(wire),
             "events" => events::native_event(&mut store, step).map(|value| {
                 if step["lossless"] == true {
                     json!({"encoded":stringify(&value,1<<26).unwrap()})

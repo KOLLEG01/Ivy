@@ -13,7 +13,15 @@ registerHooks({resolve(specifier,context,next){
 const {HiveStore}=await import('../../services/hive/src/store.ts');
 const {Objects}=await import('../../services/hive/src/objects.ts');
 const {Events}=await import('../../services/hive/src/events.ts');
-const {IvyError}=await import('../../packages/contracts/src/errors.ts');
+const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
+const {canonical,digest}=await import('../../packages/contracts/src/canonical.ts');
+// Invoke the unchanged worker functions in isolation with the actual HiveStore.
+// No kernel/transport/startup behavior is supplied by this auth-only fixture.
+const workerSource=readFileSync(new URL('../../services/hive/src/worker.ts',import.meta.url),'utf8');
+const identityStart=workerSource.indexOf('const oauthPrefix = '),identityEnd=workerSource.indexOf('let chain = Promise.resolve();');
+if(identityStart<0||identityEnd<identityStart)throw Error('Original worker identity slice changed');
+const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
+const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
 let store;
 const tableHash=(table,columns)=>'sha256:'+createHash('sha256').update(store.get(`SELECT json_group_array(json_array(${columns})) AS encoded FROM (SELECT rowid AS record_id,* FROM ${table} ORDER BY rowid)`).encoded).digest('hex');
@@ -22,9 +30,10 @@ const rows=[];
 try {
  store=new HiveStore(input.path);
  for(const original of input.steps){
-  const step=original.bindings?structuredClone(original):original;
+  const step=original.bindings||original.identityBindings?structuredClone(original):original;
   const set=(value,pointer,next)=>{const fields=pointer.split('/').slice(1).map(s=>s.replaceAll('~1','/').replaceAll('~0','~'));for(const field of fields.slice(0,-1))value=value[field];value[fields.at(-1)]=next;};
   for(const binding of step.bindings??[])set(step,binding.at,rows[binding.from].value.object.id);
+  for(const binding of step.identityBindings??[]){let v=rows[binding.from];for(const key of binding.select.split('/').slice(1))v=v[key];set(step,binding.at,binding.digest?digest(v):v);}
   let value=null,error=null;
   try {
    switch(step.op){
@@ -66,6 +75,19 @@ try {
         },step.overdue?-1:10000);
         if(step.watchChanges)value={result:value,changes:Number(store.get('SELECT total_changes() AS n').n)-changes};
       }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;syncBuiltinESMExports();}
+      break;
+    }
+    case 'identity':{
+      const RealDate=Date;
+      if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
+      globalThis.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[step.now]));}static now(){return step.now;}};
+      try{
+        const api=originalIdentity({get store(){return store;},execute(_context,request){return {forwarded:request};}},canonical,digest,crypto.createHmac,
+          size=>step.sessionBytes?Buffer.from(step.sessionBytes,'base64'):crypto.randomBytes(size),IvyError,requireThat);
+        if(step.method==='credentialReference')value=api.credentialReference(step.params.digest);
+        else if(step.method==='collect')value=store.transaction(()=>api.collectOAuthFamilies(step.now,step.params.active===undefined?undefined:new Set(step.params.active)));
+        else value=await api.handle({action:step.method,...step.params});
+      }finally{globalThis.Date=RealDate;}
       break;
     }
     case 'events':{

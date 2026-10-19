@@ -143,6 +143,20 @@ fn value(rows: &Value, index: usize) -> &Value {
 #[test]
 fn topic_registration_and_service_publication_preserve_schema_ownership_registry_and_receipt_order()
 {
+    for (encoded, expected) in [
+        ("null", "registry_invalid"),
+        ("{}", "internal_error"),
+        ("{", "internal_error"),
+    ] {
+        let mut steps = setup();
+        steps.push(sql(format!(
+            "UPDATE registries SET registry_json='{encoded}' WHERE node_id='publisher';"
+        )));
+        let failed = steps.len();
+        steps.push(publish("malformed-registry", 1));
+        let rows = compare(&steps);
+        no_effect(&rows, failed, expected);
+    }
     let mut steps = setup();
     steps.push(topic());
     let mut owner = topic();
@@ -212,6 +226,23 @@ fn topic_registration_and_service_publication_preserve_schema_ownership_registry
 
 #[test]
 fn event_reads_keep_fixed_scan_filter_boundaries_work_budgets_gaps_and_deliverable_byte_limits() {
+    let mut legacy = setup();
+    legacy.push(sql("INSERT INTO events(topic,topic_version,source,occurred_at,mutation_id,payload) VALUES('hive.object.changed','1.0.0','source','now','id','null');"));
+    let skipped = legacy.len();
+    legacy.push(event(
+        "read",
+        None,
+        json!({"afterSequence":0,"filter":{"topics":[],"objectIds":["x"]}}),
+    ));
+    let malformed = legacy.len();
+    legacy.push(event(
+        "read",
+        None,
+        json!({"afterSequence":0,"filter":{"objectIds":["x"]}}),
+    ));
+    let rows = compare(&legacy);
+    success(&rows, skipped);
+    no_effect(&rows, malformed, "internal_error");
     let mut steps = setup();
     steps.push(journal(205));
     let start = steps.len();

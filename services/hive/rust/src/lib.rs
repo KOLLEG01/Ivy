@@ -7,6 +7,7 @@ pub mod query;
 pub mod storage_read;
 pub mod store;
 pub mod worker_client;
+pub mod worker_identity;
 pub mod worker_protocol;
 pub mod worker_runtime;
 pub mod worker_server;
