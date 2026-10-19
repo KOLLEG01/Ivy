@@ -51,7 +51,7 @@ impl StopClock for Clock {
         let mut position = self.position.lock().unwrap();
         let value = self.now[(*position).min(self.now.len() - 1)];
         *position += 1;
-        append(&self.trace, "now", (value as f64).into());
+        append(&self.trace, "now", IvyJson::Number(value as f64));
         value
     }
 }
@@ -262,7 +262,10 @@ async fn production_stop_callback_does_not_promote_without_job_and_persists_unkn
     .unwrap();
     let first = process_stop_fence(root.0.clone()).await.unwrap().unwrap();
     assert_eq!(first.get("ownerId"), Some(&"first-epoch".into()));
-    assert_eq!(first.get("processId"), Some(&(child.pid as f64).into()));
+    assert_eq!(
+        first.get("processId"),
+        Some(&IvyJson::Number(child.pid as f64))
+    );
     callback(
         "second-epoch".into(),
         &child,

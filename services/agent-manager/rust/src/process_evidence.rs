@@ -138,10 +138,10 @@ impl OwnedProcessEvidence {
             record_process_stop_fence(
                 self.root.clone(),
                 IvyJson::object([
-                    ("schemaVersion", 1.0.into()),
+                    ("schemaVersion", IvyJson::Number(1.0)),
                     ("owner", "native".into()),
                     ("ownerId", IvyJson::String(epoch)),
-                    ("processId", (process.pid as f64).into()),
+                    ("processId", IvyJson::Number(process.pid as f64)),
                     ("observedAt", IvyJson::String(self.clock.observed_at())),
                     ("code", "outcome_unknown".into()),
                 ]),
