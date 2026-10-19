@@ -110,7 +110,14 @@ pub(super) fn native_write(store: &mut Store, step: &Value) -> IvyResult<IvyJson
 }
 pub(super) fn apply_units(parameters: &mut IvyJson, step: &Value) {
     fn set(value: &mut IvyJson, fields: &[&str], next: IvyJson) {
-        if fields.len() == 1 {
+        if let IvyJson::Array(items) = value {
+            let item = items.get_mut(fields[0].parse::<usize>().unwrap()).unwrap();
+            if fields.len() == 1 {
+                *item = next;
+            } else {
+                set(item, &fields[1..], next);
+            }
+        } else if fields.len() == 1 {
             value.insert(fields[0], next);
         } else {
             let mut child = value.get(fields[0]).unwrap().clone();

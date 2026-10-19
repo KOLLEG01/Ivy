@@ -23,6 +23,7 @@ pub use events::EVENT_MAX_COUNT;
 mod cursor;
 #[path = "store_query.rs"]
 mod query;
+pub use query::QueryRuntime;
 
 const SCHEMA: &str = include_str!("schema.sql");
 const IMMUTABLE: &[&str] = &[

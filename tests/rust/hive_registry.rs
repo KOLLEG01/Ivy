@@ -8,7 +8,9 @@ use ivy_hive::{
     retention::Runtime,
 };
 use serde_json::{Value, json};
-use std::{cmp::Ordering, collections::HashMap};
+use std::{cmp::Ordering, collections::HashMap, sync::Arc, time::Duration};
+#[path = "hive_inventory.rs"]
+mod inventory;
 
 fn units(value: &Value) -> JsString {
     JsString(
@@ -24,6 +26,7 @@ struct ObservedRuntime {
     dates: HashMap<JsString, f64>,
     iso: HashMap<i64, JsString>,
     locale: HashMap<JsString, i64>,
+    lowercase: HashMap<JsString, JsString>,
 }
 impl ObservedRuntime {
     fn new(profile: &Value) -> Self {
@@ -46,7 +49,24 @@ impl ObservedRuntime {
                 .iter()
                 .map(|v| (units(&v[0]), v[1].as_i64().unwrap()))
                 .collect(),
+            lowercase: profile
+                .get("lowercase")
+                .and_then(Value::as_array)
+                .map(|v| v.iter().map(|v| (units(&v[0]), units(&v[1]))).collect())
+                .unwrap_or_default(),
         }
+    }
+}
+impl ivy_hive::store::QueryRuntime for ObservedRuntime {
+    fn parse_date(&self, value: &JsString) -> f64 {
+        Runtime::parse_date(self, value)
+    }
+    fn locale_lowercase(&self, value: &JsString) -> IvyResult<JsString> {
+        Ok(self
+            .lowercase
+            .get(value)
+            .unwrap_or_else(|| panic!("Unobserved locale lowercase {value:?}"))
+            .clone())
     }
 }
 impl Runtime for ObservedRuntime {
@@ -79,7 +99,7 @@ impl Runtime for ObservedRuntime {
 #[derive(Default)]
 pub(super) struct Trace {
     registry: Option<Registry>,
-    runtime: Option<ObservedRuntime>,
+    runtime: Option<Arc<ObservedRuntime>>,
 }
 impl Trace {
     pub(super) fn reset_owner(&mut self) {
@@ -100,9 +120,9 @@ impl Trace {
         profile: &Value,
     ) -> IvyResult<IvyJson> {
         if self.runtime.is_none() {
-            self.runtime = Some(ObservedRuntime::new(profile));
+            self.runtime = Some(Arc::new(ObservedRuntime::new(profile)));
         }
-        let runtime = self.runtime.as_ref().unwrap();
+        let runtime = self.runtime.as_ref().unwrap().as_ref();
         let now = step["now"].as_f64().unwrap();
         let method = step["method"].as_str().unwrap();
         let mut parameters = step
@@ -116,6 +136,48 @@ impl Trace {
             self.registry = Some(Registry::new(store, runtime, now)?);
         }
         let registry = self.registry.as_mut().unwrap();
+        if step["op"] == "inventory" {
+            store.bind_query_runtime(self.runtime.as_ref().unwrap().clone());
+            return store.with_budget_mut(
+                if step["overdue"] == true {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(10)
+                },
+                |store| match method {
+                    "sync" => ivy_hive::inventory::sync(
+                        store,
+                        registry,
+                        &step
+                            .get("idUnits")
+                            .map(units)
+                            .or_else(|| step["id"].as_str().map(JsString::from))
+                            .ok_or_else(IvyError::internal)?,
+                        &parameters,
+                        runtime,
+                        now,
+                    ),
+                    "get" => ivy_hive::inventory::get(
+                        store,
+                        registry,
+                        parameters
+                            .get("resourceRef")
+                            .ok_or_else(IvyError::internal)?,
+                        runtime,
+                        now,
+                    ),
+                    "list" => ivy_hive::inventory::list(store, registry, &parameters, runtime, now),
+                    "cursor" => store
+                        .cursor(
+                            parameters.get("identity").ok_or_else(IvyError::internal)?,
+                            parameters.get("boundary").ok_or_else(IvyError::internal)?,
+                        )
+                        .map(IvyJson::from),
+                    "sql" => inventory::query_sql(store, step["sql"].as_str().unwrap()),
+                    _ => Err(IvyError::internal()),
+                },
+            );
+        }
         let principal = if step["context"].is_object() {
             Some(
                 store.authenticate(&AuthContext {

@@ -16,6 +16,7 @@ const {Events}=await import('../../services/hive/src/events.ts');
 const {Retention}=await import('../../services/hive/src/retention.ts');
 const {pruneObjectRevisions}=await import('../../services/hive/src/object-retention.ts');
 const {Registry}=await import('../../services/hive/src/registry.ts');
+const {Inventory}=await import('../../services/hive/src/inventory.ts');
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
 const {canonical,digest,hashJson}=await import('../../packages/contracts/src/canonical.ts');
 // Invoke the unchanged worker functions in isolation with the actual HiveStore.
@@ -27,7 +28,9 @@ const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,ident
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
 let store,registry;
-const registryTrace=input.steps.some(step=>step.op==='registry');
+const registryTrace=input.steps.some(step=>['registry','inventory'].includes(step.op));
+const inventoryTrace=input.steps.some(step=>step.op==='inventory');
+const lowercase=new Map();
 const localeStrings=new Set();
 const units=value=>Array.from({length:String(value).length},(_,i)=>String(value).charCodeAt(i));
 const collectStrings=value=>{
@@ -177,17 +180,29 @@ try {
       }finally{globalThis.Date=RealDate;}
       break;
     }
-    case 'registry':{
+    case 'registry':case 'inventory':{
       const RealDate=Date;
+      const realLower=String.prototype.toLocaleLowerCase;
       const params=step.params===undefined?{}:step.params;
       for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...codeUnits));
       if(step.idUnits)step.id=String.fromCharCode(...step.idUnits);
       registryStrings({...step,params});
       globalThis.Date=retentionDate(RealDate,step.now);
+      if(step.op==='inventory')String.prototype.toLocaleLowerCase=function(...args){const value=realLower.apply(this,args);lowercase.set(String(this),value);return value;};
       try{
         if(step.method==='constructor'||!registry)registry=new Registry(store);
         const context={...(step.context?store.authenticate(step.context):{}),serviceNodeId:step.id,generation:step.generation};
-        switch(step.method){
+        if(step.op==='inventory'){
+          const inventory=new Inventory(store,registry);
+          value=store.withBudget(()=>{
+            if(step.method==='sync')return inventory.sync(context,params);
+            if(step.method==='get')return inventory.get(params.resourceRef);
+            if(step.method==='list')return inventory.list(params);
+            if(step.method==='cursor')return store.cursor(params.identity,params.boundary);
+            if(step.method==='sql')return store.all(step.sql,...(params.bindings??[]));
+            throw Error('Unknown inventory method');
+          },step.overdue?-1:10000);
+        }else switch(step.method){
           case 'constructor':break;
           case 'connect':value=registry.connect({...context,sessionDigest:step.context?.sessionDigest},params);break;
           case 'disconnect':registry.disconnect(step.id);break;
@@ -213,7 +228,7 @@ try {
           default:throw Error('Unknown registry method');
         }
         if(step.lossless)value={encoded:JSON.stringify(value)};
-      }finally{globalThis.Date=RealDate;registryStrings({...step,params});}
+      }finally{globalThis.Date=RealDate;String.prototype.toLocaleLowerCase=realLower;registryStrings({...step,params});}
       break;
     }
     case 'configure':store.configureCredentials(step.credentials);break;
@@ -253,6 +268,7 @@ try {
    }
   }catch(e){error=IvyError.from(e).toWire();}
   const state=snapshot(step.compactEvents??false,step.compactDiagnostics??false);
+  if(inventoryTrace){state.inventorySets=store.all('SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind');state.inventory=step.compactInventory?tableHash('inventory','record_id,node_id,namespace,kind,native_id,schema_version,summary,observed_at'):store.all('SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id');}
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
   rows.push({value,error,state,...mirror});
@@ -265,6 +281,7 @@ try {
   const sorted=[...localeStrings].sort((a,b)=>a.localeCompare(b));let rank=0;
   const localeOrder=sorted.map((value,index)=>{if(index&&value.localeCompare(sorted[index-1])!==0)rank++;return [units(value),rank];});
   runtime.registryRuntime={dates:[...retentionRuntime.dates].map(([value,date])=>[units(value),date]),iso:[...retentionRuntime.iso],localeOrder};
+  if(inventoryTrace)runtime.registryRuntime.lowercase=[...lowercase].map(([value,lower])=>[units(value),units(lower)]);
  }
  process.stdout.write(JSON.stringify({rows,definitions,metadata,topics,...runtime}));
 }finally{store?.close();}

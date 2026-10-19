@@ -10,11 +10,19 @@ use std::{
     time::Instant,
 };
 
+/// The process owner supplies the exact JavaScript runtime primitives. SQL
+/// policy and pointer lookup remain in Hive; no locale/date fallback is used.
+pub trait QueryRuntime: Send + Sync {
+    fn parse_date(&self, value: &JsString) -> f64;
+    fn locale_lowercase(&self, value: &JsString) -> IvyResult<JsString>;
+}
+
 #[derive(Default)]
 struct State {
     deadline: Option<Instant>,
     cache: HashMap<String, IvyJson>,
     error: Option<IvyError>,
+    runtime: Option<Arc<dyn QueryRuntime>>,
 }
 #[derive(Clone, Default)]
 pub(super) struct QueryState(Arc<Mutex<State>>);
@@ -84,6 +92,22 @@ impl State {
 }
 
 impl Store {
+    pub fn bind_query_runtime(&self, runtime: Arc<dyn QueryRuntime>) {
+        self.query_state.0.lock().unwrap().runtime = Some(runtime);
+    }
+
+    pub fn locale_lowercase(&self, value: &JsString) -> IvyResult<JsString> {
+        let runtime = self
+            .query_state
+            .0
+            .lock()
+            .unwrap()
+            .runtime
+            .clone()
+            .ok_or_else(IvyError::internal)?;
+        runtime.locale_lowercase(value)
+    }
+
     pub(super) fn install_query_functions(&self) -> IvyResult<()> {
         let state = self.query_state.0.clone();
         self.db
@@ -124,6 +148,65 @@ impl Store {
                         },
                     })
                 })
+                .map_err(sql_error)?;
+        }
+        for (name, arguments) in [("ivy_contains", 3), ("ivy_recency", 2)] {
+            let state = self.query_state.0.clone();
+            self.db
+                .create_scalar_function(
+                    name,
+                    arguments,
+                    FunctionFlags::SQLITE_UTF8,
+                    move |context| {
+                        let mut state = state.lock().unwrap();
+                        let result = (|| -> IvyResult<f64> {
+                            let value = state.value(context.get_raw(0), context.get_raw(1))?;
+                            if name == "ivy_contains" {
+                                let (IvyJson::String(ref value), ValueRef::Text(needle)) =
+                                    (value, context.get_raw(2))
+                                else {
+                                    return Ok(0.0);
+                                };
+                                let lowered = state
+                                    .runtime
+                                    .as_ref()
+                                    .ok_or_else(IvyError::internal)?
+                                    .locale_lowercase(value)?;
+                                let needle =
+                                    JsString::from(std::str::from_utf8(needle).map_err(sql_error)?);
+                                return Ok(u8::from(
+                                    needle.0.is_empty()
+                                        || lowered
+                                            .0
+                                            .windows(needle.0.len())
+                                            .any(|part| part == needle.0),
+                                ) as f64);
+                            }
+                            Ok(match value {
+                                IvyJson::Number(v)
+                                    if v.is_finite()
+                                        && v.fract() == 0.0
+                                        && v.abs() <= 9_007_199_254_740_991.0 =>
+                                {
+                                    v
+                                }
+                                IvyJson::String(ref value) => {
+                                    let parsed = state
+                                        .runtime
+                                        .as_ref()
+                                        .ok_or_else(IvyError::internal)?
+                                        .parse_date(value);
+                                    if parsed.is_finite() { parsed } else { 0.0 }
+                                }
+                                _ => 0.0,
+                            })
+                        })();
+                        result.map_err(|error| {
+                            state.error = Some(error.clone());
+                            rusqlite::Error::UserFunctionError(Box::new(error))
+                        })
+                    },
+                )
                 .map_err(sql_error)?;
         }
         Ok(())
