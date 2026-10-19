@@ -80,5 +80,6 @@ pub mod linux_host;
 pub mod linux_resources;
 pub mod linux_service_identity;
 pub mod bootstrap;
+pub mod bootstrap_restart;
 pub mod systemd;
 pub mod docker;

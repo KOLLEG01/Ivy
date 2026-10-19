@@ -3,7 +3,7 @@
 use crate::{IvyError, IvyResult, node_path, process::{self, LaunchContext, OutputStream, ResolvedCommand}, process_output::Utf8Decoder};
 use ivy_contracts::JsString;
 use std::{collections::BTreeMap, ffi::OsString, path::{Path, PathBuf}, sync::{Arc,Mutex}, time::Duration};
-use tokio::{io::{AsyncRead, AsyncReadExt}, sync::mpsc};
+use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
 pub struct FileCommand {
@@ -93,16 +93,29 @@ pub async fn exec_file(command: FileCommand, bootstrap_root: PathBuf, options: F
 }
 
 pub(crate) async fn exec_file_detailed(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions) -> IvyResult<FileExecution> {
+    execute(command, bootstrap_root, options, Input::Open).await
+}
+
+/// The retained Windows scheduler adapter accepts one UTF-8 JSON request on
+/// stdin. Keep its write/EOF under the same deadline and tree owner as output;
+/// a rejected request closing the pipe early does not replace its actual result.
+pub(crate) async fn exec_file_input(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions, input: Vec<u8>) -> IvyResult<FileResult> {
+    Ok(execute(command, bootstrap_root, options, Input::Bytes(input)).await?.result)
+}
+
+enum Input { Open, Closed, Bytes(Vec<u8>) }
+
+async fn execute(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions, input: Input) -> IvyResult<FileExecution> {
     if command.timeout_ms == 0 || command.timeout_ms > 3_600_000 || command.maximum_buffer_bytes > 64 * 1024 * 1024 {
         return Err(IvyError::new("invalid_arguments", "Exec-file requires bounded time and output limits."));
     }
-    tokio::spawn(run(command, bootstrap_root, options, false)).await.map_err(|_| IvyError::internal())
+    tokio::spawn(run(command, bootstrap_root, options, input)).await.map_err(|_| IvyError::internal())
 }
 
 /// Source's original spawnSync closes stdin and counts raw bytes across both
 /// streams. Keep that private policy separate from public execFile semantics.
 pub(crate) async fn source_output(command: FileCommand, bootstrap_root: PathBuf) -> IvyResult<FileResult> {
-    Ok(tokio::spawn(run(command, bootstrap_root, FileOptions::default(), true)).await.map_err(|_| IvyError::internal())?.result)
+    Ok(tokio::spawn(run(command, bootstrap_root, FileOptions::default(), Input::Closed)).await.map_err(|_| IvyError::internal())?.result)
 }
 
 async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: OutputStream, overflow: mpsc::Sender<OutputStream>, stop_capture: CancellationToken, text: Arc<Mutex<Vec<u16>>>, combined: Option<Arc<std::sync::atomic::AtomicUsize>>) -> std::io::Result<()> {
@@ -133,7 +146,8 @@ async fn collect<R: AsyncRead + Unpin>(mut pipe: R, maximum: usize, stream: Outp
     Ok(())
 }
 
-async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions, synchronous_input: bool) -> FileExecution {
+async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions, input: Input) -> FileExecution {
+    let synchronous_input = matches!(&input, Input::Closed);
     if options.cancellation.is_cancelled() { return empty(FileFailure::Cancelled).into() }
     let environment = options.environment.unwrap_or_else(|| std::env::vars_os().collect());
     let (command,environment,resolved) = match tokio::task::spawn_blocking(move || {
@@ -147,7 +161,14 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
         Ok(value) => value, Err(error) => return FileExecution { result: empty(if error.error.outcome == ivy_contracts::Outcome::Unknown { FileFailure::Unknown } else { FileFailure::Spawn }), spawn_error: error.source },
     };
     // execFile leaves stdin open; spawnSync's absent input is immediate EOF.
-    if synchronous_input { drop(child.stdin.take()); }
+    let writer = match input {
+        Input::Open => None,
+        Input::Closed => { drop(child.stdin.take()); None },
+        Input::Bytes(bytes) => child.stdin.take().map(|mut pipe| tokio::spawn(async move {
+            let _ = pipe.write_all(&bytes).await;
+            let _ = pipe.shutdown().await;
+        })),
+    };
     let (overflow, mut exceeded) = mpsc::channel(2);
     let stop_capture = CancellationToken::new();
     let out=Arc::new(Mutex::new(Vec::new()));let err=Arc::new(Mutex::new(Vec::new()));
@@ -169,6 +190,7 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
     if !matches!(captured,Ok((Ok(Ok(())),Ok(Ok(()))))) {
         stdout.abort();stderr.abort();failure=Some(FileFailure::Unknown);
     }
+    if let Some(writer) = writer { writer.abort(); let _ = writer.await; }
     let stdout=JsString(std::mem::take(&mut *out.lock().unwrap_or_else(|p|p.into_inner())));
     let stderr=JsString(std::mem::take(&mut *err.lock().unwrap_or_else(|p|p.into_inner())));
     if failure.is_none() { failure = exceeded.try_recv().ok().map(FileFailure::MaxBuffer); }

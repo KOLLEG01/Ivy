@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    bootstrap_restart::BootstrapConfigurationRestarts,
     configuration_updater::{self, ConfigurationUpdater},
     executor_lock::ExecutorLock,
     scheduler,
@@ -18,6 +19,7 @@ struct Coordinator {
     clock: Arc<dyn Clock>,
     status: StatusWriter,
     configuration: Option<ConfigurationUpdater>,
+    bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
 }
 struct Control {
     pending: Mutex<Option<Coordinator>>,
@@ -50,7 +52,7 @@ impl HostExecutor {
         runtime: Arc<dyn ActivationRuntime>,
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
-        Self::open_inner(config, options, runtime, clock, None).await
+        Self::open_inner(config, options, runtime, clock, None, None).await
     }
     pub async fn open_with_configuration(
         config: IvyJson,
@@ -77,6 +79,31 @@ impl HostExecutor {
         runtime: Arc<dyn ActivationRuntime>,
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
+        Self::open_configuration(config, config_path, credential, options, runtime, clock, None).await
+    }
+    /// Service startup supplies its actual process start time and the immutable
+    /// scheduler helper through the reconciler. Existing core constructors do
+    /// not manufacture a process generation or an OS-owner fallback.
+    pub async fn open_with_configuration_and_restarts(
+        config: IvyJson,
+        config_path: std::path::PathBuf,
+        credential: Option<JsString>,
+        options: ExecutorOptions,
+        runtime: Arc<dyn ActivationRuntime>,
+        clock: Arc<dyn Clock>,
+        bootstrap_restarts: BootstrapConfigurationRestarts,
+    ) -> IvyResult<Self> {
+        Self::open_configuration(config, config_path, credential, options, runtime, clock, Some(bootstrap_restarts)).await
+    }
+    async fn open_configuration(
+        config: IvyJson,
+        config_path: std::path::PathBuf,
+        credential: Option<JsString>,
+        options: ExecutorOptions,
+        runtime: Arc<dyn ActivationRuntime>,
+        clock: Arc<dyn Clock>,
+        bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
+    ) -> IvyResult<Self> {
         let credential = configuration_updater::update_credential(
             &config,
             options.own_instance_id.as_deref(),
@@ -89,6 +116,7 @@ impl HostExecutor {
             runtime,
             clock,
             Some((config_path, credential)),
+            bootstrap_restarts,
         )
         .await
     }
@@ -98,6 +126,7 @@ impl HostExecutor {
         runtime: Arc<dyn ActivationRuntime>,
         clock: Arc<dyn Clock>,
         configuration: Option<(std::path::PathBuf, Option<String>)>,
+        bootstrap_restarts: Option<BootstrapConfigurationRestarts>,
     ) -> IvyResult<Self> {
         let lock = ExecutorLock::acquire(
             config::path_value(config.required("runtimeRoot")?)?.join("executor"),
@@ -144,6 +173,7 @@ impl HostExecutor {
                 clock,
                 status,
                 configuration,
+                bootstrap_restarts,
             })),
             cancel,
             result,
@@ -356,7 +386,7 @@ impl Coordinator {
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop{tokio::select!{biased;_=stopped.cancelled()=>break,_=ticks.tick()=>{let _=status.write("ready").await;}}}
             }));
-            let mut next_configuration=0.0;let mut last_hint=String::new();
+            let mut next_configuration=0.0;let mut next_bootstrap_restart=0.0;let mut last_hint=String::new();
             while !self.cancel.is_cancelled(){
                 if let Some(updater)=&self.configuration {
                     let config=self.base.config().await?;
@@ -377,6 +407,15 @@ impl Coordinator {
                         let config=self.base.config().await?;
                         let interval=config.get("configurationUpdates").and_then(|v|v.get("intervalSeconds")).filter(|v|!v.is_null()).and_then(IvyJson::as_f64).unwrap_or(60.0);
                         next_configuration=self.clock.utc_millis() as f64+interval*1000.0;
+                    }
+                    if let Some(restarts)=&self.bootstrap_restarts
+                        && self.clock.utc_millis() as f64>=next_bootstrap_restart {
+                        next_bootstrap_restart=self.clock.utc_millis() as f64+5000.0;
+                        match restarts.reconcile(self.base.config().await?).await {
+                            Ok(true)=>{self.cancel.cancel();break;}
+                            Ok(false)=>{},
+                            Err(error)=>self.status.value.lock().map_err(|_|IvyError::internal())?.configuration_code=Some(error.code_js()),
+                        }
                     }
                 }
                 let mut index=0;

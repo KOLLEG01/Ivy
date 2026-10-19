@@ -561,7 +561,7 @@ fn configuration_updater_credential_selection_matches_original_configured_execut
     pair("credential-selection", &input, &actual, &call(&input));
 }
 
-struct NoActions;
+pub(super) struct NoActions;
 impl ivy_host_runtime::executor::ActivationRuntime for NoActions {
     fn prepare<'a>(
         &'a self,

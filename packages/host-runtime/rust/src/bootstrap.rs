@@ -7,6 +7,83 @@ use crate::{
     node_path::{self, Context, Style},
 };
 use ivy_contracts::{JsString, core_schema::validate_host, hash::hash_json, json};
+use std::{fs, path::Path};
+
+fn fs_path(path: &Path) -> std::path::PathBuf {
+    node_path::filesystem_path(&node_path::from_native(path))
+}
+
+/// Selected authority precedes immutable history. Pending atomic writes are
+/// retained but never interpreted; stale contract/hash/installation plans have
+/// no execution authority. Other I/O and syntax errors remain failures.
+pub async fn retained_bootstrap_plans(config: IvyJson) -> IvyResult<Vec<IvyJson>> {
+    tokio::task::spawn_blocking(move || {
+        let identity = installation_identity(&config)?;
+        let runtime = crate::config::path_value(config.required("runtimeRoot")?)?;
+        let selected = runtime.join("bootstrap").join(format!("{identity}.json"));
+        let root = runtime.join("bootstrap-plans");
+        let mut entries = match fs::read_dir(fs_path(&root)) {
+            Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(|_| IvyError::internal())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(IvyError::internal()),
+        };
+        let accepted = |name: &str| name.len() == 69 && name.ends_with(".json")
+            && name.as_bytes()[..64].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b));
+        let pending = |name: &str| name.len() == 110 && name.ends_with(".tmp")
+            && name.as_bytes().get(69) == Some(&b'.') && accepted(&name[..69])
+            && name.as_bytes()[70..106].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b) || *b == b'-');
+        // Name admission is ASCII, so rejecting non-ASCII before slicing also
+        // preserves Node's regexp behavior for malformed native filename bytes.
+        require(entries.len() <= 1000 && entries.iter().all(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str().unwrap_or("");
+            name.is_ascii() && entry.file_type().is_ok_and(|kind| kind.is_file())
+                && (accepted(name) || pending(name))
+        }), "storage_invalid", "Invalid retained bootstrap plan set.")?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut paths = Vec::new();
+        match fs::symlink_metadata(fs_path(&selected)) {
+            Ok(_) => paths.push(selected.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(_) => return Err(IvyError::internal()),
+        }
+        for entry in entries {
+            if entry.file_name().to_str().is_some_and(accepted) {
+                paths.push(root.join(entry.file_name()));
+            }
+        }
+        let mut plans = Vec::new();
+        let mut hashes = std::collections::BTreeSet::new();
+        for path in paths {
+            let read = || -> IvyResult<Option<(String, IvyJson)>> {
+                let metadata = fs::symlink_metadata(fs_path(&path)).map_err(|_| IvyError::internal())?;
+                require(metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 65536,
+                    "storage_invalid", "Retained bootstrap plan is not a bounded regular file.")?;
+                let plan = crate::config::read_json(&path, crate::config::CONFIGURATION_BYTES)
+                    .map_err(crate::config::FileError::error)?;
+                validate_host("BootstrapPlan", &plan)?;
+                let hash = hash_json(&plan)?;
+                require(path == selected || path == root.join(format!("{}.json", &hash[7..])),
+                    "storage_invalid", "Retained bootstrap plan hash changed.")?;
+                let same = plan.get("installationId") == Some(&identity.clone().into())
+                    && plan.get("hostId") == config.get("hostId") && plan.get("runtimeRoot") == config.get("runtimeRoot");
+                require(path != selected || same, "storage_invalid", "Selected bootstrap plan belongs to a different installation.")?;
+                if !same { return Ok(None); }
+                if let Some(scope) = plan.get("linuxResources").filter(|v| truthy(v)) {
+                    linux_resources::validate_linux_resource_scope(scope, Some(&identity))?;
+                }
+                Ok(Some((hash, plan)))
+            };
+            match read() {
+                Ok(Some((hash, plan))) => { if hashes.insert(hash) { plans.push(plan); } },
+                Ok(_) => {},
+                Err(error) if ["invalid_arguments", "storage_invalid", "artifact_changed"].iter().any(|code| error.code == *code) => {},
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(plans)
+    }).await.map_err(|_| IvyError::internal())?
+}
 fn require(ok: bool, code: &str, message: &str) -> IvyResult<()> {
     if ok {
         Ok(())
