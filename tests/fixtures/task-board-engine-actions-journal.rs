@@ -469,13 +469,10 @@ async fn comment_recovery_preserves_a_later_writer_and_returns_the_original_rece
                     "task-board/task",
                     &changed,
                     "other-writer",
-                    &Json::object([(
-                        "update",
-                        Json::object([
-                            ("objectId", f(&task.pin, "objectId").clone()),
-                            ("expectedRevision", Json::Number(3.0)),
-                        ]),
-                    )]),
+                    &Json::object([
+                        ("objectId", f(&task.pin, "objectId").clone()),
+                        ("expectedRevision", Json::Number(3.0)),
+                    ]),
                 )
                 .await
                 .unwrap();
