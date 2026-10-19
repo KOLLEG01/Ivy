@@ -6,6 +6,8 @@ mod exec_file_cases;
 mod process_path_cases;
 #[path="host-process-tree-cases.rs"]
 mod process_tree_cases;
+#[path="host-raw-process-cases.rs"]
+mod raw_process_cases;
 
 // Exercise the private retained-handle failure paths through this selected target.
 #[cfg(windows)]

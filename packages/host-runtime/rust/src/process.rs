@@ -323,6 +323,24 @@ pub async fn spawn(
     spawn_resolved(resolved, root, context, None, None).await
 }
 
+/// Use exactly context.environment while retaining ordinary executable/cwd
+/// admission and the shared process-tree owner. No ambient keys are added.
+/// With raw_output the caller owns both byte pipes, their limits, deadlines,
+/// cancellation and stdin closure; no diagnostic stream is retained here.
+/// Await stop/completion and owned_process_tree_stopped before claiming
+/// retirement. The ordinary spawn API keeps its filtered runtime environment.
+pub async fn spawn_exact_environment(
+    command: &Command,
+    root: &Path,
+    executables: &BTreeMap<String, PathBuf>,
+    mut context: LaunchContext,
+) -> IvyResult<OwnedProcess> {
+    validate_capture(&context)?;
+    let resolved = resolve_command(command, root, executables)?;
+    let environment = std::mem::take(&mut context.environment);
+    spawn_resolved(resolved, root, context, Some(environment), None).await
+}
+
 fn validate_capture(context: &LaunchContext) -> IvyResult<()> {
     if context.redact.iter().any(|value| value.0.len() > 65536) {
         return Err(invalid("Redaction values exceed their bounded length."));
@@ -333,8 +351,8 @@ fn validate_capture(context: &LaunchContext) -> IvyResult<()> {
     Ok(())
 }
 
-/// Shared process-tree owner. Only the exec-file adapter selects unrestricted
-/// executable/environment semantics; artifact commands keep resolve_command.
+/// Shared process-tree owner. Exec-file supplies its separate executable/argv0
+/// semantics; ordinary and exact-environment commands keep resolve_command.
 pub(crate) async fn spawn_resolved(
     resolved: ResolvedCommand,
     root: &Path,
