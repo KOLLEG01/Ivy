@@ -924,6 +924,15 @@ test('Catalog failures leave readiness inspectable and cannot change a live task
   assert.deepEqual(f.selectionUpdates, []);
 });
 
+test('Speaker API distinguishes the selected catalog from its start protocol without a version allowlist', () => {
+  for (const [protocol, catalogVersion] of [['v3', 'v1'], ['v4', 'v4'], ['v10', 'v10']]) {
+    validatePhoneService('PhoneSpeakerVoices', { protocol, catalogVersion,
+      defaultVoiceId: 'offered', voices: [{ id: 'offered', displayName: 'Offered' }], selection: null });
+  }
+  assert.throws(() => validatePhoneService('PhoneSpeakerVoices', { protocol: 'v0', catalogVersion: 'v01',
+    defaultVoiceId: 'offered', voices: [{ id: 'offered', displayName: 'Offered' }], selection: null }));
+});
+
 test('MCP speaker selection is call-bound, validated, retained and applied only by an explicit Voice restart', async t => {
   const f = fixture(t), flow = f.flow(), bridge = new PhoneBridge(flow, f.native);
   const catalog = await bridge.invoke('speakerVoices', {}, context('main')) as { voices: { id: string }[]; selection: unknown };

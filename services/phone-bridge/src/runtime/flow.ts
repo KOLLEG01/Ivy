@@ -140,7 +140,7 @@ export class PhoneFlow {
     const pending = Promise.resolve().then(async () => {
       const catalog = await this.speakerVoiceCatalog();
       requireThat(catalog.voices.some(voice => voice.id === voiceId), 'phone_speaker_voice_invalid',
-        'Select a speaker voice advertised by phone_bridge_speaker_voices for native V3.');
+        'Select a speaker voice advertised by phone_bridge_speaker_voices.');
       await this.confirmConnectedForVoice(call);
       const intent: PhoneJournalIntent & { method: 'call.selectSpeakerVoice' } = {
         epoch: call.epoch, callId, operationId, method: 'call.selectSpeakerVoice', voiceId,

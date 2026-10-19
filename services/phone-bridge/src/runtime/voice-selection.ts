@@ -6,7 +6,8 @@ export interface PhoneVoiceSelection {
 }
 
 export interface PhoneSpeakerVoiceCatalog {
-  protocol: 'v3';
+  protocol: string;
+  catalogVersion?: string;
   defaultVoiceId: string;
   voices: { id: string; displayName: string }[];
 }

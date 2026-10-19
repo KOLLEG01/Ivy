@@ -11,6 +11,7 @@ import { phoneVoiceInstructions, phoneVoiceOpeningCue, phoneVoicePreparationProm
 import catalog from "../specs/native/codex-0.159.2/catalog.json" with { type: "json" };
 import { PhoneCodexVoice } from "../services/phone-bridge/src/runtime/codex-voice.js";
 import type { PhoneCodexVoiceSettings } from "../services/phone-bridge/src/runtime/codex-voice.js";
+import { selectSpeakerCatalog } from '../services/phone-bridge/src/runtime/speaker-catalog.js';
 import { PhoneJournal } from "../services/phone-bridge/src/runtime/journal.js";
 import { PhoneAdmission } from "../services/phone-bridge/src/runtime/admission.js";
 import type { startCodexProcess } from "../packages/host-runtime/src/codex-process.js";
@@ -21,6 +22,7 @@ const selection = {
   reasoningEffort: "high" as const,
 };
 function fixture(t: test.TestContext) {
+  const nativeCatalog = structuredClone(catalog);
   const root = mkdtempSync(join(tmpdir(), "ivy-phone-codex-"));
   const journal = new PhoneJournal(
     root,
@@ -91,7 +93,7 @@ function fixture(t: test.TestContext) {
     online = true;
     opens++;
     const rpc = {
-      catalog,
+      catalog: nativeCatalog,
       get connected() {
         return online;
       },
@@ -270,6 +272,16 @@ function fixture(t: test.TestContext) {
     settings,
     preparationItems: (items: typeof preparationItems) => { preparationItems = items; },
     speakerResponse: (value: unknown) => { speakerResponse = value; },
+    startContract: (versions: string[], voices: string[]) => {
+      const schema = nativeCatalog.clientRequests.find(item => item.method === 'thread/realtime/start')!.inputSchema as
+        { $defs: Record<string, { enum?: string[] }> };
+      Object.values(schema.$defs).find(item => item.enum?.includes('v3'))!.enum = versions;
+      Object.values(schema.$defs).find(item => item.enum?.includes('cove'))!.enum = voices;
+    },
+    unconstrainedStartContract: () => {
+      nativeCatalog.clientRequests.find(item => item.method === 'thread/realtime/start')!.inputSchema =
+        { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object' };
+    },
     configuredSpeaker: (value: string | null) => { configuredSpeaker = value; },
     opens: () => opens,
     forgetTasks: () => threads.clear(),
@@ -335,7 +347,7 @@ test('Preparation rejects NOT_READY, bare READY, ivy_dev-only tools, tool failur
 test('Native speaker discovery uses V3-compatible voices, preserves configured defaults and rejects malformed catalogs', async t => {
   const f = fixture(t), voice = f.voice();
   const first = await voice.speakerVoices();
-  assert.deepEqual(first, { protocol: 'v3', defaultVoiceId: 'cove',
+  assert.deepEqual(first, { protocol: 'v3', catalogVersion: 'v1', defaultVoiceId: 'cove',
     voices: [{ id: 'cove', displayName: 'Cove' }, { id: 'ember', displayName: 'Ember' }] });
   first.voices.length = 0;
   assert.equal((await voice.speakerVoices()).voices.length, 2);
@@ -347,6 +359,98 @@ test('Native speaker discovery uses V3-compatible voices, preserves configured d
   f.speakerResponse({ voices: { v1: [], defaultV1: 'cove', v2: ['marin'], defaultV2: 'marin' } });
   f.disconnect();
   await assert.rejects(voice.speakerVoices(), { code: 'phone_speaker_catalog_invalid' });
+});
+
+test('Speaker catalogs use numeric ordering and only native-compatible start combinations', () => {
+  const catalog = { v9: ['nine'], defaultV9: 'nine', v3: ['cove'], defaultV1: 'cove',
+    v10: ['ten'], defaultV10: 'ten', v4: ['four'], defaultV4: 'four', v01: ['not-a-version'] };
+  for (const entries of [Object.entries(catalog), Object.entries(catalog).reverse()]) {
+    const result = selectSpeakerCatalog(Object.fromEntries(entries), protocol => ['v3', 'v4', 'v9', 'v10'].includes(protocol));
+    assert.deepEqual(result, { protocol: 'v10', catalogVersion: 'v10', defaultVoiceId: 'ten',
+      voices: [{ id: 'ten', displayName: 'Ten' }] });
+  }
+  const legacy = { v1: ['cove'], defaultV1: 'cove', v2: ['marin'], defaultV2: 'marin' };
+  assert.deepEqual(selectSpeakerCatalog(legacy, protocol => protocol === 'v3'),
+    { protocol: 'v3', catalogVersion: 'v1', defaultVoiceId: 'cove', voices: [{ id: 'cove', displayName: 'Cove' }] });
+  assert.throws(() => selectSpeakerCatalog(legacy, () => false), { code: 'phone_speaker_catalog_invalid' });
+  assert.throws(() => selectSpeakerCatalog({ v2: ['marin'], defaultV2: 'marin' }, () => true),
+    { code: 'phone_speaker_catalog_invalid' });
+  assert.equal(selectSpeakerCatalog(catalog, protocol => protocol === 'v3').catalogVersion, 'v3');
+  assert.equal(selectSpeakerCatalog(catalog, (protocol, id) => protocol !== 'v10' || id !== 'ten').catalogVersion, 'v9');
+  assert.equal(selectSpeakerCatalog({ ...catalog, v10: [], v9: [] }, () => true).catalogVersion, 'v4');
+});
+
+test('Speaker discovery rejects malformed catalogs and defaults outside the chosen group', () => {
+  for (const voices of [{}, { v3: [] }, { v0: ['cove'], defaultV0: 'cove' },
+    { v3: 'cove' }, { v3: [null] }, { v3: [''] }, { v3: ['cove', 'cove'] },
+    { v3: ['x'.repeat(257)] }, { v3: ['cove'] }, { v3: ['cove'], defaultV3: 'marin' },
+    { v3: ['sonna'], defaultV1: 'cove' }]) {
+    assert.throws(() => selectSpeakerCatalog(voices, () => true), { code: 'phone_speaker_catalog_invalid' });
+  }
+  const voices = { v1: ['cove'], defaultV1: 'cove', v3: ['sonna'], defaultV3: 'sonna' };
+  assert.throws(() => selectSpeakerCatalog(voices, () => true, 'cove'), { code: 'phone_speaker_voice_invalid' });
+  assert.throws(() => selectSpeakerCatalog(voices, () => true, ''), { code: 'phone_speaker_voice_invalid' });
+  assert.equal(selectSpeakerCatalog(voices, () => true, 'sonna').defaultVoiceId, 'sonna');
+  assert.equal(selectSpeakerCatalog({ v3: ['cove', 'sonna'], defaultV1: 'cove' }, () => true).defaultVoiceId, 'cove');
+  // A valid explicit override need not use the fallback default of an older group.
+  assert.equal(selectSpeakerCatalog({ v3: ['sonna'], defaultV1: 'cove' }, () => true, 'sonna').defaultVoiceId, 'sonna');
+});
+
+test('Native discovery and startup use the same selected future catalog and checked protocol', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit();
+  const data = { voices: { v1: ['cove'], defaultV1: 'cove', v2: ['marin'], defaultV2: 'marin',
+    v3: ['cove', 'sonna'], v4: ['cove', 'miko'], defaultV4: 'miko' } };
+  f.speakerResponse(data);
+  // Offering v4 alone cannot change the protocol supported by the original native contract.
+  assert.equal((await voice.speakerVoices()).catalogVersion, 'v1');
+  f.startContract(['v3'], ['cove', 'sonna', 'miko']); f.disconnect();
+  assert.equal((await voice.speakerVoices()).catalogVersion, 'v3');
+  f.startContract(['v3', 'v4'], ['cove', 'sonna', 'miko']); f.disconnect();
+  assert.deepEqual(await voice.speakerVoices(), { protocol: 'v4', catalogVersion: 'v4', defaultVoiceId: 'miko',
+    voices: [{ id: 'cove', displayName: 'Cove' }, { id: 'miko', displayName: 'Miko' }] });
+  const threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Initial conversation', 'offer', () => {});
+  const start = f.requests.find(item => item.method === 'thread/realtime/start')!;
+  assert.equal(start.params['version'], 'v4');
+  assert.equal(start.params['voice'], 'miko');
+  assert.equal(voice.speakerVoice(call.callId), 'miko');
+  assert.equal(f.requests.filter(item => item.method === 'thread/realtime/start').length, 1);
+});
+
+test('A retained voice from another catalog is rejected before any new native session starts', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit();
+  f.startContract(['v3'], ['cove', 'ember', 'sonna']);
+  f.speakerResponse({ voices: { v1: ['cove', 'ember'], defaultV1: 'cove', v2: ['marin'], defaultV2: 'marin',
+    v3: ['sonna'], defaultV3: 'sonna' } });
+  const threadId = await voice.prepare(call, 0, selection);
+  const intent = { epoch: call.epoch, callId: call.callId, operationId: randomUUID(), method: 'call.selectSpeakerVoice' as const,
+    voiceId: 'ember', requestHash: digest(canonical({ voiceId: 'ember' })) };
+  f.journal.submit(intent); f.journal.finishSpeakerVoiceSelection(intent, { selectedVoiceId: 'ember' });
+  await assert.rejects(voice.start(call, 0, threadId, 'Initial conversation', 'offer', () => {}),
+    { code: 'phone_speaker_voice_invalid' });
+  assert.equal(f.requests.some(item => item.method === 'thread/realtime/start'), false);
+});
+
+test('An unconstrained native start schema cannot authorize an advertised protocol', async t => {
+  const f = fixture(t), voice = f.voice();
+  f.unconstrainedStartContract();
+  await assert.rejects(voice.speakerVoices(), { code: 'phone_speaker_catalog_invalid' });
+  assert.equal(f.requests.some(item => item.method === 'thread/realtime/start'), false);
+});
+
+test('Refreshing the catalog does not replace or restart an active Voice session', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.admit();
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Initial conversation', 'offer', () => {});
+  f.startContract(['v3', 'v4'], ['cove', 'miko']);
+  f.speakerResponse({ voices: { v1: ['cove'], defaultV1: 'cove', v2: ['marin'], defaultV2: 'marin',
+    v4: ['miko'], defaultV4: 'miko' } });
+  now += 60001;
+  assert.equal((await voice.speakerVoices()).catalogVersion, 'v4');
+  assert.equal(voice.speakerVoice(call.callId), 'cove');
+  assert.equal(f.requests.filter(item => item.method === 'thread/realtime/start').length, 1);
+  assert.equal(f.requests.some(item => item.method === 'thread/realtime/stop'), false);
 });
 
 test('A retained speaker selection reaches native V3 only after the original call starts its next Voice session', async t => {

@@ -129,8 +129,15 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   generations and operations prevent another restart on replay.
 - Audio speaker voices are separate from model/reasoning selection.
   `phone_bridge_speaker_voices` uses native `thread/realtime/listVoices`, cached
-  for 60 seconds and cleared on reconnect. Native V3 uses the returned V1 group
-  and default; no fixed voice list is supplied by PhoneBridge. The explicit
+  for 60 seconds and cleared on reconnect. It selects the highest numeric `vN`
+  group whose voices and required startup parameters fit the pinned native start
+  contract. `catalogVersion` reports the group; `protocol` reports the independently
+  validated start version. The original V1 group remains usable with a V3 start;
+  V2 startup does not provide the required handoff behavior. Empty groups are
+  skipped and incompatible groups are never merged. Defaults must belong to the
+  chosen group; its `defaultVN` takes precedence over the existing `defaultV1`
+  fallback. New runtime contracts still require matching checked native artifacts;
+  discovery does not upgrade Codex or guarantee future protocol semantics. The explicit
   `codexVoice.voice` setting overrides the native `realtime.voice` configuration.
   With `callId`, the API reports selected/effective voice and `restartRequired`;
   active-call status also includes `speakerVoice` and discovery errors.

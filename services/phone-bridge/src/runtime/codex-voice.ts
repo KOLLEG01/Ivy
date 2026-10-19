@@ -20,6 +20,7 @@ import { phoneCallerIdentity } from "./admission.js";
 import type { PhoneJournal, PhoneJournalIntent, PhoneConversation, PhoneVoiceText } from "./journal.js";
 import type { PhoneVoiceModel, PhoneVoiceSelection } from "./voice-selection.js";
 import type { PhoneSpeakerVoiceCatalog } from "./voice-selection.js";
+import { selectSpeakerCatalog } from './speaker-catalog.js';
 import { PhoneVoiceWorks, activePhoneWork } from './voice-work.js';
 import type { PhoneVoiceWork } from './voice-work.js';
 
@@ -63,6 +64,14 @@ type Session = {
 type PreparationTurn = { id: string; status: string; items?: Record<string, Wire.Json>[] };
 // This slot has no caller context. The original call journal still owns admission.
 const preparedTaskKey = "prepared-phone-voice";
+const realtimeStartOptions = {
+  outputModality: 'audio',
+  // Keep partial backing-task progress contextual until its confirmed result.
+  codexResponseHandoffMode: 'commentary',
+  clientManagedHandoffs: false,
+  // Each phone conversation supplies its own complete context.
+  includeStartupContext: false,
+};
 
 export interface PhoneVoicePort {
   models(): Promise<PhoneVoiceModel[]>;
@@ -696,18 +705,24 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       const result = await this.call("thread/realtime/listVoices", {}, { detachOnTimeout: true }, 15000);
       const definition = this.connection!.rpc.catalog.clientRequests.find(item => item.method === "thread/realtime/listVoices")!;
       this.schemas.validate(definition.outputSchema, result, 64 * 1024);
-      const voices = result["voices"] as { v1: string[]; defaultV1: string };
-      // Native V3 validates against the V1 catalog, including its default.
-      requireThat(voices.v1.length > 0 && new Set(voices.v1).size === voices.v1.length && voices.v1.includes(voices.defaultV1),
-        "phone_speaker_catalog_invalid", "Native V3 speaker catalog is incomplete.");
+      const voices = result["voices"] as Record<string, Wire.Json>;
+      const start = this.connection!.rpc.catalog.clientRequests.find(item => item.method === 'thread/realtime/start');
+      requireThat(start, 'native_method_unavailable', 'Native Voice startup is unavailable.');
+      const acceptsStart = this.schemas.compile(start.inputSchema);
       const configuration = await this.call("config/read", { cwd: this.settings.cwd, includeLayers: false }, { detachOnTimeout: true }, 15000);
       const config = configuration["config"] as Record<string, Wire.Json>;
       const realtime = config["realtime"] as Record<string, Wire.Json> | null;
-      const defaultVoiceId = this.settings.voice ?? realtime?.["voice"] ?? voices.defaultV1;
-      requireThat(typeof defaultVoiceId === "string" && voices.v1.includes(defaultVoiceId),
-        "phone_speaker_voice_invalid", "Configured speaker voice is not supported by native V3.");
-      const catalog: PhoneSpeakerVoiceCatalog = { protocol: "v3", defaultVoiceId,
-        voices: voices.v1.map(id => ({ id, displayName: id.charAt(0).toUpperCase() + id.slice(1) })) };
+      const catalog = selectSpeakerCatalog(voices, (protocol, voice) => {
+        const params = {
+          ...realtimeStartOptions, threadId: 'speaker-catalog-discovery', version: protocol, voice,
+          transport: { type: 'webrtc', sdp: 'speaker-catalog-discovery' },
+          prompt: phoneVoiceInstructions, initialItems: [{ role: 'user', text: 'Speaker discovery.' }],
+          realtimeStartInstructions: 'Speaker discovery.',
+          ...(this.settings.realtimeModel ? { model: this.settings.realtimeModel } : {}),
+        };
+        // Permitting unknown properties is not evidence of protocol support.
+        return acceptsStart(params) && !acceptsStart({ ...params, version: 'unsupported-protocol' });
+      }, this.settings.voice ?? realtime?.['voice']);
       this.speakerCatalog = { catalog, expiresAt: Date.now() + 60000 };
       return catalog;
     })().finally(() => { this.loadingSpeakers = null; });
@@ -1144,7 +1159,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       const speakers = await this.speakerVoices();
       const speakerVoiceId = this.journal.selectedSpeakerVoice(call.callId) ?? speakers.defaultVoiceId;
       requireThat(speakers.voices.some(item => item.id === speakerVoiceId),
-        "phone_speaker_voice_invalid", "Selected speaker voice is no longer supported by native V3.");
+        "phone_speaker_voice_invalid", "Selected speaker voice is outside the current native catalog.");
       guard();
       const intent: PhoneJournalIntent & { method: "call.promptVoice" } = {
         method: "call.promptVoice",
@@ -1193,8 +1208,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         session.realtimeRequested = true;
         await this.call("thread/realtime/start", {
           threadId,
-          version: "v3",
-          outputModality: "audio",
+          ...realtimeStartOptions,
+          version: speakers.protocol,
           transport: { type: "webrtc", sdp },
           prompt: phoneVoiceInstructions,
           initialItems: this.rejoining.has(call.callId)
@@ -1202,13 +1217,6 @@ export class PhoneCodexVoice implements PhoneVoicePort {
             : [...history, { role: "user", text: prompt }],
           // Startup context must not open another backing turn on a running thread.
           ...(!this.rejoining.has(call.callId) ? { realtimeStartInstructions: context() } : {}),
-          // Native V3 otherwise feeds partial progress as speakable completion.
-          // Keep it contextual so Voice waits for the confirmed result.
-          codexResponseHandoffMode: "commentary",
-          clientManagedHandoffs: false,
-          // Each phone conversation carries its complete current context explicitly.
-          // Avoid scanning unrelated workspace/history and replaying earlier calls.
-          includeStartupContext: false,
           voice: speakerVoiceId,
           ...(this.settings.realtimeModel
             ? { model: this.settings.realtimeModel }
