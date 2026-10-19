@@ -21,6 +21,8 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     task::Poll,
 };
+#[path = "task-board-engine-execution-journal.rs"]
+mod journal;
 fn f<'a>(v: &'a Json, k: &str) -> &'a Json {
     static NULL: Json = Json::Null;
     v.get(k).unwrap_or(&NULL)
@@ -419,5 +421,98 @@ async fn publication_gates_and_retained_execution_match_original_recovery() {
             "{:?}: unconsumed execution boundaries",
             replay.name
         );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_owner_work_coalesces_survives_caller_loss_and_drains() {
+    use ivy_task_board::engine_execution::ExecutionProgram;
+    use std::{cell::Cell, task::Waker};
+    struct Program {
+        calls: Cell<usize>,
+        open: Cell<bool>,
+        waiter: RefCell<Option<Waker>>,
+        fail: bool,
+    }
+    impl ExecutionProgram for Program {
+        async fn run(&self, operation: Document) -> IvyResult<Json> {
+            self.calls.set(self.calls.get() + 1);
+            poll_fn(|cx| {
+                if self.open.get() {
+                    Poll::Ready(())
+                } else {
+                    *self.waiter.borrow_mut() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            })
+            .await;
+            if self.fail {
+                Err(IvyError::new("fixture_unknown", "Retained uncertain work.")
+                    .with_outcome(Outcome::Unknown))
+            } else {
+                Ok(operation.value)
+            }
+        }
+    }
+    let operation = |id: &str, value: &str| {
+        let value = Json::String(value.into());
+        Document {
+            pin: Json::object([("objectId", id.into()), ("revision", Json::Number(1.0))]),
+            content_hash: hash_json(&value).unwrap(),
+            value,
+            parent_id: None,
+        }
+    };
+    for fail in [false, true] {
+        let program = Program {
+            calls: Cell::new(0),
+            open: Cell::new(false),
+            waiter: RefCell::new(None),
+            fail,
+        };
+        let executor = Executor::default();
+        let queue = ExecutionQueue::new(&program, &executor);
+        drop(queue.execute(operation("one", "first")).unwrap());
+        let duplicate = queue
+            .execute(operation("one", "ignored replacement"))
+            .unwrap();
+        let other = queue.execute(operation("two", "second")).unwrap();
+        let mut drain = Box::pin(queue.settled());
+        poll_fn(|cx| {
+            let mut tasks = std::mem::take(&mut *executor.work.borrow_mut());
+            assert_eq!(tasks.len(), 2);
+            while let Some(mut task) = tasks.pop_front() {
+                assert!(task.as_mut().poll(cx).is_pending());
+                executor.work.borrow_mut().push_back(task);
+            }
+            assert!(drain.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(program.calls.get(), 2);
+        program.open.set(true);
+        program.waiter.borrow_mut().take().unwrap().wake();
+        let results = executor
+            .drive(async { [duplicate.await, other.await] })
+            .await;
+        if fail {
+            for result in results {
+                assert_eq!(result.unwrap_err().outcome, Outcome::Unknown)
+            }
+        } else {
+            assert_eq!(results[0].as_ref().unwrap(), &Json::from("first"));
+            assert_eq!(results[1].as_ref().unwrap(), &Json::from("second"));
+        }
+        executor.drive(drain).await;
+        assert!(executor.work.borrow().is_empty());
+        let result = executor
+            .drive(queue.execute(operation("one", "later")).unwrap())
+            .await;
+        assert_eq!(program.calls.get(), 3);
+        if fail {
+            assert!(result.is_err())
+        } else {
+            assert_eq!(result.unwrap(), Json::from("later"))
+        }
     }
 }
