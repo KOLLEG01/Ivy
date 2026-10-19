@@ -335,6 +335,21 @@ impl InventoryManager {
         }
         self.refresh_projects(connection, true)?.wait().await
     }
+    /// Notice policy joins an existing refresh, or performs initial discovery.
+    /// An already observed complete snapshot does not cause another native read.
+    pub async fn ensure_projects(&self, connection: InventoryConnection) -> IvyResult<()> {
+        let (running, observed) = {
+            let state = self.0.state.lock().map_err(|_| IvyError::internal())?;
+            (state.projects.work.clone(), state.project_observed)
+        };
+        if let Some(work) = running {
+            work.wait().await
+        } else if !observed {
+            self.refresh_projects(connection, true)?.wait().await
+        } else {
+            Ok(())
+        }
+    }
     pub fn request_threads(&self, ready: bool) -> IvyResult<()> {
         self.request(ready, false)
     }

@@ -57,6 +57,40 @@ impl CapabilityStore for SqliteCapabilityStore {
 /// service readiness before sending agent/capabilities at schema version 1.0.0.
 pub type CapabilityPublisher = dyn Fn(&IvyJson) -> IvyResult<()> + Send + Sync;
 
+/// Startup initializes this row before loading environment defaults, retaining
+/// the original partial-startup boundary. Reopening the manager reuses the row.
+pub async fn initialize_profile(
+    store: &dyn CapabilityStore,
+    service_node_id: &JsString,
+    host_id: &JsString,
+    capabilities: Option<IvyJson>,
+    clock: &JournalClock,
+) -> IvyResult<SavedState> {
+    match store.read().await? {
+        Some(saved) => Ok(saved),
+        None => {
+            store
+                .write(
+                    IvyJson::object([
+                        ("serviceNodeId", IvyJson::String(service_node_id.clone())),
+                        ("hostId", IvyJson::String(host_id.clone())),
+                        ("revision", IvyJson::Number(1.0)),
+                        (
+                            "capabilities",
+                            capabilities
+                                .filter(|v| !v.is_null())
+                                .unwrap_or(IvyJson::Array(vec![])),
+                        ),
+                        ("updatedAt", IvyJson::String(clock())),
+                        ("operationId", IvyJson::Null),
+                    ]),
+                    None,
+                )
+                .await
+        }
+    }
+}
+
 struct Inner {
     service_node_id: JsString,
     host_id: JsString,
@@ -103,29 +137,14 @@ impl CapabilityManagement {
         publish: Arc<CapabilityPublisher>,
         clock: Arc<JournalClock>,
     ) -> IvyResult<Self> {
-        let saved = match store.read().await? {
-            Some(saved) => saved,
-            None => {
-                store
-                    .write(
-                        IvyJson::object([
-                            ("serviceNodeId", IvyJson::String(service_node_id.clone())),
-                            ("hostId", IvyJson::String(host_id.clone())),
-                            ("revision", IvyJson::Number(1.0)),
-                            (
-                                "capabilities",
-                                capabilities
-                                    .filter(|v| !v.is_null())
-                                    .unwrap_or(IvyJson::Array(vec![])),
-                            ),
-                            ("updatedAt", IvyJson::String(clock())),
-                            ("operationId", IvyJson::Null),
-                        ]),
-                        None,
-                    )
-                    .await?
-            }
-        };
+        let saved = initialize_profile(
+            store.as_ref(),
+            &service_node_id,
+            &host_id,
+            capabilities,
+            clock.as_ref(),
+        )
+        .await?;
         Ok(Self(Arc::new(Inner {
             service_node_id,
             host_id,

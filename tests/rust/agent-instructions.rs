@@ -11,6 +11,8 @@ mod environment_cases;
 mod environment_manager_cases;
 #[path = "agent-environment-defaults.rs"]
 mod environment_defaults_cases;
+#[path = "agent-service-kernel.rs"]
+mod service_kernel_cases;
 // These Agent-owner checks use synthetic RPC streams and stop before any CLI
 // probe. They do not replay the separate native-launch qualification target.
 #[path = "agent-native-owner.rs"]

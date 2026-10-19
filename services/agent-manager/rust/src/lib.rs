@@ -1,5 +1,6 @@
 //! AgentManager's local receipts and native connection ownership.
 pub mod agent_health;
+pub mod browser_notices;
 pub mod capabilities;
 pub mod claude_mcp;
 pub mod claude_launch;
@@ -43,6 +44,9 @@ pub mod project_management;
 pub mod registry;
 pub mod reconciliation;
 pub mod service_work;
+pub mod service_events;
+pub mod service_link;
+pub mod service_kernel;
 pub mod shutdown;
 pub mod skills;
 pub mod skills_files;
