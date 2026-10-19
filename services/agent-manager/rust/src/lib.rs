@@ -5,6 +5,7 @@ pub mod claude_mcp;
 pub mod claude_launch;
 pub mod directories;
 pub mod environment;
+pub mod environment_defaults;
 pub mod environment_manager;
 pub mod environment_text;
 pub mod instructions;

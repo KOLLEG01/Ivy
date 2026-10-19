@@ -19,7 +19,8 @@ function prepare(root,variant){
  mkdirSync(bin);mkdirSync(dataRoot);mkdirSync(artifactRoot);
  const executable=join(bin,variant==='wrapper'?'native.CMD':'native.exe');writeFileSync(executable,'pinned synthetic file; never execute\n');
  const home=join(dataRoot,'native');
- const version=variant.startsWith('version-')?variant.slice(8):'0.142.3';
+ const lineEndings={'version-lf':'\n','version-cr':'\r','version-ls':'\u2028','version-ps':'\u2029'};
+ const version=Object.hasOwn(lineEndings,variant)?'0.142.3'+lineEndings[variant]:variant.startsWith('version-')?variant.slice(8):'0.142.3';
  const settings={nativeExecutable:executable,nativeVersion:version,nativeExecutableHash:digest(readFileSync(executable)),codexHome:home,appServer:{mode:'owned-stdio'},limits};
  if(variant==='external')settings.appServer={mode:'external-proxy',socketPath:join(root,'external.sock'),expectedCodexHome:join(root,'server-home')};
  if(variant==='default')delete settings.appServer;
@@ -57,7 +58,7 @@ function prepare(root,variant){
  if(variant==='executable-hash'){settings.nativeExecutableHash='sha256:'+'0'.repeat(64);catalog.nativeExecutableHash=settings.nativeExecutableHash;}
  if(variant==='no-realtime')catalog.clientRequests=catalog.clientRequests.filter(row=>row.method!=='thread/realtime/start');
  if(variant==='catalog-provider')catalog.provider='claude';
- save(join(artifactRoot,'dist','specs','native','codex-'+version,'catalog.json'),catalog);
+ save(join(artifactRoot,'dist','specs','native','codex-'+(existsSync(retainedCatalog)?version:'0.142.3'),'catalog.json'),catalog);
  if(variant==='fence')save(join(dataRoot,'process-stop-fence.json'),{schemaVersion:1,owner:'native',ownerId:'fixture-epoch',processId:1234,observedAt:'2026-01-02T03:04:05.000Z',code:'outcome_unknown'});
  return {settings,artifactRoot,dataRoot,home,root};
 }

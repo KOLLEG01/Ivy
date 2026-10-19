@@ -127,7 +127,6 @@ fn exact_version(version: &JsString) -> bool {
         }
     }
     end == units.len()
-        || (end + 1 == units.len() && matches!(units[end], 10 | 13 | 0x2028 | 0x2029))
 }
 fn whitespace(c: u16) -> bool {
     matches!(c, 9..=13 | 32 | 160 | 5760 | 8192..=8202 | 8232 | 8233 | 8239 | 8287 | 12288 | 65279)
