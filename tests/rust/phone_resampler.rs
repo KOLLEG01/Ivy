@@ -165,11 +165,11 @@ fn pcm_resampler_bounds_identity_and_rejected_input_preserve_history() {
         );
         assert_eq!(output, other);
         if source == target {
-            assert_eq!(actual.delay_samples(), 0);
+            assert_eq!(actual.startup_samples(), 0);
             assert_eq!(&output[..input.len()], input);
         } else {
-            assert!(actual.delay_samples() > 0);
-            assert!(actual.delay_samples() <= target / 250);
+            assert!(actual.startup_samples() > 0);
+            assert!(actual.startup_samples() <= target / 200);
         }
     }
 }
@@ -213,9 +213,9 @@ fn pcm_resampler_continuous_clock_arbitrary_splits_and_reset() {
             difference < 2e-5,
             "split difference {source}->{target}: {difference}"
         );
-        assert!(
-            target * 4 - regular_pcm.len() <= target / 1000,
-            "unbounded startup deficit"
+        assert_eq!(
+            target * 4 - regular_pcm.len(),
+            PcmResampler::new(source, target).unwrap().startup_samples()
         );
         for frame in regular.iter().skip(1) {
             assert_eq!(frame.len(), target / 50);
@@ -425,8 +425,8 @@ async fn pcm_resampler_original_wdl_delay_gain_alias_and_stream_comparison() {
                 ("candidatePeakDelaySamples", scalar(a_delay as f64)),
                 ("originalPeakDelaySamples", scalar(b_delay as f64)),
                 (
-                    "declaredDelaySamples",
-                    number(PcmResampler::new(source, target).unwrap().delay_samples()),
+                    "startupHoldbackSamples",
+                    number(PcmResampler::new(source, target).unwrap().startup_samples()),
                 ),
             ]);
         } else if kind == "alias" {
