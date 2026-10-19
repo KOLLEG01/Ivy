@@ -9,6 +9,8 @@ mod media_format;
 mod pcm_codec;
 #[path = "phone_resampler.rs"]
 mod resampler;
+#[path = "phone_media_codec.rs"]
+mod media_codec;
 #[path = "phone_rtp_transport.rs"]
 mod rtp_transport;
 #[path = "phone_sdp.rs"]
