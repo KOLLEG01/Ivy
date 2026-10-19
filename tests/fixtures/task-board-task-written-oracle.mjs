@@ -25,7 +25,7 @@ add('other marker is retained',task({publication:pin('other')}));
 add('no notice still releases reserved marker',task({publication:pin('op'),comments:[]}));
 add('ticket contact still releases reserved marker',task({publication:pin('op'),fields:{title:'Task',userContact:'ticket'}}));
 add('missing contact preserves source selection',task({fields:{title:'Task'}}));
-for(const value of ['with spaces','all !\"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~','🧪\ud800\udfff\u0000\t'])add('form route '+JSON.stringify(value),task(),{node:'node '+value,pin:pin('id '+value)});
+for(const value of ['with spaces','all !\"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~','🧪\ud800X\udfff\u0000\t'])add('form route '+JSON.stringify(value),task(),{node:'node '+value,pin:pin('id '+value)});
 for(const [title,body] of [['T'.repeat(100),'B'.repeat(301)],['T'.repeat(93)+'🧪','B'.repeat(299)+'🧪'],['\ud800🧪\udfff','Body \ud800🧪\udfff']])add('UTF16 notice '+title.length+' '+body.length,task({fields:{title,userContact:'chat'},comments:[comment({body})]}));
 add('same client repeats original mutation',task(),{},[{},{}]);
 add('new comment uses a distinct scope',task(),{},[{}, {taskPatch:{comments:[comment({commentId:'second'})]}}]);
