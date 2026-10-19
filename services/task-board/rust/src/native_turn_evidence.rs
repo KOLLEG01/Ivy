@@ -11,6 +11,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, agent_schema::validate_agent,
     checked_native_contract::CheckedNativeContracts, hash::hash_json, json::canonical,
+    limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::{clock::parse_date, native_observations::NativeObservations, rpc::RpcClient};
 use std::collections::HashSet;
@@ -105,7 +106,9 @@ fn time(v: &Json) -> f64 {
 }
 fn same(a: Option<&Json>, b: Option<&Json>) -> IvyResult<bool> {
     match (a, b) {
-        (Some(a), Some(b)) => Ok(canonical(a, MAXIMUM_BYTES)? == canonical(b, MAXIMUM_BYTES)?),
+        (Some(a), Some(b)) => {
+            Ok(canonical(a, MANAGEMENT_FRAME_BYTES)? == canonical(b, MANAGEMENT_FRAME_BYTES)?)
+        }
         _ => Ok(a.is_none() && b.is_none()),
     }
 }

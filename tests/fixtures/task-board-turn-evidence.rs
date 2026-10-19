@@ -279,6 +279,16 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
                         }
                         allowed.insert(hash_json(&v).unwrap());
                     }
+                } else if s(a, "method") == &JsString::from("largeRequest") {
+                    let count = a.required("args").unwrap().as_array().unwrap()[0]
+                        .as_f64()
+                        .unwrap() as usize;
+                    let mut v = run.clone();
+                    v.insert(
+                        "originalRequest",
+                        Json::object([("body", Json::String(JsString(vec![120; count])))]),
+                    );
+                    allowed.insert(hash_json(&v).unwrap());
                 }
             }
             let current_id = RefCell::new(id(400));
@@ -418,6 +428,36 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
                             .unwrap();
                         Ok(Json::Null)
                     }
+                    "largeRequest" => {
+                        for revision in [1.0, 2.0] {
+                            let p = pin(200, revision);
+                            let mut v = store
+                                .journal
+                                .read("task-board/run", &p, true)
+                                .unwrap()
+                                .value;
+                            v.insert(
+                                "originalRequest",
+                                Json::object([(
+                                    "body",
+                                    Json::String(JsString(vec![
+                                        120;
+                                        a[0].as_f64().unwrap() as usize
+                                    ])),
+                                )]),
+                            );
+                            db.execute(
+                                "UPDATE revisions SET value_json=? WHERE id=? AND revision=?",
+                                params![
+                                    canonical(&v, MANAGEMENT_FRAME_BYTES).unwrap(),
+                                    id(200).to_utf8().unwrap(),
+                                    revision
+                                ],
+                            )
+                            .unwrap();
+                        }
+                        Ok(Json::Null)
+                    }
                     "patch" => {
                         let key = a[0].as_str().unwrap();
                         let d = store.journal.read(&key, &a[1], false).unwrap();
@@ -476,7 +516,7 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
             assert!(db.is_autocommit());
         }
     }
-    assert_eq!(count, 61);
+    assert_eq!(count, 69);
 }
 
 #[tokio::test(flavor = "current_thread")]

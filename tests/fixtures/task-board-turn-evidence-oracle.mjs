@@ -27,6 +27,13 @@ for(const directory of readdirSync('specs/native').filter(n=>/^codex-/.test(n)))
  const rows=[],add=(name,scenario,input={})=>rows.push({name,scenario,input});
  add('snapshot completion and replay','snapshot');add('single assistant output','output');add('two-page transcript and published artifact','transcript');add('stored name and replay identity','label');add('commentary is not final output','output',{item:{phase:'commentary'}});add('native wrapper identity follows retained layout','output',{wrongWrappedTurn:true});
  if(c.version==='0.159.2'){
+  add('historical request uses full management frame bound','large');
+  add('failed turn completion','snapshot',{status:'failed'});add('interrupted turn completion','snapshot',{status:'interrupted'});
+  add('page body byte count after aggregate admission','transcript',{pagePatch:{nativeBytes:1},totalFromPages:true});
+  add('page body item count','transcript',{pagePatch:{itemCount:0}});
+  add('page body next cursor','transcript',{pagePatch:{nextCursor:'other'}});
+  add('opaque cursor cannot repeat','transcript',{repeatCursor:true});
+  add('transcript UTF16 summary bound','transcript',{largeTranscript:true});
   for(const [name,input]of Object.entries({owner:{run:{primaryResourceRef:{...run.primaryResourceRef,serviceNodeId:'other'}}},turn:{turnData:[]},duplicate:{turnData:[{id:'turn',status:'completed'},{id:'turn',status:'completed'}]},ephemeral:{thread:{ephemeral:true}},thread:{thread:{id:'other'}},epoch:{turnEpoch:'other'},chronology:{metaTime:9},status:{status:'inProgress'},reply:{metadataError:true}}))add('snapshot '+name,'snapshot',input);
   add('snapshot history cannot substitute request','history');add('snapshot corrupt body refuses read','corrupt');add('snapshot artifact hash','artifact',{patch:{contentHash:'sha256:'+'0'.repeat(64)}});
   add('snapshot partial write replay','retry');
@@ -48,7 +55,8 @@ for(const directory of readdirSync('specs/native').filter(n=>/^codex-/.test(n)))
   const turns=observed(2,'thread/turns/list',{threadId:'thread',cursor:null,limit:100,itemsView:'notLoaded',sortDirection:'desc'},{data:i.turnData??[{id:'turn',status:i.status??'completed'}]},i.turnEpoch??'epoch');
   const turnSubject=new Turns(store,'caller');
   const shape=(v)=>v?.document?{value:v.document.value,...(v.summary!==undefined?{summary:v.summary,status:v.status}:{thread:v.thread,turn:v.turn,run:v.source.run.value})}:v?.snapshot?{snapshot:v.snapshot.document.value,status:v.status,summary:v.summary}:v;
-  const action=async(method,args)=>{actions.push({method,args:structuredClone(args)});try{let v;if(method==='patch'){const d=latest(args[0],args[1]);Object.assign(d.value,args[2]);if(args[3])d.name=args[3];v=null;}else if(method==='corrupt'){blobs[0].body[0]^=1;v=null;}else if(method==='fault'){fault=args[0];v=null;}else if(method==='write'){v=await store.write(...args);}else v=await turnSubject[method](...args);results.push({ok:shape(v)});return v;}catch(e){if(!(e instanceof IvyError))throw new Error(row.name,{cause:e});results.push({error:{code:e.code,message:e.message,outcome:e.outcome}});return undefined;}};
+  const action=async(method,args)=>{actions.push({method,args:structuredClone(args)});try{let v;if(method==='patch'){const d=latest(args[0],args[1]);Object.assign(d.value,args[2]);if(args[3])d.name=args[3];v=null;}else if(method==='largeRequest'){for(const d of docs.filter(d=>d.key==='task-board/run'))d.value.originalRequest={body:'x'.repeat(args[0])};v=null;}else if(method==='corrupt'){blobs[0].body[0]^=1;v=null;}else if(method==='fault'){fault=args[0];v=null;}else if(method==='write'){v=await store.write(...args);}else v=await turnSubject[method](...args);results.push({ok:shape(v)});return v;}catch(e){if(!(e instanceof IvyError))throw new Error(row.name,{cause:e});results.push({error:{code:e.code,message:e.message,outcome:e.outcome}});return undefined;}};
+  if(row.scenario==='large')await action('largeRequest',[17*1024*1024]);
   const snapshot=await action('saveSnapshot',[pin(200),metadata,turns]);
   if(!snapshot){if(row.scenario==='retry')throw Error('Unexpected setup failure');}
   else if(row.scenario==='snapshot'){await action('snapshot',[pin(200,2),snapshot]);await action('completion',[pin(200,2),snapshot,null]);await action('saveSnapshot',[pin(200),metadata,turns]);}
@@ -56,6 +64,7 @@ for(const directory of readdirSync('specs/native').filter(n=>/^codex-/.test(n)))
   else if(row.scenario==='history'){await action('patch',['task-board/run',pin(200,2),{originalRequest:{other:true}}]);await action('snapshot',[pin(200,2),snapshot]);}
   else if(row.scenario==='corrupt'){await action('corrupt',[]);await action('snapshot',[pin(200),snapshot]);}
   else if(row.scenario==='artifact')await action('snapshot',[pin(200),{...snapshot,...i.patch}]);
+  else if(row.scenario==='large')await action('completion',[pin(200,2),snapshot,null]);
   else if(row.scenario==='retry'){await action('fault',['task-board/native-turn-snapshot']);await action('saveSnapshot',[pin(200),metadata,observed(3,'thread/turns/list',turns.params,turns.reply.result)]);await action('saveSnapshot',[pin(200),metadata,observed(3,'thread/turns/list',turns.params,turns.reply.result)]);}
   else if(row.scenario==='output'){
    const value={...item,...i.item};const entry=v=>wrap?{turnId:i.wrongWrappedTurn?'other':'turn',item:v}:v;
@@ -65,25 +74,26 @@ for(const directory of readdirSync('specs/native').filter(n=>/^codex-/.test(n)))
   }else if(row.scenario==='transcript'){
    const snap=latest('task-board/native-turn-snapshot',snapshot.object).value;
    const entry=v=>wrap?{turnId:'turn',item:v}:v;
-   const first={...item,id:'a',phase:i.noFinal?'analysis':'final_answer',text:i.twoAnswers?'first':'answer'};if(i.noAssistant)first.type='commandExecution';
+   const first={...item,id:'a',phase:i.noFinal?'analysis':'final_answer',text:i.largeTranscript?'a'+'😄'.repeat(65536):i.twoAnswers?'first':'answer'};if(i.noAssistant)first.type='commandExecution';
    const second={...item,id:i.duplicateItem?'a':'b',phase:i.noFinal?'analysis':i.twoAnswers?'final_answer':'commentary',text:'last'};if(i.noAssistant)second.type='commandExecution';
    const one=observed(3,'thread/items/list',{threadId:'thread',turnId:'turn',cursor:null,limit:100,sortDirection:'asc'},{data:[entry(first)],nextCursor:'next'},'epoch',i.pageTime??3);
-   const two=observed(i.duplicateObservation?3:4,'thread/items/list',{threadId:'thread',turnId:'turn',cursor:'next',limit:100,sortDirection:'asc'},{data:[entry(second)],nextCursor:i.lastCursor??null});
+   const two=observed(i.duplicateObservation?3:4,'thread/items/list',{threadId:'thread',turnId:'turn',cursor:'next',limit:100,sortDirection:'asc'},{data:[entry(second)],nextCursor:i.repeatCursor?'next':i.lastCursor??null});
    const p1=await action('savePage',[pin(200),snap,'collection',null,1,null,one]);
-   const p2=await action('savePage',[pin(200),snap,'collection',p1,2,'next',two]);
+   let p2=await action('savePage',[pin(200),snap,'collection',p1,2,'next',two]);
+   let third;if(i.repeatCursor){third=observed(5,'thread/items/list',two.params,{data:[entry({...item,id:'c'})],nextCursor:null});p2=await action('savePage',[pin(200),snap,'collection',p2,3,'next',third]);}
    if(i.pagePatch){const patch={...i.pagePatch};if(patch.previous==='self')patch.previous=p2;await action('patch',['task-board/native-result-page',p2,patch]);}
-   const verification=observed(i.verificationDuplicate?4:5,'thread/turns/list',turns.params,{data:[{id:'turn',status:i.verificationStatus??'completed'}]},i.verificationEpoch??'epoch',5);
+   const verification=observed(i.verificationDuplicate?4:i.repeatCursor?6:5,'thread/turns/list',turns.params,{data:[{id:'turn',status:i.verificationStatus??'completed'}]},i.verificationEpoch??'epoch',i.repeatCursor?6:5);
    const evidence=await new Reads(store).save(pin(200),verification,{observationId:verification.observationId,callerPrincipalId:'caller',serviceNodeId:'native-agent',nativeVersion:c.version,epoch:verification.epoch,method:verification.method,params:verification.params});
    // This explicit setup call also executes through the Rust reads action.
    actions.push({method:'saveRead',args:[pin(200),verification]});results.push({ok:evidence});
-   const transcript={schemaVersion:1,collectionId:'collection',run:pin(200),snapshot,phase:'complete',head:p2,pageCount:2,nativeBytes:Buffer.byteLength(canonical(one))+Buffer.byteLength(canonical(two)),nextCursor:null,verification:{artifact:evidence,observationId:verification.observationId,epoch:verification.epoch},verificationCursor:null,createdAt:time(2),updatedAt:time(5),...i.transcriptPatch};
+   const transcript={schemaVersion:1,collectionId:'collection',run:pin(200),snapshot,phase:'complete',head:p2,pageCount:i.repeatCursor?3:2,nativeBytes:i.totalFromPages?docs.filter(d=>d.key==='task-board/native-result-page').reduce((n,p)=>n+p.value.nativeBytes,0):Buffer.byteLength(canonical(one))+Buffer.byteLength(canonical(two))+(third?Buffer.byteLength(canonical(third)):0),nextCursor:null,verification:{artifact:evidence,observationId:verification.observationId,epoch:verification.epoch},verificationCursor:null,createdAt:time(2),updatedAt:time(5),...i.transcriptPatch};
    await action('verifyTranscript',[pin(200,2),transcript]);
    const p=await action('write',['task-board/native-transcript',transcript,'fixture-transcript',{create:{name:'Transcript',parentId:id(200)}}]);
    if(p)await action('transcript',[pin(200,2),{object:p,label:'Transcript',contentHash:hashJson(transcript),mediaType:'application/json'}]);
   }
   const documents=docs.filter((d,index)=>d.key!=='task-board/run'&&!docs.slice(index+1).some(x=>x.pin.objectId===d.pin.objectId)).map(d=>({key:d.key,pin:d.pin,value:d.value,name:d.name,parent:d.parent})).sort((a,b)=>a.pin.objectId<b.pin.objectId?-1:1);
   row.actions=actions;row.run=active;row.writeIds=writeIds;row.expectedHash=hashJson({results,trace,documents});row.blobs=blobs.map(b=>({key:b.key,name:b.name,parent:b.parent,pin:b.pin,hex:b.initial.toString('hex')}));
-  if(['single assistant output','two-page transcript and published artifact','stored name and replay identity'].includes(row.name))assert.ok(results.every(r=>'ok'in r),row.name+JSON.stringify(results));
+  if(row.scenario==='large'||['single assistant output','two-page transcript and published artifact','stored name and replay identity'].includes(row.name))assert.ok(results.every(r=>'ok'in r),row.name+JSON.stringify(results));
  }
  groups.push({path,rows});
 }
