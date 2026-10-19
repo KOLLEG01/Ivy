@@ -10,6 +10,7 @@ mod invite;
 mod registration;
 mod registration_client;
 mod tls;
+pub(crate) use registration::same_ip;
 
 pub use binding::{BindError, BoundSipTransport, SipBoundFlow};
 pub use call::{

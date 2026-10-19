@@ -198,7 +198,7 @@ fn known_method(method: &str) -> bool {
 // Locate root property value spans AFTER shared JSON validation. This is only a
 // token-span walk, not a competing JSON parser. Preserve the exact params text,
 // including nested whitespace, escape spelling, number lexemes and property order.
-fn root_values(text: &str) -> Vec<&str> {
+pub(crate) fn root_values(text: &str) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut at = 0;
     let space = |at: &mut usize| {

@@ -13,6 +13,8 @@ mod sip_host;
 mod native_dispatch;
 #[path = "phone_native_pipe.rs"]
 mod native_pipe;
+#[path = "phone_native_config.rs"]
+mod native_config;
 #[path = "phone_sip.rs"]
 mod sip;
 #[path = "phone_sip_stack.rs"]

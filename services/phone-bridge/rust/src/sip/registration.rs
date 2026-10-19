@@ -18,6 +18,13 @@ pub struct RegistrationPeer {
     pub address: SocketAddr,
     pub transport: RegistrationTransport,
 }
+pub(crate) fn same_ip(left: SocketAddr, right: SocketAddr) -> bool {
+    left.ip() == right.ip()
+        && match (left, right) {
+            (SocketAddr::V6(a), SocketAddr::V6(b)) => a.scope_id() == b.scope_id(),
+            _ => true,
+        }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegistrationPhase {
@@ -173,7 +180,7 @@ impl RegistrationLease {
         self.observation(now).phase == RegistrationPhase::Registered
             && self.flow.as_ref().is_some_and(|flow| {
                 flow.remote.transport == peer.transport
-                    && flow.remote.address.ip() == peer.address.ip()
+                    && same_ip(flow.remote.address, peer.address)
             })
     }
 

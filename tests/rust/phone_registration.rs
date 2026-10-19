@@ -27,6 +27,27 @@ fn registered(transport: RegistrationTransport) -> RegistrationLease {
 }
 
 #[test]
+fn registered_ipv6_peer_identity_includes_original_scope_id() {
+    let mut lease = RegistrationLease::default();
+    lease.confirmed(
+        at(100),
+        200,
+        120,
+        peer("[fe80::2%12]:40000", RegistrationTransport::Udp),
+        peer("[fe80::1%12]:5060", RegistrationTransport::Udp),
+    );
+    assert!(lease.matches_peer(
+        at(101),
+        peer("[fe80::1%12]:60000", RegistrationTransport::Udp)
+    ));
+    assert!(!lease.matches_peer(
+        at(101),
+        peer("[fe80::1%13]:5060", RegistrationTransport::Udp)
+    ));
+    assert!(!lease.matches_peer(at(101), peer("[fe80::1]:5060", RegistrationTransport::Udp)));
+}
+
+#[test]
 fn contact_lifetimes_preserve_the_original_registrar_policy() {
     // Original RegistrationExpiry and SipRegistration.EffectiveExpiry:
     // Contact overrides global; no cap at the requested lifetime; all bindings
