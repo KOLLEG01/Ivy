@@ -9,6 +9,8 @@ use ivy_hive::{
 };
 use serde_json::{Value, json};
 use std::{cmp::Ordering, collections::HashMap, sync::Arc, time::Duration};
+#[path = "hive_configurations.rs"]
+mod configurations;
 #[path = "hive_discovery.rs"]
 mod discovery;
 #[path = "hive_inventory.rs"]
@@ -172,11 +174,13 @@ pub(super) struct Trace {
     registry: Option<Registry>,
     runtime: Option<Arc<ObservedRuntime>>,
     discovery: Option<ivy_hive::discovery::Discovery>,
+    configurations: Option<ivy_hive::configurations::Configurations>,
 }
 impl Trace {
     pub(super) fn reset_owner(&mut self) {
         self.registry = None;
         self.discovery = None;
+        self.configurations = None;
     }
     pub(super) fn state(&self) -> Value {
         match self.registry.as_ref() {
@@ -205,6 +209,18 @@ impl Trace {
             .unwrap()
             .unwrap_or_else(|| IvyJson::object(std::iter::empty::<(&str, IvyJson)>()));
         super::object_write::apply_units(&mut parameters, step);
+        if step["op"] == "configurations" {
+            if self.configurations.is_none() || method == "constructor" {
+                self.configurations = Some(ivy_hive::configurations::Configurations::new(store)?);
+            }
+            return configurations::execute(
+                self.configurations.as_ref().unwrap(),
+                store,
+                runtime,
+                &parameters,
+                step,
+            );
+        }
         if (method == "constructor" && step["op"] != "discovery") || self.registry.is_none() {
             self.registry = Some(Registry::new(store, runtime, now)?);
         }

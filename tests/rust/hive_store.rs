@@ -26,6 +26,8 @@ mod query;
 mod registry;
 #[path = "hive_retention.rs"]
 mod retention;
+#[path = "hive_wiki.rs"]
+mod wiki;
 use rusqlite::types::ValueRef;
 use serde_json::{Value, json};
 use std::{
@@ -108,7 +110,10 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
     let mut store = Store::open(path).unwrap();
     let mut result = vec![];
     let registry_trace = steps.iter().any(|step| {
-        step["op"] == "registry" || step["op"] == "inventory" || step["op"] == "discovery"
+        step["op"] == "registry"
+            || step["op"] == "inventory"
+            || step["op"] == "discovery"
+            || step["op"] == "configurations"
     });
     let inventory_trace = steps.iter().any(|step| step["op"] == "inventory");
     let mut registry = registry::Trace::default();
@@ -126,8 +131,14 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
         } else {
             step
         };
+        let mut wiki_calls = vec![];
         let outcome = match step["op"].as_str().unwrap() {
-            "registry" | "inventory" | "discovery" => registry
+            "wiki" => {
+                let (result, calls) = wiki::execute(&mut store, step);
+                wiki_calls = calls;
+                result.map(wire)
+            }
+            "registry" | "inventory" | "discovery" | "configurations" => registry
                 .execute(
                     &mut store,
                     step,
@@ -451,6 +462,9 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
         }
         if registry_trace {
             row["registry"] = registry.state();
+        }
+        if step["op"] == "wiki" {
+            row["wikiCalls"] = wire(IvyJson::Array(wiki_calls));
         }
         result.push(row);
     }

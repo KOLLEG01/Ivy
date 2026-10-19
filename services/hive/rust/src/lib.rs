@@ -1,5 +1,6 @@
 //! Hive service implementation. Storage policy is independent of the network executor.
 pub mod admission;
+pub mod configurations;
 pub mod discovery;
 pub mod events;
 pub mod inventory;
@@ -13,6 +14,7 @@ pub mod registry;
 pub mod retention;
 pub mod storage_read;
 pub mod store;
+pub mod wiki;
 pub mod worker_client;
 pub mod worker_identity;
 pub mod worker_protocol;

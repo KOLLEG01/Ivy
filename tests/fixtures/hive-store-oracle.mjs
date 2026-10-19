@@ -12,23 +12,27 @@ registerHooks({resolve(specifier,context,next){
 }});
 const {HiveStore}=await import('../../services/hive/src/store.ts');
 const {Objects}=await import('../../services/hive/src/objects.ts');
+const {queryObjects}=await import('../../services/hive/src/query.ts');
 const {Events}=await import('../../services/hive/src/events.ts');
 const {Retention}=await import('../../services/hive/src/retention.ts');
 const {pruneObjectRevisions}=await import('../../services/hive/src/object-retention.ts');
 const {Registry}=await import('../../services/hive/src/registry.ts');
 const {Inventory}=await import('../../services/hive/src/inventory.ts');
+const {Configurations}=await import('../../services/hive/src/configurations.ts');
+const {wikiHandlers}=await import('../../services/hive/src/wiki.ts');
+const {validateInput,validateOutput}=await import('../../packages/contracts/src/core-validation.ts');
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
 const {canonical,digest,hashJson}=await import('../../packages/contracts/src/canonical.ts');
 // Invoke the unchanged worker functions in isolation with the actual HiveStore.
-// No kernel/transport/startup behavior is supplied by this auth-only fixture.
+// No complete kernel, transport or startup lifecycle is supplied by this fixture.
 const workerSource=readFileSync(new URL('../../services/hive/src/worker.ts',import.meta.url),'utf8');
 const identityStart=workerSource.indexOf('const oauthPrefix = '),identityEnd=workerSource.indexOf('let chain = Promise.resolve();');
 if(identityStart<0||identityEnd<identityStart)throw Error('Original worker identity slice changed');
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
-let store,registry,discovery,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
-const registryTrace=input.steps.some(step=>['registry','inventory','discovery'].includes(step.op));
+let store,registry,discovery,configurations,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
+const registryTrace=input.steps.some(step=>['registry','inventory','discovery','configurations'].includes(step.op));
 const inventoryTrace=input.steps.some(step=>step.op==='inventory');
 const discoveryTrace=input.steps.some(step=>step.op==='discovery');
 const plainLowercase=new Map(),uppercase=new Map(),englishStrings=new Set(),wordCharacters=new Map();
@@ -97,7 +101,7 @@ try {
   const set=(value,pointer,next)=>{const fields=pointer.split('/').slice(1).map(s=>s.replaceAll('~1','/').replaceAll('~0','~'));for(const field of fields.slice(0,-1))value=value[field];value[fields.at(-1)]=next;};
   for(const binding of step.bindings??[])set(step,binding.at,rows[binding.from].value.object.id);
   for(const binding of step.identityBindings??[]){let v=rows[binding.from];for(const key of binding.select.split('/').slice(1))v=v[key];set(step,binding.at,binding.digest?digest(v):v);}
-  let value=null,error=null;
+  let value=null,error=null,wikiCalls=[];
   try {
    switch(step.op){
     case 'register':{
@@ -196,6 +200,57 @@ try {
       }finally{globalThis.Date=RealDate;}
       break;
     }
+    case 'wiki':{
+      const RealDate=Date,realUUID=crypto.randomUUID;
+      const params=structuredClone(step.params??{});
+      for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...codeUnits));
+      globalThis.Date=retentionDate(RealDate,step.now);
+      if(step.createdId){crypto.randomUUID=()=>step.createdId;syncBuiltinESMExports();}
+      try{
+        validateInput(step.method,params);
+        const context=store.authenticate(step.context),objects=new Objects(store);
+        const called=(method,params)=>{wikiCalls.push({method,params:structuredClone(params)});if(step.failAt===wikiCalls.length)throw new IvyError('fixture_failure','Requested Wiki dependency failure.');};
+        const request=(method,params)=>{
+          called(method,params);validateInput(method,params);
+          // Search uses an explicit callback response; this does not qualify its backend.
+          if(method==='objects.search'&&!Object.hasOwn(step,'searchResponse'))throw Error('Explicit search callback response required');
+          const result=method==='objects.search'?step.searchResponse:method==='objects.query'?queryObjects(store,params):method==='objects.write'?objects.write(context,params):method==='objects.move'?objects.move(context,params):method==='objects.archive'?objects.archive(context,params):objects[method.slice(8)](params);
+          validateOutput(method,result);return result;
+        };
+        const update=params=>{called('wiki.updateContent',params);return objects.write(context,{mutationId:params.mutationId,objectId:params.objectId,expectedRevision:params.expectedRevision,contractVersion:'1.0.0',references:{},content:{encoding:'text',value:params.markdown}},true);};
+        value=store.withBudget(()=>wikiHandlers(request,update)[step.method](params),step.overdue?-1:10000);
+        validateOutput(step.method,value);
+      }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;syncBuiltinESMExports();}
+      break;
+    }
+    case 'configurations':{
+      const RealDate=Date,realUUID=crypto.randomUUID;
+      const params=structuredClone(step.params??{});
+      for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...codeUnits));
+      registryStrings({...step,params});globalThis.Date=retentionDate(RealDate,step.now);
+      if(step.createdId){crypto.randomUUID=()=>step.createdId;syncBuiltinESMExports();}
+      try{
+        if(!configurations||step.method==='constructor')configurations=new Configurations(store);
+        const context=step.context?store.authenticate(step.context):null;
+        value=store.withBudget(()=>{
+          switch(step.method){
+            case 'constructor':return null;
+            case 'get':return configurations.get(params.hostId,params.revision);
+            case 'list':return configurations.list();
+            case 'put':return configurations.put(context,params);
+            case 'edit':return configurations.edit(params.hostId,params.revision);
+            case 'save':return configurations.save(context,params);
+            case 'history':return configurations.history(params);
+            case 'projectRead':return configurations.projectRead(params.read??new Objects(store).read(params));
+            case 'isConfigurationContract':return configurations.isConfigurationContract(params.key);
+            case 'sql':store.run(params.sql,...(params.bindings??[]));return null;
+            default:throw Error('Unknown configuration method');
+          }
+        },step.overdue?-1:10000);
+        if(step.lossless)value={encoded:JSON.stringify(value)};
+      }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;syncBuiltinESMExports();registryStrings({...step,params});}
+      break;
+    }
     case 'registry':case 'inventory':case 'discovery':{
       const RealDate=Date;
       const realLower=String.prototype.toLocaleLowerCase;
@@ -278,7 +333,7 @@ try {
     case 'sql':store.db.exec(step.sql);break;
     case 'invalidate':store.invalidate(step.scope);break;
     case 'transaction':store.transaction(()=>{store.db.exec(step.sql);store.invalidate(step.scope);if(step.fail)throw new IvyError('fixture_failure','Rollback requested.');});break;
-    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;discovery=undefined;break;
+    case 'reopen':store.close();store=new HiveStore(input.path);registry=undefined;discovery=undefined;configurations=undefined;break;
     case 'reorder':case 'archive':case 'delete':case 'move':{
       const RealDate=Date;
       if(new RealDate(step.now).toISOString()!==step.nowText)throw Error('Fixture clock mismatch');
@@ -313,7 +368,7 @@ try {
   if(inventoryTrace){state.inventorySets=store.all('SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind');state.inventory=step.compactInventory?tableHash('inventory','record_id,node_id,namespace,kind,native_id,schema_version,summary,observed_at'):store.all('SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id');}
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
-  rows.push({value,error,state,...mirror});
+  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{})});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");
