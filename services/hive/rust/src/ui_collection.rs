@@ -2,6 +2,7 @@
 use super::*;
 use ivy_host_runtime::{
     filesystem_error::{self, Syscall},
+    filesystem_remove,
     node_path::{Context, from_native},
 };
 
@@ -69,10 +70,13 @@ impl Collector<'_> {
         sql_error(error)
     }
     fn remove(&self, path: &Path) -> IvyResult<()> {
-        // Node's synchronous recursive rm has a separate native error boundary.
-        // std::remove_dir_all does not retain its failed child/syscall. Until that
-        // Host operation is supplied, its cause is explicitly unavailable.
-        remove(path, true).map_err(|error| self.unmapped(error))
+        let context = Context::current().map_err(|error| self.unmapped(error))?;
+        filesystem_remove::remove_sync_force_at(&from_native(path), &context).map_err(|failure| {
+            if let Some(store) = self.store {
+                store.observe_failure(|| failure.node.map(|cause| cause.message));
+            }
+            sql_error(failure.source)
+        })
     }
     fn collect(&self, ui: &JsString, retained: &HashSet<JsString>, now_ms: f64) -> IvyResult<()> {
         let directory = absolute(&self.files.root.join(component_id(ui)?)).map_err(sql_error)?;

@@ -12,6 +12,9 @@ use std::{
 };
 
 static CORPUS: Mutex<()> = Mutex::new(());
+#[cfg(windows)]
+#[path = "hive_ui_collection_removal.rs"]
+mod removal;
 struct Clock;
 impl Runtime for Clock {
     fn parse_date(&self, _: &JsString) -> f64 {
@@ -25,7 +28,7 @@ impl Runtime for Clock {
         panic!("No locale sorting in failure journal")
     }
 }
-fn original(root: &Path, seed: &str) -> Value {
+fn original_output(root: &Path, seed: &str) -> std::process::Output {
     let mut child =
         Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
             .arg(
@@ -43,7 +46,10 @@ fn original(root: &Path, seed: &str) -> Value {
         .unwrap()
         .write_all(json!({"root":root,"seedSql":seed}).to_string().as_bytes())
         .unwrap();
-    let result = child.wait_with_output().unwrap();
+    child.wait_with_output().unwrap()
+}
+fn original(root: &Path, seed: &str) -> Value {
+    let result = original_output(root, seed);
     assert!(
         result.status.success(),
         "{}",
@@ -165,7 +171,7 @@ fn ui_collection_private_scandir_causes_and_journal_match_original_without_wire_
 
 #[cfg(windows)]
 #[test]
-fn ui_collection_actual_windows_acl_rmdir_and_unmapped_recursive_failures_preserve_boundaries() {
+fn ui_collection_actual_windows_acl_rmdir_and_recursive_causes_preserve_boundaries() {
     use std::os::windows::fs::OpenOptionsExt;
     struct Denied(PathBuf);
     impl Denied {
@@ -224,7 +230,7 @@ fn ui_collection_actual_windows_acl_rmdir_and_unmapped_recursive_failures_preser
         .share_mode(0)
         .open(&child)
         .unwrap();
-    compare("recursive-rm-explicitly-unmapped", &private, "", false);
+    compare("recursive-rm-private-cause", &private, "", true);
     drop(held);
     assert!(child.exists());
     let mut store = Store::open(Path::new(":memory:")).unwrap();
