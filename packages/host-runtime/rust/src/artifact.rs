@@ -1,27 +1,15 @@
 //! Runtime release-manifest boundary shared by retained and new candidates.
 use crate::{IvyError, IvyJson, IvyResult, config::{path_value, read_json, FileError, CONFIGURATION_BYTES}, node_runtime::NodeRuntime, paths::{inside, realpath}};
 use ivy_contracts::{JsString, core_schema::validate_host};
-use sha2::{Digest, Sha256};
-use std::{fs, io::Read, path::{Path, PathBuf}};
+use std::{fs, path::{Path, PathBuf}};
+#[path="artifact/file_hash.rs"]
+mod streaming_hash;
+pub use streaming_hash::file_hash;
+use streaming_hash::hash_file;
 
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> { value.map_err(|_| IvyError::internal()) }
 fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
     if value { Ok(()) } else { Err(IvyError::new(code, message)) }
-}
-fn hash_file(source: &Path) -> IvyResult<String> {
-    let mut file = internal(fs::File::open(source))?;
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0; 4 * 1024 * 1024];
-    loop {
-        let count = internal(file.read(&mut buffer))?;
-        if count == 0 { break; }
-        hash.update(&buffer[..count]);
-    }
-    Ok(format!("sha256:{}", hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>()))
-}
-pub async fn file_hash(source: impl Into<PathBuf>) -> IvyResult<String> {
-    let source = source.into();
-    internal(tokio::task::spawn_blocking(move || hash_file(&source)).await)?
 }
 /// Check bytes received from another host; local immutable candidate activation
 /// uses the identity stamp and selected entry, without rehashing its entire tree.

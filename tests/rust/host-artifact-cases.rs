@@ -104,3 +104,5 @@ async fn candidate_rejects_linked_launch_stamp_archive_and_escaping_manifest() {
     #[cfg(unix)] std::os::unix::fs::symlink(&outside,root.join("manifest.json")).unwrap();
     compare("verifyCandidate",vec![candidate.clone(),host(&root)],verify(&fixture,&candidate).await);
 }
+#[path="host-streaming-hash-cases.rs"]
+mod streaming_hash_cases;
