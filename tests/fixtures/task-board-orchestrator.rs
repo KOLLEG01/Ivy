@@ -53,7 +53,7 @@ fn doc(v: &Json) -> Document {
         parent_id: None,
     }
 }
-fn data() -> &'static Json {
+pub(crate) fn data() -> &'static Json {
     static DATA: OnceLock<Json> = OnceLock::new();
     DATA.get_or_init(|| {
         let o = Command::new("node")

@@ -160,8 +160,21 @@ fn operation(fixture: &Fixture) -> Option<(String, u64, Json)> {
 fn count(fixture: &Fixture, sql: &str) -> i64 {
     fixture.database().query_row(sql, [], |r| r.get(0)).unwrap()
 }
+pub(super) fn reviewed_records() -> Vec<(&'static str, Json, &'static str)> {
+    Scenario {
+        cancelling: false,
+        current_run: false,
+        ready: Gate::default(),
+        replay: RefCell::default(),
+        response: RefCell::default(),
+    }
+    .records()
+}
 fn assert_current(fixture: &Fixture, scenario: &Scenario) {
     let expected = scenario.records();
+    assert_reviewed_current(fixture, &expected);
+}
+pub(super) fn assert_reviewed_current(fixture: &Fixture, expected: &[(&str, Json, &str)]) {
     let task = &fixture.rows("task-board/task")[0].2;
     let original = &expected.iter().find(|(_, _, id)| *id == "task").unwrap().1;
     for key in [

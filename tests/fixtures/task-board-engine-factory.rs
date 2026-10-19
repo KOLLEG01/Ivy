@@ -18,6 +18,8 @@ use ivy_task_board::{
 use std::{cmp::Ordering, path::PathBuf};
 #[path = "task-board-engine-factory-native.rs"]
 mod native;
+#[path = "task-board-engine-factory-observations.rs"]
+mod observations;
 #[path = "task-board-engine-factory-retirement.rs"]
 mod retirement;
 
@@ -44,6 +46,7 @@ struct Fixture {
     refusal: bool,
     native: Option<native::Scenario>,
     retirement: Option<retirement::Scenario>,
+    observations: Option<observations::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -65,6 +68,7 @@ impl Fixture {
             refusal,
             native: None,
             retirement: None,
+            observations: None,
         }
     }
     fn database(&self) -> Connection {
@@ -134,6 +138,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         if let Some(retirement) = &self.retirement {
             retirement.bind(&policy.context)?;
         }
+        if let Some(observations) = &self.observations {
+            observations.bind(&policy.context)?;
+        }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
         drop(policy.context.calls.recover_publication()?);
@@ -180,7 +187,12 @@ impl NativePublicationPolicies for Policies<'_> {
     fn now(&self) -> JsString {
         clock().into()
     }
-    fn handoff(&self, _: &Json, _: &JsString) -> IvyResult<Json> {
+    fn handoff(&self, task: &Json, run: &JsString) -> IvyResult<Json> {
+        if self.fixture.observations.is_some() {
+            assert_eq!(run, &JsString::from("run"));
+            assert_eq!(task.get("comments"), Some(&Json::Array(vec![])));
+            return Ok(Json::Null);
+        }
         panic!("No native handoff")
     }
     fn retry_at(&self, _: &Json, _: &JsString) -> IvyResult<Json> {
@@ -226,6 +238,9 @@ impl TaskNoticePolicy for Policies<'_> {
         if let Some(retirement) = &self.fixture.retirement {
             return retirement.notice(self.context.owner.generation, task, operation);
         }
+        if let Some(observations) = &self.fixture.observations {
+            return observations.notice(self.context.owner.generation, task, operation);
+        }
         // An applied first Task step with an uncertain observation must retain
         // its original prepared write and reserved gate for the next owner.
         if self.context.owner.generation == 1.0 {
@@ -259,6 +274,11 @@ impl LifecyclePages for Policies<'_> {
                 retirement.ready.wait().await;
             }
         }
+        if let Some(observations) = &self.fixture.observations {
+            if key == "task-board/run" && self.context.owner.generation == 1.0 {
+                observations.ready.wait().await;
+            }
+        }
         if self.context.owner.generation == 1.0 && options.get("select").is_some() {
             self.fixture.page_waiting.set(true);
             self.fixture.page_held.wait().await;
@@ -277,7 +297,7 @@ impl LifecyclePages for Policies<'_> {
             if let Some(filter) = options.get("where") {
                 if filter.get("op") == Some(&"and".into()) {
                     assert_eq!(key, "task-board/task");
-                    if self.fixture.retirement.is_some() {
+                    if self.fixture.retirement.is_some() || self.fixture.observations.is_some() {
                         assert_eq!(value.get("workflowState"), Some(&"review".into()));
                     } else if self.fixture.native.is_some() {
                         assert_eq!(value.get("workflowState"), Some(&"in_progress".into()));
@@ -356,7 +376,12 @@ impl CurrentPolicies for Policies<'_> {
     async fn unstarted_missing_context(&self, _: &Document) -> IvyResult<bool> {
         panic!("No native context")
     }
-    fn run_handoff(&self, _: &Json, _: &JsString) -> IvyResult<bool> {
+    fn run_handoff(&self, task: &Json, run: &JsString) -> IvyResult<bool> {
+        if self.fixture.observations.is_some() {
+            assert_eq!(run, &JsString::from("run"));
+            assert_eq!(task.get("comments"), Some(&Json::Array(vec![])));
+            return Ok(false);
+        }
         panic!("No Run")
     }
     fn claimed_workflow_state(&self, _: &Json) -> IvyResult<JsString> {

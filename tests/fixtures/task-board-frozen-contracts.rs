@@ -60,6 +60,8 @@ impl Contracts for ContractsBinding {
                 "task-board/configuration" => "Configuration",
                 "task-board/task-key-allocation" => "TaskKeyAllocation",
                 "task-board/task-key-sequence" => "TaskKeySequence",
+                "task-board/native-read-evidence" => "NativeReadEvidence",
+                "task-board/native-turn-snapshot" => "NativeTurnSnapshot",
                 key => panic!("Unexpected record {key}"),
             },
             value,
