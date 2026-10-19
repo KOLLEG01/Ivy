@@ -2,6 +2,7 @@
 pub mod agent_health;
 pub mod capabilities;
 pub mod claude_mcp;
+pub mod claude_launch;
 pub mod directories;
 pub mod environment;
 pub mod environment_manager;
@@ -23,6 +24,9 @@ pub mod mcp_output;
 pub mod mcp_prepare;
 pub mod mcp_render;
 pub mod native_journal;
+pub mod native_handshake;
+pub mod native_connection;
+pub mod native_launch;
 pub mod native_operations;
 pub mod native_clock;
 pub mod native_dispatch;
