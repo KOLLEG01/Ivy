@@ -71,7 +71,7 @@ impl<R: RpcClient + 'static, P: DeliveryPolicies> DeliveryEngine for DeliveryRun
         .await
     }
     async fn new_chat_operation(&self) -> IvyResult<JsString> {
-        new_operation_id(self.client.clone()).await
+        new_operation_id(self.client.clone(), None).await
     }
     fn new_phone_operation(&self) -> IvyResult<JsString> {
         Ok(uuid::Uuid::new_v4().to_string().into())
