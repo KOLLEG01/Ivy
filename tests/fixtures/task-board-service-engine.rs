@@ -288,9 +288,13 @@ impl GenerationFactory for EngineFactory {
             .unwrap()
             .map(|r| json(&r.unwrap()))
             .collect::<Vec<_>>();
+        let revisions: i64 = database
+            .query_row("SELECT count(*) FROM revisions", [], |r| r.get(0))
+            .unwrap();
         self.saved.borrow_mut().push(Json::object([
             ("generation", Json::Number(number as f64)),
             ("operations", Json::Array(rows)),
+            ("revisions", Json::Number(revisions as f64)),
         ]));
         drop(statement);
         drop(program);
@@ -386,6 +390,7 @@ async fn engine_activation_reconnect_drains_public_and_abandoned_internal_operat
             result.get("result").unwrap().get("original"),
             Some(&action("public-2"))
         );
+        until(|| factory.base.count(2, "private.write") == 1).await;
         assert!(
             service.control.handler("workspace")(Json::Null, context(1))
                 .await
@@ -399,6 +404,13 @@ async fn engine_activation_reconnect_drains_public_and_abandoned_internal_operat
     let saved = factory.saved.borrow();
     let rows = saved[0].get("operations").unwrap().as_array().unwrap();
     assert_eq!(rows.len(), 3);
+    assert_eq!(saved[0].get("revisions"), Some(&Json::Number(6.0)));
+    let mut identities = rows
+        .iter()
+        .map(|row| row.required("operationId").unwrap().as_str().unwrap())
+        .collect::<Vec<_>>();
+    identities.sort();
+    assert_eq!(identities, ["abandoned-1", "private-1", "public-1"]);
     for row in rows {
         assert_eq!(row.get("phase"), Some(&"succeeded".into()));
         assert_eq!(
@@ -406,6 +418,19 @@ async fn engine_activation_reconnect_drains_public_and_abandoned_internal_operat
             &Json::from(hash_json(row.required("request").unwrap()).unwrap())
         );
         let native = row.required("operationId").unwrap() == &Json::from("private-1");
+        let expected = if native {
+            Json::object([
+                ("action", "nativeUpdate".into()),
+                ("operationId", "private-1".into()),
+            ])
+        } else {
+            action(&row.required("operationId").unwrap().as_str().unwrap())
+        };
+        assert_eq!(row.get("request"), Some(&expected));
+        assert_eq!(
+            row.required("outcome").unwrap().get("original"),
+            Some(&expected)
+        );
         let actor = row.required("actor").unwrap();
         assert_eq!(
             actor.get("source"),
@@ -430,6 +455,7 @@ async fn engine_activation_reconnect_drains_public_and_abandoned_internal_operat
             .len(),
         2
     );
+    assert_eq!(saved[1].get("revisions"), Some(&Json::Number(4.0)));
     drop(saved);
     peer.finish().await;
 }
