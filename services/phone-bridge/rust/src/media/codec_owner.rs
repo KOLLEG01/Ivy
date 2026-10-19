@@ -301,7 +301,10 @@ impl MediaCodec {
             }
         }
         self.decode(&packet.payload, Some(packet.generation))?;
-        if self.audio.state() == self.observed && self.observed.open {
+        if self.audio.state() == self.observed
+            && self.observed.open
+            && self.observed.generation == packet.generation
+        {
             self.next_receive_timestamp = Some(packet.timestamp.wrapping_add(duration as u32));
         }
         Ok(())

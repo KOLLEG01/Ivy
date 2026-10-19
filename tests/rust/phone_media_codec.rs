@@ -194,6 +194,10 @@ struct State {
     samples: Vec<f32>,
     revoke_read: bool,
     churn_write: bool,
+    writes: usize,
+    churn_write_at: Option<usize>,
+    state_calls: usize,
+    churn_state_at: Option<usize>,
 }
 struct Port(Mutex<State>);
 impl Port {
@@ -211,6 +215,10 @@ impl Port {
             samples: Vec::new(),
             revoke_read: false,
             churn_write: false,
+            writes: 0,
+            churn_write_at: None,
+            state_calls: 0,
+            churn_state_at: None,
         })))
     }
     fn received(&self) -> usize {
@@ -225,7 +233,14 @@ impl Port {
 }
 impl PcmAudioPort for Port {
     fn state(&self) -> PcmAudioState {
-        self.0.lock().unwrap().authority
+        let mut state = self.0.lock().unwrap();
+        state.state_calls += 1;
+        let observed = state.authority;
+        if state.churn_state_at == Some(state.state_calls) {
+            state.churn_state_at = None;
+            state.authority.generation += 1;
+        }
+        observed
     }
     fn read_captured(&self, output: &mut [f32], generation: u64) -> usize {
         let mut s = self.0.lock().unwrap();
@@ -269,8 +284,10 @@ impl PcmAudioPort for Port {
         if s.relay {
             s.queue.extend(input);
         }
-        if s.churn_write {
+        s.writes += 1;
+        if s.churn_write || s.churn_write_at == Some(s.writes) {
             s.churn_write = false;
+            s.churn_write_at = None;
             s.authority.generation += 1;
         }
         true
@@ -465,4 +482,160 @@ fn media_codec_opus_timeline_gap_reset_and_timestamp_wrap() {
     rx.decode_rtp(&rtp(packet, 100000, 2)).unwrap();
     assert_eq!(sink.received() - before, 960);
     assert_eq!(rx.concealed_samples(), concealed);
+    for timestamp in [100000, 99040, 100001] {
+        let before = sink.received();
+        let concealed = rx.concealed_samples();
+        rx.decode_rtp(&rtp(tx.encode().unwrap(), timestamp, 2))
+            .unwrap();
+        assert_eq!(sink.received() - before, 960);
+        assert_eq!(rx.concealed_samples(), concealed);
+    }
+    sink.change(false);
+    let before = sink.received();
+    rx.decode_rtp(&rtp(vec![], 0, 3)).unwrap();
+    assert_eq!(sink.received(), before);
+    sink.change(true);
+    rx.decode_rtp(&rtp(tx.encode().unwrap(), 0, 4)).unwrap();
+    let before = sink.received();
+    let concealed = rx.concealed_samples();
+    rx.decode_rtp(&rtp(tx.encode().unwrap(), 6720, 4)).unwrap();
+    assert_eq!(sink.received() - before, 6720);
+    assert_eq!(rx.concealed_samples() - concealed, 5760);
+}
+
+fn opus_payload(duration: usize) -> Vec<u8> {
+    let frame = duration.min(960);
+    let mut encoder =
+        opus::Encoder::new(48000, opus::Channels::Mono, opus::Application::Voip).unwrap();
+    encoder.set_bitrate(opus::Bitrate::Bits(24000)).unwrap();
+    encoder.set_vbr(false).unwrap();
+    encoder.set_inband_fec(true).unwrap();
+    encoder.set_packet_loss_perc(30).unwrap();
+    let mut packet = vec![0; 8192];
+    for index in 0..80 {
+        let samples: Vec<_> = (index * frame..(index + 1) * frame).map(signal).collect();
+        let length = encoder.encode(&samples, &mut packet).unwrap();
+        if index == 79 {
+            packet.truncate(length);
+        }
+    }
+    if duration <= 960 {
+        return packet;
+    }
+    let parts = vec![packet.as_slice(); duration / 960];
+    let mut combined = vec![0; 8192];
+    let count = opus::Repacketizer::new()
+        .unwrap()
+        .combine(&parts, &mut combined)
+        .unwrap();
+    combined.truncate(count);
+    combined
+}
+
+#[test]
+fn media_codec_approved_packet_generation_fences_every_recovery_boundary() {
+    let mut reports = Vec::new();
+    for (duration, gap, recovery_writes) in [
+        (120, 480, 1),
+        (240, 480, 1),
+        (480, 960, 2),
+        (960, 960, 1),
+        (960, 2880, 3),
+        (1920, 5760, 5),
+        (5760, 5760, 1),
+    ] {
+        let packet = opus_payload(duration);
+        for (kind, limit) in [
+            ("write", recovery_writes + 1),
+            ("state", 2 * recovery_writes + 5),
+        ] {
+            for stage in 1..=limit {
+                let sink = Port::new(false, false);
+                let mut rx =
+                    MediaCodec::new(Codec::Opus.offered_formats()[0].clone(), sink.clone(), None)
+                        .unwrap();
+                rx.decode_rtp(&rtp(packet.clone(), 0, 1)).unwrap();
+                {
+                    let mut state = sink.0.lock().unwrap();
+                    state.writes = 0;
+                    state.state_calls = 0;
+                    if kind == "write" {
+                        state.churn_write_at = Some(stage);
+                    } else {
+                        state.churn_state_at = Some(stage);
+                    }
+                }
+                let old_timestamp = (duration + gap) as u32;
+                rx.decode_rtp(&rtp(packet.clone(), old_timestamp, 1))
+                    .unwrap();
+                let generation = sink.0.lock().unwrap().authority.generation;
+                assert_eq!(
+                    generation, 2,
+                    "unreached callback {duration}/{gap}/{kind}/{stage}"
+                );
+                let before = sink.received();
+                let concealed = rx.concealed_samples();
+                let next_timestamp = old_timestamp + duration as u32 * 2;
+                rx.decode_rtp(&rtp(packet.clone(), next_timestamp, generation))
+                    .unwrap();
+                assert_eq!(
+                    sink.received() - before,
+                    duration,
+                    "old timestamp seed at {duration}/{gap}/{kind}/{stage}"
+                );
+                assert_eq!(
+                    rx.concealed_samples(),
+                    concealed,
+                    "new generation inherited concealment"
+                );
+                rx.decode_rtp(&rtp(
+                    packet.clone(),
+                    next_timestamp + duration as u32,
+                    generation,
+                ))
+                .unwrap();
+                assert_eq!(sink.received() - before, 2 * duration);
+                assert_eq!(rx.concealed_samples(), concealed);
+                // A second revocation proves history does not survive a later
+                // epoch either. Counters retain the old work; no rollback.
+                sink.0.lock().unwrap().churn_write = true;
+                let old_again = next_timestamp + 2 * duration as u32 + gap as u32;
+                rx.decode_rtp(&rtp(packet.clone(), old_again, generation))
+                    .unwrap();
+                let next_generation = sink.0.lock().unwrap().authority.generation;
+                assert_eq!(next_generation, 3);
+                let before = sink.received();
+                let second_concealed = rx.concealed_samples();
+                assert!(second_concealed >= concealed);
+                rx.decode_rtp(&rtp(
+                    packet.clone(),
+                    old_again + 2 * duration as u32,
+                    next_generation,
+                ))
+                .unwrap();
+                assert_eq!(sink.received() - before, duration);
+                assert_eq!(rx.concealed_samples(), second_concealed);
+                reports.push(IvyJson::object([
+                    ("packetSamples", IvyJson::Number(duration as f64)),
+                    ("gapSamples", IvyJson::Number(gap as f64)),
+                    ("callbackKind", kind.into()),
+                    ("callbackStage", IvyJson::Number(stage as f64)),
+                    (
+                        "firstNewGenerationSamples",
+                        IvyJson::Number(duration as f64),
+                    ),
+                    ("inheritedConcealmentSamples", IvyJson::Number(0.0)),
+                    (
+                        "retainedOldConcealedSamples",
+                        IvyJson::Number(concealed as f64),
+                    ),
+                    (
+                        "repeatedGenerationSamples",
+                        IvyJson::Number(duration as f64),
+                    ),
+                ]));
+            }
+        }
+    }
+    trace("IVY_PHONE_MEDIA_GENERATION_TRACE", IvyJson::Array(reports));
 }
