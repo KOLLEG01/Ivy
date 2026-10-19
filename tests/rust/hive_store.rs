@@ -118,6 +118,7 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
             || step["op"] == "inventory"
             || step["op"] == "discovery"
             || step["op"] == "configurations"
+            || step["op"] == "uis"
     });
     let inventory_trace = steps.iter().any(|step| step["op"] == "inventory");
     let mut registry = registry::Trace::default();
@@ -153,11 +154,12 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
                 runtime.expect("Search Unicode observations"),
             )
             .map(wire),
-            "registry" | "inventory" | "discovery" | "configurations" => registry
+            "registry" | "inventory" | "discovery" | "configurations" | "uis" => registry
                 .execute(
                     &mut store,
                     step,
                     runtime.expect("Registry runtime observations"),
+                    path,
                 )
                 .map(|value| {
                     if step["lossless"] == true {
@@ -460,7 +462,7 @@ fn native_with_runtime(path: &Path, steps: &[Value], runtime: Option<&Value>) ->
             ),
         };
         let mut row = json!({"value":value,"error":error,"state":snapshot(&store,step)});
-        if step["op"] == "uiFiles" {
+        if step["op"] == "uiFiles" || step["op"] == "uis" {
             row["fileTree"] = ui_files::tree(&path.with_extension("files"));
             row["state"]["appAssets"] = rows(
                 &store,

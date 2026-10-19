@@ -19,6 +19,8 @@ mod inventory;
 mod mcp;
 #[path = "hive_mcp_request.rs"]
 mod mcp_request;
+#[path = "hive_uis.rs"]
+mod uis;
 
 fn units(value: &Value) -> JsString {
     JsString(
@@ -195,6 +197,7 @@ impl Trace {
         store: &mut Store,
         step: &Value,
         profile: &Value,
+        database: &std::path::Path,
     ) -> IvyResult<IvyJson> {
         if self.runtime.is_none() {
             self.runtime = Some(Arc::new(ObservedRuntime::new(profile)));
@@ -225,6 +228,9 @@ impl Trace {
             self.registry = Some(Registry::new(store, runtime, now)?);
         }
         let registry = self.registry.as_mut().unwrap();
+        if step["op"] == "uis" {
+            return uis::execute(registry, store, runtime, &parameters, step, database);
+        }
         if step["op"] == "discovery" {
             if self.discovery.is_none() || method == "constructor" {
                 self.discovery = Some(ivy_hive::discovery::Discovery::new(runtime)?);

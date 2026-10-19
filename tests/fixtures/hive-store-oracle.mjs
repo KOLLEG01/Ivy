@@ -22,7 +22,7 @@ const {Registry}=await import('../../services/hive/src/registry.ts');
 const {Inventory}=await import('../../services/hive/src/inventory.ts');
 const {Configurations}=await import('../../services/hive/src/configurations.ts');
 const {UiFiles}=await import('../../services/hive/src/ui-files.ts');
-const {assetPath}=await import('../../services/hive/src/uis.ts');
+const {Uis,assetPath}=await import('../../services/hive/src/uis.ts');
 const {uiContentPolicy}=await import('../../services/hive/src/ui-security.ts');
 const {wikiHandlers}=await import('../../services/hive/src/wiki.ts');
 const {validateInput,validateOutput}=await import('../../packages/contracts/src/core-validation.ts');
@@ -37,7 +37,7 @@ const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,ident
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
 const input=JSON.parse(readFileSync(0,'utf8'));
 let store,registry,discovery,configurations,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
-const registryTrace=input.steps.some(step=>['registry','inventory','discovery','configurations'].includes(step.op));
+const registryTrace=input.steps.some(step=>['registry','inventory','discovery','configurations','uis'].includes(step.op));
 const inventoryTrace=input.steps.some(step=>step.op==='inventory');
 const discoveryTrace=input.steps.some(step=>step.op==='discovery');
 const plainLowercase=new Map(),uppercase=new Map(),englishStrings=new Set(),wordCharacters=new Map();
@@ -236,6 +236,38 @@ try {
       }finally{globalThis.Date=RealDate;crypto.randomUUID=realUUID;syncBuiltinESMExports();}
       break;
     }
+    case 'uis':{
+      const root=input.path.replace(/\.[^.\\/]+$/,'')+'.files',files=new UiFiles(join(root,'private'));
+      const params=structuredClone(step.params??{}),RealDate=Date;
+      for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(params,pointer,String.fromCharCode(...codeUnits));
+      registryStrings({...step,params});globalThis.Date=retentionDate(RealDate,step.now);
+      try{
+        if(!registry||step.method==='constructor')registry=new Registry(store);
+        const owner=new Uis(store,registry,files),context=step.context?store.authenticate(step.context):null;
+        value=store.withBudget(()=>{
+          switch(step.method){
+            case 'constructor':return null;
+            case 'list':return owner.list();
+            case 'get':return owner.get(params.uiId);
+            case 'catalog':return owner.catalog(params);
+            case 'releases':return owner.releases(params);
+            case 'resolveSlug':return owner.resolveSlug(params.slug);
+            case 'inspect':return owner.inspect(params);
+            case 'entry':return owner.entry(params.uiId);
+            case 'asset':return owner.asset(params.uiId,params.releaseId,params.path);
+            case 'currentAsset':return owner.currentAsset(params.uiId,params.path);
+            case 'stageAsset':return owner.stageAsset(context,params);
+            case 'deploy':return owner.deploy(context,params);
+            case 'rollback':return owner.rollback(context,params);
+            case 'collectFiles':owner.collectFiles();return null;
+            case 'cursor':return store.cursor(params.identity,params.boundary);
+            default:throw Error('Unknown Uis method');
+          }
+        },step.overdue?-1:10000);
+        if(step.lossless)value={encoded:JSON.stringify(value)};
+      }finally{globalThis.Date=RealDate;registryStrings({...step,params});}
+      break;
+    }
     case 'uiFiles':{
       const root=input.path.replace(/\.[^.\\/]+$/,'')+'.files',files=new UiFiles(join(root,'private'));
       const params=structuredClone(step.params??{});
@@ -409,11 +441,11 @@ try {
    }
   }catch(e){error=IvyError.from(e).toWire();}
   const state=snapshot(step.compactEvents??false,step.compactDiagnostics??false);
-  if(step.op==='uiFiles')state.appAssets=store.all('SELECT * FROM app_assets ORDER BY app_id,release_id,path');
+  if(step.op==='uiFiles'||step.op==='uis')state.appAssets=store.all('SELECT * FROM app_assets ORDER BY app_id,release_id,path');
   if(inventoryTrace){state.inventorySets=store.all('SELECT * FROM inventory_sets ORDER BY node_id,namespace,kind');state.inventory=step.compactInventory?tableHash('inventory','record_id,node_id,namespace,kind,native_id,schema_version,summary,observed_at'):store.all('SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id');}
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
-  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(step.op==='uiFiles'?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{})});
+  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{})});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");
