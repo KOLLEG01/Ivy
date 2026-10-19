@@ -10,6 +10,7 @@ use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_store::rusqlite::{Connection, params};
 use ivy_task_board::{
     evidence_bytes::{BlobStore, ChunkKey},
+    full_turn_evidence::{FullTurnEvidence, verify_native_transcript},
     journal_store::{Contracts, JournalStore},
     local_journal::{self, LocalJournal},
     local_retention::HistoryLimits,
@@ -22,8 +23,10 @@ use std::{
     collections::HashSet,
     path::Path,
     process::Command,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
+#[path = "task-board-collector.rs"]
+mod collector;
 fn s<'a>(v: &'a Json, k: &str) -> &'a JsString {
     v.required(k).unwrap().as_js_string().unwrap()
 }
@@ -89,6 +92,8 @@ fn definition(key: &str) -> &str {
         "task-board/native-turn-snapshot" => "NativeTurnSnapshot",
         "task-board/native-result-page" => "NativeResultPage",
         "task-board/native-transcript" => "NativeTranscript",
+        "task-board/native-full-turn-transcript" => "NativeFullTurnTranscript",
+        "task-board/native-turn-search" => "NativeTurnSearch",
         _ => panic!("Unexpected contract {key}"),
     }
 }
@@ -128,7 +133,7 @@ impl RpcClient for NoRpc {
 }
 struct Trace<'a, S> {
     inner: &'a S,
-    log: RefCell<Vec<Json>>,
+    log: Arc<Mutex<Vec<Json>>>,
     write_ids: &'a [Json],
     write_index: Cell<usize>,
     current_id: &'a RefCell<JsString>,
@@ -137,7 +142,8 @@ struct Trace<'a, S> {
 impl<S> Trace<'_, S> {
     fn event(&self, v: impl IntoIterator<Item = Json>) {
         self.log
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push(Json::Array(v.into_iter().collect()));
     }
 }
@@ -327,7 +333,7 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
                 .unwrap();
             let trace = Trace {
                 inner: &store,
-                log: RefCell::default(),
+                log: Arc::default(),
                 write_ids: row.required("writeIds").unwrap().as_array().unwrap(),
                 write_index: Cell::new(0),
                 current_id: &current_id,
@@ -371,6 +377,32 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
                     "verifyTranscript" => {
                         turns.verify_transcript(&a[0], &a[1]).await.map(completion)
                     }
+                    "verifyFull" => FullTurnEvidence {
+                        turns: TurnEvidence {
+                            store: &trace,
+                            catalogs: &catalogs,
+                            principal_id: &principal,
+                        },
+                    }
+                    .verify(&a[0], &a[1])
+                    .await
+                    .map(completion),
+                    "fullTranscript" => FullTurnEvidence {
+                        turns: TurnEvidence {
+                            store: &trace,
+                            catalogs: &catalogs,
+                            principal_id: &principal,
+                        },
+                    }
+                    .transcript(&a[0], &a[1])
+                    .await
+                    .map(|t| {
+                        Json::object([
+                            ("value", t.document.value),
+                            ("status", Json::String(t.completion.status)),
+                            ("summary", Json::String(t.completion.summary)),
+                        ])
+                    }),
                     "transcript" => turns.transcript(&a[0], &a[1]).await.map(|t| {
                         Json::object([
                             ("value", t.document.value),
@@ -502,7 +534,7 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
             }
             let actual = Json::object([
                 ("results", Json::Array(results)),
-                ("trace", Json::Array(trace.log.into_inner())),
+                ("trace", Json::Array(trace.log.lock().unwrap().clone())),
                 ("documents", documents(&db)),
             ]);
             assert_eq!(
@@ -516,7 +548,7 @@ async fn terminal_snapshots_outputs_and_transcripts_match_original_over_actual_j
             assert!(db.is_autocommit());
         }
     }
-    assert_eq!(count, 69);
+    assert_eq!(count, 123);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -539,6 +571,7 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
     let principal = JsString::from("caller");
     let mut saved_snapshot = None;
     let mut saved_transcript = None;
+    let mut saved_full = None;
     for round in 0..2 {
         let db = Connection::open(&temp.0).unwrap();
         local_journal::initialize(&db).unwrap();
@@ -685,6 +718,78 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
                 ("contentHash", hash_json(&value).unwrap().into()),
                 ("mediaType", "application/json".into()),
             ]));
+            let full_row = group
+                .required("rows")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| {
+                    s(r, "name") == &JsString::from("full proof exact unsupported first page")
+                })
+                .unwrap();
+            let full_actions = full_row.required("actions").unwrap().as_array().unwrap();
+            let mut value = full_actions
+                .iter()
+                .find(|a| s(a, "method") == &JsString::from("verifyFull"))
+                .unwrap()
+                .required("args")
+                .unwrap()
+                .as_array()
+                .unwrap()[1]
+                .clone();
+            value.insert("snapshot", saved_snapshot.as_ref().unwrap().clone());
+            for (name, action) in ["unsupportedItems", "fullTurn", "verification"]
+                .into_iter()
+                .zip(
+                    full_actions
+                        .iter()
+                        .filter(|a| s(a, "method") == &JsString::from("saveRead")),
+                )
+            {
+                let observed = &action.required("args").unwrap().as_array().unwrap()[1];
+                let artifact = turns
+                    .reads()
+                    .save(
+                        &pin(200, 1.0),
+                        observed,
+                        &ReadIdentity {
+                            observation_id: s(observed, "observationId").clone(),
+                            caller_principal_id: principal.clone(),
+                            service_node_id: s(observed, "serviceNodeId").clone(),
+                            native_version: s(observed, "nativeVersion").clone(),
+                            epoch: s(observed, "epoch").clone(),
+                            method: s(observed, "method").clone(),
+                            params: observed.required("params").unwrap().clone(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let mut reference = value.required(name).unwrap().clone();
+                reference.insert("artifact", artifact);
+                value.insert(name, reference);
+            }
+            let p = store
+                .write_document(
+                    "task-board/native-full-turn-transcript",
+                    &value,
+                    "actual-full-transcript",
+                    &Json::object([(
+                        "create",
+                        Json::object([
+                            ("name", "Full transcript".into()),
+                            ("parentId", Json::String(id(200))),
+                        ]),
+                    )]),
+                )
+                .await
+                .unwrap();
+            saved_full = Some(Json::object([
+                ("object", p),
+                ("label", "Full transcript".into()),
+                ("contentHash", hash_json(&value).unwrap().into()),
+                ("mediaType", "application/json".into()),
+            ]));
         } else {
             let before = db.total_changes();
             let snapshot = turns
@@ -704,6 +809,24 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
                     .summary,
                 JsString::from("answer")
             );
+            for artifact in [
+                saved_transcript.as_ref().unwrap(),
+                saved_full.as_ref().unwrap(),
+            ] {
+                let result = verify_native_transcript(
+                    TurnEvidence {
+                        store: &store,
+                        catalogs: &catalogs,
+                        principal_id: &principal,
+                    },
+                    &pin(200, 2.0),
+                    artifact,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.completion.summary, JsString::from("answer"));
+                assert_eq!(result.completion.status, JsString::from("completed"));
+            }
             assert_eq!(db.total_changes(), before);
             let (blob, mut bytes): (String, Vec<u8>) = db
                 .query_row(
@@ -720,6 +843,19 @@ async fn actual_snapshot_and_transcript_reopen_without_io_or_writes_and_refuse_c
                 .await
                 .err()
                 .unwrap();
+            assert_eq!(error.code, "task_board_evidence_mismatch");
+            let error = verify_native_transcript(
+                TurnEvidence {
+                    store: &store,
+                    catalogs: &catalogs,
+                    principal_id: &principal,
+                },
+                &pin(200, 2.0),
+                saved_full.as_ref().unwrap(),
+            )
+            .await
+            .err()
+            .unwrap();
             assert_eq!(error.code, "task_board_evidence_mismatch");
         }
         assert!(db.is_autocommit());

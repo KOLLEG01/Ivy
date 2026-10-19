@@ -3,7 +3,9 @@
 use crate::{
     evidence_bytes::{BlobStore, ChunkKey},
     journal_store::{Contracts, JournalStore},
+    native_collector::CollectionStore,
     native_inspector::InspectionStore,
+    native_turn_evidence::TurnEvidenceStore,
     operations::{Document, Store},
     read_evidence::ReadEvidenceStore,
 };
@@ -124,5 +126,33 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
     }
     fn now(&self) -> JsString {
         (self.journal.now)().into()
+    }
+}
+
+impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString> TurnEvidenceStore
+    for InspectionJournal<'_, '_, R, P, C, I>
+{
+    async fn read_named_document(
+        &self,
+        key: &str,
+        address: &Json,
+        primary: bool,
+    ) -> IvyResult<(Document, JsString)> {
+        self.journal
+            .read_named_document(key, address, primary)
+            .await
+    }
+}
+impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsString> CollectionStore
+    for InspectionJournal<'_, '_, R, P, C, I>
+{
+    fn document_name(&self, document: &Document) -> IvyResult<JsString> {
+        self.journal.journal.name(
+            document
+                .pin
+                .required("objectId")?
+                .as_js_string()
+                .ok_or_else(IvyError::internal)?,
+        )
     }
 }

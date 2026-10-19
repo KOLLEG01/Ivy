@@ -1,6 +1,7 @@
 pub mod configuration;
 pub mod coordination;
 pub mod evidence_bytes;
+pub mod full_turn_evidence;
 pub mod inspection_journal;
 pub mod journal_store;
 pub mod local_blobs;
@@ -9,6 +10,7 @@ pub mod local_journal;
 pub mod local_retention;
 pub mod local_workspaces;
 pub mod native_comments;
+pub mod native_collector;
 pub mod native_driver;
 pub mod native_evidence;
 pub mod native_inspector;
