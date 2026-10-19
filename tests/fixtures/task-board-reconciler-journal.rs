@@ -103,6 +103,7 @@ impl LifecyclePages for Pages<'_> {
             let records=self.0.prepare("SELECT documents.id,current_revision,value_json FROM documents JOIN revisions ON revisions.id=documents.id AND revisions.revision=documents.current_revision WHERE documents.key='task-board/operation' ORDER BY documents.id").unwrap()
             .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
             for (id, rev, v) in records {
+                assert!((1..=9_007_199_254_740_991).contains(&rev));
                 let v = parse(&v, MANAGEMENT_FRAME_BYTES)?;
                 if ["accepted", "preparing", "publishing", "needs_attention"]
                     .iter()
