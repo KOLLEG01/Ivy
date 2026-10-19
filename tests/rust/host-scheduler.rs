@@ -1,6 +1,8 @@
 // Behavioral cases from tests/host-executor-parallel.test.ts.
-#[path = "../../packages/host-runtime/rust/src/scheduler.rs"]
-mod scheduler;
+use ivy_host_runtime::scheduler;
+
+#[path = "host-target-storage-cases.rs"]
+mod target_storage_cases;
 
 use scheduler::{Deployment, exclusive_deployment, parallel_deployments};
 

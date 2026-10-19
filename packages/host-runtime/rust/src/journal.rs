@@ -171,10 +171,11 @@ impl HostJournal {
         let id = candidate_id.to_owned(); self.with(move |s| s.candidate(&id)).await
     }
     pub async fn manifest(&self, candidate_id: &str) -> IvyResult<IvyJson> {
-        let id = candidate_id.to_owned(); self.with(move |s| {
-            let value = s.value("SELECT manifest_json FROM candidates WHERE candidate_id=?", &id)?.ok_or_else(|| IvyError::new("not_found", "Prepared candidate manifest was not found."))?;
-            crate::artifact::release_manifest(&value)
-        }).await
+        let id = candidate_id.to_owned(); self.with(move |s| s.manifest(&id)).await
+    }
+    pub(crate) async fn materialization_snapshot(&self, instance_id: &JsString, candidate_id: &str) -> IvyResult<(IvyJson,IvyJson,IvyJson,IvyJson)> {
+        let instance_id=instance_id.clone();let candidate_id=candidate_id.to_owned();
+        self.with(move |s| Ok((s.config.clone(),s.instance_js(&instance_id)?.clone(),s.candidate(&candidate_id)?,s.manifest(&candidate_id)?))).await
     }
     pub async fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> { self.with(|s| s.retention_candidate_ids()).await }
     pub async fn retire_candidate(&self, candidate_id: &str) -> IvyResult<bool> {
@@ -412,7 +413,10 @@ impl State {
     fn value(&self, sql: &str, key: &str) -> IvyResult<Option<IvyJson>> { self.text(sql, key)?.map(|s| decoded(&s)).transpose() }
     fn identities(&self, config: &IvyJson) -> IvyResult<()> {
         for instance in config.required("instances")?.as_array().ok_or_else(IvyError::internal)? {
-            let key = format!("instanceIdentity:{}", instance.required("instanceId")?.as_str()?);
+            let id=instance.required("instanceId")?.as_js_string().ok_or_else(IvyError::internal)?;
+            // Node's SQLite text binding uses UTF-8 replacement while stored
+            // JSON and in-memory identity comparisons retain original UTF-16.
+            let key = format!("instanceIdentity:{}",String::from_utf16_lossy(&id.0));
             let identity = encoded(&project(instance, &["componentId", "serviceNodeId"]))?;
             require(self.text("SELECT value FROM meta WHERE key=?", &key)?.is_none_or(|v| v == identity), "target_conflict", "A previously configured instance identity cannot be reused.")?;
             internal(self.db.execute("INSERT OR IGNORE INTO meta VALUES (?,?)", params![key, identity]))?;
@@ -420,8 +424,16 @@ impl State {
         Ok(())
     }
     fn instance(&self, id: &str) -> IvyResult<&IvyJson> {
-        self.config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter().find(|i| i.get("instanceId") == Some(&IvyJson::from(id)))
+        self.instance_js(&id.into())
+    }
+    fn instance_js(&self, id: &JsString) -> IvyResult<&IvyJson> {
+        let id=IvyJson::String(id.clone());
+        self.config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter().find(|i| i.get("instanceId") == Some(&id))
             .ok_or_else(|| IvyError::new("not_found", "Instance is not in this explicit host configuration."))
+    }
+    fn manifest(&self, id: &str) -> IvyResult<IvyJson> {
+        let value=self.value("SELECT manifest_json FROM candidates WHERE candidate_id=?",id)?.ok_or_else(||IvyError::new("not_found","Prepared candidate manifest was not found."))?;
+        crate::artifact::release_manifest(&value)
     }
     fn normalize_entry(&self, value: IvyJson) -> IvyResult<IvyJson> {
         if !truthy(field(&value, "configurationHash")) { validate_host("JournalEntry", &value)?; return Ok(value) }
