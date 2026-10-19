@@ -19,6 +19,8 @@ mod browser_push;
 mod content;
 #[path = "hive_kernel_domains.rs"]
 mod domains;
+#[path = "hive_browser_push_sender.rs"]
+mod push_sender;
 #[path = "hive_worker_actions.rs"]
 mod worker_actions;
 #[path = "hive_worker_kernel.rs"]

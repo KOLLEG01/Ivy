@@ -289,7 +289,7 @@ fn real_storage_child_shared_start_notifications_errors_and_close_reopen() {
                 .unwrap()
                 .unwrap();
             let value = IvyJson::String(JsString(vec![0xd800, 65, 0xdc00]));
-            let result = request(
+            let result = ivy_hive::browser_push::Worker::request(
                 &client,
                 IvyJson::object([("action", "echo".into()), ("value", value.clone())]),
             )
@@ -297,7 +297,7 @@ fn real_storage_child_shared_start_notifications_errors_and_close_reopen() {
             .unwrap();
             assert_eq!(result, value);
             assert_eq!(events.lock().unwrap().len(), 3);
-            let error = request(
+            let error = ivy_hive::browser_push::Worker::request(
                 &client,
                 IvyJson::object([("action", "error".into()), ("value", value.clone())]),
             )
