@@ -1,6 +1,9 @@
 use ivy_host_runtime::paths;
 use std::{fs, path::PathBuf};
 
+#[path = "host-config-write-cases.rs"]
+mod config_write_cases;
+
 #[path = "host-journal-cases.rs"]
 mod journal_cases;
 #[path = "host-artifact-cases.rs"]
