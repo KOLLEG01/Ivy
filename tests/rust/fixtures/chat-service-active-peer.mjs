@@ -37,10 +37,10 @@ function open(spec){
  const env=environment(spec.seed,false,ext);
  // Both service and synthetic peer inspect this same isolated SQLite file.
  // Existing fixture guards therefore verify the actual durable native claim.
- scope={spec,env,observer:new DatabaseSync(env.file,{readOnly:true}),get context(){return context;},calls:[],handshakes:[],heartbeats:[],notifications:[],bad:[],pending:0,generation:6,reads:0,hold:null,held:false,armReads:0};
+ scope={spec,env,observer:new DatabaseSync(env.file,{readOnly:true}),started:performance.now(),get context(){return context;},calls:[],handshakes:[],heartbeats:[],notifications:[],bad:[],pending:0,generation:6,reads:0,hold:null,held:false,armReads:0};
  return{url:base,root:env.root};
 }
-function summary(){return{calls:scope.calls,handshakes:scope.handshakes,heartbeats:scope.heartbeats,notifications:scope.notifications,bad:scope.bad,reads:scope.reads,held:scope.held,readsAfterArm:scope.reads-scope.armReads,pending:scope.pending};}
+function summary(){return{calls:scope.calls,handshakes:scope.handshakes,heartbeats:scope.heartbeats,notifications:scope.notifications,bad:scope.bad,reads:scope.reads,held:scope.held,readsAfterArm:scope.reads-scope.armReads,pending:scope.pending,elapsedMs:Math.round(performance.now()-scope.started)};}
 async function quiet(){let previous='',stable=0;for(let n=0;n<1000;n++){const count=scope.calls.length+':'+scope.observer.prepare('PRAGMA data_version').get().data_version;if(!scope.pending&&count===previous){if(++stable>=20)return;}else stable=0;previous=count;await delay(10);}throw Error('Autonomous service did not settle');}
 async function invoke(name,args){
  const[s,session]=[...sockets].find(([,v])=>v.generation===7)??[];if(!s||!session.registry)throw Error('No registered provider');
@@ -76,7 +76,7 @@ server.on('connection',socket=>{
  const owned=scope,session={generation:++owned.generation,registry:null};sockets.set(socket,session);socket.on('close',()=>sockets.delete(socket));
  socket.on('message',async bytes=>{
   const frame=JSON.parse(bytes.toString());if(!frame.method){pending.get(frame.id)?.(frame);pending.delete(frame.id);return;}
-  const{id,method,params}=frame,call={method,params};owned.calls.push(call);owned.pending++;
+  const{id,method,params}=frame,call={method,params,elapsedMs:Math.round(performance.now()-owned.started)};owned.calls.push(call);owned.pending++;
   try{
    let value;
    if(method==='service.connect'){owned.handshakes.push({method,params});value={generation:session.generation};}

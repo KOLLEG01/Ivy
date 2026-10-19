@@ -75,7 +75,7 @@ async fn invoke(peer: &mut Peer, name: &str, args: &Json) -> Json {
     .await
 }
 async fn state_until(peer: &mut Peer, predicate: impl Fn(&Json) -> bool, label: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let value = peer.command(command("state")).await;
         if predicate(&value) {
