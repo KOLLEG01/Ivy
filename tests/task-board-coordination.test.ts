@@ -49,7 +49,9 @@ test('failed steering preserves the run and queues feedback for the same primary
   const continued = await new TaskBoardScheduler(w.f.first).task(finished.task!.objectId);
   const next = (await w.f.first.store.read('task-board/run', continued!.run!)).value;
   assert.deepEqual(next.primaryResourceRef, run.primaryResourceRef);
-  assert.deepEqual(next.originalRequest.commentIds, [id]);
+  assert.deepEqual(next.originalRequest.commentIds, []);
+  assert.ok(next.originalRequest.action === 'continue' && next.originalRequest.recoveryFor);
+  assert.equal((await w.f.first.store.read('task-board/task', finished.task!.objectId)).value.commentDeliveries.find(value => value.commentId === id)?.state, 'queued');
 });
 
 test('unknown steering receipts cannot be replaced and acknowledge only after exact recovery', async t => {
@@ -80,6 +82,7 @@ test('explicit task blockers resume automatically after the linked task finishes
 
 for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a blocked task' : 'review'} for coordination, while ordinary agent comments stay quiet`, async t => {
   const w = await nativeWorkflow(t); await w.running();
+  await w.handoff();
   const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
   const source = await w.f.planned('agent'), scheduler = new TaskBoardScheduler(w.f.first);
   await scheduler.task(source.task.objectId);
@@ -162,6 +165,7 @@ test('a delegated final result queues parent review once and closes only after a
   await w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId: child.pin.objectId, expectedRevision: child.pin.revision,
     fields: { ...child.value.fields, userContact: 'chat' }, parentTaskId: parent.task.objectId });
   await w.refresh();
+  await w.handoff();
   const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
   const delegated = await w.f.first.store.read('task-board/task', finished.task!);
   await forwardDelegatedReview(w.f.first, delegated);

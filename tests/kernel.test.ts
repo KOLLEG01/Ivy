@@ -311,7 +311,7 @@ test("all reads pass the same authenticated operation and exact output validatio
       "contracts.list",
       {},
     ).items.map((value) => value.key),
-    ["ivy/host-configuration", "ivy/package-catalog"],
+    ["ivy/host-configuration", "ivy/openai-configuration", "ivy/package-catalog", "ivy/settings"],
   );
   assert.equal(
     call<{ callerPrincipalId: string }>(
@@ -1756,7 +1756,7 @@ test("large inventory materializes only page-sized rows and byte trimming advanc
   );
 });
 
-test("ui deployment retains private release files and rollback uses CAS, replay and compatibility", (t) => {
+test("ui deployment retains the current release while preserving CAS, replay and compatibility", (t) => {
   const { kernel, call, connect, ready } = fixture(t);
   const node = connect("node");
   ready(node);
@@ -1820,8 +1820,10 @@ test("ui deployment retains private release files and rollback uses CAS, replay 
     },
   });
   assert.deepEqual(call(client, "uis.deploy", initial), committed);
-  assert.equal(readFileSync(kernel.uiFiles.path("test-ui", "one", "index.html"), "utf8"),
-    "<!doctype html><p>release one</p>");
+  assert.deepEqual(kernel.uis.get('test-ui').releases.map(value => value.releaseId), ['two']);
+  assert.throws(() => kernel.uis.asset('test-ui', 'one', 'index.html'), code('not_found'));
+  kernel.uiFiles.collect('test-ui', new Set(['two']), Date.now() + 2 * 24 * 60 * 60 * 1000);
+  assert.throws(() => readFileSync(kernel.uiFiles.path('test-ui', 'one', 'index.html')), { code: 'ENOENT' });
   assert.throws(
     () =>
       call(client, "uis.rollback", {
@@ -1841,7 +1843,7 @@ test("ui deployment retains private release files and rollback uses CAS, replay 
     () =>
       call(client, "uis.rollback", {
         uiId: "test-ui",
-        releaseId: "one",
+        releaseId: "two",
         expectedReleaseId: "two",
         mutationId: "incompatible-rollback",
       }),
@@ -1850,7 +1852,7 @@ test("ui deployment retains private release files and rollback uses CAS, replay 
   ready(node);
   call(client, "uis.rollback", {
     uiId: "test-ui",
-    releaseId: "one",
+    releaseId: "two",
     expectedReleaseId: "two",
     mutationId: "rollback",
   });
@@ -1859,7 +1861,7 @@ test("ui deployment retains private release files and rollback uses CAS, replay 
       call(client, "uis.deploy", {
         ...initial,
         mutationId: "traversal",
-        expectedReleaseId: "one",
+        expectedReleaseId: "two",
         release: {
           ...release,
           releaseId: "invalid",
@@ -1871,6 +1873,6 @@ test("ui deployment retains private release files and rollback uses CAS, replay 
   assert.equal(
     call<{ currentReleaseId: string }>(client, "uis.get", { uiId: "test-ui" })
       .currentReleaseId,
-    "one",
+    "two",
   );
 });

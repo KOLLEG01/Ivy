@@ -266,6 +266,7 @@ const defs = {
     policy: shared("RetentionPolicy"),
     policyHash: hash,
     previewRequired: bool,
+    waitingForOwner: bool,
     objectCount: uint(),
     revisionCount: uint(),
     byteLength: uint(),

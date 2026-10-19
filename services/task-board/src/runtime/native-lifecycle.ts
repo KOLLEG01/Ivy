@@ -242,6 +242,9 @@ export class TaskBoardNativeLifecycle {
     const value: TaskBoard.Task = { ...task.value, primaryResourceRef: primary, publication: steps.pin, updatedAt: at,
       ...(startWork ? { workflowState: 'todo' as const, waiting: null, acceptedReview: null,
         fields: { ...task.value.fields, control: 'agent' as const, nextReviewAt: null } } : {}) };
+    if (startWork && operation.value.request.action === 'newThread') {
+      delete value.completionIssue; delete value.continuation;
+    }
     const reserved = await steps.write('task-board/task', value, { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
     const request = operation.value.request;
     outcome.history = await steps.create('task-board/history', { schemaVersion: 1, taskId: task.pin.objectId,

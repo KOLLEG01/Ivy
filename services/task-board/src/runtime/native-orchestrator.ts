@@ -264,7 +264,8 @@ export class TaskBoardNativeOrchestrator {
         }
       }
       if (status === "inProgress") {
-        if (active && !run.value.cancellation && inspection.turns.epoch === run.value.nativeEpoch) {
+        if (active && !run.value.cancellation && !run.value.originalRequest.checkOnly &&
+            !(run.value.originalRequest.action === 'continue' && run.value.originalRequest.recoveryFor) && inspection.turns.epoch === run.value.nativeEpoch) {
           const previous = run.value.calls.steer ? (await store.read('task-board/native-call', run.value.calls.steer)).value.origin : null;
           const initial = (await store.read('task-board/task', { objectId: run.value.taskId, revision: run.value.originalRequest.expectedRevision })).value;
           const peersHash = await peerState(store, task.value, task.pin.objectId);

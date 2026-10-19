@@ -10,6 +10,7 @@ import {
 } from "../../../packages/contracts/src/errors.js";
 import { HiveKernel } from "./kernel.js";
 import { BrowserPushStore } from "./browser-push-store.js";
+import { reclaimStoragePages } from './storage-compaction.js';
 import type { KernelOptions } from "./kernel.js";
 import type { OAuthRefreshFamily, WorkerAction } from "./worker-protocol.js";
 
@@ -19,6 +20,11 @@ let browserPush: BrowserPushStore;
 try {
   kernel = new HiveKernel(workerData as KernelOptions);
   browserPush = new BrowserPushStore(kernel.store, new URL(kernel.options.publicBaseUrl));
+  const compaction = kernel.store.metadata('storage_compaction_pending'), at = new Date().toISOString();
+  kernel.registry.diagnostic({ code: 'storage_compaction_pending', source: 'hive.storage', resource: {},
+    severity: compaction ? 'warning' : 'info', status: compaction ? 'current' : 'resolved',
+    firstObservedAt: at, lastObservedAt: at,
+    message: compaction || 'Incremental database storage reclamation is available.' });
   parentPort.postMessage({ ready: true });
 } catch (error) {
   parentPort.postMessage({ fatal: IvyError.from(error).toWire() });
@@ -318,6 +324,7 @@ async function handle(
         kernel.store.transaction(() => {
           collectOAuthFamilies();
         });
+        if (!backupTask) reclaimStoragePages(kernel.store.db);
         return result;
       } catch (error) {
         kernel.retention.recordFailure(error);

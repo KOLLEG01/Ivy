@@ -29,6 +29,9 @@ export function automaticBootstrapRoot(config: Host.HostConfig, operationId: str
 }
 
 export async function automaticBootstrapRecord(config: Host.HostConfig, operationId: string): Promise<AutomaticBootstrapRecord | null> {
+  const journal = new HostJournal(config);
+  try { requireThat(!journal.retiredRequestHash(operationId), 'operation_expired', 'Superseded automatic bootstrap maintenance was collected.'); }
+  finally { journal.close(); }
   const path = join(automaticBootstrapRoot(config, operationId), 'record.json');
   if (!await exists(path)) return null;
   const value = await jsonFile<AutomaticBootstrapRecord>(path);
@@ -68,6 +71,7 @@ export class AutomaticBootstrapUpdater {
     const operationId = 'bootstrap-package-' + hashJson({ hostId: config.hostId, config: next.configHash,
       releases: [...desired].sort(([a], [b]) => a.localeCompare(b)) }).slice(7, 47);
     const root = automaticBootstrapRoot(config, operationId), requestPath = join(root, 'request.json');
+    if (this.journal.retiredRequestHash(operationId)) return false;
     const existing = await automaticBootstrapRecord(config, operationId);
     if (existing && ['succeeded', 'rolled_back', 'needs_attention'].includes(existing.phase)) return false;
     const parent = join(config.runtimeRoot, 'bootstrap-automatic');

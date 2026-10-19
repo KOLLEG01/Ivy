@@ -10,8 +10,9 @@ const time = '2026-05-01T12:00:00.000Z';
 const actor = { principalId: 'user', serviceNodeId: 'task-board', generation: 1, source: 'user' as const };
 
 test('published Task contract definitions stay stable when tool descriptions change', () => {
-  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task');
+  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0'].includes(value.version));
   assert.deepEqual(Object.fromEntries(contracts.map(value => [value.version, hashJson(value)])), {
+    '1.9.0': 'sha256:d77cdc4472e267298847aed6fa7f207d546fbe96afadc1a379c5a886961164ff',
     '1.8.0': 'sha256:00a22238b737fc5e1f178c5dd239b88aaa2467220c103bf7ff3094772cc70db7',
     '1.7.0': 'sha256:3292027f5a0bfcc962c9c91fce6363ec046c3b0c910912959900c77af39dfa3b',
     '1.6.0': 'sha256:7c4a5106d614116242641156bb4f15920ff509d255a47119c033363470a6da5d',
@@ -31,6 +32,17 @@ test('published Task contract definitions stay stable when tool descriptions cha
     'sha256:ebf2011875459c74f6d7f07f8ae6a4d5c596e3eba726c2a59f4a2fbd6ea4aa98');
   assert.equal(hashJson(taskBoardContracts().find(value => value.key === 'task-board/delivery' && value.version === '1.0.0')!),
     'sha256:8633eacd16bc5a4c3254c2ff465a7f508277d8d595111b4733c7db1652332a3c');
+});
+
+test('published compact tasks, comments and Run contracts remain unchanged by completion recovery', () => {
+  const selected = taskBoardContracts().filter(value => value.key === 'task-board/task' && ['1.10.0', '1.11.0'].includes(value.version) ||
+    value.key === 'task-board/run' && value.version === '1.2.0' || value.key === 'task-board/comments' && value.version === '1.0.0');
+  assert.deepEqual(Object.fromEntries(selected.map(value => [value.key + '@' + value.version, hashJson(value)])), {
+    'task-board/task@1.11.0': 'sha256:6fc7e6ff9cb78cd56fbc6d080d4675d8136d13db710bb3aa4ada1ae06c291ae7',
+    'task-board/task@1.10.0': 'sha256:b6a0ccb154303242d8e2bb204587733b9b4e5f10d188aa360e98a152311324e8',
+    'task-board/comments@1.0.0': 'sha256:e111eb69561fe00c67c6f5b669ae16a403a7f19613dfbc4aa14c30ecbdd2cfd8',
+    'task-board/run@1.2.0': 'sha256:bebd82533ebffc0ee65d480c8e62ecb8c1f4205b946877cbdf0c6f03776b412d',
+  });
 });
 
 test('older capability requirements read as automatic placement with a required capability', () => {

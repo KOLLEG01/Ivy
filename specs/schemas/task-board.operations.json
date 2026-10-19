@@ -10,12 +10,12 @@
     },
     {
       "key": "task-board/task",
-      "version": "1.8.0",
+      "version": "1.9.0",
       "definition": "#/$defs/Task"
     },
     {
       "key": "task-board/run",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "definition": "#/$defs/Run"
     },
     {
@@ -210,6 +210,11 @@
     "operation": {
       "input": "#/$defs/OperationQuery",
       "output": "#/$defs/Operation",
+      "mutation": false
+    },
+    "operationReceipt": {
+      "input": "#/$defs/OperationReceiptQuery",
+      "output": "#/$defs/OperationReceipt",
       "mutation": false
     },
     "workspace": {

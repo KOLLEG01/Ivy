@@ -19,7 +19,17 @@ UI requirements: [UI](UI.md).
   Task, initial manual Result and history publish through one retained Create operation;
   an unfinished publication cannot schedule work. Offline host/capability waits retain valid
   registered selections and defer unavailable live model validation until allocation.
-- Permanent deletion removes the Task, its attachments, all Hive revisions, and task-linked
+- Tickets retain the latest 50 revisions. Each ticket has one retained `task-board/comments`
+  child with current-only revisions; immutable comment bodies are stored there once. Ticket
+  snapshots select the conversation prefix and preserve mutable delivery, native-input and
+  handoff observations. Reads, including historical reads, restore that exact comment view.
+  Storage backfill also covers archived tickets without changing workflow state and retries
+  active or conflicting tickets on later passes. Before readiness enables the new policy,
+  current-only migration ledgers protect source revisions of legacy unfinished Runs without
+  changing their claims or accepted operation pins. Periodic refresh releases obsolete ledger
+  references; new Runs retain their sources directly. Other Hive families keep their
+  own retention policies.
+- Permanent deletion removes the Task, its comments child, attachments, all Hive revisions, and task-linked
   Run, Result, Review, History, Delivery and comment-read records. It is refused while a claim
   or publication is active, or another Task still depends on it. The deleted task key is not reused.
 - Archiving a ticket also archives its linked Codex tasks, including previous Run and History contexts.
@@ -134,22 +144,51 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
 - Delegated tasks identify their original task with `parentTaskId`; their separate hosts and worktrees
   do not change that responsibility. The parent reviews saved final results and integration, moves
   accepted children to Done, and archives them. Waiting on a child uses `until=idle` so its Review can
-  be assessed. Coordination-only turns may accept and archive children while preserving the parent's
+  be assessed. Named deliveries (`until=delivery`, `key`) wait for exact published artifact or code
+  references without requiring the whole child to reach Done. Each idle/done or named delivery
+  identity wakes the same work once; repeating an unchanged condition does not create a polling loop.
+  Host capacity, memory admission and execution retry belong to the executing agent system.
+  Coordination-only turns may accept and archive children while preserving the parent's
   result and blocker. Delegation cycles are rejected. Omitted child contact defaults to ticket;
   completion is delivered once to the parent through normal directed-comment handling.
 - Agents publish one final comment with `purpose=handoff`, useful output links, actual verification
-  and material limitations, then end the turn. TaskBoard alone moves successful execution to Review
-  and sends the configured root completion notification or delivers the delegated result to its parent. Unanswered questions and failed attempts remain
+  and material limitations. Its structured `handoff` declares overall readiness (`workflowState=review`)
+  or remaining work (`waiting` with public waiting details), and `nextReviewAt` or null.
+  TaskBoard applies this intent with the result only after confirmed native completion; merely ending
+  a successful turn does not establish readiness. Missing intent displays workflow attention separately
+  from an unanswered user question. Completion first reconciles accepted handoff operations under
+  their original Run identity. Only unchanged work under the same claim permits rebasing an
+  unpublished handoff across unrelated ticket revisions.
+  Only actual review readiness sends the configured root completion notification or delivers the delegated result to its parent. Unanswered questions and failed attempts remain
   Blocked; queued follow-up work returns to Todo unless an explicit blocker remains. Users move root Review to Done using the normal board
   transition, with no result-acceptance action or extra review state.
+- Ordinary questions remain open until an addressed user reply (`replyTo`), their typed answers,
+  or explicit `resolvesQuestions` with an explanation. Unrelated replies and handoffs never close them.
+  Native questions retain their owner-bound answer workflow. Open questions remain visible during checks.
+  A `questionWait` names the exact ticket and question comment blocking another task; an empty local
+  question count does not answer it. Its addressed answer permits work to resume.
+- A handoff or idle deferral may add `checkScope`, an explicit independent check performed at
+  `nextReviewAt`. TaskBoard schedules it in Blocked or Review despite unanswered ordinary questions,
+  while still enforcing dependencies, host/workspace availability, active claims and unknown outcomes.
+  The retained check-only Run acknowledges field-edit markers already in its pinned snapshot,
+  but does not consume queued discussion, steer into general work, replace a
+  result awaiting Review or repeat its completion notification. New discussion waits for a normal Run.
+  Each check explicitly renews its future date/scope or clears it. Resolved native failures or missing
+  check intent retain the scope, publish a visible failure and retry after fifteen minutes (or the
+  native reset time), preserving a confirmed later date or an explicit timer stop.
+  Owner-reported `checkFailure` likewise stays visible until a successful check.
+  Scheduling belongs to TaskBoard; no second scheduling assignment is required. Durable claims and
+  original operation reconciliation prevent duplicate starts across restarts and missed notifications.
 - Serialize publication per Task until the first Task write has durably retained the owning
   Operation marker. Root coordination additionally covers shared category and dependency graph
-  changes. That marker and Task CAS then protect the unfinished publication while up to ten
+  changes. That marker and Task CAS then protect the unfinished publication while up to twenty
   independent Tasks reconcile concurrently. Free slots continue reconciling while another Task
   awaits its owner; scans retain bounded pending pages. An ambiguous first write retains its Task gate until
   exact replay proves the marker; recovery must finish the original prepared writes. Dependency
   checks include committed marked intents, and optional worktree reservations remain unique by
   host and canonical path. Shared checkouts serialize active work unless both tasks allow parallel execution.
+  Failed publication recovery yields before retrying so unrelated Tasks can progress. Advisory native
+  signals retain only their current checkpoint; immutable execution receipts and evidence remain separate.
 - Final comments retain actual verification, limitations and artifact/Git links. Internal Run outcome
   records remain available for recovery; they are not a second user-facing result or acceptance workflow.
   Unavailable evidence is not success; local commits are not represented as confirmed remote commits.
@@ -159,7 +198,8 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   output history or fall back to a full turn read for completion; Codex retains that history.
 - Raw native evidence and completed operation payloads enter the bounded local FIFO history
   after a closed Run is fully published, without a minimum retention duration. Compact replay
-  guards prevent reuse of evicted operation IDs. The ticket, final Result and published attachments remain. Unfinished Runs,
+  guards prevent reuse of evicted operation IDs. Compact caller-bound receipts retain original request
+  hashes and outcomes after payload eviction, without permitting replay. The ticket, final Result and published attachments remain. Unfinished Runs,
   unfinished publications, pending deliveries and retryable scheduler actions retain the local records they need.
   A full ticket may omit the additional automatic result comment; its complete Result and history
   must still publish without leaving a reservation behind.
@@ -170,7 +210,27 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
 
 ## Recovery and contact
 
+- Execution mode is one of work, coordination, independent check or completion recovery.
+  Admission and scheduling share mode selection; the owner validates mode-specific writes.
+  Missing handoffs take priority over peer coordination, without consuming queued discussion.
+  Recover the original accepted publication first. After confirmed native termination, a
+  recovery-only continuation reuses the same context to publish existing work, never to repeat
+  implementation or uncertain effects. Its original Run and necessary evidence remain protected.
+  A legacy pre-closure pin already pruned before protection may use the same original Run's
+  confirmed terminal revision; this never authorizes replay or a replacement Run identity.
+  Two completed unusable recovery attempts require inspection; transport backoff does not reset
+  the durable attempt count. Explicit stops, user control and genuine questions remain binding.
+  An explicit move to Todo rearms the bounded handoff recovery in the existing context,
+  or clears a terminal execution error so the original work can be retried.
+- A handoff may select Todo with a concrete `nextStep` and a null review date to continue
+  already authorized work. Waiting details and check scopes are forbidden on this disposition.
+  Unchanged committed/output evidence may continue twice before a visible no-progress fault.
+  Technical failed or recovery outcomes do not replace a previously saved work result.
+  Operational recovery failures remain visible independently of service readiness.
+
 - Reconcile unfinished claims/publications before fresh work. Fair bounded scans recover missed
+  claims whose Run is terminal through their original completion operation; age alone never clears
+  a claim. Scans also recover missed
   notifications; notifications only accelerate authoritative reads. Rotate operation, Run, Task
   and delivery scans so scheduling a waiting Task cannot starve its Run. Unchanged blockers do
   not create revisions. Keep reconciliation failures visible during retry backoff until a real

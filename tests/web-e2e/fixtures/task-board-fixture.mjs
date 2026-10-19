@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { fixture, fixtureToken } from './fixture.mjs';
 import { agentFixture } from './agent-fixture.mjs';
 import { startTaskBoard } from '../../../dist/services/task-board/src/main.js';
+import { TaskComments } from '../../../dist/services/task-board/src/runtime/comment-store.js';
 import { atomicJson } from '../../../dist/packages/host-runtime/src/config.js';
 import { publishUi } from '../../../dist/packages/cli/src/publish-ui.js';
 import { discover, callBound, newOperationId } from '../../../dist/packages/sdk/src/client.js';
@@ -28,7 +29,7 @@ export async function taskBoardFixture(t, { native = false, viewport, scheduler 
     await invoke({ action: 'configure', configuration: current.object, value: { ...current.configuration,
       defaults: { ...current.configuration.defaults, nativeOptions: { model: null, reasoningEffort: null, serviceTier: 'standard' } } } });
   }
-  const task = async id => (await f.client.request('objects.read', { objectId: id })).content.value;
+  const task = async id => new TaskComments(f.client, scope => operationId(scope)).read((await f.client.request('objects.read', { objectId: id })).content.value, id);
   const restartTaskBoard = async () => { await service.close(); service = await startTaskBoard(path); await service.service.waitReady(); };
   return { ...f, url, open, invoke, task, restartTaskBoard, taskBoard: () => service, taskBoardConfig: config };
 }

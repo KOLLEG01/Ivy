@@ -107,6 +107,7 @@ for (const capacity of [false, true]) test(`${capacity ? 'capacity' : 'quota'} f
   const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
   assert.equal(run.value.phase, 'failed'); assert.equal(task.value.claim, null);
   assert.equal(task.value.workflowState, 'waiting'); assert.equal(task.value.waiting?.reason, 'time');
+  assert.equal(engine.condition(task.value).state, 'deferred');
   assert.equal(task.value.fields.nextReviewAt, new Date(Date.parse(capacity ? run.value.finishedAt! : reset) + 60000).toISOString());
   assert.equal(task.value.comments.at(-1)!.body, message);
   const scheduler = new TaskBoardScheduler(engine);

@@ -27,6 +27,7 @@ export interface FamilyRetentionStatus {
   policy: RetentionPolicy;
   policyHash: string;
   previewRequired: boolean;
+  waitingForOwner: boolean;
   objectCount: number;
   revisionCount: number;
   byteLength: number;
@@ -49,6 +50,12 @@ export class Retention {
     readonly store: HiveStore,
     private readonly diagnostics?: { collectDiagnostics(now: number): void },
   ) {}
+
+  private waitingForOwner(contract: DataContract): boolean {
+    return contract.retention.awaitOwnerReadiness === true &&
+      this.store.metadata('retention_owner_ready:' + contract.key + ':' + contract.version) !==
+        hashJson({ version: contract.version, policy: contract.retention });
+  }
 
   private contracts(): DataContract[] {
     const latest = new Map<string, DataContract>();
@@ -321,6 +328,7 @@ export class Retention {
         policy: contract.retention,
         policyHash,
         previewRequired: saved?.["policy_hash"] !== policyHash,
+        waitingForOwner: this.waitingForOwner(contract),
         objectCount: totals ? Number(totals["objects"]) : summary.objectCount,
         revisionCount: revisions
           ? Number(revisions["revisions"])
@@ -380,6 +388,7 @@ export class Retention {
       previewObjects = candidatePlan(),
       enabled = new Set<string>();
     for (const contract of contracts) {
+      if (this.waitingForOwner(contract)) continue;
       this.store.transaction(() => {
         const policyHash = hashJson(contract.retention),
           saved = this.store.get(
@@ -540,14 +549,14 @@ export class Retention {
 
   private collectUiReleases(): void {
     for (const app of this.store.all(
-      "SELECT app_id,current_release_id,previous_release_id FROM apps",
+      "SELECT app_id,current_release_id FROM apps",
     )) {
       this.store.run(
-        "DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ? AND release_id IS NOT ?",
+        "DELETE FROM app_releases WHERE app_id=? AND release_id IS NOT ?",
         String(app["app_id"]),
         app["current_release_id"] ?? null,
-        app["previous_release_id"] ?? null,
       );
+      this.store.run('UPDATE apps SET previous_release_id=NULL WHERE app_id=?', String(app['app_id']));
     }
   }
 

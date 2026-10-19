@@ -29,6 +29,9 @@ async function retained(config: Host.HostConfig, operationId: string): Promise<H
   return record;
 }
 export async function bootstrapStatus(config: Host.HostConfig, operationId: string): Promise<Host.BootstrapMaintenanceRecord> {
+  const journal = new HostJournal(config);
+  try { requireThat(!journal.retiredRequestHash(operationId), 'operation_expired', 'Superseded bootstrap maintenance was collected.'); }
+  finally { journal.close(); }
   const record = await retained(config, operationId); requireThat(record, 'not_found', 'Bootstrap maintenance operation was not found.'); return record;
 }
 async function candidatePlans(config: Host.HostConfig, configPath: string, journal: HostJournal, next?: Host.BootstrapPlan): Promise<Host.BootstrapPlan[]> {
@@ -100,6 +103,10 @@ export async function updateBootstrap(configPath: string, request: Host.Bootstra
   const lock = new ExecutorLock(join(config.runtimeRoot, 'bootstrap-maintenance-lock'));
   let closeOwners: (() => void) | null = null, journal: HostJournal | null = null, record: Host.BootstrapMaintenanceRecord | null = null;
   try {
+    journal = new HostJournal(config);
+    const retiredHash = journal.retiredRequestHash(request.operationId);
+    requireThat(!retiredHash || retiredHash === requestHash, 'operation_conflict', 'The retired bootstrap identity belongs to another request.');
+    requireThat(!retiredHash, 'operation_expired', 'Superseded bootstrap maintenance cannot be replayed.');
     record = await retained(config, request.operationId);
     requireThat(!record || record.requestHash === requestHash, 'operation_conflict', 'Bootstrap operation ID already belongs to another exact request.');
     // Historical replay never inspects, repairs or rolls back definitions changed by a later operation.
@@ -108,7 +115,6 @@ export async function updateBootstrap(configPath: string, request: Host.Bootstra
     requireThat(next.configPath === path && previous.configPath === path && next.hostId === config.hostId && previous.hostId === config.hostId &&
       next.runtimeRoot === config.runtimeRoot && next.configHash === hashJson(config) && previous.configurationHash === hashJson(config),
       'configuration_changed', 'Bootstrap maintenance belongs to a different installation or configuration.');
-    journal = new HostJournal(config);
     const candidate = journal.candidate(next.candidateId);
     requireThat(candidate.componentId === 'host-executor' && next.os === process.platform, 'target_conflict', 'Maintenance requires this platform\'s checked host-executor candidate.');
     const manifest = await verifyCandidate(candidate, config);

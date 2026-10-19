@@ -20,29 +20,36 @@ Local commands and operating procedure: [host operations](#local-host-operations
 - One Hive Object holds the versioned package catalog. Apps use the same package path;
   Hive installs them in its app catalog. HostExecutor activates only configured executable
   components and verifies downloaded bytes/manifest without rebuilding on the target.
+  The catalog keeps the latest archive per component plus builds still selected by an
+  installation or needed by an unfinished deployment. Superseded archives are collected.
+  UI release records also retain only the current selection; unused private UI files
+  expire through the bounded upload-recovery grace.
 - A failed exact release is not retried without a new version or explicit retry.
   Hive releases are packages, not container images; any container lifecycle owner must
   remain outside the replaced Hive process.
 - Package reconciliation includes bootstrap-owned components through an independent OS
   handoff and stopped-owner maintenance, with readiness and rollback. Returning offline
   hosts converge from the catalog without a central push.
-- HostExecutor collects completed build preparations, unreferenced source snapshots and
-  obsolete candidate directories after three days. It retains live selections, their
-  previous successful build (or the nearest older version when no predecessor is known),
-  and candidates referenced by unresolved operations or preparation evidence.
+- HostExecutor collects superseded installation artifacts, completed deployment records,
+  stopped unconfigured instance state and obsolete bootstrap plans. It retains live
+  selections and exact candidates needed by unresolved operations or active preparations.
+  Only the newest unselected candidate per component has a three-day preparation grace;
+  superseded candidates have no historical rollback retention. Superseded completed
+  preparations and their unreferenced source snapshots are collected together; remaining
+  source snapshots and completed preparations have a three-day grace.
   Dependency caches retain only the most recently used cache and caches leased by running
   builds. Shared build leases prevent collection from invalidating dependency links.
-  Bootstrap history keeps current, rollback and unresolved maintenance plans plus the
-  grace period; older plans no longer pin all historical releases. Candidate deletion
+  Bootstrap history keeps the selected installation and unresolved maintenance plans.
+  A verified later installation supersedes old failed maintenance only when every current
+  configured owner has a fresh matching observation. Candidate deletion
   is journaled and retried after interruption. Eligible preparations and snapshots are
   atomically renamed with a `.retiring-` prefix before deletion; interrupted removal
   resumes from those names even if their metadata has gone. Failed and unknown
   preparations remain for diagnosis; unknown ownership pauses source snapshot collection only.
-  Completed bootstrap detail files form a ring with no minimum retention duration,
-  keeping details for the latest 20 maintenance operations, current rollback evidence
-  and unresolved operations.
-  Small request and outcome records remain unchanged for replay and restore; their
-  number grows with operation history. Only detail files named in those records are deleted.
+  Superseded maintenance records and their known detail files are removed together.
+  Unknown files preserve the whole operation directory for review. Compact request-hash
+  fences prevent retired operation identities from launching again without retaining old
+  installation payloads; original requests remain available while an operation is current.
   Host status includes the last collection outcome, last complete success, deletion
   counts, free space and grouped reasons for retained entries. A partial
   result explicitly reports blocked areas. Free space is checked every minute;
@@ -188,9 +195,16 @@ substitute a development build for an installed artifact.
   `false`. Hive then stops creating local backups and collects its generated backup pairs
   and sidecars; unrelated files remain untouched. Local backups default to enabled.
 - Standalone installers use [release collection](../tools/operations/collect-installation-releases.mjs)
-  under their update lock after verifying the live build. Protect that build, its last
-  successful predecessor and all unresolved update targets before removing other owned
-  hash directories. Managed installations use HostExecutor retention instead.
+  under their update lock after verifying the live build. Protect that build and unresolved
+  update targets before removing other owned hash directories. Hive packages include the
+  collector at `dist/tools/operations/collect-installation-releases.mjs`; standalone owners
+  load it from the verified current artifact so subsequent deployments update its policy
+  without copying another script. Deploy Hive before services that declare new wire features.
+  Managed installations use
+  HostExecutor retention instead. Superseded deployment records and disabled instances
+  removed from configuration are collected once no live owner or unfinished action needs
+  them. Compact replay fences prevent retired operation identities from running again;
+  they do not retain old release artifacts or deployment payloads.
 - Shared native homes remain external data as specified in [agent environments](AGENT-INSTRUCTIONS.md).
   Destructive runtime reset is a separate explicit, coordinated maintenance operation:
   verify its exact deletion/preservation plan and stopped owners before execution.

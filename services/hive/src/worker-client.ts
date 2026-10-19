@@ -33,7 +33,7 @@ export class WorkerClient {
     const worker = this.createWorker(file, { workerData: this.options, resourceLimits: { maxOldGenerationSizeMb: 512 } });
     this.worker = worker;
     this.starting = new Promise<void>((resolve, reject) => {
-      const deadline = setTimeout(() => { const error = new IvyError('deadline_exceeded', 'Hive storage startup exceeded its deadline.'); reject(error); this.fail(error, worker); }, 30_000);
+      const deadline = setTimeout(() => { const error = new IvyError('deadline_exceeded', 'Hive storage startup exceeded its deadline.'); reject(error); this.fail(error, worker); }, 120_000);
       const failed = (error: IvyError) => { clearTimeout(deadline); reject(error); this.fail(error, worker); };
       worker.on('error', () => failed(new IvyError('storage_unavailable', 'Hive storage worker failed.', 'unknown')));
       worker.on('exit', code => {

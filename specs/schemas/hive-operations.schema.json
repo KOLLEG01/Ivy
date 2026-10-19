@@ -1039,6 +1039,9 @@
         "previewRequired": {
           "type": "boolean"
         },
+        "waitingForOwner": {
+          "type": "boolean"
+        },
         "objectCount": {
           "type": "integer",
           "minimum": 0,
@@ -1075,6 +1078,7 @@
         "policy",
         "policyHash",
         "previewRequired",
+        "waitingForOwner",
         "objectCount",
         "revisionCount",
         "byteLength",

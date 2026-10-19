@@ -1,0 +1,207 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import type { TaskBoard } from '../packages/contracts/src/generated.js';
+import { taskBoardFixture } from './fixtures/task-board.js';
+import { taskBoardContracts } from '../services/task-board/src/runtime/schema.js';
+import { TaskComments } from '../services/task-board/src/runtime/comment-store.js';
+import { canonical, IvyError, jsonObjectContentBytes } from '../packages/sdk/src/node.js';
+import { nativeWorkflow } from './fixtures/task-board-native.js';
+
+const comment = (sequence: number): TaskBoard.Comment => ({ commentId: 'comment-' + sequence, sequence,
+  author: { principalId: 'user', serviceNodeId: 'task-board', generation: 1, source: 'user' }, authorKind: 'user',
+  body: 'Conversation body '.repeat(1024), requests: [], responses: [], delivery: null, attachments: [], run: null,
+  turnId: null, replyTo: null, createdAt: '2026-05-01T12:00:00.000Z', operationId: 'comment-' + sequence });
+
+test('a native handoff completes when its separate ticket and conversation fit but their combined view exceeds one Object', async t => {
+  const workflow = await nativeWorkflow(t);
+  await workflow.running();
+  const store = workflow.f.first.store;
+  const current = await store.read('task-board/task', workflow.state().task);
+  await store.write('task-board/task', { ...current.value,
+    fields: { ...current.value.fields, description: 'Acceptance context '.repeat(12000) },
+    comments: Array.from({ length: 55 }, (_entry, index) => comment(index + 1)) }, 'large-conversation',
+  { objectId: current.pin.objectId, expectedRevision: current.pin.revision });
+  await workflow.refresh();
+  await workflow.handoff();
+  await workflow.update((await workflow.snapshot()).change);
+  const completed = await store.read('task-board/task', current.pin.objectId);
+  assert.equal(completed.value.workflowState, 'review');
+  assert.equal(completed.value.claim, null);
+  assert.equal(completed.value.completionIssue, undefined);
+  assert.ok(Buffer.byteLength(canonical(completed.value)) > jsonObjectContentBytes);
+  const header = await store.client.request('objects.read', { objectId: current.pin.objectId });
+  assert.ok(header.revision.byteLength < jsonObjectContentBytes);
+  const records = await store.client.request('objects.query', { contractKey: 'task-board/comments', limit: 2 });
+  const conversation = await store.client.request('objects.read', { objectId: records.items[0]!.objectId });
+  assert.ok(conversation.revision.byteLength < jsonObjectContentBytes);
+  assert.equal(completed.value.comments.length, 56);
+});
+
+test('ticket status revisions share one current-only conversation and retain exact comment prefixes', async t => {
+  const f = taskBoardFixture(t), created = await f.create();
+  const store = f.first.store, taskId = created.task!.objectId;
+  const initial = await store.read('task-board/task', taskId);
+  const first = await store.write('task-board/task', { ...initial.value, comments: [comment(1)] }, 'first-comment',
+    { objectId: taskId, expectedRevision: initial.pin.revision });
+  const loaded = await store.read('task-board/task', first);
+  assert.deepEqual(loaded.value.comments, [comment(1)]);
+  const status = await store.write('task-board/task', { ...loaded.value, workRevision: loaded.value.workRevision + 1 }, 'status-only',
+    { objectId: taskId, expectedRevision: first.revision });
+  const objects = await store.client.request('objects.query', { contractKey: 'task-board/comments', limit: 10 });
+  assert.equal(objects.items.length, 1);
+  const log = await store.client.request('objects.read', { objectId: objects.items[0]!.objectId });
+  assert.equal(log.object.currentRevision, 2, 'only creation and the new comment may write the conversation');
+  const raw = await store.client.request('objects.read', { objectId: taskId });
+  assert.ok(raw.revision.byteLength < comment(1).body.length / 2, 'the ticket header must not contain comment bodies');
+  const current = await store.read('task-board/task', status);
+  await store.write('task-board/task', { ...current.value, comments: [...current.value.comments, comment(2)] }, 'second-comment',
+    { objectId: taskId, expectedRevision: status.revision });
+  assert.deepEqual((await store.read('task-board/task', first)).value.comments, [comment(1)]);
+  assert.deepEqual((await store.read('task-board/task', taskId)).value.comments, [comment(1), comment(2)]);
+  const contracts = taskBoardContracts();
+  assert.deepEqual(contracts.find(c => c.key === 'task-board/task' && c.version === '1.10.0')!.retention.revisions,
+    { mode: 'bounded', maximumCount: 50 });
+  assert.deepEqual(contracts.find(c => c.key === 'task-board/comments')!.retention,
+    { objects: { mode: 'retain' }, revisions: { mode: 'current' } });
+  const now = Date.now() + 2 * 24 * 60 * 60 * 1000;
+  f.kernel.retention.preview(now);
+  f.kernel.retention.collect(now);
+  assert.deepEqual((await store.read('task-board/task', first)).value.comments, [comment(1)]);
+  assert.deepEqual((await store.read('task-board/task', taskId)).value.comments, [comment(1), comment(2)]);
+});
+
+test('conversation metadata snapshots and lost append replies preserve the original comment body', async t => {
+  const f = taskBoardFixture(t), created = await f.create(), store = f.first.store, taskId = created.task!.objectId;
+  const comments = new TaskComments(store.client, scope => store.preparedMutationId('comments-test:' + scope));
+  const initial = await store.read('task-board/task', taskId);
+  const pin = await store.write('task-board/task', { ...initial.value, comments: [comment(1)] }, 'append',
+    { objectId: taskId, expectedRevision: initial.pin.revision });
+  const loaded = await store.read('task-board/task', pin);
+  const amended = { ...comment(1), delivery: { objectId: taskId, revision: pin.revision } };
+  const updated = await store.write('task-board/task', { ...loaded.value, comments: [amended] }, 'delivery',
+    { objectId: taskId, expectedRevision: pin.revision });
+  assert.equal((await store.read('task-board/task', pin)).value.comments[0]!.delivery, null);
+  assert.deepEqual((await store.read('task-board/task', updated)).value.comments, [amended]);
+  await assert.rejects(comments.write({ ...loaded.value, comments: [{ ...amended, body: 'rewritten' }] }, taskId, 'rewrite'),
+    { code: 'task_board_comment_mismatch' });
+  const next = { ...loaded.value, comments: [amended, comment(2)] };
+  let loseReply = true;
+  f.intercept(params => {
+    if (loseReply && params.contractVersion === '1.1.0' && params.content.encoding === 'json' &&
+      typeof params.content.value === 'object' && params.content.value !== null && 'comments' in params.content.value) {
+      loseReply = false;
+      throw new IvyError('synthetic_response_loss', 'The conversation reply was lost.', 'unknown');
+    }
+  });
+  await assert.rejects(comments.write(next, taskId, 'lost-append'), { code: 'synthetic_response_loss' });
+  f.intercept(null);
+  const retried = await comments.write(next, taskId, 'lost-append');
+  assert.deepEqual((await comments.read(retried as never, taskId)).comments, [amended, comment(2)]);
+  assert.deepEqual((await store.read('task-board/task', pin)).value.comments, [comment(1)]);
+});
+
+test('storage backfill includes archived tickets and preserves inline historical snapshots', async t => {
+  const f = taskBoardFixture(t), created = await f.create(), store = f.first.store;
+  const initial = await store.read('task-board/task', created.task!.objectId);
+  const old = await store.client.request('objects.write', {
+    create: { name: 'Old archived ticket', contractKey: 'task-board/task', parentId: store.rootObjectId, ownerObjectId: null },
+    contractVersion: '1.9.0', mutationId: await store.preparedMutationId('old-inline-ticket'), references: {},
+    content: { encoding: 'json', value: { ...initial.value, taskKey: 'TASK-0010', comments: [comment(1)] } as never } });
+  const taskId = old.object.id;
+  await store.client.request('objects.archive', { objectId: taskId, archived: true, mutationId: await store.preparedMutationId('archive-old-ticket') });
+  assert.equal(await store.compactComments(2), true);
+  const raw = await store.client.request('objects.read', { objectId: taskId });
+  assert.equal(raw.revision.contractVersion, '1.12.0');
+  assert.equal(raw.object.effectivelyArchived, true);
+  assert.deepEqual((await store.read('task-board/task', taskId, true, true)).value.comments, [comment(1)]);
+  assert.deepEqual((await store.read('task-board/task', { objectId: taskId, revision: old.revision.revision }, true, true)).value.comments, [comment(1)]);
+});
+
+test('deployment protects legacy Run sources before retention and survives a lost migration reply', async t => {
+  const w = await nativeWorkflow(t); await w.running();
+  const store = w.f.first.store, client = store.client;
+  const template = await store.read('task-board/task', w.state().task.objectId);
+  const { completionIssue: _issue, consumedBlockers: _consumed, deliveries: _deliveries, questionWait: _questionWait,
+    ...legacyTask } = template.value;
+  const created = await client.request('objects.write', { create: { contractKey: 'task-board/task', parentId: store.rootObjectId,
+    ownerObjectId: null, name: 'Legacy source ticket' }, contractVersion: '1.9.0', references: {},
+    mutationId: await store.preparedMutationId('legacy-source'), content: { encoding: 'json', value: {
+      ...legacyTask, workflowState: 'todo', waiting: null, claim: null, lastRun: null, publication: null, comments: [],
+    } as never } });
+  const source = { objectId: created.object.id, revision: created.revision.revision };
+  const sourceRead = await client.request('objects.read', source);
+  let current = created;
+  for (let i = 0; i < 60; i++) current = await client.request('objects.write', {
+    objectId: source.objectId, expectedRevision: current.revision.revision, contractVersion: '1.9.0', references: {},
+    mutationId: await store.preparedMutationId('legacy-source-' + i), content: sourceRead.content });
+  const runTemplate = await store.read('task-board/run', w.state().run);
+  const legacy = await client.request('objects.write', { create: { contractKey: 'task-board/run', parentId: store.rootObjectId,
+    ownerObjectId: null, name: 'Legacy unfinished Run' }, contractVersion: '1.2.0', references: {},
+    mutationId: await store.preparedMutationId('legacy-run'), content: { encoding: 'json', value: {
+      ...runTemplate.value, taskId: source.objectId,
+      originalRequest: { ...runTemplate.value.originalRequest, taskId: source.objectId, expectedRevision: source.revision },
+    } as never } });
+  const legacyRead = await client.request('objects.read', { objectId: legacy.object.id });
+  const at = Date.now() + 2 * 86400000;
+  w.f.kernel.store.setMetadata('retention_owner_ready:task-board/task:1.12.0', '');
+  const registry = w.f.kernel.registry.getRegistry(w.f.first.owner.serviceNodeId)!;
+  const oldRegistry = structuredClone(registry);
+  oldRegistry.requiredContracts.find(c => c.key === 'task-board/task')!.writeVersions = ['1.10.0'];
+  await client.request('registry.sync', oldRegistry);
+  await client.request('service.heartbeat', { ready: true, diagnostics: [] });
+  assert.equal(w.f.kernel.retention.status(at).families.find(f => f.contractKey === 'task-board/task')!.waitingForOwner, true,
+    'an older ready writer cannot acknowledge the new migration');
+  await client.request('registry.sync', registry);
+  await client.request('service.heartbeat', { ready: false, diagnostics: [] });
+  w.f.kernel.retention.collect(at); w.f.kernel.retention.collect(at);
+  assert.equal(w.f.kernel.retention.status(at).families.find(f => f.contractKey === 'task-board/task')!.waitingForOwner, true);
+  assert.ok(w.f.kernel.store.get('SELECT 1 FROM revisions WHERE object_id=? AND revision=?', source.objectId, source.revision));
+  let lost = false;
+  w.f.intercept(params => { if (!lost && 'create' in params && params.create.contractKey === 'task-board/revision-protection') {
+    lost = true; throw new IvyError('synthetic_response_loss', 'Migration reply was lost.', 'unknown');
+  } });
+  await assert.rejects(store.protectRunSources(), { code: 'synthetic_response_loss' });
+  w.f.intercept(null);
+  await w.f.second.store.protectRunSources();
+  const ledgers = await client.request('objects.query', { contractKey: 'task-board/revision-protection' });
+  assert.equal(ledgers.items.length, 1);
+  assert.equal(ledgers.items[0]!.revision, 1, 'retry must recognize the committed ledger');
+  assert.deepEqual((await client.request('objects.read', { objectId: legacy.object.id })).revision, legacy.revision);
+  assert.equal((await client.request('objects.read', { objectId: source.objectId })).revision.revision, current.revision.revision);
+  await client.request('service.heartbeat', { ready: true, diagnostics: [] });
+  const heartbeatChanges = w.f.kernel.store.get('SELECT total_changes() AS n')!['n'];
+  await client.request('service.heartbeat', { ready: true, diagnostics: [] });
+  assert.equal(w.f.kernel.store.get('SELECT total_changes() AS n')!['n'], heartbeatChanges,
+    'readiness acknowledgements must not generate writes on every heartbeat');
+  w.f.kernel.retention.collect(at); w.f.kernel.retention.collect(at);
+  assert.equal(w.f.kernel.retention.status(at).families.find(f => f.contractKey === 'task-board/task')!.waitingForOwner, false);
+  assert.ok(w.f.kernel.store.get('SELECT 1 FROM revisions WHERE object_id=? AND revision=?', source.objectId, source.revision));
+  assert.equal(Number(w.f.kernel.store.get('SELECT COUNT(*) AS n FROM revisions WHERE object_id=?', source.objectId)!['n']), 51);
+  await client.request('objects.write', { objectId: legacy.object.id, expectedRevision: legacy.revision.revision,
+    contractVersion: '1.2.0', references: { 'source-task': source }, content: legacyRead.content,
+    mutationId: await store.preparedMutationId('run-adopts-source') });
+  await store.protectRunSources();
+  const cleared = await client.request('objects.read', { objectId: ledgers.items[0]!.objectId });
+  assert.deepEqual(cleared.revision.references, {}, 'the bridge retires when the Run protects its own source');
+  w.f.kernel.retention.collect(at);
+  assert.deepEqual((await client.request('objects.read', source)).content, sourceRead.content);
+});
+
+test('comment migration retries tickets skipped during an accepted publication', async t => {
+  const f = taskBoardFixture(t), created = await f.create(), store = f.first.store;
+  const initial = await store.read('task-board/task', created.task!.objectId);
+  const old = await store.client.request('objects.write', { create: { name: 'Publishing legacy ticket', contractKey: 'task-board/task',
+    parentId: store.rootObjectId, ownerObjectId: null }, contractVersion: '1.9.0', references: {},
+    mutationId: await store.preparedMutationId('publishing-old'), content: { encoding: 'json', value: {
+      ...initial.value, publication: initial.pin, comments: [comment(1)] } as never } });
+  assert.equal(await store.compactComments(100), false);
+  const value = (await store.client.request('objects.read', { objectId: old.object.id })).content as { encoding: 'json'; value: Record<string, unknown> };
+  await store.client.request('objects.write', { objectId: old.object.id, expectedRevision: old.revision.revision,
+    contractVersion: '1.9.0', references: {}, mutationId: await store.preparedMutationId('published-old'),
+    content: { encoding: 'json', value: { ...value.value, publication: null } as never } });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(60_001);
+  assert.equal(await store.compactComments(100), true);
+  assert.equal((await store.client.request('objects.read', { objectId: old.object.id })).revision.contractVersion, '1.12.0');
+  assert.deepEqual((await store.read('task-board/task', old.object.id)).value.comments, [comment(1)]);
+});

@@ -19,6 +19,46 @@ import { fixture, principal, settingsFor } from './secretary-fixture.mjs';
 const at = '2026-09-22T08:00:00.000Z';
 const executionTarget = { serviceNodeId: 'fixture.agent-manager', threadCwd: resolve('secretary-test-project'), model: null, effort: 'medium', permissions: ':read-only' };
 
+test('event-gap snapshots recover current object changes once and retain the source boundary', async () => {
+  const now = new Date(at), id = 'snapshot-gap';
+  const assignment = { pin: { objectId: 'assignment', revision: 1 }, value: assignmentFor(at, { assignmentId: id, enabled: true,
+    trigger: { kind: 'object-change', objectIds: ['source'], paths: ['/value'], delaySeconds: 5, observation: null } }) };
+  const gap = { pin: { objectId: 'gap', revision: 1 }, value: { prunedThroughSequence: 50, relevant: true } };
+  const key = hashJson([id, 1, 'source']); let reads = 0;
+  const windows = new Map([[key, { pin: { objectId: 'window', revision: 1 }, value: { assignmentId: id, objectId: 'source',
+    lastSequence: 40, fingerprint: hashJson({ '/value': 1 }), projection: { '/value': 1 }, revision: 2, pending: null } }]]);
+  const issues = new Map([['event-gap:' + id, 'secretary_event_gap']]);
+  const engine = { recoveryIssues: issues, issue: (key, code) => issues.set(key, code), client: { async request(method) {
+    assert.equal(method, 'objects.read'); reads++; return { revision: { revision: 3 }, content: { encoding: 'json', value: { value: 2 } } };
+  } }, store: {
+    technicalNamed(kind, name) { return kind === 'secretary/event-gap' ? gap : windows.get(name); },
+    async named() { return { value: { processedThrough: 80 } }; },
+    technicalAmend(kind, saved, value) { saved.value = value; return saved; },
+  } };
+  const scheduler = new AssignmentScheduler(engine);
+  await scheduler.recoverEventGap(assignment, now); await scheduler.recoverEventGap(assignment, now);
+  const state = windows.get(key).value;
+  assert.equal(reads, 1); assert.equal(state.lastSequence, 80); assert.equal(state.revision, 3);
+  assert.deepEqual(state.pending.before, { '/value': 1 }); assert.deepEqual(state.pending.after, { '/value': 2 });
+  assert.equal(state.pending.dueAt, new Date(now.getTime() + 5000).toISOString());
+  assert.equal(gap.value.disposition, 'authoritative_snapshot_rebased'); assert.equal(issues.size, 0);
+});
+
+test('a schedule gap settles only after the retained schedule cursor reaches the present', async () => {
+  const now = new Date(at), id = 'schedule-gap', pin = { objectId: 'assignment', revision: 3 };
+  const assignment = { pin, value: assignmentFor(at, { assignmentId: id, enabled: true,
+    trigger: { kind: 'schedule', cadence: 'interval', intervalMinutes: 60, localTime: null, timeZone: 'UTC', weekdays: [] } }) };
+  const gap = { pin: { objectId: 'gap', revision: 1 }, value: { prunedThroughSequence: 50, relevant: true } };
+  const progress = { value: { assignment: pin, checkedAt: new Date(now.getTime() - 1).toISOString() } };
+  const issues = new Map([['event-gap:' + id, 'secretary_event_gap']]);
+  const engine = { recoveryIssues: issues, store: { technicalNamed: () => gap, named: async () => progress,
+    technicalAmend(_kind, saved, value) { saved.value = value; } } };
+  const scheduler = new AssignmentScheduler(engine);
+  await scheduler.recoverEventGap(assignment, now); assert.equal(gap.value.disposition, undefined);
+  progress.value.checkedAt = now.toISOString(); await scheduler.recoverEventGap(assignment, now);
+  assert.equal(gap.value.disposition, 'retained_schedule_replayed'); assert.equal(issues.size, 0);
+});
+
 test('assignment rules inherit every unspecified nested global field', () => {
   const defaults = defaultConfiguration(settingsFor(randomUUID(), 'secretary'), at).rules;
   assert.equal(defaults.voice.enabled, true, 'Voice is a default policy even before an optional PhoneBridge target is discovered.');
@@ -223,11 +263,12 @@ test('channel decisions require complete fresh source evidence', () => {
   assert.equal(messageChannel({ messageChannel: { key: 'alice', occurredAt: at } }), null);
 });
 
-for (const predatesAssignment of [false, true]) test(predatesAssignment
+for (const [predatesAssignment, enabled] of [[false, true], [true, true], [false, false]]) test(!enabled
+  ? 'an inactive assignment retains gap history without restarting work or raising an active fault' : predatesAssignment
   ? 'event scheduler ignores pruned history before creation and activates on the retained assignment event'
   : 'event scheduler reports an old gap and still processes every retained page', async () => {
   const createdAt = predatesAssignment ? '2026-09-22T08:01:30.000Z' : at;
-  const assignment = { ...assignmentFor(createdAt), enabled: true };
+  const assignment = { ...assignmentFor(createdAt), enabled };
   const configuration = defaultConfiguration(settingsFor(randomUUID(), 'secretary'), at, executionTarget);
   const stored = new Map(), executions = [], acknowledgements = [], issues = new Map();
   const batches = [
@@ -262,6 +303,7 @@ for (const predatesAssignment of [false, true]) test(predatesAssignment
     async amend(current, key, value) { const saved = { pin: { ...current.pin, revision: current.pin.revision + 1 }, value };
       stored.set(key + ':' + (key === 'secretary/event-progress' ? 'event-' : 'schedule-') + hashJson(assignment.assignmentId).slice('sha256:'.length), saved);
       return saved; },
+    technicalList(key) { return [...stored].filter(([name]) => name.startsWith(key + ':')).map(([, value]) => value); },
     technicalNamed(key, name) { return stored.get(key + ':' + name) ?? null; },
     technicalCreate(key, name, value) { const saved = { pin: { objectId: key + ':' + name, revision: 1 }, name, value }; stored.set(key + ':' + name, saved); return saved; },
     technicalAmend(key, saved, value) { const next = { ...saved, value }; stored.set(key + ':' + saved.name, next); return next; },
@@ -270,12 +312,14 @@ for (const predatesAssignment of [false, true]) test(predatesAssignment
   const engine = { client, store, settings: { recordsPerTick: 2, identity: { scope: { secretaryId: 'secretary' } } }, now: () => new Date('2026-09-22T08:02:00.000Z'),
     signal: new AbortController().signal, recoveryIssues: issues, verifyOwner: async () => {}, issue(key, code) { issues.set(key, code); } };
   await new AssignmentScheduler(engine).tick();
-  assert.equal(executions.length, 1);
+  assert.equal(executions.length, enabled ? 1 : 0);
   assert.deepEqual(acknowledgements.map(value => value.throughSequence), [1100, predatesAssignment ? 1103 : 1101]);
   assert.equal(acknowledgements[0].gapThroughSequence, 1100);
-  assert.equal(issues.get('event-gap:' + assignment.assignmentId), predatesAssignment ? undefined : 'secretary_event_gap');
-  assert.equal(executions[0].trigger.occurredAt, predatesAssignment ? '2026-09-22T08:01:45.000Z' : '2026-09-22T08:01:00.000Z');
+  assert.equal(issues.get('event-gap:' + assignment.assignmentId), predatesAssignment || !enabled ? undefined : 'secretary_event_gap_unrecoverable', JSON.stringify([...issues]));
+  if (enabled) assert.equal(executions[0].trigger.occurredAt, predatesAssignment ? '2026-09-22T08:01:45.000Z' : '2026-09-22T08:01:00.000Z');
+  else assert.equal(stored.get('secretary/event-gap:' + assignment.assignmentId).value.disposition, 'inactive_history');
   assert.equal(issues.get('assignment-record:bad-assignment'), 'secretary_evidence_conflict');
+  assert.equal(issues.get('assignment:' + assignment.assignmentId), undefined);
 });
 
 test('event scheduler creates a durable subscription before retiring the old filtered one', async () => {

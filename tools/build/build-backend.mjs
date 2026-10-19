@@ -242,6 +242,10 @@ export function stageBackend(identity, component = null) {
     );
   }
   // The public SDK host entrypoint re-exports this JavaScript runtime helper.
+  if (!component || component === 'hive') {
+    mkdirSync('dist/tools/operations', { recursive: true });
+    cpSync('tools/operations/collect-installation-releases.mjs', 'dist/tools/operations/collect-installation-releases.mjs');
+  }
   mkdirSync("dist/packages/host-runtime/src", { recursive: true });
   cpSync(
     "packages/host-runtime/src/build-identity.mjs",

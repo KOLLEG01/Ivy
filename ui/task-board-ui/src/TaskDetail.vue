@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { openQuestions } from '../../../services/task-board/src/runtime/conversation';
 import {
   Alert,
   AlertDescription,
@@ -122,6 +123,10 @@ const task = useRemote((signal) =>
 const displayComments = computed(() => [...(task.value.value?.value.comments ?? [])].sort((a, b) =>
   commentPreferences.value.order === "newest-first" ? b.sequence - a.sequence : a.sequence - b.sequence,
 ));
+const pendingQuestions = computed(() => openQuestions({ comments: task.value.value?.value.comments ?? [] }));
+const replyTarget = ref<string | null>(null), commentComposer = ref<HTMLElement[]>([]);
+const replyingTo = computed(() => task.value.value?.value.comments.find(comment => comment.commentId === replyTarget.value));
+const answerQuestion = async (id: string) => { replyTarget.value = id; await nextTick(); commentComposer.value[0]?.scrollIntoView({ block: 'center' }); };
 const newestCommentId = computed(() => displayComments.value
   .reduce<TaskBoard.Comment | undefined>((latest, comment) =>
     comment.authorKind === "system" && comment.body === "Ticket edited" ? latest :
@@ -399,10 +404,11 @@ const submitComment = async () => {
     requests: [],
     responses: [],
     attachments: pendingAttachments.value,
-    replyTo: null,
+    replyTo: replyTarget.value,
   });
   if (outcome && commentBody.value === draft) {
     commentBody.value = "";
+    replyTarget.value = null;
     moveToTodo.value = false;
     pendingAttachments.value = [];
   }
@@ -519,7 +525,7 @@ watch([() => action.saved.value?.phase, action.busy, uploading], async ([phase, 
     }
   } else if (request.action === 'comment' && commentBody.value.trim() === request.body &&
       pendingAttachments.value.every(value => request.attachments.some(attachment => attachment.attachmentId === value.attachmentId))) {
-    commentBody.value = ''; moveToTodo.value = false; pendingAttachments.value = [];
+    commentBody.value = ''; replyTarget.value = null; moveToTodo.value = false; pendingAttachments.value = [];
   }
   refresh(); emit('changed');
 });
@@ -621,6 +627,10 @@ let openedAtNewest = false;
 watch([tab, () => task.value.value?.value.comments.length], async () => {
   if (openedAtNewest || tab.value !== "chat" || !task.value.value) return;
   openedAtNewest = true;
+  const linkedQuestion = props.query.get('question');
+  if (linkedQuestion && task.value.value.value.comments.some(comment => comment.commentId === linkedQuestion)) {
+    await nextTick(); commentElement(linkedQuestion)?.scrollIntoView({ block: 'center' }); return;
+  }
   if (commentPreferences.value.order === "newest-first") return;
   await nextTick();
   commentElement(newestCommentId.value)?.scrollIntoView({ block: "start" });
@@ -805,7 +815,7 @@ const showArrived = () => {
     <template v-if="task.value.value">
       <Alert
         v-if="
-          taskView.value.value && !(tab === 'chat' && task.value.value.value.publication) && task.value.value.value.workflowState !== 'review' &&
+          taskView.value.value && !(tab === 'chat' && task.value.value.value.publication) && !task.value.value.value.scheduledCheck?.failure && task.value.value.value.workflowState !== 'review' &&
           noteworthyCondition(taskView.value.value.executionCondition.state)
         "
         class="mt-4"
@@ -831,6 +841,31 @@ const showArrived = () => {
         class="mt-4"
         @changed="refresh"
       />
+      <Alert v-if="task.value.value.value.completionIssue && (task.value.value.value.scheduledCheck?.failure || taskView.value.value?.executionCondition.state === 'needs_user')" class="mt-4">
+        <CircleAlert aria-hidden="true" />
+        <AlertTitle>{{ tr('Übergabe prüfen', 'Workflow needs attention') }}</AlertTitle>
+        <AlertDescription>{{ task.value.value.value.completionIssue.detail }}</AlertDescription>
+      </Alert>
+      <p v-if="task.value.value.value.completionIssue?.code === 'task_board_handoff_missing'" class="mt-2 text-sm text-muted-foreground" role="status">
+        {{ tr('Abgeschlossene Reparaturversuche:', 'Completed recovery attempts:') }} {{ task.value.value.value.completionIssue.attempts ?? 0 }}/2.
+        <span v-if="task.value.value.value.completionIssue.retryAt">{{ tr('Nächster Versuch:', 'Next attempt:') }} {{ new Date(task.value.value.value.completionIssue.retryAt).toLocaleString() }}.</span>
+      </p>
+      <Alert v-if="task.value.value.value.questionWait" class="mt-4">
+        <CircleAlert aria-hidden="true" />
+        <AlertTitle>{{ tr('Verknüpfte Nutzerfrage', 'Linked user question') }}</AlertTitle>
+        <AlertDescription>
+          <a :href="taskRoute(workspace.serviceNodeId, task.value.value.value.questionWait.taskId, { question: task.value.value.value.questionWait.commentId })" class="underline underline-offset-4">
+            {{ tr('Die offene Frage im verknüpften Ticket ansehen', 'View the open question in the linked ticket') }}
+          </a>
+        </AlertDescription>
+      </Alert>
+      <Alert v-if="task.value.value.value.scheduledCheck?.failure" variant="destructive" class="mt-4">
+        <CircleAlert aria-hidden="true" />
+        <AlertTitle>{{ tr('Automatische Prüfung fehlgeschlagen', 'Scheduled check failed') }}</AlertTitle>
+        <AlertDescription>{{ task.value.value.value.scheduledCheck.failure.detail }}
+          <span v-if="task.value.value.value.fields.nextReviewAt" class="block">{{ tr('Nächster Versuch:', 'Next attempt:') }} {{ new Date(task.value.value.value.fields.nextReviewAt).toLocaleString() }}</span>
+        </AlertDescription>
+      </Alert>
       <p
         v-if="tab !== 'chat' && (error || archive.error.value)"
         role="alert"
@@ -980,13 +1015,16 @@ const showArrived = () => {
                 >
                 <PropertyItem
                   v-if="task.value.value.value.fields.nextReviewAt"
-                  label="Next review"
+                  :label="task.value.value.value.scheduledCheck ? tr('Nächste automatische Prüfung', 'Next automatic check') : 'Next review'"
                   >{{
                     new Date(
                       task.value.value.value.fields.nextReviewAt,
                     ).toLocaleString()
                   }}</PropertyItem
                 >
+                <PropertyItem v-if="task.value.value.value.scheduledCheck" :label="tr('Automatische Prüfung', 'Automatic check')">
+                  <span class="break-words">{{ task.value.value.value.scheduledCheck.scope }}</span>
+                </PropertyItem>
                 <PropertyItem label="Updates">{{
                   {
                     ticket: "Ticket only",
@@ -1190,6 +1228,10 @@ const showArrived = () => {
                       ><ExternalLink class="size-3 shrink-0" aria-hidden="true" /></a>
                     </template>
                     <div class="min-w-0 space-y-3">
+                      <div v-if="!entry.comment.nativeInput && pendingQuestions.some(question => question.commentId === entry.comment.commentId)" class="flex flex-wrap items-center gap-2">
+                        <StatusBadge :label="tr('Offene Frage', 'Open question')" tone="warning" />
+                        <Button size="sm" variant="outline" :disabled="!writable" @click="answerQuestion(entry.comment.commentId)">{{ tr('Antworten', 'Answer question') }}</Button>
+                      </div>
                       <ExpandableContent
                         v-if="!entry.comment.nativeInput || entry.comment.replyTo || nativeInput(entry.comment)?.state === 'answered' || nativeInput(entry.comment)?.state === 'expired'"
                         :enabled="commentPreferences.collapseOlder && entry.kind !== 'user' && entry.comment.commentId !== newestCommentId"
@@ -1286,6 +1328,7 @@ const showArrived = () => {
               </p>
               <div
                 v-else
+                ref="commentComposer"
                 data-slot="task-comment-composer"
                 class="space-y-1.5 py-3"
                 :class="commentPreferences.order === 'newest-first' ? '' : 'ivy-chat-surface sticky bottom-0 z-10'"
@@ -1296,6 +1339,10 @@ const showArrived = () => {
                   <AlertDescription>{{ tr('Ein vorheriger Vorgang wird noch abgeschlossen. Dein Text bleibt erhalten.', 'A previous action is still being completed. Your draft is retained.') }}</AlertDescription>
                 </Alert>
                 <p v-if="error || archive.error.value" role="alert" class="text-sm text-destructive">{{ error || archive.error.value }}</p>
+                <div v-if="replyingTo" role="status" class="flex items-center gap-2 rounded-lg border bg-background p-2 text-sm">
+                  <span class="min-w-0 flex-1 truncate">{{ tr('Antwort auf:', 'Answering:') }} {{ replyingTo.body }}</span>
+                  <Button variant="ghost" size="icon-sm" :aria-label="tr('Antwort abbrechen', 'Cancel reply')" @click="replyTarget = null"><X aria-hidden="true" /></Button>
+                </div>
                 <div v-if="(task.value.value.value.workflowState === 'done' && writable) || uploading" class="flex flex-wrap items-center gap-3 px-2 text-sm">
                   <Label v-if="task.value.value.value.workflowState === 'done' && writable" class="flex items-center gap-2">
                     <Checkbox v-model="moveToTodo" :disabled="!writable" />

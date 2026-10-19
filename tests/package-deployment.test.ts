@@ -183,7 +183,7 @@ test(
   },
 );
 
-for (const kind of ['app', 'service'] as const) test(`startup keeps two ${kind} archives and removes older catalog entries and files`, async (t) => {
+for (const kind of ['app', 'service'] as const) test(`startup keeps the latest ${kind} archive and removes older catalog entries and files`, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ivy-app-retention-"));
   const packageRoot = join(root, "packages");
   const packages = [] as Array<Record<string, unknown>>;
@@ -233,9 +233,10 @@ for (const kind of ['app', 'service'] as const) test(`startup keeps two ${kind} 
     { headers: { Authorization: "Bearer " + token } });
   assert.equal(response.status, 200);
   const catalog = await response.json() as { packages: Array<{ version: string }> };
-  assert.deepEqual(catalog.packages.map(value => value.version), ["1.1.0", "1.2.0"]);
+  assert.deepEqual(catalog.packages.map(value => value.version), ["1.2.0"]);
   await assert.rejects(stat(join(packageRoot, "artifacts", "retained-ui", "1.0.0")), { code: "ENOENT" });
-  assert.equal((await stat(join(packageRoot, "artifacts", "retained-ui", "1.1.0"))).isDirectory(), true);
+  await assert.rejects(stat(join(packageRoot, "artifacts", "retained-ui", "1.1.0")), { code: "ENOENT" });
+  assert.equal((await stat(join(packageRoot, "artifacts", "retained-ui", "1.2.0"))).isDirectory(), true);
   await assert.rejects(stat(orphan), { code: 'ENOENT' });
   await assert.rejects(stat(staleUpload), { code: 'ENOENT' });
   await assert.rejects(stat(join(incoming, '00000000-0000-4000-8000-000000000001-extract')), { code: 'ENOENT' });
@@ -271,8 +272,8 @@ test('catalog collection preserves offline installations and unfinished deployme
       readiness: { state: 'unknown', message: '' } }] } };
   kernel.registry.reportHost({ ...context, ...registration }, snapshot);
   kernel.registry.disconnect('manager');
-  assert.deepEqual(kernel.packageCatalog.prune(credential.principalId).map(value => value.version), ['1.2.0']);
-  assert.deepEqual(kernel.packageCatalog.current()!.catalog.packages.map(value => value.version), ['1.0.0', '1.1.0', '1.3.0', '1.4.0']);
+  assert.deepEqual(kernel.packageCatalog.prune(credential.principalId).map(value => value.version), ['1.2.0', '1.3.0']);
+  assert.deepEqual(kernel.packageCatalog.current()!.catalog.packages.map(value => value.version), ['1.0.0', '1.1.0', '1.4.0']);
   const reconnected = kernel.registry.connect({ ...context, generation: 2 }, { serviceNodeId: 'manager', hostId: 'fixture-host', serviceName: 'service-manager',
     version: '1.0.0', buildId: digest('manager'), hiveProtocol: 1 });
   snapshot.sequence++; snapshot.status.unfinished = [];

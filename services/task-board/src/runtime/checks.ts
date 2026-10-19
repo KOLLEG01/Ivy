@@ -1,5 +1,5 @@
-import { checkBlocker, validateBlocker } from './task-coordination.js';
-import { canonical, digest, hashJson, jsonObjectContentBytes } from '../../../../packages/sdk/src/node.js';
+import { checkBlocker, questionWaitOpen, validateBlocker } from './task-coordination.js';
+import { canonical, digest, hashJson } from '../../../../packages/sdk/src/node.js';
 import { IvyError, requireThat } from '../../../../packages/sdk/src/node.js';
 import type { Agent, TaskBoard } from '../../../../packages/sdk/src/node.js';
 import { nativeServiceTools } from '../../../../packages/sdk/src/client.js';
@@ -9,6 +9,8 @@ import type { Document } from './store.js';
 import { readPlan } from './native-plan.js';
 import { checkConfiguration, configurationView, effectiveExecution, executionWithDefaults } from './configuration.js';
 import { freshContextRecovery } from './native-recovery.js';
+import { queuedUserInput } from './conversation.js';
+import { validateTaskContent } from './comment-store.js';
 
 export const same = (a: unknown, b: unknown) => a === undefined || b === undefined
   ? a === b : canonical(a) === canonical(b);
@@ -44,12 +46,12 @@ export async function sharedProjectOwner(store: TaskBoardStore, task: TaskBoard.
   } while (cursor);
   return null;
 }
-export function resultCommentFits(task: TaskBoard.Task, comment: TaskBoard.Comment, publication: TaskBoard.ObjectPin): boolean {
+export function resultCommentFits(task: TaskBoard.Task, comment: TaskBoard.Comment, publication: TaskBoard.ObjectPin, taskId: string): boolean {
   if (task.comments.length >= 512) return false;
   try {
-    canonical({ ...task, publication: null, lastHistory: publication,
+    validateTaskContent({ ...task, publication: null, lastHistory: publication,
       comments: [...task.comments, { ...comment, delivery: task.fields.userContact !== 'ticket' ? publication : null }],
-      agentCommentCount: task.agentCommentCount + 1 }, jsonObjectContentBytes - 1024);
+      agentCommentCount: task.agentCommentCount + 1 }, taskId);
     return true;
   } catch (error) {
     if (!(error instanceof IvyError && error.code === 'content_too_large')) throw error;
@@ -198,16 +200,19 @@ export class TaskBoardChecks {
       (task ? (await freshContextRecovery(this.store, task))?.target.serviceNodeId : undefined);
     await checkConfiguration(this.store, { schemaVersion: 1, defaults }, serviceNodeId, allowUnavailable);
   }
-  async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution, coordinationOnly = false): Promise<Agent.PlanDraft> {
+  async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution, coordinationOnly = false, checkOnly = false, recoveryOnly = false): Promise<Agent.PlanDraft> {
     requireThat(target && workspace && target.hostId === workspace.hostId && target.serviceNodeId === workspace.serviceNodeId,
       'task_board_execution_plan_required', 'Start must retain one resolved native owner and workspace.');
     const recovery = await freshContextRecovery(this.store, task);
     if (recovery) requireThat(same(target, recovery.target) && workspace.canonicalCwd === recovery.workspace.canonicalCwd && workspace.intendedPath === recovery.workspace.intendedPath,
       'task_board_workspace_mismatch', 'Fresh recovery must retain the original owner and workspace.');
-    if (!coordinationOnly) {
-      requireThat(!task.fields.nextReviewAt || task.fields.nextReviewAt <= now, 'task_board_time_waiting', 'The task is deferred until its next review time.');
+    if (!coordinationOnly && !recoveryOnly) {
+        const linkedQuestionOpen = await questionWaitOpen(this.store, task.questionWait);
+        const questionAnswered = !!task.questionWait && !linkedQuestionOpen;
+        requireThat(questionAnswered || task.workflowState === 'todo' && queuedUserInput(task) || !task.fields.nextReviewAt || task.fields.nextReviewAt <= now, 'task_board_time_waiting', 'The task is deferred until its next review time.');
       await this.dependencies(task.fields, taskId, true);
-      await checkBlocker(this.store, task.blocker);
+        await checkBlocker(this.store, task.blocker, task.consumedBlockers, checkOnly || questionAnswered || queuedUserInput(task));
+        requireThat(checkOnly || !linkedQuestionOpen, 'task_board_input_required', 'Waiting for the linked user question to be answered.');
     }
     const plan = await readPlan(this.store, intent); planSemantics(plan);
     if (plan.location) {

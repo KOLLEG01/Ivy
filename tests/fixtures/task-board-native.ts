@@ -55,6 +55,13 @@ export async function nativeWorkflow(t: { after: (fn: () => void) => void }, nat
     return request({ kind: 'snapshot', evidence: proof, nativeOperationId: observed.operationId, notificationCursor: 1 });
   };
   const cancel = async () => { await f.invoke({ action: 'cancel', operationId: randomUUID(), taskId: task.objectId, expectedRevision: task.revision, reason: 'Stop this isolated attempt.' }); await refresh(); };
+  const handoff = async (body = 'The overall requested work is ready for acceptance.') => {
+    await refresh();
+    await f.invoke({ action: 'comment', operationId: randomUUID(), taskId: task.objectId, expectedRevision: task.revision,
+      commentId: randomUUID(), authorKind: 'agent', purpose: 'handoff', body, handoff: { workflowState: 'review', nextReviewAt: null },
+      requests: [], responses: [], attachments: [], replyTo: null });
+    await refresh();
+  };
   return { f, startRequest, started, planned, request, update, prepare, observe, snapshot, running, cancel, refresh, nativeThread, turn,
-    ownerOperation, adopt: (outcome: TaskBoard.ActionOutcome) => { task = outcome.task!; run = outcome.run!; }, state: () => ({ task, run }) };
+    ownerOperation, handoff, adopt: (outcome: TaskBoard.ActionOutcome) => { task = outcome.task!; run = outcome.run!; }, state: () => ({ task, run }) };
 }

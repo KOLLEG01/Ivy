@@ -20,6 +20,9 @@ import { scopedOperationId } from "../../../../packages/sdk/src/client.js";
 import type { RpcClient } from "../../../../packages/sdk/src/client.js";
 import { contractVersion, localContractKeys, readableVersions, upgradeRecord, version } from "./schema.js";
 import type { ContractKey, ContractValues } from "./schema.js";
+import { TaskComments } from './comment-store.js';
+import { operationReceipt } from './operation-receipt.js';
+import { protectRunSources } from './revision-protection.js';
 
 export interface Document<K extends ContractKey> {
   key: K;
@@ -39,9 +42,13 @@ export const identityHash = (callerPrincipalId: string, operationId: string) =>
 export const mutation = (scope: string, step: string) =>
   "task-board:" + hashJson({ scope, step }).slice("sha256:".length);
 
-export const taskAttachmentPins = (task: Pick<TaskBoard.Task, "attachments" | "comments">) =>
-  [...new Map([...task.attachments, ...task.comments.flatMap(comment => comment.attachments)]
-    .map(attachment => [hashJson(attachment.object), attachment.object])).values()];
+export const taskAttachmentPins = (task: Pick<TaskBoard.Task, "attachments" | "comments"> & Partial<Pick<TaskBoard.Task, 'deliveries'>>) =>
+  [...new Map([
+    ...task.attachments.map(attachment => attachment.object),
+    ...task.comments.flatMap(comment => comment.attachments.map(attachment => attachment.object)),
+    ...task.comments.flatMap(comment => comment.handoff?.deliveries?.flatMap(delivery => delivery.artifacts.map(artifact => artifact.object)) ?? []),
+    ...(task.deliveries ?? []).flatMap(receipt => [receipt.result, ...receipt.delivery.artifacts.map(artifact => artifact.object)]),
+  ].map(pin => [hashJson(pin), pin])).values()];
 
 // The journal may run on Linux while reserving a Windows host's workspace.
 const workspaceKey = (path: string) => /^[a-z]:[\\/]|^\\\\/i.test(path)
@@ -55,6 +62,50 @@ export class TaskBoardStore {
   private readonly local: DatabaseSync;
   private readonly dataRoot: string | null;
   private collection: Promise<void> | null = null;
+  private commentCursor: string | null = null;
+  private commentsCompacted = false;
+  private compactingComments = false;
+  private commentPassPending = false;
+  private commentRetryAt = 0;
+  async protectRunSources(): Promise<void> {
+    await protectRunSources(this.client, this.rootObjectId, scope => this.preparedMutationId(scope));
+  }
+  /** Bounded storage-only backfill, including archived tickets; normal workflow CAS remains authoritative. */
+  async compactComments(limit = 2): Promise<boolean> {
+    if (this.commentsCompacted || this.compactingComments || Date.now() < this.commentRetryAt) return this.commentsCompacted;
+    this.compactingComments = true;
+    try {
+      const page: Operation.ObjectsQueryResult = await this.client.request('objects.query', { contractKey: 'task-board/task', includeArchived: true,
+        where: this.rootObjectId === null ? { field: 'object.parentId', op: 'isNull' } :
+          { field: 'object.parentId', op: 'eq', value: this.rootObjectId },
+        limit, ...(this.commentCursor ? { cursor: this.commentCursor } : {}) });
+      for (const item of page.items) {
+        if (item.contractVersion === contractVersion('task-board/task')) continue;
+        const task = await this.read('task-board/task', item.objectId, true, true);
+        if (task.value.claim || task.value.publication) { this.commentPassPending = true; continue; }
+        const value = await new TaskComments(this.client, scope => this.preparedMutationId(scope))
+          .write(task.value, task.pin.objectId, 'compact:' + hashJson(task.pin));
+        const recoveryRun = task.value.completionIssue ? await this.recoveryReference(task.value.completionIssue.run) : null;
+        try {
+          await this.client.request('objects.write', { objectId: task.pin.objectId, expectedRevision: task.pin.revision,
+            expectedArchived: task.metadata.effectivelyArchived, contractVersion: contractVersion('task-board/task'),
+            mutationId: await this.preparedMutationId('compact:' + hashJson(task.pin)),
+            references: { ...task.revision.references, ...(recoveryRun ? { 'recovery-run': recoveryRun } : {}) },
+            content: { encoding: 'json', value: value as unknown as Wire.Json } });
+        } catch (error) {
+          if (!(error instanceof IvyError && error.code === 'revision_conflict')) throw error;
+          this.commentPassPending = true;
+        }
+      }
+      this.commentCursor = page.nextCursor;
+      this.commentsCompacted = page.nextCursor === null && !this.commentPassPending;
+      if (page.nextCursor === null && this.commentPassPending) {
+        this.commentPassPending = false;
+        this.commentRetryAt = Date.now() + 60_000;
+      }
+      return this.commentsCompacted;
+    } finally { this.compactingComments = false; }
+  }
   withReadCache<T>(work: () => Promise<T>): Promise<T> {
     return this.reads.getStore() ? work() : this.reads.run(new Map(), work);
   }
@@ -81,6 +132,7 @@ export class TaskBoardStore {
       CREATE TABLE IF NOT EXISTS workspace_reservations(host_id TEXT NOT NULL,canonical_cwd TEXT NOT NULL,task_id TEXT NOT NULL,operation_id TEXT NOT NULL,PRIMARY KEY(host_id,canonical_cwd),UNIQUE(task_id));
       CREATE TABLE IF NOT EXISTS storage_usage(kind TEXT PRIMARY KEY,rows INTEGER NOT NULL,bytes INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS retired_operations(caller_id TEXT NOT NULL,operation_id TEXT NOT NULL,request_hash TEXT NOT NULL,name TEXT NOT NULL,PRIMARY KEY(caller_id,operation_id));
+      CREATE TABLE IF NOT EXISTS retired_operation_receipts(caller_id TEXT NOT NULL,operation_id TEXT NOT NULL,receipt_json TEXT NOT NULL,PRIMARY KEY(caller_id,operation_id));
       CREATE TRIGGER IF NOT EXISTS retired_operation_insert BEFORE INSERT ON documents
         WHEN NEW.key='task-board/operation' AND EXISTS(SELECT 1 FROM retired_operations WHERE name=NEW.name)
         BEGIN SELECT RAISE(ABORT,'operation_expired'); END;
@@ -199,6 +251,10 @@ export class TaskBoardStore {
     const row = this.local.prepare("SELECT request_hash FROM retired_operations WHERE caller_id=? AND operation_id=?").get(caller, operationId);
     return row ? String(row["request_hash"]) : null;
   }
+  retiredOperationReceipt(caller: string, operationId: string): TaskBoard.OperationReceipt | null {
+    const row = this.local.prepare('SELECT receipt_json FROM retired_operation_receipts WHERE caller_id=? AND operation_id=?').get(caller, operationId);
+    return row ? JSON.parse(String(row['receipt_json'])) as TaskBoard.OperationReceipt : null;
+  }
   async collectLocal(_now = Date.now(), reservedBytes = 0, reservedRows = 0, protectedId?: string, incoming?: unknown): Promise<void> {
     const full = (headroom = false) => {
       const usage = this.local.prepare("SELECT SUM(rows) AS rows,SUM(bytes) AS bytes FROM storage_usage").get()!;
@@ -223,6 +279,32 @@ export class TaskBoardStore {
       else if (value && typeof value === "object") for (const part of Object.values(value)) references(part, found);
     };
     references(incoming, incomingIds);
+    // A terminal native turn is not releasable while its business handoff is unresolved.
+    // Query only those primary tickets, then follow their exact original evidence pins.
+    let recoveryCursor: string | null = null;
+    do {
+      const page: Operation.ObjectsQueryResult = await this.client.request('objects.query', { contractKey: 'task-board/task', includeArchived: true,
+        where: { op: 'and', args: [{ field: 'data:/completionIssue/code', op: 'in', value: ['task_board_handoff_missing',
+          'task_board_recovery_context_unavailable', 'task_board_recovery_evidence_missing', 'task_board_no_progress'] },
+          { field: 'object.ownerObjectId', op: 'isNull' }, this.rootObjectId === null ? { field: 'object.parentId', op: 'isNull' } :
+            { field: 'object.parentId', op: 'eq', value: this.rootObjectId }] }, limit: 100, ...(recoveryCursor ? { cursor: recoveryCursor } : {}) });
+      for (const item of page.items) {
+        const task = await this.read('task-board/task', item.objectId);
+        const pin = task.value.completionIssue?.run; if (!pin) continue;
+        let run: Document<'task-board/run'>;
+        try { run = await this.retainedRecoveryRun(pin); }
+        catch (error) { if (error instanceof IvyError && error.code === 'not_found') continue; throw error; }
+        const pending = new Set<string>(); references(run.value, pending);
+        for (const id of pending) {
+          if (incomingIds.has(id)) continue;
+          incomingIds.add(id);
+          const row = this.local.prepare('SELECT value_json FROM revisions WHERE id=? ORDER BY revision DESC LIMIT 1').get(id);
+          if (row) references(JSON.parse(String(row['value_json'])), pending);
+          requireThat(pending.size <= 10000, 'task_board_evidence_mismatch', 'Recovery evidence exceeds its bounded lineage.');
+        }
+      }
+      recoveryCursor = page.nextCursor;
+    } while (recoveryCursor);
     // Decode each current document once, rather than the entire journal for every
     // cleanup root. Refresh changed revisions after awaits before deciding deletion.
     const documents = new Map<string, { revision: number; references: Set<string>; unresolved: boolean }>();
@@ -301,6 +383,8 @@ export class TaskBoardStore {
           const operation = this.localDocument("task-board/operation", rootId, false).value;
           this.local.prepare("INSERT OR IGNORE INTO retired_operations VALUES(?,?,?,?)")
             .run(operation.callerPrincipalId, operation.operationId, operation.requestHash, before["name"]!);
+          this.local.prepare('INSERT OR IGNORE INTO retired_operation_receipts VALUES(?,?,?)')
+            .run(operation.callerPrincipalId, operation.operationId, canonical(operationReceipt(operation)));
         }
         for (const id of ids) {
           this.local.prepare("DELETE FROM active_gates WHERE gate_id=?").run(id);
@@ -637,7 +721,9 @@ export class TaskBoardStore {
     const document = {
       key,
       pin: pinOf(result),
-      value: upgradeRecord(key, result.content.value as ContractValues[K]),
+      value: upgradeRecord(key, (key === 'task-board/task'
+        ? await new TaskComments(this.client, scope => this.preparedMutationId(scope)).read(result.content.value, result.object.id)
+        : result.content.value) as ContractValues[K]),
       metadata: result.object,
       revision: result.revision,
     };
@@ -645,11 +731,30 @@ export class TaskBoardStore {
     if (
       cacheKey &&
       cache &&
-      result.revision.byteLength <= 65536 &&
+      Buffer.byteLength(canonical(document.value)) <= 65536 &&
       cache.size < 256
     )
       cache.set(cacheKey, structuredClone(document));
     return document;
+  }
+  /** Legacy completion issues can pin a pre-closure revision already pruned before recovery existed. */
+  async retainedRecoveryRun(pin: TaskBoard.ObjectPin): Promise<Document<'task-board/run'>> {
+    try { return await this.read('task-board/run', pin); }
+    catch (error) {
+      if (!(error instanceof IvyError) || !['not_found', 'revision_pruned'].includes(error.code)) throw error;
+      const current = await this.read('task-board/run', pin.objectId);
+      requireThat(current.pin.revision >= pin.revision && ['completed', 'failed'].includes(current.value.phase) &&
+        ['succeeded', 'failed'].includes(current.value.externalOutcome.state), 'task_board_recovery_evidence_missing',
+        'A pruned recovery revision needs the same original Run with a confirmed terminal owner outcome.');
+      return current;
+    }
+  }
+  private async recoveryReference(pin: TaskBoard.ObjectPin): Promise<TaskBoard.ObjectPin | null> {
+    try { return (await this.retainedRecoveryRun(pin)).pin; }
+    catch (error) {
+      if (error instanceof IvyError && ['not_found', 'revision_pruned', 'task_board_recovery_evidence_missing'].includes(error.code)) return null;
+      throw error;
+    }
   }
   async named<K extends ContractKey>(
     key: K,
@@ -834,7 +939,9 @@ export class TaskBoardStore {
     }
     const content: Wire.Content = {
       encoding: "json",
-      value: value as Wire.Json,
+      value: (key === 'task-board/task' && !('create' in destination)
+        ? await new TaskComments(this.client, scope => this.preparedMutationId(scope)).write(value as TaskBoard.Task, destination.objectId, mutationId)
+        : value) as Wire.Json,
     };
     const references: Wire.RevisionReferences = {};
     if (key === "task-board/task") {
@@ -842,6 +949,10 @@ export class TaskBoardStore {
         result = task.latestResult;
       if (result) references["result"] = result;
       if (task.lastRun) references["run"] = task.lastRun;
+        if (task.completionIssue) {
+          const recoveryRun = await this.recoveryReference(task.completionIssue.run);
+          if (recoveryRun) references['recovery-run'] = recoveryRun;
+        }
       const attachments = taskAttachmentPins(task);
       requireThat(
         attachments.length + Object.keys(references).length <= 256,
@@ -850,6 +961,10 @@ export class TaskBoardStore {
       );
       for (const [index, pin] of attachments.entries())
         references["attachment-" + index] = pin;
+    } else if (key === 'task-board/run') {
+      const run = value as TaskBoard.Run;
+      if (!['completed', 'failed', 'cancelled'].includes(run.phase))
+        references['source-task'] = { objectId: run.taskId, revision: run.originalRequest.expectedRevision };
     } else if (key === "task-board/delivery") {
       const request = (value as TaskBoard.Delivery).chatRequest;
       if (request) references["source"] = request.source;
@@ -918,7 +1033,7 @@ export class TaskBoardStore {
     if (cache)
       for (const [id, document] of cache)
         if (document.pin.objectId === result.object.id) cache.delete(id);
-    if (cache && result.revision.byteLength <= 65536 && cache.size < 256) {
+    if (cache && Buffer.byteLength(canonical(value)) <= 65536 && cache.size < 256) {
       const primary = result.object.parentId === this.rootObjectId;
       cache.set(
         key +
@@ -1030,11 +1145,11 @@ export class TaskBoardStore {
           value?: unknown;
         };
         const value = field(document, leaf.field);
-        if (leaf.op === "eq") return canonical(value) === canonical(leaf.value);
-        if (leaf.op === "ne") return canonical(value) !== canonical(leaf.value);
+        if (leaf.op === "eq") return value !== undefined && canonical(value) === canonical(leaf.value);
+        if (leaf.op === "ne") return value !== undefined && canonical(value) !== canonical(leaf.value);
         if (leaf.op === "in")
           return (
-            Array.isArray(leaf.value) &&
+            value !== undefined && Array.isArray(leaf.value) &&
             leaf.value.some((item) => canonical(item) === canonical(value))
           );
         if (leaf.op === "contains")

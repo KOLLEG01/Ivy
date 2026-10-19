@@ -29,7 +29,7 @@ import {
 } from "@ivy/ui";
 import { usePage } from "../../../packages/ui-client/src/runtime";
 import { text } from "../../../packages/ui-client/src/native";
-import { and, base, client, rootWhere, taskContractVersions } from "./runtime";
+import { and, base, client, rootWhere, taskContractVersions, workflowContractVersions } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
 import {
@@ -148,9 +148,14 @@ const pages = usePage(async (signal, cursor) => {
       { signal },
     );
     const ids = result.items.map((item) => item.objectId),
-      readCounts = new Map<string, number>();
+      readCounts = new Map<string, number>(),
+      checkFacts = new Map<string, { openQuestionCount: number; failure: string; issue?: string; question?: boolean }>();
     if (ids.length) {
-      const reads = await client.request(
+      // New scalars are admitted only by 1.9.0. Enrich this page in one batch
+      // without changing the shared query's ordering, filters or cursor.
+      const checkIds = result.items.filter((item) => item.contractVersion === "1.9.0").map((item) => item.objectId);
+      const workflowIds = result.items.filter(item => workflowContractVersions.includes(item.contractVersion)).map(item => item.objectId);
+      const [reads, checks, workflow] = await Promise.all([client.request(
         "objects.query",
         {
           contractKey: "task-board/comment-read-state",
@@ -168,12 +173,41 @@ const pages = usePage(async (signal, cursor) => {
           limit: 100,
         },
         { signal },
-      );
+      ), checkIds.length ? client.request(
+        "objects.query",
+        {
+          contractKey: "task-board/task",
+          contractVersions: ["1.9.0"],
+          where: and(
+            rootWhere(props.workspace.rootObjectId),
+            { op: "in", field: "object.id", value: checkIds },
+          ),
+          ...(props.archived ? { includeArchived: true } : {}),
+          select: ["data:/openQuestionCount", "data:/scheduledCheck/failure/detail"],
+          limit: 20,
+        },
+        { signal },
+      ) : null, workflowIds.length ? client.request('objects.query', {
+        contractKey: 'task-board/task', contractVersions: workflowContractVersions,
+        where: and(rootWhere(props.workspace.rootObjectId), { op: 'in', field: 'object.id', value: workflowIds }),
+        ...(props.archived ? { includeArchived: true } : {}),
+        select: ['data:/openQuestionCount', 'data:/scheduledCheck/failure/detail', 'data:/completionIssue/detail', 'data:/questionWait/taskId'], limit: 20,
+      }, { signal }) : null]);
       for (const item of reads.items)
         readCounts.set(
           text(item.values["data:/taskId"]),
           Number(item.values["data:/readAgentCommentCount"] ?? 0),
         );
+      for (const item of checks?.items ?? [])
+        checkFacts.set(item.objectId, {
+          openQuestionCount: Number(item.values["data:/openQuestionCount"] ?? 0),
+          failure: text(item.values["data:/scheduledCheck/failure/detail"]),
+        });
+      for (const item of workflow?.items ?? []) checkFacts.set(item.objectId, {
+        openQuestionCount: Number(item.values['data:/openQuestionCount'] ?? 0),
+        failure: text(item.values['data:/scheduledCheck/failure/detail']), issue: text(item.values['data:/completionIssue/detail']),
+        question: !!item.values['data:/questionWait/taskId'],
+      });
     }
     return {
       nextCursor: result.nextCursor,
@@ -215,6 +249,10 @@ const pages = usePage(async (signal, cursor) => {
               }
             : null,
           executionRequirement: requirement,
+          openQuestionCount: checkFacts.get(item.objectId)?.openQuestionCount ?? 0,
+          scheduledCheckFailure: checkFacts.get(item.objectId)?.failure ?? "",
+          completionIssue: checkFacts.get(item.objectId)?.issue,
+          questionWait: checkFacts.get(item.objectId)?.question,
         });
         return {
           id: item.objectId,
@@ -229,6 +267,8 @@ const pages = usePage(async (signal, cursor) => {
           resolvedHost,
           condition: derived.state,
           conditionDetail: derived.detail,
+          openQuestionCount: checkFacts.get(item.objectId)?.openQuestionCount ?? 0,
+          checkFailure: checkFacts.get(item.objectId)?.failure ?? "",
           nextReviewAt: text(item.values["data:/fields/nextReviewAt"]),
           dueAt: text(item.values["data:/fields/dueAt"]),
           unreadAgentComments: Math.max(
@@ -494,7 +534,7 @@ defineExpose({ refresh: pages.refresh });
             <span
               v-if="task.nextReviewAt"
               class="inline-flex items-center gap-1"
-              :title="'Review ' + new Date(task.nextReviewAt).toLocaleString()"
+              :title="'Next check ' + new Date(task.nextReviewAt).toLocaleString()"
               ><Clock class="size-3.5" aria-hidden="true" />{{
                 shortDate(task.nextReviewAt)
               }}</span
@@ -533,6 +573,8 @@ defineExpose({ refresh: pages.refresh });
             :tone="conditionTone(task.condition)"
             :title="task.conditionDetail"
           />
+          <StatusBadge v-if="task.openQuestionCount && task.condition !== 'needs_user'" label="Needs you" tone="warning" class="mt-2" />
+          <StatusBadge v-if="task.checkFailure" label="Check failed" tone="bad" class="mt-2" :title="task.checkFailure" />
           <DropdownMenu
             ><DropdownMenuTrigger as-child
               ><Button

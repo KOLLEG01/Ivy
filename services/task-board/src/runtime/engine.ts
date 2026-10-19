@@ -1,6 +1,6 @@
-import { coordinationPending, peerComment, workspaceIdentity } from './task-coordination.js';
+import { checkBlocker, consumeBlocker, coordinationPending, peerComment, questionWaitOpen, workspaceIdentity } from './task-coordination.js';
 import { publishBrowserNotice } from '../../../../packages/sdk/src/node.js';
-import { canonical, digest, hashJson, jsonObjectContentBytes } from "../../../../packages/sdk/src/node.js";
+import { digest, hashJson } from "../../../../packages/sdk/src/node.js";
 import { connectionOwner } from "../../../../packages/sdk/src/connection-owner.js";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
 import { validateTaskBoard } from "../../../../packages/sdk/src/node.js";
@@ -32,6 +32,11 @@ import { checkConfiguration, configurationName, configurationView } from './conf
 import { TaskBoardNativeLifecycle } from './native-lifecycle.js';
 import { unstartedArchivedContext } from './native-recovery.js';
 import { failedRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
+import { openQuestions, queuedTaskEdits, queuedUserInput } from './conversation.js';
+import { retryScheduledCheck, scheduledCheckDue } from './handoff.js';
+import { operationReceipt } from './operation-receipt.js';
+import { executionMode, missingHandoff, nextExecutionMode } from './execution-mode.js';
+import { validateTaskContent } from './comment-store.js';
 
 /** A Task has run once it has any attempt, claim, Run or native context. */
 export const started = (task: TaskBoard.Task) =>
@@ -41,6 +46,12 @@ type Op = Document<"task-board/operation">;
 type WriteKey = TaskBoard.PreparedWrite["contractKey"];
 const terminal = (task: TaskBoard.Task) =>
   ["done", "cancelled"].includes(task.workflowState);
+function handoffWork(task: TaskBoard.Task): TaskBoard.HandoffWork {
+  requireThat(task.claim, 'task_board_handoff_changed', 'The completion intent requires its original active claim.');
+  const { priority: _priority, nextReviewAt: _next, dueAt: _due, userContact: _contact, ...fields } = task.fields;
+  return { claimOperationId: task.claim.operationId, workRevision: task.workRevision,
+    contentHash: hashJson({ fields, parentTaskId: task.parentTaskId ?? null }), primaryResourceRef: task.primaryResourceRef };
+}
 const emptyOutcome = (id: string): TaskBoard.ActionOutcome => ({
   operationId: id,
   task: null,
@@ -169,6 +180,13 @@ export class TaskBoardEngine {
       source: "user",
     };
     if (request.action === 'comment' && request.authorKind === 'agent' || request.action === 'create' && request.parentTaskId) actor.source = 'worker';
+    if (actor.source === 'user' && 'taskId' in request) {
+      const targetTask = await this.store.read('task-board/task', request.taskId);
+      if (targetTask.value.claim) {
+        const nativeOwner = await this.store.client.request('serviceNodes.get', { serviceNodeId: targetTask.value.claim.target.serviceNodeId });
+        if (nativeOwner.principalId === actor.principalId) actor.source = 'worker';
+      }
+    }
     if (request.action === "savePlan") {
       const contract = checkedNativeContract(request.plan.nativeVersion, {
         sourceHash: request.plan.catalogSourceHash,
@@ -216,7 +234,14 @@ export class TaskBoardEngine {
         ),
       );
     }
-    return this.execute(await this.operations.begin(request, actor));
+    return this.execute(await this.operations.begin(request, actor,
+      request.action === 'comment' && request.handoff ? async () => {
+        requireThat(!request.sourceTaskId, 'task_board_handoff_source', 'Omit sourceTaskId on your own handoff; it is only for a directed message to another task.');
+        const task = await this.store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision });
+        await this.validateAction(request, task.value, actor, new Date().toISOString(), request.operationId);
+        requireThat(task.metadata.currentRevision === request.expectedRevision, 'revision_conflict', 'Read the current ticket before declaring its completion intent.');
+        return { run: task.value.claim!.run!, work: handoffWork(task.value) };
+      } : undefined));
   }
   async configuration(): Promise<TaskBoard.ConfigurationView> {
     await this.verifyOwner();
@@ -243,12 +268,28 @@ export class TaskBoardEngine {
     request: TaskBoard.NativeUpdateRequest,
   ): Promise<TaskBoard.ActionOutcome> {
     await this.verifyOwner();
+    let publicationTask: TaskBoard.ObjectPin | undefined;
+    if (request.change.kind === 'completion' || request.change.kind === 'transcript' || request.change.kind === 'snapshot') {
+      const before = await this.store.read('task-board/task', request.taskId);
+      const original = await this.operations.find(this.settings.principalId, request.operationId);
+      for (const intent of await this.operations.pendingHandoffs(request.run.objectId)) {
+        try { await this.execute(intent); }
+        catch (error) {
+          const latest = await this.store.read('task-board/operation', intent.pin.objectId);
+          if (latest.value.phase !== 'failed') throw error;
+        }
+      }
+      if (!original && before.pin.revision === request.expectedRevision) {
+        const after = await this.store.read('task-board/task', request.taskId);
+        if (after.pin.revision !== before.pin.revision) publicationTask = after.pin;
+      }
+    }
     return this.execute(
       await this.operations.begin(request, {
         principalId: this.settings.principalId,
         ...this.owner,
         source: "native",
-      }),
+      }, undefined, publicationTask),
     );
   }
   async nativeComment(request: TaskBoard.CommentActionRequest): Promise<TaskBoard.ActionOutcome> {
@@ -278,7 +319,8 @@ export class TaskBoardEngine {
   async operation(
     operationId: string,
     context: InvocationContext,
-  ): Promise<TaskBoard.Operation> {
+    receiptOnly = false,
+  ): Promise<TaskBoard.Operation | TaskBoard.OperationReceipt> {
     await this.verifyOwner();
     context.signal.throwIfAborted();
     validateTaskBoard("OperationQuery", { operationId });
@@ -287,6 +329,10 @@ export class TaskBoardEngine {
       "task_board_identity_conflict",
       "The Operation query must use this live connection generation.",
     );
+    if (receiptOnly) {
+      const receipt = this.store.retiredOperationReceipt(context.callerPrincipalId, operationId);
+      if (receipt) return receipt;
+    }
     const operation = await this.operations.find(
       context.callerPrincipalId,
       operationId,
@@ -296,7 +342,7 @@ export class TaskBoardEngine {
       "not_found",
       "This caller has no retained TaskBoard operation with that identity.",
     );
-    return operation.value;
+    return receiptOnly ? operationReceipt(operation.value) : operation.value;
   }
   condition(task: TaskBoard.Task): TaskBoard.ExecutionCondition {
     return executionCondition({
@@ -304,11 +350,16 @@ export class TaskBoardEngine {
       control: task.fields.control,
       publication: !!task.publication,
       claim: task.claim
-        ? { phase: task.claim.phase, hostId: task.claim.target.hostId }
+        ? { phase: task.claim.phase, hostId: task.claim.target.hostId, mode: executionMode(task.claim.request) }
         : null,
       waiting: task.waiting,
       executionRequirement: task.fields.executionRequirement,
       requiredCapabilities: task.fields.requiredCapabilities,
+      openQuestionCount: openQuestions(task).length,
+      scheduledCheckFailure: task.scheduledCheck?.failure?.detail,
+      completionIssue: task.completionIssue?.detail,
+      questionWait: !!task.questionWait,
+      recovery: missingHandoff(task) && task.fields.control === 'agent' && !!task.primaryResourceRef ? { attempts: task.completionIssue?.attempts ?? 0, retryAt: task.completionIssue?.retryAt ?? null } : undefined,
     });
   }
   private async taskDocument(
@@ -583,6 +634,10 @@ export class TaskBoardEngine {
         throw new IvyError(cause.code, cause.message, "unknown", cause.details);
       }
     }
+    if (operation.value.handoffRun && operation.value.writes.length === 0 && 'taskId' in request) {
+      const current = await this.store.read('task-board/task', request.taskId);
+      if (current.value.publication) throw new IvyError('task_board_publication_busy', 'Reconcile the recorded publication before applying this retained handoff.', 'unknown');
+    }
     // Busy or ambiguous gate acquisition is not a failed domain action. Its accepted intent remains.
     let releasedCategoryRetry = false;
     try {
@@ -669,6 +724,11 @@ export class TaskBoardEngine {
       return result;
     } catch (error) {
       if (releasedCategoryRetry) throw error;
+      if (error instanceof IvyError && error.code === 'task_board_handoff_pending' &&
+          !(await this.store.read('task-board/operation', operation.pin.objectId)).value.writes.length) {
+        await this.coordination.releaseUnstarted(operation.pin.objectId);
+        throw new IvyError(error.code, error.message, 'unknown');
+      }
       return this.failedPublication(operation.pin.objectId, error);
     }
   }
@@ -714,7 +774,9 @@ export class TaskBoardEngine {
         operation,
         async (pin, task) => {
           this.categoryProjection.observe(pin.objectId, pin.revision, task);
-          const comment = task.comments.findLast(value => value.operationId === request.operationId && value.authorKind === 'agent' && ['question', 'handoff'].includes(value.purpose ?? ''));
+          const comment = task.comments.findLast(value => value.authorKind === 'agent' &&
+            (value.operationId === request.operationId && value.purpose === 'question' ||
+             request.action === 'nativeUpdate' && task.workflowState === 'review' && !!value.delivery && value.purpose === 'handoff' && value.run?.objectId === request.run.objectId));
           if (comment && task.fields.userContact !== 'ticket' && (comment.purpose !== 'handoff' || !task.parentTaskId)) await publishBrowserNotice(this.store.client, 'task-board', {
             title: 'Ivy · ' + task.fields.title, body: comment.body, tag: hashJson([pin.objectId, comment.commentId]),
             target: { uiId: 'task-board-ui', fragment: '#/tasks?' + new URLSearchParams({ node: this.owner.serviceNodeId, id: pin.objectId }) },
@@ -837,14 +899,23 @@ export class TaskBoardEngine {
       );
       return outcome;
     }
-    const base = await this.store.read("task-board/task", {
+    const reservation = operation.value.writes[0]?.destination;
+    let base = first && operation.value.handoffWork ? await this.store.read('task-board/task', request.taskId) : await this.store.read("task-board/task", {
         objectId: request.taskId,
-        revision: request.expectedRevision,
-      }),
-      previous = base.value;
+        revision: operation.value.handoffRun && reservation && 'expectedRevision' in reservation ? reservation.expectedRevision : request.expectedRevision,
+      });
+    if (first && operation.value.handoffRun) {
+      const current = operation.value.handoffWork ? base : await this.store.read('task-board/task', request.taskId);
+      const expected = operation.value.handoffWork ?? handoffWork(base.value);
+      requireThat(current.value.claim?.run?.objectId === operation.value.handoffRun.objectId &&
+        same(handoffWork(current.value), expected),
+      'task_board_handoff_changed', 'The original handoff no longer belongs to the same unchanged work and execution claim.');
+      base = current;
+    }
+    const previous = base.value;
     if (first) {
       requireThat(
-        base.metadata.currentRevision === request.expectedRevision &&
+        base.metadata.currentRevision === base.pin.revision &&
           !previous.publication,
         "revision_conflict",
         "The task changed or has an unfinished publication. Reload its current revision.",
@@ -867,7 +938,15 @@ export class TaskBoardEngine {
     // Start claims precede Run creation, even though publication is still pending. The gate and
     // marker prevent a native observer or another action from using a half-published claim.
     if (request.action === "start" || request.action === "continue") {
-      if (!(request.action === 'continue' && request.coordinationOnly)) delete next.blocker;
+      const mode = executionMode(request);
+      if (first && mode === 'work') {
+        const questionAnswered = !!previous.questionWait && !await questionWaitOpen(this.store, previous.questionWait);
+        const observation = await checkBlocker(this.store, previous.blocker, previous.consumedBlockers, questionAnswered || queuedUserInput(previous));
+        if (observation) next.consumedBlockers = consumeBlocker(previous.consumedBlockers, observation);
+        delete next.completionIssue;
+        if (questionAnswered) delete next.questionWait;
+      }
+      if (mode === 'work' || mode === 'check') delete next.blocker;
       const claim: TaskBoard.Claim = {
         operationId: request.operationId,
         callerPrincipalId: operation.value.callerPrincipalId,
@@ -908,6 +987,7 @@ export class TaskBoardEngine {
         ...submitted,
         category: submitted.category === null ? null : normalizedCategory!,
       };
+      if (next.fields.nextReviewAt === null) delete next.scheduledCheck;
       if (!previous.claim && (request.parentTaskId === undefined || !same(previous.fields, next.fields))) next.workRevision++;
     }
     if (request.action === "reassign" && first) {
@@ -932,6 +1012,8 @@ export class TaskBoardEngine {
         ...(request.purpose ? { purpose: request.purpose } : {}),
         ...(request.nativeInput ? { nativeInput: request.nativeInput } : {}),
         ...(request.sourceTaskId ? { sourceTaskId: request.sourceTaskId } : {}),
+        ...(request.handoff ? { handoff: request.handoff } : {}),
+        ...(request.resolvesQuestions ? { resolvesQuestions: request.resolvesQuestions } : {}),
         delivery: request.contactUser && request.purpose === "question" && previous.fields.userContact !== "ticket" ? steps.pin : null,
         attachments: request.attachments, run: previous.lastRun, turnId: null, replyTo: request.replyTo,
         createdAt: at, operationId: request.operationId,
@@ -942,20 +1024,20 @@ export class TaskBoardEngine {
         : previous.commentDeliveries;
       requireThat(previous.comments.length < 512 && commentDeliveries.length <= 512,
         "content_too_large", "The Task has reached its comment capacity.");
-      canonical({ ...next, comments: [...previous.comments, comment], commentDeliveries,
-        lastHistory: steps.pin }, jsonObjectContentBytes - 1024);
+      validateTaskContent({ ...next, comments: [...previous.comments, comment], commentDeliveries,
+        lastHistory: steps.pin }, request.taskId);
     }
     if (request.action === "uploadAttachment" && first) {
       const bytes = Buffer.from(request.bytesBase64, "base64");
       const attachment: TaskBoard.TaskAttachment = { attachmentId: request.attachmentId, object: steps.pin,
         filename: request.filename, mediaType: request.mediaType, byteLength: bytes.length,
         contentHash: digest(bytes), uploader: actor, createdAt: at };
-      canonical({ ...next, attachments: [...previous.attachments, attachment], lastHistory: steps.pin }, jsonObjectContentBytes - 1024);
+      validateTaskContent({ ...next, attachments: [...previous.attachments, attachment], lastHistory: steps.pin }, request.taskId);
     }
     if (request.action === 'defer' && request.blocker) next.blocker = request.blocker;
     const reserved = await steps.write("task-board/task", next, {
       objectId: request.taskId,
-      expectedRevision: request.expectedRevision,
+      expectedRevision: base.pin.revision,
     });
     switch (request.action) {
       case "edit": {
@@ -1014,6 +1096,10 @@ export class TaskBoardEngine {
       }
       case "transition":
         next.workflowState = request.workflowState;
+        if (request.workflowState === 'todo' && previous.completionIssue) {
+          if (missingHandoff(previous)) next.completionIssue = { ...previous.completionIssue, attempts: 0, retryAt: null };
+          else delete next.completionIssue;
+        }
         next.waiting =
           request.workflowState === "waiting"
             ? {
@@ -1033,6 +1119,13 @@ export class TaskBoardEngine {
         detail = request.detail ?? `Moved to ${request.workflowState}.`;
         break;
       case "defer":
+        if ('recoveryRetryAt' in request) {
+          next.completionIssue = { ...(previous.completionIssue ?? { run: previous.lastRun!, operationId: request.operationId }),
+            code: request.recoveryRetryAt === null ? 'task_board_recovery_evidence_missing' : 'task_board_handoff_missing',
+            retryAt: request.recoveryRetryAt ?? null, detail: request.detail.slice(0, 2048) };
+          kind = 'deferred'; detail = next.completionIssue.detail;
+          break;
+        }
         next.workflowState = "waiting";
         if (request.blocker) next.blocker = request.blocker;
         next.waiting = {
@@ -1041,6 +1134,14 @@ export class TaskBoardEngine {
           since: at,
         };
         next.fields = { ...next.fields, nextReviewAt: request.nextReviewAt };
+        if (request.questionWait === null) delete next.questionWait;
+        else if (request.questionWait) next.questionWait = request.questionWait;
+        if (request.checkScope) next.scheduledCheck = { ...(previous.scheduledCheck?.scope === request.checkScope ? previous.scheduledCheck : {}), scope: request.checkScope };
+        else if (request.nextReviewAt === null) delete next.scheduledCheck;
+        if (actor.source === 'scheduler' && previous.scheduledCheck && scheduledCheckDue(previous, at) && request.reason !== 'time') {
+          next = retryScheduledCheck(next, previous.scheduledCheck, at, 'task_board_check_' + request.reason, request.detail, request.nextReviewAt ?? undefined);
+          if (previous.workflowState === 'review') { next.workflowState = 'review'; next.waiting = null; }
+        }
         kind = "deferred";
         detail = request.detail;
         break;
@@ -1071,6 +1172,8 @@ export class TaskBoardEngine {
           operationId: request.operationId,
           callerPrincipalId: operation.value.callerPrincipalId,
           originalRequest: request,
+          ...(request.checkOnly ? { checkContext: { at: previous.fields.nextReviewAt!, workflowState: previous.workflowState as TaskBoard.CheckContext['workflowState'],
+            waiting: previous.waiting, scheduledCheck: previous.scheduledCheck!, latestResult: previous.latestResult, acceptedReview: previous.acceptedReview } } : {}),
           requestHash: hashJson(request),
           target: claim.target,
           workspace: claim.workspace,
@@ -1197,7 +1300,7 @@ export class TaskBoardEngine {
             createdAt: at,
             operationId: request.operationId,
           };
-          const fits = resultCommentFits(next, comment, steps.pin);
+          const fits = resultCommentFits(next, comment, steps.pin, request.taskId);
           if (fits && previous.fields.userContact !== "ticket") {
             const delivery = await steps.create(
               "task-board/delivery",
@@ -1237,6 +1340,8 @@ export class TaskBoardEngine {
           ...(request.purpose ? { purpose: request.purpose } : {}),
           ...(request.nativeInput ? { nativeInput: request.nativeInput } : {}),
           ...(request.sourceTaskId ? { sourceTaskId: request.sourceTaskId } : {}),
+          ...(request.handoff ? { handoff: request.handoff } : {}),
+          ...(request.resolvesQuestions ? { resolvesQuestions: request.resolvesQuestions } : {}),
           requests: request.requests,
           responses: request.responses,
           delivery: null,
@@ -1324,6 +1429,7 @@ export class TaskBoardEngine {
         break;
       }
     }
+    next.openQuestionCount = openQuestions(next).length;
     const history = this.history(operation, request.taskId, base, kind, detail);
     history.result = outcome.result;
     history.review = outcome.review;
@@ -1389,6 +1495,15 @@ export class TaskBoardEngine {
     at: string,
     operationId: string,
   ): Promise<void> {
+    if (actor.source === 'worker' && task.claim) {
+      const mode = executionMode(task.claim.request);
+      requireThat(mode !== 'recovery' || ['comment', 'uploadAttachment', 'cancel'].includes(request.action),
+        'task_board_recovery_scope', 'Handoff recovery may record existing evidence and a completion intent; it cannot perform business workflow edits.');
+      if (mode === 'recovery' && request.action === 'comment') requireThat(request.authorKind !== 'user' && request.purpose !== 'question' && !request.contactUser,
+        'task_board_recovery_scope', 'Recovery records agent evidence; it cannot fabricate user input or a new approval question.');
+      requireThat(mode !== 'coordination' || !['edit', 'defer'].includes(request.action),
+        'task_board_coordination_scope', 'Coordination preserves this ticket work, schedule and blocker.');
+    }
     requireThat(
       !terminal(task) ||
         (["edit", "comment", "uploadAttachment"].includes(request.action) || request.action === "transition" &&
@@ -1403,14 +1518,22 @@ export class TaskBoardEngine {
       rateLimitRecovery = !!retryAt && (request.action === 'continue' ? retryAt <= at
         : request.nextReviewAt === retryAt && request.detail === rateLimitWaitingDetail(retryAt));
     }
+    const handoffRecovery = (request.action === 'continue' && !!request.recoveryFor || request.action === 'defer' && 'recoveryRetryAt' in request) &&
+      nextExecutionMode(task, at) === 'recovery';
     if (actor.source === "scheduler")
       requireThat(
         task.fields.control === "agent" &&
           ["start", "continue", "defer", "transition"].includes(
             request.action,
           ) &&
-          (["todo", "waiting"].includes(task.workflowState) || request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task)) &&
-          (!task.waiting || rateLimitRecovery || request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task) ||
+          (["todo", "waiting"].includes(task.workflowState) || handoffRecovery ||
+            (request.action === 'start' || request.action === 'continue') && request.checkOnly === true && scheduledCheckDue(task, at) ||
+            request.action === 'defer' && scheduledCheckDue(task, at) || request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task)) &&
+          (!task.waiting || rateLimitRecovery ||
+            handoffRecovery ||
+            request.action === 'continue' && !!task.questionWait && !await questionWaitOpen(this.store, task.questionWait) ||
+            scheduledCheckDue(task, at) && (request.action === 'defer' || (request.action === 'start' || request.action === 'continue') && request.checkOnly === true) && !['external_outcome', 'publication'].includes(task.waiting.reason) ||
+            request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task) ||
             request.action === 'continue' && task.waiting.reason === 'user' && await unstartedArchivedContext(this,
               await this.store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision })) ||
             ["time", "dependency", "host", "capability", "workspace"].includes(
@@ -1500,7 +1623,7 @@ export class TaskBoardEngine {
       case "continue":
         noClaim();
         requireThat(
-          ["todo", "waiting"].includes(task.workflowState) || request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task),
+          ["todo", "waiting"].includes(task.workflowState) || handoffRecovery || request.checkOnly === true && scheduledCheckDue(task, at) || request.action === 'continue' && request.coordinationOnly === true && coordinationPending(task),
           "task_board_invalid_transition",
           "Automatic execution starts from Todo or a resumable wait.",
         );
@@ -1516,7 +1639,22 @@ export class TaskBoardEngine {
           "Native Task allocation is automatic for agent-controlled work.",
         );
         {
-          const coordinationOnly = request.action === 'continue' && request.coordinationOnly === true;
+          const mode = executionMode(request);
+          const coordinationOnly = mode === 'coordination';
+          const recoveryOnly = mode === 'recovery';
+          if (recoveryOnly && request.action === 'continue') {
+            const origin = await this.store.read('task-board/run', request.recoveryFor!.objectId);
+            requireThat(nextExecutionMode(task, at) === 'recovery' &&
+              request.commentIds.length === 0 && same(request.recoveryFor, task.completionIssue?.run ?? task.lastRun) &&
+              origin.value.taskId === request.taskId && ['completed', 'failed'].includes(origin.value.phase) &&
+              ['succeeded', 'failed'].includes(origin.value.externalOutcome.state) && !origin.value.cancellation &&
+              same(origin.value.primaryResourceRef, task.primaryResourceRef), 'task_board_recovery_evidence_missing',
+              'Recovery requires its exact terminal original Run and the unchanged native context.');
+          }
+          if (request.checkOnly) requireThat(!coordinationOnly && scheduledCheckDue(task, at) && request.commentIds.every(id => queuedTaskEdits(task).includes(id)),
+            'task_board_invalid_transition', 'An independent check requires its due retained scope and may acknowledge only the pinned field-edit markers.');
+          else if (!coordinationOnly && !recoveryOnly) requireThat(openQuestions(task).length === 0 || request.commentIds.some(id => task.comments.some(comment => comment.commentId === id && comment.authorKind === 'user')),
+            'task_board_input_required', 'Unanswered questions permit only the scheduled independent check or an explicit user continuation.');
           if (coordinationOnly) requireThat(coordinationPending(task) && request.commentIds.length > 0 && request.commentIds.every(id => task.commentDeliveries.some(delivery => delivery.commentId === id && delivery.state === 'queued') && task.comments.some(comment => comment.commentId === id && peerComment(comment))),
             'task_board_invalid_transition', 'Coordination requires queued directed task messages and a saved primary.');
           const plan = await this.checks.execution(
@@ -1527,6 +1665,8 @@ export class TaskBoardEngine {
             request.target,
             request.workspace,
             coordinationOnly,
+            request.checkOnly === true,
+            recoveryOnly,
           );
           const input = plan.turnStart.input;
           requireThat(
@@ -1571,14 +1711,21 @@ export class TaskBoardEngine {
         }
         break;
       case "defer":
+        if ('recoveryRetryAt' in request) requireThat(actor.source === 'scheduler' && missingHandoff(task) && !!(task.completionIssue?.run ?? task.lastRun) &&
+          request.nextReviewAt === task.fields.nextReviewAt && (request.recoveryRetryAt === null || request.recoveryRetryAt! > at),
+          'task_board_forbidden', 'Only the scheduler can defer this original handoff recovery without changing its business schedule.');
         if (!request.blocker) noClaim();
         requireThat(
-          (["todo", "waiting"].includes(task.workflowState) || !!request.blocker && task.workflowState === 'in_progress') &&
+          (["todo", "waiting", "review"].includes(task.workflowState) || !!request.blocker && task.workflowState === 'in_progress') &&
             task.waiting?.reason !== "external_outcome",
           "task_board_invalid_transition",
           "This task cannot be deferred while its outcome is unresolved.",
         );
         await this.checks.deferral(request, request.taskId, at);
+        requireThat(!request.checkScope || !!request.nextReviewAt && request.nextReviewAt > at,
+          'task_board_invalid_date', 'An independent check needs a future date and its explicit scope.');
+        if (request.questionWait) requireThat(await questionWaitOpen(this.store, request.questionWait), 'task_board_comment_mismatch', 'Link an unanswered user question.');
+        if (request.questionWait === null && task.questionWait) requireThat(!await questionWaitOpen(this.store, task.questionWait), 'task_board_input_required', 'The linked user question is still unanswered.');
         break;
       case "reassign":
         await this.checks.fields(
@@ -1671,9 +1818,45 @@ export class TaskBoardEngine {
         }
         break;
       case "comment":
+        if (request.handoff && task.claim) requireThat(executionMode(task.claim.request) !== 'coordination',
+          'task_board_coordination_scope', 'A coordination-only turn cannot replace the work handoff.');
+        requireThat(!request.handoff || !request.sourceTaskId, 'task_board_handoff_source', 'Omit sourceTaskId on your own handoff; it is only for a directed message to another task.');
+        requireThat(!request.handoff || actor.source === 'worker' && request.purpose === 'handoff' && !request.sourceTaskId && !!task.claim?.run,
+          'task_board_forbidden', 'Only the active worker can declare its own completion intent.');
+        requireThat(actor.source !== 'worker' || request.purpose !== 'handoff' || !!request.handoff,
+          'task_board_handoff_required', 'A worker handoff must explicitly declare review readiness or waiting.');
+        if (request.handoff) {
+          const handoff = request.handoff;
+          requireThat(handoff.workflowState === 'waiting' ? !!handoff.waiting : !handoff.waiting,
+            'invalid_arguments', 'Only a waiting handoff must declare its actual waiting condition.');
+          if (handoff.waiting?.reason === 'user') requireThat(openQuestions(task).length > 0 ||
+            await questionWaitOpen(this.store, handoff.questionWait ?? task.questionWait),
+            'task_board_input_required', 'A worker user wait must identify a real unanswered question. Use todo with nextStep for unfinished authorized work.');
+          if (handoff.workflowState === 'todo') requireThat(!!handoff.nextStep && !handoff.waiting && !handoff.checkScope && !handoff.checkFailure &&
+            handoff.nextReviewAt === null && openQuestions(task).length === 0 &&
+            !await questionWaitOpen(this.store, handoff.questionWait ?? task.questionWait),
+            'task_board_input_required', 'A continuation needs its next step and cannot bypass an unanswered question.');
+          date(handoff.nextReviewAt);
+          requireThat(!handoff.checkScope || !!handoff.nextReviewAt && handoff.nextReviewAt > at,
+            'task_board_invalid_date', 'A scheduled check needs a future date and explicit independent scope.');
+          requireThat(!handoff.checkFailure || !!handoff.checkScope, 'invalid_arguments', 'A failed check must retain its explicit retry scope.');
+          if (handoff.waiting) await this.checks.deferral({ ...handoff.waiting, nextReviewAt: handoff.nextReviewAt }, request.taskId, at);
+          if (handoff.questionWait) requireThat(await questionWaitOpen(this.store, handoff.questionWait), 'task_board_comment_mismatch', 'Link an unanswered user question.');
+          if (handoff.questionWait === null && task.questionWait) requireThat(!await questionWaitOpen(this.store, task.questionWait), 'task_board_input_required', 'The linked user question is still unanswered.');
+          requireThat(new Set([...(task.deliveries ?? []).map(value => value.delivery.key), ...(handoff.deliveries ?? []).map(value => value.key)]).size <= 64,
+            'task_board_delivery_limit', 'A task can retain at most 64 named work deliveries.');
+          for (const delivery of handoff.deliveries ?? []) await this.checks.content({ summary: 'Delivered work.', artifacts: delivery.artifacts,
+            codeReferences: delivery.codeReferences, checks: [], repositoryResult: null, limitations: [] });
+          requireThat(!(handoff.deliveries ?? []).some(delivery => delivery.artifacts.some(artifact => !!this.store.localKey(artifact.object.objectId))),
+            'task_board_invalid_reference', 'Named deliveries must identify published artifacts, not local workflow evidence.');
+        }
+        for (const id of request.resolvesQuestions ?? []) requireThat(task.comments.some(comment => comment.commentId === id && comment.purpose === 'question' && !comment.nativeInput && !comment.sourceTaskId),
+          'task_board_comment_mismatch', 'Only existing ordinary ticket questions can be explicitly resolved.');
         if (request.sourceTaskId) {
           requireThat(['worker', 'native'].includes(actor.source) && request.sourceTaskId !== request.taskId && !request.moveToTodo, 'task_board_forbidden', 'Directed agent comments must identify another source task and cannot reopen Done.');
           const source = await this.store.read('task-board/task', request.sourceTaskId);
+          if (source.value.claim) requireThat(executionMode(source.value.claim.request) !== 'recovery',
+            'task_board_recovery_scope', 'A handoff recovery cannot initiate directed business work.');
           if (actor.source === 'native') await this.checks.aggregate(source.value, request.sourceTaskId);
           requireThat(source.value.fields.control === 'agent' && (actor.source === 'native'
             ? source.value.parentTaskId === request.taskId && source.value.workflowState === 'review' && !!source.value.latestResult && !source.value.claim && !source.value.publication
@@ -1681,7 +1864,9 @@ export class TaskBoardEngine {
         }
         requireThat(!request.nativeInput || actor.source === 'native', 'task_board_forbidden', 'Native input observations are recorded only by TaskBoard.');
         requireThat(!request.contactUser || request.purpose === 'question', 'invalid_arguments', 'Only important questions can request user contact.');
-        requireThat(taskAttachmentPins({ ...task, attachments: [...task.attachments, ...request.attachments] }).length <= 254,
+        const retainedPins = [...taskAttachmentPins({ ...task, attachments: [...task.attachments, ...request.attachments] }),
+          ...(request.handoff?.deliveries ?? []).flatMap(delivery => delivery.artifacts.map(artifact => artifact.object))];
+        requireThat(new Set(retainedPins.map(hashJson)).size + (request.handoff?.deliveries?.length ? 1 : 0) <= 254,
           "limit_exceeded", "A Task can retain at most 254 attachments alongside its Run and final Result.");
         for (const attachment of request.attachments)
           await this.checks.artifact({

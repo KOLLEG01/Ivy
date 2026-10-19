@@ -1,6 +1,7 @@
 import { hashJson, requireThat } from '../../../../packages/sdk/src/node.js';
 import type { TaskBoard, Wire } from '../../../../packages/sdk/src/node.js';
 import type { TaskBoardStore } from './store.js';
+import { openQuestions } from './conversation.js';
 
 export const peerComment = (comment: TaskBoard.Comment): boolean => comment.authorKind === 'agent' && !!comment.sourceTaskId;
 export function coordinationPending(task: TaskBoard.Task): boolean {
@@ -28,12 +29,28 @@ export async function peerState(store: TaskBoardStore, task: TaskBoard.Task, tas
   } while (cursor);
   return hashJson(states.sort());
 }
-export async function checkBlocker(store: TaskBoardStore, blocker: TaskBoard.Blocker | undefined): Promise<void> {
+export async function checkBlocker(store: TaskBoardStore, blocker: TaskBoard.Blocker | undefined,
+  consumed: TaskBoard.BlockerObservation[] = [], allowConsumed = false): Promise<TaskBoard.BlockerObservation | undefined> {
   if (!blocker) return;
   const other = (await store.read('task-board/task', blocker.taskId, true, true)).value;
   const running = other.lastRun && !['completed', 'failed', 'cancelled'].includes((await store.read('task-board/run', other.lastRun, true, true)).value.phase);
-  requireThat(blocker.until === 'done' ? other.workflowState === 'done' : !other.claim && !other.publication && !running,
-    'task_board_dependency_waiting', `Waiting for Task ${other.taskKey} to be ${blocker.until}.`);
+  const delivered = blocker.until === 'delivery' ? other.deliveries?.find(value => value.delivery.key === blocker.key) : undefined;
+  requireThat(blocker.until === 'delivery' ? !!delivered : blocker.until === 'done' ? other.workflowState === 'done' : !other.claim && !other.publication && !running,
+    'task_board_dependency_waiting', blocker.until === 'delivery' ? `Waiting for delivery ${blocker.key} from Task ${other.taskKey}.` : `Waiting for Task ${other.taskKey} to be ${blocker.until}.`);
+  const fingerprint = delivered?.identity ?? hashJson({ state: other.workflowState, result: other.latestResult, review: other.acceptedReview });
+  requireThat(allowConsumed || !consumed.some(value => hashJson(value.blocker) === hashJson(blocker) && value.fingerprint === fingerprint),
+    'task_board_dependency_consumed', `Waiting for new work from Task ${other.taskKey}; this ${blocker.until} condition was already consumed.`);
+  return { blocker, fingerprint };
+}
+export function consumeBlocker(consumed: TaskBoard.BlockerObservation[] = [], observation: TaskBoard.BlockerObservation): TaskBoard.BlockerObservation[] {
+  return [...consumed.filter(value => hashJson(value.blocker) !== hashJson(observation.blocker)), observation].slice(-32);
+}
+export async function questionWaitOpen(store: TaskBoardStore, reference?: TaskBoard.QuestionWait | null): Promise<boolean> {
+  if (!reference) return false;
+  const source = await store.read('task-board/task', reference.taskId, true, true);
+  requireThat(source.value.comments.some(value => value.commentId === reference.commentId && value.purpose === 'question' && !value.sourceTaskId),
+    'task_board_comment_mismatch', 'The linked user question must identify an actual ticket question.');
+  return openQuestions(source.value).some(value => value.commentId === reference.commentId);
 }
 export async function validateBlocker(store: TaskBoardStore, blocker: TaskBoard.Blocker, self: string | null): Promise<void> {
   const pending = [blocker.taskId], seen = new Set<string>();

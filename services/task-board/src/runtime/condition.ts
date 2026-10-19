@@ -4,10 +4,15 @@ export interface ExecutionFacts {
   workflowState: TaskBoard.Task["workflowState"];
   control: TaskBoard.TaskFields["control"];
   publication: boolean;
-  claim: { phase: TaskBoard.Claim["phase"]; hostId: string } | null;
+  claim: { phase: TaskBoard.Claim["phase"]; hostId: string; mode?: string } | null;
   waiting: Pick<TaskBoard.Waiting, "reason" | "detail"> | null;
   executionRequirement: TaskBoard.ExecutionRequirement | null;
   requiredCapabilities?: string[] | undefined;
+  openQuestionCount?: number | undefined;
+  scheduledCheckFailure?: string | undefined;
+  completionIssue?: string | undefined;
+  questionWait?: boolean | undefined;
+  recovery?: { attempts: number; retryAt: string | null } | undefined;
 }
 
 /** Automatic recovery and result publication retain the current execution's column. */
@@ -25,6 +30,7 @@ export function executionCondition(
       detail: "Publishing the current Task update.",
     };
   if (task.claim) {
+    if (task.claim.mode === 'recovery') return { state: 'recovering', detail: `Restoring the original missing handoff on ${task.claim.hostId}.` };
     if (task.claim.phase === "publishing_result")
       return { state: "publishing", detail: "Native execution ended; publishing the ticket handoff." };
     if (task.waiting?.reason === "host")
@@ -54,8 +60,17 @@ export function executionCondition(
           ? "Backlog Tasks are not scheduled."
           : "No work is scheduled.",
     };
+  if (task.recovery) return { state: task.recovery.attempts < 2 ? 'recovering' : 'workflow_attention', detail:
+    task.recovery.attempts >= 2 ? task.completionIssue ?? 'The original handoff needs inspection after two recovery attempts.' :
+      task.recovery.retryAt ? `Handoff recovery will retry after ${task.recovery.retryAt}.` : 'The original missing handoff is queued for automatic recovery.' };
   if (task.workflowState === "review")
-    return { state: "needs_user", detail: "Final result is ready for review." };
+    return { state: "needs_user", detail: task.scheduledCheckFailure ?? "Final result is ready for review." };
+  if (task.openQuestionCount || task.questionWait)
+    return { state: 'needs_user', detail: task.questionWait ? 'Waiting for the linked user question to be answered.' : 'Waiting for an answer in the ticket.' };
+  if (task.completionIssue || task.waiting?.detail === 'Execution ended without an explicit completion intent; review the ticket before continuing.')
+    return { state: 'workflow_attention', detail: task.completionIssue ?? 'The execution ended without a structured handoff. Its original outcome needs reconciliation.' };
+  if (task.scheduledCheckFailure)
+    return { state: "blocked_environment", detail: task.scheduledCheckFailure };
   if (task.waiting?.reason === "time")
     return { state: "deferred", detail: task.waiting.detail };
   if (task.waiting?.reason === "dependency")

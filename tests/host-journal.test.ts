@@ -89,7 +89,7 @@ async function fixture(t: TestContext) {
 const code = (expected: string) => (error: unknown) =>
   error instanceof IvyError && error.code === expected;
 
-test('host history preserves unresolved work and rollback evidence while retiring completed deployment identities', async t => {
+test('host history preserves unresolved work and the current result while retiring superseded identities', async t => {
   const f = await fixture(t); f.journal.historyLimits.count = 2;
   const failed = f.journal.accept({ action: 'deploy', instanceId: 'fixture', operationId: 'previous-failure', candidateId: f.candidate.candidateId });
   f.journal.advance(failed.record.deploymentId, 'prepared', 'failed');
@@ -109,10 +109,41 @@ test('host history preserves unresolved work and rollback evidence while retirin
   assert.throws(() => f.journal.accept(old.request), code('operation_expired'));
   assert.throws(() => f.journal.accept({ ...old.request, action: 'restart' }), code('mutation_conflict'));
   assert.equal(f.journal.get(pending.record.deploymentId).record.phase, 'prepared');
-  assert.equal(f.journal.operation('second')?.record.phase, 'succeeded');
+  assert.throws(() => f.journal.operation('second'), code('operation_expired'));
+  assert.equal(f.journal.operation('third')?.record.phase, 'succeeded');
   const reopened = new HostJournal(f.config);
   try { assert.throws(() => reopened.operation('old'), code('operation_expired')); }
   finally { reopened.close(); }
+});
+
+test('collection drops stopped unconfigured instances and superseded failures while preserving uncertain owners', async t => {
+  const f = await fixture(t), journal = f.journal;
+  const entry = journal.accept({ action: 'deploy', operationId: 'superseded-failure', instanceId: 'fixture', candidateId: f.candidate.candidateId });
+  journal.advance(entry.record.deploymentId, 'prepared', 'failed');
+  const later = new Date(Date.now() + 1000).toISOString();
+  const installed = { instanceId: 'fixture', candidateId: f.candidate.candidateId, buildId: f.candidate.buildId, enabled: true, installedAt: later };
+  journal.db.prepare('INSERT INTO installed VALUES (?,?)').run('fixture', canonical(installed));
+  journal.db.prepare('INSERT INTO observations VALUES (?,?)').run('fixture', canonical({ candidateId: f.candidate.candidateId,
+    state: 'ready', observedAt: new Date().toISOString() }));
+  await atomicJson(join(f.config.runtimeRoot, 'instances', 'fixture', 'data', 'health.json'), {
+    schemaVersion: 1, instanceId: 'fixture', componentId: 'fixture', buildId: f.candidate.buildId,
+    pid: process.pid, bootId: '00000000-0000-4000-8000-000000000001', ready: true,
+    startedAt: later, observedAt: new Date().toISOString(), generation: null, details: '' });
+  for (const id of ['retired', 'unknown-owner']) {
+    journal.db.prepare('INSERT INTO installed VALUES (?,?)').run(id, canonical({ ...installed, instanceId: id, enabled: false }));
+    journal.db.prepare('INSERT INTO runtime_targets VALUES (?,?)').run(id, canonical({ schemaVersion: 1, instanceId: id,
+      revision: 'retention-target', candidateId: f.candidate.candidateId, desired: 'stopped',
+      configPath: f.configPath, requestedAt: later }));
+    journal.db.prepare('INSERT INTO observations VALUES (?,?)').run(id, canonical({ candidateId: f.candidate.candidateId,
+      state: id === 'retired' ? 'stopped' : 'unknown' }));
+  }
+  journal.collectObsoleteState();
+  assert.throws(() => journal.operation(entry.request.operationId), code('operation_expired'));
+  assert.equal(journal.installed('retired'), null);
+  assert.equal(journal.target('retired'), null);
+  assert.equal(journal.observations()['retired'], undefined);
+  assert.ok(journal.installed('unknown-owner'));
+  assert.ok(journal.installed('fixture'));
 });
 
 test("normal deployment excludes exactly the OS-owned bootstrap roots", () => {

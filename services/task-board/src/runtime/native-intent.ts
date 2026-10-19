@@ -43,7 +43,8 @@ export async function intendedCall(store: TaskBoardStore, run: TaskBoard.Run, sl
   } else if (slot === 'turn') {
     requireThat(run.primaryResourceRef && run.nativeEpoch, 'task_board_primary_required', 'Turn preparation requires the saved primary and native epoch.');
     const task = await store.read('task-board/task', { objectId: run.taskId, revision: run.originalRequest.expectedRevision });
-    const taskInput = { type: 'text', text: taskPrompt(task.value, run.owner.serviceNodeId, run.originalRequest.action === 'continue' && run.originalRequest.coordinationOnly), text_elements: [] };
+    const taskInput = { type: 'text', text: taskPrompt(task.value, run.owner.serviceNodeId, run.originalRequest.action === 'continue' && run.originalRequest.coordinationOnly, run.originalRequest.checkOnly,
+      run.originalRequest.action === 'continue' && !!run.originalRequest.recoveryFor), text_elements: [] };
     method = 'turn/start'; definition = 'turnStart'; params = { ...plan.turnStart, threadId: run.primaryResourceRef.nativeId,
       input: run.owner.source === 'scheduler' ? [taskInput] : [...nativeArray(plan.turnStart.input), taskInput] };
   } else {

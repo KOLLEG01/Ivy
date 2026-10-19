@@ -39,6 +39,8 @@ export class TaskBoardOperations {
   async begin(
     request: TaskBoard.DurableRequest,
     actor: TaskBoard.Actor,
+    handoff?: () => Promise<{ run: TaskBoard.ObjectPin; work: TaskBoard.HandoffWork }>,
+    publicationTask?: TaskBoard.ObjectPin,
   ): Promise<OperationDocument> {
     const existing = await this.find(actor.principalId, request.operationId),
       requestHash = hashJson(request);
@@ -50,6 +52,7 @@ export class TaskBoardOperations {
       );
       return existing;
     }
+    const binding = handoff ? await handoff() : null;
     const now = new Date().toISOString(),
       value: TaskBoard.Operation = {
         schemaVersion: 1,
@@ -64,6 +67,8 @@ export class TaskBoardOperations {
         writes: [],
         outcome: null,
         error: null,
+        ...(binding ? { handoffRun: binding.run, handoffWork: binding.work } : {}),
+        ...(publicationTask ? { publicationTask } : {}),
       };
     try {
       const pin = await this.store.write(
@@ -91,6 +96,14 @@ export class TaskBoardOperations {
       );
       return winner;
     }
+  }
+  async pendingHandoffs(runId: string): Promise<OperationDocument[]> {
+    const page = await this.store.page('task-board/operation', { limit: 16, where: { op: 'and', args: [
+      { op: 'eq', field: 'data:/handoffRun/objectId', value: runId },
+      { op: 'in', field: 'data:/phase', value: ['accepted', 'preparing', 'publishing', 'needs_attention'] },
+    ] }, orderBy: [{ field: 'object.id', direction: 'asc' }] });
+    requireThat(!page.nextCursor, 'task_board_handoff_limit', 'This Run has too many pending completion intents.');
+    return Promise.all(page.items.map(item => this.store.read('task-board/operation', item.objectId)));
   }
   private async amend(
     id: string,

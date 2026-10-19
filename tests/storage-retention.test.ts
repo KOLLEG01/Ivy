@@ -51,10 +51,12 @@ async function fixture(t: TestContext, componentId = 'fixture', kind: 'native' |
   return { root, config, journal, candidates, old };
 }
 
-test('host collection keeps live references and recent candidates while retiring completed build copies', async t => {
+test('host collection keeps live references while retiring superseded candidates and completed build copies', async t => {
   const { root, config, journal, candidates, old } = await fixture(t);
   journal.db.prepare('INSERT INTO installed VALUES (?,?)').run('installed-fixture', JSON.stringify({ candidateId: candidates[0]!.candidateId }));
-  journal.db.prepare('INSERT INTO runtime_targets VALUES (?,?)').run('target-fixture', JSON.stringify({ candidateId: candidates[2]!.candidateId }));
+  journal.db.prepare('INSERT INTO runtime_targets VALUES (?,?)').run('target-fixture', JSON.stringify({ schemaVersion: 1,
+    instanceId: 'target-fixture', revision: 'retention-target', candidateId: candidates[2]!.candidateId,
+    desired: 'running', configPath: join(root, 'target.json'), requestedAt: new Date().toISOString() }));
   assert.deepEqual(await readReleaseManifest(candidates[1]!.manifestPath), journal.manifest(candidates[1]!.candidateId));
   const snapshotId = '00000000-0000-5000-8000-000000000002', source = join(config.stagingRoot, 'sources', snapshotId),
     snapshot: Host.SourceSnapshot = { snapshotId, sourceRoot: join(source, 'source'), originalRoot: join(root, 'checkout'),
@@ -68,13 +70,13 @@ test('host collection keeps live references and recent candidates while retiring
     snapshot, phase: 'compacted', candidate: candidates[1]!, startedAt: old.toISOString(), updatedAt: old.toISOString(), errorCode: null });
 
   const collected = await collectHostStorage(config);
-  assert.deepEqual(collected, { candidates: 3, preparations: 1, snapshots: 1 });
+  assert.deepEqual(collected, { candidates: 4, preparations: 1, snapshots: 1 });
   const status = journal.status(null).storageRetention!;
   assert.equal(status.state, 'succeeded'); assert.ok(status.lastSuccessAt);
-  assert.equal(status.removed.candidates, 3); assert.ok(status.availableBytes.artifacts > 0);
+  assert.equal(status.removed.candidates, 4); assert.ok(status.availableBytes.artifacts > 0);
   assert.ok(status.skipped.some(entry => entry.reason === 'protected_release' && !entry.requiresAttention));
   assert.deepEqual((await readdir(join(config.artifactRoot, 'candidates'))).sort(),
-    [candidates[0]!, candidates[1]!, candidates[2]!].map(value => value.candidateId.slice(7)).sort());
+    [candidates[0]!, candidates[2]!].map(value => value.candidateId.slice(7)).sort());
   await assert.rejects(stat(source), { code: 'ENOENT' });
   await assert.rejects(stat(join(config.stagingRoot, 'build-' + preparationId)), { code: 'ENOENT' });
   assert.deepEqual(await collectHostStorage(config), { candidates: 0, preparations: 0, snapshots: 0 });
@@ -198,15 +200,33 @@ test('retired staging cleanup rejects linked directories and preserves fresh pre
   assert.equal(await readFile(join(original, 'evidence'), 'utf8'), 'new preparation');
 });
 
-test('prepared future releases cannot displace the installed rollback version', async t => {
+test('old unselected preparations do not retain historical rollback versions', async t => {
   const { config, journal, candidates } = await fixture(t);
   journal.db.prepare('INSERT INTO installed VALUES (?,?)').run('fixture', JSON.stringify({ candidateId: candidates[2]!.candidateId }));
-  assert.equal((await collectHostStorage(config)).candidates, 4);
-  assert.deepEqual(journal.candidateForBuild('fixture', candidates[1]!.buildId), candidates[1]);
+  assert.equal((await collectHostStorage(config)).candidates, 5);
+  assert.deepEqual(journal.candidateForBuild('fixture', candidates[2]!.buildId), candidates[2]);
+  assert.throws(() => journal.candidate(candidates[1]!.candidateId), { code: 'not_found' });
   assert.throws(() => journal.candidate(candidates[0]!.candidateId), { code: 'not_found' });
 });
 
-test('rollback keeps the actual previous successful build when deployment skipped versions', async t => {
+test('a superseded completed preparation releases its fresh source snapshot without retaining another installation', async t => {
+  const { config, journal, candidates } = await fixture(t), candidate = candidates[0]!;
+  journal.db.prepare('INSERT INTO installed VALUES (?,?)').run('fixture', JSON.stringify({ candidateId: candidate.candidateId }));
+  const id = preparationIdForBuild(candidate.buildId), source = join(config.stagingRoot, 'sources', id);
+  const snapshot: Host.SourceSnapshot = { snapshotId: id, sourceRoot: join(source, 'source'),
+    originalRoot: source, manifestPath: join(source, 'snapshot.json'), capturedAt: new Date().toISOString() };
+  await mkdir(snapshot.sourceRoot, { recursive: true });
+  await atomicJson(snapshot.manifestPath, { schemaVersion: 1, snapshot });
+  await mkdir(join(config.stagingRoot, 'build-' + id), { recursive: true });
+  const now = new Date().toISOString();
+  await savePreparation(config, { schemaVersion: 1, preparationId: id, componentId: candidate.componentId,
+    buildId: candidate.buildId, phase: 'compacted', candidate, snapshot, startedAt: now, updatedAt: now, errorCode: null });
+  assert.deepEqual(await collectHostStorage(config), { candidates: 5, preparations: 1, snapshots: 1 });
+  assert.ok(journal.candidate(candidate.candidateId), 'the live artifact remains independent of its build source');
+  await assert.rejects(stat(source), { code: 'ENOENT' });
+});
+
+test('a successful deployment releases its predecessor even when deployment skipped versions', async t => {
   const { config, journal, candidates, old } = await fixture(t);
   journal.db.prepare('INSERT INTO installed VALUES (?,?)').run('fixture', JSON.stringify({ instanceId: 'fixture',
     candidateId: candidates[0]!.candidateId, buildId: candidates[0]!.buildId, enabled: true, installedAt: old.toISOString() }));
@@ -215,7 +235,8 @@ test('rollback keeps the actual previous successful build when deployment skippe
   journal.db.prepare('UPDATE operations SET phase=?,entry_json=? WHERE operation_id=?').run('succeeded', JSON.stringify(entry), entry.request.operationId);
   journal.db.prepare('UPDATE installed SET value=? WHERE instance_id=?').run(JSON.stringify({ candidateId: candidates[3]!.candidateId }), 'fixture');
   await collectHostStorage(config);
-  assert.deepEqual(journal.candidate(candidates[0]!.candidateId), candidates[0]);
+  assert.throws(() => journal.candidate(candidates[0]!.candidateId), { code: 'not_found' });
+  assert.deepEqual(journal.candidate(candidates[3]!.candidateId), candidates[3]);
   assert.throws(() => journal.candidate(candidates[2]!.candidateId), { code: 'not_found' });
   assert.throws(() => journal.candidate(candidates[1]!.candidateId), { code: 'not_found' });
 });
@@ -324,16 +345,16 @@ async function bootstrapFixture(t: TestContext) {
   return { ...f, plans, select };
 }
 
-test('historical bootstrap plans stop pinning obsolete candidates but retain current and rollback OS plans', async t => {
+test('historical bootstrap plans stop pinning obsolete candidates and retain only the selected OS plan', async t => {
   const { config, plans, select, journal, candidates } = await bootstrapFixture(t);
   await select(2);
-  assert.equal((await collectHostStorage(config)).candidates, 4);
-  assert.deepEqual(new Set((await retainedBootstrapPlans(config)).map(plan => hashJson(plan))), new Set([plans[1]!, plans[2]!].map(plan => hashJson(plan))));
-  assert.deepEqual(journal.candidate(candidates[1]!.candidateId), candidates[1]);
+  assert.equal((await collectHostStorage(config)).candidates, 5);
+  assert.deepEqual(new Set((await retainedBootstrapPlans(config)).map(plan => hashJson(plan))), new Set([hashJson(plans[2]!)]));
+  assert.throws(() => journal.candidate(candidates[1]!.candidateId), { code: 'not_found' });
   assert.throws(() => journal.candidate(candidates[0]!.candidateId), { code: 'not_found' });
 });
 
-test('bootstrap installation records the actual rollback even without a maintenance operation', async t => {
+test('bootstrap collection releases the predecessor recorded by a completed installation', async t => {
   const { config, plans, select, journal, candidates } = await bootstrapFixture(t);
   await select(0);
   const next = plans[3]!;
@@ -341,8 +362,8 @@ test('bootstrap installation records the actual rollback even without a maintena
   journal.syncBootstrap(next, true); // A configuration refresh must not replace the rollback pointer.
   await atomicJson(join(config.runtimeRoot, 'bootstrap', next.installationId + '.json'), next);
   await collectHostStorage(config);
-  assert.deepEqual(journal.candidate(candidates[0]!.candidateId), candidates[0]);
-  assert.ok((await retainedBootstrapPlans(config)).some(plan => plan.candidateId === candidates[0]!.candidateId));
+  assert.throws(() => journal.candidate(candidates[0]!.candidateId), { code: 'not_found' });
+  assert.ok(!(await retainedBootstrapPlans(config)).some(plan => plan.candidateId === candidates[0]!.candidateId));
   assert.throws(() => journal.candidate(candidates[1]!.candidateId), { code: 'not_found' });
 });
 
@@ -358,9 +379,39 @@ for (const phase of ['needs_attention', 'succeeded']) test(`bootstrap ${phase} r
   await atomicJson(join(config.runtimeRoot, 'bootstrap-maintenance', hashJson(operationId).slice(7), 'record.json'),
     { phase, updatedAt: new Date().toISOString(), request });
   await collectHostStorage(config);
-  assert.deepEqual(journal.candidate(candidates[0]!.candidateId), candidates[0]);
-  assert.ok((await retainedBootstrapPlans(config)).some(plan => hashJson(plan) === hashJson(prior)));
+  if (phase === 'needs_attention') {
+    assert.deepEqual(journal.candidate(candidates[0]!.candidateId), candidates[0]);
+    assert.ok((await retainedBootstrapPlans(config)).some(plan => hashJson(plan) === hashJson(prior)));
+  } else {
+    assert.throws(() => journal.candidate(candidates[0]!.candidateId), { code: 'not_found' });
+    assert.ok(!(await retainedBootstrapPlans(config)).some(plan => hashJson(plan) === hashJson(prior)));
+  }
   assert.throws(() => journal.candidate(candidates[1]!.candidateId), { code: 'not_found' });
+});
+
+test('fresh executor evidence releases a superseded failed bootstrap operation despite historical observation rows', async t => {
+  const { config, journal, candidates, plans, select } = await bootstrapFixture(t);
+  await select(3);
+  const at = new Date(Date.now() - 60_000).toISOString(), operationId = 'superseded-bootstrap-failure';
+  const request: Host.BootstrapMaintenanceRequest = { schemaVersion: 1, operationId, next: plans[2]!,
+    previous: { schemaVersion: 1, hostId: config.hostId, installationId: plans[0]!.installationId,
+      configPath: plans[0]!.configPath, configurationHash: plans[0]!.configHash, observedAt: at, owners: [] } };
+  await atomicJson(join(config.runtimeRoot, 'bootstrap-maintenance', hashJson(operationId).slice(7), 'record.json'), {
+    schemaVersion: 1, operationId, request, requestHash: hashJson(request), createdAt: at, updatedAt: at,
+    phase: 'needs_attention', errorCode: 'historical_failure', definitions: [] });
+  journal.db.prepare('UPDATE installed SET value=? WHERE instance_id=?').run(JSON.stringify({ instanceId: 'host-executor',
+    candidateId: candidates[3]!.candidateId, buildId: candidates[3]!.buildId, enabled: true, installedAt: new Date().toISOString() }), 'host-executor');
+  const current: Host.ExecutorStatus = { schemaVersion: 1, hostId: config.hostId, pid: process.pid,
+    bootId: '00000000-0000-4000-8000-000000000001', observedAt: new Date().toISOString(), state: 'ready',
+    activeDeploymentId: null, code: null, buildId: candidates[3]!.buildId };
+  await atomicJson(join(config.runtimeRoot, 'executor.json'), { ...current, observedAt: at });
+  await collectHostStorage(config);
+  assert.ok(await bootstrapStatus(config, operationId), 'stale owner evidence preserves the unresolved operation');
+  await atomicJson(join(config.runtimeRoot, 'executor.json'), current);
+  await collectHostStorage(config);
+  await assert.rejects(bootstrapStatus(config, operationId), { code: 'operation_expired' });
+  assert.throws(() => journal.candidate(candidates[2]!.candidateId), { code: 'not_found' });
+  assert.ok(journal.candidate(candidates[3]!.candidateId));
 });
 
 test('storage pressure advances collection while repeated attempts remain bounded', async t => {
@@ -380,7 +431,7 @@ test('storage pressure advances collection while repeated attempts remain bounde
   assert.ok(measured.availableBytes.staging > 0);
 });
 
-test('completed maintenance details form a ring without a minimum age while original records preserve rollback and replay', { timeout: 180000 }, async t => {
+test('superseded maintenance is collected with replay fences while unknown evidence and unresolved work survive', { timeout: 180000 }, async t => {
   const { config, journal, plans, select, root } = await bootstrapFixture(t);
   await select(3);
   const configPath = plans[3]!.configPath; await atomicJson(configPath, config);
@@ -418,28 +469,26 @@ test('completed maintenance details form a ring without a minimum age while orig
     phase: 'needs_attention', errorCode: 'fixture_failure', definitions: [] });
   const compacted = requests[1]!, directory = join(parent, hashJson(compacted.operationId).slice(7));
   const original = await readFile(join(directory, 'record.json'));
-  // The first known detail can be removed, but an unexpected directory must be left alone.
+  // Unrecognized evidence prevents removing the entire operation directory.
   const remaining = join(directory, 'host-executor.desired.json'); await rm(remaining); await mkdir(remaining);
   await writeFile(join(directory, 'unknown-evidence'), 'keep');
   await collectHostStorage(config);
-  assert.equal(journal.storageRetentionStatus()!.removed.maintenance, 7);
-  assert.ok(await stat(join(parent, hashJson(requests[0]!.operationId).slice(7), 'host-executor.prior.json')), 'the current rollback details survive despite their age');
-  assert.ok(await stat(join(parent, hashJson(requests[24]!.operationId).slice(7), 'host-executor.prior.json')), 'recent details remain retained');
+  assert.equal(journal.storageRetentionStatus()!.removed.maintenance, 48);
+  assert.ok(await stat(join(parent, hashJson(requests[0]!.operationId).slice(7), 'host-executor.prior.json')), 'the selected installation record survives');
+  await assert.rejects(stat(join(parent, hashJson(requests[24]!.operationId).slice(7))), { code: 'ENOENT' });
   assert.ok(await stat(join(parent, hashJson(unresolved.operationId).slice(7))));
-  await assert.rejects(stat(join(directory, 'host-executor.prior.json')), { code: 'ENOENT' });
+  assert.ok(await stat(join(directory, 'host-executor.prior.json')));
   assert.deepEqual(await readFile(join(directory, 'record.json')), original);
   assert.ok((await stat(remaining)).isDirectory());
   await rm(remaining, { recursive: true }); await atomicJson(remaining, { content: 'desired' });
+  await rm(join(directory, 'unknown-evidence'));
   await collectHostStorage(config);
   assert.equal(journal.storageRetentionStatus()!.removed.maintenance, 1);
   await assert.rejects(stat(remaining), { code: 'ENOENT' });
-  assert.equal(await readFile(join(directory, 'unknown-evidence'), 'utf8'), 'keep');
-  assert.equal((await bootstrapStatus(config, compacted.operationId)).phase, 'succeeded');
-  const replay = await updateBootstrap(configPath, compacted, root, {} as BootstrapOs);
-  assert.deepEqual(replay, JSON.parse(original.toString()));
+  await assert.rejects(bootstrapStatus(config, compacted.operationId), { code: 'operation_expired' });
+  await assert.rejects(updateBootstrap(configPath, compacted, root, {} as BootstrapOs), { code: 'operation_expired' });
   await assert.rejects(updateBootstrap(configPath, { ...compacted, next: plans[2]! }, root, {} as BootstrapOs), { code: 'operation_conflict' });
-  assert.equal((await automaticBootstrapRecord(config, 'old-automatic-0'))?.phase, 'rolled_back');
-  assert.equal((await automaticBootstrapRecord(config, 'old-automatic-0'))?.errorCode, 'readiness_failed');
+  await assert.rejects(automaticBootstrapRecord(config, 'old-automatic-0'), { code: 'operation_expired' });
   await collectHostStorage(config);
   assert.equal(journal.storageRetentionStatus()!.removed.maintenance, 0);
 });

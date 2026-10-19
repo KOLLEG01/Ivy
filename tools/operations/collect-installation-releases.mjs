@@ -6,11 +6,12 @@ const build = /^sha256:[0-9a-f]{64}$/;
 const missing = error => error.code === 'ENOENT';
 
 /** For standalone installers: call under their update lock after verifying the live build.
- * Keep the live build, the last successful predecessor and every unfinished update target.
+ * Keep the verified live build and every unfinished update target.
  */
-export async function collectInstallationReleases(root, componentId, protectedBuilds) {
+export async function collectInstallationReleases(root, componentId, currentBuild, pendingBuilds = new Set()) {
+  const protectedBuilds = new Set([currentBuild, ...pendingBuilds]);
   if (!isAbsolute(root) || !/^[a-z][a-z0-9-]{0,127}$/.test(componentId) ||
-    !protectedBuilds.size || [...protectedBuilds].some(value => !build.test(value)))
+    !build.test(currentBuild) || [...protectedBuilds].some(value => !build.test(value)))
     throw new Error('Release collection requires an absolute root, component and verified protected builds.');
   const boundary = await realpath(root);
   const removed = [];
@@ -38,7 +39,7 @@ export async function collectInstallationReleases(root, componentId, protectedBu
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [root, componentId, ...keep] = process.argv.slice(2);
-  if (!root || !componentId || !keep.length) throw new Error('Usage: collect-installation-releases.mjs ABSOLUTE_ROOT COMPONENT BUILD_ID...');
-  console.log(JSON.stringify({ removed: await collectInstallationReleases(root, componentId, new Set(keep)) }));
+  const [root, componentId, currentBuild, ...pending] = process.argv.slice(2);
+  if (!root || !componentId || !currentBuild) throw new Error('Usage: collect-installation-releases.mjs ABSOLUTE_ROOT COMPONENT CURRENT_BUILD [PENDING_BUILD...]');
+  console.log(JSON.stringify({ removed: await collectInstallationReleases(root, componentId, currentBuild, new Set(pending)) }));
 }

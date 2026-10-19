@@ -27,7 +27,11 @@ test('periodic scans give recovery a turn even when the same waiting Task is alw
   let recovered = 0, scheduled = 0;
   runtime.native.drain = async () => { recovered++; return true; };
   runtime.signals.step = async () => null;
-  runtime.scheduler.task = async id => { assert.equal(id, waiting.task.objectId); scheduled++; return null; };
+  runtime.scheduler.task = async id => {
+    if (id === waiting.task.objectId) scheduled++;
+    else assert.equal(id, w.state().task.objectId);
+    return null;
+  };
   while (!runtime.recovered) await step(runtime);
   recovered = 0;
   for (let pass = 0; pass < 12; pass++) await step(runtime);

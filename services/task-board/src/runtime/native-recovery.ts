@@ -40,7 +40,7 @@ async function unstartedAttempt(engine: TaskBoardEngine, taskId: string, primary
   if (run.value.taskId !== taskId || !same(run.value.primaryResourceRef, primary) || run.value.phase !== 'failed' || run.value.externalOutcome.state !== 'failed' ||
       run.value.turnId || run.value.cancellation || !run.value.result) return null;
   const store = engine.store, evidence = new TaskBoardEvidence(store), result = await store.read('task-board/result', run.value.result);
-  requireThat(result.value.taskId === taskId && result.value.kind === 'final' && result.value.run?.objectId === run.pin.objectId && result.value.run.revision < run.pin.revision,
+  requireThat(result.value.taskId === taskId && result.value.run?.objectId === run.pin.objectId && result.value.run.revision < run.pin.revision,
     'task_board_evidence_mismatch', 'Recovery requires the exact saved attempt before its terminal publication.');
   const saved = await store.read('task-board/run', result.value.run);
   if (saved.value.turnId || saved.value.calls.steer || saved.value.calls.interrupt) return null;

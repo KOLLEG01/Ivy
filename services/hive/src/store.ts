@@ -9,6 +9,7 @@ import {
 } from "node:crypto";
 import { mkdirSync, createReadStream } from "node:fs";
 import { dirname } from "node:path";
+import { openHiveStorage } from './storage-compaction.js';
 import {
   canonical,
   digest,
@@ -85,13 +86,15 @@ export class HiveStore {
   constructor(readonly filename: string) {
     if (filename !== ":memory:")
       mkdirSync(dirname(filename), { recursive: true });
-    this.db = new DatabaseSync(filename, {
+    const opened = openHiveStorage(filename, {
       timeout: 1000,
       enableForeignKeyConstraints: true,
       enableDoubleQuotedStringLiterals: false,
     });
+    this.db = opened.db;
     try {
       this.initialize();
+      this.setMetadata('storage_compaction_pending', opened.pending ?? '');
     } catch (error) {
       if (this.db.isOpen) this.db.close();
       throw error;
@@ -99,7 +102,7 @@ export class HiveStore {
   }
   private initialize(): void {
     this.db.exec(
-      "PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=1000;",
+      "PRAGMA locking_mode=EXCLUSIVE; PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=1000;",
     );
     const format = Number(this.get("PRAGMA user_version")!["user_version"]);
     if (format !== 0 && format !== STORAGE_FORMAT) {

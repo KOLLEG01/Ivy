@@ -41,7 +41,7 @@ const queries = {
       op: "and",
       args: [
         { op: "eq", field: "data:/fields/control", value: "agent" },
-        { op: "in", field: "data:/workflowState", value: ["todo", "waiting", "review"] },
+        { op: "in", field: "data:/workflowState", value: ["todo", "in_progress", "waiting", "review"] },
       ],
     },
   },
@@ -78,6 +78,9 @@ export class TaskBoardReconciler {
   private lastCleanupAt = 0;
   private gateCursor: string | null = null;
   private stopped = false;
+  private commentsCompacted = false;
+  private commentRetryAt = 0;
+  private revisionProtectionAt = Date.now() + 15 * 60_000;
   private readonly activeTasks = new Map<string, Promise<void>>();
   private readonly pages = new Map<Lane, { ids: string[]; next: string | null; taskChanges: number }>();
   private readonly cursors = new Map<Lane, string | null>();
@@ -337,6 +340,21 @@ export class TaskBoardReconciler {
         const results = await Promise.allSettled([this.scan(lane), this.recoverGates()]);
         for (const result of results) if (result.status === "rejected") throw result.reason;
         this.lane = (this.lane + 1) % lanes.length;
+        if (Date.now() >= this.revisionProtectionAt && !this.activeTasks.has('revision-protection') &&
+            this.activeTasks.size < maxConcurrentTasks) {
+          this.revisionProtectionAt = Date.now() + 15 * 60_000;
+          this.startTask('revision-protection', async () => {
+            try { await this.engine.store.protectRunSources(); this.record('revision-protection'); }
+            catch (error) { this.revisionProtectionAt = Date.now() + 60_000; this.record('revision-protection', error); }
+          });
+        }
+        if (!this.commentsCompacted && Date.now() >= this.commentRetryAt &&
+            !this.activeTasks.has('comment-storage') && this.activeTasks.size < maxConcurrentTasks) {
+          this.startTask('comment-storage', async () => {
+            try { this.commentsCompacted = await this.engine.store.compactComments(2); this.record('comment-storage'); }
+            catch (error) { this.commentRetryAt = Date.now() + 60_000; this.record('comment-storage', error); }
+          });
+        }
       }
     } catch (error) {
       this.record("publication", error);

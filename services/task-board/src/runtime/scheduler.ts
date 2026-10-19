@@ -1,6 +1,6 @@
 import { taskPrompt } from './task-prompt.js';
 import { forwardDelegatedReview } from './task-delegation.js';
-import { checkBlocker, coordinationPending, peerComment } from './task-coordination.js';
+import { checkBlocker, coordinationPending, peerComment, questionWaitOpen } from './task-coordination.js';
 import { hashJson } from "../../../../packages/sdk/src/node.js";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
 import type { TaskBoard } from "../../../../packages/sdk/src/node.js";
@@ -23,6 +23,9 @@ import type { Document } from "./store.js";
 import { effectiveExecution, supportsExecutionOptions } from './configuration.js';
 import { freshContextRecovery, unstartedArchivedContext, unstartedMissingContext } from './native-recovery.js';
 import { failedRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
+import { scheduledCheckDue } from './handoff.js';
+import { openQuestions, queuedTaskEdits, queuedUserInput } from './conversation.js';
+import { nextExecutionMode } from './execution-mode.js';
 
 /** Retains an automatic action before invocation and never replaces an uncertain Operation. */
 export class TaskBoardScheduler {
@@ -247,7 +250,7 @@ export class TaskBoardScheduler {
       "tool_not_found",
       "The selected AgentManager is missing required native tools.",
     );
-    const text = taskPrompt(task.value, this.engine.owner.serviceNodeId),
+    const text = feedback ?? taskPrompt(task.value, this.engine.owner.serviceNodeId),
       nativeOptions = effective.nativeOptions,
       draft: Agent.PlanDraft = {
         nativeVersion: selected.catalog.version,
@@ -332,6 +335,7 @@ export class TaskBoardScheduler {
     sequence: number,
     recoverThread = false,
     rateLimitRetryAt: string | null = null,
+    questionAnswered = false,
   ): Promise<TaskBoard.SchedulerRequest | null> {
     const value = task.value,
       base = {
@@ -355,18 +359,34 @@ export class TaskBoardScheduler {
       return { action: 'defer', ...base, operationId, reason: 'time', nextReviewAt,
         detail: rateLimitWaitingDetail(nextReviewAt) };
     }
-    const coordinationOnly = coordinationPending(value);
-    const comments = value.commentDeliveries
+    const mode = nextExecutionMode(value, this.now().toISOString());
+    const recoveryFor = mode === 'recovery' ? value.completionIssue?.run ?? value.lastRun : null;
+    if (mode === 'recovery') {
+      requireThat(recoveryFor, 'task_board_recovery_evidence_missing', 'Missing handoff recovery needs its original Run.');
+      const defer = (detail: string, retry = false): TaskBoard.DeferRequest => ({ action: 'defer', ...base, operationId,
+        reason: 'host', detail, nextReviewAt: value.fields.nextReviewAt,
+        recoveryRetryAt: retry ? new Date(this.now().getTime() + 30_000).toISOString() : null });
+      let source: Document<'task-board/run'>;
+      try { source = await this.engine.store.read('task-board/run', recoveryFor.objectId); }
+      catch (error) { if (error instanceof IvyError && error.code === 'not_found') return defer('The original Run is unavailable; inspect its retained operation receipts before continuing.'); throw error; }
+      if (source.value.taskId !== task.pin.objectId || source.value.cancellation || !same(source.value.primaryResourceRef, value.primaryResourceRef))
+        return defer('The original Run or native context does not match this work. No replacement execution was started.');
+      if (!['completed', 'failed'].includes(source.value.phase) || !['succeeded', 'failed'].includes(source.value.externalOutcome.state))
+        return defer('Reconcile the exact original native outcome before recovering its handoff.', true);
+    }
+    const coordinationOnly = mode === 'coordination';
+    const checkOnly = mode === 'check' && !questionAnswered;
+    const comments = recoveryFor ? [] : checkOnly ? queuedTaskEdits(value) : value.commentDeliveries
       .filter((item) => item.state === "queued")
       .map((item) => item.commentId)
       .filter(id => !coordinationOnly || value.comments.some(comment => comment.commentId === id && peerComment(comment)));
-    const feedback = taskPrompt(value, this.engine.owner.serviceNodeId, coordinationOnly);
+    const feedback = taskPrompt(value, this.engine.owner.serviceNodeId, coordinationOnly, checkOnly, !!recoveryFor);
     let allocation: Awaited<ReturnType<TaskBoardScheduler["allocate"]>> | null =
       null;
     try {
-      if (!coordinationOnly) {
+      if (!coordinationOnly && !recoveryFor) {
       requireThat(
-        !value.fields.nextReviewAt ||
+        questionAnswered || value.workflowState === 'todo' && queuedUserInput(value) || !value.fields.nextReviewAt ||
           value.fields.nextReviewAt <= this.now().toISOString(),
         "task_board_time_waiting",
         "The task is deferred until its next review time.",
@@ -376,24 +396,27 @@ export class TaskBoardScheduler {
         task.pin.objectId,
         true,
       );
-      await checkBlocker(this.engine.store, value.blocker);
+      await checkBlocker(this.engine.store, value.blocker, value.consumedBlockers, checkOnly || questionAnswered || queuedUserInput(value));
+      requireThat(checkOnly || !await questionWaitOpen(this.engine.store, value.questionWait), 'task_board_input_required', 'Waiting for the linked user question to be answered.');
       }
       allocation = await this.allocate(
         task,
         operationId,
-        value.primaryResourceRef ? feedback : undefined,
+        value.primaryResourceRef || checkOnly ? feedback : undefined,
       );
     } catch (error) {
-      if (!(error instanceof IvyError)) throw error;
+      if (!(error instanceof IvyError) && !checkOnly) throw error;
+      const failure = IvyError.from(error);
+      if (failure.code === 'task_board_dependency_consumed' && !checkOnly) return null;
       let reason: TaskBoard.DeferRequest["reason"];
-      if (error.code === "task_board_time_waiting") reason = "time";
-      else if (error.code === "task_board_dependency_waiting")
+      if (failure.code === "task_board_time_waiting") reason = "time";
+      else if (failure.code === "task_board_dependency_waiting")
         reason = "dependency";
-      else if (error.code === "task_board_capability_unavailable") reason = "capability";
-      else if (["task_board_target_unavailable", "task_board_model_unavailable", "native_catalog_mismatch"].includes(error.code))
+      else if (failure.code === "task_board_capability_unavailable") reason = "capability";
+      else if (["task_board_target_unavailable", "task_board_model_unavailable", "native_catalog_mismatch"].includes(failure.code))
         reason = "host";
       else if (
-        ["service_not_ready", "service_unavailable"].includes(error.code)
+        ["service_not_ready", "service_unavailable"].includes(failure.code)
       )
         reason = "host";
       else if (
@@ -404,27 +427,31 @@ export class TaskBoardScheduler {
           "task_board_project_mismatch",
           "task_board_workspace_reserved",
           "task_board_workspace_mismatch",
-        ].includes(error.code)
+        ].includes(failure.code)
       )
         reason = "workspace";
-      else if (error.code === "task_board_input_required") reason = "user";
-      else throw error;
+      else if (failure.code === "task_board_input_required") reason = "user";
+      else if (checkOnly) reason = 'host';
+      else throw failure;
       const detail =
-        ["task_board_model_unavailable", "task_board_capability_unavailable"].includes(error.code) ? error.message.slice(0, 2048)
+        ["task_board_model_unavailable", "task_board_capability_unavailable"].includes(failure.code) ? failure.message.slice(0, 2048)
           : reason === "time" && value.fields.nextReviewAt
           ? value.waiting?.detail === rateLimitWaitingDetail(value.fields.nextReviewAt) ? value.waiting.detail : `Deferred until ${value.fields.nextReviewAt}.`
-          : error.message.slice(0, 2048);
-      const blockerTaskId = error.details && typeof error.details === 'object' && 'blockerTaskId' in error.details
-        ? error.details.blockerTaskId : null;
-      waiting = { reason, detail, nextReviewAt: value.fields.nextReviewAt,
+          : failure.message.slice(0, 2048);
+      const blockerTaskId = failure.details && typeof failure.details === 'object' && 'blockerTaskId' in failure.details
+        ? failure.details.blockerTaskId : null;
+      waiting = { reason, detail, nextReviewAt: checkOnly && reason !== 'time' ? new Date(this.now().getTime() + 15 * 60_000).toISOString() : value.fields.nextReviewAt,
         ...(reason === 'workspace' && typeof blockerTaskId === 'string' ? { blocker: { taskId: blockerTaskId, until: 'idle' as const } } : {}) };
     }
     if (waiting) {
       if (coordinationOnly) return null;
+      if (recoveryFor) return { action: 'defer', ...base, operationId, reason: 'host', detail: waiting.detail,
+        nextReviewAt: value.fields.nextReviewAt, recoveryRetryAt: new Date(this.now().getTime() + 30_000).toISOString() };
       if (
         value.workflowState === 'waiting' &&
         value.waiting?.reason === waiting.reason &&
         value.waiting.detail === waiting.detail &&
+        (!checkOnly || value.fields.nextReviewAt === waiting.nextReviewAt) &&
         same(value.blocker ?? null, waiting.blocker ?? value.blocker ?? null)
       )
         return null;
@@ -444,6 +471,8 @@ export class TaskBoardScheduler {
           ...allocation,
           commentIds: comments,
           ...(coordinationOnly ? { coordinationOnly: true } : {}),
+          ...(checkOnly ? { checkOnly: true } : {}),
+          ...(recoveryFor ? { recoveryFor } : {}),
         }
       : {
           action: "start",
@@ -451,6 +480,7 @@ export class TaskBoardScheduler {
           operationId,
           ...allocation,
           commentIds: comments,
+          ...(checkOnly ? { checkOnly: true } : {}),
         };
   }
   private async verifyAttempt(
@@ -522,16 +552,38 @@ export class TaskBoardScheduler {
       task = await store.read("task-board/task", taskId),
       value = task.value;
     await forwardDelegatedReview(this.engine, task);
+    if (value.claim?.run && !value.publication) {
+      const run = await store.read('task-board/run', value.claim.run.objectId);
+      if (['completed', 'failed', 'cancelled'].includes(run.value.phase)) {
+        await this.engine.checks.aggregate(value, taskId);
+        if (run.value.result) {
+          const result = await store.read('task-board/result', run.value.result);
+          const original = await this.engine.operations.find(this.engine.settings.principalId, result.value.operationId);
+          if (original && !['succeeded', 'failed'].includes(original.value.phase)) {
+            await this.engine.recoverOperation(original.pin.objectId);
+            return null;
+          }
+        }
+        throw new IvyError('task_board_claim_inconsistent', 'The claimed Run is terminal, but its original completion publication has not released this claim. Reconcile its retained evidence; do not start another execution.');
+      }
+    }
+    const mode = nextExecutionMode(value, this.now().toISOString());
     if (
       value.fields.control !== "agent" ||
       value.claim ||
       value.publication ||
-      (!["todo", "waiting"].includes(value.workflowState) && !coordinationPending(value)) ||
-      (value.waiting && !coordinationPending(value) &&
+      (!["todo", "waiting"].includes(value.workflowState) && mode !== 'recovery' && !coordinationPending(value) && !scheduledCheckDue(value, this.now().toISOString())) ||
+      (value.waiting && !value.completionIssue && !coordinationPending(value) &&
         !["user", "time", "dependency", "host", "capability", "workspace"].includes(value.waiting.reason))
     )
       return null;
-    const recoveryAllowed = !value.blocker && (!value.fields.nextReviewAt || value.fields.nextReviewAt <= this.now().toISOString()) &&
+    if (!mode) {
+      if (value.completionIssue && ((value.completionIssue.attempts ?? 0) >= 2 || value.completionIssue.code !== 'task_board_handoff_missing'))
+        throw new IvyError(value.completionIssue.code === 'task_board_handoff_missing' ? 'task_board_handoff_recovery_exhausted' : value.completionIssue.code, value.completionIssue.detail);
+      return null;
+    }
+    const questionAnswered = !!value.questionWait && !await questionWaitOpen(store, value.questionWait);
+    const recoveryAllowed = mode !== 'recovery' && !value.blocker && (!value.fields.nextReviewAt || value.fields.nextReviewAt <= this.now().toISOString()) &&
       (!value.waiting || value.waiting.reason === 'user');
     const recoverThread = recoveryAllowed && await unstartedMissingContext(this.engine, task);
     const restoreArchived = recoveryAllowed && !recoverThread && value.waiting?.reason === 'user' && await unstartedArchivedContext(this.engine, task);
@@ -540,7 +592,11 @@ export class TaskBoardScheduler {
     if (recoverThread || restoreArchived) {
       const run = await store.read('task-board/run', value.lastRun!);
       if (this.now().getTime() < Date.parse(run.value.finishedAt!) + Math.max(30000, this.engine.settings.scheduler.intervalMs)) return null;
-    } else if (value.waiting?.reason === 'user' && !coordinationPending(value) && !rateLimitRetryAt) return null;
+    } else if (mode !== 'recovery' && value.waiting?.reason === 'user' && !coordinationPending(value) && !rateLimitRetryAt && !scheduledCheckDue(value, this.now().toISOString()) &&
+      !questionAnswered) return null;
+    if (mode !== 'recovery' && value.scheduledCheck?.failure && value.fields.nextReviewAt && value.fields.nextReviewAt > this.now().toISOString() && !questionAnswered && !coordinationPending(value) && !(value.workflowState === 'todo' && queuedUserInput(value))) return null;
+    if (mode !== 'recovery' && openQuestions(value).length && !scheduledCheckDue(value, this.now().toISOString()) && !coordinationPending(value) &&
+      !queuedUserInput(value)) return null;
     const freeBytes = store.localUsage().freeBytes;
     requireThat(freeBytes === null || freeBytes >= 512 * 1024 * 1024,
       "task_board_storage_low", "New agent work is paused until the TaskBoard journal has at least 512 MiB free.");
@@ -573,7 +629,7 @@ export class TaskBoardScheduler {
       previousOperation = operation;
     }
     const sequence = (attempt?.value.sequence ?? 0) + 1;
-    const proposed = await this.proposed(task, sequence, recoverThread, rateLimitRetryAt);
+    const proposed = await this.proposed(task, sequence, recoverThread, rateLimitRetryAt, questionAnswered);
     if (!proposed) return null;
     const request = proposed;
     const next: TaskBoard.SchedulerAttempt = {

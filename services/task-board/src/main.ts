@@ -58,7 +58,7 @@ export async function startTaskBoard(path: string) {
         recovered: runtime.recovered, observedAt: new Date().toISOString(), scheduler: settings.scheduler, phoneTarget: settings.phoneTarget };
       return result;
     }
-    if (tool.name === 'operation') return await engine.operation(String(args['operationId']), context) as unknown as Wire.Json;
+    if (tool.name === 'operation' || tool.name === 'operationReceipt') return await engine.operation(String(args['operationId']), context, tool.name === 'operationReceipt') as unknown as Wire.Json;
     if (tool.name === 'configuration') return await engine.configuration() as unknown as Wire.Json;
     if (tool.name === 'read') { await engine.verifyOwner(); return await engine.task(args as unknown as TaskBoard.TaskQuery, context.callerPrincipalId) as unknown as Wire.Json; }
     if (tool.name === 'list') { await engine.verifyOwner(); return await engine.list(args as unknown as TaskBoard.TaskListQuery) as unknown as Wire.Json; }
@@ -77,7 +77,10 @@ export async function startTaskBoard(path: string) {
     reconcile: async connection => {
       await retireRuntime();
       const next = new TaskBoardEngine(new TaskBoardStore(connection, settings.rootObjectId, config.dataRoot), settings, { serviceNodeId: config.serviceNodeId, generation: connection.generation });
-      await next.verifyOwner(); if (settings.rootObjectId) await connection.request('objects.stat', { objectId: settings.rootObjectId });
+      try {
+        await next.verifyOwner(); if (settings.rootObjectId) await connection.request('objects.stat', { objectId: settings.rootObjectId });
+        await next.store.protectRunSources();
+      } catch (error) { next.store.close(); throw error; }
       engine = next; runtime = new TaskBoardReconciler(next);
     },
     readiness: async connection => {

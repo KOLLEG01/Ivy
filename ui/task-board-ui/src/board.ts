@@ -31,9 +31,9 @@ const conditionLabels: Record<string, string> = {
   blocked_environment: 'Environment unavailable', blocked_dependency: 'Blocked', needs_user: 'Needs you', outcome_unknown: 'Recovery required',
   publishing: 'Publishing', starting: 'Starting', active: 'Working', deferred: 'Scheduled', queued: 'Queued', idle: 'Not scheduled',
 };
-export const conditionLabel = (condition: string) => condition === 'recovering' ? tr('Statusabgleich', 'Reconciling status') : conditionLabels[condition] ?? condition.replaceAll('_', ' ');
+export const conditionLabel = (condition: string) => condition === 'recovering' ? tr('Statusabgleich', 'Reconciling status') : condition === 'workflow_attention' ? tr('Übergabe prüfen', 'Workflow needs attention') : conditionLabels[condition] ?? condition.replaceAll('_', ' ');
 export const conditionTone = (condition: string): Tone =>
-  condition.startsWith('blocked') || condition === 'outcome_unknown' ? 'bad' : ['needs_user', 'publishing', 'starting', 'recovering'].includes(condition) ? 'warning' : condition === 'active' ? 'good' : 'neutral';
+  condition.startsWith('blocked') || condition === 'outcome_unknown' ? 'bad' : ['needs_user', 'publishing', 'starting', 'recovering', 'workflow_attention'].includes(condition) ? 'warning' : condition === 'active' ? 'good' : 'neutral';
 /** Cards only surface conditions that ask for attention; the column already states ordinary progress. */
 export const noteworthyCondition = (condition: string) => !['idle', 'active', 'queued'].includes(condition);
 export const stateLabels: Record<string, string> = { backlog: 'Backlog', todo: 'Todo', in_progress: 'In progress', waiting: 'Blocked', review: 'Review', done: 'Done', cancelled: 'Cancelled' };

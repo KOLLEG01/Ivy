@@ -1,4 +1,5 @@
-import { runHandoff, unansweredQuestion } from './conversation.js';
+import { openQuestions, queuedUserInput, runHandoff, unansweredQuestion } from './conversation.js';
+import { applyHandoff, retryScheduledCheck } from './handoff.js';
 import { claimedWorkflowState } from './condition.js';
 import { hashJson } from '../../../../packages/sdk/src/node.js';
 import { requireThat } from '../../../../packages/sdk/src/node.js';
@@ -13,6 +14,8 @@ import type { verifyNativeTranscript } from './full-turn-evidence.js';
 import { initialDelivery } from './deliveries.js';
 import { BoundToolClient } from '../../../../packages/sdk/src/client.js';
 import { nativeRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
+import { questionWaitOpen } from './task-coordination.js';
+import { executionMode } from './execution-mode.js';
 
 export const finishedRun = (run: TaskBoard.Run): boolean => ['completed', 'failed', 'cancelled'].includes(run.phase);
 type Completion = { state: 'succeeded' | 'failed' | 'cancelled'; summary: string; evidence: TaskBoard.Artifact | null; code: string | null; retryAt?: string | null };
@@ -60,10 +63,15 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   requireThat(request.action === 'nativeUpdate' && operation.value.actor.source === 'native' && operation.value.callerPrincipalId === engine.settings.principalId,
     'task_board_forbidden', 'Only the authenticated logical owner can publish native observations.');
   const store = engine.store, at = operation.value.createdAt, first = operation.value.writes.length === 0;
-  const task = await store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision }), originalRun = await store.read('task-board/run', request.run);
+  const taskPin = operation.value.publicationTask ?? { objectId: request.taskId, revision: request.expectedRevision };
+  requireThat(taskPin.objectId === request.taskId, 'task_board_identity_conflict', 'The completion publication snapshot must belong to its original Task.');
+  const task = await store.read('task-board/task', taskPin), originalRun = await store.read('task-board/run', request.run);
   const run = originalRun.value, active = task.value.claim?.run?.objectId === request.run.objectId, evidence = new TaskBoardEvidence(store);
   if (first) {
-    requireThat(task.metadata.currentRevision === request.expectedRevision && !task.value.publication && originalRun.metadata.currentRevision === request.run.revision,
+    if (request.change.kind === 'completion' || request.change.kind === 'transcript' || request.change.kind === 'snapshot') requireThat(
+      !(await engine.operations.pendingHandoffs(request.run.objectId)).length,
+      'task_board_handoff_pending', 'Reconcile the original accepted handoff before publishing this Run completion.');
+    requireThat(task.metadata.currentRevision === task.pin.revision && !task.value.publication && originalRun.metadata.currentRevision === request.run.revision,
       'revision_conflict', 'Task or Run changed before native publication.');
     await engine.checks.aggregate(task.value, request.taskId);
     requireThat(run.taskId === request.taskId && run.originalRequest.taskId === request.taskId && run.operationId === run.originalRequest.operationId && !finishedRun(run),
@@ -298,9 +306,22 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     'task_board_outcome_unresolved', 'Resolve the original steering receipt before closing its turn.');
   let finalTask: TaskBoard.Task = { ...task.value, updatedAt: at, publication: steps.pin,
     commentDeliveries: task.value.commentDeliveries.map(value => steeredComments.includes(value.commentId) ? { ...value, state: 'delivered', updatedAt: at, code: null } : value) };
-  const coordinationOnly = run.originalRequest.action === 'continue' && run.originalRequest.coordinationOnly === true;
+  const mode = executionMode(run.originalRequest);
+  const coordinationOnly = mode === 'coordination';
+  const recoveryOnly = mode === 'recovery';
+  const recoveryInitial = recoveryOnly ? (await store.read('task-board/task', { objectId: run.taskId, revision: run.originalRequest.expectedRevision })).value : null;
+  const recoveryUnchanged = !recoveryInitial || same(recoveryInitial.primaryResourceRef, finalTask.primaryResourceRef) &&
+    (['title', 'description', 'acceptanceCriteria', 'control', 'dependencies', 'requiredCapabilities',
+      'executionRequirement', 'workspaceRequirement', 'nativeOptions', 'allowParallel'] as const)
+      .every(key => same(recoveryInitial.fields[key], finalTask.fields[key]));
+  const checkOnly = run.originalRequest.checkOnly === true;
+  const checkInitial = checkOnly ? run.checkContext! : null;
+  const preservedReview = (checkInitial ?? recoveryInitial)?.workflowState === 'review';
+  const declaredHandoff = recoveryUnchanged ? runHandoff(finalTask, request.run.objectId)?.handoff : undefined;
+  const linkedQuestion = await questionWaitOpen(store, declaredHandoff?.questionWait === null ? null : declaredHandoff?.questionWait ?? finalTask.questionWait);
+  const pendingFollowUp = checkOnly || recoveryOnly ? queuedUserInput(finalTask) : finalTask.commentDeliveries.some(delivery => delivery.state === 'queued');
   // All semantic/evidence checks precede reservation; deterministic replay below uses original pins.
-  const reserved = await steps.write('task-board/task', finalTask, { objectId: request.taskId, expectedRevision: request.expectedRevision });
+  const reserved = await steps.write('task-board/task', finalTask, { objectId: request.taskId, expectedRevision: task.pin.revision });
   const outcome: TaskBoard.ActionOutcome = { operationId: request.operationId, task: null, plan: null, run: null, history: null, result: null, review: null, attachment: null };
   if (completion) {
     try {
@@ -310,14 +331,18 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     } catch { /* The retained allocation still identifies the material host and limitation. */ }
     const evidence = completion.evidence && !store.localKey(completion.evidence.object.objectId) ? [completion.evidence] : [];
     const content: TaskBoard.ResultContent = { summary: completion.summary, artifacts: evidence,
-      checks: [{ name: 'Native execution outcome', status: completion.state === 'succeeded' ? 'passed' : 'failed', detail: completion.code ?? 'Owner-confirmed native completion; acceptance criteria require user review.', evidence }],
+      checks: [{ name: 'Native execution outcome', status: completion.state === 'succeeded' ? 'passed' : 'failed', detail: completion.code ?? 'Owner-confirmed native completion; task readiness follows the declared handoff.', evidence }],
       codeReferences: [], repositoryResult: next.workspace.project && next.workspace.repository ? { hostId: next.target.hostId, serviceNodeId: next.target.serviceNodeId,
         project: next.workspace.project, repositoryName: next.workspace.repository.name, branch: next.workspace.repository.branch, commit: next.workspace.repository.commit,
         originName: next.workspace.repository.originName, originUrl: next.workspace.repository.originUrl,
         originState: next.workspace.repository.originState, remoteRef: next.workspace.repository.remoteRef, observedAt: next.workspace.repository.observedAt,
         limitation: next.workspace.repository.limitation } : null,
       limitations: ['Native completion does not automatically accept the task. Native conversation history remains available from its AgentManager owner while retained there.'] };
-    outcome.result = await steps.create('task-board/result', { schemaVersion: 1, taskId: request.taskId, run: request.run, kind: 'final', content, createdAt: at, actor: operation.value.actor, operationId: request.operationId }, 'Native result');
+    const handoff = declaredHandoff;
+    outcome.result = await steps.create('task-board/result', { schemaVersion: 1, taskId: request.taskId, run: request.run,
+      kind: completion.state === 'succeeded' && handoff?.workflowState === 'review' && !preservedReview &&
+        !unansweredQuestion(finalTask, request.run.objectId) && !linkedQuestion && !finalTask.blocker && !pendingFollowUp ? 'final' : 'intermediate',
+      content, createdAt: at, actor: operation.value.actor, operationId: request.operationId }, 'Native result');
     next = { ...next, result: outcome.result, phase: completion.state === 'succeeded' ? 'completed' : completion.state === 'cancelled' ? 'cancelled' : 'failed', finishedAt: at,
       externalOutcome: { state: completion.state, observedAt: at, evidence: completion.evidence, code: completion.code } };
     kind = completion.state === 'cancelled' ? 'cancelled' : 'result_saved'; detail = 'Saved native ' + completion.state + ' outcome' + (active ? '.' : ' for the retained reassigned attempt.');
@@ -340,15 +365,99 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   outcome.run = await steps.write('task-board/run', next, { objectId: request.run.objectId, expectedRevision: request.run.revision });
   if (active) {
     if (completion) {
-      const followUp = completion.state !== 'cancelled' && !!next.turnId && finalTask.commentDeliveries.some(value => value.state === 'queued');
-      const needsAnswer = unansweredQuestion(finalTask, request.run.objectId);
-      const ready = completion.state === 'succeeded' && !followUp && !needsAnswer && !finalTask.blocker;
-      finalTask = { ...finalTask, claim: null, primaryResourceRef: next.primaryResourceRef, latestResult: outcome.result, acceptedReview: null, lastRun: outcome.run,
-        workflowState: completion.state === 'cancelled' ? 'cancelled' : finalTask.blocker ? 'waiting' : followUp ? 'todo' : ready ? 'review' : 'waiting',
-        waiting: !followUp && completion.state !== 'cancelled' && !ready
-          ? { reason: 'user', detail: needsAnswer ? 'Waiting for a response in the ticket.' : 'Execution failed; see the ticket comment.', since: at } : null };
-      if (finalTask.blocker && completion.state !== 'cancelled') finalTask.waiting = { reason: 'dependency', detail: 'Waiting for the linked task condition.', since: at };
-      if (completion.state === 'failed' && completion.retryAt && !next.cancellation && !needsAnswer && !finalTask.blocker && !coordinationOnly) {
+      const followUp = completion.state !== 'cancelled' && !!next.turnId && pendingFollowUp;
+      const needsAnswer = unansweredQuestion(finalTask, request.run.objectId) || linkedQuestion;
+      const handoffIntent = declaredHandoff;
+      const initial = checkInitial;
+      if (completion.state === 'succeeded' && handoffIntent) finalTask = applyHandoff(finalTask, handoffIntent, at);
+      if (!coordinationOnly && !checkOnly && !recoveryOnly && completion.state !== 'cancelled') {
+        if (completion.state === 'failed' && completion.retryAt) delete finalTask.completionIssue;
+        else if (!handoffIntent || completion.state === 'failed') finalTask.completionIssue = {
+          code: completion.state === 'failed' ? completion.code ?? 'native_failed' : 'task_board_handoff_missing',
+          detail: completion.state === 'failed' ? completion.summary.slice(0, 2048) : 'The execution ended without a structured handoff. Its original outcome needs reconciliation.',
+          run: request.run, operationId: request.operationId,
+          ...(completion.state === 'succeeded' ? { attempts: 0, retryAt: null } : {}),
+        };
+        else delete finalTask.completionIssue;
+      }
+      const ready = completion.state === 'succeeded' && handoffIntent?.workflowState === 'review' && !followUp && !needsAnswer && !finalTask.blocker && !preservedReview;
+      const declaredWait = completion.state === 'succeeded' && handoffIntent?.workflowState === 'waiting' ? finalTask.waiting : null;
+      finalTask = { ...finalTask, claim: null, primaryResourceRef: next.primaryResourceRef,
+        latestResult: handoffIntent && completion.state === 'succeeded' ? outcome.result : task.value.latestResult ?? outcome.result,
+        acceptedReview: null, lastRun: outcome.run,
+        workflowState: completion.state === 'cancelled' ? 'cancelled' : finalTask.blocker ? 'waiting' : followUp || handoffIntent?.workflowState === 'todo' ? 'todo' : ready ? 'review' : 'waiting',
+        waiting: !followUp && completion.state !== 'cancelled' && !ready && handoffIntent?.workflowState !== 'todo'
+          ? declaredWait ?? { reason: needsAnswer ? 'user' : 'workflow', detail: needsAnswer ? 'Waiting for a response in the ticket.' : completion.state === 'succeeded'
+            ? 'Execution ended without an explicit completion intent; review the ticket before continuing.' : 'Execution failed; see the ticket comment.', since: at } : null };
+      if (finalTask.blocker && completion.state !== 'cancelled') finalTask.waiting = declaredWait ?? { reason: 'dependency', detail: 'Waiting for the linked task condition.', since: at };
+      if (recoveryOnly && recoveryInitial && completion.state !== 'cancelled') {
+        if (completion.state === 'succeeded' && handoffIntent) {
+          delete finalTask.completionIssue;
+          if (handoffIntent.workflowState !== 'review' || preservedReview) finalTask.latestResult = recoveryInitial.latestResult;
+          if (preservedReview && !pendingFollowUp && handoffIntent.workflowState === 'review') finalTask = { ...finalTask,
+            workflowState: 'review', waiting: null, acceptedReview: recoveryInitial.acceptedReview };
+        }
+        else {
+          const original = recoveryInitial.completionIssue ?? { code: 'task_board_handoff_missing',
+            detail: 'The original completion handoff is missing.', run: run.originalRequest.action === 'continue' ? run.originalRequest.recoveryFor! : request.run,
+            operationId: run.operationId };
+          const contextUnavailable = !next.turnId && completion.state === 'failed' && !completion.retryAt;
+          const attempts = Math.min(2, (original.attempts ?? 0) + (next.turnId && !completion.retryAt ? 1 : 0));
+          finalTask = { ...finalTask, workflowState: queuedUserInput(finalTask) ? 'todo' : recoveryInitial.workflowState,
+            waiting: queuedUserInput(finalTask) ? null : recoveryInitial.waiting,
+            latestResult: recoveryInitial.latestResult, acceptedReview: recoveryInitial.acceptedReview,
+            completionIssue: { ...original, code: contextUnavailable ? 'task_board_recovery_context_unavailable' : original.code,
+              attempts, retryAt: contextUnavailable ? null : completion.retryAt ?? (attempts < 2 ? new Date(Date.parse(at) + 30_000).toISOString() : null),
+              detail: contextUnavailable ? 'The original context could not resume before recovery started: ' + completion.summary.slice(0, 1700) :
+                !recoveryUnchanged ? 'The work changed during handoff recovery; review the queued instructions before proceeding.' :
+                attempts >= 2 ? 'Two handoff recovery attempts produced no valid completion intent. Inspect the original result and owner receipts.' :
+                'The original handoff still needs reconstruction; a bounded retry is scheduled.' } };
+          if (attempts >= 2 || contextUnavailable) finalTask = { ...finalTask, workflowState: 'waiting',
+            waiting: { reason: 'workflow', detail: finalTask.completionIssue!.detail, since: at } };
+        }
+        if (recoveryInitial.fields.nextReviewAt && task.value.fields.nextReviewAt === null) {
+          finalTask.fields = { ...finalTask.fields, nextReviewAt: null }; delete finalTask.scheduledCheck;
+        }
+      }
+      if (completion.state === 'succeeded' && !recoveryOnly && handoffIntent?.workflowState === 'todo') {
+        const comment = runHandoff(finalTask, request.run.objectId)!;
+        const fingerprint = hashJson({ commit: next.workspace.repository?.commit ?? null,
+          artifacts: comment.attachments.map(value => value.contentHash).sort(),
+          deliveries: (handoffIntent.deliveries ?? []).map(value => ({ key: value.key,
+            artifacts: value.artifacts.map(artifact => artifact.contentHash).sort(),
+            code: value.codeReferences.map(reference => hashJson(reference)).sort() })).sort((a, b) => a.key.localeCompare(b.key)) });
+        const stalls = finalTask.continuation?.fingerprint === fingerprint ? Math.min(2, finalTask.continuation.stalls + 1) : 0;
+        finalTask.continuation = { fingerprint, stalls };
+        if (stalls >= 2) {
+          finalTask.workflowState = 'waiting'; finalTask.waiting = { reason: 'workflow', detail: 'Repeated continuation produced no new work evidence.', since: at };
+          finalTask.completionIssue = { code: 'task_board_no_progress', detail: 'Repeated continuation has no new committed work or published evidence. Inspect the next step before another execution.',
+            run: request.run, operationId: request.operationId };
+        }
+      }
+      if (completion.state === 'succeeded' && !coordinationOnly && handoffIntent?.deliveries?.length) {
+        const deliveries = new Map((finalTask.deliveries ?? []).map(value => [value.delivery.key, value]));
+        for (const delivery of handoffIntent.deliveries) deliveries.set(delivery.key, { delivery,
+          identity: hashJson({ taskId: request.taskId, delivery }), result: outcome.result! });
+        requireThat(deliveries.size <= 64, 'task_board_delivery_limit', 'A task can retain at most 64 named work deliveries.');
+        finalTask.deliveries = [...deliveries.values()];
+      }
+      if (checkOnly && initial && completion.state !== 'cancelled') {
+        if (initial.workflowState === 'review') finalTask = { ...finalTask, workflowState: next.turnId && queuedUserInput(finalTask) ? 'todo' : 'review', waiting: null,
+          latestResult: initial.latestResult, acceptedReview: initial.acceptedReview };
+        if ((!handoffIntent || completion.state === 'failed') && initial.scheduledCheck) {
+          if (initial.workflowState !== 'review') finalTask = { ...finalTask, workflowState: 'waiting', waiting: initial.waiting ??
+            { reason: 'time', detail: 'Scheduled check failed; another attempt is planned.', since: at } };
+          finalTask = retryScheduledCheck(finalTask, initial.scheduledCheck, at, completion.code ?? 'task_board_check_handoff_missing', completion.state === 'failed'
+            ? completion.summary : 'The scheduled check ended without an explicit completion intent.', completion.retryAt ?? undefined, initial.at);
+          if (!finalTask.scheduledCheck && finalTask.fields.nextReviewAt === null) finalTask.completionIssue = {
+            code: 'task_board_handoff_missing', detail: 'The independent check ended without a completion intent after its timer was stopped. No further work is scheduled.',
+            run: request.run, operationId: request.operationId,
+          };
+        }
+      }
+      if (checkOnly && next.turnId && completion.state !== 'cancelled' && queuedUserInput(finalTask) && !finalTask.blocker)
+        finalTask = { ...finalTask, workflowState: 'todo', waiting: null, acceptedReview: null };
+      if (completion.state === 'failed' && completion.retryAt && !next.cancellation && !needsAnswer && !finalTask.blocker && !coordinationOnly && !checkOnly && !recoveryOnly) {
         const nextReviewAt = finalTask.fields.nextReviewAt && finalTask.fields.nextReviewAt > completion.retryAt ? finalTask.fields.nextReviewAt : completion.retryAt;
         finalTask = { ...finalTask, workflowState: 'waiting', fields: { ...finalTask.fields, nextReviewAt },
           waiting: { reason: 'time', detail: rateLimitWaitingDetail(nextReviewAt), since: at } };
@@ -366,7 +475,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
           body: completion.summary.slice(0, 65536), requests: [], responses: [], delivery: null,
           attachments: [], run: request.run, turnId: next.turnId, replyTo: null, createdAt: at, operationId: request.operationId };
         const append = !handoff && !needsAnswer;
-        const fits = !!handoff || resultCommentFits(finalTask, comment, steps.pin);
+        const fits = !!handoff || resultCommentFits(finalTask, comment, steps.pin, request.taskId);
         if (fits && ready && !finalTask.parentTaskId && finalTask.fields.userContact !== 'ticket' && !comment.delivery) {
           const delivery = await steps.create('task-board/delivery', initialDelivery(engine.settings, steps.pin, request.taskId, comment.commentId, finalTask.fields.userContact, at), 'Handoff notification');
           comment = { ...comment, delivery };
@@ -383,12 +492,13 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
           : finalTask.commentDeliveries };
     }
   } else if (task.value.lastRun?.objectId === request.run.objectId) finalTask.lastRun = outcome.run;
+  finalTask.openQuestionCount = openQuestions(finalTask).length;
   if (completion || waiting?.reason !== task.value.waiting?.reason) outcome.history = await steps.create('task-board/history', { schemaVersion: 1, taskId: request.taskId, operationId: request.operationId, actor: operation.value.actor, createdAt: at, kind, detail,
     previousTask: task.pin, previousHistory: task.value.lastHistory, priorRun: request.run, fromTarget: null, toTarget: null, result: outcome.result, review: null }, 'Native history');
   outcome.task = await steps.write('task-board/task', { ...finalTask, publication: null, lastHistory: outcome.history ?? task.value.lastHistory }, { objectId: request.taskId, expectedRevision: reserved.revision });
   if (active && completion && (completion.state === 'cancelled' || sharedProjectKey(task.value.fields.workspaceRequirement, next.workspace)))
     store.releaseWorkspace(request.taskId);
-  if (finishedRun(next)) {
+  if (finishedRun(next) && !finalTask.completionIssue) {
     // The result must be fully published before starting retention. Keep replay
     // dependencies if the operation's final receipt is interrupted afterwards.
     const publishedAt = new Date().toISOString();
@@ -396,6 +506,22 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       store.completeLocalWorkflow(root.objectId, publishedAt, operation.pin.objectId);
     if (next.owner.source === 'scheduler' && store.localKey(next.originalRequest.intent.objectId) === 'task-board/native-plan')
       store.completeLocalWorkflow(next.originalRequest.intent.objectId, publishedAt, operation.pin.objectId);
+    if (recoveryInitial?.completionIssue) {
+      const origin = await store.retainedRecoveryRun(recoveryInitial.completionIssue.run);
+      store.completeLocalWorkflow(origin.pin.objectId, publishedAt, operation.pin.objectId);
+      const calls = Object.values(origin.value.calls).filter((pin): pin is TaskBoard.ObjectPin => !!pin);
+      const seen = new Set<string>();
+      for (const pin of calls) {
+        if (seen.has(pin.objectId)) continue;
+        requireThat(seen.size < 2048, 'task_board_evidence_mismatch', 'The recovered call lineage exceeds its limit.');
+        seen.add(pin.objectId); store.completeLocalWorkflow(pin.objectId, publishedAt, operation.pin.objectId);
+        try {
+          const call = await store.read('task-board/native-call', pin.objectId), previous = call.value.origin;
+          if (previous && previous.kind !== 'initial' && previous.predecessor) calls.push(previous.predecessor);
+        } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'not_found')) throw error; }
+      }
+      if (store.localKey(origin.value.originalRequest.intent.objectId)) store.completeLocalWorkflow(origin.value.originalRequest.intent.objectId, publishedAt, operation.pin.objectId);
+    }
   }
   return outcome;
 }
