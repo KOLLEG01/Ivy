@@ -95,6 +95,7 @@ fn audio_packetization_matches_original_actual_udp_wrap_split_empty_and_suppress
         std::str::from_utf8(&result.stdout)
             .unwrap()
             .trim_start_matches('\u{feff}'),
+        4_000_000,
     )
     .unwrap();
     let outputs = old.as_array().unwrap();
