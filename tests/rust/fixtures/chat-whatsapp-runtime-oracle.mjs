@@ -74,6 +74,7 @@ add('status-socket-error-wins-over-lane-error',[{op:'run',lane:'output'},{op:'st
 add('immediately-ready-output-burst',[{op:'runMany',lane:'output',count:3}],{calls:{flush:[{ready:true,value:null}]}});
 add('immediately-ready-command-burst',[{op:'runMany',lane:'control',count:3}],{rows:[row('cmd','/help')],calls:{'A.command':[{ready:true,value:null}]}});
 add('immediately-ready-error-recovery',[{op:'runMany',lane:'output',count:3},{op:'status'}],{calls:{flush:[{ready:true,value:err('ready_failure')},{ready:true,value:null}]}});
+add('late-attachment-admits-no-work-after-close',[{op:'close'},{op:'attach',id:'B'},{op:'close'}]);
 
 let ctx;const originalDate=Date;globalThis.Date=class extends originalDate{constructor(...args){super(...(args.length?args:[ctx?.now??1000]));}static now(){return ctx?.now??1000;}};
 globalThis.setInterval=(fn,ms)=>{const name=['control','input','listener','output','status','read-receipts','activity','retention'][ctx.timers.length%8];const timer={name,ms,fn,cleared:false};ctx.timers.push(timer);ctx.emit('timer',name,ms);return timer;};

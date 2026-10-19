@@ -343,7 +343,7 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         owner.upgrade().is_none(),
         "Detach must release the real session/listener generation lease"
     );
-    let next = ChatGeneration::with_clock(config, c.clone(), clock)
+    let next = ChatGeneration::with_clock(config.clone(), c.clone(), clock.clone())
         .await
         .unwrap();
     ChatTransport::attach(&runtime, Some(next.clone())).unwrap();
@@ -372,19 +372,31 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
     assert_eq!(state.auth.load(Ordering::SeqCst), 1);
     assert_eq!(state.lock.load(Ordering::SeqCst), 1);
     assert!(journal.access(|_| Ok(())).is_err());
+    // Reconciliation may have finished constructing an owner after transport
+    // cleanup. With no accepted jobs, that owner must not pin another store.
+    let late = ChatGeneration::with_clock(config, c.clone(), clock)
+        .await
+        .unwrap();
+    ChatTransport::attach(&runtime, Some(late.clone())).unwrap();
+    assert!(factory.owners.lock().unwrap()[2].upgrade().is_none());
+    tokio::time::timeout(Duration::from_secs(30), settled(late.retire()))
+        .await
+        .unwrap()
+        .unwrap();
     c.close();
     let report = peer
         .command(Json::object([("action", "summary".into())]))
         .await;
     assert!(field(&report, "mismatches").as_array().unwrap().is_empty());
     let actual = Json::object([
-        ("generations", Json::Number(2.0)),
+        ("generations", Json::Number(3.0)),
         ("failedReplacement", Json::String(rejected.code_js())),
         ("helpOutputs", Json::Number(1.0)),
         ("oldOwnerRetainedOnFailure", true.into()),
         ("detachReleasedStore", true.into()),
         ("cancelledCloseObserver", true.into()),
         ("closeReleasedStore", true.into()),
+        ("lateAttachmentReleasedStore", true.into()),
         ("timersCleared", Json::Number(8.0)),
         (
             "statuses",
@@ -397,5 +409,9 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         std::fs::write(path, canonical(&actual, usize::MAX).unwrap()).unwrap();
     }
     peer.finish().await;
+    assert_eq!(
+        root.canonicalize().unwrap().parent(),
+        Some(std::env::temp_dir().canonicalize().unwrap().as_path())
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }

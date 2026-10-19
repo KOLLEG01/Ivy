@@ -425,6 +425,11 @@ impl WhatsAppRuntime {
     fn install(&self, attached: Option<Arc<dyn RuntimeAttached>>) {
         {
             let mut state = self.0.state.lock().unwrap();
+            // No new work is admitted after close. Release a late constructor's
+            // lease too, including when asynchronous cleanup has already ended.
+            if state.closed && attached.is_some() {
+                return;
+            }
             state.attached = attached.clone();
             if attached.is_none() {
                 state.again.clear();
