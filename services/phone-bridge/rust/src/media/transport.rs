@@ -76,15 +76,11 @@ pub struct RtpTransportObservation {
     pub counters: RtpTransportCounters,
 }
 struct ReceiveSockets {
-    rtp: UdpSocket,
-    rtcp: UdpSocket,
-}
-struct SendSockets {
-    rtp: StdUdpSocket,
-    rtcp: StdUdpSocket,
+    rtp: Arc<UdpSocket>,
+    rtcp: Arc<UdpSocket>,
 }
 struct State {
-    sockets: Option<SendSockets>,
+    sockets: Option<ReceiveSockets>,
     peer: Option<RtpPeer>,
     closed: bool,
     failed: bool,
@@ -159,18 +155,13 @@ impl RtpTransport {
                 .map_err(|_| RtpTransportError::Io)?;
             rtcp.set_nonblocking(true)
                 .map_err(|_| RtpTransportError::Io)?;
-            // Duplicate handles refer to the same original bound sockets. Std's
-            // nonblocking send does not depend on Tokio's cached write readiness.
-            let receive = ReceiveSockets {
-                rtp: UdpSocket::from_std(rtp.try_clone().map_err(|_| RtpTransportError::Io)?)
-                    .map_err(|_| RtpTransportError::Io)?,
-                rtcp: UdpSocket::from_std(rtcp.try_clone().map_err(|_| RtpTransportError::Io)?)
-                    .map_err(|_| RtpTransportError::Io)?,
-            };
-            selected = Some((SendSockets { rtp, rtcp }, receive));
+            selected = Some(ReceiveSockets {
+                rtp: Arc::new(UdpSocket::from_std(rtp).map_err(|_| RtpTransportError::Io)?),
+                rtcp: Arc::new(UdpSocket::from_std(rtcp).map_err(|_| RtpTransportError::Io)?),
+            });
             break;
         }
-        let (sockets, receive_sockets) = selected.ok_or(RtpTransportError::AddressInUse)?;
+        let sockets = selected.ok_or(RtpTransportError::AddressInUse)?;
         let inner = Arc::new(Inner {
             local_rtp: sockets
                 .rtp
@@ -181,7 +172,10 @@ impl RtpTransport {
                 .local_addr()
                 .map_err(|_| RtpTransportError::Io)?,
             state: Mutex::new(State {
-                sockets: Some(sockets),
+                sockets: Some(ReceiveSockets {
+                    rtp: sockets.rtp.clone(),
+                    rtcp: sockets.rtcp.clone(),
+                }),
                 peer: None,
                 closed: false,
                 failed: false,
@@ -192,7 +186,7 @@ impl RtpTransport {
             changed: Notify::new(),
         });
         let task_inner = inner.clone();
-        let worker = tokio::spawn(async move { receive(task_inner, receive_sockets, sink).await });
+        let worker = tokio::spawn(async move { receive(task_inner, sockets, sink).await });
         let completion = inner.clone();
         tokio::spawn(async move {
             let failed = !matches!(worker.await, Ok(Ok(())));
@@ -274,7 +268,7 @@ impl RtpTransport {
         };
         // A synchronous nonblocking send and close share this short lock. No
         // packet can be newly dispatched after request_close has returned.
-        let sent = socket.send_to(datagram, destination).map_err(|error| {
+        let sent = send_to(socket, datagram, destination).map_err(|error| {
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 RtpTransportError::WouldBlock
             } else {
@@ -311,6 +305,27 @@ impl RtpTransport {
 }
 fn same_endpoint(left: SocketAddr, right: SocketAddr) -> bool {
     left.port() == right.port() && same_ip(left, right)
+}
+fn send_to(socket: &UdpSocket, datagram: &[u8], destination: SocketAddr) -> std::io::Result<usize> {
+    // Borrow the original nonblocking socket only for this synchronous send.
+    // No duplicate descriptor can extend a Windows bind past close. The caller
+    // holds its Arc and lifecycle lock; this temporary cannot escape or close it.
+    #[cfg(windows)]
+    let borrowed = {
+        use std::os::windows::io::{AsRawSocket, FromRawSocket};
+        // SAFETY: socket remains open for the call; ManuallyDrop never owns or
+        // closes its descriptor. send_to borrows the wrapper and retains no I/O.
+        std::mem::ManuallyDrop::new(unsafe {
+            StdUdpSocket::from_raw_socket(socket.as_raw_socket())
+        })
+    };
+    #[cfg(unix)]
+    let borrowed = {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: same bounded borrow as the Windows branch above.
+        std::mem::ManuallyDrop::new(unsafe { StdUdpSocket::from_raw_fd(socket.as_raw_fd()) })
+    };
+    borrowed.send_to(datagram, destination)
 }
 async fn receive(
     inner: Arc<Inner>,

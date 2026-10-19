@@ -87,7 +87,14 @@ impl<'a> RtpPacket<'a> {
             contributing_sources,
             extension,
             padding,
-            payload: &bytes[offset..bytes.len() - usize::from(padding)],
+            // The original GetPayloadBytes falls back to the post-header bytes
+            // when removing padding would leave zero payload. Keep this narrow
+            // compatibility quirk; ordinary padded payloads exclude all padding.
+            payload: if offset == bytes.len() - usize::from(padding) {
+                &bytes[offset..]
+            } else {
+                &bytes[offset..bytes.len() - usize::from(padding)]
+            },
         })
     }
 }

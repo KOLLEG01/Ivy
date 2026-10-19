@@ -622,6 +622,13 @@ async fn original_managed_peer_exchanges_actual_rtp_rtcp_and_ordered_g711_with_r
             ("command", parse(text, 65536).unwrap()),
             ("reply", reply.clone()),
         ]));
+        if let Some(path) = std::env::var_os("IVY_PHONE_RTP_ORACLE_TRACE") {
+            std::fs::write(
+                path,
+                stringify(&IvyJson::Array(trace.clone()), 2_000_000).unwrap(),
+            )
+            .unwrap();
+        }
         reply
     }
     let hello = read(&mut output).await;
@@ -716,9 +723,16 @@ async fn original_managed_peer_exchanges_actual_rtp_rtcp_and_ordered_g711_with_r
         ..header(0)
     };
     channel.send_rtp(second, &encoded).unwrap();
-    channel
-        .send_rtcp(&[0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78])
-        .unwrap();
+    // A complete sender report + CNAME compound, rather than reduced-size RR.
+    let mut report = vec![0x80, 200, 0, 6];
+    for value in [0x12345678_u32, 3_900_000_000, 0, 159, 2, 320] {
+        report.extend_from_slice(&value.to_be_bytes());
+    }
+    report.extend_from_slice(&[
+        0x81, 202, 0, 4, 0x12, 0x34, 0x56, 0x78, 1, 7, b'f', b'i', b'x', b't', b'u', b'r', b'e', 0,
+        0, 0,
+    ]);
+    channel.send_rtcp(&report).unwrap();
     let deadline = Instant::now() + Duration::from_secs(4);
     let status = loop {
         let value = command(&mut input, &mut output, r#"{"op":"status"}"#, &mut trace).await;
@@ -729,7 +743,8 @@ async fn original_managed_peer_exchanges_actual_rtp_rtcp_and_ordered_g711_with_r
         }
         assert!(
             Instant::now() < deadline,
-            "Original peer did not receive actual RTP/RTCP"
+            "Original peer did not receive actual RTP/RTCP: {}",
+            stringify(&value, 65536).unwrap()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
