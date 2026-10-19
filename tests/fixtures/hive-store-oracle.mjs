@@ -36,12 +36,17 @@ const identityStart=workerSource.indexOf('const oauthPrefix = '),identityEnd=wor
 if(identityStart<0||identityEnd<identityStart)throw Error('Original worker identity slice changed');
 const identitySource=stripTypeScriptTypes(workerSource.slice(identityStart,identityEnd),{mode:'strip'});
 const originalIdentity=new Function('kernel','canonical','digest','createHmac','randomBytes','IvyError','requireThat',identitySource+'\nreturn {handle,collectOAuthFamilies,credentialReference};');
+const publishStart=workerSource.indexOf('function publishRoutes('),publishEnd=workerSource.indexOf('parentPort.on(',publishStart);
+if(publishStart<0||publishEnd<publishStart)throw Error('Original worker notification boundaries changed');
+const originalPublisher=new Function('kernel','parentPort','announcedEventSequence',stripTypeScriptTypes(workerSource.slice(publishStart,publishEnd),{mode:'strip'})+';return payload=>{publishRoutes(payload);publishEventsAvailable();};');
 const input=JSON.parse(readFileSync(0,'utf8'));
 let store,registry,discovery,configurations,packageCatalog,packageKernel,kernelExecution,KernelExecution,Discovery,directDescriptors,directCall,hasStructuredOutput,McpSchemaBundle,mcpSurfaceBindings,mcpSuccess,mcpRequest;
-const kernelTrace=input.steps.some(step=>step.op==='kernel');
+const workerTrace=input.steps.some(step=>step.op==='worker');
+const kernelTrace=workerTrace||input.steps.some(step=>step.op==='kernel');
+let workerPublisher,workerNotifications;
 const packageTrace=input.steps.some(step=>['packageCatalog','packageKernel'].includes(step.op));
 let createKernelCatalog,kernelPackageAction;
-if(input.steps.some(step=>step.op==='packageKernel')){
+if(workerTrace||input.steps.some(step=>step.op==='packageKernel')){
  const kernelSource=readFileSync(new URL('../../services/hive/src/kernel.ts',import.meta.url),'utf8');
  const start=kernelSource.indexOf('    this.packageCatalog = new PackageCatalogObject('),end=kernelSource.indexOf('    this.registerHandlers();',start);
  const actionStart=workerSource.indexOf('    case "package.catalog":'),actionEnd=workerSource.indexOf('    case "protocol.diagnostic":',actionStart);
@@ -133,14 +138,17 @@ try {
   for(const binding of step.bindings??[])set(step,binding.at,rows[binding.from].value.object.id);
   for(const binding of step.identityBindings??[]){let v=rows[binding.from];for(const key of binding.select.split('/').slice(1))v=v[key];set(step,binding.at,binding.digest?digest(v):v);}
   let value=null,error=null,wikiCalls=[];
+  workerNotifications=[];
   try {
    switch(step.op){
-    case 'kernel':{
+    case 'worker':case 'kernel':{
       const RealDate=Date,realUUID=crypto.randomUUID,realGlobalUUID=globalThis.crypto.randomUUID;
       const realLocaleLower=String.prototype.toLocaleLowerCase;
       if(inventoryTrace)String.prototype.toLocaleLowerCase=function(...args){const value=realLocaleLower.apply(this,args);lowercase.set(String(this),value);return value;};
-      registryStrings({...step,params:step.request?.params??step.params});globalThis.Date=retentionDate(RealDate,step.now);
-      if(step.createdId){crypto.randomUUID=()=>step.createdId;globalThis.crypto.randomUUID=()=>step.createdId;syncBuiltinESMExports();}
+      registryStrings({...step,params:step.payload??step.request?.params??step.params});globalThis.Date=retentionDate(RealDate,step.now);
+      let workerUuid=0;
+      if(step.uuids){const next=()=>{if(workerUuid>=step.uuids.length)throw Error('Unobserved worker entropy');return step.uuids[workerUuid++];};crypto.randomUUID=next;globalThis.crypto.randomUUID=next;syncBuiltinESMExports();}
+      else if(step.createdId){crypto.randomUUID=()=>step.createdId;globalThis.crypto.randomUUID=()=>step.createdId;syncBuiltinESMExports();}
       try{
        const fileRoot=input.path.replace(/\.[^.\\/]+$/,'')+'.files';
        if(step.files)uiFileSetup(fileRoot,step.files);
@@ -149,10 +157,20 @@ try {
         registry=new Registry(store);discovery=new Discovery(registry);configurations=new Configurations(store,new Objects(store));
         kernelExecution=Object.assign(new KernelExecution(),{store,registry,discovery,configurations,objects:new Objects(store),events:new Events(store),inventory:new Inventory(store,registry),retention:new Retention(store,registry),uis:new Uis(store,registry,new UiFiles(join(fileRoot,'private'))),handlers:new Map(),connectionGeneration:0,options:{version:'1.0.0',buildId:'sha256:'+'a'.repeat(64),publicBaseUrl:'https://example.invalid/base',...step.options}});
         kernelExecution.registerHandlers();
+        if(workerTrace){
+         kernelExecution.options.credentials=step.credentials??[];store.configureCredentials(kernelExecution.options.credentials);
+         createKernelCatalog.call(kernelExecution);
+         workerPublisher=originalPublisher(kernelExecution,{postMessage:value=>workerNotifications.push(value)},Number(store.get('SELECT MAX(sequence) AS sequence FROM events').sequence??0));
+        }
        }
        if(step.options)Object.assign(kernelExecution.options,step.options);
        switch(step.method){
         case 'constructor':case 'reopen':break;
+        case 'dispatch':{
+         const api=originalIdentity(kernelExecution,canonical,digest,crypto.createHmac,size=>step.sessionBytes?Buffer.from(step.sessionBytes,'base64'):crypto.randomBytes(size),IvyError,requireThat);
+         try{value=await api.handle(step.payload);}finally{workerPublisher(step.payload);}
+         break;
+        }
         case 'execute':{
          const request=structuredClone(step.request);
          for(const [pointer,codeUnits]of Object.entries(step.parameterUnits??{}))set(request,pointer,String.fromCharCode(...codeUnits));
@@ -551,7 +569,7 @@ try {
   if(kernelTrace)state.deploymentReports=store.all('SELECT * FROM deployment_reports ORDER BY host_id,deployment_id');
   if(step.lossless)state.changes={encoded:JSON.stringify(state.changes)};
   const mirror=registryTrace?{registry:registry?{changedNodes:[...registry.changedNodes].map(units),changedGenerations:[...registry.changedGenerations].map(([id,g])=>[units(id),g])}:null}:{};
-  rows.push({value,error,state,...mirror,...(step.op==='wiki'?{wikiCalls}:{}),...(kernelTrace||['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{}) ,...(packageTrace?{catalogMutations:store.all('SELECT mutation_id FROM mutations ORDER BY rowid')}:{})});
+  rows.push({value,error,state,...mirror,...(step.op==='worker'?{notifications:workerNotifications}:{}),...(step.op==='wiki'?{wikiCalls}:{}),...(kernelTrace||['uiFiles','uis'].includes(step.op)?{fileTree:uiFileTree(input.path.replace(/\.[^.\\/]+$/,'')+'.files')}:{}) ,...(packageTrace||workerTrace?{catalogMutations:store.all('SELECT mutation_id FROM mutations ORDER BY rowid')}:{})});
  }
  const definitions=store.all("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name");
  const metadata=store.all("SELECT * FROM metadata WHERE key NOT IN ('cursor_secret','runtime_epoch') ORDER BY key");

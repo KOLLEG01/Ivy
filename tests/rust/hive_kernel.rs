@@ -17,6 +17,8 @@ use std::{
 mod content;
 #[path = "hive_kernel_domains.rs"]
 mod domains;
+#[path = "hive_worker_actions.rs"]
+mod worker_actions;
 
 fn options() -> Options {
     Options {
@@ -78,7 +80,9 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
     assert_eq!(steps[0]["method"], "constructor");
     let clock = Rc::new(Cell::new(100000.0));
     let mut kernel = Some(compose(path, profile, clock.clone()));
+    let mut worker: Option<ivy_hive::worker_actions::WorkerActions> = None;
     let mut observations = vec![];
+    let worker_trace = steps.iter().any(|step| step["op"] == "worker");
     let inventory_trace = steps.iter().any(|step| {
         step["request"]["method"]
             .as_str()
@@ -101,6 +105,31 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
         update_options(kernel, &step);
         let result = (|| -> IvyResult<IvyJson> {
             match step["op"].as_str().unwrap() {
+                "worker" => match step["method"].as_str().unwrap() {
+                    "constructor" => {
+                        let credentials = step["credentials"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|v| Credential {
+                                principal_id: v["principalId"].as_str().unwrap().into(),
+                                digest: v["digest"].as_str().unwrap().into(),
+                            })
+                            .collect::<Vec<_>>();
+                        kernel.parts.store.configure_credentials(&credentials)?;
+                        worker = Some(ivy_hive::worker_actions::WorkerActions::new(
+                            kernel,
+                            &credentials,
+                        )?);
+                        Ok(IvyJson::Null)
+                    }
+                    "dispatch" => worker
+                        .as_ref()
+                        .unwrap()
+                        .handle(kernel, &IvyJson::from_serde(&step["payload"]).unwrap())
+                        .expect("Qualified worker action"),
+                    _ => panic!("Unexpected worker fixture method"),
+                },
                 "kernel" => match step["method"].as_str().unwrap() {
                     "constructor" | "reopen" => Ok(IvyJson::Null),
                     "execute" => {
@@ -197,6 +226,18 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                 _ => panic!("Unexpected kernel fixture operation"),
             }
         })();
+        let mut notifications = vec![];
+        if step["op"] == "worker" && step["method"] == "dispatch" {
+            worker
+                .as_mut()
+                .unwrap()
+                .publish(
+                    kernel,
+                    &IvyJson::from_serde(&step["payload"]).unwrap(),
+                    |value| notifications.push(wire(value.to_json())),
+                )
+                .unwrap();
+        }
         let (value, error) = match result {
             Ok(v) => (wire(v), Value::Null),
             Err(e) => (Value::Null, wire(e.to_wire())),
@@ -221,9 +262,19 @@ fn native(path: &Path, steps: &[Value], profile: &Value) -> Value {
                 "SELECT * FROM inventory ORDER BY node_id,namespace,kind,native_id",
             );
         }
-        observations.push(json!({"value":value,"error":error,"state":state,"fileTree":ui_files::tree(&path.with_extension("files")),
+        let mut observation = json!({"value":value,"error":error,"state":state,"fileTree":ui_files::tree(&path.with_extension("files")),
             "registry":{"changedNodes":registry.changed_nodes().iter().map(|v|&v.0).collect::<Vec<_>>(),
-            "changedGenerations":registry.changed_generations().iter().map(|(id,g)|json!([id.0,wire(IvyJson::Number(*g))])).collect::<Vec<_>>()}}));
+            "changedGenerations":registry.changed_generations().iter().map(|(id,g)|json!([id.0,wire(IvyJson::Number(*g))])).collect::<Vec<_>>()}});
+        if step["op"] == "worker" {
+            observation["notifications"] = json!(notifications);
+        }
+        if worker_trace {
+            observation["catalogMutations"] = rows(
+                &kernel.parts.store,
+                "SELECT mutation_id FROM mutations ORDER BY rowid",
+            );
+        }
+        observations.push(observation);
     }
     let store = &kernel.as_ref().unwrap().parts.store;
     json!({"rows":observations,"definitions":rows(store,"SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name"),

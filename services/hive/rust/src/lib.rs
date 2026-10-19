@@ -24,6 +24,7 @@ pub mod ui_files;
 pub mod ui_security;
 pub mod uis;
 pub mod wiki;
+pub mod worker_actions;
 pub mod worker_client;
 pub mod worker_identity;
 pub mod worker_protocol;

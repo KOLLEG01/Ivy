@@ -338,13 +338,13 @@ fn metadata(ui: &str) -> Value {
 fn release(id: &str, bytes: &str) -> Value {
     json!({"releaseId":id,"entryPath":"index.html","requirements":{"hiveProtocol":1,"contracts":[],"services":[]},"assets":[asset(bytes)]})
 }
-fn stage(ui: &str, id: &str, bytes: &str, nonce: &str) -> Value {
+pub(super) fn stage(ui: &str, id: &str, bytes: &str, nonce: &str) -> Value {
     request(
         "uis.stageAsset",
         json!({"uiId":ui,"releaseId":id,"asset":asset(bytes),"base64":STANDARD.encode(bytes),"mutationId":format!("epoch:100000:{nonce}")}),
     )
 }
-fn deploy(ui: &str, id: &str, bytes: &str, expected: Value, nonce: &str) -> Value {
+pub(super) fn deploy(ui: &str, id: &str, bytes: &str, expected: Value, nonce: &str) -> Value {
     request(
         "uis.deploy",
         json!({"metadata":metadata(ui),"release":release(id,bytes),"expectedReleaseId":expected,"mutationId":format!("epoch:100000:{nonce}")}),

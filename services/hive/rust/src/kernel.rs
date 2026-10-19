@@ -54,8 +54,8 @@ pub type Handler = fn(&mut Call<'_>, &IvyJson, &IvyJson, &str) -> IvyResult<IvyJ
 pub struct Kernel {
     pub parts: Parts,
     pub options: Options,
-    runtime: Rc<dyn Runtime>,
-    clock: Rc<dyn Fn() -> f64>,
+    pub(crate) runtime: Rc<dyn Runtime>,
+    pub(crate) clock: Rc<dyn Fn() -> f64>,
     handlers: HashMap<JsString, Handler>,
     connection_generation: f64,
 }

@@ -312,6 +312,13 @@ pub fn create_session(
     credential_digest: &JsString,
     now: &JsString,
 ) -> IvyResult<IvyJson> {
+    create_session_with_date(store, credential_digest, || Ok(now.clone()))
+}
+pub(crate) fn create_session_with_date(
+    store: &Store,
+    credential_digest: &JsString,
+    now: impl FnOnce() -> IvyResult<JsString>,
+) -> IvyResult<IvyJson> {
     store.authenticate(&AuthContext {
         credential_digest: credential_digest.clone(),
         session_digest: None,
@@ -323,7 +330,7 @@ pub fn create_session(
         .connection()
         .execute(
             "INSERT INTO browser_sessions VALUES (?,?,?)",
-            params![digest(&token), text(credential_digest), text(now)],
+            params![digest(&token), text(credential_digest), text(&now()?)],
         )
         .map_err(|e| store.query_error(e))?;
     Ok(IvyJson::object([("sessionToken", token.into())]))

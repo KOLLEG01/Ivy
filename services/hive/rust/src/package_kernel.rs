@@ -103,6 +103,17 @@ pub enum CatalogRequest<'a> {
         publisher_principal_id: &'a JsString,
     },
 }
+pub(crate) fn configured_principal(principals: &[JsString]) -> IvyResult<&JsString> {
+    principals
+        .first()
+        .filter(|id| !id.0.is_empty())
+        .ok_or_else(|| {
+            IvyError::new(
+                "service_unavailable",
+                "Hive package catalog requires one configured principal.",
+            )
+        })
+}
 /// The caller supplies the current configured credential order for every request.
 /// Only seed/prune require its first principal; an empty first entry is not skipped.
 pub fn dispatch(
@@ -113,17 +124,7 @@ pub fn dispatch(
     now_ms: u64,
     now: &JsString,
 ) -> IvyResult<IvyJson> {
-    let principal = || {
-        configured_principals
-            .first()
-            .filter(|id| !id.0.is_empty())
-            .ok_or_else(|| {
-                IvyError::new(
-                    "service_unavailable",
-                    "Hive package catalog requires one configured principal.",
-                )
-            })
-    };
+    let principal = || configured_principal(configured_principals);
     match request {
         CatalogRequest::Catalog { after, include_uis } => catalog
             .list(store, after, include_uis)
