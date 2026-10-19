@@ -7,8 +7,7 @@ use ivy_host_runtime::{
     node_path,
     process::{OwnedProcess, ProcessResult},
 };
-use ivy_sdk::service::ServiceFuture;
-use std::{future::Future, path::PathBuf, sync::Arc, time::Duration};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 use tokio::{
     io::AsyncReadExt,
     sync::{oneshot, watch},
@@ -16,8 +15,10 @@ use tokio::{
 
 /// Startup supplies the original retained-evidence writer, including the full
 /// process-tree observation. The connection never infers retirement from a PID.
-pub type NativeStopEvidence =
-    dyn Fn(JsString, u32, NativeMode, Arc<ProcessResult>) -> ServiceFuture<()> + Send + Sync;
+pub type NativeStopFuture<'a> = Pin<Box<dyn Future<Output = IvyResult<()>> + Send + 'a>>;
+pub type NativeStopEvidence = dyn for<'a> Fn(JsString, &'a OwnedProcess, NativeMode, Arc<ProcessResult>) -> NativeStopFuture<'a>
+    + Send
+    + Sync;
 pub struct NativeConnectionSettings {
     pub epoch: JsString,
     pub catalog: IvyJson,
@@ -158,7 +159,7 @@ impl Owner {
     async fn evidence(&self, result: Arc<ProcessResult>) -> Stopped {
         (self.settings.record_stop)(
             self.settings.epoch.clone(),
-            self.child.pid,
+            &self.child,
             self.settings.mode,
             result.clone(),
         )
