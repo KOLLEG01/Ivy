@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { hashJson } from '../packages/contracts/src/canonical.js';
+import { digest, hashJson } from '../packages/contracts/src/canonical.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import { validateTaskBoard } from '../packages/contracts/src/task-board-validation.js';
 import { admitSchema } from '../packages/contracts/src/schema.js';
@@ -11,8 +11,9 @@ import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler
 import { TaskBoardReconciler } from '../services/task-board/src/runtime/reconciler.js';
 import { checkBlocker, consumeBlocker } from '../services/task-board/src/runtime/task-coordination.js';
 import { nativeWorkflow } from './fixtures/task-board-native.js';
-import { context } from './fixtures/task-board.js';
+import { content, context } from './fixtures/task-board.js';
 import { TaskBoardEvidence } from '../services/task-board/src/runtime/evidence.js';
+import { referencePageKey, taskReferences } from '../services/task-board/src/runtime/reference-pages.js';
 
 type Workflow = Awaited<ReturnType<typeof nativeWorkflow>>;
 const code = (expected: string) => (error: unknown) => error instanceof IvyError && error.code === expected;
@@ -32,6 +33,62 @@ async function finish(w: Workflow, intent?: TaskBoard.Handoff) {
 
 test('operation receipts fit the normal service schema admission limits', () => {
   for (const name of ['operation', 'operationReceipt']) assert.doesNotThrow(() => admitSchema(taskBoardTools.find(tool => tool.name === name)!.outputSchema));
+});
+
+test('native completion at the reference limit preserves recovery evidence and retries overflowing pages without loss', async t => {
+  const w = await nativeWorkflow(t); await w.running();
+  const store = w.f.first.store, client = store.client, task = await store.read('task-board/task', w.state().task);
+  const at = new Date().toISOString(), attachments: TaskBoard.Task['attachments'] = [];
+  for (let index = 0; index < 254; index++) {
+    const bytes = Buffer.from('Retained evidence ' + index), attachmentId = 'capacity-' + index;
+    const object = await store.writeAttachment(task.pin.objectId, randomUUID(), attachmentId, bytes);
+    attachments.push({ attachmentId, object, filename: attachmentId + '.txt', mediaType: 'text/plain',
+      byteLength: bytes.length, contentHash: digest(bytes), uploader: { ...w.f.first.owner, principalId: 'user', source: 'user' }, createdAt: at });
+  }
+  const priorResult = await store.write('task-board/result', { schemaVersion: 1, taskId: task.pin.objectId,
+    run: w.state().run, kind: 'intermediate', content, createdAt: at, actor: task.value.claim!.owner, operationId: randomUUID() },
+  randomUUID(), { create: { parentId: store.rootObjectId, name: 'Prior retained result' } });
+  await store.write('task-board/task', { ...task.value, latestResult: priorResult, attachments }, randomUUID(),
+    { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
+  await w.refresh();
+  const closed = await finish(w), raw = await client.request('objects.read', closed.pin);
+  assert.equal(closed.value.claim, null);
+  assert.equal(closed.value.publication, null);
+  assert.equal(closed.value.completionIssue?.code, 'task_board_handoff_missing');
+  assert.deepEqual(closed.value.latestResult, priorResult);
+  assert.notDeepEqual(closed.value.lastRun, closed.value.completionIssue!.run);
+  assert.deepEqual(raw.revision.references['recovery-run'], closed.value.completionIssue!.run);
+  const pagePin = raw.revision.references['reference-page-0']!;
+  const page = await client.request('objects.read', pagePin);
+  assert.equal(page.object.ownerObjectId, task.pin.objectId);
+  assert.equal(Object.keys(page.revision.references).length, attachments.length);
+  const named = { run: closed.value.lastRun!, result: priorResult, 'recovery-run': closed.value.completionIssue!.run };
+  const deduplicated = await taskReferences(client, task.pin.objectId, named,
+    [...attachments.slice(0, 253).map(attachment => attachment.object), priorResult], scope => store.preparedMutationId(scope));
+  assert.equal(Object.keys(deduplicated).length, 256);
+  assert.equal(Object.values(deduplicated).filter(pin => hashJson(pin) === hashJson(priorResult)).length, 1);
+  assert.equal(deduplicated['reference-page-0'], undefined);
+
+  const reordered = { ...closed.value, attachments: [...attachments].reverse() };
+  let lost = false;
+  w.f.intercept(params => {
+    if (!lost && params.content.encoding === 'json' && params.content.value && typeof params.content.value === 'object' &&
+        'pins' in params.content.value) {
+      lost = true; throw new IvyError('synthetic_response_loss', 'The committed reference page reply was lost.', 'unknown');
+    }
+  });
+  const destination = { objectId: task.pin.objectId, expectedRevision: closed.pin.revision };
+  await assert.rejects(store.write('task-board/task', reordered, 'lost-reference-page', destination), code('synthetic_response_loss'));
+  w.f.intercept(null);
+  const next = await w.f.second.store.write('task-board/task', reordered, 'lost-reference-page', destination);
+  const updated = await client.request('objects.read', next);
+  assert.equal(updated.revision.references['reference-page-0']!.revision, pagePin.revision + 1);
+  assert.deepEqual((await client.request('objects.query', { contractKey: referencePageKey })).items.map(item => item.objectId), [pagePin.objectId]);
+  const now = Date.now() + 2 * 86_400_000;
+  w.f.kernel.retention.collect(now); w.f.kernel.retention.collect(now);
+  assert.deepEqual((await client.request('objects.read', pagePin)).revision.references, page.revision.references);
+  assert.deepEqual((await store.read('task-board/task', closed.pin)).value.attachments, attachments);
+  assert.deepEqual((await store.read('task-board/task', next)).value.attachments, reordered.attachments);
 });
 
 test('an own handoff rejects sourceTaskId precisely and keeps the active claim available for correction', async t => {

@@ -7,6 +7,7 @@ import readEvidenceChunk from '../../../../specs/schemas/task-board.read-evidenc
 import attachment from '../../../../specs/schemas/task-board.attachment.json' with { type: 'json' };
 import { upgradeConfigurationRecord, upgradeTaskRecord } from '../../../../packages/sdk/src/client.js';
 import { freezePublishedWorkflowSchema, freezeRecoverySchema } from './workflow-schema.js';
+import { referencePageKey } from './reference-pages.js';
 
 export const version = '1.0.0' as const;
 export const contractVersion = (key: ContractKey | 'task-board/comments'): '1.0.0' | '1.1.0' | '1.2.0' | '1.3.0' | '1.12.0' => key === 'task-board/task' ? '1.12.0' : key === 'task-board/run' ? '1.3.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comments' || key === 'task-board/comment-read-state' ? '1.1.0' : version;
@@ -230,6 +231,14 @@ export function taskBoardContracts(): Wire.DataContract[] {
       $defs: { Pin: { type: 'object', properties: { objectId: { type: 'string', minLength: 1, maxLength: 256 },
         revision: { type: 'integer', minimum: 1 } }, required: ['objectId', 'revision'], additionalProperties: false } } },
     specMarkdown: '# task-board/revision-protection 1.0.0\n\nCurrent-only storage migration ledger. Exact references protect source ticket revisions of legacy unfinished primary Runs until the Run supplies its own reference or terminates. Ledgers are refreshed before owner readiness and periodically; they never alter workflow claims, Run pins or accepted operations.' });
+  contracts.push({ key: referencePageKey, version: '1.0.0', owner: { kind: 'service', serviceName: 'task-board' },
+    mediaType: 'application/json', retention: { objects: { mode: 'owned' }, revisions: { mode: 'current' } },
+    jsonSchema: { type: 'object', properties: { schemaVersion: { const: 1 }, taskId: { type: 'string', minLength: 1, maxLength: 256 },
+      pins: { type: 'array', minItems: 1, maxItems: 256, items: { type: 'object', properties: {
+        objectId: { type: 'string', minLength: 1, maxLength: 256 }, revision: { type: 'integer', minimum: 1 } },
+        required: ['objectId', 'revision'], additionalProperties: false } } },
+      required: ['schemaVersion', 'taskId', 'pins'], additionalProperties: false },
+    specMarkdown: '# task-board/reference-page 1.0.0\n\nTicket-owned storage pages retain overflowing exact evidence references. Ticket revisions pin exact page revisions; each page retains every listed pin through Hive revision references. Pages do not authorize workflow transitions and are deleted with their ticket.' });
   const recoveryTask = structuredClone(guardedTask);
   recoveryTask.version = '1.12.0';
   recoveryTask.specMarkdown = recoveryTask.specMarkdown.replace('task-board/task 1.11.0', 'task-board/task 1.12.0') +

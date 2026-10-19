@@ -103,8 +103,8 @@ const pages = usePage(async (signal, cursor) => {
     orderBy: props.archived ? [{ field: 'object.updatedAt', direction: 'desc' }, { field: 'object.id', direction: 'asc' }]
       : [...(props.swimlane === 'category' ? [{ field: 'data:/fields/category', direction: 'asc' as const }] : []),
         ...(manual.value ? [{ field: 'object.position', direction: 'asc' as const }]
-          : [{ field: 'data:/fields/priority', direction: 'desc' as const }, { field: 'object.createdAt', direction: 'desc' as const }]),
-        { field: 'object.id', direction: 'asc' }],
+          : [{ field: 'data:/fields/priority', direction: 'desc' as const }, { field: 'object.createdAt', direction: 'desc' as const }])],
+    // Hive always breaks sort ties by object ID; an explicit fourth field exceeds the query contract.
     limit: waiting ? 200 : 20, ...(cursor ? { cursor } : {}),
   }, { signal });
   const result = await load(cursor ?? null);

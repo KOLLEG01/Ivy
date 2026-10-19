@@ -23,6 +23,7 @@ import type { ContractKey, ContractValues } from "./schema.js";
 import { TaskComments } from './comment-store.js';
 import { operationReceipt } from './operation-receipt.js';
 import { protectRunSources } from './revision-protection.js';
+import { taskReferences } from './reference-pages.js';
 
 export interface Document<K extends ContractKey> {
   key: K;
@@ -943,24 +944,23 @@ export class TaskBoardStore {
         ? await new TaskComments(this.client, scope => this.preparedMutationId(scope)).write(value as TaskBoard.Task, destination.objectId, mutationId)
         : value) as Wire.Json,
     };
-    const references: Wire.RevisionReferences = {};
+    let references: Wire.RevisionReferences = {};
     if (key === "task-board/task") {
       const task = value as TaskBoard.Task,
         result = task.latestResult;
       if (result) references["result"] = result;
       if (task.lastRun) references["run"] = task.lastRun;
-        if (task.completionIssue) {
-          const recoveryRun = await this.recoveryReference(task.completionIssue.run);
-          if (recoveryRun) references['recovery-run'] = recoveryRun;
-        }
+      if (task.completionIssue) {
+        const recoveryRun = await this.recoveryReference(task.completionIssue.run);
+        if (recoveryRun) references['recovery-run'] = recoveryRun;
+      }
       const attachments = taskAttachmentPins(task);
-      requireThat(
-        attachments.length + Object.keys(references).length <= 256,
-        "limit_exceeded",
-        "A Task can retain at most 256 exact Run, Result and attachment references.",
-      );
-      for (const [index, pin] of attachments.entries())
-        references["attachment-" + index] = pin;
+      if ('create' in destination) {
+        requireThat(attachments.length + Object.keys(references).length <= 256,
+          'limit_exceeded', 'An initial Task exceeds its exact reference capacity.');
+        for (const [index, pin] of attachments.entries()) references['attachment-' + index] = pin;
+      } else references = await taskReferences(this.client, destination.objectId, references, attachments,
+        scope => this.preparedMutationId(scope));
     } else if (key === 'task-board/run') {
       const run = value as TaskBoard.Run;
       if (!['completed', 'failed', 'cancelled'].includes(run.phase))

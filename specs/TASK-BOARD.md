@@ -32,6 +32,10 @@ UI requirements: [UI](UI.md).
   changing their claims or accepted operation pins. Periodic refresh releases obsolete ledger
   references; new Runs retain their sources directly. Other Hive families keep their
   own retention policies.
+- Exact evidence references are deduplicated across attachments, Results and Runs. If a ticket
+  exceeds one Hive revision's reference budget, ticket-owned reference pages preserve every
+  exact pin. Historical ticket revisions retain their exact page revisions; storage limits
+  must not block publication of an already admitted native completion.
 - Permanent deletion removes the Task, its comments child, attachments, all Hive revisions, and task-linked
   Run, Result, Review, History, Delivery and comment-read records. It is refused while a claim
   or publication is active, or another Task still depends on it. The deleted task key is not reused.
