@@ -108,14 +108,35 @@ fn private_frames_survive_cancelled_partial_reads_and_preserve_full_u64_utf16_er
                 IvyJson::object([("x", IvyJson::String(JsString(vec![0xd800, 10, 0xdc00])))]);
             let encoded = stringify(&value, MAX_FRAME_BYTES).unwrap().into_bytes();
             let header = (encoded.len() as u32).to_be_bytes();
-            let (mut input, output) = tokio::io::duplex(3);
+            let (mut input, output) = tokio::io::duplex(4);
+            let mut reader = FrameReader::new(output);
+            // Poll exactly to Pending, then drop that read future. Bytes are
+            // withheld by the writer rather than guessed from wall-clock sleeps.
+            // This exercises cancellation inside both the header and body even
+            // when the runtime is delayed past several timer deadlines.
+            input.write_all(&header[..2]).await.unwrap();
+            {
+                let mut reading = Box::pin(reader.next());
+                assert!(
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(
+                        std::future::Future::poll(reading.as_mut(), cx).is_pending()
+                    ))
+                    .await
+                );
+            }
+            input.write_all(&header[2..]).await.unwrap();
+            input.write_all(&encoded[..2]).await.unwrap();
+            {
+                let mut reading = Box::pin(reader.next());
+                assert!(
+                    std::future::poll_fn(|cx| std::task::Poll::Ready(
+                        std::future::Future::poll(reading.as_mut(), cx).is_pending()
+                    ))
+                    .await
+                );
+            }
             let expected = value.clone();
             let writer = tokio::spawn(async move {
-                input.write_all(&header[..2]).await.unwrap();
-                sleep(Duration::from_millis(20)).await;
-                input.write_all(&header[2..]).await.unwrap();
-                input.write_all(&encoded[..2]).await.unwrap();
-                sleep(Duration::from_millis(20)).await;
                 input.write_all(&encoded[2..]).await.unwrap();
                 write_frame(
                     &mut input,
@@ -128,17 +149,6 @@ fn private_frames_survive_cancelled_partial_reads_and_preserve_full_u64_utf16_er
                 .await
                 .unwrap();
             });
-            let mut reader = FrameReader::new(output);
-            assert!(
-                timeout(Duration::from_millis(5), reader.next())
-                    .await
-                    .is_err()
-            );
-            assert!(
-                timeout(Duration::from_millis(25), reader.next())
-                    .await
-                    .is_err()
-            );
             assert_eq!(reader.next().await.unwrap().unwrap(), value);
             let received = Request::from_json(reader.next().await.unwrap().unwrap()).unwrap();
             assert_eq!(received.id, u64::MAX);

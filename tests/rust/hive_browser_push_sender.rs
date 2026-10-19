@@ -8,6 +8,8 @@ use std::{
     sync::Mutex,
 };
 use tokio::sync::{mpsc, oneshot};
+#[path = "hive_browser_push_http.rs"]
+mod http;
 
 type Posted = (IvyJson, oneshot::Sender<IvyResult<IvyJson>>);
 static CORPUS: Mutex<()> = Mutex::new(());
@@ -140,6 +142,11 @@ fn actor(input: &Value) -> Option<mpsc::UnboundedSender<Posted>> {
         let mut store = store;
         while let Some((request, reply)) = receive.recv().await {
             let result = match request.get("action").unwrap().as_str().unwrap().as_str() {
+                "browserPush.request" => push.request(
+                    &mut store,
+                    request.get("context").unwrap(),
+                    request.get("request").unwrap(),
+                ),
                 "browserPush.next" => push.next(&mut store),
                 "browserPush.keys" => push.keys(&store),
                 "browserPush.complete" => push
@@ -245,11 +252,15 @@ async fn native_sender(input: &Value) -> Value {
     result
 }
 fn original_sender(input: &Value) -> Value {
+    original_output("tests/fixtures/hive-browser-push-sender-oracle.mjs", input)
+}
+fn original_output(fixture: &str, input: &Value) -> Value {
     let mut child =
         Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
             .arg(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../tests/fixtures/hive-browser-push-sender-oracle.mjs"),
+                    .join("../../..")
+                    .join(fixture),
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
