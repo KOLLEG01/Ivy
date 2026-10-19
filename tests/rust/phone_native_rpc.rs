@@ -3,6 +3,8 @@ use ivy_phone_bridge::{
     native_rpc::{Admission, NativeOutcome, NativeReceipts, NativeRequest},
 };
 use std::sync::Arc;
+#[path = "phone_audio_sender.rs"]
+mod audio_sender;
 #[path = "phone_media_codec.rs"]
 mod media_codec;
 #[path = "phone_media_format.rs"]

@@ -1,3 +1,4 @@
+mod audio_frame;
 mod codec_owner;
 mod codecs;
 mod evs;
@@ -23,6 +24,7 @@ mod send_clock;
 mod startup;
 mod transport;
 
+pub use audio_frame::RtpAudioFrames;
 pub use permit::AudioPermit;
 pub use queue::AudioQueue;
 pub use receive_owner::{ReceiveError, SipReceiveEvents, SipReceiveObservation, SipRtpReceiver};
