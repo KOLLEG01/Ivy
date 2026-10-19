@@ -223,7 +223,7 @@ async fn all_real_codec_receive_paths_use_the_same_bound_owner_and_accepted_nego
         let samples = audio.state.lock().unwrap().1.iter().map(Vec::len).sum::<usize>();
         assert!(samples > 23000 && samples <= 24000, "{} samples={samples}", codec.name());
         paths.push(ivy_contracts::IvyJson::object([
-            ("codec", codec.name().into()), ("packets", 25.0.into()), ("samples", (samples as f64).into()),
+            ("codec", codec.name().into()), ("packets", ivy_contracts::IvyJson::Number(25.0)), ("samples", ivy_contracts::IvyJson::Number(samples as f64)),
         ]));
         receiver.close().await; assert!(!receiver.observation().failed);
     }
