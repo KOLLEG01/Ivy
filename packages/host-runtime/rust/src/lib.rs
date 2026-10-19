@@ -27,6 +27,8 @@ pub mod paths;
 pub mod node_path;
 pub mod platform;
 pub mod process;
+#[path="artifact/file_hash.rs"]
+pub mod streaming_hash;
 pub mod process_fence;
 pub mod process_output;
 pub mod scheduler;
