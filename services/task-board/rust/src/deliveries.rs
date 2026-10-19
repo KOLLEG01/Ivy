@@ -315,20 +315,17 @@ impl<S: Store, E: DeliveryEngine> Deliveries<'_, S, E> {
             "task_board_delivery_mismatch",
             "A Phone call identity requires its retained original request.",
         )?;
+        let request = f(
+            v,
+            if eq(v, "activeRoute", "phone") {
+                "phoneRequest"
+            } else {
+                "chatRequest"
+            },
+        );
+        // Optional chaining yields undefined for an absent request, distinct from saved null.
         require(
-            eq(v, "state", "pending")
-                || f(v, "operationId")
-                    == f(
-                        f(
-                            v,
-                            if eq(v, "activeRoute", "phone") {
-                                "phoneRequest"
-                            } else {
-                                "chatRequest"
-                            },
-                        ),
-                        "operationId",
-                    ),
+            eq(v, "state", "pending") || v.get("operationId") == request.get("operationId"),
             "task_board_delivery_mismatch",
             "Active delivery state must retain its exact provider operation identity.",
         )?;
