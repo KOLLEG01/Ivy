@@ -1,4 +1,5 @@
 pub mod configuration;
+pub mod allocation;
 pub mod coordination;
 pub mod evidence_bytes;
 pub mod full_turn_evidence;
@@ -26,5 +27,7 @@ pub mod native_turn_evidence;
 pub mod operations;
 pub mod publication;
 pub mod read_evidence;
+pub mod scheduler;
+pub mod scheduler_journal;
 pub mod task_keys;
 pub mod turn_output;

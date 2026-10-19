@@ -25,6 +25,8 @@ mod recovery;
 mod task_keys;
 #[path = "../fixtures/task-board-lifecycle.rs"]
 mod lifecycle;
+#[path = "../fixtures/task-board-scheduler.rs"]
+mod scheduler;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()
