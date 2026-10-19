@@ -297,12 +297,11 @@ async fn actual_gates_and_cached_execution_reopen_lost_final_callback_without_ne
                 .unwrap()
         } else {
             let request = Json::object([
-                ("action", "transition".into()),
+                ("action", "cancel".into()),
                 ("operationId", "local-execution".into()),
                 ("taskId", f(&task_pin, "objectId").clone()),
                 ("expectedRevision", Json::Number(1.0)),
-                ("workflowState", "todo".into()),
-                ("detail", Json::Null),
+                ("reason", "Fixture gate recovery.".into()),
             ]);
             let actor = Json::object([
                 ("principalId", "caller".into()),
