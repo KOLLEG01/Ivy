@@ -1,4 +1,5 @@
 import {WebSocketServer} from 'ws';
+import {createServer} from 'node:http';
 import {load,settings as base,owner,rootId,at} from './inbox-fixtures.mjs';
 const {SecretaryStore}=await load('services/secretary/src/store.js');
 const {defaultConfiguration}=await load('services/secretary/src/assignment-schema.js');
@@ -17,19 +18,28 @@ try{
 }finally{store.close();}
 // This socket supplies only the real SDK connection lifetime. Domain RPCs are
 // independently gated by the Rust test; there is no live Hive or provider.
-const server=new WebSocketServer({host:'127.0.0.1',port:0});
-await new Promise((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);});
+const trace=[];
+let healthNode={connected:true,synced:true,ready:true,buildId:'sha256:'+'a'.repeat(64)};
+const http=process.argv.includes('--package-health')?createServer(async(request,response)=>{
+ const chunks=[];for await(const part of request)chunks.push(part);
+ const call=JSON.parse(Buffer.concat(chunks));
+ if(request.headers.authorization!=='Bearer fixture'||call.method!=='serviceNodes.get'){response.writeHead(400);response.end();return;}
+ trace.push({method:'health.serviceNodes.get',params:call.params});
+ response.setHeader('content-type','application/json');response.end(JSON.stringify({jsonrpc:'2.0',id:call.id,result:healthNode}));
+}):null;
+const server=new WebSocketServer(http?{server:http}:{host:'127.0.0.1',port:0});
+await new Promise((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject);if(http)http.listen(0,'127.0.0.1');});
 if(reconcile){
  const failures=Number(process.argv[process.argv.indexOf('--failures')+1]??0)||0;
  const gated=process.argv.includes('--gate-stat');
  let remaining=failures,held=null,released=!gated;
  const statWaiters=[];
- const trace=[];
  const send=(socket,id,result,error)=>{if(socket.readyState===1)socket.send(JSON.stringify({jsonrpc:'2.0',id,...(error?{error:{code:-32000,message:error.message,data:{code:error.code,outcome:error.outcome}}}:{result})}));};
  server.on('connection',socket=>socket.on('message',bytes=>{
   const {id,method,params}=JSON.parse(bytes.toString());
   if(method==='fixture.trace'){send(socket,id,trace);return;}
   if(method==='fixture.reset'){trace.length=0;send(socket,id,{});return;}
+  if(method==='fixture.healthNode'){healthNode={connected:true,synced:true,ready:true,buildId:'sha256:'+'a'.repeat(64),...params};send(socket,id,{});return;}
   if(method==='fixture.waitStat'){
    if(trace.some(row=>row.method==='objects.stat'))send(socket,id,{});else statWaiters.push({socket,id});return;
   }
@@ -57,4 +67,4 @@ if(reconcile){
 }
 process.stdout.write(JSON.stringify({port:server.address().port,settings,owner,rootId,document,node:process.execPath,oracleRoot:(await import('./inbox-fixtures.mjs')).oracleRoot,...(service?{notificationPolicy:(await load('instructions/secretary-notification-policy.js')).secretaryNotificationPolicy}:{})})+'\n');
 process.stdin.resume();
-process.stdin.on('end',()=>{for(const socket of server.clients)socket.terminate();server.close();});
+process.stdin.on('end',()=>{for(const socket of server.clients)socket.terminate();server.close();http?.close();});

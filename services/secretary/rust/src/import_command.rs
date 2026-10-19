@@ -8,9 +8,7 @@ use crate::{
     retained_import::{ImportContext, step},
     service_handlers::PublicMethod,
 };
-use ivy_contracts::{
-    IvyError, IvyJson, IvyResult, JsString, checked_native_contract::CheckedNativeContracts,
-};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{config::instance_config, node_runtime::NodeRuntime};
 use ivy_sdk::{
     clock::{Clock, SystemClock},
@@ -55,7 +53,7 @@ pub async fn run(
         .required("filename")?
         .as_str()?;
     let source = import_state::open_source(&config.data_root().join(&name))?;
-    let retained = CheckedNativeContracts::new(config.artifact_root());
+    let retained = crate::service::retained_native_contracts(config.artifact_root());
     let registry = service_registry(
         settings
             .required("identity")?

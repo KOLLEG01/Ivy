@@ -21,12 +21,24 @@ use ivy_sdk::{
     clock::{Clock, SystemClock, date_to_iso},
     service::{ServiceClient, ServiceOptions},
 };
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, MissedTickBehavior},
 };
+
+/// Retained native catalogs occupy the same dist/specs path as the original
+/// compiled loader. The instance's artifact root also contains non-dist data.
+pub fn retained_native_contracts(
+    artifact_root: &Path,
+) -> ivy_contracts::checked_native_contract::CheckedNativeContracts {
+    ivy_contracts::checked_native_contract::CheckedNativeContracts::new(artifact_root.join("dist"))
+}
 
 enum HealthUpdate {
     Write {

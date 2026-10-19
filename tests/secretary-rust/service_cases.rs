@@ -19,8 +19,23 @@ impl Drop for Process {
 struct Directory(PathBuf);
 impl Drop for Directory {
     fn drop(&mut self) {
-        assert_eq!(self.0.parent(), Some(std::env::temp_dir().as_path()));
-        let _ = std::fs::remove_dir_all(&self.0);
+        let actual = std::fs::canonicalize(&self.0).unwrap();
+        assert_eq!(
+            actual.parent(),
+            Some(
+                std::fs::canonicalize(std::env::temp_dir())
+                    .unwrap()
+                    .as_path()
+            )
+        );
+        assert!(
+            actual
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("secretary-startup-")
+        );
+        let _ = std::fs::remove_dir_all(actual);
     }
 }
 fn hidden(command: &mut Command) {
@@ -94,7 +109,11 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut fixture = Command::new("node");
     fixture
-        .args(["tests/secretary-rust/generation-fixture.mjs", "--service"])
+        .args([
+            "tests/secretary-rust/generation-fixture.mjs",
+            "--service",
+            "--package-health",
+        ])
         .current_dir(&root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -132,8 +151,34 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
         ("buildId", format!("sha256:{}", "a".repeat(64)).into()),
     ]);
     write(&artifact.join("dist/build-info.json"), &build);
+    let node = fixture_data.required("node").unwrap().as_str().unwrap();
+    let mut package = Command::new(&node);
+    package
+        .arg("tests/secretary-rust/package-fixture.mjs")
+        .arg(&artifact)
+        .arg(env!("CARGO_BIN_EXE_ivy-secretary"))
+        .arg(
+            std::env::var_os("IVY_SECRETARY_HEALTH_BINARY")
+                .expect("Actual Host health prerequisite is required"),
+        )
+        .arg(
+            std::env::var_os("IVY_SECRETARY_JOB_HELPER")
+                .expect("Qualified Host Job helper is required"),
+        )
+        .current_dir(&root);
+    hidden(&mut package);
+    let output = package.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let package = parse(std::str::from_utf8(&output.stdout).unwrap(), 1024 * 1024).unwrap();
+    assert_eq!(package.get("missingMatrixRefused"), Some(&true.into()));
     let mut results = vec![];
-    for reference in [true, false] {
+    for mode in ["original", "rust", "packaged"] {
+        let reference = mode == "original";
+        let packaged = mode == "packaged";
         observer
             .request(
                 "fixture.reset",
@@ -142,9 +187,7 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
             )
             .await
             .unwrap();
-        let state = directory
-            .0
-            .join(if reference { "original" } else { "rust" });
+        let state = directory.0.join(mode);
         let data = state.join("data");
         std::fs::create_dir_all(&data).unwrap();
         {
@@ -172,7 +215,13 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
         write(&path, &config);
         let node = fixture_data.required("node").unwrap().as_str().unwrap();
         if !reference {
-            let mut import = Command::new(env!("CARGO_BIN_EXE_ivy-secretary"));
+            let mut import = if packaged {
+                let mut command = Command::new(&node);
+                command.arg(package.required("main").unwrap().as_str().unwrap());
+                command
+            } else {
+                Command::new(env!("CARGO_BIN_EXE_ivy-secretary"))
+            };
             import
                 .args([
                     "import",
@@ -183,6 +232,9 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
                 .arg(&path)
                 .current_dir(&root)
                 .env("IVY_NODE_EXECUTABLE", &node);
+            if packaged {
+                import.env("IVY_NODE_EXECUTABLE", "ignored-before-dispatch.exe");
+            }
             hidden(&mut import);
             let output = import.output().unwrap();
             assert!(
@@ -226,6 +278,10 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
                 .join("services/secretary/src/main.js"),
             );
             command
+        } else if packaged {
+            let mut command = Command::new(&node);
+            command.arg(package.required("main").unwrap().as_str().unwrap());
+            command
         } else {
             Command::new(env!("CARGO_BIN_EXE_ivy-secretary"))
         };
@@ -239,6 +295,9 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
             .stderr(Stdio::from(stderr))
             .stdout(Stdio::null())
             .stdin(Stdio::null());
+        if packaged {
+            command.env("IVY_NODE_EXECUTABLE", "ignored-before-dispatch.exe");
+        }
         hidden(&mut command);
         let mut child = Process(command.spawn().unwrap());
         let health_path = data.join("health.json");
@@ -254,10 +313,71 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
         let health = read(&health_path).unwrap();
         validate_host("Health", &health).unwrap();
         assert_eq!(health.get("generation"), Some(&IvyJson::Number(7.0)));
+        if packaged {
+            assert_ne!(
+                health.get("pid").and_then(IvyJson::as_f64),
+                Some(child.0.id() as f64)
+            );
+        } else {
+            assert_eq!(
+                health.get("pid").and_then(IvyJson::as_f64),
+                Some(child.0.id() as f64)
+            );
+        }
+        let run_health = || {
+            let mut command = Command::new(&node);
+            let selected = if packaged {
+                PathBuf::from(package.required("health").unwrap().as_str().unwrap())
+            } else {
+                PathBuf::from(
+                    fixture_data
+                        .required("oracleRoot")
+                        .unwrap()
+                        .as_str()
+                        .unwrap(),
+                )
+                .join("packages/host-runtime/src/health.js")
+            };
+            command
+                .arg(selected)
+                .arg("--config")
+                .arg(&path)
+                .current_dir(&artifact)
+                .env("IVY_NODE_EXECUTABLE", "ignored-before-health-dispatch.exe");
+            hidden(&mut command);
+            let output = command.output().unwrap();
+            let value = parse(std::str::from_utf8(&output.stdout).unwrap(), 1024).unwrap();
+            (output.status.success(), value)
+        };
+        let (healthy, value) = run_health();
+        assert!(healthy, "{mode}: {value:?}");
         assert_eq!(
-            health.get("pid").and_then(IvyJson::as_f64),
-            Some(child.0.id() as f64)
+            value,
+            IvyJson::object([
+                ("ok", true.into()),
+                ("buildId", build.required("buildId").unwrap().clone()),
+                ("generation", IvyJson::Number(7.0))
+            ])
         );
+        observer
+            .request(
+                "fixture.healthNode",
+                IvyJson::object([("buildId", format!("sha256:{}", "b".repeat(64)).into())]),
+                RequestOptions::default(),
+            )
+            .await
+            .unwrap();
+        let (healthy, value) = run_health();
+        assert!(!healthy);
+        assert_eq!(value.get("code"), Some(&"service_not_ready".into()));
+        observer
+            .request(
+                "fixture.healthNode",
+                IvyJson::object(Vec::<(String, IvyJson)>::new()),
+                RequestOptions::default(),
+            )
+            .await
+            .unwrap();
         let mut control = IvyJson::object([
             ("schemaVersion", IvyJson::Number(1.0)),
             ("instanceId", "fixture.secretary".into()),
@@ -291,6 +411,9 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
         assert_eq!(stopped.get("ready"), Some(&false.into()));
         assert_eq!(stopped.get("details"), Some(&"Secretary stopped.".into()));
         assert_eq!(stopped.get("generation"), Some(&IvyJson::Null));
+        let (healthy, value) = run_health();
+        assert!(!healthy);
+        assert_eq!(value.get("code"), Some(&"service_not_ready".into()));
         let calls = trace(&observer).await;
         let selected = |method: &str| {
             calls
@@ -339,6 +462,13 @@ async fn original_and_rust_service_process_registration_health_control_and_shutd
     assert_eq!(
         canonical(&results[1], 4 * 1024 * 1024).unwrap(),
         canonical(&results[0], 4 * 1024 * 1024).unwrap()
+    );
+    assert_eq!(
+        canonical(&results[2], 4 * 1024 * 1024).unwrap(),
+        canonical(&results[0], 4 * 1024 * 1024).unwrap()
+    );
+    println!(
+        "v1 Secretary launch: original/direct Rust/real legacy dispatch import,registry,ready+registration-bound health,foreign/invalid control,shutdown and retained SQLite bytes agree; incomplete advertised matrix refuses before staging"
     );
     observer.close();
 }

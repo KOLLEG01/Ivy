@@ -224,7 +224,7 @@ impl Reconciliation {
         events: &mut mpsc::UnboundedReceiver<ServiceEvent>,
         clock: &dyn Clock,
     ) {
-        let retained = CheckedNativeContracts::new(&self.config.distribution_root);
+        let retained = crate::service::retained_native_contracts(&self.config.distribution_root);
         let mut next = None;
         loop {
             let event = match next.take() {
