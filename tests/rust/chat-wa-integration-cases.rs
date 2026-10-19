@@ -576,3 +576,195 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[tokio::test]
+async fn remote_image_sdk_publication_reuses_immutable_mutation_after_reply_loss() {
+    let corpus = oracle();
+    let mut peer = Peer::start().await;
+    peer.command(Json::object([
+        ("action", "begin".into()),
+        (
+            "spec",
+            Json::object([
+                ("label", "remote-media".into()),
+                ("remoteMedia", true.into()),
+            ]),
+        ),
+    ]))
+    .await;
+    let seed = peer
+        .command(Json::object([
+            ("action", "mediaSeed".into()),
+            ("version", "0.154.0".into()),
+        ]))
+        .await;
+    let root = std::env::temp_dir().join(format!("ivy-rust-wa-remote-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("chat-bridge.sqlite"),
+        STANDARD.decode(text(&seed, "database")).unwrap(),
+    )
+    .unwrap();
+    let config = Arc::new(ChatGenerationConfig {
+        admission: ChatAdmission::new(field(&seed, "definition")).unwrap(),
+        catalogs: ivy_contracts::checked_native_contract::CheckedNativeContracts::new(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."),
+        ),
+        instructions: parse(
+            &String::from_utf8(STANDARD.decode(text(corpus, "instructions")).unwrap()).unwrap(),
+            usize::MAX,
+        )
+        .unwrap()
+        .into_js_string()
+        .unwrap(),
+        notice_instructions: NoticeInstructions::from_json(
+            &parse(
+                &String::from_utf8(STANDARD.decode(text(corpus, "noticeInstructions")).unwrap())
+                    .unwrap(),
+                usize::MAX,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+        service_node_id: "chat-provider".into(),
+        data_root: Some(root.clone()),
+        language: "en".into(),
+    });
+    let c = ServiceConnection::connect(
+        &peer.url,
+        "fixture-token",
+        ConnectionOptions::new("chat-provider".into()),
+        RequestOptions::default().cancellation,
+    )
+    .await
+    .unwrap();
+    c.set_generation(7);
+    c.set_ready(true);
+    let generation = ChatGeneration::reconcile(config, c.clone()).await.unwrap();
+    let journal = Journal::new(JournalIo::open(root.join("whatsapp.sqlite")).unwrap());
+    let io = Arc::new(MediaIo::default());
+    let media = WhatsAppMedia::new(
+        journal.clone(),
+        Json::object(Vec::<(String, Json)>::new()),
+        root.clone(),
+        Arc::new(MediaAdapter(io.clone())),
+        Translator::default(),
+    );
+    let id = "e".repeat(64);
+    let row=Inbox{id:id.clone(),sender:"alice".into(),jid:"15555550201@s.whatsapp.net".into(),message:r#"{"message":{"imageMessage":{"fileLength":8,"mimetype":"image/png","caption":"Remote caption"}}}"#.into(),state:"pending".into(),request:None,received:1000};
+    let payload;
+    let expected_owner;
+    let expected_parent;
+    {
+        let lease = generation.accept().unwrap();
+        let operations = lease.operations().unwrap();
+        let native = lease.native().unwrap();
+        let main = ivy_chat_bridge::chat_main::ChatMain::new(
+            &operations,
+            &native,
+            &lease.config().notice_instructions,
+        )
+        .unwrap();
+        expected_owner = field(
+            &field(&main.queue().main().await.unwrap().value, "conversation"),
+            "objectId",
+        )
+        .clone();
+        expected_parent = lease
+            .store()
+            .root_object_id
+            .clone()
+            .map_or(Json::Null, Json::from);
+        let lost = RuntimeMedia::payload(&media, &row, &lease, false)
+            .await
+            .unwrap_err();
+        assert_eq!(lost.code, "fixture_image_reply_lost");
+        assert_eq!(lost.outcome, ivy_contracts::Outcome::Unknown);
+        assert!(journal.get(&format!("payload:{id}")).unwrap().is_null());
+        payload = RuntimeMedia::payload(&media, &row, &lease, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            RuntimeMedia::payload(&media, &row, &lease, false)
+                .await
+                .unwrap(),
+            payload
+        );
+    }
+    assert_eq!(field(&payload, "text"), &Json::from("Remote caption"));
+    let image = &field(&payload, "images").as_array().unwrap()[0];
+    let bytes = [137, 80, 78, 71, 13, 10, 26, 10];
+    assert_eq!(
+        field(image, "contentHash"),
+        &Json::from(ivy_contracts::hash::digest(&bytes))
+    );
+    assert_eq!(field(image, "byteLength"), &Json::Number(8.0));
+    assert_eq!(
+        field(image, "object"),
+        &Json::object([
+            ("objectId", "remote-image".into()),
+            ("revision", Json::Number(1.0))
+        ])
+    );
+    assert_eq!(
+        io.calls.lock().unwrap().len(),
+        2,
+        "One original download/destroy; reply recovery uses the saved bytes"
+    );
+    journal.flush().await.unwrap();
+    journal.close().await.unwrap();
+    let disk = Journal::new(JournalIo::open(root.join("whatsapp.sqlite")).unwrap());
+    assert_eq!(disk.get(&format!("payload:{id}")).unwrap(), payload);
+    disk.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), settled(generation.retire()))
+        .await
+        .unwrap()
+        .unwrap();
+    c.close();
+    let report = peer
+        .command(Json::object([("action", "summary".into())]))
+        .await;
+    assert!(field(&report, "mismatches").as_array().unwrap().is_empty());
+    let writes = field(&report, "calls")
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c.get("method") == Some(&Json::from("objects.write")))
+        .collect::<Vec<_>>();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(field(writes[0], "params"), field(writes[1], "params"));
+    let request = field(writes[0], "params");
+    let create = field(request, "create");
+    assert_eq!(field(create, "ownerObjectId"), &expected_owner);
+    assert_eq!(field(create, "parentId"), &expected_parent);
+    assert_eq!(
+        field(create, "contractKey"),
+        &Json::from("chat-bridge/image-png")
+    );
+    assert_eq!(field(request, "contractVersion"), &Json::from("1.0.0"));
+    assert_eq!(
+        field(request, "content"),
+        &Json::object([
+            ("encoding", "base64".into()),
+            ("value", STANDARD.encode(bytes).into())
+        ])
+    );
+    assert!(!field(request, "mutationId").as_str().unwrap().is_empty());
+    let capture = Json::object([
+        ("originalSeed", seed),
+        ("payload", payload),
+        ("rpc", report),
+        ("mediaCalls", Json::Array(io.calls.lock().unwrap().clone())),
+        ("replyLossRetainedMutation", true.into()),
+        ("physicalJournalReopen", true.into()),
+    ]);
+    if let Some(p) = std::env::var_os("IVY_CHAT_REMOTE_IMAGE_CAPTURE") {
+        std::fs::write(p, canonical(&capture, usize::MAX).unwrap()).unwrap();
+    }
+    peer.finish().await;
+    assert_eq!(
+        root.canonicalize().unwrap().parent(),
+        Some(std::env::temp_dir().canonicalize().unwrap().as_path())
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

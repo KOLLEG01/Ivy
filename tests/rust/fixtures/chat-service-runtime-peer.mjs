@@ -1,5 +1,6 @@
 // Real SDK/service lifecycle with explicit Host/account probes.
 import{starting,now,instructions,noticeInstructions,key,startChatBridge,IvyError,toolDefinitionHash,canonical}from"./chat-service-runtime-loader.mjs";
+import{environment}from"./chat-main-oracle.mjs";
 import{mkdtempSync,readFileSync,writeFileSync,rmSync}from"node:fs";
 import{tmpdir}from"node:os";
 import{join}from"node:path";
@@ -23,6 +24,7 @@ function summary(){return{calls:selected.calls,heartbeats:selected.heartbeats,ha
 async function command(c){
  if(c.action==='begin'){begin(c.spec);return{url:base};}
  if(c.action==='summary')return summary();
+ if(c.action==='mediaSeed'){const e=environment(starting[c.version]);try{if((await e.run({action:'create'})).phase!=='succeeded')throw Error('Original Main seed failed');return e.exportSeed();}finally{e.close();}}
  if(c.action==='disconnect'){for(const socket of sockets.keys())socket.close();return null;}
  if(c.action==='invoke'){
   const [socket,session]=[...sockets].find(([,s])=>s.generation===c.generation)??[];
@@ -50,6 +52,13 @@ wss.on('connection',socket=>{
    else if(method==='service.heartbeat'){scope.heartbeats.push({generation:session.generation,...params});value={ready:params.ready};}
    else if(method==='serviceNodes.get')value={principalId:'chat-service',serviceName:'chat-bridge',connected:true,synced:true};
    else if(method==='system.status')value={runtimeEpoch:'chat'};
+   else if(method==='objects.write'&&scope.spec.remoteMedia){
+    const prior=scope.imageWrite;
+    if(prior&&canonical(prior)!==canonical(params))throw new IvyError('fixture_image_changed','Retried immutable image request changed.');
+    scope.imageWrite??=structuredClone(params);
+    value={object:{id:'remote-image'},revision:{revision:1}};
+    if(!prior)throw new IvyError('fixture_image_reply_lost','Synthetic committed image reply was lost.','unknown');
+   }
    else if(method==='system.diagnostics'){
     if(scope.spec.label==='diagnostic-read-failure')throw new IvyError('fixture_diagnostic_unavailable','Original diagnostic source is unavailable.','unknown');
     value={items:[],nextCursor:null};
