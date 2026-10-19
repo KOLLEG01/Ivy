@@ -35,6 +35,7 @@ pub mod native_inspector;
 pub mod native_intent;
 pub mod native_lifecycle;
 pub mod native_orchestrator;
+pub mod native_rate_limit;
 pub mod native_plan;
 pub mod native_publication;
 pub mod native_recovery;

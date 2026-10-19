@@ -12,6 +12,8 @@ mod signals;
 mod native_comments;
 #[path = "../fixtures/task-board-orchestrator.rs"]
 mod orchestrator;
+#[path = "../fixtures/task-board-rate-limit.rs"]
+mod rate_limit;
 #[path = "../fixtures/task-board-reconciler.rs"]
 mod reconciler;
 #[path = "../fixtures/task-board-native-publication.rs"]
