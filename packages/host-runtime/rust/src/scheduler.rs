@@ -18,30 +18,68 @@ pub fn parallel_deployments(
     active: &[Deployment<'_>],
     limit: usize,
 ) -> Vec<usize> {
-    if active.iter().any(|entry| entry.exclusive) {
-        return Vec::new();
-    }
-    let mut instances: HashSet<&str> = active.iter().map(|e| e.instance_id).collect();
-    let running: HashSet<&str> = active.iter().map(|e| e.deployment_id).collect();
+    let mut admission = Admission::new(active, limit);
     let mut selected = Vec::new();
     for (index, entry) in queued.iter().enumerate() {
-        if running.contains(entry.deployment_id) {
-            continue;
-        }
-        if entry.exclusive {
-            if active.is_empty() && selected.is_empty() {
-                selected.push(index);
-            }
-            break;
-        }
-        if active.len() + selected.len() >= limit {
-            break;
-        }
-        if instances.insert(entry.instance_id) {
+        if admission.consider(*entry) {
             selected.push(index);
+        }
+        if admission.stopped() {
+            break;
         }
     }
     selected
+}
+
+/// Incremental form for a journal caller that must resolve exclusivity lazily.
+/// No later manifest may be inspected beyond the same fair queue barrier.
+pub struct Admission<'a> {
+    instances: HashSet<&'a str>,
+    running: HashSet<&'a str>,
+    active: usize,
+    selected: usize,
+    limit: usize,
+    stopped: bool,
+}
+impl<'a> Admission<'a> {
+    pub fn new(active: &[Deployment<'a>], limit: usize) -> Self {
+        Self {
+            instances: active.iter().map(|e| e.instance_id).collect(),
+            running: active.iter().map(|e| e.deployment_id).collect(),
+            active: active.len(),
+            selected: 0,
+            limit,
+            stopped: active.iter().any(|e| e.exclusive),
+        }
+    }
+    pub fn stopped(&self) -> bool {
+        self.stopped
+    }
+    pub fn ignores(&self, id: &str) -> bool {
+        self.stopped || self.running.contains(id)
+    }
+    pub fn consider(&mut self, entry: Deployment<'a>) -> bool {
+        if self.ignores(entry.deployment_id) {
+            return false;
+        }
+        if entry.exclusive {
+            self.stopped = true;
+            if self.active == 0 && self.selected == 0 {
+                self.selected += 1;
+                return true;
+            }
+            return false;
+        }
+        if self.active + self.selected >= self.limit {
+            self.stopped = true;
+            return false;
+        }
+        if !self.instances.insert(entry.instance_id) {
+            return false;
+        }
+        self.selected += 1;
+        true
+    }
 }
 
 /// A source build or infrastructure replacement owns the entire activation queue.

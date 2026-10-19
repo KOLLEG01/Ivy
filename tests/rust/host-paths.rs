@@ -12,6 +12,10 @@ mod artifact_cases;
 mod native_dispatch_cases;
 #[path = "host-native-helper-cases.rs"]
 mod native_helper_cases;
+#[path = "host-executor-cases.rs"]
+mod executor_cases;
+#[path = "host-node-filesystem-cases.rs"]
+mod node_filesystem_cases;
 #[path = "host-package-archive-cases.rs"]
 mod package_archive_cases;
 #[path = "host-filesystem-cases.rs"]

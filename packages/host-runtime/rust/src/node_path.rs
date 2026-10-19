@@ -257,6 +257,18 @@ impl Context {
         local.0 != [46, 46] && !local.0.starts_with(&[46, 46, 92])
             && !local.0.starts_with(&[46, 46, 47]) && !is_absolute(self.style, &local)
     }
+    /// Node's Windows namespace conversion precedes its UTF-8 filesystem
+    /// encoding. Keep this separate from logical paths and direct native argv.
+    pub fn filesystem_path(&self, path: &JsString) -> PathBuf {
+        if self.style != Style::Windows || path.0.is_empty() { return filesystem_utf8(path); }
+        let resolved=self.resolve(std::slice::from_ref(path));
+        if resolved.0.len()<=2 { return filesystem_utf8(path); }
+        let units=&resolved.0;
+        let prefix=if units.starts_with(&[92,92])&&units.get(2).is_some_and(|c|*c!=63&&*c!=46){Some(("\\\\?\\UNC\\",2))}
+            else if units.len()>=3&&letter(units[0])&&units[1]==58&&units[2]==92{Some(("\\\\?\\",0))}else{None};
+        let physical=match prefix{Some((prefix,offset))=>JsString(prefix.encode_utf16().chain(units[offset..].iter().copied()).collect()),None=>resolved};
+        filesystem_utf8(&physical)
+    }
 }
 pub fn from_native(path: &Path) -> JsString {
     #[cfg(windows)] { use std::os::windows::ffi::OsStrExt; JsString(path.as_os_str().encode_wide().collect()) }
@@ -266,9 +278,28 @@ pub fn to_native(path: &JsString) -> PathBuf {
     #[cfg(windows)] { use std::os::windows::ffi::OsStringExt; std::ffi::OsString::from_wide(&path.0).into() }
     #[cfg(not(windows))] { String::from_utf16_lossy(&path.0).into() }
 }
-/// Node fs string arguments cross a UTF-8 boundary before native filesystem I/O.
-/// Lexical paths, JSON and direct native arguments still use lossless to_native.
-pub fn filesystem_path(path: &JsString) -> PathBuf { String::from_utf16_lossy(&path.0).into() }
+fn filesystem_utf8(path:&JsString)->PathBuf{String::from_utf16_lossy(&path.0).into()}
+/// Node-compatible filesystem spelling for fully qualified Windows paths,
+/// including namespace handling that preserves trailing dots/spaces. Relative
+/// paths retain the legacy conversion; use node_filesystem_path or an explicit
+/// Context at a boundary that accepts relative input. Never use this for argv.
+pub fn filesystem_path(path: &JsString) -> PathBuf {
+    #[cfg(windows)] {
+        let root=windows_root(&path.0,false);
+        if root.absolute&&!root.device.is_empty(){return Context{style:Style::Windows,cwd:JsString::default(),drive_cwds:BTreeMap::new()}.filesystem_path(path);}
+    }
+    filesystem_utf8(path)
+}
+/// Fallible current-context boundary for Node filesystem string arguments.
+/// It changes neither logical strings nor containment/admission policy.
+pub fn node_filesystem_path(path:&JsString)->io::Result<PathBuf>{
+    #[cfg(windows)] {
+        let root=windows_root(&path.0,false);
+        if path.0.is_empty()||root.absolute&&!root.device.is_empty(){return Ok(filesystem_path(path));}
+        Ok(Context::current()?.filesystem_path(path))
+    }
+    #[cfg(not(windows))] {Ok(filesystem_utf8(path))}
+}
 
 /// Decode a native filesystem name using Node's UTF-8 replacement behavior.
 pub fn node_utf8(value: &std::ffi::OsStr) -> JsString {
