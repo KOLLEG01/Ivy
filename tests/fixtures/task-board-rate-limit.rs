@@ -17,6 +17,8 @@ use std::{
     process::Command,
     sync::{Arc, Mutex, OnceLock},
 };
+#[path = "task-board-shared-dates.rs"]
+mod shared_dates;
 fn f<'a>(v: &'a Json, key: &str) -> &'a Json {
     v.required(key).unwrap()
 }

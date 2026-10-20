@@ -5,7 +5,7 @@ use crate::{
     operations::{Document, Store},
 };
 use ivy_contracts::{
-    IvyJson as Json, IvyResult, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
+    IvyError, IvyJson as Json, IvyResult, JsString, json::canonical, limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_sdk::clock::LocalParts;
 
@@ -18,6 +18,44 @@ pub trait RetryDates {
     fn parts(&self, zone: &Self::Zone, at: f64) -> IvyResult<LocalParts>;
     fn utc(&self, year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> f64;
     fn iso(&self, at: f64) -> IvyResult<JsString>;
+}
+/// The owner supplies exact Date.parse and Intl behavior, including its local
+/// time zone and locale. No process defaults are selected by the retry adapter.
+pub trait RetryDateContext {
+    type Zone;
+    fn parse(&self, value: &JsString) -> f64;
+    fn zone(&self, name: &JsString) -> IvyResult<Self::Zone>;
+    fn parts(&self, zone: &Self::Zone, at: f64) -> IvyResult<LocalParts>;
+}
+pub struct SharedRetryDates<D> {
+    pub context: D,
+}
+impl<D: RetryDateContext> RetryDates for SharedRetryDates<D> {
+    type Zone = D::Zone;
+    fn parse(&self, value: &JsString) -> f64 {
+        self.context.parse(value)
+    }
+    fn zone(&self, name: &JsString) -> IvyResult<Self::Zone> {
+        self.context.zone(name)
+    }
+    fn parts(&self, zone: &Self::Zone, at: f64) -> IvyResult<LocalParts> {
+        self.context.parts(zone, at)
+    }
+    fn utc(&self, year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> f64 {
+        ivy_sdk::clock::date_utc(
+            year as f64,
+            month as f64,
+            day as f64,
+            hour as f64,
+            minute as f64,
+            second as f64,
+            0.0,
+        )
+    }
+    fn iso(&self, at: f64) -> IvyResult<JsString> {
+        // The source normalizes the thrown RangeError through IvyError.from.
+        ivy_sdk::clock::date_to_iso(at).map_err(|_| IvyError::internal())
+    }
 }
 pub trait RetryQuestions {
     fn unanswered(&self, task: &Json, run: &JsString) -> IvyResult<bool>;
