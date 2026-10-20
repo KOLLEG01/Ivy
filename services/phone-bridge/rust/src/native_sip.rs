@@ -745,7 +745,7 @@ impl NativeSipOperations {
     ) -> Result<String, NativeSipError> {
         self.connected_feedback(expected, Some((sequence, success)))?;
         Ok(format!(
-            "{{\"callId\":\"{}\",\"commandSequence\":{sequence},\"success\":{success}}",
+            "{{\"callId\":\"{}\",\"commandSequence\":{sequence},\"success\":{success}}}",
             expected.0.original.id()
         ))
     }
