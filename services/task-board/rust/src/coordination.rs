@@ -4,6 +4,9 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::hash::Hash;
 
+#[path = "next_steps.rs"]
+pub mod next_steps;
+
 /// Policy failures are separate from the store's original read error. The service
 /// adapter preserves that error, including its execution outcome.
 #[derive(Debug, PartialEq, Eq)]

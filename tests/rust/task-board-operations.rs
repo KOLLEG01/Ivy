@@ -29,6 +29,8 @@ mod lifecycle;
 mod scheduler;
 #[path = "../fixtures/task-board-deliveries.rs"]
 mod deliveries;
+#[path = "../fixtures/task-board-next-steps.rs"]
+mod next_steps;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()

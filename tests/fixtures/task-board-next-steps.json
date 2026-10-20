@@ -1,0 +1,5105 @@
+{
+  "schemaVersion": 1,
+  "at": "2026-10-20T12:00:00.000Z",
+  "sourceFiles": [
+    {
+      "path": "services/task-board/src/runtime/next-steps.js",
+      "byteLength": 8992,
+      "contentHash": "sha256:3a8d0559c4e4f6b7f0c4d1ed7e6541e2b178296ebff6664e7e574cb103ad37ef"
+    },
+    {
+      "path": "packages/contracts/src/task-board-questions.js",
+      "byteLength": 1034,
+      "contentHash": "sha256:b2157d3e844fba177885fbb154a665ab1398c3cf922be79221c22e127df1ac2c"
+    }
+  ],
+  "reusedCases": 26,
+  "newCases": 30,
+  "questionViews": [
+    {
+      "key": "sha256:f226435b6a3ddf28267354167e60c548649353766385ef9646a181a31ac648fb",
+      "comments": [
+        {
+          "commentId": "q",
+          "sequence": 1,
+          "purpose": "question",
+          "authorKind": "agent",
+          "body": "Exact question q",
+          "recipient": {
+            "kind": "user"
+          },
+          "replyTo": null
+        }
+      ],
+      "open": [
+        "q"
+      ]
+    },
+    {
+      "key": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "comments": [],
+      "open": []
+    },
+    {
+      "key": "sha256:0c59f2438a76221a57923169d85d85dc8f642633b60655625035bee1dc7745d5",
+      "comments": [
+        {
+          "commentId": "foreign",
+          "sequence": 1,
+          "purpose": "question",
+          "authorKind": "agent",
+          "body": "Exact question foreign",
+          "recipient": {
+            "kind": "user"
+          },
+          "replyTo": null
+        }
+      ],
+      "open": [
+        "foreign"
+      ]
+    },
+    {
+      "key": "sha256:2e6b6fad512eeede4516c96dde84140f33b1e78af6dcc689b06df5116d61cfb6",
+      "comments": [
+        {
+          "commentId": "q",
+          "sequence": 1,
+          "purpose": "question",
+          "authorKind": "agent",
+          "body": "Exact question q",
+          "recipient": {
+            "kind": "task",
+            "taskId": "parent"
+          },
+          "replyTo": null
+        }
+      ],
+      "open": [
+        "q"
+      ]
+    },
+    {
+      "key": "sha256:6f4065881fa16e503f9e8744f68957c102a23cbc6fa21434e69f3ce59c241961",
+      "comments": [
+        {
+          "commentId": "q",
+          "sequence": 1,
+          "purpose": "question",
+          "authorKind": "agent",
+          "body": "Question",
+          "replyTo": null,
+          "requests": [],
+          "responses": []
+        }
+      ],
+      "open": [
+        "q"
+      ]
+    },
+    {
+      "key": "sha256:eeeb3a53a70b9d745c3124a450e04df2e8d565ef8ca31c3d81a46c13b97efe4d",
+      "comments": [
+        {
+          "commentId": "q",
+          "sequence": 1,
+          "purpose": "question",
+          "authorKind": "agent",
+          "body": "Question",
+          "replyTo": null,
+          "requests": [],
+          "responses": [],
+          "recipient": {
+            "kind": "task",
+            "taskId": "parent"
+          }
+        }
+      ],
+      "open": [
+        "q"
+      ]
+    },
+    {
+      "key": "sha256:d9868382f16cbad1c267857719db52582899535b7787722c213bcee196c8d4e9",
+      "comments": [
+        {
+          "commentId": "foreign",
+          "sequence": 1,
+          "purpose": "question",
+          "authorKind": "agent",
+          "body": "Question",
+          "replyTo": null,
+          "requests": [],
+          "responses": [],
+          "recipient": {
+            "kind": "user"
+          },
+          "sourceTaskId": "other"
+        }
+      ],
+      "open": []
+    }
+  ],
+  "cases": [
+    {
+      "kind": "assessment",
+      "name": "unrelated own question leaves independent step ready",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "q",
+              "sequence": 1,
+              "purpose": "question",
+              "authorKind": "agent",
+              "body": "Exact question q",
+              "recipient": {
+                "kind": "user"
+              },
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Original bounded scope question",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            },
+            {
+              "id": "independent",
+              "scope": "Original bounded scope independent",
+              "requires": []
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {},
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Original bounded scope question",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            },
+            "fingerprint": "sha256:859d5d328688a5bbbdf890559231d92fbca95628fb7af3125bb7cbc33ac9a4cd",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "question",
+                "questionId": "q"
+              }
+            ],
+            "needsUser": true
+          },
+          {
+            "step": {
+              "id": "independent",
+              "scope": "Original bounded scope independent",
+              "requires": []
+            },
+            "fingerprint": "sha256:3a8e3297928c9fe97ed5a8960d8134400cae8e8413830deb0239258ffa537209",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "AND conditions require every prerequisite",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "and",
+              "scope": "Original bounded scope and",
+              "requires": [
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T11:00:00.000Z"
+                },
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "and",
+              "scope": "Original bounded scope and",
+              "requires": [
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T11:00:00.000Z"
+                },
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api"
+                }
+              ]
+            },
+            "fingerprint": "sha256:94a8034f4f5589cbb6b4fcff42fcfb7fd1671976101ef162e7fc50892e7dc692",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "delivery",
+                "taskId": "other",
+                "key": "api"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "foreign questions do not gate header dependency",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            {
+              "id": "delivery",
+              "scope": "Original bounded scope delivery",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "missing"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [
+              {
+                "commentId": "foreign",
+                "sequence": 1,
+                "purpose": "question",
+                "authorKind": "agent",
+                "body": "Exact question foreign",
+                "recipient": {
+                  "kind": "user"
+                },
+                "replyTo": null
+              }
+            ],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:0f5a1fb71d99b2a1b34935e41a6f0fcbc19b788b3535d188e55188b4d804183d",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          },
+          {
+            "step": {
+              "id": "delivery",
+              "scope": "Original bounded scope delivery",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "missing"
+                }
+              ]
+            },
+            "fingerprint": "sha256:294cd06c582ac740df54c114648284e3746d5b704241e3239561fef5b1baeebc",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "delivery",
+                "taskId": "other",
+                "key": "missing"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "idle examines saved Run phase running",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": {
+              "objectId": "run",
+              "revision": 3
+            },
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          },
+          "task-board/run:run": {
+            "phase": "running"
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:0f5a1fb71d99b2a1b34935e41a6f0fcbc19b788b3535d188e55188b4d804183d",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "idle"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "run",
+            "revision": 3
+          },
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "idle examines saved Run phase completed",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": {
+              "objectId": "run",
+              "revision": 3
+            },
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          },
+          "task-board/run:run": {
+            "phase": "completed"
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:0f5a1fb71d99b2a1b34935e41a6f0fcbc19b788b3535d188e55188b4d804183d",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "run",
+            "revision": 3
+          },
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "idle examines saved Run phase failed",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": {
+              "objectId": "run",
+              "revision": 3
+            },
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          },
+          "task-board/run:run": {
+            "phase": "failed"
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:0f5a1fb71d99b2a1b34935e41a6f0fcbc19b788b3535d188e55188b4d804183d",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "run",
+            "revision": 3
+          },
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "idle examines saved Run phase cancelled",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": {
+              "objectId": "run",
+              "revision": 3
+            },
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          },
+          "task-board/run:run": {
+            "phase": "cancelled"
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:0f5a1fb71d99b2a1b34935e41a6f0fcbc19b788b3535d188e55188b4d804183d",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "run",
+            "revision": 3
+          },
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "Done requires exact workflow and no publication",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "done",
+              "scope": "Original bounded scope done",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "review",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "done",
+              "scope": "Original bounded scope done",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            },
+            "fingerprint": "sha256:928dcc9fa6b9ee597b45876afac4e929d58090daca62bfc73fb27a2561122d7a",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "done"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "publication vetoes Done",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "done",
+              "scope": "Original bounded scope done",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "done",
+            "claim": null,
+            "publication": {
+              "operation": {
+                "objectId": "op",
+                "revision": 1
+              }
+            },
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "done",
+              "scope": "Original bounded scope done",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            },
+            "fingerprint": "sha256:85f00d04d9d8d7428851151d71dad2808bfe448c40e29fe08f8fedaf5286cfd4",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "done"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "same named delivery identity does not satisfy after",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [
+              {
+                "delivery": {
+                  "key": "api",
+                  "artifacts": [],
+                  "codeReferences": []
+                },
+                "identity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            },
+            "fingerprint": "sha256:a08cbf27d6336a4e0b8201c306880d43710eed7f90002e373367f1bc1cb96493",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "delivery",
+                "taskId": "other",
+                "key": "api",
+                "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "new named identity satisfies after",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [
+              {
+                "delivery": {
+                  "key": "api",
+                  "artifacts": [],
+                  "codeReferences": []
+                },
+                "identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              }
+            ],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            },
+            "fingerprint": "sha256:166ba34fbf97b62199ff5b55472c33a1dc698a922488bce165a97b37c54ee7ef",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "consume",
+      "name": "exact fingerprint is retained",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "selected": {
+          "step": {
+            "id": "api",
+            "scope": "Original bounded scope api",
+            "requires": [
+              {
+                "kind": "delivery",
+                "taskId": "other",
+                "key": "api",
+                "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ]
+          },
+          "fingerprint": "sha256:166ba34fbf97b62199ff5b55472c33a1dc698a922488bce165a97b37c54ee7ef",
+          "ready": true,
+          "consumed": false,
+          "pending": [],
+          "needsUser": false
+        }
+      },
+      "output": [
+        {
+          "stepId": "api",
+          "fingerprint": "sha256:166ba34fbf97b62199ff5b55472c33a1dc698a922488bce165a97b37c54ee7ef"
+        }
+      ],
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "unchanged satisfied gate is consumed once",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [
+            {
+              "stepId": "api",
+              "fingerprint": "sha256:166ba34fbf97b62199ff5b55472c33a1dc698a922488bce165a97b37c54ee7ef"
+            }
+          ],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [
+              {
+                "delivery": {
+                  "key": "api",
+                  "artifacts": [],
+                  "codeReferences": []
+                },
+                "identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              }
+            ],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            },
+            "fingerprint": "sha256:166ba34fbf97b62199ff5b55472c33a1dc698a922488bce165a97b37c54ee7ef",
+            "ready": false,
+            "consumed": true,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "workflow_attention",
+          "detail": "This unchanged next step has already been processed. Publish a new next step or delivery condition."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "changed observed identity creates new work",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [
+            {
+              "stepId": "api",
+              "fingerprint": "sha256:166ba34fbf97b62199ff5b55472c33a1dc698a922488bce165a97b37c54ee7ef"
+            }
+          ],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [
+              {
+                "delivery": {
+                  "key": "api",
+                  "artifacts": [],
+                  "codeReferences": []
+                },
+                "identity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+              }
+            ],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "api",
+              "scope": "Original bounded scope api",
+              "requires": [
+                {
+                  "kind": "delivery",
+                  "taskId": "other",
+                  "key": "api",
+                  "after": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            },
+            "fingerprint": "sha256:9fbe14e2839d864202cba94c3675a0ec85b3503eb675e8a3ade6500bc9147e92",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "addressed task question is a dependency",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "q",
+              "sequence": 1,
+              "purpose": "question",
+              "authorKind": "agent",
+              "body": "Exact question q",
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              },
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Original bounded scope question",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {},
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Original bounded scope question",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            },
+            "fingerprint": "sha256:859d5d328688a5bbbdf890559231d92fbca95628fb7af3125bb7cbc33ac9a4cd",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "question",
+                "questionId": "q"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "addressed user question needs user",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "q",
+              "sequence": 1,
+              "purpose": "question",
+              "authorKind": "agent",
+              "body": "Exact question q",
+              "recipient": {
+                "kind": "user"
+              },
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Original bounded scope question",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {},
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Original bounded scope question",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            },
+            "fingerprint": "sha256:859d5d328688a5bbbdf890559231d92fbca95628fb7af3125bb7cbc33ac9a4cd",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "question",
+                "questionId": "q"
+              }
+            ],
+            "needsUser": true
+          }
+        ],
+        "condition": {
+          "state": "needs_user",
+          "detail": "The remaining next steps require an answer to this ticket's own question."
+        }
+      },
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "indexed closed question supports header-only assessment",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Original bounded scope question",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {},
+        "index": [
+          {
+            "commentId": "q",
+            "sequence": 7,
+            "open": false,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ]
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Original bounded scope question",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            },
+            "fingerprint": "sha256:f729d550d7f099b0be253a44cae45cb6e1dae23c490544931d7c523ff38ad8a0",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "time appointment uses AND maximum then earliest alternative",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "later",
+              "scope": "Original bounded scope later",
+              "requires": [
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T13:00:00.000Z"
+                },
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T14:00:00.000Z"
+                }
+              ]
+            },
+            {
+              "id": "first",
+              "scope": "Original bounded scope first",
+              "requires": [
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T13:30:00.000Z"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {},
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "later",
+              "scope": "Original bounded scope later",
+              "requires": [
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T13:00:00.000Z"
+                },
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T14:00:00.000Z"
+                }
+              ]
+            },
+            "fingerprint": "sha256:14a3873e17170eb5982cdf1f9258b03bfe02936ac5b27ce5fb224515ef921c30",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "time",
+                "at": "2026-10-20T13:00:00.000Z"
+              },
+              {
+                "kind": "time",
+                "at": "2026-10-20T14:00:00.000Z"
+              }
+            ],
+            "needsUser": false
+          },
+          {
+            "step": {
+              "id": "first",
+              "scope": "Original bounded scope first",
+              "requires": [
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T13:30:00.000Z"
+                }
+              ]
+            },
+            "fingerprint": "sha256:8a7b4b41b54c6a940a027070cc481269b7af1e9adbb889ef2c8b35db0cb2e9b2",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "time",
+                "at": "2026-10-20T13:30:00.000Z"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "deferred",
+          "detail": "Next authorized step is scheduled for 2026-10-20T13:30:00.000Z."
+        }
+      },
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "time",
+      "name": "earliest raw time reference",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "later",
+              "scope": "Original bounded scope later",
+              "requires": [
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T13:00:00.000Z"
+                },
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T14:00:00.000Z"
+                }
+              ]
+            },
+            {
+              "id": "first",
+              "scope": "Original bounded scope first",
+              "requires": [
+                {
+                  "kind": "time",
+                  "at": "2026-10-20T13:30:00.000Z"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": "2026-10-20T13:00:00.000Z",
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "consume",
+      "name": "bounded64 fingerprints",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [
+            {
+              "stepId": "s0",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s1",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s2",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s3",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s4",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s5",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s6",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s7",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s8",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s9",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s10",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s11",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s12",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s13",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s14",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s15",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s16",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s17",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s18",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s19",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s20",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s21",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s22",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s23",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s24",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s25",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s26",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s27",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s28",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s29",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s30",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s31",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s32",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s33",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s34",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s35",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s36",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s37",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s38",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s39",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s40",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s41",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s42",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s43",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s44",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s45",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s46",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s47",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s48",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s49",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s50",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s51",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s52",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s53",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s54",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s55",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s56",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s57",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s58",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s59",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s60",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s61",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s62",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s63",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s64",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s65",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s66",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s67",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s68",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "stepId": "s69",
+              "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ],
+          "runtimeWait": null
+        },
+        "selected": {
+          "step": {
+            "id": "new"
+          },
+          "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "output": [
+        {
+          "stepId": "s7",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s8",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s9",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s10",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s11",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s12",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s13",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s14",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s15",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s16",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s17",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s18",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s19",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s20",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s21",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s22",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s23",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s24",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s25",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s26",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s27",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s28",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s29",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s30",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s31",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s32",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s33",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s34",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s35",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s36",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s37",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s38",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s39",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s40",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s41",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s42",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s43",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s44",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s45",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s46",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s47",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s48",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s49",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s50",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s51",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s52",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s53",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s54",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s55",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s56",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s57",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s58",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s59",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s60",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s61",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s62",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s63",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s64",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s65",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s66",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s67",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s68",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "s69",
+          "fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "stepId": "new",
+          "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "validate",
+      "name": "unique ready step",
+      "input": {
+        "steps": [
+          {
+            "id": "ready",
+            "scope": "Original bounded scope ready",
+            "requires": []
+          }
+        ],
+        "records": {},
+        "own": "self",
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "ready",
+              "scope": "Original bounded scope ready",
+              "requires": []
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": null,
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "validate",
+      "name": "duplicate identities rejected",
+      "input": {
+        "steps": [
+          {
+            "id": "same",
+            "scope": "Original bounded scope same",
+            "requires": []
+          },
+          {
+            "id": "same",
+            "scope": "Original bounded scope same",
+            "requires": []
+          }
+        ],
+        "records": {},
+        "own": "self",
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "same",
+              "scope": "Original bounded scope same",
+              "requires": []
+            },
+            {
+              "id": "same",
+              "scope": "Original bounded scope same",
+              "requires": []
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "code": "invalid_arguments",
+        "message": "Next-step identities must be unique.",
+        "outcome": "not_executed"
+      },
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "validate",
+      "name": "self dependency rejected",
+      "input": {
+        "steps": [
+          {
+            "id": "self",
+            "scope": "Original bounded scope self",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "self",
+                "until": "idle"
+              }
+            ]
+          }
+        ],
+        "records": {},
+        "own": "self",
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "self",
+              "scope": "Original bounded scope self",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "self",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "code": "task_board_dependency_cycle",
+        "message": "A task cannot wait on itself.",
+        "outcome": "not_executed"
+      },
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "validate",
+      "name": "missing owned question rejected",
+      "input": {
+        "steps": [
+          {
+            "id": "q",
+            "scope": "Original bounded scope q",
+            "requires": [
+              {
+                "kind": "question",
+                "questionId": "missing"
+              }
+            ]
+          }
+        ],
+        "records": {},
+        "own": "self",
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "q",
+              "scope": "Original bounded scope q",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "missing"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "code": "task_board_comment_mismatch",
+        "message": "A user condition must identify a question owned by this ticket.",
+        "outcome": "not_executed"
+      },
+      "trace": [],
+      "reusedObservation": true
+    },
+    {
+      "kind": "validate",
+      "name": "all dependency alternatives cyclic",
+      "input": {
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [
+              {
+                "id": "back",
+                "scope": "Original bounded scope back",
+                "requires": [
+                  {
+                    "kind": "task",
+                    "taskId": "self",
+                    "until": "done"
+                  }
+                ]
+              }
+            ],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "own": "self",
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "a",
+              "scope": "Original bounded scope a",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "code": "task_board_dependency_cycle",
+        "message": "Every next step would wait indirectly on this ticket. Keep an independent progress path.",
+        "outcome": "not_executed"
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "validate",
+      "name": "independent foreign path permits progress",
+      "input": {
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [
+              {
+                "id": "back",
+                "scope": "Original bounded scope back",
+                "requires": [
+                  {
+                    "kind": "task",
+                    "taskId": "self",
+                    "until": "done"
+                  }
+                ]
+              },
+              {
+                "id": "independent",
+                "scope": "Original bounded scope independent",
+                "requires": []
+              }
+            ],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "own": "self",
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "a",
+              "scope": "Original bounded scope a",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": null,
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ],
+      "reusedObservation": true
+    },
+    {
+      "kind": "assessment",
+      "name": "missing result/review stay absent in fingerprint",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null
+          }
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value is outside the JSON domain.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "assessment",
+      "name": "overrides avoid header reads but preserve Run pins",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "a",
+              "scope": "Original bounded scope a",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            {
+              "id": "b",
+              "scope": "Original bounded scope b",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "overrides": {
+          "other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "done",
+            "claim": null,
+            "publication": null,
+            "lastRun": {
+              "objectId": "r",
+              "revision": 9
+            },
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "records": {
+          "task-board/run:r": {
+            "phase": "running"
+          }
+        }
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "a",
+              "scope": "Original bounded scope a",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:45f3a11fc81eb5ab5b001129dd79e87b7b23c66fac1299aecb2fb7a167fdf33a",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "idle"
+              }
+            ],
+            "needsUser": false
+          },
+          {
+            "step": {
+              "id": "b",
+              "scope": "Original bounded scope b",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            },
+            "fingerprint": "sha256:bdddd15ede84e0cf00712a10cd3a1a79743bdd37b54a43a5562055103ebadb9a",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "r",
+            "revision": 9
+          },
+          "flags": [
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "r",
+            "revision": 9
+          },
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "assessment",
+      "name": "shared header with separate saved Run reads",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "a",
+              "scope": "Original bounded scope a",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            {
+              "id": "b",
+              "scope": "Original bounded scope b",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": {
+              "objectId": "r",
+              "revision": 9
+            },
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          },
+          "task-board/run:r": {
+            "phase": "completed"
+          }
+        }
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "a",
+              "scope": "Original bounded scope a",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:da38403af48920e049a428f2276d8110860ae6faa8ad193c67cefb4ddce1b5df",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          },
+          {
+            "step": {
+              "id": "b",
+              "scope": "Original bounded scope b",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:09d9048cf1fb29111860e7e356210d72937cd3dab4fb0901f16652c42dafd0c3",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "r",
+            "revision": 9
+          },
+          "flags": [
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "r",
+            "revision": 9
+          },
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "assessment",
+      "name": "claim prevents idle",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": {
+              "run": "r"
+            },
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        }
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:0f5a1fb71d99b2a1b34935e41a6f0fcbc19b788b3535d188e55188b4d804183d",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "idle"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "assessment",
+      "name": "publication prevents idle",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": {
+              "operation": "p"
+            },
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        }
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            },
+            "fingerprint": "sha256:0f5a1fb71d99b2a1b34935e41a6f0fcbc19b788b3535d188e55188b4d804183d",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "idle"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "assessment",
+      "name": "done ignores claim but still loads Run",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "done",
+              "scope": "Original bounded scope done",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "done",
+            "claim": {
+              "run": "r"
+            },
+            "publication": null,
+            "lastRun": {
+              "objectId": "r",
+              "revision": 2
+            },
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          },
+          "task-board/run:r": {
+            "phase": "running"
+          }
+        }
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "done",
+              "scope": "Original bounded scope done",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "done"
+                }
+              ]
+            },
+            "fingerprint": "sha256:85f00d04d9d8d7428851151d71dad2808bfe448c40e29fe08f8fedaf5286cfd4",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "r",
+            "revision": 2
+          },
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "assessment",
+      "name": "missing recipient classification",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "q",
+              "sequence": 1,
+              "purpose": "question",
+              "authorKind": "agent",
+              "body": "Question",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "q",
+              "scope": "Original bounded scope q",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "q",
+              "scope": "Original bounded scope q",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            },
+            "fingerprint": "sha256:517077bf71e87fceb8be9311ae4ae1c303b424fb9937f18ac1ba359cfeb95eea",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "question",
+                "questionId": "q"
+              }
+            ],
+            "needsUser": true
+          }
+        ],
+        "condition": {
+          "state": "needs_user",
+          "detail": "The remaining next steps require an answer to this ticket's own question."
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "assessment",
+      "name": "legacy user alias classification",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "q",
+              "sequence": 1,
+              "purpose": "question",
+              "authorKind": "agent",
+              "body": "Question",
+              "replyTo": null,
+              "requests": [],
+              "responses": [],
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "q",
+              "scope": "Original bounded scope q",
+              "requires": [
+                {
+                  "kind": "user",
+                  "questionId": "q"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "index": null
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "q",
+              "scope": "Original bounded scope q",
+              "requires": [
+                {
+                  "kind": "user",
+                  "questionId": "q"
+                }
+              ]
+            },
+            "fingerprint": "sha256:7e7c651b8136cdf20cf8f70bb9775a4354eb9ad7c8ac6e13766f6f62757bcd6a",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "user",
+                "questionId": "q"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "assessment",
+      "name": "indexed open task classification",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "q",
+              "sequence": 1,
+              "purpose": "question",
+              "authorKind": "agent",
+              "body": "Question",
+              "replyTo": null,
+              "requests": [],
+              "responses": [],
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "q",
+              "scope": "Original bounded scope q",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "index": [
+          {
+            "commentId": "q",
+            "sequence": 1,
+            "open": true,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ]
+      },
+      "output": {
+        "assessments": [
+          {
+            "step": {
+              "id": "q",
+              "scope": "Original bounded scope q",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "q"
+                }
+              ]
+            },
+            "fingerprint": "sha256:517077bf71e87fceb8be9311ae4ae1c303b424fb9937f18ac1ba359cfeb95eea",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "question",
+                "questionId": "q"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "assessment",
+      "name": "empty steps need workflow attention",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "assessments": [],
+        "condition": {
+          "state": "workflow_attention",
+          "detail": "No next step is recorded."
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "assessment",
+      "name": "read error retains outcome and starts independent read",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "a",
+              "scope": "Original bounded scope a",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "bad",
+                  "until": "done"
+                }
+              ]
+            },
+            {
+              "id": "b",
+              "scope": "Original bounded scope b",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "waiting",
+                  "until": "done"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "failure": "bad",
+        "stalled": "waiting"
+      },
+      "output": {
+        "error": {
+          "code": "owner_unavailable",
+          "message": "Original read unavailable.",
+          "outcome": "unknown",
+          "details": {
+            "address": "bad"
+          }
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "bad",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "waiting",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "assessment",
+      "name": "Run read error retains exact pin and outcome",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "idle",
+              "scope": "Original bounded scope idle",
+              "requires": [
+                {
+                  "kind": "task",
+                  "taskId": "other",
+                  "until": "idle"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": {
+              "objectId": "bad",
+              "revision": 9
+            },
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        },
+        "failure": "bad"
+      },
+      "output": {
+        "error": {
+          "code": "owner_unavailable",
+          "message": "Original read unavailable.",
+          "outcome": "unknown",
+          "details": {
+            "address": "bad"
+          }
+        }
+      },
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/run",
+          "id": {
+            "objectId": "bad",
+            "revision": 9
+          },
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "validate",
+      "name": "missing id",
+      "input": {
+        "steps": [
+          {
+            "scope": "Missing identity",
+            "requires": []
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "missing requires",
+      "input": {
+        "steps": [
+          {
+            "id": "bad",
+            "scope": "Missing prerequisites"
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "unknown property",
+      "input": {
+        "steps": [
+          {
+            "id": "bad",
+            "scope": "Original bounded scope bad",
+            "requires": [],
+            "extra": true
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "empty scope",
+      "input": {
+        "steps": [
+          {
+            "id": "bad",
+            "scope": "",
+            "requires": []
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "unknown condition",
+      "input": {
+        "steps": [
+          {
+            "id": "bad",
+            "scope": "Original bounded scope bad",
+            "requires": [
+              {
+                "kind": "unknown"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "time 2026-10-20T13:00:00Z",
+      "input": {
+        "steps": [
+          {
+            "id": "time",
+            "scope": "Original bounded scope time",
+            "requires": [
+              {
+                "kind": "time",
+                "at": "2026-10-20T13:00:00Z"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "time 2026-10-20T13:00:00.0Z",
+      "input": {
+        "steps": [
+          {
+            "id": "time",
+            "scope": "Original bounded scope time",
+            "requires": [
+              {
+                "kind": "time",
+                "at": "2026-10-20T13:00:00.0Z"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "time 2026-02-29T00:00:00.000Z",
+      "input": {
+        "steps": [
+          {
+            "id": "time",
+            "scope": "Original bounded scope time",
+            "requires": [
+              {
+                "kind": "time",
+                "at": "2026-02-29T00:00:00.000Z"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "task_board_invalid_date",
+          "message": "A time condition needs a valid UTC timestamp.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "time 2026-10-20T13:00:00+00:00",
+      "input": {
+        "steps": [
+          {
+            "id": "time",
+            "scope": "Original bounded scope time",
+            "requires": [
+              {
+                "kind": "time",
+                "at": "2026-10-20T13:00:00+00:00"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "time +010000-01-01T00:00:00.000Z",
+      "input": {
+        "steps": [
+          {
+            "id": "time",
+            "scope": "Original bounded scope time",
+            "requires": [
+              {
+                "kind": "time",
+                "at": "+010000-01-01T00:00:00.000Z"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "invalid_arguments",
+          "message": "Value does not match its TaskBoard workflow contract.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "question belongs to another ticket",
+      "input": {
+        "steps": [
+          {
+            "id": "q",
+            "scope": "Original bounded scope q",
+            "requires": [
+              {
+                "kind": "question",
+                "questionId": "foreign"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "foreign",
+              "sequence": 1,
+              "purpose": "question",
+              "authorKind": "agent",
+              "body": "Question",
+              "replyTo": null,
+              "requests": [],
+              "responses": [],
+              "recipient": {
+                "kind": "user"
+              },
+              "sourceTaskId": "other"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        }
+      },
+      "output": {
+        "error": {
+          "code": "task_board_comment_mismatch",
+          "message": "A user condition must reference a question owned by this ticket.",
+          "outcome": "not_executed"
+        }
+      },
+      "trace": []
+    },
+    {
+      "kind": "validate",
+      "name": "terminal foreign done breaks cycle",
+      "input": {
+        "own": "self",
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "done",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [
+              {
+                "id": "back",
+                "scope": "Original bounded scope back",
+                "requires": [
+                  {
+                    "kind": "task",
+                    "taskId": "self",
+                    "until": "done"
+                  }
+                ]
+              }
+            ],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        }
+      },
+      "output": null,
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "validate",
+      "name": "terminal foreign cancelled breaks cycle",
+      "input": {
+        "own": "self",
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "cancelled",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [
+              {
+                "id": "back",
+                "scope": "Original bounded scope back",
+                "requires": [
+                  {
+                    "kind": "task",
+                    "taskId": "self",
+                    "until": "done"
+                  }
+                ]
+              }
+            ],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        }
+      },
+      "output": null,
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "validate",
+      "name": "terminal foreign review breaks cycle",
+      "input": {
+        "own": "self",
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "review",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [
+              {
+                "id": "back",
+                "scope": "Original bounded scope back",
+                "requires": [
+                  {
+                    "kind": "task",
+                    "taskId": "self",
+                    "until": "done"
+                  }
+                ]
+              }
+            ],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        }
+      },
+      "output": null,
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "validate",
+      "name": "claimed foreign task breaks cycle",
+      "input": {
+        "own": "self",
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "other",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:other": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": {
+              "run": "r"
+            },
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [
+              {
+                "id": "back",
+                "scope": "Original bounded scope back",
+                "requires": [
+                  {
+                    "kind": "task",
+                    "taskId": "self",
+                    "until": "done"
+                  }
+                ]
+              }
+            ],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        }
+      },
+      "output": null,
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "other",
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "validate",
+      "name": "foreign loop without this ticket permits validation",
+      "input": {
+        "own": "self",
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "a",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "records": {
+          "task-board/task:a": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [
+              {
+                "id": "ab",
+                "scope": "Original bounded scope ab",
+                "requires": [
+                  {
+                    "kind": "task",
+                    "taskId": "b",
+                    "until": "done"
+                  }
+                ]
+              }
+            ],
+            "consumedSteps": [],
+            "runtimeWait": null
+          },
+          "task-board/task:b": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "claim": null,
+            "publication": null,
+            "lastRun": null,
+            "latestResult": null,
+            "acceptedReview": null,
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "nextSteps": [
+              {
+                "id": "ba",
+                "scope": "Original bounded scope ba",
+                "requires": [
+                  {
+                    "kind": "task",
+                    "taskId": "a",
+                    "until": "done"
+                  }
+                ]
+              }
+            ],
+            "consumedSteps": [],
+            "runtimeWait": null
+          }
+        }
+      },
+      "output": null,
+      "trace": [
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "a",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "a",
+          "flags": [
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "b",
+          "flags": [
+            true,
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "b",
+          "flags": [
+            true,
+            true
+          ]
+        },
+        {
+          "method": "read",
+          "key": "task-board/task",
+          "id": "a",
+          "flags": [
+            true,
+            true
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "validate",
+      "name": "graph chain bound 1023",
+      "input": {
+        "own": "self",
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "n1",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "chainLength": 1023
+      },
+      "output": null,
+      "traceCount": 2047,
+      "traceHash": "sha256:3b3ff429d705276853eaefea8a6b111a3289109a9e05d18f538c2b3195dc35a7"
+    },
+    {
+      "kind": "validate",
+      "name": "graph chain bound 1024",
+      "input": {
+        "own": "self",
+        "steps": [
+          {
+            "id": "a",
+            "scope": "Original bounded scope a",
+            "requires": [
+              {
+                "kind": "task",
+                "taskId": "n1",
+                "until": "done"
+              }
+            ]
+          }
+        ],
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "claim": null,
+          "publication": null,
+          "lastRun": null,
+          "latestResult": null,
+          "acceptedReview": null,
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "runtimeWait": null
+        },
+        "chainLength": 1024
+      },
+      "output": {
+        "error": {
+          "code": "task_board_dependency_limit",
+          "message": "The next-step dependency graph exceeds its validation bound.",
+          "outcome": "not_executed"
+        }
+      },
+      "traceCount": 2047,
+      "traceHash": "sha256:ca6ae2e8f92f9047c4921f2ef00da523817e74b8b200f6a5d07ab114843ac258"
+    }
+  ],
+  "losslessReference": {
+    "taskJson": "{\"comments\":[],\"nextSteps\":[{\"id\":\"\\ud800\",\"scope\":\"\\udfff\",\"requires\":[]}]}",
+    "fingerprint": "sha256:2fae232890aa19966e41cf8b38f916d112c55d749e45427bede926ab7c96333a"
+  }
+}
