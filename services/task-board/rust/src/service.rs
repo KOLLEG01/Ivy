@@ -455,13 +455,30 @@ pub fn service<P: Contracts>(
     setup: ServiceSetup,
     contracts: &P,
 ) -> IvyResult<(TaskBoardService, ServiceOwner)> {
-    contracts.validate_definition("Settings", &setup.settings)?;
-    if setup.component_id != JsString::from("task-board") || setup.credential.is_empty() {
+    admit_service(
+        &setup.settings,
+        &setup.component_id,
+        !setup.credential.is_empty(),
+        contracts,
+    )?;
+    admitted_service(setup)
+}
+pub(crate) fn admit_service<P: Contracts>(
+    settings: &Json,
+    component_id: &JsString,
+    has_credential: bool,
+    contracts: &P,
+) -> IvyResult<()> {
+    contracts.validate_definition("Settings", settings)?;
+    if component_id != &JsString::from("task-board") || !has_credential {
         return Err(IvyError::new(
             "invalid_arguments",
             "TaskBoard requires its own component identity and Hive credential.",
         ));
     }
+    Ok(())
+}
+pub(crate) fn admitted_service(setup: ServiceSetup) -> IvyResult<(TaskBoardService, ServiceOwner)> {
     let interval_ms = setup
         .settings
         .required("scheduler")?

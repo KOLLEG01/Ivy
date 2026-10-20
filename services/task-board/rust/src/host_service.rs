@@ -2,7 +2,7 @@
 //! The caller supplies the exact registry and current contract implementation.
 use crate::{
     journal_store::Contracts,
-    service::{ServiceOwner, ServiceSetup, TaskBoardService, service},
+    service::{ServiceOwner, ServiceSetup, TaskBoardService, admit_service, admitted_service},
 };
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
 use ivy_host_runtime::{
@@ -36,27 +36,35 @@ pub async fn prepare<P: Contracts>(
             .cloned()
             .ok_or_else(IvyError::internal)
     };
-    // Keep Settings admission before the component/credential guard, as in the
-    // original entrypoint. No registry discovery or Hive connection starts here.
-    let (service, owner) = service(
-        ServiceSetup {
-            component_id: text("componentId")?,
-            public_base_url: text("publicBaseUrl")?.to_utf8()?,
-            credential: value
-                .get("credential")
-                .map(Json::as_str)
-                .transpose()?
-                .unwrap_or_default(),
-            service_node_id: text("serviceNodeId")?,
-            host_id: Some(text("hostId")?),
-            version: text("version")?,
-            build_id: text("buildId")?,
-            settings: value.required("settings")?.clone(),
-            registry,
-            tools,
-        },
+    let settings = value.required("settings")?.clone();
+    let component_id = text("componentId")?;
+    let credential = value
+        .get("credential")
+        .and_then(Json::as_js_string)
+        .cloned()
+        .unwrap_or_default();
+    // Admit the original JSON before any transport conversion. The same check
+    // serves direct ServiceSetup callers and runs exactly once on either path.
+    admit_service(
+        &settings,
+        &component_id,
+        !credential.0.is_empty(),
         contracts,
     )?;
+    let (service, owner) = admitted_service(ServiceSetup {
+        component_id,
+        // URL takes a USVString in the original constructor, unlike JSON
+        // identities and credentials. Keep the retained config untouched.
+        public_base_url: String::from_utf16_lossy(&text("publicBaseUrl")?.0),
+        credential: credential.to_utf8()?,
+        service_node_id: text("serviceNodeId")?,
+        host_id: Some(text("hostId")?),
+        version: text("version")?,
+        build_id: text("buildId")?,
+        settings,
+        registry,
+        tools,
+    })?;
     let health = Arc::new(HealthFile::new(config.clone()));
     Ok(PreparedTaskBoard {
         config,
