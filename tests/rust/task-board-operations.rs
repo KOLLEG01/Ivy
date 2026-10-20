@@ -33,6 +33,8 @@ mod deliveries;
 mod next_steps;
 #[path = "../fixtures/task-board-comment-reads.rs"]
 mod comment_reads;
+#[path = "../fixtures/task-board-condition.rs"]
+mod condition_policy;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()

@@ -1,0 +1,3287 @@
+{
+  "schemaVersion": 1,
+  "at": "2026-10-20T12:00:00.000Z",
+  "sourceFiles": [
+    {
+      "path": "services/task-board/src/runtime/condition.js",
+      "byteLength": 2161,
+      "contentHash": "sha256:f507b5a5630b8d3c089752cd12928a171a0dfafb609019e2ed49c1a6c0ffb520"
+    },
+    {
+      "path": "services/task-board/src/runtime/engine.js",
+      "byteLength": 90021,
+      "contentHash": "sha256:eae8345b94df88646d8605913f41ba8a9fdb2b60ce611de8612bc1e8a26621e7"
+    },
+    {
+      "path": "services/task-board/src/runtime/execution-mode.js",
+      "byteLength": 962,
+      "contentHash": "sha256:a75835fb40a6225f3f4f72d32c4486e987508e6bf871e92aeab2be6fa7e4b7ec"
+    },
+    {
+      "path": "services/task-board/src/runtime/task-read.js",
+      "byteLength": 3737,
+      "contentHash": "sha256:aa4402aa79d7f96af1b1195356b079ecd3af74157ec936eee1998ad272308119"
+    },
+    {
+      "path": "specs/schemas/task-board.schema.json",
+      "byteLength": 259865,
+      "contentHash": "sha256:e8876021a7267e1c6a2653da5a9234a696bcd6e9392d5adb63ff8618c6129b0d"
+    }
+  ],
+  "unchangedReadFixtureHash": "sha256:89bd23f57e04e176d08c50c8ab4eb4183c24014de8d460cf3a0a10d6a22ac968",
+  "cases": [
+    {
+      "kind": "facts",
+      "name": "backlog agent",
+      "input": {
+        "workflowState": "backlog",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "backlog user",
+      "input": {
+        "workflowState": "backlog",
+        "control": "user",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "todo agent",
+      "input": {
+        "workflowState": "todo",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "queued",
+        "detail": "Waiting for an authorized next step."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "todo user",
+      "input": {
+        "workflowState": "todo",
+        "control": "user",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "needs_user",
+        "detail": "Ready for manual work."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "in_progress agent",
+      "input": {
+        "workflowState": "in_progress",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "queued",
+        "detail": "Waiting for an authorized next step."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "in_progress user",
+      "input": {
+        "workflowState": "in_progress",
+        "control": "user",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "needs_user",
+        "detail": "Ready for manual work."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "waiting agent",
+      "input": {
+        "workflowState": "waiting",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "queued",
+        "detail": "Waiting for an authorized next step."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "waiting user",
+      "input": {
+        "workflowState": "waiting",
+        "control": "user",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "needs_user",
+        "detail": "Ready for manual work."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "review agent",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "needs_user",
+        "detail": "The final result is ready for review."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "review user",
+      "input": {
+        "workflowState": "review",
+        "control": "user",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "needs_user",
+        "detail": "The final result is ready for review."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "done agent",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "done user",
+      "input": {
+        "workflowState": "done",
+        "control": "user",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "cancelled agent",
+      "input": {
+        "workflowState": "cancelled",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "cancelled user",
+      "input": {
+        "workflowState": "cancelled",
+        "control": "user",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim execution claimed",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "claimed",
+          "hostId": "host",
+          "mode": "execution"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "starting",
+        "detail": "Working on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim execution run_created",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "run_created",
+          "hostId": "host",
+          "mode": "execution"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "starting",
+        "detail": "Working on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim execution starting",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "starting",
+          "hostId": "host",
+          "mode": "execution"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "starting",
+        "detail": "Working on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim execution running",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "running",
+          "hostId": "host",
+          "mode": "execution"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "active",
+        "detail": "Working on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim execution waiting_input",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "waiting_input",
+          "hostId": "host",
+          "mode": "execution"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "needs_user",
+        "detail": "The native execution needs an owner-bound answer."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim execution outcome_unknown",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "outcome_unknown",
+          "hostId": "host",
+          "mode": "execution"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Reconciling the original native execution."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim execution cancel_requested",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "cancel_requested",
+          "hostId": "host",
+          "mode": "execution"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Reconciling the original native execution."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim execution publishing_result",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "publishing_result",
+          "hostId": "host",
+          "mode": "execution"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "publishing",
+        "detail": "Working on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim conversation claimed",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "claimed",
+          "hostId": "host",
+          "mode": "conversation"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "starting",
+        "detail": "Processing new comments on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim conversation run_created",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "run_created",
+          "hostId": "host",
+          "mode": "conversation"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "starting",
+        "detail": "Processing new comments on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim conversation starting",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "starting",
+          "hostId": "host",
+          "mode": "conversation"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "starting",
+        "detail": "Processing new comments on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim conversation running",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "running",
+          "hostId": "host",
+          "mode": "conversation"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "active",
+        "detail": "Processing new comments on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim conversation waiting_input",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "waiting_input",
+          "hostId": "host",
+          "mode": "conversation"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "needs_user",
+        "detail": "The native execution needs an owner-bound answer."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim conversation outcome_unknown",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "outcome_unknown",
+          "hostId": "host",
+          "mode": "conversation"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Reconciling the original native execution."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim conversation cancel_requested",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "cancel_requested",
+          "hostId": "host",
+          "mode": "conversation"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Reconciling the original native execution."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim conversation publishing_result",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "publishing_result",
+          "hostId": "host",
+          "mode": "conversation"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "publishing",
+        "detail": "Processing new comments on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim recovery claimed",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "claimed",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim recovery run_created",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "run_created",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim recovery starting",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "starting",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim recovery running",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "running",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim recovery waiting_input",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "waiting_input",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim recovery outcome_unknown",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "outcome_unknown",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim recovery cancel_requested",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "cancel_requested",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "claim recovery publishing_result",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "publishing_result",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "publication takes precedence over every lower fact",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": true,
+        "claim": {
+          "phase": "waiting_input",
+          "hostId": "host",
+          "mode": "recovery"
+        },
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Lower issue.",
+        "recovery": {
+          "attempts": 3,
+          "retryAt": null
+        },
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "publishing",
+        "detail": "Publishing the current task update."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "terminal before recovery backlog",
+      "input": {
+        "workflowState": "backlog",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 0,
+          "retryAt": "2026-10-20T12:00:00.000Z"
+        },
+        "completionIssue": "Lower issue."
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "terminal before recovery done",
+      "input": {
+        "workflowState": "done",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 0,
+          "retryAt": "2026-10-20T12:00:00.000Z"
+        },
+        "completionIssue": "Lower issue."
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "terminal before recovery cancelled",
+      "input": {
+        "workflowState": "cancelled",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 0,
+          "retryAt": "2026-10-20T12:00:00.000Z"
+        },
+        "completionIssue": "Lower issue."
+      },
+      "output": {
+        "state": "idle",
+        "detail": "No task work is scheduled."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "recovery attempt 0",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 0,
+          "retryAt": "2099-01-01T00:00:00.000Z"
+        },
+        "completionIssue": "Retained recovery issue."
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Retained recovery issue."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "recovery attempt 1",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 1,
+          "retryAt": "2099-01-01T00:00:00.000Z"
+        },
+        "completionIssue": "Retained recovery issue."
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Retained recovery issue."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "recovery attempt 2",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 2,
+          "retryAt": "2099-01-01T00:00:00.000Z"
+        },
+        "completionIssue": "Retained recovery issue."
+      },
+      "output": {
+        "state": "failed",
+        "detail": "Retained recovery issue."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "recovery attempt 3",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 3,
+          "retryAt": "2099-01-01T00:00:00.000Z"
+        },
+        "completionIssue": "Retained recovery issue."
+      },
+      "output": {
+        "state": "failed",
+        "detail": "Retained recovery issue."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "recovery nullish detail undefined",
+      "input": {
+        "workflowState": "todo",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 1,
+          "retryAt": null
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "The original completion intent needs reconciliation."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "recovery nullish detail null",
+      "input": {
+        "workflowState": "todo",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 1,
+          "retryAt": null
+        },
+        "completionIssue": null
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "The original completion intent needs reconciliation."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "recovery nullish detail ",
+      "input": {
+        "workflowState": "todo",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null,
+        "recovery": {
+          "attempts": 1,
+          "retryAt": null
+        },
+        "completionIssue": ""
+      },
+      "output": {
+        "state": "recovering",
+        "detail": ""
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "completion issue before wait and review",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Lower wait."
+        },
+        "executionRequirement": null,
+        "completionIssue": "Retained failure."
+      },
+      "output": {
+        "state": "failed",
+        "detail": "Retained failure."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "runtime wait host",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "host",
+          "detail": "Exact host detail."
+        },
+        "executionRequirement": null,
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "blocked_environment",
+        "detail": "Exact host detail."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "runtime wait capability",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "capability",
+          "detail": "Exact capability detail."
+        },
+        "executionRequirement": null,
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "blocked_environment",
+        "detail": "Exact capability detail."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "runtime wait workspace",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workspace",
+          "detail": "Exact workspace detail."
+        },
+        "executionRequirement": null,
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "blocked_environment",
+        "detail": "Exact workspace detail."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "runtime wait external_outcome",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "external_outcome",
+          "detail": "Exact external_outcome detail."
+        },
+        "executionRequirement": null,
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Exact external_outcome detail."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "runtime wait publication",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "publication",
+          "detail": "Exact publication detail."
+        },
+        "executionRequirement": null,
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "blocked_environment",
+        "detail": "Exact publication detail."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "runtime wait workflow",
+      "input": {
+        "workflowState": "review",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": {
+          "reason": "workflow",
+          "detail": "Exact workflow detail."
+        },
+        "executionRequirement": null,
+        "steps": {
+          "state": "queued",
+          "detail": "Lower steps."
+        }
+      },
+      "output": {
+        "state": "workflow_attention",
+        "detail": "Exact workflow detail."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "steps returned verbatim agent",
+      "input": {
+        "workflowState": "waiting",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null,
+        "steps": {
+          "state": "blocked_dependency",
+          "detail": "Original step detail.",
+          "sentinel": {
+            "value": 1
+          }
+        }
+      },
+      "output": {
+        "state": "blocked_dependency",
+        "detail": "Original step detail.",
+        "sentinel": {
+          "value": 1
+        }
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "steps returned verbatim user",
+      "input": {
+        "workflowState": "waiting",
+        "control": "user",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null,
+        "steps": {
+          "state": "blocked_dependency",
+          "detail": "Original step detail.",
+          "sentinel": {
+            "value": 1
+          }
+        }
+      },
+      "output": {
+        "state": "blocked_dependency",
+        "detail": "Original step detail.",
+        "sentinel": {
+          "value": 1
+        }
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "host requirements do not replace current queue copy",
+      "input": {
+        "workflowState": "todo",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": {
+          "kind": "host",
+          "hostId": "other"
+        },
+        "requiredCapabilities": [
+          "a",
+          "b"
+        ]
+      },
+      "output": {
+        "state": "queued",
+        "detail": "Waiting for an authorized next step."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "lossless host detail",
+      "input": {
+        "workflowState": "todo",
+        "control": "agent",
+        "publication": false,
+        "claim": {
+          "phase": "running",
+          "hostId": "host-\ud800-é",
+          "mode": "conversation"
+        },
+        "runtimeWait": null,
+        "executionRequirement": null
+      },
+      "output": {
+        "state": "active",
+        "detail": "Processing new comments on host-\ud800-é."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "facts",
+      "name": "lossless retained failure",
+      "input": {
+        "workflowState": "todo",
+        "control": "agent",
+        "publication": false,
+        "claim": null,
+        "runtimeWait": null,
+        "executionRequirement": null,
+        "completionIssue": "Failure \udfff."
+      },
+      "output": {
+        "state": "failed",
+        "detail": "Failure \udfff."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "workflow",
+      "name": "null runtime wait",
+      "input": null,
+      "output": "in_progress",
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "workflow",
+      "name": "claimed state host",
+      "input": {
+        "reason": "host"
+      },
+      "output": "in_progress",
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "workflow",
+      "name": "claimed state capability",
+      "input": {
+        "reason": "capability"
+      },
+      "output": "in_progress",
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "workflow",
+      "name": "claimed state workspace",
+      "input": {
+        "reason": "workspace"
+      },
+      "output": "in_progress",
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "workflow",
+      "name": "claimed state external_outcome",
+      "input": {
+        "reason": "external_outcome"
+      },
+      "output": "in_progress",
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "workflow",
+      "name": "claimed state publication",
+      "input": {
+        "reason": "publication"
+      },
+      "output": "in_progress",
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "workflow",
+      "name": "claimed state workflow",
+      "input": {
+        "reason": "workflow"
+      },
+      "output": "waiting",
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "claim request mode {\"action\":\"start\"}",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": {
+            "phase": "running",
+            "target": {
+              "hostId": "host",
+              "serviceNodeId": "agent"
+            },
+            "request": {
+              "action": "start"
+            }
+          },
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null,
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "active",
+        "detail": "Working on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "claim request mode {\"action\":\"continue\",\"coordinationOnly\":true}",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": {
+            "phase": "running",
+            "target": {
+              "hostId": "host",
+              "serviceNodeId": "agent"
+            },
+            "request": {
+              "action": "continue",
+              "coordinationOnly": true
+            }
+          },
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null,
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "active",
+        "detail": "Processing new comments on host."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "claim request mode {\"action\":\"continue\",\"recoveryFor\":{\"objectId\":\"run\",\"revision\":1}}",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": {
+            "phase": "running",
+            "target": {
+              "hostId": "host",
+              "serviceNodeId": "agent"
+            },
+            "request": {
+              "action": "continue",
+              "recoveryFor": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          },
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null,
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "claim request mode {\"action\":\"continue\",\"coordinationOnly\":true,\"recoveryFor\":{\"objectId\":\"run\",\"revision\":1}}",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": {
+            "phase": "running",
+            "target": {
+              "hostId": "host",
+              "serviceNodeId": "agent"
+            },
+            "request": {
+              "action": "continue",
+              "coordinationOnly": true,
+              "recoveryFor": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          },
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null,
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Restoring the original completion intent."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "legacy waiting field is ignored",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null,
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": [],
+          "waiting": {
+            "reason": "host",
+            "detail": "Legacy wait."
+          }
+        }
+      },
+      "output": {
+        "state": "queued",
+        "detail": "Waiting for an authorized next step."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "missing handoff attempts undefined",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            }
+          },
+          "primaryResourceRef": {
+            "kind": "thread",
+            "id": "thread",
+            "serviceNodeId": "agent"
+          },
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "missing handoff attempts null",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            },
+            "attempts": null
+          },
+          "primaryResourceRef": {
+            "kind": "thread",
+            "id": "thread",
+            "serviceNodeId": "agent"
+          },
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "missing handoff attempts 0",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            },
+            "attempts": 0
+          },
+          "primaryResourceRef": {
+            "kind": "thread",
+            "id": "thread",
+            "serviceNodeId": "agent"
+          },
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "missing handoff attempts 1",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            },
+            "attempts": 1
+          },
+          "primaryResourceRef": {
+            "kind": "thread",
+            "id": "thread",
+            "serviceNodeId": "agent"
+          },
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "missing handoff attempts 2",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            },
+            "attempts": 2
+          },
+          "primaryResourceRef": {
+            "kind": "thread",
+            "id": "thread",
+            "serviceNodeId": "agent"
+          },
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "failed",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "missing handoff future retry does not change condition",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            },
+            "attempts": 1,
+            "retryAt": "2099-01-01T00:00:00.000Z"
+          },
+          "primaryResourceRef": {
+            "kind": "thread",
+            "id": "thread",
+            "serviceNodeId": "agent"
+          },
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "recovering",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "manual missing handoff cannot auto-recover",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "user",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            },
+            "attempts": 0
+          },
+          "primaryResourceRef": {
+            "kind": "thread",
+            "id": "thread",
+            "serviceNodeId": "agent"
+          },
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "failed",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "missing handoff without primary source",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            },
+            "attempts": 0
+          },
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "failed",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "other issue cannot auto-recover",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "other_issue",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            }
+          },
+          "primaryResourceRef": {
+            "kind": "thread",
+            "id": "thread",
+            "serviceNodeId": "agent"
+          },
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        }
+      },
+      "output": {
+        "state": "failed",
+        "detail": "Original completion issue."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "failed handoff record overrides current detail",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "other_issue",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            }
+          },
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        },
+        "failedHandoff": {
+          "code": "storage_full",
+          "detail": "Retained publication failure.",
+          "operationId": "original-operation"
+        }
+      },
+      "output": {
+        "state": "failed",
+        "detail": "storage_full: Retained publication failure."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "lookup remains eager beneath publication",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": {},
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            }
+          },
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        },
+        "failedHandoff": {
+          "code": "storage_full",
+          "detail": "Retained.",
+          "operationId": "original-operation"
+        }
+      },
+      "output": {
+        "state": "publishing",
+        "detail": "Publishing the current task update."
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "lookup error beneath publication is preserved",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": {},
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            }
+          },
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        },
+        "failure": true
+      },
+      "output": {
+        "error": {
+          "code": "handoff_unavailable",
+          "message": "Original retained handoff unavailable.",
+          "outcome": "unknown",
+          "details": {
+            "runId": "original-run"
+          }
+        }
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "lookup error beneath terminal state is preserved",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "done",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": {
+            "code": "task_board_handoff_missing",
+            "detail": "Original completion issue.",
+            "run": {
+              "objectId": "original-run",
+              "revision": 2
+            }
+          },
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        },
+        "failure": true
+      },
+      "output": {
+        "error": {
+          "code": "handoff_unavailable",
+          "message": "Original retained handoff unavailable.",
+          "outcome": "unknown",
+          "details": {
+            "runId": "original-run"
+          }
+        }
+      },
+      "trace": [
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "task",
+      "name": "closed read passes supplied steps",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null,
+          "primaryResourceRef": null,
+          "nextSteps": [],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [],
+          "commentDeliveries": []
+        },
+        "steps": {
+          "state": "deferred",
+          "detail": "Supplied next-step condition."
+        }
+      },
+      "output": {
+        "state": "deferred",
+        "detail": "Supplied next-step condition."
+      },
+      "trace": [],
+      "clockCalls": 0
+    },
+    {
+      "kind": "read",
+      "name": "current next-step condition in bounded read",
+      "input": {
+        "header": {
+          "pin": {
+            "objectId": "self",
+            "revision": 4
+          },
+          "metadata": {
+            "effectivelyArchived": false
+          },
+          "value": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "fields": {
+              "title": "Fixture",
+              "category": null,
+              "control": "agent",
+              "priority": 2,
+              "executionRequirement": null,
+              "dueAt": null
+            },
+            "claim": null,
+            "publication": null,
+            "runtimeWait": null,
+            "completionIssue": null,
+            "primaryResourceRef": null,
+            "nextSteps": [
+              {
+                "id": "ready",
+                "scope": "Pure read condition.",
+                "requires": []
+              }
+            ],
+            "consumedSteps": [],
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "commentStore": {
+              "kind": "tree",
+              "root": {
+                "object": {
+                  "objectId": "tree",
+                  "revision": 2
+                },
+                "length": 2
+              },
+              "length": 2
+            }
+          }
+        },
+        "summary": {
+          "directCount": 2,
+          "questions": []
+        },
+        "entries": [
+          {
+            "comment": {
+              "commentId": "c1",
+              "sequence": 1,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 1",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            "receipt": null
+          },
+          {
+            "comment": {
+              "commentId": "c2",
+              "sequence": 2,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 2",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            "receipt": null
+          }
+        ],
+        "query": {}
+      },
+      "output": {
+        "object": {
+          "objectId": "self",
+          "revision": 4
+        },
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null,
+          "primaryResourceRef": null,
+          "nextSteps": [
+            {
+              "id": "ready",
+              "scope": "Pure read condition.",
+              "requires": []
+            }
+          ],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "c2",
+              "sequence": 2,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 2",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            {
+              "commentId": "c1",
+              "sequence": 1,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 1",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            }
+          ],
+          "commentDeliveries": []
+        },
+        "executionCondition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        },
+        "archived": false,
+        "openQuestions": [],
+        "commentPage": {
+          "total": 2,
+          "offset": 0,
+          "nextOffset": null,
+          "nextBefore": null,
+          "order": "desc"
+        }
+      },
+      "trace": [
+        {
+          "method": "summary"
+        },
+        {
+          "method": "range",
+          "tree": {
+            "kind": "tree",
+            "root": {
+              "object": {
+                "objectId": "tree",
+                "revision": 2
+              },
+              "length": 2
+            },
+            "length": 2
+          },
+          "id": "self",
+          "start": 0,
+          "end": 2
+        }
+      ],
+      "clockCalls": 1
+    },
+    {
+      "kind": "read",
+      "name": "runtime workflow attention precedes ready step",
+      "input": {
+        "header": {
+          "pin": {
+            "objectId": "self",
+            "revision": 4
+          },
+          "metadata": {
+            "effectivelyArchived": false
+          },
+          "value": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "fields": {
+              "title": "Fixture",
+              "category": null,
+              "control": "agent",
+              "priority": 2,
+              "executionRequirement": null,
+              "dueAt": null
+            },
+            "claim": null,
+            "publication": null,
+            "runtimeWait": {
+              "reason": "workflow",
+              "detail": "Owned workflow detail."
+            },
+            "completionIssue": null,
+            "primaryResourceRef": null,
+            "nextSteps": [
+              {
+                "id": "ready",
+                "scope": "Pure read condition.",
+                "requires": []
+              }
+            ],
+            "consumedSteps": [],
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "commentStore": {
+              "kind": "tree",
+              "root": {
+                "object": {
+                  "objectId": "tree",
+                  "revision": 2
+                },
+                "length": 2
+              },
+              "length": 2
+            }
+          }
+        },
+        "summary": {
+          "directCount": 2,
+          "questions": []
+        },
+        "entries": [
+          {
+            "comment": {
+              "commentId": "c1",
+              "sequence": 1,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 1",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            "receipt": null
+          },
+          {
+            "comment": {
+              "commentId": "c2",
+              "sequence": 2,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 2",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            "receipt": null
+          }
+        ],
+        "query": {}
+      },
+      "output": {
+        "object": {
+          "objectId": "self",
+          "revision": 4
+        },
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "claim": null,
+          "publication": null,
+          "runtimeWait": {
+            "reason": "workflow",
+            "detail": "Owned workflow detail."
+          },
+          "completionIssue": null,
+          "primaryResourceRef": null,
+          "nextSteps": [
+            {
+              "id": "ready",
+              "scope": "Pure read condition.",
+              "requires": []
+            }
+          ],
+          "consumedSteps": [],
+          "deliveries": [],
+          "comments": [
+            {
+              "commentId": "c2",
+              "sequence": 2,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 2",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            {
+              "commentId": "c1",
+              "sequence": 1,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 1",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            }
+          ],
+          "commentDeliveries": []
+        },
+        "executionCondition": {
+          "state": "workflow_attention",
+          "detail": "Owned workflow detail."
+        },
+        "archived": false,
+        "openQuestions": [],
+        "commentPage": {
+          "total": 2,
+          "offset": 0,
+          "nextOffset": null,
+          "nextBefore": null,
+          "order": "desc"
+        }
+      },
+      "trace": [
+        {
+          "method": "summary"
+        },
+        {
+          "method": "range",
+          "tree": {
+            "kind": "tree",
+            "root": {
+              "object": {
+                "objectId": "tree",
+                "revision": 2
+              },
+              "length": 2
+            },
+            "length": 2
+          },
+          "id": "self",
+          "start": 0,
+          "end": 2
+        }
+      ],
+      "clockCalls": 1
+    },
+    {
+      "kind": "read",
+      "name": "conversation claim in summary card",
+      "input": {
+        "header": {
+          "pin": {
+            "objectId": "self",
+            "revision": 4
+          },
+          "metadata": {
+            "effectivelyArchived": false
+          },
+          "value": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "fields": {
+              "title": "Fixture",
+              "category": null,
+              "control": "agent",
+              "priority": 2,
+              "executionRequirement": null,
+              "dueAt": null
+            },
+            "claim": {
+              "phase": "running",
+              "target": {
+                "hostId": "host",
+                "serviceNodeId": "agent"
+              },
+              "request": {
+                "action": "continue",
+                "coordinationOnly": true
+              }
+            },
+            "publication": null,
+            "runtimeWait": null,
+            "completionIssue": null,
+            "primaryResourceRef": null,
+            "nextSteps": [
+              {
+                "id": "ready",
+                "scope": "Pure read condition.",
+                "requires": []
+              }
+            ],
+            "consumedSteps": [],
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "commentStore": {
+              "kind": "tree",
+              "root": {
+                "object": {
+                  "objectId": "tree",
+                  "revision": 2
+                },
+                "length": 2
+              },
+              "length": 2
+            }
+          }
+        },
+        "summary": {
+          "directCount": 2,
+          "questions": []
+        },
+        "entries": [
+          {
+            "comment": {
+              "commentId": "c1",
+              "sequence": 1,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 1",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            "receipt": null
+          },
+          {
+            "comment": {
+              "commentId": "c2",
+              "sequence": 2,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 2",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            "receipt": null
+          }
+        ],
+        "query": {
+          "view": "card"
+        }
+      },
+      "output": {
+        "object": {
+          "objectId": "self",
+          "revision": 4
+        },
+        "executionCondition": {
+          "state": "active",
+          "detail": "Processing new comments on host."
+        },
+        "commentCount": 2,
+        "directCommentCount": 2,
+        "task": {
+          "taskKey": "TASK-0001",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "workflowState": "todo",
+          "runtimeWait": null,
+          "nextStepAt": null,
+          "claim": {
+            "phase": "running",
+            "target": {
+              "hostId": "host",
+              "serviceNodeId": "agent"
+            }
+          },
+          "publication": null,
+          "openQuestionCount": 0
+        }
+      },
+      "trace": [
+        {
+          "method": "summary"
+        }
+      ],
+      "clockCalls": 0
+    },
+    {
+      "kind": "read",
+      "name": "publication still propagates eager handoff error",
+      "input": {
+        "header": {
+          "pin": {
+            "objectId": "self",
+            "revision": 4
+          },
+          "metadata": {
+            "effectivelyArchived": false
+          },
+          "value": {
+            "taskKey": "TASK-0001",
+            "workflowState": "todo",
+            "fields": {
+              "title": "Fixture",
+              "category": null,
+              "control": "agent",
+              "priority": 2,
+              "executionRequirement": null,
+              "dueAt": null
+            },
+            "claim": null,
+            "publication": {},
+            "runtimeWait": null,
+            "completionIssue": {
+              "code": "task_board_handoff_missing",
+              "detail": "Original completion issue.",
+              "run": {
+                "objectId": "original-run",
+                "revision": 2
+              }
+            },
+            "primaryResourceRef": null,
+            "nextSteps": [
+              {
+                "id": "ready",
+                "scope": "Pure read condition.",
+                "requires": []
+              }
+            ],
+            "consumedSteps": [],
+            "deliveries": [],
+            "comments": [],
+            "commentDeliveries": [],
+            "commentStore": {
+              "kind": "tree",
+              "root": {
+                "object": {
+                  "objectId": "tree",
+                  "revision": 2
+                },
+                "length": 2
+              },
+              "length": 2
+            }
+          }
+        },
+        "summary": {
+          "directCount": 2,
+          "questions": []
+        },
+        "entries": [
+          {
+            "comment": {
+              "commentId": "c1",
+              "sequence": 1,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 1",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            "receipt": null
+          },
+          {
+            "comment": {
+              "commentId": "c2",
+              "sequence": 2,
+              "purpose": "update",
+              "authorKind": "agent",
+              "body": "Entry 2",
+              "replyTo": null,
+              "requests": [],
+              "responses": []
+            },
+            "receipt": null
+          }
+        ],
+        "query": {
+          "view": "card"
+        },
+        "failure": true
+      },
+      "output": {
+        "error": {
+          "code": "handoff_unavailable",
+          "message": "Original retained handoff unavailable.",
+          "outcome": "unknown",
+          "details": {
+            "runId": "original-run"
+          }
+        }
+      },
+      "trace": [
+        {
+          "method": "summary"
+        },
+        {
+          "method": "failedHandoff",
+          "runId": "original-run"
+        }
+      ],
+      "clockCalls": 0
+    }
+  ]
+}
