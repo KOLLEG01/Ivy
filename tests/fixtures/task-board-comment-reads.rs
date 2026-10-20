@@ -7,6 +7,7 @@ use ivy_contracts::{
 use ivy_task_board::{
     coordination::next_steps::{NextStepPolicies, NextStepStore},
     engine_read::comment_reads::*,
+    engine_read::conversation::open_question_ids,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -81,16 +82,18 @@ impl Policies {
 impl NextStepPolicies for Policies {
     fn open_questions(&self, task: &Json) -> IvyResult<Vec<JsString>> {
         self.resolver_calls.set(self.resolver_calls.get() + 1);
-        // Exact frozen outputs of the unchanged current shared resolver.
-        self.views
+        let expected = self
+            .views
             .get(&hash_json(field(task, "comments"))?)
-            .cloned()
             .ok_or_else(|| {
                 IvyError::new(
                     "fixture_missing_question_view",
                     "Unexpected conversation resolver input.",
                 )
-            })
+            })?;
+        let actual = open_question_ids(&ivy_sdk::open_task_questions, task)?;
+        assert_eq!(&actual, expected, "Exact captured original question view");
+        Ok(actual)
     }
     fn validate_next_step(&self, _: &Json) -> IvyResult<()> {
         Err(IvyError::new(

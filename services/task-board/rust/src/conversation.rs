@@ -1,5 +1,5 @@
-//! Current conversation projections. The Shared question resolver is supplied
-//! explicitly; these helpers do not implement or default its resolution rules.
+//! Current conversation projections and the Shared question-resolver binding.
+//! Validation, clock and condition-store dependencies remain explicit.
 use super::comment_reads::CommentReadPolicies;
 use crate::coordination::next_steps::NextStepPolicies;
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
@@ -7,13 +7,29 @@ use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
 pub type QuestionResolver<'a> = dyn Fn(&Json, Option<&JsString>) -> IvyResult<Vec<Json>> + 'a;
 pub type ReadCondition<'a> = dyn Fn(&Json, Option<&Json>) -> IvyResult<Json> + 'a;
 
-/// All four dependencies are mandatory. The actual Shared resolver, contract
-/// validator, clock and condition store must be bound by the runtime owner.
+/// Explicit question, validation, clock and condition-store dependencies.
+/// `current` binds the SDK resolver while retaining the other owner bindings.
 pub struct ConversationPolicies<'a> {
     pub questions: &'a QuestionResolver<'a>,
     pub validate_next_step: &'a dyn Fn(&Json) -> IvyResult<()>,
     pub now: &'a dyn Fn() -> JsString,
     pub condition: &'a ReadCondition<'a>,
+}
+impl<'a> ConversationPolicies<'a> {
+    /// Bind the current SDK resolver without changing its full-value or failure
+    /// semantics. The remaining runtime dependencies have no implicit defaults.
+    pub fn current(
+        validate_next_step: &'a dyn Fn(&Json) -> IvyResult<()>,
+        now: &'a dyn Fn() -> JsString,
+        condition: &'a ReadCondition<'a>,
+    ) -> Self {
+        Self {
+            questions: &ivy_sdk::open_task_questions,
+            validate_next_step,
+            now,
+            condition,
+        }
+    }
 }
 impl NextStepPolicies for ConversationPolicies<'_> {
     fn open_questions(&self, task: &Json) -> IvyResult<Vec<JsString>> {

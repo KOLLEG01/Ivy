@@ -163,15 +163,8 @@ fn current_question_views_compose_with_owned_policies() {
         let input = field(case, "input");
         let task = field(input, "task");
         let before = input.clone();
-        let calls = Cell::new(0);
         let clocks = Cell::new(0);
         let conditions = Cell::new(0);
-        let resolver = |value: &Json, run: Option<&JsString>| -> IvyResult<Vec<Json>> {
-            assert_eq!(value, task);
-            assert!(run.is_none());
-            calls.set(calls.get() + 1);
-            Ok(items(field(field(case, "resolverViews"), "all")).to_vec())
-        };
         let validate =
             |_: &Json| -> IvyResult<()> { panic!("Read composition cannot validate a write") };
         let now = || {
@@ -183,12 +176,7 @@ fn current_question_views_compose_with_owned_policies() {
             conditions.set(conditions.get() + 1);
             task_condition(&NoRead, value, steps)
         };
-        let policies = ConversationPolicies {
-            questions: &resolver,
-            validate_next_step: &validate,
-            now: &now,
-            condition: &condition,
-        };
+        let policies = ConversationPolicies::current(&validate, &now, &condition);
         let summary = comment_summary(&policies, task, string(input, "taskId")).unwrap();
         let assessments = complete(assess_steps(
             &NoRead,
@@ -212,15 +200,108 @@ fn current_question_views_compose_with_owned_policies() {
             ),
         ]);
         same(&result, field(case, "output"), &name);
-        assert_eq!(
-            (calls.get(), clocks.get(), conditions.get()),
-            (2, 1, 1),
-            "{name}"
-        );
+        assert_eq!((clocks.get(), conditions.get()), (1, 1), "{name}");
         same(input, &before, &format!("{name} unchanged input"));
         count += 1;
     }
     assert_eq!(count, 5);
+}
+
+#[test]
+fn current_shared_resolver_drives_owned_question_projections() {
+    let fixture = fixture();
+    let validate = |_: &Json| -> IvyResult<()> { panic!("Question reads cannot validate writes") };
+    let now = || panic!("Question reads cannot use the clock");
+    let condition = |_: &Json, _: Option<&Json>| -> IvyResult<Json> {
+        panic!("Question reads cannot query execution state")
+    };
+    let policies = ConversationPolicies::current(&validate, &now, &condition);
+    let mut count = 0;
+    for case in items(field(&fixture, "cases"))
+        .iter()
+        .filter(|c| is(c, "kind", "questions"))
+    {
+        let input = field(case, "input");
+        let before = input.clone();
+        let task = field(input, "task");
+        let run = string(input, "runId");
+        let name = string(case, "name").to_utf8().unwrap();
+        let views = field(case, "resolverViews");
+        same(
+            &Json::Array((policies.questions)(task, None).unwrap()),
+            field(views, "all"),
+            &format!("{name} full ordered comments"),
+        );
+        same(
+            &Json::Array((policies.questions)(task, Some(run)).unwrap()),
+            field(views, "run"),
+            &format!("{name} native run view"),
+        );
+        let actual = Json::object([
+            ("openIds", ids(policies.open_questions(task).unwrap())),
+            (
+                "unanswered",
+                unanswered_question(policies.questions, task, run)
+                    .unwrap()
+                    .into(),
+            ),
+        ]);
+        same(&actual, field(case, "output"), &name);
+        same(input, &before, &format!("{name} unchanged input"));
+        count += 1;
+    }
+    assert_eq!(count, 23);
+}
+
+#[test]
+fn current_shared_resolver_failures_reach_owned_consumers() {
+    // Reuse exact captured original failures from the supplied Shared oracle.
+    let path = std::env::var("IVY_TASK_BOARD_QUESTION_ORACLE").unwrap();
+    let source = std::fs::read_to_string(path).unwrap();
+    let oracle = parse(&source, MANAGEMENT_FRAME_BYTES).unwrap();
+    let validate =
+        |_: &Json| -> IvyResult<()> { panic!("Question failure cannot validate writes") };
+    let now = || panic!("Question failure cannot use the clock");
+    let condition = |_: &Json, _: Option<&Json>| -> IvyResult<Json> {
+        panic!("Question failure cannot query execution state")
+    };
+    let policies = ConversationPolicies::current(&validate, &now, &condition);
+    let run = JsString::from("run");
+    let mut count = 0;
+    for case in items(field(&oracle, "cases")) {
+        let expected = field(field(field(case, "expected"), "all"), "error");
+        if expected.is_null() {
+            continue;
+        }
+        let task = field(case, "task");
+        let before = task.clone();
+        let run = case
+            .get("runId")
+            .and_then(Json::as_js_string)
+            .unwrap_or(&run);
+        let failures = [
+            open_question_ids(policies.questions, task)
+                .map(|_| ())
+                .unwrap_err(),
+            unanswered_question(policies.questions, task, run)
+                .map(|_| ())
+                .unwrap_err(),
+            policies.open_questions(task).map(|_| ()).unwrap_err(),
+            comment_summary(&policies, task, &JsString::from("self"))
+                .map(|_| ())
+                .unwrap_err(),
+        ];
+        for error in failures {
+            same(
+                &error.to_wire(),
+                expected,
+                "original resolver failure at consumer boundary",
+            );
+        }
+        same(task, &before, "failure leaves input unchanged");
+        count += 1;
+    }
+    assert_eq!(count, 11);
 }
 
 fn error_value(e: IvyError) -> Json {
