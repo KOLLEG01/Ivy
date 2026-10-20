@@ -50,3 +50,11 @@ path = "../../../tests/rust/agent-claude.rs"
 [[test]]
 name = "agent-native-backup-paths"
 path = "../../../tests/rust/agent-native-backup-paths.rs"
+
+[[test]]
+name = "agent-skills-files"
+path = "../../../tests/rust/agent-skills-locale.rs"
+
+[[test]]
+name = "agent-offline-import"
+path = "../../../tests/rust/agent-offline-import.rs"

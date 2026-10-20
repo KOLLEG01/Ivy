@@ -57,6 +57,19 @@ use std::{
     process::{Command, Stdio},
 };
 
+// This broad domain suite uses its original finite Node fixture table. The
+// focused Skills target supplies the mandatory packaged runtime instead.
+fn skills_comparator() -> std::sync::Arc<ivy_agent_manager::skills_files::SkillsComparator> {
+    let pairs = skills_file_cases::catalog().get("pairs").unwrap().as_array().unwrap();
+    std::sync::Arc::new(move |left, right| {
+        let pair = pairs.iter().find(|row| {
+            row.get("left").and_then(IvyJson::as_js_string) == Some(left)
+                && row.get("right").and_then(IvyJson::as_js_string) == Some(right)
+        }).expect("Qualified original fixture pair");
+        pair.get("result").unwrap().as_f64().unwrap().partial_cmp(&0.0).unwrap()
+    })
+}
+
 fn document(host: bool, enabled: IvyJson, include_local: bool) -> IvyJson {
     IvyJson::object([
         ("schemaVersion", IvyJson::Number(1.0)),

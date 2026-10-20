@@ -28,12 +28,34 @@ impl Root {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("ivy-skills-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&path).unwrap();
+        assert_eq!(
+            fs::canonicalize(&path).unwrap().parent(),
+            Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path())
+        );
         Self(path)
     }
 }
 impl Drop for Root {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let actual = fs::canonicalize(&self.0).unwrap();
+        assert_eq!(
+            actual.parent(),
+            Some(fs::canonicalize(std::env::temp_dir()).unwrap().as_path())
+        );
+        assert!(
+            self.0
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("ivy-skills-")
+        );
+        assert!(
+            !fs::symlink_metadata(&self.0)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(actual).unwrap();
     }
 }
 fn value(path: &Path) -> IvyJson {
@@ -72,25 +94,12 @@ fn fixture(input: IvyJson) -> IvyJson {
     )
     .unwrap()
 }
-fn catalog() -> &'static IvyJson {
+pub(super) fn catalog() -> &'static IvyJson {
     static DATA: OnceLock<IvyJson> = OnceLock::new();
     DATA.get_or_init(|| fixture(IvyJson::object([("action", "catalog".into())])))
 }
 fn comparator() -> Arc<SkillsComparator> {
-    let pairs = field(catalog(), "pairs").as_array().unwrap();
-    // These original Node pairs isolate filesystem behavior while the actual
-    // Shared locale API is pending. They do not qualify a production comparator.
-    Arc::new(move |left, right| {
-        let pair = pairs
-            .iter()
-            .find(|row| text(row, "left") == *left && text(row, "right") == *right)
-            .unwrap_or_else(|| panic!("unexpected synthetic locale pair {left:?}/{right:?}"));
-        field(pair, "result")
-            .as_f64()
-            .unwrap()
-            .partial_cmp(&0.0)
-            .unwrap()
-    })
+    super::skills_comparator()
 }
 fn manager(prepared: &IvyJson) -> SkillsManager {
     SkillsManager::new(SkillsSettings {
@@ -122,6 +131,23 @@ fn compare(actual: &IvyJson, expected: &IvyJson, label: &str) {
         canonical(expected, 8 * 1024 * 1024).unwrap(),
         "{label}"
     );
+    if let Some(path) = std::env::var_os("IVY_UNIFIED_IMPORT_PROOF") {
+        let record = IvyJson::object([
+            ("label", label.into()),
+            ("actual", actual.clone()),
+            ("expected", expected.clone()),
+        ]);
+        writeln!(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap(),
+            "{}",
+            canonical(&record, usize::MAX).unwrap()
+        )
+        .unwrap();
+    }
 }
 struct Missing;
 impl RpcClient for Missing {

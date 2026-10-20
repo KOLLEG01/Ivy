@@ -698,6 +698,7 @@ dependencies = [
  "iana-time-zone",
  "ivy-contracts",
  "jiff-tzdb",
+ "libc",
  "reqwest",
  "serde_json",
  "tokio",
@@ -705,6 +706,7 @@ dependencies = [
  "tokio-util",
  "tz-rs",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
