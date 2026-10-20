@@ -215,7 +215,10 @@ export const rustTests = {
   'tests/rust/chat-main-context.rs': { package: 'ivy-chat-bridge', test: 'chat-main-context' },
   'tests/rust/chat-outbox.rs': { package: 'ivy-chat-bridge', test: 'chat-outbox' },
   'tests/rust/chat-queries.rs': { package: 'ivy-chat-bridge', test: 'chat-queries' },
-  'tests/rust/chat-storage.rs': { package: 'ivy-chat-bridge', test: 'chat-storage' },
+  'tests/rust/chat-storage.rs': {
+    package: 'ivy-chat-bridge', test: 'chat-storage',
+    prerequisites: [{ platform: 'win32', package: 'ivy-host-runtime', bin: 'ivy-job' }],
+  },
   'tests/rust/chat-audio.rs': { package: 'ivy-chat-bridge', test: 'chat-audio' },
   'tests/rust/chat-output.rs': { package: 'ivy-chat-bridge', test: 'chat-output' },
   'tests/rust/chat-identity.rs': { package: 'ivy-chat-bridge', test: 'chat-identity' },
