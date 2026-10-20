@@ -7,52 +7,7 @@ use ivy_agent_manager::claude::{
 };
 
 pub(super) fn files() -> WorkflowFiles {
-    WorkflowFiles {
-        realpath: Arc::new(|path| {
-            Box::pin(async move {
-                match ivy_host_runtime::paths::realpath(&node_path::filesystem_path(&path)) {
-                    Ok(path) => Ok(Some(node_path::from_native(&path))),
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                        ) =>
-                    {
-                        Ok(None)
-                    }
-                    Err(error) => Err(error.into()),
-                }
-            })
-        }),
-        // Fixture binding only: the test creates regular, bounded files in its
-        // disposable root. Production no-follow/opened-handle qualification is
-        // an explicit Host delivery and is not asserted by these parser cases.
-        read_regular: Arc::new(|directory, path, limit| {
-            Box::pin(async move {
-                let path = node_path::filesystem_path(&path);
-                let directory = node_path::filesystem_path(&directory);
-                let canonical = match fs::canonicalize(&path) {
-                    Ok(p) => p,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                        ) =>
-                    {
-                        return Ok(None);
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                assert!(canonical.starts_with(fs::canonicalize(directory).unwrap()));
-                let metadata = fs::symlink_metadata(&path)?;
-                assert!(metadata.is_file() && !metadata.file_type().is_symlink());
-                assert!(metadata.len() <= limit as u64);
-                Ok(Some(
-                    String::from_utf8_lossy(&fs::read(path)?).as_ref().into(),
-                ))
-            })
-        }),
-    }
+    WorkflowFiles::host()
 }
 async fn native(root: &Path, spec: &J) -> J {
     let mut rows = vec![];

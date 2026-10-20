@@ -33,6 +33,28 @@ pub struct WorkflowFiles {
     pub read_regular:
         Arc<dyn Fn(JsString, JsString, usize) -> IoFuture<Option<JsString>> + Send + Sync>,
 }
+impl WorkflowFiles {
+    /// Bind the opened-handle reader supplied by the Host runtime. Admission,
+    /// journal projection and workflow lifetime remain with the adapter.
+    pub fn host() -> Self {
+        Self {
+            realpath: Arc::new(|path| {
+                Box::pin(async move {
+                    ivy_host_runtime::filesystem::realpath(path)
+                        .await
+                        .map_err(|e| super::error::AdapterError::typed(e.name, e.message))
+                })
+            }),
+            read_regular: Arc::new(|directory, path, limit| {
+                Box::pin(async move {
+                    ivy_host_runtime::filesystem::read_regular(directory, path, limit)
+                        .await
+                        .map_err(|e| super::error::AdapterError::typed(e.name, e.message))
+                })
+            }),
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Launch {
     pub task_id: JsString,

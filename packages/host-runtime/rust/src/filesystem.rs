@@ -1,4 +1,6 @@
 //! Shared filesystem identity, access, timestamps and owned payload removal.
+mod regular_text;
+pub use regular_text::{TextFileError, read_regular, realpath};
 use crate::{IvyError,IvyResult,node_path};
 use std::{fs,path::{Path,PathBuf}};
 fn internal<T,E>(value:Result<T,E>)->IvyResult<T>{value.map_err(|_|IvyError::internal())}
@@ -33,6 +35,16 @@ fn identity(path: &Path) -> std::io::Result<FileIdentity> {
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 { return Err(std::io::Error::last_os_error()); }
     Ok(FileIdentity { dev: info.dwVolumeSerialNumber.to_string(), ino: (((info.nFileIndexHigh as u64)<<32)|info.nFileIndexLow as u64).to_string() })
 }
+
+#[cfg(windows)]
+fn handle_information(file: &fs::File) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION,GetFileInformationByHandle};
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 { return Err(std::io::Error::last_os_error()); }
+    Ok(info)
+}
+
 
 /// fs.access semantics, including Windows' read-only-file check. This does not
 /// replace opening a file for a later operation or checking its owned identity.

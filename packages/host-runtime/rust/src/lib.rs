@@ -18,6 +18,7 @@ pub mod default_settings;
 pub mod executor_lock;
 pub mod exec_file;
 pub mod filesystem;
+pub mod filesystem_error;
 pub mod health;
 pub mod logs;
 pub mod node_runtime;
