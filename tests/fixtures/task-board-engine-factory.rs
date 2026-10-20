@@ -28,6 +28,8 @@ mod lifecycle;
 mod native;
 #[path = "task-board-engine-factory-observations.rs"]
 mod observations;
+#[path = "task-board-engine-factory-retention.rs"]
+mod retention;
 #[path = "task-board-engine-factory-retirement.rs"]
 mod retirement;
 #[path = "task-board-engine-factory-scheduler.rs"]
@@ -42,7 +44,7 @@ fn id() -> JsString {
     uuid::Uuid::new_v4().to_string().into()
 }
 type Context<'a> =
-    PolicyContext<'a, ContractsBinding, fn() -> String, fn() -> JsString, SystemClock>;
+    PolicyContext<'a, ContractsBinding, fn() -> String, fn() -> JsString, retention::FactoryClock>;
 struct Fixture {
     path: PathBuf,
     opens: Cell<u64>,
@@ -65,6 +67,8 @@ struct Fixture {
     scheduler: Option<scheduler::Scenario>,
     delivery: Option<delivery::Scenario>,
     lifecycle: Option<lifecycle::Scenario>,
+    retention: bool,
+    clock: retention::FactoryClock,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -93,6 +97,8 @@ impl Fixture {
             scheduler: None,
             delivery: None,
             lifecycle: None,
+            retention: false,
+            clock: retention::FactoryClock::default(),
         }
     }
     fn database(&self) -> Connection {
@@ -122,7 +128,14 @@ impl Fixture {
         self.opens.set(count);
         Ok(OpenedJournal {
             connection: self.database(),
-            limits: HistoryLimits::default(),
+            limits: if self.retention {
+                HistoryLimits {
+                    count: 0,
+                    ..HistoryLimits::default()
+                }
+            } else {
+                HistoryLimits::default()
+            },
         })
     }
 }
@@ -143,7 +156,9 @@ impl Drop for Policies<'_> {
             .push(self.context.owner.generation as u64);
     }
 }
-impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClock> for Fixture {
+impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, retention::FactoryClock>
+    for Fixture
+{
     type Policies<'a> = Policies<'a>;
     fn bind<'a>(&'a self, context: Context<'a>) -> IvyResult<Policies<'a>> {
         self.connections
@@ -370,6 +385,14 @@ impl LifecyclePages for Policies<'_> {
         if let Some(delivery) = &self.fixture.delivery {
             if key == "task-board/delivery" {
                 delivery.check_page(options)?;
+                if self.fixture.retention && !delivery.ready.open.get() {
+                    // The finite current paging port withholds the delivery
+                    // until its pending retention checkpoint has completed.
+                    return Ok(Json::object([
+                        ("items", Json::Array(vec![])),
+                        ("nextCursor", Json::Null),
+                    ]));
+                }
                 if self.context.owner.generation == 1.0 {
                     delivery.ready.wait().await;
                 }
@@ -591,7 +614,7 @@ fn make_factory<'a>(
     impl Fn(&Json) -> IvyResult<OpenedJournal> + 'a,
     fn() -> String,
     fn() -> JsString,
-    SystemClock,
+    retention::FactoryClock,
 > {
     EngineFactory {
         contracts,
@@ -600,7 +623,7 @@ fn make_factory<'a>(
         open_journal: move |s: &Json| fixture.open(s),
         now: clock as fn() -> String,
         new_id: id as fn() -> JsString,
-        clock: SystemClock,
+        clock: fixture.clock.clone(),
         service_node_id: "fixture-task-board".into(),
     }
 }

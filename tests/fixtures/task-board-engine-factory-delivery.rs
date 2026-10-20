@@ -304,9 +304,16 @@ fn verify_route_request(scenario: &Scenario, retained: &Json, history: &Json, ph
 }
 
 async fn run_delivery(name: &str) {
+    run_delivery_mode(name, false).await;
+}
+pub(super) async fn run_delivery_mode(name: &str, retention: bool) {
     let peer = Peer::start_mode(Some("--factory-delivery")).await;
     let mut fixture = Fixture::new(false);
     fixture.delivery = Some(Scenario::new(name));
+    fixture.retention = retention;
+    if retention {
+        fixture.clock = super::retention::FactoryClock::manual();
+    }
     let scenario = fixture.delivery.as_ref().unwrap();
     let (phone, fallback, forwarded) = (scenario.phone, scenario.fallback, scenario.forwarded);
     let contracts = ContractsBinding;
@@ -386,7 +393,17 @@ async fn run_delivery(name: &str) {
         assert_eq!(f(comment, "delivery"), &pin(&initial.0, 1));
         assert_eq!(f(&outcome, "task"), &pin("contact-task", 3));
         scenario.preserved(&fixture, &written_task);
+        if retention {
+            super::retention::pending(&fixture, &peer, &service.control, &first, &original).await;
+        }
         scenario.ready.release();
+        if retention {
+            super::retention::drive(&fixture, || {
+                delivery(&fixture)
+                    .is_some_and(|row| f(&row.2, "state") == &"outcome_unknown".into())
+            })
+            .await;
+        }
         reached(
             &fixture,
             &peer,
@@ -437,6 +454,9 @@ async fn run_delivery(name: &str) {
         );
         assert_eq!(f(&uncertain.2, "operationId"), f(&request, "operationId"));
         if active_phone {
+            // The peer trace travels over child stdout, independently of the
+            // SDK response that has already persisted this unknown outcome.
+            until(|| !frames(&peer, "delivery-phone-first-admission").is_empty()).await;
             assert_eq!(frames(&peer, "delivery-phone-first-admission").len(), 1);
             assert_eq!(
                 f(&uncertain.2, "phoneCallId"),
@@ -461,6 +481,9 @@ async fn run_delivery(name: &str) {
             verify_forwarded_history(scenario, &fixture, &initial.0, "unknown-forward");
         }
         scenario.preserved(&fixture, &written_task);
+        if retention {
+            super::retention::checkpoint(&fixture, &peer, &first, "unknown").await;
+        }
         rpc(
             &first,
             "test.close",
@@ -471,6 +494,12 @@ async fn run_delivery(name: &str) {
         until(|| peer.methods(2).contains(&"registry.sync".into())).await;
         let second = bounded(service.client.wait_ready(None)).await.unwrap();
         assert_eq!(second.generation(), 2);
+        if retention {
+            super::retention::drive(&fixture, || {
+                delivery(&fixture).is_some_and(|row| f(&row.2, "state") == &"confirmed".into())
+            })
+            .await;
+        }
         reached(
             &fixture,
             &peer,
@@ -566,6 +595,9 @@ async fn run_delivery(name: &str) {
             hash_json(&published.2).unwrap()
         );
         scenario.preserved(&fixture, &written_task);
+        if retention {
+            super::retention::checkpoint(&fixture, &peer, &second, "confirmed").await;
+        }
         let revisions = count(&fixture, "SELECT count(*) FROM revisions");
         let blobs = count(&fixture, "SELECT count(*) FROM blobs");
         let notices = fixture.notices.get();
@@ -631,6 +663,9 @@ async fn run_delivery(name: &str) {
     assert_eq!(fixture.drops.borrow().as_slice(), [1, 2, 3]);
     assert_eq!(count(&fixture, "SELECT count(*) FROM active_gates"), 0);
     peer.finish().await;
+    if retention {
+        super::retention::closed(&fixture);
+    }
     if forwarded {
         verify_forwarded_history(scenario, &fixture, &delivery(&fixture).unwrap().0, "closed");
     }

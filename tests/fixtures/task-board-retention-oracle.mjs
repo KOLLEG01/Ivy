@@ -60,4 +60,22 @@ for(const row of rows){const i=row.input,db=new DatabaseSync(':memory:');db.exec
  try{await store.collectLocal(0,i.reservedBytes??0,i.reservedRows??0,i.protectedId,i.incoming);}catch(e){result=e instanceof IvyError?{code:e.code,message:e.message}:{storageError:true};}
  row.expected={result,trace,tables:snapshot(db)};db.close();
 }
-process.stdout.write(JSON.stringify({time,tables,rows}));
+if(process.argv.includes('--factory-snapshot')){
+ // Replay the real factory's saved tables in an isolated database through the
+ // original collector. No synthetic Operation or delivery schema is admitted.
+ const input=JSON.parse(readFileSync(0,'utf8')),db=new DatabaseSync(':memory:');db.exec(schema);
+ for(const table of Object.keys(tables))db.exec('DELETE FROM '+table);
+ for(const [table,values]of Object.entries(input.tables)){
+  if(table==='storage_usage')continue;
+  for(const saved of values){const row=[...saved];if(table==='blobs')row[4]=Buffer.from(row[4],'hex');db.prepare('INSERT INTO '+table+' VALUES('+row.map(()=>'?').join(',')+')').run(...row);}
+ }
+ db.exec('DELETE FROM storage_usage');for(const row of input.tables.storage_usage)db.prepare('INSERT INTO storage_usage VALUES(?,?,?)').run(...row);
+ const trace=[],client={async request(method,params){trace.push([method,params]);const raw=input.remote[params.objectId];if(!raw)throw new IvyError('not_found','fixture remote');return structuredClone(raw);}};
+ const store=new Store(db,client,input.limits);await store.collectLocal(input.nowMs);
+ const operations=readFileSync('services/task-board/src/runtime/operations.ts','utf8');
+ const find=operations.slice(operations.indexOf('const operationName'),operations.indexOf('  async begin(')).replace('export class','class')+'\n}';
+ const Subject=new Function('identityHash','requireThat',stripTypeScriptTypes(find,{mode:'transform'})+'\nreturn TaskBoardOperations;')((callerPrincipalId,operationId)=>hashJson({callerPrincipalId,operationId}).slice('sha256:'.length),requireThat);
+ const subject=new Subject({async named(key,name){const row=db.prepare('SELECT d.id,d.current_revision,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key=? AND d.name=?').get(key,name);return row?{pin:{objectId:row.id,revision:row.current_revision},value:JSON.parse(row.value_json)}:null;},retiredOperation:(...args)=>store.retiredOperation(...args)});
+ const lookups=[];for(const [caller,id]of input.lookups??[]){try{const found=await subject.find(caller,id);lookups.push({found:found?.pin??null});}catch(e){if(!(e instanceof IvyError))throw e;lookups.push({error:{code:e.code,message:e.message,outcome:e.outcome}});}}
+ process.stdout.write(JSON.stringify({trace,tables:snapshot(db),lookups}));db.close();
+}else process.stdout.write(JSON.stringify({time,tables,rows}));
