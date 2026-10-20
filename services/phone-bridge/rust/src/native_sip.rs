@@ -522,7 +522,10 @@ impl NativeSipOperations {
             (
                 duplicate,
                 authorized,
-                state.stopping,
+                state.stopping
+                    || config.is_some_and(|c| {
+                        state.calls.len() >= usize::from(c.binding.max_concurrent_calls())
+                    }),
                 config
                     .map(|c| c.binding.incoming_ring_seconds())
                     .unwrap_or(30),

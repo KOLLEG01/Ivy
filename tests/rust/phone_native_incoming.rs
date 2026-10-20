@@ -1,5 +1,5 @@
 use super::*;
-use rsipstack::sip::{Response, prelude::*};
+use rsipstack::sip::Response;
 use std::net::SocketAddr;
 
 async fn receive(peer: &UdpSocket, milliseconds: u64) -> Option<Response> {
@@ -52,7 +52,16 @@ fn normalize(value: &mut IvyJson, generated: &str) {
                     normalize(&mut decoded, generated);
                     *value = stringify(&decoded, 65536).unwrap().into();
                 } else if key == &"id".into() && value.as_str().is_ok_and(|s| s == generated) {
-                    assert!(ivy_phone_bridge::native_rpc::guid_d(generated));
+                    assert_eq!(generated.len(), 36);
+                    assert!(generated.bytes().enumerate().all(|(i, b)| {
+                        if [8, 13, 18, 23].contains(&i) {
+                            b == b'-'
+                        } else {
+                            b.is_ascii_hexdigit()
+                        }
+                    }));
+                    assert_eq!(generated.as_bytes()[14], b'4');
+                    assert!(b"89ab".contains(&generated.as_bytes()[19]));
                     *value = "original-incoming-id".into();
                 } else if key == &"peerPort".into() {
                     assert!((1.0..=65535.0).contains(&value.as_f64().unwrap()));
