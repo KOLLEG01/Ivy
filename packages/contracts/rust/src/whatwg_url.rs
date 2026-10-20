@@ -139,6 +139,67 @@ pub fn clear_url_credentials(input: &JsString) -> IvyResult<JsString> {
     let _ = quirks::set_password(&mut url, "");
     Ok(JsString::from(href(&url)))
 }
+
+/// Construct URLSearchParams from a string, preserving duplicate names and order.
+/// The input undergoes USVString conversion before form decoding.
+pub fn parse_form(input: &JsString) -> Vec<(JsString, JsString)> {
+    let text = String::from_utf16_lossy(&input.0);
+    url::form_urlencoded::parse(text.strip_prefix('?').unwrap_or(&text).as_bytes())
+        .map(|(name, value)| {
+            (
+                JsString::from(name.as_ref()),
+                JsString::from(value.as_ref()),
+            )
+        })
+        .collect()
+}
+
+/// Construct an absolute URL and apply searchParams.set for each pair in order.
+/// Empty updates leave the constructor's query spelling intact. Caller policy
+/// (including permitted redirect schemes and origins) is deliberately separate.
+pub fn set_url_search_params(
+    input: &JsString,
+    updates: &[(JsString, JsString)],
+) -> IvyResult<JsString> {
+    let projected = absolute_projection(&String::from_utf16_lossy(&input.0))?;
+    if updates.is_empty() {
+        return Ok(projected.href.into());
+    }
+    // Work on the already normalized href so updating the query cannot reapply
+    // the crate's older file-path rules or alter an opaque path or fragment.
+    let href = &projected.href;
+    let fragment = href.find('#').unwrap_or(href.len());
+    let query = href[..fragment].find('?').unwrap_or(fragment);
+    let mut pairs: Vec<(String, String)> = if query < fragment {
+        // A literal '?' at the start of the URL's query is part of its first name;
+        // only the string constructor above strips an optional leading '?'.
+        url::form_urlencoded::parse(href[query + 1..fragment].as_bytes())
+            .into_owned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for (name, value) in updates {
+        let name = String::from_utf16_lossy(&name.0);
+        let value = String::from_utf16_lossy(&value.0);
+        if let Some(first) = pairs.iter().position(|(key, _)| key == &name) {
+            pairs[first].1 = value;
+            let mut index = 0;
+            pairs.retain(|(key, _)| {
+                let keep = index <= first || key != &name;
+                index += 1;
+                keep
+            });
+        } else {
+            pairs.push((name, value));
+        }
+    }
+    let query_text = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(&pairs)
+        .finish();
+    Ok(format!("{}?{}{}", &href[..query], query_text, &href[fragment..]).into())
+}
+
 fn href(url: &Url) -> String {
     let mut href = quirks::href(url).to_string();
     if url.cannot_be_a_base()

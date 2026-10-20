@@ -270,11 +270,18 @@ fn native_frame_bounds_match_the_existing_contract() {
 #[test]
 fn url_projection_matches_node_constructor_fields_and_failures() {
     use ivy_contracts::whatwg_url::{
-        clear_url_credentials, parse_url, parse_url_with_base, url_components,
+        clear_url_credentials, parse_form, parse_url, parse_url_with_base, set_url_search_params,
+        url_components,
     };
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut mismatches = Vec::new();
-    for mode in ["projection", "credentials", "components", "relative"] {
+    for mode in [
+        "projection",
+        "credentials",
+        "components",
+        "relative",
+        "form",
+    ] {
         let output = std::process::Command::new("node")
             .args([
                 "--experimental-transform-types",
@@ -295,7 +302,38 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
         for row in rows {
             let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
             let expected = parse(row["result"].as_str().unwrap(), 100_000).unwrap();
-            let actual = if mode == "credentials" {
+            let actual = if mode == "form" {
+                let result = if let Some(form) = input.get("form") {
+                    Ok(IvyJson::Array(
+                        parse_form(form.as_js_string().unwrap())
+                            .into_iter()
+                            .map(|(name, value)| {
+                                IvyJson::Array(vec![IvyJson::String(name), IvyJson::String(value)])
+                            })
+                            .collect(),
+                    ))
+                } else {
+                    let pairs = input.get("pairs").unwrap().as_array().unwrap();
+                    let pairs: Vec<_> = pairs
+                        .iter()
+                        .map(|pair| {
+                            let pair = pair.as_array().unwrap();
+                            (
+                                pair[0].as_js_string().unwrap().clone(),
+                                pair[1].as_js_string().unwrap().clone(),
+                            )
+                        })
+                        .collect();
+                    set_url_search_params(input.get("url").unwrap().as_js_string().unwrap(), &pairs)
+                        .map(IvyJson::String)
+                };
+                match result {
+                    Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),
+                    Err(error) => {
+                        IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
+                    }
+                }
+            } else if mode == "credentials" {
                 match clear_url_credentials(input.as_js_string().unwrap()) {
                     Ok(value) => {
                         IvyJson::object([("ok", true.into()), ("value", IvyJson::String(value))])

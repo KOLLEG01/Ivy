@@ -36,8 +36,61 @@ for (const value of [' ', '\t', '\r', '\n', '\0', 'é', '😀', '\ud800', '\udc0
   inputs.add(`https://u${value}:p${value}@example.invalid/mcp`);
   inputs.add(`${value}https://example.invalid/mcp${value}`);
 }
+function formRows() {
+  const rows = [];
+  function add(input, fn) {
+    let result;
+    try { result = {ok: true, value: fn()}; }
+    catch (error) { result = {ok: false, error: IvyError.from(error).toWire()}; }
+    rows.push({input: JSON.stringify(input), result: JSON.stringify(result)});
+  }
+  const forms = new Set([
+    '', '?', '??', '?a=1&a=2&b=3', '&&', '&a&&b=&=v&=',
+    'a=b=c', 'a=1&a=2&a=3', 'a+b=c+d', 'a%2Bb=c%2Bd',
+    '%=x&%zz=y&%2=z', '%EF%BB%BF=x', 'a=\0\r\n\t',
+    '%ED%A0%80=%ED%BF%BF', '%F0%9F%98%80=😀',
+    'a=%C0%AF&b=%E0%80%AF&c=%F4%90%80%80',
+  ]);
+  for (let byte = 0; byte < 256; byte++) {
+    const encoded = '%' + byte.toString(16).padStart(2, '0');
+    for (const value of [encoded, `%E2${encoded}%A1`, `%F0%9F${encoded}%80`])
+      forms.add(`?${value}=v&k=${value}&${value}=last`);
+  }
+  for (let unit = 0xd800; unit <= 0xdfff; unit++) {
+    const value = String.fromCharCode(unit);
+    forms.add(`?${value}=x&k=${value}&${value}=last`);
+  }
+  for (const value of [' ', '+', '?', '#', '%', '&', '=', '~', '*', '-', '_', '.',
+    '\0', '\t', '\r', '\n', 'é', '😀', '\ud800x\udfff', '\ud800\udfff', '\ufeff']) {
+    forms.add(`?${value}=${value}&a=${value}&a=last`);
+    forms.add(`??${value}=${value}`);
+  }
+  for (const form of forms) add({form}, () => [...new URLSearchParams(form)]);
+  const updates = [
+    [], [['code', 'token'], ['state', 'a b+~'], ['iss', 'https://issuer.invalid/prefix/']],
+    [['a', 'first'], ['b', 'value'], ['a', 'last']], [['', '']],
+    [['\ud800', 'first'], ['\udfff', 'last']],
+    [['?', '+%&=#?\0é😀'], ['a', '\ud800x\udfff']],
+  ];
+  const urls = new Set(inputs);
+  for (const prefix of ['https://u:p@example.invalid/prefix/', 'file://server/C:/a',
+    'file:////C|/a', 'custom:opaque  ', 'custom:/a', 'custom://host/a']) {
+    for (const suffix of ['', '?', '?#', '??a=1', '?a=1&b=2&a=3&c=4&a=5#kept?x',
+      '?a=%zz&b=hello%20world&x=~#\ud800', '?\ud800=1&%EF%BF%BD=2#', '?&&#'])
+      urls.add(prefix + suffix);
+  }
+  for (const url of urls) for (const pairs of updates) add({url, pairs}, () => {
+    const parsed = new URL(url);
+    for (const [name, value] of pairs) parsed.searchParams.set(name, value);
+    return parsed.href;
+  });
+  return rows;
+}
+
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){
 const mode=process.argv[2];
+if (mode === 'form') process.stdout.write(JSON.stringify(formRows()));
+else {
 const credentials=mode==='credentials';
 if(credentials){
   for(const scheme of ['http','https','ws','wss','ftp','custom','file'])for(const credential of ['user:pass','user:','user',':pass',':','u@v:p:a','u%40v:p%3Aa','é:😀','\ud800:\udfff'])for(const suffix of ['/a/../repo?q#h','/a%2Fb','/a\\b'])inputs.add(`${scheme}://${credential}@example.invalid${suffix}`);
@@ -95,4 +148,5 @@ const rows = cases.map(({input,base}) => {
   return {input: JSON.stringify(input), ...(base===undefined?{}:{base:JSON.stringify(base)}), result: JSON.stringify(result)};
 });
 process.stdout.write(JSON.stringify(rows));
+}
 }
