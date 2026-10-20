@@ -115,10 +115,64 @@ public static class PhoneNativeDialOracle {
         var rows=new List<object>();
         try {foreach(var step in input.RootElement.EnumerateArray()) {
             try {string method=step.GetProperty("method").GetString();var args=step.GetProperty("params");
-                object result=method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():method=="fixture.requests"?Requests(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
+                object result=method=="fixture.incoming"?PhoneNativeIncomingOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():method=="fixture.requests"?Requests(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
                 rows.Add(new{json=JsonSerializer.Serialize(result,NativeRpc.Json)});
             } catch(Exception e){rows.Add(new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"});}
         }} finally {owner.DisposeAsync().AsTask().GetAwaiter().GetResult();}
         Console.Write(JsonSerializer.Serialize(rows,NativeRpc.Json));
+    }
+}
+
+public static class PhoneNativeIncomingOracle {
+    static SipTransportHost Host(NativeSipOperations owner)=>(SipTransportHost)typeof(NativeSipOperations).GetField("host",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(owner);
+    static JsonElement Args(object value)=>JsonSerializer.SerializeToElement(value,NativeRpc.Json);
+    static async Task<SIPResponse> Receive(UdpClient peer,int milliseconds=4000) {
+        using var cancel=new CancellationTokenSource(milliseconds);
+        for(;;) {var packet=await peer.ReceiveAsync(cancel.Token);var response=SIPResponse.ParseSIPResponse(Encoding.UTF8.GetString(packet.Buffer));if((int)response.Status!=100)return response;}
+    }
+    static async Task Wait(Func<bool> ready) {var until=DateTime.UtcNow.AddSeconds(4);while(!ready()){if(DateTime.UtcNow>=until)throw new Exception("Original incoming state evidence unavailable");await Task.Delay(1);}}
+    static async Task<object> Invoke(NativeSipOperations owner,string method,object args) {
+        try{return new{json=JsonSerializer.Serialize(await owner.InvokeAsync(method,Args(args)),NativeRpc.Json)};}
+        catch(Exception e){return new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"};}
+    }
+    public static async Task<object> Run(NativeSipOperations owner,JsonElement args) {
+        string scenario=args.GetProperty("scenario").GetString();bool claimed=scenario.Contains("claimed")&&!scenario.Contains("unclaimed");
+        string wire=args.GetProperty("wireId").GetString(),asserted=args.GetProperty("asserted").GetString();
+        await owner.InvokeAsync("configure",args.GetProperty("configuration"));
+        string outgoing="11111111-1111-4111-8111-111111111111";
+        if(scenario=="busy")await owner.InvokeAsync("call.prepare",Args(new{callId=outgoing}));
+        using var peer=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));var target=Host(owner).LocalEndpoint;
+        var source=(IPEndPoint)peer.Client.LocalEndPoint;
+        string via=scenario=="spoofed"?$"127.0.0.2:{source.Port}":source.ToString();
+        string Raw(string method,string branch)=>$"{method} sip:fixture@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {via};rport;branch={branch}\r\nFrom: <sip:caller@{source}>;tag=caller-tag\r\nTo: <sip:fixture@{target}>\r\nCall-ID: {wire}\r\nCSeq: 1 {method}\r\nContact: <sip:caller@{source}>\r\nMax-Forwards: 70\r\nP-Asserted-Identity: {asserted}\r\nContent-Length: 0\r\n\r\n";
+        async Task Send(string method,string branch="z9hG4bK-owned-incoming") {var bytes=Encoding.UTF8.GetBytes(Raw(method,branch));await peer.SendAsync(bytes,bytes.Length,target);}
+        await Send("INVITE");var first=await Receive(peer);int code=(int)first.Status;
+        if(code!=180) {
+            int count=Host(owner).Calls.Count();object existing=scenario=="busy"?Host(owner).FindCall(outgoing).Observation:null;
+            if(scenario=="busy")await owner.InvokeAsync("call.release",Args(new{callId=outgoing}));
+            await owner.DisposeAsync();return new{code,call=(object)null,existing,retained=count,closed=true};
+        }
+        await Wait(()=>Host(owner).Calls.Any(c=>c.Observation.SipCallId==wire));var call=Host(owner).Calls.Single(c=>c.Observation.SipCallId==wire);string id=call.Observation.Id;
+        object admitted=call.Observation,claim=null,features=null,hungup=null,expired=null;bool duplicateIgnored=false;
+        if(scenario=="duplicate") {
+            await Send("INVITE");if((int)(await Receive(peer)).Status!=180)throw new Exception("Original ringing retransmission unavailable");
+            await Send("INVITE","z9hG4bK-duplicate-wire");try{await Receive(peer,150);}catch(OperationCanceledException){duplicateIgnored=true;}
+            if(Host(owner).Calls.Count()!=1)throw new Exception("Duplicate original call");
+            claimed=true;
+        }
+        if(claimed) {
+            claim=await Invoke(owner,"call.claim",new{callId=id});
+            features=await Invoke(owner,"call.features",new{callId=id,challenge=(object)null});
+        }
+        var statuses=new List<int>();
+        if(scenario.StartsWith("cancel")) {await Send("CANCEL");statuses.Add((int)(await Receive(peer)).Status);statuses.Add((int)(await Receive(peer)).Status);statuses.Sort();}
+        else if(scenario.StartsWith("expire"))statuses.Add((int)(await Receive(peer)).Status);
+        else {hungup=await Invoke(owner,"call.hangup",new{callId=id});statuses.Add((int)(await Receive(peer)).Status);}
+        await Wait(()=>call.Observation.State=="local_ended");object ended=call.Observation;
+        if(!claimed)await Wait(()=>Host(owner).FindCall(id)==null);
+        int retained=Host(owner).Calls.Count();expired=await Invoke(owner,"call.claim",new{callId=id});
+        if(claimed)await owner.InvokeAsync("call.release",Args(new{callId=id}));
+        bool released=Host(owner).FindCall(id)==null;await owner.DisposeAsync();
+        return new{code,call=admitted,claim,features,hungup,ended,statuses,retained,expired,released,duplicateIgnored,closed=true};
     }
 }

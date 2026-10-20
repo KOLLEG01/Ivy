@@ -28,6 +28,7 @@ use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeSipError {
+    OfferExpired,
     Features(FeatureError),
     Configuration(NativeConfigError),
     Host(SipHostError),
@@ -35,6 +36,7 @@ pub enum NativeSipError {
 impl NativeSipError {
     pub fn code(self) -> &'static str {
         match self {
+            Self::OfferExpired => "phone_offer_expired",
             Self::Features(error) => error.code(),
             Self::Configuration(error) => error.code(),
             Self::Host(SipHostError::InvalidRequest) => "invalid_request",
@@ -191,6 +193,7 @@ struct Call {
     original: SipHostCall,
     media: Arc<OnceLock<SipMediaSession>>,
     features: PhoneCallFeatures,
+    incoming: Option<crate::native_incoming::NativeIncoming>,
     result: Mutex<CallResult>,
     releasing: Mutex<Option<NativeSipOperation<()>>>,
 }
@@ -200,10 +203,20 @@ struct CallResult {
     ending: bool,
     unknown: bool,
     error: Option<&'static str>,
+    claimed: bool,
+    retiring: bool,
 }
 #[derive(Clone)]
 pub struct NativeSipCall(Arc<Call>);
 impl NativeSipCall {
+    pub(crate) fn incoming(&self) -> Option<&crate::native_incoming::NativeIncoming> {
+        self.0.incoming.as_ref()
+    }
+    pub(crate) fn sip_call_id(&self) -> &str {
+        self.incoming()
+            .map(|i| i.sip_call_id.as_str())
+            .unwrap_or(self.0.original.id())
+    }
     pub fn signalling(&self) -> Option<crate::sip::SipSignallingObservation> {
         self.0.original.signalling()
     }
@@ -339,11 +352,15 @@ impl NativeSipOperations {
             registration,
         }));
         let host = self.0.host.clone();
+        let incoming_owner = Arc::downgrade(&self.0);
         let operation = retained(async move {
             let endpoint = host
                 .configure_with_setup(parts.host, move || setup(parts.micro))
                 .await?;
-            host.start_requests()?;
+            host.start_requests(Arc::new(move |transaction, source| {
+                let owner = incoming_owner.clone();
+                Box::pin(async move { Self::receive_incoming(owner, transaction, source).await })
+            }))?;
             Ok(endpoint)
         });
         state.configuring = Some(operation.clone());
@@ -373,6 +390,13 @@ impl NativeSipOperations {
         self.0.state.lock().unwrap().configuration.clone()
     }
     pub fn prepare(&self, id: String) -> Result<NativeSipCall, SipHostError> {
+        self.prepare_call(id, None)
+    }
+    fn prepare_call(
+        &self,
+        id: String,
+        incoming: Option<crate::native_incoming::NativeIncoming>,
+    ) -> Result<NativeSipCall, SipHostError> {
         let mut state = self.0.state.lock().unwrap();
         if state.stopping {
             return Err(SipHostError::Stopping);
@@ -393,6 +417,9 @@ impl NativeSipOperations {
         // Preserve this owner's ID until the same retained work retires it.
         if state.calls.len() >= usize::from(configuration.binding().max_concurrent_calls())
             || state.calls.iter().any(|call| call.observation().id == id)
+            || incoming
+                .as_ref()
+                .is_some_and(|i| state.calls.iter().any(|c| c.sip_call_id() == i.sip_call_id))
         {
             return Err(SipHostError::OperationConflict);
         }
@@ -417,7 +444,7 @@ impl NativeSipOperations {
         )
         .map_err(|_| SipHostError::NotReady)?;
         let media_features = features.clone();
-        let original = self.0.host.prepare_async(id, move || async move {
+        let create = move || async move {
             let session = factory.create(original_id, configuration).await?;
             // Publish the exact session even if policy attachment is uncertain;
             // it must remain fenced for explicit original-call cleanup.
@@ -438,17 +465,178 @@ impl NativeSipOperations {
                 return Err(SipHostError::CleanupUnconfirmed);
             }
             Ok(Arc::new(session) as Arc<dyn HostedSipMedia>)
-        })?;
+        };
+        let original = match &incoming {
+            Some(context) => {
+                self.0
+                    .host
+                    .prepare_incoming_async(id, context.sip_call_id.clone(), create)
+            }
+            None => self.0.host.prepare_async(id, create),
+        }?;
         let call = NativeSipCall(Arc::new(Call {
             original,
             media,
             features,
+            incoming,
             result: Mutex::new(CallResult::default()),
             releasing: Mutex::new(None),
         }));
         let _ = original_slot.set(Arc::downgrade(&call.0));
         state.calls.push(call.clone());
         Ok(call)
+    }
+    async fn receive_incoming(
+        owner: std::sync::Weak<Owner>,
+        mut transaction: rsipstack::transaction::Transaction,
+        source: Option<rsipstack::transport::SipAddr>,
+    ) -> Result<(), rsipstack::transaction::Transaction> {
+        use rsipstack::sip::{StatusCode, prelude::HeadersExt};
+        let Some(owner) = owner.upgrade().map(Self) else {
+            return Err(transaction);
+        };
+        transaction.destination = source.clone();
+        let configuring = owner.0.state.lock().unwrap().configuring.clone();
+        let configured = match configuring {
+            Some(work) => work.wait().await.is_ok(),
+            None => false,
+        };
+        let wire = transaction
+            .original
+            .call_id_header()
+            .ok()
+            .map(|v| v.value().to_owned());
+        let mut context =
+            crate::native_incoming::NativeIncoming::parse(&transaction.original, source.as_ref());
+        let (duplicate, authorized, stopping, ring_seconds) = {
+            let state = owner.0.state.lock().unwrap();
+            let duplicate = wire
+                .as_ref()
+                .is_some_and(|id| state.calls.iter().any(|c| c.sip_call_id() == id));
+            let config = state.configuration.as_ref();
+            let authorized = configured
+                && context.as_mut().is_some_and(|incoming| {
+                    incoming.registered = owner.0.host.matches_registered_peer(incoming.peer);
+                    config.is_some_and(|c| c.incoming.allows(incoming.peer, &owner.0.host))
+                });
+            (
+                duplicate,
+                authorized,
+                state.stopping,
+                config
+                    .map(|c| c.binding.incoming_ring_seconds())
+                    .unwrap_or(30),
+            )
+        };
+        if duplicate {
+            return Ok(());
+        }
+        let mut status = if authorized {
+            StatusCode::BusyHere
+        } else {
+            StatusCode::Forbidden
+        };
+        if authorized && !stopping {
+            if let Some(id) = crate::native_incoming::call_id() {
+                match owner.prepare_call(id, context.take()) {
+                    Ok(call) => match owner.0.host.adopt_incoming(
+                        &call.0.original,
+                        transaction,
+                        ring_seconds,
+                    ) {
+                        Ok(()) => {
+                            owner.observe_incoming(call);
+                            return Ok(());
+                        }
+                        Err(original) => {
+                            transaction = original;
+                            let _ = owner.release(&call);
+                            status = StatusCode::Forbidden;
+                        }
+                    },
+                    Err(SipHostError::OperationConflict) => {
+                        if wire.as_ref().is_some_and(|id| {
+                            owner
+                                .0
+                                .state
+                                .lock()
+                                .unwrap()
+                                .calls
+                                .iter()
+                                .any(|c| c.sip_call_id() == id)
+                        }) {
+                            return Ok(());
+                        }
+                    }
+                    Err(_) => status = StatusCode::Forbidden,
+                }
+            } else {
+                status = StatusCode::Forbidden;
+            }
+        }
+        if transaction.reply(status).await.is_ok() {
+            Ok(())
+        } else {
+            Err(transaction)
+        }
+    }
+    fn observe_incoming(&self, call: NativeSipCall) {
+        let owner = Arc::downgrade(&self.0);
+        let mut changes = call
+            .0
+            .original
+            .incoming_observations()
+            .expect("adopted original");
+        tokio::spawn(async move {
+            loop {
+                let observed = *changes.borrow_and_update();
+                if observed.ending || observed.uncertain || observed.outcome.is_some() {
+                    if let Some(media) = call.media() {
+                        media.request_close();
+                    }
+                    if let Some(owner) = owner.upgrade().map(Self) {
+                        owner.retire_offer(&call);
+                    }
+                    break;
+                }
+                if changes.changed().await.is_err() {
+                    if let Some(owner) = owner.upgrade().map(Self) {
+                        let _ = owner.hangup(&call);
+                        owner.retire_offer(&call);
+                    }
+                    break;
+                }
+            }
+        });
+    }
+    fn retire_offer(&self, call: &NativeSipCall) {
+        {
+            let state = self.0.state.lock().unwrap();
+            if Self::original(&state, call).is_err() || !call.observation().ending {
+                return;
+            }
+            let mut result = call.0.result.lock().unwrap();
+            if result.claimed || result.attempted || result.retiring {
+                return;
+            }
+            result.retiring = true;
+        }
+        let _ = self.release(call);
+    }
+    pub fn claim(&self, call: &NativeSipCall) -> Result<(), NativeSipError> {
+        let state = self.0.state.lock().unwrap();
+        if Self::original(&state, call).is_err()
+            || call.incoming().is_none()
+            || call.observation().ending
+        {
+            return Err(NativeSipError::OfferExpired);
+        }
+        let mut result = call.0.result.lock().unwrap();
+        if result.retiring || call.0.releasing.lock().unwrap().is_some() {
+            return Err(NativeSipError::OfferExpired);
+        }
+        result.claimed = true;
+        Ok(())
     }
     pub fn find(&self, id: &str) -> Option<NativeSipCall> {
         self.0
@@ -515,7 +703,7 @@ impl NativeSipOperations {
         let config = state.configuration.as_ref().ok_or(SipHostError::NotReady)?;
         let descriptor = input.descriptor(config.registration.as_ref())?;
         let observation = expected.observation();
-        if observation.attempted || observation.ending {
+        if observation.attempted || observation.ending || expected.incoming().is_some() {
             return Err(NativeConfigError::OutcomeUnknown.into());
         }
         expected.0.result.lock().unwrap().attempted = true;
@@ -628,9 +816,10 @@ impl NativeSipOperations {
         if observation.attempted || observation.ending {
             return Err(FeatureError::OutcomeUnknown.into());
         }
-        // This admission owner currently prepares outgoing calls only. Incoming
-        // admission must supply its original direction before gaining authority.
-        expected.0.features.configure(challenge, false)?;
+        expected
+            .0
+            .features
+            .configure(challenge, expected.incoming().is_some())?;
         Ok(expected.0.features.observation())
     }
     pub fn release(

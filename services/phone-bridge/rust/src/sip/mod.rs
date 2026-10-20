@@ -6,6 +6,7 @@ mod delayed_offer;
 mod dialog;
 mod endpoint;
 mod host;
+mod incoming;
 mod invite;
 mod registration;
 mod registration_client;

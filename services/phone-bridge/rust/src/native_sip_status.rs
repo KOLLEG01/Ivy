@@ -49,20 +49,25 @@ pub fn call_json(call: &NativeSipCall) -> Result<String, NativeSipError> {
     let s = call.observation();
     let state = match s.phase {
         SipHostCallPhase::Prepared => "prepared",
+        SipHostCallPhase::Ringing => "ringing",
         SipHostCallPhase::Dialing => "dialing",
         SipHostCallPhase::Connected => "connected",
         SipHostCallPhase::LocalEnded => "local_ended",
         SipHostCallPhase::OutcomeUnknown => "outcome_unknown",
     };
     let error = call.error();
-    // NativeSipOperations currently admits outgoing calls only. Incoming
-    // admission must carry its original direction/context before using this view.
     Ok(format!(
-        "{{\"id\":{},\"direction\":\"outgoing\",\"state\":{},\"sipCallId\":{},\"error\":{},\"incoming\":null,\"features\":{}}}",
+        "{{\"id\":{},\"direction\":{},\"state\":{},\"sipCallId\":{},\"error\":{},\"incoming\":{},\"features\":{}}}",
         quote(&s.id)?,
+        quote(if call.incoming().is_some() {
+            "incoming"
+        } else {
+            "outgoing"
+        })?,
         quote(state)?,
-        quote(&s.id)?,
+        quote(call.sip_call_id())?,
         optional(error)?,
+        call.incoming().map_or("null".into(), |i| i.json()),
         call.features().observation().json()
     ))
 }

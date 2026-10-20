@@ -179,9 +179,18 @@ impl NativeSipCommands {
                 }
             }));
         }
-        let call = selected
-            .and_then(|id| self.owner.find(&id))
-            .ok_or(SipHostError::NotReady)?;
+        let call = selected.and_then(|id| self.owner.find(&id)).ok_or(
+            if request.method() == "call.claim" {
+                NativeSipError::OfferExpired
+            } else {
+                SipHostError::NotReady.into()
+            },
+        )?;
+        if request.method() == "call.claim" {
+            self.owner.claim(&call)?;
+            let snapshot = call_json(&call)?;
+            return Ok(Box::pin(async move { NativeOutcome::result(snapshot) }));
+        }
         if request.method() == "call.hangup" {
             self.owner.hangup(&call)?;
             let outcome = match call_json(&call) {
@@ -233,6 +242,7 @@ impl NativeHandler for NativeSipCommands {
                 | "heartbeat"
                 | "call.prepare"
                 | "call.dial"
+                | "call.claim"
                 | "call.hangup"
                 | "call.release"
                 | "registration.reconnect"

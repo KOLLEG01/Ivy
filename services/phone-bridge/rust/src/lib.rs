@@ -9,6 +9,7 @@ pub mod ipc;
 pub mod media;
 pub mod native_config;
 mod native_dial;
+mod native_incoming;
 pub mod native_pipe;
 pub mod native_registration;
 pub mod native_rpc;

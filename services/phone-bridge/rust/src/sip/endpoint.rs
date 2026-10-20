@@ -13,7 +13,7 @@ use rsipstack::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 use tokio::{
     sync::{mpsc, watch},
@@ -74,7 +74,16 @@ struct Routes {
     clients: HashMap<TransactionKey, Arc<Route>>,
 }
 #[derive(Clone, Default)]
-struct FinalResponses(Arc<Mutex<Routes>>, super::signalling::SignallingObservers);
+struct FinalResponses(
+    Arc<Mutex<Routes>>,
+    super::signalling::SignallingObservers,
+    Arc<IncomingSources>,
+);
+#[derive(Default)]
+struct IncomingSources {
+    endpoint: OnceLock<Weak<rsipstack::transaction::endpoint::EndpointInner>>,
+    pending: Mutex<HashMap<TransactionKey, SipAddr>>,
+}
 impl FinalResponses {
     fn close(&self) {
         let mut routes = self.0.lock().unwrap();
@@ -106,6 +115,23 @@ impl MessageInspector for FinalResponses {
         message
     }
     fn after_received(&self, message: SipMessage, from: Option<&SipAddr>) -> SipMessage {
+        // Admission uses the actual transport source, never a caller's Via or
+        // Contact address. Capture only newly created INVITE transactions.
+        if let (SipMessage::Request(request), Some(from), Some(endpoint)) = (
+            &message,
+            from,
+            self.2.endpoint.get().and_then(Weak::upgrade),
+        ) {
+            if request.method == Method::Invite {
+                if let Ok(key) = TransactionKey::from_request(request, TransactionRole::Server) {
+                    if endpoint.transactions.get(&key).is_none() {
+                        let mut pending = self.2.pending.lock().unwrap();
+                        pending.retain(|key, _| endpoint.transactions.get(key).is_some());
+                        pending.insert(key, from.clone());
+                    }
+                }
+            }
+        }
         // Stack-generated timeout/send-error responses have no remote source.
         if from.is_some() {
             self.1.record(&message, false);
@@ -196,6 +222,7 @@ impl SipEndpoint {
             .with_option(options)
             .with_inspector(Box::new(routes.clone()))
             .build();
+        let _ = routes.2.endpoint.set(Arc::downgrade(&endpoint.inner));
         let inner = endpoint.inner.clone();
         let observed = routes.clone();
         let serving = tokio::spawn(async move {
@@ -229,6 +256,14 @@ impl SipEndpoint {
         self.endpoint
             .incoming_transactions()
             .map_err(|_| SipIoError::InUse)
+    }
+    pub(crate) fn incoming_source(&self, transaction: &Transaction) -> Option<SipAddr> {
+        self.routes
+            .2
+            .pending
+            .lock()
+            .unwrap()
+            .remove(&transaction.key)
     }
     pub fn client(
         &self,

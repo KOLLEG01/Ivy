@@ -225,7 +225,7 @@ async fn unhandled_invite_retains_original_uncertain_cleanup_fence() {
     let target = owner.observation().endpoint.unwrap();
     let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     peer.send_to(
-        request("INVITE", peer.local_addr().unwrap(), target, 300, false).as_bytes(),
+        request("INVITE", peer.local_addr().unwrap(), target, 300, true).as_bytes(),
         target,
     )
     .await
