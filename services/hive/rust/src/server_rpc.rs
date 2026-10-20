@@ -10,7 +10,7 @@ use crate::{
 use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, Outcome,
     limits::{MANAGEMENT_FRAME_BYTES, RPC_BATCH_REQUEST_BYTES, RPC_BATCH_REQUESTS},
-    validation::validate_request,
+    validation::{validate_request, validate_tool_routing},
 };
 use std::{
     future::Future,
@@ -32,7 +32,7 @@ impl Storage for StorageClient {
     }
 }
 /// Direct routing starts eagerly and may throw before returning its promise.
-/// Freshness is checked by Invocation::direct before this callback is entered.
+/// Freshness and tool/discovery routing fields are checked before this callback.
 pub type Direct = Arc<dyn Fn(&IvyJson, &IvyJson) -> IvyResult<Option<Reply>> + Send + Sync>;
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 
@@ -79,6 +79,17 @@ fn require(value: bool, code: &str, message: &str) -> IvyResult<()> {
     }
 }
 
+/// Keep the shared wire guard ahead of direct routing on both ingress paths.
+/// Other methods retain their own dispatcher/storage validation boundaries.
+pub(crate) fn validate_direct_tool_request(request: &IvyJson) -> IvyResult<()> {
+    let discovery = request.get("method") == Some(&"discovery.call".into());
+    if discovery || request.get("method") == Some(&"tools.call".into()) {
+        validate_request(request)?;
+        validate_tool_routing(request.required("params")?, discovery)?;
+    }
+    Ok(())
+}
+
 impl Invocation {
     pub fn new(
         storage: Arc<dyn Storage>,
@@ -99,6 +110,7 @@ impl Invocation {
     }
     pub fn direct(&self, context: &IvyJson, request: &IvyJson) -> IvyResult<Option<Reply>> {
         require_fresh(context, &*self.0.now)?;
+        validate_direct_tool_request(request)?;
         (self.0.direct)(context, request)
     }
     pub fn invoke(&self, context: IvyJson, request: IvyJson, received_bytes: f64) -> Reply {

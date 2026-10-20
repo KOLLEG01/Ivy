@@ -27,6 +27,8 @@ mod server_peers;
 mod server_lifecycle;
 #[path = "hive_ws_socket_io.rs"]
 mod ws_socket_io;
+#[path = "hive_tool_routing_cases.rs"]
+mod tool_routing_cases;
 
 trait FixtureMut {
     fn get_mut(&mut self, name: &str) -> Option<&mut IvyJson>;

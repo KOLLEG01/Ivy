@@ -229,8 +229,25 @@ fn compare(group: &str, traces: Vec<Value>) {
             });
             let direct_events = events.clone();
             let direct_controls = controls.clone();
+            let tool_routing = trace["toolRouting"] == true;
             let direct = Arc::new(
                 move |context: &IvyJson, request: &IvyJson| -> IvyResult<Option<Reply>> {
+                    if tool_routing {
+                        if request.get("method") == Some(&"tools.call".into())
+                            || request.get("method") == Some(&"discovery.call".into())
+                        {
+                            direct_events.lock().unwrap().push(IvyJson::object([
+                                ("kind", "routing".into()),
+                                ("context", context.clone()),
+                                ("params", request.required("params")?.clone()),
+                            ]));
+                            return Err(IvyError::new(
+                                "fixture_routing",
+                                "Selected routing owner reached.",
+                            ));
+                        }
+                        return Ok(None);
+                    }
                     direct_events.lock().unwrap().push(IvyJson::object([
                         ("kind", "direct".into()),
                         ("context", context.clone()),
@@ -423,6 +440,65 @@ fn complete(label: &str, direct: bool, value: Value) -> Value {
 }
 fn probe(key: &str, bytes: usize) -> Value {
     json!({"op":"probe","key":key,"bytes":bytes})
+}
+
+#[test]
+fn tool_routing_rpc_validation_before_routing_and_admission_release() {
+    let mut traces = vec![];
+    for (name, request) in super::tool_routing_cases::requests() {
+        traces.push(json!({"name":name,"toolRouting":true,"requests":{"perConsumer":1},"steps":[{"op":"invoke","name":"call","context":context(),"request":request},probe("credential",0)]}));
+    }
+    let malformed = json!({"jsonrpc":"2.0","id":"call","method":"tools.call","params":{}});
+    for (name, options, requests, caller, clock) in [
+        (
+            "expired-before-admission",
+            json!({}),
+            json!({}),
+            json!({"principalId":"caller","credentialDigest":"credential","transport":"http","expiresAt":0}),
+            json!([]),
+        ),
+        (
+            "expired-at-direct",
+            json!({}),
+            json!({"perConsumer":1}),
+            json!({"principalId":"caller","credentialDigest":"credential","transport":"http","expiresAt":10}),
+            json!([0, 0, 10]),
+        ),
+        (
+            "maintenance-before-validation",
+            json!({"resetBootstrapCredentialDigest":"other"}),
+            json!({"perConsumer":1}),
+            context(),
+            json!([]),
+        ),
+        (
+            "budget-before-validation",
+            json!({}),
+            json!({"maximum":0}),
+            context(),
+            json!([]),
+        ),
+    ] {
+        traces.push(json!({"name":name,"toolRouting":true,"options":options,"requests":requests,"steps":[{"op":"invoke","name":"call","context":caller,"request":malformed,"clock":clock},probe("credential",0)]}));
+    }
+    traces.push(json!({"name":"unrelated-method-still-queues","toolRouting":true,"steps":[invoke("queued",false),complete("queued",false,json!("queued")),probe("credential",0)]}));
+    compare("tool-routing-rpc", traces);
+}
+
+#[test]
+fn tool_routing_batch_keeps_item_envelope_precedence_and_release() {
+    let frames: Vec<_> = super::tool_routing_cases::requests()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, mut request))| {
+            if !request["id"].is_null() {
+                request["id"] = json!(index);
+            }
+            request
+        })
+        .collect();
+    let traces=frames.chunks(8).enumerate().map(|(index,frames)|json!({"name":format!("mixed-routing-batch-{index}"),"toolRouting":true,"requests":{"perConsumer":1},"steps":[{"op":"batch","name":"batch","context":context(),"frames":frames},probe("credential",0)]})).collect();
+    compare("tool-routing-batch", traces);
 }
 
 #[test]

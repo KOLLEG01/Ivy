@@ -7,7 +7,7 @@ use crate::{
     http_common,
     live_routing::{LiveRouting, PreparedCall},
     rpc,
-    server_rpc::{Clock, Reply, Storage, require_fresh},
+    server_rpc::{Clock, Reply, Storage, require_fresh, validate_direct_tool_request},
     tool_binding_diagnostics::ToolBindingDiagnostics,
     worker_client::RequestOptions,
     ws_send::{self, Socket},
@@ -643,6 +643,7 @@ impl Peers {
         peer.0.session.lock().unwrap().active += 1;
         let direct = (|| {
             require_fresh(&context, &*self.0.owners.now)?;
+            validate_direct_tool_request(&frame)?;
             let direct = (self.0.owners.direct)(self, &context, &frame, peer)?;
             if direct.is_none() {
                 let mut routing = self.0.owners.routing.lock().unwrap();

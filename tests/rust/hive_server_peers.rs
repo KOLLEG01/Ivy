@@ -396,6 +396,7 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
     let capture = trace["captureErrorFactory"] == true;
     let direct_events = events.clone();
     let direct_controls = controls.clone();
+    let tool_routing = trace["toolRouting"] == true;
     let wake_events = events.clone();
     let cache_events = events.clone();
     let unhandled_events = events.clone();
@@ -415,6 +416,20 @@ async fn run_trace(trace: &Value, source: &IvyJson) -> IvyJson {
             now,
             ids,
             direct: Arc::new(move |owner, context, request, peer| {
+                if tool_routing
+                    && (request.get("method") == Some(&"tools.call".into())
+                        || request.get("method") == Some(&"discovery.call".into()))
+                {
+                    direct_events.lock().unwrap().push(IvyJson::object([
+                        ("kind", "routing".into()),
+                        ("context", context.clone()),
+                        ("params", request.required("params")?.clone()),
+                    ]));
+                    return Err(IvyError::new(
+                        "fixture_routing",
+                        "Selected routing owner reached.",
+                    ));
+                }
                 if request.get("method") == Some(&"notifications.subscribe".into()) {
                     validate_request(request)?;
                     return owner
@@ -743,6 +758,48 @@ fn context(node: Option<(&str, f64)>) -> Value {
         value["generation"] = json!(generation);
     }
     value
+}
+
+#[test]
+fn tool_routing_websocket_validation_before_routing_and_session_release() {
+    let mut traces = vec![];
+    for (name, request) in super::tool_routing_cases::requests() {
+        traces.push(json!({"name":name,"toolRouting":true,"requests":{"perConsumer":1},"steps":[connect("caller",None),message("caller",request),{"op":"probe","key":"credential","bytes":0}]}));
+    }
+    let malformed = json!({"jsonrpc":"2.0","id":"call","method":"tools.call","params":{}});
+    let mut steps = vec![connect("caller", None)];
+    for _ in 0..70 {
+        steps.push(message("caller", malformed.clone()));
+    }
+    steps.push(message(
+        "caller",
+        super::tool_routing_cases::requests()[0].1.clone(),
+    ));
+    steps.push(json!({"op":"probe","key":"credential","bytes":0}));
+    traces.push(json!({"name":"invalid-calls-release-session-and-budget","toolRouting":true,"requests":{"perConsumer":1},"steps":steps}));
+    for (name, requests, caller, clock) in [
+        (
+            "expired-before-admission",
+            json!({}),
+            json!({"principalId":"caller","credentialDigest":"credential","transport":"ws","expiresAt":0}),
+            json!([]),
+        ),
+        (
+            "expired-at-direct",
+            json!({"perConsumer":1}),
+            json!({"principalId":"caller","credentialDigest":"credential","transport":"ws","expiresAt":10}),
+            json!([0, 10]),
+        ),
+        (
+            "budget-before-validation",
+            json!({"maximum":0}),
+            context(None),
+            json!([]),
+        ),
+    ] {
+        traces.push(json!({"name":name,"toolRouting":true,"requests":requests,"steps":[{"op":"connect","name":"caller","context":caller},{"op":"message","peer":"caller","frame":malformed,"clock":clock},{"op":"probe","key":"credential","bytes":0}]}));
+    }
+    compare("tool-routing-peers", traces);
 }
 fn connect(name: &str, node: Option<(&str, f64)>) -> Value {
     json!({"op":"connect","name":name,"context":context(node)})

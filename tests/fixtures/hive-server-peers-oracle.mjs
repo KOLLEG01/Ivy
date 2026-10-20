@@ -57,10 +57,11 @@ try{
   }};
   owner.bindingDiagnostics=new ToolBindingDiagnostics(value=>{events.push({kind:'binding-record',value:structuredClone(value)});if(trace.throwRecord)throw error({code:'fixture_record',message:'Record failed.'});},Date.now);
   owner.routing=new LiveRouting(trace.options?.validateMessages===true,value=>owner.bindingDiagnostics.rejected(value));
+  if(trace.toolRouting)owner.routing.prepare=(context,params)=>{events.push({kind:'routing',context,params});throw new IvyError('fixture_routing','Selected routing owner reached.');};
   owner.withDispatchGate=work=>owner.dispatchGate.run(work);
   const direct=owner.direct;
   owner.direct=function(context,request,peer){
-   if(request?.method==='notifications.subscribe')return direct.call(this,context,request,peer);
+   if(trace.toolRouting||request?.method==='notifications.subscribe')return direct.call(this,context,request,peer);
    this.requireFresh(context);const p=request?.params;
    if(p?.fixtureDirect==='throw')throw error(p.error??{});
    if(p?.fixtureDirect==='return')return post('direct:'+p.label,{kind:'direct-start',label:p.label});

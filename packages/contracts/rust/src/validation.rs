@@ -39,6 +39,44 @@ pub fn validate_provider_call_frame(value:&IvyJson)->IvyResult<()> {
 fn service_name(value:Option<&IvyJson>)->bool {
     value.and_then(IvyJson::as_js_string).is_some_and(|s| !s.0.is_empty() && s.0.len()<=64 && (97..=122).contains(&s.0[0]) && s.0.iter().all(|c| (97..=122).contains(c)||(48..=57).contains(c)||*c==45))
 }
+
+/// Validate correlation and selectors before the selected tool's payload schema.
+pub fn validate_tool_routing(value: &IvyJson, discovery: bool) -> IvyResult<()> {
+    object(value, "Tool call params must be an object.")?;
+    let allowed: &[&str] = if discovery {
+        &["qualifiedName", "arguments", "expectedDefinitionHash", "serviceNodeId", "operationId", "expectedCallerPrincipalId", "serviceName"]
+    } else {
+        &["qualifiedName", "arguments", "expectedDefinitionHash", "serviceNodeId", "operationId", "expectedCallerPrincipalId", "hostId", "serviceName", "resourceRef"]
+    };
+    let optional_text = |field: Option<&IvyJson>| field.is_none() || text(field, 256);
+    if !(exact_keys(value, allowed)
+        && text(value.get("qualifiedName"), 256)
+        && value.get("arguments").is_some()
+        && hash(value.get("expectedDefinitionHash"))
+        && optional_text(value.get("operationId"))
+        && optional_text(value.get("expectedCallerPrincipalId"))
+        && optional_text(value.get("serviceNodeId"))
+        && (value.get("serviceName").is_none() || service_name(value.get("serviceName")))
+        && optional_text(value.get("hostId")))
+    {
+        return Err(IvyError::new("invalid_arguments", "Tool routing fields are invalid."));
+    }
+    if discovery && !text(value.get("serviceName"), 256) {
+        return Err(IvyError::new("invalid_arguments", "Discovery calls require a service name."));
+    }
+    if let Some(reference) = value.get("resourceRef") {
+        object(reference, "Resource reference must be an object.")?;
+        if !(exact_keys(reference, &["serviceNodeId", "namespace", "kind", "nativeId"])
+            && text(reference.get("serviceNodeId"), 256)
+            && text(reference.get("namespace"), 64)
+            && text(reference.get("kind"), 64)
+            && text(reference.get("nativeId"), 1024))
+        {
+            return Err(IvyError::new("invalid_arguments", "Resource routing fields are invalid."));
+        }
+    }
+    Ok(())
+}
 fn contract_version(value:Option<&IvyJson>)->bool {
     value.and_then(IvyJson::as_js_string).is_some_and(|s| {
         let parts:Vec<_>=s.0.split(|c|*c==46).collect();

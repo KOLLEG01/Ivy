@@ -17,14 +17,16 @@ registerHooks({resolve(specifier,context,next){
 const {RequestBudget,DispatchGate}=await import('../../services/hive/src/admission.ts');
 const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
 const {encodeJson}=await import('../../packages/contracts/src/canonical-json.ts');
-const {validateRequest}=await import('../../packages/contracts/src/core-validation.ts');
+const {validateRequest,validateInput,validateOutput}=await import('../../packages/contracts/src/core-validation.ts');
+const {validateToolRouting}=await import('../../packages/contracts/src/transport-validation.ts');
+const {resolveCoreCall}=await import('../../services/hive/src/discovery.ts');
 const {managementFrameBytes:MAX_FRAME,rpcBatchRequests,rpcBatchRequestBytes}=await import('../../packages/contracts/src/limits.ts');
 const server=readFileSync(new URL('../../services/hive/src/server.ts',import.meta.url),'utf8');
 const kernel=readFileSync(new URL('../../services/hive/src/kernel.ts',import.meta.url),'utf8');
 function span(source,start,end){const at=source.indexOf(start),stop=source.indexOf(end,at+start.length);if(at<0||stop<0)throw Error('Original server boundary changed: '+start);return source.slice(at,stop);}
 const rpc=new Function('IvyError',stripTypeScriptTypes(span(kernel,'export function rpcFailure(', '\nexport function validRequestId(').replace('export ', '')+span(kernel,'export function validRequestId(', '\n}').concat('\n}').replace('export ',''),{mode:'transform'})+';return {rpcFailure,validRequestId};')(IvyError);
-const methods=span(server,'  private requireFresh(', '\n  private ')+span(server,'  async invoke(', '  private checkedDirect(');
-const Owner=new Function('IvyError','requireThat','validateRequest','encodeJson','rpcFailure','validRequestId','MAX_FRAME','rpcBatchRequests','rpcBatchRequestBytes',stripTypeScriptTypes('class Owner {\n'+methods+'\n}',{mode:'transform'})+';return Owner;')(IvyError,requireThat,validateRequest,encodeJson,rpc.rpcFailure,rpc.validRequestId,MAX_FRAME,rpcBatchRequests,rpcBatchRequestBytes);
+const methods=span(server,'  private requireFresh(', '\n  private ')+span(server,'  async invoke(', '  private subscribed(');
+const Owner=new Function('IvyError','requireThat','validateRequest','encodeJson','rpcFailure','validRequestId','MAX_FRAME','rpcBatchRequests','rpcBatchRequestBytes','validateInput','validateOutput','validateToolRouting','resolveCoreCall',stripTypeScriptTypes('class Owner {\n'+methods+'\n}',{mode:'transform'})+';return Owner;')(IvyError,requireThat,validateRequest,encodeJson,rpc.rpcFailure,rpc.validRequestId,MAX_FRAME,rpcBatchRequests,rpcBatchRequestBytes,validateInput,validateOutput,validateToolRouting,resolveCoreCall);
 const number=value=>value&&typeof value==='object'&&'$number' in value?({nan:NaN,infinity:Infinity,negativeInfinity:-Infinity,negativeZero:-0})[value.$number]:value;
 const failure=value=>new IvyError(value.code??'remote_error',value.messageUnits?String.fromCharCode(...value.messageUnits):value.message??'Work failed.',value.outcome??'unknown',value.details);
 const value=input=>input&&typeof input==='object'&&'$repeat' in input?'x'.repeat(input.$repeat):input??null;
@@ -55,7 +57,8 @@ try{
    events.push(event);let resolve,reject;const work=new Promise((ok,fail)=>{resolve=ok;reject=fail;});
    controls.set(name,{resolve,reject});return work;
   };
-  owner.direct=(context,request)=>{
+  if(trace.toolRouting)owner.routing={prepare(context,params){events.push({kind:'routing',context,params});throw new IvyError('fixture_routing','Selected routing owner reached.');}};
+  else owner.direct=(context,request)=>{
    owner.requireFresh(context);events.push({kind:'direct',context,request});
    const params=request?.params,mode=params?.fixtureDirect;
    if(mode==='throw')throw failure(params.error??{});
