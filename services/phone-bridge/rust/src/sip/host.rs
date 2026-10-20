@@ -272,7 +272,7 @@ struct State {
     registration: Option<SipRegistration>,
     registration_view: Option<SipRegistrationObserver>,
     reconnecting: Option<Arc<Completion<RegistrationObservation>>>,
-    calls: Vec<Arc<Call>>,
+    calls: crate::call_slots::CallSlots<Arc<Call>>,
     closing: Option<Arc<Completion<()>>>,
 }
 type Shared = Arc<Mutex<State>>;
@@ -312,7 +312,7 @@ impl SipHost {
             registration: None,
             registration_view: None,
             reconnecting: None,
-            calls: Vec::new(),
+            calls: Default::default(),
             closing: None,
         })))))
     }
@@ -745,7 +745,7 @@ impl SipHost {
     }
     pub fn deliver_control(&self, mut transaction: Transaction) -> Result<(), Transaction> {
         let state = self.shared().lock().unwrap();
-        for call in &state.calls {
+        for call in state.calls.iter() {
             if let Some(invite) = &call.state.lock().unwrap().invite {
                 transaction = match invite.deliver_control(transaction) {
                     Ok(()) => return Ok(()),

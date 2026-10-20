@@ -33,6 +33,7 @@ fn normalize(v: &mut IvyJson) {
 fn status_corpus(params: String) -> Vec<(String, String)> {
     let a = selected(CALL);
     let b = selected(SECOND);
+    let c = selected("31111111-1111-4111-8111-111111111111");
     vec![
         ("status".into(), "{}".into()),
         ("status".into(), r#"{"callId":null}"#.into()),
@@ -78,9 +79,24 @@ fn status_corpus(params: String) -> Vec<(String, String)> {
         ("call.prepare".into(), a.clone()),
         ("status".into(), a.clone()),
         ("heartbeat".into(), "{}".into()),
-        ("call.release".into(), b),
+        ("call.release".into(), b.clone()),
         ("status".into(), "{}".into()),
+        ("call.release".into(), a.clone()),
+        // Multiple removals also expose the dictionary's LIFO free list.
+        ("call.prepare".into(), a.clone()),
+        ("call.prepare".into(), b.clone()),
+        ("call.prepare".into(), c.clone()),
+        ("call.release".into(), a.clone()),
+        ("call.release".into(), b.clone()),
+        ("status".into(), "{}".into()),
+        ("call.prepare".into(), a.clone()),
+        ("heartbeat".into(), "{}".into()),
+        ("call.prepare".into(), b.clone()),
+        ("heartbeat".into(), "{}".into()),
         ("call.release".into(), a),
+        ("call.release".into(), b),
+        ("call.release".into(), c),
+        ("status".into(), "{}".into()),
         ("fixture.dispose".into(), "{}".into()),
         ("status".into(), "{}".into()),
         ("heartbeat".into(), "{}".into()),
@@ -200,7 +216,7 @@ async fn original_full_native_status_heartbeat_and_call_views_follow_owned_lifet
         .await;
     assert_eq!(replay.outcome().result_json(), Some(snapshot.as_str()));
     assert!(remaining.methods.lock().unwrap().is_empty());
-    assert_eq!(factory.starts.load(Ordering::SeqCst), 3);
+    assert_eq!(factory.starts.load(Ordering::SeqCst), 8);
     assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

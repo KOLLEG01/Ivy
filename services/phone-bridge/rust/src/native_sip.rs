@@ -218,7 +218,7 @@ struct State {
     stopping: bool,
     configuration: Option<Arc<NativeCallConfiguration>>,
     configuring: Option<NativeSipOperation<SocketAddr>>,
-    calls: Vec<NativeSipCall>,
+    calls: crate::call_slots::CallSlots<NativeSipCall>,
     closing: Option<NativeSipOperation<()>>,
 }
 struct Owner {
@@ -271,7 +271,7 @@ impl NativeSipOperations {
                 stopping: false,
                 configuration: None,
                 configuring: None,
-                calls: Vec::new(),
+                calls: Default::default(),
                 closing: None,
             }),
             host: SipHost::new(),
@@ -360,7 +360,9 @@ impl NativeSipOperations {
         let configuration = state.configuration.clone().ok_or(SipHostError::NotReady)?;
         // Host disposal completes before its native completion is published.
         // Preserve this owner's ID until the same retained work retires it.
-        if state.calls.iter().any(|call| call.observation().id == id) {
+        if state.calls.len() >= usize::from(configuration.binding().max_concurrent_calls())
+            || state.calls.iter().any(|call| call.observation().id == id)
+        {
             return Err(SipHostError::OperationConflict);
         }
         let factory = self.0.media.clone();
@@ -520,7 +522,7 @@ impl NativeSipOperations {
             return operation.clone();
         }
         state.stopping = true;
-        for call in &state.calls {
+        for call in state.calls.iter() {
             let _ = self.0.host.hangup(&call.0.original);
             call.0.features.dispose();
         }
