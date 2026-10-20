@@ -186,7 +186,16 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
                 events.receipts.lock().unwrap().len(),
                 usize::from(!remote_end)
             );
-            assert_eq!(call.features().observation().access, "not_required");
+            assert_eq!(call.features().observation().access, "trusted");
+            for digit in ['*', '0', '#'] {
+                call.features()
+                    .digit(digit, ivy_phone_bridge::dtmf::InputSource::SipInfo)
+                    .unwrap();
+            }
+            assert!(
+                call.features().observation().command.is_none(),
+                "Early ending cannot grant connected command authority"
+            );
             trace(
                 &format!("native-terminal-start-{delayed}-{remote_end}"),
                 IvyJson::object([
