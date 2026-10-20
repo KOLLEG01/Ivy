@@ -118,10 +118,13 @@ async fn admitted_factory_uses_sdk_identity_and_offer_answer_addresses() {
             Arc::new(Clock),
             |_| Arc::new(Events::default()),
         )));
-        let params = BASE.replace(
-            "\"address\":\"127.0.0.1\"",
-            &format!("\"address\":\"{binding}\""),
-        );
+        let params = BASE
+            .replace(
+                "\"address\":\"127.0.0.1\"",
+                &format!("\"address\":\"{binding}\""),
+            )
+            .replace("57000", "58000")
+            .replace("57998", "58998");
         owner
             .configure(&configuration(&params), |_| async { Ok(()) })
             .unwrap()
@@ -252,8 +255,9 @@ async fn production_factory_retains_one_identity_attempt_and_clean_entropy_failu
         Some(SipHostError::NotReady)
     );
     assert_eq!(entropy.fills.load(Ordering::SeqCst), 0);
+    let params = BASE.replace("57000", "59000").replace("57998", "59998");
     owner
-        .configure(&configuration(BASE), |_| async { Ok(()) })
+        .configure(&configuration(&params), |_| async { Ok(()) })
         .unwrap()
         .wait()
         .await

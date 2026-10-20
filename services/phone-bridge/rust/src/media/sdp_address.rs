@@ -5,7 +5,6 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::{Mutex, OnceLock},
-    time::{Duration, SystemTime},
 };
 
 /// A route lookup sends no datagram and preserves an IPv6 numeric scope.
@@ -15,15 +14,12 @@ pub trait SipSdpRoute: Send + Sync + 'static {
 }
 
 #[derive(Default)]
-struct Cache(HashMap<SocketAddr, (SocketAddr, SystemTime)>);
+struct Cache(HashMap<SocketAddr, (SocketAddr, i64)>);
 impl Cache {
-    fn get(&mut self, remote: SocketAddr, now: SystemTime) -> Option<SocketAddr> {
+    fn get(&mut self, remote: SocketAddr, now: i64) -> Option<SocketAddr> {
         let &(local, recorded) = self.0.get(&remote)?;
         // The SDK compares DateTime.Now, including a clock moving backwards.
-        if now
-            .duration_since(recorded)
-            .is_ok_and(|age| age >= Duration::from_secs(300))
-        {
+        if now - recorded >= 300 * 10_000_000 {
             self.0.remove(&remote);
             None
         } else {
@@ -32,6 +28,26 @@ impl Cache {
     }
 }
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+fn cache_time() -> Result<i64, MediaError> {
+    #[cfg(windows)]
+    {
+        use super::RtcpRuntime;
+        Ok(super::WindowsRtcpRuntime.now()?.local_ticks())
+    }
+    #[cfg(not(windows))]
+    {
+        let ticks = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_err(|_| MediaError::ClockUnavailable)?
+            .as_nanos()
+            / 100;
+        i64::try_from(ticks)
+            .ok()
+            .and_then(|ticks| ticks.checked_add(super::RtcpWallTime::UNIX_TICKS))
+            .ok_or(MediaError::ClockUnavailable)
+    }
+}
 
 /// Like the SDK's static NetworkAddressChanged subscription, this one
 /// process-lifetime registration invalidates the shared successful-route cache.
@@ -87,7 +103,7 @@ impl SipSdpRoute for SystemSipSdpRoute {
         if let Some(local) = cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(remote, SystemTime::now())
+            .get(remote, cache_time()?)
         {
             return Ok(Some(local));
         }
@@ -117,7 +133,7 @@ impl SipSdpRoute for SystemSipSdpRoute {
             .unwrap_or_else(|p| p.into_inner())
             .0
             .entry(remote)
-            .or_insert((local, SystemTime::now()));
+            .or_insert((local, cache_time()?));
         Ok(Some(local))
     }
 }
@@ -143,15 +159,12 @@ mod tests {
     fn route_cache_expires_at_five_minutes_and_retains_backwards_clock_policy() {
         let remote = "127.0.0.2:0".parse().unwrap();
         let local = "127.0.0.1:0".parse().unwrap();
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let now = 1000 * 10_000_000;
         let mut cache = Cache::default();
         cache.0.insert(remote, (local, now));
-        assert_eq!(cache.get(remote, now - Duration::from_secs(1)), Some(local));
-        assert_eq!(
-            cache.get(remote, now + Duration::from_secs(299)),
-            Some(local)
-        );
-        assert_eq!(cache.get(remote, now + Duration::from_secs(300)), None);
+        assert_eq!(cache.get(remote, now - 10_000_000), Some(local));
+        assert_eq!(cache.get(remote, now + 299 * 10_000_000), Some(local));
+        assert_eq!(cache.get(remote, now + 300 * 10_000_000), None);
         assert!(cache.0.is_empty());
     }
     #[test]
