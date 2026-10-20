@@ -778,7 +778,10 @@ fn spawn_owned(
     work: impl Future<Output = Result<()>> + Send + 'static,
 ) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-        inner.state.lock().unwrap_or_else(|p| p.into_inner()).failed = true;
+        let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.failed = true;
+        state.cleanup_error = Some(CallAudioError::CleanupUnconfirmed);
+        drop(state);
         operation.complete(Err(CallAudioError::CleanupUnconfirmed));
         return;
     };

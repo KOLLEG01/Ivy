@@ -15,7 +15,7 @@ use std::{
     collections::VecDeque,
     future::Future,
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     pin::Pin,
     process::{Command, Stdio},
     sync::{
@@ -306,6 +306,7 @@ impl CallAudioRoute for Route {
 struct Factory {
     routes: Mutex<VecDeque<Result<Arc<Route>, CallAudioError>>>,
     gate: Option<Arc<Gate>>,
+    gate_at: usize,
     opens: AtomicUsize,
 }
 impl Factory {
@@ -313,6 +314,7 @@ impl Factory {
         Self {
             routes: Mutex::new(routes.into_iter().map(Ok).collect()),
             gate: None,
+            gate_at: 0,
             opens: AtomicUsize::new(0),
         }
     }
@@ -329,8 +331,10 @@ impl CallAudioFactory for Factory {
         Box::pin(async move {
             assert_eq!(settings.capture_endpoint, "capture-fixture");
             assert!(!permit.permitted());
-            self.opens.fetch_add(1, Ordering::SeqCst);
-            if let Some(gate) = &self.gate {
+            let index = self.opens.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = &self.gate
+                && index == self.gate_at
+            {
                 gate.block().await;
             }
             let route = self.routes.lock().unwrap().pop_front().unwrap()?;
@@ -561,6 +565,7 @@ async fn late_preparation_waiters_and_cleanup_uncertainty_keep_the_original_fenc
         let factory = Factory {
             routes: Mutex::new(VecDeque::from([Err(error)])),
             gate: None,
+            gate_at: 0,
             opens: AtomicUsize::new(0),
         };
         let port = CallAudioPort::new(CALL.into(), Arc::new(factory)).unwrap();
@@ -641,6 +646,132 @@ async fn one_same_owner_repair_waits_for_old_route_and_cannot_adopt_a_foreign_or
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_retains_blocked_repair_and_releases_late_devices_without_adoption() {
+    for late_factory in [false, true] {
+        let gate = Arc::new(Gate::default());
+        let mut first = Route::new();
+        if !late_factory {
+            first.close_gate = Some(gate.clone());
+        }
+        let first = Arc::new(first);
+        let second = Arc::new(Route::new());
+        let mut factory = Factory::routes(vec![first.clone(), second.clone()]);
+        if late_factory {
+            factory.gate = Some(gate.clone());
+            factory.gate_at = 1;
+        }
+        let factory = Arc::new(factory);
+        let port = CallAudioPort::new(CALL.into(), factory.clone()).unwrap();
+        let mut config = settings();
+        config.source_mode = "desktop_process".into();
+        port.prepare(config, Some(desktop()), CancellationToken::new())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        port.bind_authority("capture-fixture").unwrap();
+        port.grant_authority().unwrap();
+        port.arm_voice_recovery().unwrap();
+        first.mode("failed");
+        let repair = port.rebind(desktop(), Arc::new(|| true)).unwrap();
+        gate.wait().await;
+        let close = port.close();
+        let observer = tokio::spawn({
+            let close = close.clone();
+            async move { close.wait().await }
+        });
+        observer.abort();
+        let _ = observer.await;
+        assert!(!close.finished());
+        assert!(!port.state().open);
+        gate.release();
+        assert_eq!(repair.wait().await, Err(CallAudioError::OwnerChanged));
+        close.wait().await.unwrap();
+        assert_eq!(port.status().state, "closed");
+        assert_eq!(
+            factory.opens.load(Ordering::SeqCst),
+            if late_factory { 2 } else { 1 }
+        );
+        assert_eq!(first.state.lock().unwrap().disposals, 1);
+        let second = second.state.lock().unwrap();
+        assert_eq!(
+            (second.disposals, second.resumes),
+            (usize::from(late_factory), 0)
+        );
+    }
+    let mut first = Route::new();
+    first.state.get_mut().unwrap().bad_close = true;
+    let first = Arc::new(first);
+    let factory = Arc::new(Factory::routes(vec![first.clone()]));
+    let port = CallAudioPort::new(CALL.into(), factory.clone()).unwrap();
+    let mut config = settings();
+    config.source_mode = "desktop_process".into();
+    port.prepare(config, Some(desktop()), CancellationToken::new())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    port.bind_authority("capture-fixture").unwrap();
+    port.grant_authority().unwrap();
+    port.arm_voice_recovery().unwrap();
+    first.mode("failed");
+    assert_eq!(
+        port.rebind(desktop(), Arc::new(|| true))
+            .unwrap()
+            .wait()
+            .await,
+        Err(CallAudioError::RouteFailed)
+    );
+    assert_eq!(factory.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(first.state.lock().unwrap().disposals, 1);
+    assert_eq!(port.close().wait().await, Err(CallAudioError::RouteFailed));
+    assert_eq!(port.status().state, "failed");
+    trace(
+        "repair-close-races",
+        IvyJson::object([
+            ("blockedOldCleanupWaited", true.into()),
+            ("lateReplacementDisposedOnce", true.into()),
+            ("cancelledCloseObserverRetainedWork", true.into()),
+            ("failedCleanupFenced", true.into()),
+        ]),
+    );
+}
+
+#[test]
+fn unavailable_executor_cannot_report_successful_resource_release() {
+    let route = Arc::new(Route::new());
+    let factory = Arc::new(Factory::routes(vec![route.clone()]));
+    let port = CallAudioPort::new(CALL.into(), factory.clone()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        port.prepare(settings(), None, CancellationToken::new())
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+    });
+    // Owned work is requested outside an entered runtime, so no disposal can be proved.
+    let close = port.close();
+    assert_eq!(
+        runtime.block_on(close.wait()),
+        Err(CallAudioError::CleanupUnconfirmed)
+    );
+    assert_eq!(port.status().state, "failed");
+    assert_eq!(route.state.lock().unwrap().disposals, 0);
+    runtime.block_on(route.close()).unwrap();
+    trace(
+        "executor-cleanup-fence",
+        IvyJson::object([
+            ("missingExecutorClaimedClosed", false.into()),
+            ("fixtureResourcesReleasedSeparately", true.into()),
+        ]),
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn revoke_during_capture_clears_pcm_and_final_guard_never_recaptures_a_new_route_generation()
 {
@@ -672,6 +803,7 @@ async fn revoke_during_capture_clears_pcm_and_final_guard_never_recaptures_a_new
     });
     wait(|| read.entered.load(Ordering::SeqCst)).await;
     let revoked = Arc::new(AtomicBool::new(false));
+    let lease = route.state.lock().unwrap().permit.clone().unwrap();
     let revoke = tokio::task::spawn_blocking({
         let port = port.clone();
         let revoked = revoked.clone();
@@ -680,7 +812,7 @@ async fn revoke_during_capture_clears_pcm_and_final_guard_never_recaptures_a_new
             revoked.store(true, Ordering::SeqCst);
         }
     });
-    sleep(Duration::from_millis(20)).await;
+    wait(|| !lease.permitted()).await;
     assert!(!revoked.load(Ordering::SeqCst));
     read.release();
     let (count, pcm) = capture.await.unwrap();
@@ -872,6 +1004,113 @@ async fn waiting_and_feedback_pcm_match_original_without_forwarding_capture_or_r
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn screening_repeats_pause_and_bridge_match_original_without_capture_authority() {
+    let bytes = wav(11025, 2, 41);
+    let actions = [
+        ("read", 200),
+        ("pause", 0),
+        ("read", 10),
+        ("write", 0),
+        ("wait", 0),
+        ("read", 24500),
+        ("read", 23500),
+        ("read", 25000),
+        ("pause", 0),
+        ("grant", 0),
+        ("read", 32),
+        ("write", 0),
+        ("bridge", 0),
+        ("read", 32),
+        ("write", 0),
+        ("bridge", 0),
+    ];
+    let input = IvyJson::object([
+        ("op", "screen".into()),
+        ("hex", hex(&bytes).into()),
+        ("timeout", n(1)),
+        ("repeats", n(1)),
+        (
+            "actions",
+            IvyJson::Array(
+                actions
+                    .iter()
+                    .map(|(op, count)| {
+                        IvyJson::object([("op", (*op).into()), ("count", n(*count))])
+                    })
+                    .collect(),
+            ),
+        ),
+    ]);
+    let Some(old) = original(&[input.clone()]) else {
+        return;
+    };
+    let expected = &old.as_array().unwrap()[0];
+    assert_eq!(
+        expected.get("ok").unwrap().as_bool(),
+        Some(true),
+        "{expected:?}"
+    );
+    let file = TempWav::new(&bytes);
+    let route = Arc::new(Route::new());
+    let port =
+        CallAudioPort::new(CALL.into(), Arc::new(Factory::routes(vec![route.clone()]))).unwrap();
+    port.prepare(settings(), None, CancellationToken::new())
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let screening = ScreeningAudio::new(
+        port.clone(),
+        &file.0,
+        &ivy_contracts::hash::digest(&bytes),
+        1,
+        1,
+        true,
+    )
+    .unwrap();
+    let mut rows = Vec::new();
+    for (op, count) in actions {
+        let mut output = Vec::new();
+        match op {
+            "read" => {
+                output.resize(count, 0.0);
+                screening.read_captured(&mut output, screening.state().generation);
+            }
+            "write" => {
+                screening.write_received(&[0.0; 32], screening.state().generation);
+            }
+            "pause" => screening.set_waiting(false),
+            "wait" => screening.set_waiting(true),
+            "grant" => port.grant_authority().unwrap(),
+            "bridge" => screening.bridge(),
+            _ => unreachable!(),
+        }
+        let open = screening.state().open;
+        let route = route.state.lock().unwrap();
+        rows.push(IvyJson::object([
+            ("action", op.into()),
+            ("open", open.into()),
+            ("reads", n(route.reads)),
+            ("writes", n(route.writes)),
+            ("pcm", floats(&output).into()),
+        ]));
+    }
+    assert_eq!(
+        IvyJson::Array(rows.clone()),
+        *expected.get("trace").unwrap()
+    );
+    port.close().wait().await.unwrap();
+    trace(
+        "original-screening",
+        IvyJson::object([
+            ("input", input),
+            ("original", old),
+            ("rust", IvyJson::Array(rows)),
+        ]),
+    );
+}
+
 struct TempWav(PathBuf);
 impl TempWav {
     fn new(bytes: &[u8]) -> Self {
@@ -966,6 +1205,7 @@ async fn actual_sender_uses_waiting_and_screening_authority_and_stops_at_the_ori
     receiver.close().await;
     port.close().wait().await.unwrap();
     assert_eq!(route.state.lock().unwrap().disposals, 1);
+    while rtp.try_recv(&mut wire).is_ok() {}
     let bytes = wav(48000, 1, 960);
     let file = TempWav::new(&bytes);
     let hash = ivy_contracts::hash::digest(&bytes);
@@ -985,6 +1225,27 @@ async fn actual_sender_uses_waiting_and_screening_authority_and_stops_at_the_ori
     screening.read_captured(&mut pcm, original.generation);
     assert!(pcm.iter().any(|s| s.abs() > 0.01));
     assert_eq!(route.state.lock().unwrap().reads, 0);
+    let receiver = SipRtpReceiver::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        54000,
+        54998,
+        20,
+        Arc::new(CallWaitingAudio::new(port.clone()).unwrap()),
+        None,
+        events,
+    )
+    .unwrap();
+    configure(&receiver, &rtp, &rtcp);
+    receiver
+        .start_sending(screening.clone(), 18, 8, 88)
+        .unwrap();
+    let (size, _) = timeout(Duration::from_secs(2), rtp.recv_from(&mut wire))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(RtpPacket::parse(&wire[..size]).unwrap().header.source, 18);
+    assert!(!port.state().open);
+    assert_eq!(route.state.lock().unwrap().reads, 0);
     screening.set_waiting(false);
     let mut sent = false;
     assert!(!screening.with_send_state(original, &mut || sent = true));
@@ -996,12 +1257,17 @@ async fn actual_sender_uses_waiting_and_screening_authority_and_stops_at_the_ori
     screening.read_captured(&mut pcm, current.generation);
     assert!(pcm.iter().all(|s| *s == 0.25));
     port.revoke();
+    let after = receiver.observation().transport.counters.rtp_sent;
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(receiver.observation().transport.counters.rtp_sent, after);
     assert!(!screening.with_send_state(screening.state(), &mut || sent = true));
+    receiver.close().await;
     port.close().wait().await.unwrap();
     trace(
         "actual-progress-guard",
         IvyJson::object([
             ("actualWaitingUdp", true.into()),
+            ("actualScreeningUdp", true.into()),
             ("desktopReadsDuringWaiting", n(0)),
             ("postRevokePackets", n(0)),
             ("obsoleteScreeningSuppressed", true.into()),

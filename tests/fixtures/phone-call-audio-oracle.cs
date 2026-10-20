@@ -95,8 +95,34 @@ public static class PhoneCallAudioOracle {
         var samples=parse(Convert.FromHexString(input.GetProperty("hex").GetString()));
         return new{ok=true,pcm=Floats(samples)};
     }
+    static async Task<object> Screen(JsonElement input){
+        string path=Path.GetTempFileName();
+        var route=new Route();var permit=new AudioPermit();
+        var normal=new CallAudioPort("11111111-1111-4111-8111-111111111111",permit,(_,_,allowed,_)=>{route.Allowed=allowed;return Task.FromResult<ICallAudioRoute>(route);});
+        object screen=null;
+        try {
+            byte[] bytes=Convert.FromHexString(input.GetProperty("hex").GetString());File.WriteAllBytes(path,bytes);
+            await normal.PrepareAsync(Settings(),null);bool waiting=true;
+            var type=typeof(CallAudioPort).Assembly.GetType("Ivy.PhoneBridge.ScreeningAudio");
+            screen=Activator.CreateInstance(type,BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic,null,new object[]{normal,(Func<bool>)(()=>waiting)},null);
+            Invoke(screen,"Load",new ScreeningSettings(path,"sha256:"+Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)),input.GetProperty("timeout").GetInt32(),input.GetProperty("repeats").GetInt32()));
+            var audio=(IPcmAudioPort)screen;var rows=new List<object>();
+            foreach(var action in input.GetProperty("actions").EnumerateArray()){
+                string name=action.GetProperty("op").GetString();float[] output=Array.Empty<float>();
+                switch(name){
+                    case "read":output=new float[action.GetProperty("count").GetInt32()];audio.ReadCaptured(output);break;
+                    case "write":audio.WriteReceived(new float[32]);break;
+                    case "wait":waiting=true;break;case "pause":waiting=false;break;
+                    case "grant":Invoke(normal,"GrantAuthority");break;case "bridge":Invoke(screen,"Bridge");break;
+                    default:throw new ArgumentException();
+                }
+                rows.Add(new{action=name,open=audio.IsOpen,reads=route.Reads,writes=route.Writes,pcm=Floats(output)});
+            }
+            return new{ok=true,trace=rows};
+        } finally {if(screen is IDisposable owned)owned.Dispose();await normal.DisposeAsync();File.Delete(path);}
+    }
     static async Task RunAsync(){using var input=JsonDocument.Parse(Console.In.ReadToEnd());var rows=new List<object>();
-        foreach(var item in input.RootElement.EnumerateArray())try{string op=item.GetProperty("op").GetString();rows.Add(op=="wave"?Wave(item):op=="waiting"?await Waiting(item):await Lifetime(item));}
+        foreach(var item in input.RootElement.EnumerateArray())try{string op=item.GetProperty("op").GetString();rows.Add(op=="wave"?Wave(item):op=="screen"?await Screen(item):op=="waiting"?await Waiting(item):await Lifetime(item));}
         catch(Exception error){rows.Add(new{ok=false,error=error.GetType().Name});}
         Console.Write(JsonSerializer.Serialize(rows));
     }
