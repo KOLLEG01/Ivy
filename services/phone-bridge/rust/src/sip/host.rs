@@ -17,7 +17,8 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, OnceLock, Weak},
 };
-use tokio::sync::Notify;
+use tokio::{sync::Notify, task::JoinSet};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SipHostError {
@@ -276,7 +277,13 @@ struct State {
     registration_view: Option<SipRegistrationObserver>,
     reconnecting: Option<Arc<Completion<RegistrationObservation>>>,
     calls: crate::call_slots::CallSlots<Arc<Call>>,
+    requests: Option<ManagedRequests>,
+    unhandled_requests: Vec<Transaction>,
     closing: Option<Arc<Completion<()>>>,
+}
+struct ManagedRequests {
+    stop: CancellationToken,
+    done: Arc<Completion<()>>,
 }
 type Shared = Arc<Mutex<State>>;
 struct Handle(Shared);
@@ -316,6 +323,8 @@ impl SipHost {
             registration_view: None,
             reconnecting: None,
             calls: Default::default(),
+            requests: None,
+            unhandled_requests: Vec::new(),
             closing: None,
         })))))
     }
@@ -760,17 +769,41 @@ impl SipHost {
             .incoming_transactions()
             .map_err(SipHostError::Signalling)
     }
-    pub fn deliver_control(&self, mut transaction: Transaction) -> Result<(), Transaction> {
-        let state = self.shared().lock().unwrap();
-        for call in state.calls.iter() {
-            if let Some(invite) = &call.state.lock().unwrap().invite {
-                transaction = match invite.deliver_control(transaction) {
-                    Ok(()) => return Ok(()),
-                    Err(transaction) => transaction,
-                };
-            }
+    /// Own the original TU stream through call/registration teardown. This does
+    /// not grant admission to an incoming INVITE: that original transaction
+    /// remains fenced until an incoming call owner can adopt it.
+    pub(crate) fn start_requests(&self) -> Result<(), SipHostError> {
+        let mut state = self.shared().lock().unwrap();
+        ready(&state)?;
+        if state.requests.is_some() {
+            return Err(SipHostError::OperationConflict);
         }
-        Err(transaction)
+        let receiver = state
+            .binding
+            .as_ref()
+            .unwrap()
+            .endpoint()
+            .map_err(SipHostError::Binding)?
+            .incoming_transactions()
+            .map_err(SipHostError::Signalling)?;
+        let stop = CancellationToken::new();
+        let done = Completion::new();
+        state.requests = Some(ManagedRequests {
+            stop: stop.clone(),
+            done: done.clone(),
+        });
+        let owner = Arc::downgrade(self.shared());
+        tokio::spawn(async move {
+            let result = tokio::spawn(dispatch_requests(owner, receiver, stop))
+                .await
+                .unwrap_or(Err(SipHostError::CleanupUnconfirmed));
+            done.finish(result);
+        });
+        Ok(())
+    }
+    pub fn deliver_control(&self, transaction: Transaction) -> Result<(), Transaction> {
+        let state = self.shared().lock().unwrap();
+        deliver_control(&state, transaction)
     }
     pub async fn close(&self) -> Result<(), SipHostError> {
         begin_close(self.shared()).wait().await
@@ -787,6 +820,101 @@ fn ready(state: &State) -> Result<(), SipHostError> {
             .is_some_and(|work| work.pending())
     {
         Err(SipHostError::NotReady)
+    } else {
+        Ok(())
+    }
+}
+fn deliver_control(state: &State, mut transaction: Transaction) -> Result<(), Transaction> {
+    for call in state.calls.iter() {
+        if let Some(invite) = &call.state.lock().unwrap().invite {
+            transaction = match invite.deliver_control(transaction) {
+                Ok(()) => return Ok(()),
+                Err(transaction) => transaction,
+            };
+        }
+    }
+    Err(transaction)
+}
+async fn dispatch_requests(
+    owner: Weak<Mutex<State>>,
+    mut receiver: TransactionReceiver,
+    stop: CancellationToken,
+) -> Result<(), SipHostError> {
+    use rsipstack::sip::{Method, StatusCode, prelude::HeadersExt};
+    let mut replies = JoinSet::new();
+    let mut stopping = false;
+    let mut failed = false;
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled(), if !stopping => {
+                // Close admission before draining queued originals; do not
+                // abort a response inside the stack's send future.
+                stopping = true;
+                receiver.close();
+            }
+            result = replies.join_next(), if !replies.is_empty() => {
+                failed |= !matches!(result, Some(Ok(true)));
+            }
+            transaction = receiver.recv() => {
+                let Some(transaction) = transaction else { failed |= !stopping; break; };
+                let Some(host) = owner.upgrade() else {
+                    return Err(SipHostError::CleanupUnconfirmed);
+                };
+                let transaction = {
+                    let state = host.lock().unwrap();
+                    match deliver_control(&state, transaction) {
+                        Ok(()) => continue,
+                        Err(transaction) => transaction,
+                    }
+                };
+                if transaction.original.method == Method::Invite {
+                    // No incoming media/answer owner exists yet. Keep the
+                    // original, including its timers/socket references; an
+                    // ignored request cannot become confirmed host cleanup.
+                    host.lock().unwrap().unhandled_requests.push(transaction);
+                    continue;
+                }
+                let request = &transaction.original;
+                let in_dialog = request.from_header().ok().and_then(|h| h.tag().ok().flatten()).is_some()
+                    && request.to_header().ok().and_then(|h| h.tag().ok().flatten()).is_some();
+                let status = if in_dialog { None } else { match request.method {
+                    Method::Options => Some(StatusCode::OK),
+                    Method::Notify | Method::Message => Some(StatusCode::MethodNotAllowed),
+                    _ => None,
+                }};
+                if let Some(status) = status {
+                    let owner = owner.clone();
+                    replies.spawn(async move {
+                        let mut original = transaction;
+                        if original.reply(status).await.is_ok() {
+                            // Server non-INVITE final responses retire on the
+                            // original driver. Drop before publishing completion.
+                            drop(original);
+                            true
+                        } else {
+                            if let Some(host) = owner.upgrade() {
+                                host.lock().unwrap().unhandled_requests.push(original);
+                            }
+                            false
+                        }
+                    });
+                }
+                // Original host policy ignores all other non-INVITE requests.
+                // They have no response or protocol work to infer; dropping
+                // this TU-owned transaction removes its original stack route.
+            }
+        }
+    }
+    while let Some(result) = replies.join_next().await {
+        failed |= !matches!(result, Ok(true));
+    }
+    if failed
+        || owner
+            .upgrade()
+            .is_none_or(|host| !host.lock().unwrap().unhandled_requests.is_empty())
+    {
+        Err(SipHostError::CleanupUnconfirmed)
     } else {
         Ok(())
     }
@@ -916,6 +1044,22 @@ fn begin_close(owner: &Shared) -> Arc<Completion<()>> {
             if let Err(error) = registration.close().await {
                 owner.lock().unwrap().registration = Some(registration);
                 done.finish(Err(SipHostError::Registration(error)));
+                return;
+            }
+        }
+        // Calls still receive matching controls while they retire. Only then
+        // close the TU receiver and await every response before unwrapping the
+        // same binding. Unhandled/failed originals retain the existing fence.
+        let requests = owner
+            .lock()
+            .unwrap()
+            .requests
+            .as_ref()
+            .map(|requests| (requests.stop.clone(), requests.done.clone()));
+        if let Some((stop, requests)) = requests {
+            stop.cancel();
+            if let Err(error) = requests.wait().await {
+                done.finish(Err(error));
                 return;
             }
         }

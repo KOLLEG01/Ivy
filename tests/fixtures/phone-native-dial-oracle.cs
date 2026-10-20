@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Ivy.PhoneBridge;
 using SIPSorcery.SIP;
@@ -56,13 +57,27 @@ public static class PhoneNativeDialOracle {
                 foreach(char digit in "*0#")digitMethod.Invoke(Host(owner).FindCall(id).Features,new object[]{digit,source});
             }
             var policy=Host(owner).FindCall(id).Features.Observation;
-            if(scenario!="refused") {
+            object ended=null;
+            if(scenario=="remote_bye") {
+                string raw=$"BYE sip:fixture@{remote} SIP/2.0\r\nVia: SIP/2.0/UDP {peer.Client.LocalEndPoint};branch=z9hG4bK-owned-bye\r\nFrom: <sip:peer@{peer.Client.LocalEndPoint}>;tag=owned-peer\r\nTo: <{invite.Header.From.FromURI}>;tag={invite.Header.From.FromTag}\r\nCall-ID: {id}\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n";
+                byte[] packet=Encoding.UTF8.GetBytes(raw);
+                for(int n=0;n<2;n++) {
+                    await peer.SendAsync(packet,packet.Length,remote);
+                    var reply=await peer.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(4));
+                    if((int)SIPResponse.ParseSIPResponse(Encoding.UTF8.GetString(reply.Buffer)).Status!=200)throw new Exception("Original BYE response unavailable");
+                }
+                var until=DateTime.UtcNow.AddSeconds(4);
+                while(Host(owner).FindCall(id).Observation.State=="connected"&&DateTime.UtcNow<until)await Task.Delay(1);
+                ended=Host(owner).FindCall(id).Observation;
+            } else if(scenario!="refused") {
                 await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
                 var (bye,byeRemote)=await ReceiveDialog(peer);
                 if(bye.Method!=SIPMethodsEnum.BYE)throw new Exception("Original BYE unavailable");
                 Reply(peer,bye,byeRemote,200,"");
             }
             await owner.InvokeAsync("call.release",Args(new{callId=id}));
+            if(scenario=="remote_bye")return new{call,ended,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
+                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null};
             return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
                 requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null};
         }
@@ -74,12 +89,33 @@ public static class PhoneNativeDialOracle {
         await owner.InvokeAsync("call.prepare",Args(new{callId=args.GetProperty("callId").GetString()}));
         return await Outgoing(owner,args,peer);
     }
+    static async Task<object> Requests(NativeSipOperations owner,JsonElement args) {
+        string id=args.GetProperty("callId").GetString();
+        using var peer=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        var target=Host(owner).LocalEndpoint;
+        var rows=new List<object>();int sequence=100;
+        foreach(var input in args.GetProperty("requests").EnumerateArray()) {
+            string method=input.GetProperty("method").GetString();bool tagged=input.GetProperty("tagged").GetBoolean();
+            string raw=$"{method} sip:fixture@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {peer.Client.LocalEndPoint};branch=z9hG4bK-owned-request-{sequence}\r\nFrom: <sip:peer@{peer.Client.LocalEndPoint}>;tag=foreign\r\nTo: <sip:fixture@{target}>{(tagged?";tag=foreign":"")}\r\nCall-ID: {id}\r\nCSeq: {sequence++} {method}\r\nContent-Type: application/octet-stream\r\nContent-Length: 19\r\n\r\nprivate-fixture-raw";
+            byte[] bytes=Encoding.UTF8.GetBytes(raw);await peer.SendAsync(bytes,bytes.Length,target);
+            int? status=null;
+            using var cancel=new CancellationTokenSource(input.GetProperty("response").ValueKind==JsonValueKind.Null?150:4000);
+            try {
+                var reply=await peer.ReceiveAsync(cancel.Token);
+                status=(int)SIPResponse.ParseSIPResponse(Encoding.UTF8.GetString(reply.Buffer)).Status;
+            } catch(OperationCanceledException) { }
+            rows.Add(new{method,tagged,status});
+        }
+        await owner.InvokeAsync("call.release",Args(new{callId=id}));
+        await owner.DisposeAsync();
+        return new{requests=rows,closed=true};
+    }
     public static void Run() {
         using var input=JsonDocument.Parse(Console.In.ReadToEnd());var owner=new NativeSipOperations(id=>new CallAudioPort(id,new AudioPermit()));
         var rows=new List<object>();
         try {foreach(var step in input.RootElement.EnumerateArray()) {
             try {string method=step.GetProperty("method").GetString();var args=step.GetProperty("params");
-                object result=method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
+                object result=method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():method=="fixture.requests"?Requests(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
                 rows.Add(new{json=JsonSerializer.Serialize(result,NativeRpc.Json)});
             } catch(Exception e){rows.Add(new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"});}
         }} finally {owner.DisposeAsync().AsTask().GetAwaiter().GetResult();}

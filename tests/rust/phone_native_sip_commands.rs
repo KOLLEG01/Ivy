@@ -3,6 +3,8 @@ use super::*;
 mod dial;
 #[path = "phone_native_registration.rs"]
 mod registration;
+#[path = "phone_native_requests.rs"]
+mod requests;
 #[path = "phone_native_status.rs"]
 mod status;
 use ivy_phone_bridge::{

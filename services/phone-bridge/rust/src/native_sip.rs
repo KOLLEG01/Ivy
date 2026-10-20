@@ -340,8 +340,11 @@ impl NativeSipOperations {
         }));
         let host = self.0.host.clone();
         let operation = retained(async move {
-            host.configure_with_setup(parts.host, move || setup(parts.micro))
-                .await
+            let endpoint = host
+                .configure_with_setup(parts.host, move || setup(parts.micro))
+                .await?;
+            host.start_requests()?;
+            Ok(endpoint)
         });
         state.configuring = Some(operation.clone());
         Ok(operation)

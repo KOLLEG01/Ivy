@@ -23,7 +23,7 @@ fn normal_params(id: &str) -> String {
         "false",
     )
 }
-fn original_raw(steps: &[(String, String)]) -> Option<IvyJson> {
+pub(super) fn original_raw(steps: &[(String, String)]) -> Option<IvyJson> {
     if std::env::var_os("IVY_PHONE_CONFIG_ORACLE_DIR").is_none() {
         return None;
     }
@@ -103,7 +103,7 @@ fn normalize(v: &mut IvyJson) {
         }
     }
 }
-fn compare(rows: &[IvyJson], original: &Option<IvyJson>, steps: &[(String, String)]) {
+pub(super) fn compare(rows: &[IvyJson], original: &Option<IvyJson>, steps: &[(String, String)]) {
     if let Some(original) = original {
         for (i, (a, b)) in rows.iter().zip(original.as_array().unwrap()).enumerate() {
             if let Some(raw) = a.get("json") {
@@ -351,7 +351,43 @@ async fn outgoing(
         assert_eq!(policy.command, Some("new_voice"));
         assert_eq!(policy.command_sequence, 1);
     }
-    if scenario != "refused" {
+    let mut ended = None;
+    if scenario == "remote_bye" {
+        let from = invite.from_header().unwrap();
+        let tag = from.tag().unwrap().unwrap().value().to_string();
+        let raw = format!(
+            "BYE sip:fixture@{remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-owned-bye\r\nFrom: <sip:peer@{}>;tag=owned-peer\r\nTo: <{}>;tag={tag}\r\nCall-ID: {CALL}\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n",
+            peer.local_addr().unwrap(),
+            peer.local_addr().unwrap(),
+            from.uri().unwrap()
+        );
+        for _ in 0..2 {
+            peer.send_to(raw.as_bytes(), remote).await.unwrap();
+            let mut bytes = [0u8; 4096];
+            let (n, source) =
+                tokio::time::timeout(Duration::from_secs(4), peer.recv_from(&mut bytes))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(source, remote);
+            let response =
+                rsipstack::sip::Response::try_from(std::str::from_utf8(&bytes[..n]).unwrap())
+                    .unwrap();
+            assert_eq!(response.status_code.code(), 200);
+        }
+        until(|| {
+            original_call.observation().phase == ivy_phone_bridge::sip::SipHostCallPhase::LocalEnded
+                && media.observation().closed
+        })
+        .await;
+        ended = Some(
+            parse(
+                &ivy_phone_bridge::native_sip_status::call_json(&original_call).unwrap(),
+                65536,
+            )
+            .unwrap(),
+        );
+    } else if scenario != "refused" {
         let h = dispatcher
             .execute(command(
                 "call.hangup",
@@ -389,7 +425,7 @@ async fn outgoing(
     assert_eq!(replay.outcome().result_json(), Some(saved.as_str()));
     assert!(media.observation().closed);
     assert_eq!(media.observation().receive.transport.local_rtp, local_media);
-    IvyJson::object([
+    let mut result = IvyJson::object([
         ("call", call),
         ("hungup", hungup),
         ("policy", parse(&policy.json(), 65536).unwrap()),
@@ -413,7 +449,11 @@ async fn outgoing(
                 .into(),
         ),
         ("released", owner.find(CALL).is_none().into()),
-    ])
+    ]);
+    if let (Some(ended), IvyJson::Object(fields)) = (ended, &mut result) {
+        fields.push(("ended".into(), ended));
+    }
+    result
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_receipts() {
@@ -435,7 +475,7 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
             Arc::new(NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap());
         let selected = format!(r#"{{"callId":"{CALL}"}}"#);
         let mut steps = vec![("configure".into(), params.clone())];
-        for scenario in ["connected", "refused", "hangup_before_answer"] {
+        for scenario in ["connected", "refused", "hangup_before_answer", "remote_bye"] {
             steps.push(("call.prepare".into(), selected.clone()));
             steps.push((
                 "fixture.outgoing".into(),
@@ -480,7 +520,7 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
             ]),
         );
         compare(&rows, &original, &steps);
-        assert_eq!(factory.starts.load(Ordering::SeqCst), 3);
+        assert_eq!(factory.starts.load(Ordering::SeqCst), 4);
         assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
         assert!(remaining.methods.lock().unwrap().is_empty());
         handler.shutdown().await.unwrap();
