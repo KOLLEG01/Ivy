@@ -387,6 +387,18 @@ fn perform_step(
 }
 fn full_shape(m: &SipMediaSession, peer: u16) -> IvyJson {
     let mut state = shape(m, peer);
+    if m.is_closed() {
+        // SDK Close detaches its public RTCP session. Rust retains its closed
+        // owner for disposal evidence; project that same nullable SDK view.
+        assert!(
+            m.observation()
+                .receive
+                .rtcp_session
+                .as_ref()
+                .is_none_or(|s| s.closed)
+        );
+        state.insert("controlClosed", IvyJson::Null);
+    }
     state.insert("closed", m.is_closed().into());
     let remote = m.remote_description();
     state.insert(
