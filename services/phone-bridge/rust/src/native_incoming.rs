@@ -42,12 +42,8 @@ impl NativeIncoming {
         for identity in request
             .headers
             .iter()
-            .filter_map(|h| match h {
-                Header::Other(name, value) if name.eq_ignore_ascii_case("P-Asserted-Identity") => {
-                    Some(value.as_str())
-                }
-                _ => None,
-            })
+            .filter(|h| h.name().eq_ignore_ascii_case("P-Asserted-Identity"))
+            .map(Header::value)
             .flat_map(|h| h.split(','))
             .take(16)
         {

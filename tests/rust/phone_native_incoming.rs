@@ -465,3 +465,120 @@ async fn native_claim_preserves_original_dto_lookup_and_outgoing_refusal_order()
     super::dial::compare(&rows, &original, &steps);
     handler.shutdown().await.unwrap();
 }
+
+struct HoldingIncomingFactory {
+    inner: Arc<CountedFactory>,
+    gate: Arc<Gate>,
+}
+impl NativeSipMediaFactory for HoldingIncomingFactory {
+    fn create(
+        &self,
+        id: String,
+        configuration: Arc<NativeCallConfiguration>,
+    ) -> NativeSipMediaFuture {
+        let inner = self.inner.clone();
+        let gate = self.gate.clone();
+        Box::pin(async move {
+            gate.block().await;
+            inner.create(id, configuration).await
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incoming_claim_waits_for_original_construction_and_cannot_restore_released_authority() {
+    let (_, factory, routes, config) = actual_owner(42000, 42998);
+    let gate = Arc::new(Gate::default());
+    let owner = NativeSipOperations::new(Arc::new(HoldingIncomingFactory {
+        inner: factory.clone(),
+        gate: gate.clone(),
+    }));
+    let remaining = Arc::new(Remaining::default());
+    remaining.close_gate.release();
+    let handler = Arc::new(NativeSipCommands::new(
+        owner.clone(),
+        remaining.clone(),
+        |_| Box::pin(async { Ok(()) }),
+        closed_platform_views(),
+    ));
+    let dispatcher = Arc::new(NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap());
+    assert!(
+        dispatcher
+            .execute(command("configure", &config, 1, 1))
+            .await
+            .outcome()
+            .error_code()
+            .is_none()
+    );
+    let target = owner.observation().endpoint.unwrap();
+    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    peer.send_to(
+        raw(
+            "INVITE",
+            "z9hG4bK-construction",
+            "wire-construction",
+            "<sip:+49123456789@identity.example.test>",
+            peer.local_addr().unwrap(),
+            target,
+            false,
+        )
+        .as_bytes(),
+        target,
+    )
+    .await
+    .unwrap();
+    gate.wait().await;
+    until(|| owner.observation().calls.len() == 1).await;
+    let id = owner.observation().calls[0].id.clone();
+    let original = owner.find(&id).unwrap();
+    let selected = format!(r#"{{"callId":"{id}"}}"#);
+    let requests = dispatcher.clone();
+    let params = selected.clone();
+    let mut claim =
+        tokio::spawn(async move { requests.execute(command("call.claim", &params, 2, 2)).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), &mut claim)
+            .await
+            .is_err()
+    );
+    assert!(receive(&peer, 75).await.is_none());
+    owner.hangup(&original).unwrap();
+    let released = owner.release(&original).unwrap();
+    assert_eq!(
+        owner.prepare(id.clone()).err(),
+        Some(SipHostError::OperationConflict)
+    );
+    gate.release();
+    assert_eq!(
+        claim.await.unwrap().outcome().error_code(),
+        Some("phone_offer_expired")
+    );
+    assert_eq!(receive(&peer, 4000).await.unwrap().status_code.code(), 603);
+    released.wait().await.unwrap();
+    assert!(original.media().unwrap().observation().closed);
+    let replacement = owner.prepare(id.clone()).unwrap();
+    replacement.prepared().await.unwrap();
+    assert_eq!(
+        dispatcher
+            .execute(command("call.claim", &selected, 2, 3))
+            .await
+            .outcome()
+            .error_code(),
+        Some("phone_offer_expired")
+    );
+    assert!(!replacement.observation().ending);
+    owner.release(&replacement).unwrap().wait().await.unwrap();
+    handler.shutdown().await.unwrap();
+    drop(UdpSocket::bind(target).await.unwrap());
+    assert_eq!(factory.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
+    trace(
+        "native-incoming-construction-claim",
+        IvyJson::object([
+            ("claimWaitedForOriginalConstruction", true.into()),
+            ("expiredClaim", true.into()),
+            ("finalResponse", n(603)),
+            ("originalMediaClosed", true.into()),
+            ("originalBindingReleased", true.into()),
+        ]),
+    );
+}

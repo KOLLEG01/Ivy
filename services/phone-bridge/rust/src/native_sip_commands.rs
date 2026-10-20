@@ -187,9 +187,16 @@ impl NativeSipCommands {
             },
         )?;
         if request.method() == "call.claim" {
-            self.owner.claim(&call)?;
-            let snapshot = call_json(&call)?;
-            return Ok(Box::pin(async move { NativeOutcome::result(snapshot) }));
+            let owner = self.owner.clone();
+            return Ok(Box::pin(async move {
+                if let Err(error) = call.constructed().await {
+                    return failed(error.into());
+                }
+                match owner.claim(&call).and_then(|()| call_json(&call)) {
+                    Ok(snapshot) => NativeOutcome::result(snapshot),
+                    Err(error) => failed(error),
+                }
+            }));
         }
         if request.method() == "call.hangup" {
             self.owner.hangup(&call)?;

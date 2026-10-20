@@ -517,7 +517,13 @@ impl NativeSipOperations {
             let authorized = configured
                 && context.as_mut().is_some_and(|incoming| {
                     incoming.registered = owner.0.host.matches_registered_peer(incoming.peer);
-                    config.is_some_and(|c| c.incoming.allows(incoming.peer, &owner.0.host))
+                    config.is_some_and(|c| {
+                        c.incoming
+                            .addresses()
+                            .iter()
+                            .any(|address| crate::sip::same_ip(*address, incoming.peer.address))
+                            || c.incoming.uses_registered_peer() && incoming.registered
+                    })
                 });
             (
                 duplicate,
@@ -626,7 +632,7 @@ impl NativeSipOperations {
         }
         let _ = self.release(call);
     }
-    pub fn claim(&self, call: &NativeSipCall) -> Result<(), NativeSipError> {
+    pub(crate) fn claim(&self, call: &NativeSipCall) -> Result<(), NativeSipError> {
         let state = self.0.state.lock().unwrap();
         if Self::original(&state, call).is_err()
             || call.incoming().is_none()
