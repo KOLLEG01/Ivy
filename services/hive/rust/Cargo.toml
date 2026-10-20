@@ -11,7 +11,8 @@ p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic"
 ecdsa = { version = "=0.16.9", default-features = false, features = ["arithmetic", "hazmat"] }
 http-body-util = { version = "=0.1.5", default-features = false }
 hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
-hyper = { version = "=1.12.0", default-features = false, features = ["client", "http1"] }
+hyper.workspace = true
+tokio-tungstenite.workspace = true
 rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 futures-util.workspace = true
@@ -72,3 +73,7 @@ path = "../../../tests/rust/hive_http.rs"
 [[test]]
 name = "hive-offline-backup"
 path = "../../../tests/rust/hive_offline_backup.rs"
+
+[[test]]
+name = "hive-network"
+path = "../../../tests/rust/hive_network.rs"
