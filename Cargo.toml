@@ -28,7 +28,7 @@ tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "sync", 
 tokio-util = { version = "=0.7.20", features = ["rt"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "stream", "json", "multipart"] }
 aws-lc-rs = { version = "=1.18.2", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
-hyper = { version = "=1.12.0", features = ["server", "http1"] }
+hyper = { version = "=1.12.0", default-features = false, features = ["client", "server", "http1"] }
 hyper-util = { version = "=0.1.21", features = ["tokio"] }
 http-body-util = "=0.1.5"
 bytes = "=1.12.1"
