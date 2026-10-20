@@ -10,6 +10,9 @@ use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, hash::hash_j
 use ivy_sdk::rpc::RpcClient;
 use std::collections::HashSet;
 
+#[path = "comment_reads.rs"]
+pub mod comment_reads;
+
 #[allow(async_fn_in_trait)]
 pub trait EngineReadRuntime {
     fn validate(&self, definition: &str, value: &Json) -> IvyResult<()>;

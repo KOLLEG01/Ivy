@@ -31,6 +31,8 @@ mod scheduler;
 mod deliveries;
 #[path = "../fixtures/task-board-next-steps.rs"]
 mod next_steps;
+#[path = "../fixtures/task-board-comment-reads.rs"]
+mod comment_reads;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()

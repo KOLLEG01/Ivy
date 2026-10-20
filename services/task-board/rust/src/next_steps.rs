@@ -13,8 +13,9 @@ use std::{
     task::Poll,
 };
 
-/// Reads include archived objects and upgrade records, as in the workflow store.
-/// Header reads must omit foreign conversations. Run reads retain the exact pin.
+/// Reads are primary-domain reads and include archived objects. `header_only`
+/// binds the original retained flag: it skips conversation loading and record
+/// upgrading. Full reads materialize/upgrade records; Run pins remain exact.
 /// The current comment-tree store adapter is an explicit composition boundary;
 /// the legacy Store cannot silently stand in for this header-capable reader.
 #[allow(async_fn_in_trait)]
