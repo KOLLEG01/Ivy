@@ -52,7 +52,7 @@ public static class PhoneNativeDialOracle {
             var (ack,ackRemote)=await ReceiveDialog(peer);
             if(ack.Method!=SIPMethodsEnum.ACK)throw new Exception("Original ACK unavailable");
             object call=await pending.WaitAsync(TimeSpan.FromSeconds(5));
-            if(scenario=="media_failure_connected"){originalCall.Media.SetRemoteDescription(SIPSorcery.SIP.App.SdpType.offer,SIPSorcery.Net.SDP.ParseSDPDescription(sdp.Replace("PCMA/8000","PCMA/8000/2")));if(!originalCall.Media.Failed)throw new Exception("Original media failure unavailable");}
+            if(scenario=="media_failure_connected"){typeof(SipMediaSession).GetMethod("Fail",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(originalCall.Media,Array.Empty<object>());if(!originalCall.Media.Failed)throw new Exception("Original media failure unavailable");}
             if(scenario=="connected") {
                 var digitMethod=typeof(PhoneCallFeatures).GetMethod("Digit",BindingFlags.Instance|BindingFlags.NonPublic);
                 var source=Enum.Parse(digitMethod.GetParameters()[1].ParameterType,"SipInfo");
@@ -201,7 +201,7 @@ public static class PhoneNativeAnswerOracle {
             var ring=SIPResponse.ParseSIPResponse(await Receive(peer));if((int)ring.Status!=180)throw new Exception("Original answer ringing unavailable");
             await Wait(()=>Host(owner).Calls.Any(c=>c.Observation.SipCallId==wire));var call=Host(owner).Calls.Single(c=>c.Observation.SipCallId==wire);var media=call.Media;string id=call.Observation.Id;
             var failureCallbacks=new List<object>();media.MediaFailed+=()=>{failureCallbacks.Add(call.Observation);throw new InvalidOperationException("Synthetic external failure listener");};
-            void FailMedia(){media.SetRemoteDescription(SIPSorcery.SIP.App.SdpType.offer,SIPSorcery.Net.SDP.ParseSDPDescription(sdp.Replace("PCMA/8000","PCMA/8000/2")));if(!media.Failed)throw new Exception("Original media failure unavailable");}
+            void FailMedia(){typeof(SipMediaSession).GetMethod("Fail",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(media,Array.Empty<object>());if(!media.Failed)throw new Exception("Original media failure unavailable");}
             await owner.InvokeAsync("call.claim",Args(new{callId=id}));await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
             var pending=Invoke(owner,"call.answer",new{callId=id,waiting});
             var final=SIPResponse.ParseSIPResponse(await Receive(peer));int status=(int)final.Status;tag=final.Header.To.ToTag;
