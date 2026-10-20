@@ -8,6 +8,7 @@ pub mod media;
 pub mod native_config;
 pub mod native_pipe;
 pub mod native_rpc;
+pub mod native_sip;
 pub mod sip;
 pub mod voice_rpc;
 pub mod voice_selection;

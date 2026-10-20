@@ -1,4 +1,6 @@
 use super::*;
+#[path = "phone_native_sip.rs"]
+mod native_operations;
 use ivy_phone_bridge::{
     media::{
         MediaError, RtcpRuntime, RtcpWallTime, SdpDirection, SipMediaError, SipMediaIdentity,

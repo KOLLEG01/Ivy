@@ -1,0 +1,347 @@
+//! Native SIP configuration and the original call's retained media admission.
+use crate::{
+    media::{SipMediaIdentity, SipMediaSession, SipMediaSettings},
+    native_config::{
+        NativeCodecSettings, NativeConfigError, NativeIncomingPeers, NativeMicroSettings,
+        NativeSipBinding, NativeSipConfiguration,
+    },
+    native_rpc::NativeRequest,
+    sip::{
+        HostedSipMedia, SipHost, SipHostCall, SipHostCallObservation, SipHostError,
+        SipHostObservation,
+    },
+};
+use std::{
+    future::Future,
+    net::{IpAddr, SocketAddr},
+    pin::Pin,
+    sync::{Arc, Mutex, OnceLock},
+};
+use tokio::sync::watch;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeSipError {
+    Configuration(NativeConfigError),
+    Host(SipHostError),
+}
+impl NativeSipError {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Configuration(error) => error.code(),
+            Self::Host(SipHostError::InvalidRequest) => "invalid_request",
+            Self::Host(SipHostError::OperationConflict) => "operation_conflict",
+            Self::Host(SipHostError::NotReady) => "runtime_not_ready",
+            Self::Host(SipHostError::Stopping) => "runtime_stopping",
+            Self::Host(_) => "operation_outcome_unknown",
+        }
+    }
+}
+impl From<NativeConfigError> for NativeSipError {
+    fn from(error: NativeConfigError) -> Self {
+        Self::Configuration(error)
+    }
+}
+impl From<SipHostError> for NativeSipError {
+    fn from(error: SipHostError) -> Self {
+        Self::Host(error)
+    }
+}
+
+/// A waiter observes retained native work. Dropping every waiter cannot stop
+/// configuration/construction/disposal or permit another factory invocation.
+#[derive(Clone)]
+pub struct NativeSipOperation<T: Clone>(watch::Receiver<Option<Result<T, SipHostError>>>);
+impl<T: Clone> NativeSipOperation<T> {
+    pub fn result(&self) -> Option<Result<T, SipHostError>> {
+        self.0.borrow().clone()
+    }
+    pub async fn wait(mut self) -> Result<T, SipHostError> {
+        loop {
+            if let Some(result) = self.result() {
+                return result;
+            }
+            if self.0.changed().await.is_err() {
+                return Err(SipHostError::CleanupUnconfirmed);
+            }
+        }
+    }
+}
+fn retained<T, F>(work: F) -> NativeSipOperation<T>
+where
+    T: Clone + Send + Sync + 'static,
+    F: Future<Output = Result<T, SipHostError>> + Send + 'static,
+{
+    let (result, waiter) = watch::channel(None);
+    tokio::spawn(async move {
+        let outcome = tokio::spawn(work)
+            .await
+            .unwrap_or(Err(SipHostError::CleanupUnconfirmed));
+        result.send_replace(Some(outcome));
+    });
+    NativeSipOperation(waiter)
+}
+
+/// Validated settings remain available to the original media/call owner after
+/// the host consumes registration credentials. No protected configuration is
+/// serialized into status or command receipts.
+pub struct NativeCallConfiguration {
+    binding: NativeSipBinding,
+    codecs: NativeCodecSettings,
+    incoming: NativeIncomingPeers,
+}
+impl NativeCallConfiguration {
+    pub fn binding(&self) -> &NativeSipBinding {
+        &self.binding
+    }
+    pub fn codecs(&self) -> &NativeCodecSettings {
+        &self.codecs
+    }
+    pub fn incoming_peers(&self) -> &NativeIncomingPeers {
+        &self.incoming
+    }
+    /// The call owner supplies its original entropy and resolved SDP address.
+    /// Construct these only inside the admitted factory, before RTP startup.
+    pub fn media_settings(
+        &self,
+        id: String,
+        identity: SipMediaIdentity,
+        connection_address: IpAddr,
+    ) -> SipMediaSettings {
+        let (first_port, last_port) = self.binding.rtp_port_range();
+        SipMediaSettings {
+            call_id: id,
+            interface: SocketAddr::new(self.binding.endpoint().ip(), 0),
+            connection_address,
+            first_port,
+            last_port,
+            reorder_ms: self.codecs.receive_reorder_ms().into(),
+            preferences: self.codecs.preferences().to_vec(),
+            identity,
+        }
+    }
+}
+pub type NativeSipMediaFuture =
+    Pin<Box<dyn Future<Output = Result<SipMediaSession, SipHostError>> + Send>>;
+/// This constructor runs once after the original host slot is reserved. On
+/// failure it must return CleanupUnconfirmed unless all created audio/media
+/// resources are confirmed drained. A panic is also uncertain.
+pub trait NativeSipMediaFactory: Send + Sync + 'static {
+    fn create(
+        &self,
+        id: String,
+        configuration: Arc<NativeCallConfiguration>,
+    ) -> NativeSipMediaFuture;
+}
+struct Call {
+    original: SipHostCall,
+    media: Arc<OnceLock<SipMediaSession>>,
+    releasing: Mutex<Option<NativeSipOperation<()>>>,
+}
+#[derive(Clone)]
+pub struct NativeSipCall(Arc<Call>);
+impl NativeSipCall {
+    pub fn observation(&self) -> SipHostCallObservation {
+        self.0.original.observation()
+    }
+    pub async fn prepared(&self) -> Result<(), SipHostError> {
+        self.0.original.prepared().await
+    }
+    pub fn media(&self) -> Option<SipMediaSession> {
+        self.0.media.get().cloned()
+    }
+}
+struct State {
+    configured: bool,
+    stopping: bool,
+    configuration: Option<Arc<NativeCallConfiguration>>,
+    configuring: Option<NativeSipOperation<SocketAddr>>,
+    calls: Vec<NativeSipCall>,
+    closing: Option<NativeSipOperation<()>>,
+}
+struct Owner {
+    state: Mutex<State>,
+    host: SipHost,
+    media: Arc<dyn NativeSipMediaFactory>,
+}
+#[derive(Clone)]
+pub struct NativeSipOperations(Arc<Owner>);
+impl NativeSipOperations {
+    pub fn new(media: Arc<dyn NativeSipMediaFactory>) -> Self {
+        Self(Arc::new(Owner {
+            state: Mutex::new(State {
+                configured: false,
+                stopping: false,
+                configuration: None,
+                configuring: None,
+                calls: Vec::new(),
+                closing: None,
+            }),
+            host: SipHost::new(),
+            media,
+        }))
+    }
+    /// Exact DTO validation precedes the one-way latch. Micro setup is required
+    /// explicitly, occurs after binding and before registration, and is never
+    /// silently discarded by this owner.
+    pub fn configure<F, S>(
+        &self,
+        request: &NativeRequest,
+        setup: S,
+    ) -> Result<NativeSipOperation<SocketAddr>, NativeSipError>
+    where
+        F: Future<Output = Result<(), SipHostError>> + Send + 'static,
+        S: FnOnce(Option<NativeMicroSettings>) -> F + Send + 'static,
+    {
+        let mut state = self.0.state.lock().unwrap();
+        if state.stopping {
+            return Err(SipHostError::Stopping.into());
+        }
+        if state.configured {
+            return Err(SipHostError::OperationConflict.into());
+        }
+        let parsed = NativeSipConfiguration::parse(request)?;
+        tokio::runtime::Handle::try_current().map_err(|_| SipHostError::NotReady)?;
+        state.configured = true;
+        let parts = parsed.into_parts()?;
+        state.configuration = Some(Arc::new(NativeCallConfiguration {
+            binding: parts.binding,
+            codecs: parts.codecs,
+            incoming: parts.incoming,
+        }));
+        let host = self.0.host.clone();
+        let operation = retained(async move {
+            host.configure_with_setup(parts.host, move || setup(parts.micro))
+                .await
+        });
+        state.configuring = Some(operation.clone());
+        Ok(operation)
+    }
+    pub fn configured(&self) -> bool {
+        self.0.state.lock().unwrap().configured
+    }
+    pub fn configuration_result(&self) -> Option<Result<SocketAddr, SipHostError>> {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .configuring
+            .as_ref()
+            .and_then(NativeSipOperation::result)
+    }
+    pub fn observation(&self) -> SipHostObservation {
+        self.0.host.observation()
+    }
+    pub fn configuration(&self) -> Option<Arc<NativeCallConfiguration>> {
+        self.0.state.lock().unwrap().configuration.clone()
+    }
+    pub fn prepare(&self, id: String) -> Result<NativeSipCall, SipHostError> {
+        let mut state = self.0.state.lock().unwrap();
+        if state.stopping {
+            return Err(SipHostError::Stopping);
+        }
+        // A retained socket alone is insufficient: setup/registration creation
+        // may have failed after bind. Only a successful saved configuration
+        // grants authority to construct any call media.
+        if state
+            .configuring
+            .as_ref()
+            .and_then(NativeSipOperation::result)
+            .is_none_or(|r| r.is_err())
+        {
+            return Err(SipHostError::NotReady);
+        }
+        let configuration = state.configuration.clone().ok_or(SipHostError::NotReady)?;
+        let factory = self.0.media.clone();
+        let media = Arc::new(OnceLock::new());
+        let saved = media.clone();
+        let original_id = id.clone();
+        let original = self.0.host.prepare_async(id, move || async move {
+            let session = factory.create(original_id, configuration).await?;
+            let _ = saved.set(session.clone());
+            Ok(Arc::new(session) as Arc<dyn HostedSipMedia>)
+        })?;
+        let call = NativeSipCall(Arc::new(Call {
+            original,
+            media,
+            releasing: Mutex::new(None),
+        }));
+        state.calls.push(call.clone());
+        Ok(call)
+    }
+    pub fn find(&self, id: &str) -> Option<NativeSipCall> {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .find(|c| c.observation().id == id)
+            .cloned()
+    }
+    fn original(state: &State, expected: &NativeSipCall) -> Result<(), SipHostError> {
+        if state.calls.iter().any(|c| Arc::ptr_eq(&c.0, &expected.0)) {
+            Ok(())
+        } else {
+            Err(SipHostError::NotReady)
+        }
+    }
+    pub fn hangup(&self, expected: &NativeSipCall) -> Result<SipHostCallObservation, SipHostError> {
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        self.0.host.hangup(&expected.0.original)
+    }
+    pub fn release(
+        &self,
+        expected: &NativeSipCall,
+    ) -> Result<NativeSipOperation<()>, SipHostError> {
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        let mut releasing = expected.0.releasing.lock().unwrap();
+        if let Some(operation) = &*releasing {
+            return Ok(operation.clone());
+        }
+        let owner = self.clone();
+        let call = expected.clone();
+        // Revoke even if no observer polls the retained disposal operation.
+        self.0.host.hangup(&expected.0.original)?;
+        let operation = retained(async move {
+            owner.0.host.release(&call.0.original).await?;
+            owner
+                .0
+                .state
+                .lock()
+                .unwrap()
+                .calls
+                .retain(|c| !Arc::ptr_eq(&c.0, &call.0));
+            Ok(())
+        });
+        *releasing = Some(operation.clone());
+        Ok(operation)
+    }
+    pub fn close(&self) -> NativeSipOperation<()> {
+        let mut state = self.0.state.lock().unwrap();
+        if let Some(operation) = &state.closing {
+            return operation.clone();
+        }
+        state.stopping = true;
+        for call in &state.calls {
+            let _ = self.0.host.hangup(&call.0.original);
+        }
+        let owner = self.clone();
+        let configuring = state.configuring.clone();
+        let operation = retained(async move {
+            // Failed optional setup can still own native resources. Its
+            // uncertainty must not become a confirmed close or free binding.
+            if let Some(configuring) = configuring {
+                if configuring.wait().await == Err(SipHostError::CleanupUnconfirmed) {
+                    return Err(SipHostError::CleanupUnconfirmed);
+                }
+            }
+            owner.0.host.close().await?;
+            owner.0.state.lock().unwrap().calls.clear();
+            Ok(())
+        });
+        state.closing = Some(operation.clone());
+        operation
+    }
+}
