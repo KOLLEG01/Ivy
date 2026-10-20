@@ -56,11 +56,11 @@ async fn keepalive_retains_the_original_udp_socket_and_typed_failure_until_close
         .unwrap();
     assert_eq!(&bytes[..count], b"\r\n\r\n");
     assert_eq!(source, local);
-    // Port zero is rejected locally. No packet reaches an unowned endpoint.
-    flow.remote.set_port(0);
+    // A family mismatch is rejected locally. No packet reaches another peer.
+    flow.remote = "[::1]:9".parse().unwrap();
     let failure = flow.keepalive().await.unwrap_err();
     #[cfg(windows)]
-    assert_eq!(failure, RegistrationKeepaliveError::SocketError(10022));
+    assert_eq!(failure, RegistrationKeepaliveError::SocketError(10047));
     #[cfg(not(windows))]
     assert!(matches!(
         failure,
@@ -79,7 +79,7 @@ async fn keepalive_retains_the_original_udp_socket_and_typed_failure_until_close
             RegistrationKeepaliveError::SocketError(code) => format!("{code}"),
             _ => "null".into(),
         };
-        std::fs::write(std::path::PathBuf::from(directory).join("native-registration-keepalive-socket.json"), format!("{{\"sameBoundSocket\":true,\"crlfBytes\":4,\"invalidPortErrorCode\":{error},\"retainedFlowFencedClose\":true,\"originalBindingReleased\":true,\"replacementSockets\":0}}")).unwrap();
+        std::fs::write(std::path::PathBuf::from(directory).join("native-registration-keepalive-socket.json"), format!("{{\"sameBoundSocket\":true,\"crlfBytes\":4,\"familyMismatchErrorCode\":{error},\"retainedFlowFencedClose\":true,\"originalBindingReleased\":true,\"replacementSockets\":0}}")).unwrap();
     }
 }
 

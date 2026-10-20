@@ -1,3 +1,4 @@
+param([switch]$SocketFailure)
 $ErrorActionPreference='Stop'
 [Console]::InputEncoding=[Text.UTF8Encoding]::new($false,$true)
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false,$true)
@@ -6,4 +7,5 @@ $task93References=@(Get-ChildItem -LiteralPath "$PSHOME/ref" -Filter '*.dll' | F
 $task93Managed=@(Get-ChildItem -LiteralPath $task93Directory -Filter '*.dll' | ForEach-Object FullName)
 foreach($path in $task93Managed){$null=[Runtime.Loader.AssemblyLoadContext]::Default.LoadFromAssemblyPath($path)}
 Add-Type -Path (Join-Path $PSScriptRoot 'phone-registration-keepalive-oracle.cs') -ReferencedAssemblies ($task93References+$task93Managed) -CompilerOptions '/nowarn:1701'
-[PhoneRegistrationKeepaliveOracle]::Run()
+if($SocketFailure){[PhoneRegistrationKeepaliveOracle]::SocketFailure()}
+else{[PhoneRegistrationKeepaliveOracle]::Run()}
