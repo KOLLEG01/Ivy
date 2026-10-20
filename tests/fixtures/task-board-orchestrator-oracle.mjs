@@ -61,6 +61,7 @@ add('new steering keeps predecessor and original queue',{calls:{steer:{ownerPhas
 add('native user input projects waiting',{thread:{status:{type:'active',activeFlags:['waitingOnUserInput']}}});
 add('idle thread projects unknown',{thread:{status:{type:'idle'}}});
 add('first terminal observation saves snapshot',{status:'completed'});
+add('cancelled retained terminal turn saves snapshot',{status:'interrupted',run:{cancellation:{reason:'cancel'}},task:{claim:null}});
 add('different retained epoch gets a fresh snapshot',{status:'completed',prior:true,retainedEpoch:'old'});
 add('different retained status gets a fresh snapshot',{status:'completed',prior:true,retainedStatus:'failed'});
 add('another artifact type is not a snapshot',{status:'completed',prior:true,localKey:'task-board/native-evidence'});

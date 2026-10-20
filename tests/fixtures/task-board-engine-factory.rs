@@ -233,10 +233,10 @@ impl NativePublicationPolicies for Policies<'_> {
         panic!("No native handoff")
     }
     fn retry_at(&self, turn: &Json, at: &JsString) -> IvyResult<Json> {
-        if self.fixture.observations.is_some() {
+        if let Some(observations) = &self.fixture.observations {
             assert_eq!(
                 hash_json(turn).unwrap(),
-                hash_json(&json(r#"{"id":"turn","status":"completed"}"#)).unwrap()
+                hash_json(&observations.expected_turn()).unwrap()
             );
             assert_eq!(at, &JsString::from(clock()));
             return Ok(Json::Null);

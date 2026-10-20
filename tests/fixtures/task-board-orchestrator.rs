@@ -648,5 +648,5 @@ async fn bounded_orchestration_matches_original_component_order_error_fences_ret
             canonical(&actual, MANAGEMENT_FRAME_BYTES).unwrap()
         );
     }
-    assert_eq!(rows.len(), 86);
+    assert_eq!(rows.len(), 87);
 }
