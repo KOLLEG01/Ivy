@@ -64,6 +64,21 @@ public static class PhoneNativeUpgradeOracle {
                 if(reverse&&concurrentInvite!=null){var first=invite;invite=concurrentInvite;concurrentInvite=first;}
                 if(late){rows.Add(await upgrade.WaitAsync(TimeSpan.FromSeconds(7)));firstSaved=true;}
                 if(concurrentLate){rows.Add(await concurrentUpgrade.WaitAsync(TimeSpan.FromSeconds(7)));secondSaved=true;}
+                if(scenario.Contains("_shutdown_")){
+                    bool preReleased=scenario.EndsWith("released"),replacementDistinct=false;
+                    if(preReleased){await End();await owner.InvokeAsync("call.release",Args(new{callId=id}));await owner.InvokeAsync("call.prepare",Args(new{callId=id}));var replacement=Host(owner).FindCall(id);replacementDistinct=replacement!=null&&!ReferenceEquals(replacement,call);}
+                    var shutdown=owner.DisposeAsync().AsTask();string byeError=null;bool byeObserved=preReleased;
+                    if(!preReleased){try{var bye=await Next(SIPMethodsEnum.BYE);byeObserved=true;byeSequence=bye.Header.CSeq;var ended=SIPResponse.GetResponse(bye,(SIPResponseStatusCodesEnum)200,null);var bytes=Encoding.UTF8.GetBytes(ended.ToString());await peer.SendAsync(bytes,bytes.Length,target);}catch(Exception e){byeError=e.GetType().FullName+": "+e.Message;}}
+                    await Task.WhenAny(shutdown,Task.Delay(750));bool shutdownBeforeFinal=shutdown.IsCompletedSuccessfully;
+                    bool bindingReleased=false;string rebindError=null;if(shutdownBeforeFinal){try{using var rebound=new UdpClient(target);bindingReleased=true;}catch(Exception e){rebindError=e.GetType().FullName+": "+e.Message;}}
+                    var accepted=SIPResponse.GetResponse(invite,(SIPResponseStatusCodesEnum)200,null);accepted.Header.Contact=[SIPContactHeader.ParseContactHeader($"<sip:caller@{source}>").Single()];accepted.Header.ContentType="application/sdp";accepted.Body=Sdp("PCMU",0);accepted.Header.ContentLength=Encoding.UTF8.GetByteCount(accepted.Body);FinalRow(accepted);
+                    string finalSendError=null,ackError=null;var bytesFinal=Encoding.UTF8.GetBytes(accepted.ToString());try{await peer.SendAsync(bytesFinal,bytesFinal.Length,target);}catch(Exception e){finalSendError=e.GetType().FullName+": "+e.Message;}
+                    try{AckRow(await Next(SIPMethodsEnum.ACK));}catch(Exception e){acked=false;ackError=e.GetType().FullName+": "+e.Message;}
+                    rows.Add(await upgrade.WaitAsync(TimeSpan.FromSeconds(7)));
+                    object closed;try{await shutdown.WaitAsync(TimeSpan.FromSeconds(7));closed=new{closed=true};}catch(Exception e){closed=new{error=e.GetType().FullName,message=e.Message};}
+                    var shared=new{rows,before,sameMedia=ReferenceEquals(media,call.Media),preReleased,replacementDistinct,sendCodecAfterShutdown=(string)media.GetType().GetProperty("SendCodec",BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic).GetValue(media),byeSequence};
+                    return new{shared,requests,finals,shutdownBeforeFinal,bindingReleased,rebindError,byeObserved,byeError,finalSendError,ackObserved=acked,ackError,shutdown=closed};
+                }
                 if(pendingHangup||pendingRelease||hangupSuccess){await End();endedBeforeFinal=true;}
                 if(pendingRelease){releasePending=owner.InvokeAsync("call.release",Args(new{callId=id}));await Task.WhenAny(releasePending,Task.Delay(1000));releaseBeforeFinal=releasePending.IsCompletedSuccessfully;}
                 var response=SIPResponse.GetResponse(invite,(SIPResponseStatusCodesEnum)(scenario.EndsWith("refused")||pendingHangup||refusedFirst?488:200),null);

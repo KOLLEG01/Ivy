@@ -1,6 +1,442 @@
 use super::*;
 use rsipstack::sip::{Method, Request, Response, prelude::*};
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_pending_host_shutdown_retains_original_binding_media_and_completion() {
+    use ivy_phone_bridge::sip::SipHostError;
+    for preferred in ["PCMA", "PCMU"] {
+        for mode in ["initial", "delayed"] {
+            for pre_released in [false, true] {
+                let control = format!(
+                    "{mode}_{preferred}_shutdown_{}",
+                    if pre_released { "released" } else { "pending" }
+                );
+                let (_, _, _, configuration) = actual_owner(43000, 43998);
+                let configuration = configuration.replace(
+                    r#"["PCMA","PCMU"]"#,
+                    if preferred == "PCMA" {
+                        r#"["PCMA","PCMU"]"#
+                    } else {
+                        r#"["PCMU","PCMA"]"#
+                    },
+                );
+                let fixture = IvyJson::object([
+                    ("scenario", control.clone().into()),
+                    ("configuration", parse(&configuration, 65536).unwrap()),
+                ]);
+                let original = super::dial::original_raw(&[(
+                    "fixture.upgrade".into(),
+                    stringify(&fixture, 65536).unwrap(),
+                )]);
+                trace(
+                    &format!("pending-shutdown-original-{control}"),
+                    original.clone().unwrap_or(IvyJson::Null),
+                );
+                for outcome in ["accepted", "refused", "unconfirmed"] {
+                    if outcome == "unconfirmed" && preferred != "PCMU" {
+                        continue;
+                    }
+                    let scenario = format!("{control}_{outcome}");
+                    let (owner, factory, routes, _) = actual_owner(43000, 43998);
+                    let remaining = Arc::new(Remaining::default());
+                    remaining.close_gate.release();
+                    let handler = Arc::new(NativeSipCommands::new(
+                        owner.clone(),
+                        remaining.clone(),
+                        |_| Box::pin(async { Ok(()) }),
+                        closed_platform_views(),
+                    ));
+                    let dispatcher =
+                        Arc::new(NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap());
+                    assert!(
+                        dispatcher
+                            .execute(command("configure", &configuration, 1, 1))
+                            .await
+                            .outcome()
+                            .error_code()
+                            .is_none()
+                    );
+                    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    let (rtp, _rtcp) = pair().await;
+                    let target = owner.observation().endpoint.unwrap();
+                    let sdp = |codec: &str, payload: u8| {
+                        format!(
+                            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP {payload} 101\r\na=rtpmap:{payload} {codec}/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n",
+                            rtp.local_addr().unwrap().port()
+                        )
+                    };
+                    let initial = sdp("PCMA", 8);
+                    super::answer::send(
+                        &peer,
+                        target,
+                        "INVITE",
+                        1,
+                        "z9hG4bK-owned-upgrade",
+                        "",
+                        if mode == "delayed" { "" } else { &initial },
+                    )
+                    .await;
+                    assert_eq!(
+                        super::incoming::receive(&peer, 4000)
+                            .await
+                            .unwrap()
+                            .status_code
+                            .code(),
+                        180
+                    );
+                    until(|| !owner.observation().calls.is_empty()).await;
+                    let id = owner.observation().calls[0].id.clone();
+                    let call = owner.find(&id).unwrap();
+                    call.prepared().await.unwrap();
+                    let media = call.media().unwrap();
+                    let original_transport = media.observation().receive.transport;
+                    let selected = format!(r#"{{"callId":"{id}"}}"#);
+                    for (method, params, op) in [
+                        ("call.claim", selected.clone(), 2),
+                        (
+                            "call.features",
+                            format!(
+                                r#"{{"callId":"{id}","challenge":{{"code":"*123#","timeoutSeconds":30,"maxFailedAttempts":3,"failedAttemptWindowSeconds":60}}}}"#
+                            ),
+                            3,
+                        ),
+                    ] {
+                        assert!(
+                            dispatcher
+                                .execute(command(method, &params, op, op))
+                                .await
+                                .outcome()
+                                .error_code()
+                                .is_none()
+                        );
+                    }
+                    let answer = format!(r#"{{"callId":"{id}","waiting":false}}"#);
+                    let dispatch = dispatcher.clone();
+                    let answered = tokio::spawn(async move {
+                        dispatch
+                            .execute(command("call.answer", &answer, 4, 4))
+                            .await
+                    });
+                    let final_response = super::incoming::receive(&peer, 4000).await.unwrap();
+                    assert_eq!(final_response.status_code.code(), 200);
+                    let tag = final_response
+                        .to_header()
+                        .unwrap()
+                        .tag()
+                        .unwrap()
+                        .unwrap()
+                        .value()
+                        .to_owned();
+                    super::answer::send(
+                        &peer,
+                        target,
+                        "ACK",
+                        1,
+                        "z9hG4bK-owned-upgrade-ack",
+                        &tag,
+                        if mode == "delayed" { &initial } else { "" },
+                    )
+                    .await;
+                    assert!(answered.await.unwrap().outcome().error_code().is_none());
+                    for digit in "*123#".chars() {
+                        call.features().digit(digit, InputSource::SipInfo).unwrap();
+                    }
+                    let before = parse(&call.features().observation().json(), 65536).unwrap();
+                    let dispatch = dispatcher.clone();
+                    let params = selected.clone();
+                    let upgrade = tokio::spawn(async move {
+                        dispatch
+                            .execute(command("call.codec.upgrade", &params, 5, 5))
+                            .await
+                    });
+                    let (invite, remote) = next(&peer, Method::Invite).await;
+                    let mut requests = vec![invite_row(&invite, &tag)];
+                    upgrade.abort();
+                    let _ = upgrade.await;
+                    let mut replacement = None;
+                    let mut bye_sequence = None;
+                    if pre_released {
+                        bye_sequence = Some(end(&dispatcher, &selected, &peer).await);
+                        tokio::time::timeout(
+                            Duration::from_secs(2),
+                            owner.release(&call).unwrap().wait(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        let fresh = owner.prepare(id.clone()).unwrap();
+                        fresh.prepared().await.unwrap();
+                        assert!(!fresh.observation().attempted && !fresh.observation().ending);
+                        assert!(media.observation().closed);
+                        assert!(!fresh.media().unwrap().observation().closed);
+                        replacement = Some(fresh);
+                    }
+                    let started = tokio::time::Instant::now();
+                    // This polls then abandons an observer of the real retained
+                    // NativeSipCommands shutdown, not a synthetic close result.
+                    cancel(handler.shutdown()).await;
+                    let close = owner.close();
+                    if !pre_released {
+                        let (bye, source) = next(&peer, Method::Bye).await;
+                        bye_sequence = Some(bye.cseq_header().unwrap().seq().unwrap());
+                        crate::sip_host::send(
+                            &peer,
+                            source,
+                            &crate::sip_host::response(&bye, 200, "", ""),
+                        )
+                        .await;
+                    }
+                    until(|| media.observation().cleanup_confirmed).await;
+                    assert!(
+                        media.observation().closed && media.observation().send_format.is_none()
+                    );
+                    if let Some(fresh) = &replacement {
+                        until(|| fresh.media().unwrap().observation().cleanup_confirmed).await;
+                    }
+                    for address in [original_transport.local_rtp, original_transport.local_rtcp] {
+                        drop(
+                            UdpSocket::bind(address)
+                                .await
+                                .expect("Original media socket did not retire"),
+                        );
+                    }
+                    // A bounded observer timeout never retires the original
+                    // pending INVITE, clears the binding, or runs other cleanup.
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(100), close.clone().wait())
+                            .await
+                            .is_err()
+                    );
+                    assert!(close.result().is_none());
+                    assert_eq!(remaining.closes.load(Ordering::SeqCst), 0);
+                    assert!(UdpSocket::bind(target).await.is_err());
+                    assert!(matches!(
+                        owner.prepare(id.clone()),
+                        Err(SipHostError::Stopping)
+                    ));
+                    assert_eq!(
+                        dispatcher
+                            .execute(command("call.prepare", &selected, 9, 9))
+                            .await
+                            .outcome()
+                            .error_code(),
+                        Some("runtime_stopping")
+                    );
+                    let sent = media.observation().sent_frames;
+                    let mut finals = vec![];
+                    if outcome != "unconfirmed" {
+                        let body = if outcome == "accepted" {
+                            sdp("PCMU", 0)
+                        } else {
+                            String::new()
+                        };
+                        let mut response = crate::sip_host::response(
+                            &invite,
+                            if outcome == "accepted" { 200 } else { 488 },
+                            &format!(
+                                "{}Contact: <sip:caller@{}>\r\n",
+                                if outcome == "accepted" {
+                                    "Content-Type: application/sdp\r\n"
+                                } else {
+                                    ""
+                                },
+                                peer.local_addr().unwrap()
+                            ),
+                            &body,
+                        );
+                        response
+                            .headers
+                            .unique_push(invite.to_header().unwrap().clone().into());
+                        finals.push(final_row(&response, rtp.local_addr().unwrap().port()));
+                        crate::sip_host::send(&peer, remote, &response).await;
+                        let (ack, _) = next(&peer, Method::Ack).await;
+                        requests.push(ack_row(&ack));
+                    }
+                    let result =
+                        tokio::time::timeout(Duration::from_secs(40), close.clone().wait())
+                            .await
+                            .expect("Per-call close did not produce a bounded outcome");
+                    let expected = if outcome == "unconfirmed" {
+                        Err(SipHostError::CleanupUnconfirmed)
+                    } else {
+                        Ok(())
+                    };
+                    assert_eq!(result, expected, "{scenario}");
+                    assert_eq!(owner.close().wait().await, expected);
+                    assert_eq!(
+                        handler.shutdown().await,
+                        if outcome == "unconfirmed" {
+                            Err(NativeShutdownError::OutcomeUnknown)
+                        } else {
+                            Ok(())
+                        }
+                    );
+                    assert_eq!(
+                        handler.shutdown().await,
+                        if outcome == "unconfirmed" {
+                            Err(NativeShutdownError::OutcomeUnknown)
+                        } else {
+                            Ok(())
+                        }
+                    );
+                    assert_eq!(remaining.closes.load(Ordering::SeqCst), 1);
+                    assert!(remaining.methods.lock().unwrap().is_empty());
+                    assert_eq!(owner.observation().closed, outcome != "unconfirmed");
+                    assert!(owner.observation().stopping);
+                    assert_eq!(media.observation().sent_frames, sent);
+                    assert!(
+                        media.observation().closed
+                            && media.observation().cleanup_confirmed
+                            && media.observation().send_format.is_none()
+                    );
+                    if let Some(fresh) = &replacement {
+                        assert!(
+                            fresh.media().unwrap().observation().closed
+                                && fresh.media().unwrap().observation().cleanup_confirmed
+                        );
+                    }
+                    let row =
+                        super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5).await;
+                    assert_eq!(
+                        parse(
+                            &row.get("output")
+                                .unwrap()
+                                .get("json")
+                                .unwrap()
+                                .as_str()
+                                .unwrap(),
+                            65536
+                        )
+                        .unwrap(),
+                        IvyJson::object([
+                            ("state", "fallback".into()),
+                            ("codec", IvyJson::Null),
+                            ("payload", IvyJson::Null)
+                        ])
+                    );
+                    assert_eq!(
+                        super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5).await,
+                        row
+                    );
+                    let mut shared = IvyJson::object([
+                        ("rows", IvyJson::Array(vec![row])),
+                        ("before", before),
+                        ("sameMedia", true.into()),
+                        ("preReleased", pre_released.into()),
+                        ("replacementDistinct", replacement.is_some().into()),
+                        ("sendCodecAfterShutdown", IvyJson::Null),
+                        ("byeSequence", n(bye_sequence.unwrap() as usize)),
+                    ]);
+                    normalize(&mut shared);
+                    let original_shared = if outcome == "accepted" {
+                        original.as_ref().map(|raw| {
+                            let observed = parse(
+                                &raw.as_array().unwrap()[0]
+                                    .get("json")
+                                    .expect("Original shutdown control unavailable")
+                                    .as_str()
+                                    .unwrap(),
+                                65536,
+                            )
+                            .unwrap();
+                            assert!(
+                                observed
+                                    .get("shutdownBeforeFinal")
+                                    .unwrap()
+                                    .as_bool()
+                                    .unwrap()
+                            );
+                            assert!(observed.get("bindingReleased").unwrap().as_bool().unwrap());
+                            assert!(
+                                observed
+                                    .get("shutdown")
+                                    .unwrap()
+                                    .get("closed")
+                                    .unwrap()
+                                    .as_bool()
+                                    .unwrap()
+                            );
+                            // Socket failure is unavailable late-ACK evidence,
+                            // never normalized into a passing ACK comparison.
+                            assert!(!observed.get("ackObserved").unwrap().as_bool().unwrap());
+                            assert!(!observed.get("ackError").unwrap().is_null());
+                            assert_eq!(
+                                observed.get("requests").unwrap(),
+                                &IvyJson::Array(vec![requests[0].clone()])
+                            );
+                            assert_eq!(
+                                observed.get("finals").unwrap(),
+                                &IvyJson::Array(finals.clone())
+                            );
+                            let mut comparison = observed.get("shared").unwrap().clone();
+                            normalize(&mut comparison);
+                            assert_eq!(shared, comparison, "{scenario}");
+                            comparison
+                        })
+                    } else {
+                        None
+                    };
+                    assert_eq!(
+                        factory.starts.load(Ordering::SeqCst),
+                        if pre_released { 2 } else { 1 }
+                    );
+                    assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
+                    let host_released = match UdpSocket::bind(target).await {
+                        Ok(socket) => {
+                            drop(socket);
+                            true
+                        }
+                        Err(_) => false,
+                    };
+                    assert_eq!(host_released, outcome != "unconfirmed");
+                    drop(replacement);
+                    drop(call);
+                    drop(media);
+                    drop(dispatcher);
+                    drop(handler);
+                    drop(owner);
+                    let after_drop_released = match UdpSocket::bind(target).await {
+                        Ok(socket) => {
+                            drop(socket);
+                            true
+                        }
+                        Err(_) => false,
+                    };
+                    assert_eq!(
+                        after_drop_released,
+                        outcome != "unconfirmed",
+                        "Last-handle drop must not clear an unconfirmed fence"
+                    );
+                    trace(
+                        &format!("pending-shutdown-{scenario}"),
+                        IvyJson::object([
+                            ("sharedRust", shared),
+                            ("sharedOriginal", original_shared.unwrap_or(IvyJson::Null)),
+                            ("outcome", outcome.into()),
+                            ("requests", IvyJson::Array(requests)),
+                            ("finals", IvyJson::Array(finals)),
+                            ("portHeldBeforeFinal", true.into()),
+                            ("mediaRetiredBeforeFinal", true.into()),
+                            ("abandonedCloseObserver", true.into()),
+                            ("oldReceiptReplayed", true.into()),
+                            ("lateMediaResurrected", false.into()),
+                            ("hostClosed", (outcome != "unconfirmed").into()),
+                            ("hostPortReleased", host_released.into()),
+                            ("hostPortReleasedAfterDrop", after_drop_released.into()),
+                            ("remainingCloses", n(1)),
+                            (
+                                "elapsedMilliseconds",
+                                n(started.elapsed().as_millis() as usize),
+                            ),
+                            ("physicalAudioOpens", n(0)),
+                        ]),
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn invite_row(invite: &Request, tag: &str) -> IvyJson {
     let body = String::from_utf8(invite.body.clone()).unwrap();
     IvyJson::object([
