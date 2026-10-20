@@ -1,6 +1,9 @@
 use ivy_host_runtime::paths;
 use std::{fs, path::PathBuf};
 
+#[path = "host-executor-service-cases.rs"]
+mod executor_service_cases;
+
 #[path = "host-config-write-cases.rs"]
 mod config_write_cases;
 
