@@ -3,22 +3,15 @@ use crate::{IvyError, IvyJson, IvyResult};
 use crate::node_path::{self, Style};
 use ivy_contracts::{JsString, json};
 use std::{collections::BTreeMap, path::{Path, PathBuf}};
+mod storage_api;
+pub use storage_api::{StorageArea, StorageContext, host_storage_areas, storage_path, storage_file, service_paths, service_paths_for_style};
+use storage_api::{text, joined, service_base};
 
 pub(crate) fn path(value: &IvyJson) -> IvyResult<PathBuf> { crate::config::path_value(value) }
 pub(crate) fn path_json(path: &Path) -> IvyJson {
     IvyJson::String(node_path::from_native(path))
 }
-fn text(value: &IvyJson) -> IvyResult<JsString> { value.as_js_string().cloned().ok_or_else(IvyError::internal) }
 fn selected<'a>(value: &'a IvyJson, key: &str) -> Option<&'a IvyJson> { value.get(key).filter(|v| !v.is_null()) }
-fn joined(style: Style, parts: &[IvyJson]) -> IvyResult<IvyJson> {
-    Ok(IvyJson::String(node_path::join(style, &parts.iter().map(text).collect::<IvyResult<Vec<_>>>()?)))
-}
-fn service_base(config: &IvyJson, instance: &IvyJson, style: Style) -> IvyResult<IvyJson> {
-    match config.get("servicesRoot").filter(|v| v.as_js_string().is_some_and(|s| !s.0.is_empty())) {
-        Some(root) => joined(style, &[root.clone(), instance.required("componentId")?.clone()]),
-        None => joined(style, &[config.required("runtimeRoot")?.clone(), "instances".into(), instance.required("instanceId")?.clone()]),
-    }
-}
 pub fn host_configuration_path(config: &IvyJson) -> IvyResult<PathBuf> {
     path(&host_configuration_path_for_style(config, Style::native())?)
 }
@@ -28,21 +21,6 @@ pub fn host_configuration_path_for_style(config: &IvyJson, style: Style) -> IvyR
         None => joined(style, &[config.required("runtimeRoot")?.clone(), "host.json".into()]),
     }
 }
-/// `instance` is either a configured instance object or its instance ID.
-pub fn service_paths(config: &IvyJson, instance: &IvyJson) -> IvyResult<IvyJson> {
-    service_paths_for_style(config, instance, Style::native())
-}
-pub fn service_paths_for_style(config: &IvyJson, instance: &IvyJson, style: Style) -> IvyResult<IvyJson> {
-    let instance = if instance.as_js_string().is_some() {
-        config.required("instances")?.as_array().ok_or_else(IvyError::internal)?.iter()
-            .find(|v| v.get("instanceId") == Some(instance))
-            .ok_or_else(|| IvyError::new("not_found", "Unknown service instance for path resolution."))?
-    } else { instance };
-    let base = service_base(config, instance, style)?;
-    if let Some(paths) = instance.get("paths").filter(|v| !v.is_null()) { return Ok(paths.clone()); }
-    Ok(IvyJson::object([("data", joined(style, &[base.clone(), "data".into()])?), ("work", joined(style, &[base.clone(), "work".into()])?), ("logs", joined(style, &[base, "logs".into()])?)]))
-}
-
 /// Unreduced permanent storage union for bidirectional overlap checks only.
 /// Selecting stable storage keys/order is a separate locale-sensitive operation.
 pub(crate) fn storage_overlap_roots(config: &IvyJson, account_home: impl Fn() -> IvyResult<JsString>) -> IvyResult<Vec<JsString>> {

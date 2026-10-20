@@ -3,6 +3,7 @@ use crate::{IvyError, IvyResult, paths};
 use std::path::{Path, PathBuf};
 
 mod files;
+pub(crate) use files::sync_close as sync_file;
 pub use files::{
     BackupExclusion, BackupFile, copy_verified, inventory_files, relative_file,
     relative_file_with_context, sync_directories,

@@ -324,7 +324,7 @@ pub async fn copy_verified(
     )?
 }
 
-fn sync_close(file: File) -> IvyResult<()> {
+pub(crate) fn sync_close(file: File) -> IvyResult<()> {
     let synced = internal(file.sync_all());
     // The source's finally-close error wins over a preceding sync error.
     internal(close_file(file))?;
@@ -337,7 +337,14 @@ fn close_file(file: File) -> io::Result<()> {
         if unsafe { libc::close(file.into_raw_fd()) } == 0 {
             Ok(())
         } else {
-            Err(io::Error::last_os_error())
+            let error = io::Error::last_os_error();
+            // Match libuv: completion in progress consumes this descriptor;
+            // it must neither become a Promise rejection nor be retried.
+            if matches!(error.raw_os_error(), Some(libc::EINTR | libc::EINPROGRESS)) {
+                Ok(())
+            } else {
+                Err(error)
+            }
         }
     }
     #[cfg(windows)]

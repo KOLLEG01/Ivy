@@ -1,10 +1,14 @@
-//! Offline ownership gates shared by bootstrap maintenance and private backup.
+//! Offline ownership and complete private backup of current Host state.
 use crate::{
     IvyError, IvyJson, IvyResult, config, executor_lock::ExecutorLock, layout, process_fence,
 };
 use ivy_contracts::JsString;
 use ivy_sdk::clock::Clock;
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
+mod snapshot;
+pub use snapshot::snapshot_journal;
+mod host;
+pub use host::{BackupBindings, NativeBackupPaths, backup_host};
 
 pub struct OfflineOwners(Vec<ExecutorLock>);
 impl OfflineOwners {
@@ -14,6 +18,83 @@ impl OfflineOwners {
         }
         Ok(())
     }
+}
+/// Acquire executor, then every configured owner in the executing locale order.
+/// The caller retains this value throughout the admitted maintenance operation.
+pub async fn offline_owners(
+    config: &IvyJson,
+    compare: &crate::artifact::FileCompare,
+    docker: &crate::docker::DockerAdapter,
+) -> IvyResult<OfflineOwners> {
+    let root = config::path_value(config.required("runtimeRoot")?)?;
+    let mut owners = OfflineOwners(Vec::new());
+    let result = async {
+        owners
+            .0
+            .push(ExecutorLock::acquire(root.join("executor"), false).await?);
+        let mut instances = config
+            .required("instances")?
+            .as_array()
+            .ok_or_else(IvyError::internal)?
+            .iter()
+            .collect::<Vec<_>>();
+        instances.sort_by(|a, b| {
+            compare(
+                a.get("instanceId")
+                    .and_then(IvyJson::as_js_string)
+                    .unwrap_or(&JsString::default()),
+                b.get("instanceId")
+                    .and_then(IvyJson::as_js_string)
+                    .unwrap_or(&JsString::default()),
+            )
+        });
+        for instance in instances {
+            let id = instance
+                .required("instanceId")?
+                .as_js_string()
+                .cloned()
+                .ok_or_else(IvyError::internal)?;
+            owners.0.push(
+                ExecutorLock::acquire(
+                    root.join("owners").join(crate::node_path::to_native(&id)),
+                    false,
+                )
+                .await?,
+            );
+            let paths = layout::service_paths(config, instance)?;
+            process_fence::require_clear_process_stop_fence(config::path_value(
+                paths.required("data")?,
+            )?)
+            .await?;
+            if instance.get("engine") == Some(&"docker".into()) {
+                if let Some(container) = docker.inspect_container(config.clone(), id).await? {
+                    if !["created", "exited", "dead"]
+                        .iter()
+                        .any(|state| container.get("state") == Some(&IvyJson::from(*state)))
+                    {
+                        return Err(IvyError::new(
+                            "backup_busy",
+                            "Owned container must be stopped before complete backup.",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        owners.close().await?;
+        return Err(if error.code == "executor_already_running" {
+            IvyError::new(
+                "backup_busy",
+                "Stop the explicitly owned OS bootstrap processes before complete backup.",
+            )
+        } else {
+            error
+        });
+    }
+    Ok(owners)
 }
 async fn stopped_owner(path: PathBuf, clock: &dyn Clock) -> IvyResult<ExecutorLock> {
     let deadline = clock.utc_millis() + 5000;
