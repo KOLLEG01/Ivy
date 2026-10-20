@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+ivy-cli.workspace = true
 ivy-sdk.workspace = true
 p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic"] }
 ecdsa = { version = "=0.16.9", default-features = false, features = ["arithmetic", "hazmat"] }
@@ -59,3 +60,7 @@ path = "../../../tests/rust/hive_push_native.rs"
 [[test]]
 name = "hive-push-profile"
 path = "../../../tests/rust/hive_push_profile.rs"
+
+[[test]]
+name = "hive-package-ui"
+path = "../../../tests/rust/hive_package_ui.rs"

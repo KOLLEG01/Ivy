@@ -24,6 +24,7 @@ pub mod oauth_http;
 pub mod objects;
 pub mod package_catalog_object;
 pub mod package_kernel;
+pub mod package_ui;
 pub mod packages;
 pub mod paging;
 pub mod query;

@@ -34,7 +34,7 @@ use tokio::{
 };
 
 pub type PackageRequest = Pin<Box<dyn Future<Output = IvyResult<IvyJson>> + Send>>;
-/// Requests use the existing package.catalog/seed/prune/publish worker protocol.
+/// Requests use the existing storage-worker protocol, including package actions.
 pub trait PackageStorage: Send + Sync {
     fn request(&self, request: IvyJson) -> PackageRequest;
 }
