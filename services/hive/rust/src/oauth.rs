@@ -28,6 +28,11 @@ pub const REFRESH_TOKEN_INACTIVITY_LIFETIME_MS: f64 = 365.0 * 24.0 * 60.0 * 60_0
 #[derive(Clone, Default)]
 pub struct Parameters(Vec<(JsString, JsString)>);
 impl Parameters {
+    /// The canonical URLSearchParams string constructor, including its optional
+    /// leading '?' and ordered duplicate/USVString decoding semantics.
+    pub fn parse_form(input: &JsString) -> Self {
+        Self(ivy_contracts::whatwg_url::parse_form(input))
+    }
     pub fn new(entries: impl IntoIterator<Item = (JsString, JsString)>) -> Self {
         Self(
             entries
@@ -78,6 +83,17 @@ pub trait Redirects: Send + Sync {
         uri: &JsString,
         entries: &[(JsString, JsString)],
     ) -> IvyResult<JsString>;
+}
+/// Production redirect serialization supplied by the canonical URL owner.
+pub struct UrlRedirects;
+impl Redirects for UrlRedirects {
+    fn set_parameters(
+        &self,
+        uri: &JsString,
+        entries: &[(JsString, JsString)],
+    ) -> IvyResult<JsString> {
+        ivy_contracts::whatwg_url::set_url_search_params(uri, entries)
+    }
 }
 pub trait Entropy: Send + Sync {
     fn bytes(&self, length: usize) -> IvyResult<Vec<u8>>;

@@ -1,12 +1,12 @@
-//! Public OAuth metadata and JSON registration after outer HTTP admission.
+//! Public OAuth metadata, registration and form routes after outer HTTP admission.
 use crate::{
     admission::RequestLease,
-    http_auth::{Connection, Headers as AuthenticationHeaders},
-    http_body::{BodyBuffers, BodyStream},
+    http_auth::{self, Connection, Headers as AuthenticationHeaders},
+    http_body::{BodyBuffers, BodyStream, require_form},
     http_response::{self, Response},
     oauth::{HiveOAuth, Parameters},
 };
-use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
+use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, hash::digest, json::parse};
 
 pub struct Headers<'a> {
     pub authentication: &'a AuthenticationHeaders,
@@ -19,6 +19,15 @@ pub struct Handler<'a> {
     pub buffers: &'a BodyBuffers,
 }
 impl Handler<'_> {
+    /// Caller selected GET /oauth/authorize and supplies the URL search getter.
+    pub fn authorize_query(
+        &self,
+        headers: &AuthenticationHeaders,
+        search: &JsString,
+        response: &mut impl Response,
+    ) -> IvyResult<()> {
+        self.authorize_page(headers, &Parameters::parse_form(search), response)
+    }
     /// Caller selected GET /oauth/authorize and decoded its canonical search
     /// parameters. Rendering stays inside the same authentication admission.
     pub fn authorize_page(
@@ -97,8 +106,17 @@ impl Handler<'_> {
                 return Ok(true);
             }
         }
-        if method != Some(&JsString::from("POST")) || path != JsString::from("/oauth/register") {
+        let register = path == JsString::from("/oauth/register");
+        let authorize = path == JsString::from("/oauth/authorize");
+        let token = path == JsString::from("/oauth/token");
+        if method != Some(&JsString::from("POST")) || !(register || authorize || token) {
             return Ok(false);
+        }
+        if authorize {
+            http_auth::same_origin(
+                authentication.canonical_origin(),
+                headers.authentication.origin.as_ref(),
+            )?;
         }
         // Registration shares authentication arrivals/slots, but intentionally
         // has no browser Origin check. Admission precedes the content-type guard.
@@ -106,6 +124,54 @@ impl Handler<'_> {
             .connection
             .admit_authentication(headers.authentication)?;
         let result = async {
+            if !register {
+                require_form(
+                    headers.content_type,
+                    if authorize {
+                        "OAuth authorization requires a form POST."
+                    } else {
+                        "OAuth token exchange requires form encoding."
+                    },
+                )?;
+                let bytes = self
+                    .buffers
+                    .read(
+                        body,
+                        headers.content_length,
+                        if authorize { 8192 } else { 32 * 1024 },
+                        lease,
+                    )
+                    .await?;
+                let text = String::from_utf8_lossy(&bytes);
+                let form = Parameters::parse_form(&text.as_ref().into());
+                if token {
+                    return http_response::json(response, 200, &self.oauth.token(&form).await?);
+                }
+                let transaction = form.get("transaction").cloned().unwrap_or_default();
+                let credential = form.get("credential").cloned().unwrap_or_default();
+                let pending = self.oauth.transaction(&transaction)?;
+                let result = self
+                    .oauth
+                    .authorize(
+                        &transaction,
+                        &digest(String::from_utf16_lossy(&credential.0)).into(),
+                    )
+                    .and_then(|target| http_response::redirect(response, &target));
+                return match result {
+                    Err(error) if error.code == "unauthenticated" => crate::auth_pages::html(
+                        response,
+                        401,
+                        &crate::auth_pages::oauth(
+                            authentication.base_path(),
+                            &transaction,
+                            pending.get("clientName").unwrap().as_js_string().unwrap(),
+                            pending.get("scope").unwrap().as_js_string().unwrap(),
+                            true,
+                        ),
+                    ),
+                    other => other,
+                };
+            }
             require_json(headers.content_type)?;
             let bytes = self
                 .buffers

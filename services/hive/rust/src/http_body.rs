@@ -11,6 +11,27 @@ use std::{
 
 const MAXIMUM_BUFFERED_BYTES: f64 = 64.0 * 1024.0 * 1024.0;
 
+pub fn require_form(value: Option<&IvyJson>, message: &str) -> IvyResult<()> {
+    let valid = match value {
+        None | Some(IvyJson::Null) => false,
+        Some(IvyJson::String(value)) => {
+            value.0.split(|v| *v == 59).next()
+                == Some(
+                    "application/x-www-form-urlencoded"
+                        .encode_utf16()
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                )
+        }
+        Some(_) => return Err(IvyError::internal()),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(IvyError::new("invalid_arguments", message))
+    }
+}
+
 /// Preserve transport chunk boundaries. Closing an iterator after a rejected
 /// chunk belongs to that transport; an exhausted or failed iterator is not closed
 /// a second time. Dropping a pending request is the outer connection owner's job.

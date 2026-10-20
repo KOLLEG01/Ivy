@@ -1,8 +1,10 @@
 //! Browser session policy after HTTP path/content-type/body admission. The
 //! transport owns page rendering, response I/O and the live WebSocket peer set.
 use crate::{
+    admission::RequestLease,
     browser_push::Worker,
     http_auth::{self, Connection, Headers},
+    http_body::{BodyBuffers, BodyStream, require_form},
     oauth::Parameters,
 };
 use ivy_contracts::{
@@ -31,7 +33,35 @@ pub struct Session<'a> {
     pub connection: &'a Connection,
     pub worker: &'a dyn Worker,
 }
+pub struct LoginHeaders<'a> {
+    pub authentication: &'a Headers,
+    pub content_type: Option<&'a IvyJson>,
+    pub content_length: Option<&'a IvyJson>,
+}
 impl Session<'_> {
+    /// Caller selected POST /login after the outer maintenance/path guards.
+    /// Unlike OAuth, login reads the form before authentication admission.
+    pub async fn login_post(
+        &self,
+        headers: LoginHeaders<'_>,
+        buffers: &BodyBuffers,
+        body: &mut impl BodyStream,
+        lease: Option<&mut RequestLease>,
+        response: &mut impl Response,
+    ) -> IvyResult<()> {
+        http_auth::same_origin(
+            self.connection.authentication().canonical_origin(),
+            headers.authentication.origin.as_ref(),
+        )?;
+        require_form(headers.content_type, "Login requires a form POST.")?;
+        let bytes = buffers
+            .read(body, headers.content_length, 8192, lease)
+            .await?;
+        // Buffer.toString('utf8') replaces malformed input and preserves a BOM.
+        let text = String::from_utf8_lossy(&bytes);
+        let form = Parameters::parse_form(&text.as_ref().into());
+        self.login(headers.authentication, &form, response).await
+    }
     /// The HTTP owner has already checked exact Origin and form content type,
     /// read the bounded8KiB body, and used the canonical form decoder. It must
     /// keep driving this future until completion when a socket disconnects.

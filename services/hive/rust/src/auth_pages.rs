@@ -113,6 +113,14 @@ pub fn login_response(
     )?;
     html(response, 200, &login(owner.base_path(), &target, false))
 }
+/// Search is the canonical URL owner's search getter, including its leading '?'.
+pub fn login_query_response(
+    connection: &Connection,
+    search: &JsString,
+    response: &mut impl Response,
+) -> IvyResult<()> {
+    login_response(connection, &Parameters::parse_form(search), response)
+}
 /// Caller selected GET /login/theme.js after the outer maintenance guard.
 pub fn theme_response(response: &mut impl Response) -> IvyResult<()> {
     response.write_head(
