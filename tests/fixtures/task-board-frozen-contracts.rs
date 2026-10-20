@@ -33,6 +33,7 @@ impl Contracts for ContractsBinding {
             "task-board/task" => "1.8.0",
             "task-board/configuration" => "1.2.0",
             "task-board/run" => "1.1.0",
+            "task-board/delivery" => "1.1.0",
             _ => "1.0.0",
         }
         .into())
@@ -65,6 +66,7 @@ impl Contracts for ContractsBinding {
                 "task-board/native-call" => "NativeCall",
                 "task-board/native-signals" => "NativeSignals",
                 "task-board/scheduler-attempt" => "SchedulerAttempt",
+                "task-board/delivery" => "Delivery",
                 "task-board/native-evidence" => "NativeEvidence",
                 key => panic!("Unexpected record {key}"),
             },

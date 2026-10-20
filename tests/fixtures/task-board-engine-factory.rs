@@ -18,6 +18,8 @@ use ivy_task_board::{
 use std::{cmp::Ordering, path::PathBuf};
 #[path = "task-board-engine-factory-control.rs"]
 mod control;
+#[path = "task-board-engine-factory-delivery.rs"]
+mod delivery;
 #[path = "task-board-engine-factory-driver.rs"]
 mod driver;
 #[path = "task-board-engine-factory-native.rs"]
@@ -59,6 +61,7 @@ struct Fixture {
     control: Option<control::Scenario>,
     steering: Option<steering::Scenario>,
     scheduler: Option<scheduler::Scenario>,
+    delivery: Option<delivery::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -85,6 +88,7 @@ impl Fixture {
             control: None,
             steering: None,
             scheduler: None,
+            delivery: None,
         }
     }
     fn database(&self) -> Connection {
@@ -168,6 +172,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         }
         if let Some(scheduler) = &self.scheduler {
             scheduler.bind(&policy.context)?;
+        }
+        if let Some(delivery) = &self.delivery {
+            delivery.bind(&policy.context)?;
         }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
@@ -273,10 +280,16 @@ impl DeliveryPolicies for Policies<'_> {
     fn phone_target(&self) -> &Json {
         self.context.settings.get("phoneTarget").unwrap()
     }
-    fn chat_readable_version(&self, _: &JsString) -> bool {
+    fn chat_readable_version(&self, version: &JsString) -> bool {
+        if let Some(delivery) = &self.fixture.delivery {
+            return delivery.chat_readable_version(version);
+        }
         panic!("No contact transport")
     }
-    fn handoff(&self, _: &Json, _: &Json) -> IvyResult<JsString> {
+    fn handoff(&self, task: &Json, comment: &Json) -> IvyResult<JsString> {
+        if let Some(delivery) = &self.fixture.delivery {
+            return delivery.handoff(task, comment);
+        }
         panic!("No contact handoff")
     }
     fn voice_prompt(&self, _: &Json, _: &Json) -> IvyResult<JsString> {
@@ -301,6 +314,9 @@ impl TaskNoticePolicy for Policies<'_> {
         }
         if let Some(scheduler) = &self.fixture.scheduler {
             return scheduler.notice(self.context.owner.generation, task, operation);
+        }
+        if self.fixture.delivery.is_some() {
+            return TaskCommentNotices.comment(task, operation);
         }
         if self.fixture.driver.is_some()
             || self.fixture.control.is_some()
@@ -331,6 +347,14 @@ impl CategoryLocale for Policies<'_> {
 }
 impl LifecyclePages for Policies<'_> {
     async fn page(&self, key: &str, options: &Json) -> IvyResult<Json> {
+        if let Some(delivery) = &self.fixture.delivery {
+            if key == "task-board/delivery" {
+                delivery.check_page(options)?;
+                if self.context.owner.generation == 1.0 {
+                    delivery.ready.wait().await;
+                }
+            }
+        }
         if let Some(scheduler) = &self.fixture.scheduler {
             if key == "task-board/task"
                 && options.get("where").and_then(|v| v.get("op")) == Some(&"and".into())
@@ -387,6 +411,13 @@ impl LifecyclePages for Policies<'_> {
                 && options.get("where").and_then(|v| v.get("op")) == Some(&"and".into())
             {
                 return scheduler.page(self.fixture, options);
+            }
+        }
+        if let Some(delivery) = &self.fixture.delivery {
+            if key == "task-board/task"
+                && options.get("where").and_then(|v| v.get("op")) == Some(&"and".into())
+            {
+                return delivery.tasks(self.fixture, options);
             }
         }
         let mut items = vec![];

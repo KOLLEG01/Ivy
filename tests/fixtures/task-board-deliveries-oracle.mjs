@@ -8,6 +8,7 @@ const rows=[],add=(name,input={})=>rows.push({name,input});
 add('prepare original chat');add('prepare original phone',{mode:'phone'});add('prepare phone with current configured target',{mode:'phone',originalPhone:null});add('unconfigured phone falls back',{mode:'phone',phoneTarget:null,originalPhone:null});
 add('confirm chat proof',{mode:'chat',phase:'succeeded',replyState:'confirmed'});add('pending display proof',{mode:'chat',phase:'succeeded'});add('unknown display proof',{mode:'chat',phase:'succeeded',replyState:'outcome_unknown'});
 add('accepted Main handoff',{mode:'chat'});add('applying Main handoff',{mode:'chat',phase:'applying'});add('original missing notify dispatched',{mode:'chat',notFound:1});add('lost notify reply reuses original',{mode:'chat',notFound:1,loseNotify:true,passes:3});
+add('factory question lost notify recovers confirmed',{mode:'chat',phase:'succeeded',replyState:'confirmed',notFound:1,loseNotify:true,passes:3,comment:{purpose:'question',body:'Saved question\ud800'}});
 add('repeat uncertain host has no new revision',{mode:'chat',node:{connected:false},passes:3,tickMillis:1000});add('repeat awaiting Main has no new revision',{mode:'chat',passes:3,tickMillis:1000});
 add('retarget admitted transport metadata',{mode:'chat',retarget:true,passes:2});add('failed Main is unresolved',{mode:'chat',phase:'failed'});add('unknown Main is unresolved',{mode:'chat',phase:'outcome_unknown'});
 add('confirmed needs no publication',{confirmed:true,pub:{writes:[]}});add('publication must finish first',{pub:{phase:'publishing'}});

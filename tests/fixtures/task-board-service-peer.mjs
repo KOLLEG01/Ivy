@@ -24,7 +24,9 @@ const driverBoundary=driver?(await import('./task-board-driver-peer.mjs')).drive
 const control=process.argv.includes('--factory-control');
 const controlBoundary=control?(await import('./task-board-control-peer.mjs')).controlBoundary():null;
 const scheduler=process.argv.includes('--factory-scheduler');
-const factory=process.argv.includes('--factory')||retirement||observations||driver||control||scheduler;
+const delivery=process.argv.includes('--factory-delivery');
+const deliveryBoundary=delivery?(await import('./task-board-delivery-peer.mjs')).deliveryBoundary():null;
+const factory=process.argv.includes('--factory')||retirement||observations||driver||control||scheduler||delivery;
 const registry={namespaces:[{namespace:'task-board',description:'Fixture',guideMarkdown:'',tools:[definition,...(process.argv.includes('--engine')||factory?[actionDefinition]:[])],topics:[],inventoryKinds:[]}],contracts:[],requiredContracts:[]};
 const wss=new WebSocketServer({host:'127.0.0.1',port:0,perMessageDeflate:false,maxPayload:32*1024*1024});
 await once(wss,'listening');
@@ -49,6 +51,7 @@ wss.on('connection',(socket,request)=>{
     const {method,params,id}=frame;emit({kind:'rpc',method,params});
     if(driverBoundary?.({method,params,id,selected,send,reply,emit}))return;
     if(controlBoundary?.({method,params,id,selected,send,reply,emit}))return;
+    if(deliveryBoundary?.({method,params,id,selected,send,reply,emit}))return;
     if(method==='service.connect')reply(id,{generation:selected});
     else if(method==='service.heartbeat')reply(id,{ready:params.ready});
     else if(method==='objects.stat'&&selected===1&&params.objectId==='missing-root')send({jsonrpc:'2.0',id,error:{code:-32000,message:'Refused root.',data:{code:'fixture_refusal',outcome:'unknown',details:{phase:'root'}}}});
