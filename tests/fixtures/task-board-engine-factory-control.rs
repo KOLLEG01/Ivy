@@ -179,6 +179,230 @@ pub(super) fn data() -> Json {
     );
     json(std::str::from_utf8(&output.stdout).unwrap())
 }
+pub(super) fn signals(fixture: &Fixture) -> Vec<Json> {
+    let db = fixture.database();
+    let mut statement = db.prepare("SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='task-board/native-signals' AND d.parent_id='run'").unwrap();
+    statement
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|row| json(&row.unwrap()))
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interrupt_rechecks_the_owner_epoch_after_inspection_without_replacing_current_review() {
+    let data = data();
+    let original = data
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| f(f(f(g, "base"), "run"), "plan").get("nativeVersion") == Some(&"0.159.2".into()))
+        .unwrap();
+    assert!(
+        f(original, "rows")
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| f(r, "name") == &"interrupt refuses replacement epoch".into())
+    );
+    let base = f(original, "base");
+    let plan = f(f(base, "run"), "plan").clone();
+    let intended = f(f(base, "calls"), "interrupt");
+    let peer = Peer::start_mode(Some("--factory-control")).await;
+    let mut fixture = Fixture::new(false);
+    fixture.control = Some(Scenario {
+        plan: plan.clone(),
+        ready: Gate::default(),
+        replay: RefCell::default(),
+        response: RefCell::default(),
+    });
+    let scenario = fixture.control.as_ref().unwrap();
+    let contracts = ContractsBinding;
+    let catalogs =
+        CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    let factory = make_factory(&fixture, &contracts, &catalogs);
+    let (service, owner) = make_service(configured(&peer), &contracts).unwrap();
+    let guard = |v: &Json| {
+        f(f(v, "request"), "change").get("code") == Some(&"task_board_native_epoch_changed".into())
+    };
+    let settled = || {
+        fixture
+            .rows("task-board/operation")
+            .iter()
+            .all(|r| f(&r.2, "phase") == &"succeeded".into())
+    };
+    let quiet = || {
+        assert!(frames(&peer, "native-invoke").is_empty());
+        assert!(frames(&peer, "committed-operation").is_empty());
+        assert!(frames(&peer, "prevented-operation").is_empty());
+        assert!(evidence(&fixture).is_empty());
+    };
+    let script = async {
+        service.start();
+        let first = bounded(service.client.wait_ready(None)).await.unwrap();
+        rpc(
+            &first,
+            "test.control",
+            Json::object([
+                ("plan", plan.clone()),
+                ("replacement", true.into()),
+                ("interruptRace", true.into()),
+            ]),
+        )
+        .await
+        .unwrap();
+        scenario.ready.release();
+        reached(
+            &fixture,
+            &peer,
+            "owner epoch changed at the interrupt dispatch guard",
+            || {
+                settled()
+                    && fixture
+                        .rows("task-board/operation")
+                        .iter()
+                        .any(|r| guard(&r.2))
+                    && signals(&fixture)
+                        .iter()
+                        .any(|v| f(v, "epoch") == &"replacement-epoch".into())
+            },
+        )
+        .await;
+        let calls = fixture.rows("task-board/native-call");
+        assert_eq!(calls.len(), 1);
+        let prepared = calls[0].clone();
+        assert_eq!(prepared.1, 1);
+        assert_eq!(f(&prepared.2, "state"), &"prepared".into());
+        assert_eq!(f(&prepared.2, "evidence"), &Json::Null);
+        for key in ["request", "expectedDefinitionHash", "origin"] {
+            assert_eq!(
+                hash_json(f(&prepared.2, key)).unwrap(),
+                hash_json(f(intended, key)).unwrap()
+            );
+        }
+        let operations = fixture.rows("task-board/operation");
+        let guarded: Vec<_> = operations.iter().filter(|r| guard(&r.2)).collect();
+        assert_eq!(guarded.len(), 1);
+        let guarded = guarded[0];
+        let change = f(f(&guarded.2, "request"), "change");
+        assert_eq!(f(change, "kind"), &"unavailable".into());
+        assert_eq!(f(change, "reason"), &"external_outcome".into());
+        assert_eq!(f(change, "detail"), &"Native reconciliation is waiting: task_board_native_epoch_changed. An old turn cannot be interrupted as if the replacement owner controlled it.".into());
+        let trace = peer.frames.lock().unwrap().clone();
+        let switch = trace
+            .iter()
+            .position(|v| f(v, "kind") == &"epoch-switch".into())
+            .unwrap();
+        assert!(
+            trace[..switch]
+                .iter()
+                .any(|v| f(v, "kind") == &"control-observation".into()
+                    && f(f(v, "observation"), "method") == &"thread/turns/list".into()
+                    && f(f(v, "observation"), "epoch") == &"epoch".into())
+        );
+        assert_eq!(f(&trace[switch], "previousEpoch"), &"epoch".into());
+        assert_eq!(f(&trace[switch], "epoch"), &"replacement-epoch".into());
+        assert_eq!(
+            f(&trace[switch], "operationId"),
+            f(&prepared.2, "operationId")
+        );
+        let absence = trace
+            .iter()
+            .enumerate()
+            .skip(switch + 1)
+            .find(|(_, v)| f(v, "kind") == &"absence".into())
+            .unwrap();
+        assert_eq!(
+            f(f(absence.1, "absence"), "epoch"),
+            &"replacement-epoch".into()
+        );
+        assert_eq!(
+            f(f(absence.1, "absence"), "operationId"),
+            f(&prepared.2, "operationId")
+        );
+        assert!(
+            trace[absence.0 + 1..]
+                .iter()
+                .any(|v| f(v, "kind") == &"control-status".into()
+                    && f(f(v, "status"), "epoch") == &"replacement-epoch".into())
+        );
+        assert_eq!(frames(&peer, "epoch-switch").len(), 1);
+        assert_eq!(frames(&peer, "absence").len(), 1);
+        assert_eq!(
+            f(f(&run(&fixture).2, "externalOutcome"), "state"),
+            &"unknown".into()
+        );
+        assert_review(&fixture, scenario);
+        quiet();
+        let replay = f(&guarded.2, "request").clone();
+        let outcome = f(&guarded.2, "outcome").clone();
+        rpc(
+            &first,
+            "test.close",
+            Json::object(Vec::<(&str, Json)>::new()),
+        )
+        .await
+        .unwrap();
+        until(|| peer.methods(2).contains(&"registry.sync".into())).await;
+        let second = bounded(service.client.wait_ready(None)).await.unwrap();
+        assert_eq!(second.generation(), 2);
+        reached(
+            &fixture,
+            &peer,
+            "replacement inspection retains unresolved old turn",
+            || {
+                settled()
+                    && f(f(&run(&fixture).2, "externalOutcome"), "code")
+                        == &"native_active_owner_unconfirmed".into()
+            },
+        )
+        .await;
+        let current = fixture.rows("task-board/native-call");
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].0, prepared.0);
+        assert_eq!(current[0].1, 1);
+        assert_eq!(
+            hash_json(&current[0].2).unwrap(),
+            hash_json(&prepared.2).unwrap()
+        );
+        assert_eq!(f(&run(&fixture).2, "nativeEpoch"), &"epoch".into());
+        assert_eq!(f(&run(&fixture).2, "turnId"), &"turn".into());
+        assert_review(&fixture, scenario);
+        quiet();
+        *scenario.replay.borrow_mut() = Some(replay);
+        let revisions = count(&fixture, "SELECT count(*) FROM revisions");
+        let blobs = count(&fixture, "SELECT count(*) FROM blobs");
+        let notices = fixture.notices.get();
+        rpc(
+            &second,
+            "test.close",
+            Json::object(Vec::<(&str, Json)>::new()),
+        )
+        .await
+        .unwrap();
+        until(|| scenario.response.borrow().is_some()).await;
+        let third = bounded(service.client.wait_ready(None)).await.unwrap();
+        assert_eq!(third.generation(), 3);
+        let response = scenario.response.borrow_mut().take().unwrap();
+        assert_eq!(
+            hash_json(&bounded(response).await.unwrap()).unwrap(),
+            hash_json(&outcome).unwrap()
+        );
+        assert_eq!(count(&fixture, "SELECT count(*) FROM revisions"), revisions);
+        assert_eq!(count(&fixture, "SELECT count(*) FROM blobs"), blobs);
+        assert_eq!(fixture.notices.get(), notices);
+        assert_eq!(frames(&peer, "absence").len(), 1);
+        assert_eq!(frames(&peer, "epoch-switch").len(), 1);
+        assert_review(&fixture, scenario);
+        quiet();
+        bounded(service.close()).await.unwrap();
+    };
+    let (result, ()) = tokio::join!(owner.run(&factory), script);
+    result.unwrap();
+    assert_eq!(fixture.drops.borrow().as_slice(), [1, 2, 3]);
+    assert_eq!(count(&fixture, "SELECT count(*) FROM active_gates"), 0);
+    peer.finish().await;
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn retained_interrupt_recovers_only_the_original_epoch_and_preserves_current_review() {

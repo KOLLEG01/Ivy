@@ -6,22 +6,24 @@ import {toolDefinitionHash} from '../../packages/contracts/src/tool-definition.t
 // Finite provider for retained cancellation and steering source cases. It
 // advertises only the management/read methods this control boundary consumes.
 export function controlBoundary(){
- let catalog=null,replacement=false,steering=false,reads=0;
+ let catalog=null,replacement=false,steering=false,race=false,raceEpoch=false,reads=0;
  const operations=new Map();
  return ({method,params,id,selected,send,reply,emit})=>{
-  const epoch=selected>1&&replacement?'replacement-epoch':'epoch';
+  const epoch=raceEpoch||selected>1&&replacement?'replacement-epoch':'epoch';
   const fail=(code,message,outcome='not_executed',details={})=>send({jsonrpc:'2.0',id,error:{code:-32000,message,data:{code,outcome,details}}});
   if(method==='test.control'){
    assert.equal(catalog,null);
    catalog=checkedNativeContract(params.plan.nativeVersion,{sourceHash:params.plan.catalogSourceHash});
    replacement=params.replacement;
    steering=params.steering===true;
+   race=params.interruptRace===true;
+   assert.ok(!race||!steering);
    reply(id,{});return true;
   }
   if(method==='tools.list'){
    assert.ok(catalog,'Configure the control provider before releasing the Run lane');
    const name=params.namePrefix,namespace=params.namespace;
-   assert.ok(namespace==='codex'?name===(steering?'turn/steer':'turn/interrupt'):['inputs','status','read','operation','invoke',...(steering?['prevent','notifications']:[])].includes(name),'Unbound control tool '+namespace+'.'+name);
+   assert.ok(namespace==='codex'?name===(steering?'turn/steer':'turn/interrupt'):['inputs','status','read','operation','invoke',...(steering?['prevent']:[]),...(steering||race?['notifications']:[])].includes(name),'Unbound control tool '+namespace+'.'+name);
    const definition=namespace==='codex'?catalog.definitions.get(name):{namespace:'agent',name,interfaceVersion:'1.0.0',annotations:{readOnlyHint:!['invoke','prevent'].includes(name)},inputSchema:{},outputSchema:{}};
    reply(id,{provider:{node:{serviceNodeId:'native-agent'}},items:[{qualifiedName:namespace+'.'+name,definition,definitionHash:toolDefinitionHash(definition),catalogHash:catalog.catalogHash}],nextCursor:null});
    return true;
@@ -31,7 +33,7 @@ export function controlBoundary(){
   const name=params.qualifiedName,a=params.arguments;
   if(name==='agent.inputs')reply(id,{epoch,items:[],truncated:false});
   else if(name==='agent.notifications'){
-   assert.ok(steering);assert.deepEqual(a,{afterSequence:0,limit:100});
+   assert.ok(steering||race);assert.deepEqual(a,{afterSequence:0,limit:100});
    reply(id,{epoch,firstAvailableSequence:1,throughSequence:0,gap:false,hasMore:false,items:[]});
   }
   else if(name==='agent.status'){
@@ -40,12 +42,17 @@ export function controlBoundary(){
   }else if(name==='agent.operation'){
    const operation=operations.get(a.operationId);
    if(!operation){
+    if(race){
+     assert.equal(selected,1);assert.equal(raceEpoch,false,'The original interrupt must not be queried again after the guard refuses it');
+     raceEpoch=true;
+     emit({kind:'epoch-switch',operationId:a.operationId,previousEpoch:epoch,epoch:'replacement-epoch'});
+    }
     if(steering&&replacement&&selected===1){
      emit({kind:'owner-unavailable',operationId:a.operationId});
      fail('fixture_owner_wait','Original owner evidence is unavailable until reconnection.');return true;
     }
     assert.equal(selected,steering&&replacement?2:1,'Unexpected original operation absence');
-    const absence={kind:'agent_operation_absent',operationId:a.operationId,serviceNodeId:'native-agent',epoch};
+    const absence={kind:'agent_operation_absent',operationId:a.operationId,serviceNodeId:'native-agent',epoch:race?'replacement-epoch':epoch};
     emit({kind:'absence',absence});fail('not_found','Exact isolated original operation absence.','not_executed',absence);
    }else if(selected===1){
     emit({kind:'receipt-unavailable',operationId:a.operationId});
@@ -55,6 +62,7 @@ export function controlBoundary(){
     emit({kind:'original-operation',operation});reply(id,operation);
    }
   }else if(name==='agent.invoke'){
+   assert.equal(race,false,'An old turn must receive no input after its native owner epoch changes');
    assert.equal(selected,1);assert.equal(a.operationId,params.operationId);
    assert.equal(a.nativeVersion,catalog.catalog.version);
    assert.equal(a.method,steering?'turn/steer':'turn/interrupt');

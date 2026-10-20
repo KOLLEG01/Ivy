@@ -1,4 +1,5 @@
 use super::*;
+use control::signals;
 use driver::{count, exact_evidence, frames, reached};
 use ivy_task_board::engine_invocations::InvocationRequest;
 
@@ -35,15 +36,6 @@ fn settled(fixture: &Fixture) -> bool {
         .rows("task-board/operation")
         .iter()
         .all(|r| f(&r.2, "phase") == &"succeeded".into())
-}
-fn signals(fixture: &Fixture) -> Vec<Json> {
-    let db = fixture.database();
-    let mut statement = db.prepare("SELECT r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='task-board/native-signals' AND d.parent_id='run'").unwrap();
-    statement
-        .query_map([], |r| r.get::<_, String>(0))
-        .unwrap()
-        .map(|row| json(&row.unwrap()))
-        .collect()
 }
 impl Scenario {
     fn initial(&self) -> (Json, Json) {
