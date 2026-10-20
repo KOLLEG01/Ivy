@@ -270,7 +270,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             )
             .await;
         } else {
-            assert_eq!(status, 488, "{scenario}");
+            assert_eq!(status, 406, "{scenario}");
             send(&peer, target, "ACK", 1, "z9hG4bK-owned-answer", &tag, "").await;
         }
         let answer = tokio::time::timeout(Duration::from_secs(7), &mut pending)

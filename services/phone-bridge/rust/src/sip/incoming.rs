@@ -372,7 +372,7 @@ impl IncomingActor {
             return self.finish_response(StatusCode::Decline).await;
         }
         let Some(body) = body else {
-            return self.finish_response(StatusCode::NotAcceptableHere).await;
+            return self.finish_response(StatusCode::from(406)).await;
         };
         self.current.phase = FinalPhase::Acknowledging;
         self.publish();
