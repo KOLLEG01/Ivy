@@ -8,18 +8,28 @@ use crate::{
     generation::{ChatGeneration, ChatGenerationConfig, ChatGenerationLease, settled},
     main_context::truthy,
     registry::{chat_registry, chat_tools},
+    whatsapp::{
+        journal_owner::Journal,
+        messages::Translator,
+        runtime::{
+            RuntimeAssembly, RuntimeMedia, RuntimeParts, RuntimeResources, RuntimeSocket,
+            WhatsAppRuntime,
+        },
+    },
     worker::ChatWorker,
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString, chat_schema::validate_chat, json::canonical,
     limits::MANAGEMENT_FRAME_BYTES,
 };
+use ivy_host_runtime::portable_native_files::NativeHelperLayout;
 use ivy_sdk::{
     clock::{Clock, SystemClock, date_to_iso},
     service::{ServiceClient, ServiceFuture, ServiceOptions, ServiceState},
 };
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -47,6 +57,17 @@ pub struct HealthObservation {
 pub struct ChatHealth {
     pub write: Arc<dyn Fn(HealthObservation) -> ServiceFuture<()> + Send + Sync>,
     pub control: Arc<dyn Fn() -> ServiceFuture<bool> + Send + Sync>,
+}
+/// The account and media owners open these resources before service startup.
+/// Component admission and helper layout remain explicit at this boundary.
+pub struct WhatsAppServiceParts {
+    pub config: Json,
+    pub journal: Journal,
+    pub socket: Arc<dyn RuntimeSocket>,
+    pub media: Arc<dyn RuntimeMedia>,
+    pub resources: RuntimeResources,
+    pub admitted_artifact: PathBuf,
+    pub helper_layout: NativeHelperLayout,
 }
 /// The service opens the real native transport before constructing these parts.
 /// Every accepted transport operation that uses Main must retain its generation
@@ -591,6 +612,48 @@ struct Inner {
 #[derive(Clone)]
 pub struct ChatService(Arc<Inner>);
 impl ChatService {
+    /// Compose the admitted desktop factory and WhatsApp controller from the
+    /// same owners before the ordinary provider lifecycle can start.
+    pub async fn start_with_whatsapp(
+        config: &Json,
+        generation: Arc<ChatGenerationConfig>,
+        health: ChatHealth,
+        parts: WhatsAppServiceParts,
+    ) -> IvyResult<Self> {
+        Self::validate_parts(config, &generation, true)?;
+        let host_id = config
+            .required("hostId")?
+            .as_js_string()
+            .cloned()
+            .ok_or_else(IvyError::internal)?;
+        let translator = Translator::new(Some(&generation.language));
+        let factory = Arc::new(RuntimeAssembly::for_component(
+            parts.journal.clone(),
+            parts.config.clone(),
+            parts.media.clone(),
+            parts.admitted_artifact,
+            parts.helper_layout,
+            translator,
+        )?);
+        let transport = Arc::new(WhatsAppRuntime::new(RuntimeParts {
+            config: parts.config,
+            host_id,
+            journal: parts.journal,
+            socket: parts.socket,
+            media: parts.media,
+            factory,
+            resources: parts.resources,
+            translator,
+        }));
+        Self::start_admitted(
+            config,
+            generation,
+            health,
+            Some(transport),
+            Arc::new(SystemClock),
+        )
+        .await
+    }
     /// Compose already admitted Host/transport parts. The executable adapter must
     /// load them through their owners before calling this service constructor.
     pub async fn start(
@@ -608,6 +671,14 @@ impl ChatService {
         transport: Option<Arc<dyn ChatTransport>>,
         clock: Arc<dyn Clock>,
     ) -> IvyResult<Self> {
+        Self::validate_parts(config, &generation, transport.is_some())?;
+        Self::start_admitted(config, generation, health, transport, clock).await
+    }
+    fn validate_parts(
+        config: &Json,
+        generation: &ChatGenerationConfig,
+        transport: bool,
+    ) -> IvyResult<()> {
         let settings = config.required("settings")?;
         validate_chat("Settings", settings)?;
         if config.get("componentId") != Some(&Json::from("chat-bridge"))
@@ -622,13 +693,23 @@ impl ChatService {
             != canonical(generation.admission.definition(), MANAGEMENT_FRAME_BYTES)?
             || config.get("serviceNodeId")
                 != Some(&Json::String(generation.service_node_id.clone()))
-            || settings.get("whatsappConfigPath").is_some_and(truthy) != transport.is_some()
+            || settings.get("whatsappConfigPath").is_some_and(truthy) != transport
         {
             return Err(IvyError::new(
                 "chat_scope_mismatch",
                 "Chat service parts must preserve their immutable configuration and configured transport.",
             ));
         }
+        Ok(())
+    }
+    async fn start_admitted(
+        config: &Json,
+        generation: Arc<ChatGenerationConfig>,
+        health: ChatHealth,
+        transport: Option<Arc<dyn ChatTransport>>,
+        clock: Arc<dyn Clock>,
+    ) -> IvyResult<Self> {
+        let settings = config.required("settings")?;
         let (stopped, _) = watch::channel(false);
         let core = Arc::new(Core {
             config: generation,

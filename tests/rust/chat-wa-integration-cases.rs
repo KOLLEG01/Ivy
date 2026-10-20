@@ -6,7 +6,7 @@ use ivy_chat_bridge::{
     admission::ChatAdmission,
     generation::{ChatGeneration, ChatGenerationConfig, settled},
     notice_input::NoticeInstructions,
-    runtime::ChatTransport,
+    runtime::{ChatService, ChatTransport, WhatsAppServiceParts},
     whatsapp::{
         desktop::{DesktopHost, DesktopInvocation, WhatsAppDesktop},
         journal::Inbox,
@@ -198,6 +198,7 @@ impl RuntimeAttachmentFactory for Factory {
 }
 #[derive(Default)]
 struct Account {
+    binds: AtomicUsize,
     flushes: AtomicUsize,
     closes: AtomicUsize,
     close_entered: AtomicBool,
@@ -211,7 +212,9 @@ struct Socket {
     close: watch::Receiver<bool>,
 }
 impl RuntimeSocket for Socket {
-    fn bind(&self, _: RuntimeCallbacks) {}
+    fn bind(&self, _: RuntimeCallbacks) {
+        self.state.binds.fetch_add(1, Ordering::SeqCst);
+    }
     fn start(&self) {
         self.state.events.lock().unwrap().push("start".into());
     }
@@ -424,6 +427,218 @@ async fn component_desktop_assembly(
         ("physicalResultReused", Json::Bool(cfg!(windows))),
         ("attemptFence", unknown.code.into()),
         ("localizedValidation", Json::String(invalid.message_js())),
+        ("desktopActivation", false.into()),
+    ])
+}
+async fn component_service_startup(
+    root: &Path,
+    peer: &mut Peer,
+    row: &Json,
+    generation: Arc<ChatGenerationConfig>,
+    wa_config: Json,
+) -> Json {
+    peer.command(Json::object([
+        ("action", "begin".into()),
+        ("spec", row.clone()),
+    ]))
+    .await;
+    let journal = Journal::new(JournalIo::open(root.join("service-whatsapp.sqlite")).unwrap());
+    let media: Arc<dyn RuntimeMedia> = Arc::new(WhatsAppMedia::new(
+        journal.clone(),
+        wa_config.clone(),
+        root.to_path_buf(),
+        Arc::new(MediaAdapter(Arc::new(MediaIo::default()))),
+        Translator::new(Some(&generation.language)),
+    ));
+    let account = Arc::new(Account::default());
+    let (_release, close) = watch::channel(true);
+    let parts = || {
+        let status = account.clone();
+        let auth = account.clone();
+        let lock = account.clone();
+        let owned_journal = journal.clone();
+        WhatsAppServiceParts {
+            config: wa_config.clone(),
+            journal: journal.clone(),
+            socket: Arc::new(Socket {
+                state: account.clone(),
+                close: close.clone(),
+            }),
+            media: media.clone(),
+            resources: RuntimeResources {
+                status: Arc::new(move |value| {
+                    status.status.lock().unwrap().push(value);
+                    Box::pin(async { Ok(()) })
+                }),
+                close_auth: Arc::new(move || {
+                    assert!(owned_journal.access(|_| Ok(())).is_err());
+                    auth.auth.fetch_add(1, Ordering::SeqCst);
+                    auth.events.lock().unwrap().push("auth-closed".into());
+                    Ok(())
+                }),
+                close_lock: Arc::new(move || {
+                    lock.lock.fetch_add(1, Ordering::SeqCst);
+                    lock.events.lock().unwrap().push("lock-closed".into());
+                    Ok(())
+                }),
+            },
+            admitted_artifact: root.join("admitted-component"),
+            helper_layout: NativeHelperLayout::Target,
+        }
+    };
+    let config = Json::object([
+        ("componentId", "chat-bridge".into()),
+        ("credential", "fixture-token".into()),
+        ("serviceNodeId", "chat-provider".into()),
+        ("hostId", "host".into()),
+        ("version", "1.0.0".into()),
+        ("buildId", format!("sha256:{}", "a".repeat(64)).into()),
+        ("publicBaseUrl", peer.url.clone().into()),
+        (
+            "settings",
+            Json::object([
+                ("pollMs", Json::Number(60000.0)),
+                ("definition", generation.admission.definition().clone()),
+                ("whatsappConfigPath", "synthetic-account-lifecycle".into()),
+            ]),
+        ),
+    ]);
+    let health = super::Probe::new("component-service-startup".into());
+    let mut invalid = config.clone();
+    invalid.insert("componentId", "other-component".into());
+    let rejected =
+        ChatService::start_with_whatsapp(&invalid, generation.clone(), health.health(), parts())
+            .await
+            .err()
+            .unwrap();
+    assert_eq!(rejected.code, "invalid_arguments");
+    #[cfg(windows)]
+    {
+        let mut missing = parts();
+        missing.admitted_artifact = root.join("service-missing-helper");
+        std::fs::create_dir(&missing.admitted_artifact).unwrap();
+        assert_eq!(
+            ChatService::start_with_whatsapp(
+                &config,
+                generation.clone(),
+                health.health(),
+                missing,
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            "artifact_missing"
+        );
+    }
+    assert_eq!(account.binds.load(Ordering::SeqCst), 0);
+    assert!(account.events.lock().unwrap().is_empty());
+    assert!(health.health.lock().unwrap().is_empty());
+    assert!(
+        field(
+            &peer
+                .command(Json::object([("action", "summary".into())]))
+                .await,
+            "handshakes"
+        )
+        .as_array()
+        .unwrap()
+        .is_empty()
+    );
+    let app = ChatService::start_with_whatsapp(&config, generation, health.health(), parts())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), app.service().wait_ready(None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(account.binds.load(Ordering::SeqCst), 1);
+    assert_eq!(account.events.lock().unwrap()[0], Json::from("start"));
+    assert_eq!(
+        field(&health.health.lock().unwrap()[0], "details"),
+        &Json::from("Connecting ChatBridge and verifying its exact workspace contracts.")
+    );
+    let first = app.runtime().unwrap();
+    let first_lease = first.accept().unwrap();
+    journal
+        .set("service-shared-owner", &Json::Bool(true))
+        .unwrap();
+    peer.command(Json::object([("action", "disconnect".into())]))
+        .await;
+    super::until(
+        || {
+            app.service().ready()
+                && app
+                    .runtime()
+                    .is_some_and(|g| g.generation() > first.generation())
+        },
+        "composed service reconnects its real WhatsApp attachment",
+    )
+    .await;
+    assert!(first.accept().is_err());
+    let retired = first.retire();
+    assert!(
+        retired.borrow().is_none(),
+        "Accepted old store lease survives reconnect"
+    );
+    assert_eq!(
+        journal.get("service-shared-owner").unwrap(),
+        Json::Bool(true)
+    );
+    assert_eq!(account.binds.load(Ordering::SeqCst), 1);
+    assert_eq!(account.closes.load(Ordering::SeqCst), 0);
+    drop(first_lease);
+    tokio::time::timeout(Duration::from_secs(30), settled(retired))
+        .await
+        .unwrap()
+        .unwrap();
+    let current = app.runtime().unwrap();
+    let lease = current.accept().unwrap();
+    drop(app.close());
+    super::until(
+        || account.auth.load(Ordering::SeqCst) == 1,
+        "composed account close",
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), app.close())
+            .await
+            .is_err()
+    );
+    drop(lease);
+    tokio::time::timeout(Duration::from_secs(30), app.close())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(current.accept().is_err());
+    assert!(journal.access(|_| Ok(())).is_err());
+    assert_eq!(account.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(account.auth.load(Ordering::SeqCst), 1);
+    assert_eq!(account.lock.load(Ordering::SeqCst), 1);
+    let report = peer
+        .command(Json::object([("action", "summary".into())]))
+        .await;
+    assert!(field(&report, "mismatches").as_array().unwrap().is_empty());
+    Json::object([
+        ("admissionBeforeEffects", true.into()),
+        (
+            "runtimeBindings",
+            Json::Number(account.binds.load(Ordering::SeqCst) as f64),
+        ),
+        ("firstGeneration", Json::Number(first.generation() as f64)),
+        (
+            "reconnectedGeneration",
+            Json::Number(current.generation() as f64),
+        ),
+        ("sharedJournalRetained", true.into()),
+        ("acceptedStoreLeaseRetained", true.into()),
+        ("cancelledCloseRetained", true.into()),
+        (
+            "events",
+            Json::Array(account.events.lock().unwrap().clone()),
+        ),
+        ("health", Json::Array(health.health.lock().unwrap().clone())),
+        ("rpc", report),
         ("desktopActivation", false.into()),
     ])
 }
@@ -770,7 +985,7 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
     assert!(journal.access(|_| Ok(())).is_err());
     // Reconciliation may have finished constructing an owner after transport
     // cleanup. With no accepted jobs, that owner must not pin another store.
-    let late = ChatGeneration::with_clock(config, c.clone(), clock)
+    let late = ChatGeneration::with_clock(config.clone(), c.clone(), clock)
         .await
         .unwrap();
     ChatTransport::attach(&runtime, Some(late.clone())).unwrap();
@@ -784,12 +999,16 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         .command(Json::object([("action", "summary".into())]))
         .await;
     assert!(field(&report, "mismatches").as_array().unwrap().is_empty());
+    let service_startup =
+        component_service_startup(&root, &mut peer, row, config, factory.inner.config.clone())
+            .await;
     let actual = Json::object([
         ("generations", Json::Number(3.0)),
         ("failedReplacement", Json::String(rejected.code_js())),
         ("helpOutputs", Json::Number(1.0)),
         ("desktopOutputs", Json::Number(1.0)),
         ("componentDesktopAssembly", component_assembly),
+        ("componentServiceStartup", service_startup),
         (
             "desktopCalls",
             Json::Array(desktop_io.calls.lock().unwrap().clone()),
