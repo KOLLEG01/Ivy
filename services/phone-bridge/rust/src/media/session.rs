@@ -857,6 +857,12 @@ impl DelayedInviteMedia for SipMediaSession {
             .ok()?;
         self.create_answer().map(|d| d.to_sdp())
     }
+    fn accept_answer(&self, answer: &str) -> bool {
+        SdpDocument::parse(answer).ok().is_some_and(|description| {
+            self.set_remote_description(SdpType::Answer, &description)
+                .is_ok()
+        })
+    }
     fn start(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
         Box::pin(async move {
             let c = &self.handle.0;

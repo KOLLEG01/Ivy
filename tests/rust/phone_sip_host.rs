@@ -48,6 +48,7 @@ impl DelayedInviteMedia for Media {
     fn failed(&self) -> bool {
         false
     }
+    fn accept_answer(&self, _: &str) -> bool { false }
     fn negotiate_offer(&self, offer: &str) -> Option<String> {
         (offer == OFFER).then(|| ANSWER.into())
     }

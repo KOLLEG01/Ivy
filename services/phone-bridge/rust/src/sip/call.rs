@@ -35,6 +35,8 @@ pub trait DelayedInviteMedia: Send + Sync + 'static {
     fn is_closed(&self) -> bool;
     fn failed(&self) -> bool;
     fn negotiate_offer(&self, offer: &str) -> Option<String>;
+    /// Apply a response to the initial offer on this same media session.
+    fn accept_answer(&self, answer: &str) -> bool;
     fn rejected_answer(&self, offer: &str) -> Option<String> {
         crate::media::SdpDocument::rejected_answer(offer)
     }
@@ -78,7 +80,7 @@ impl PreparedInvite {
         destination: SipAddr,
         proxy: Option<SipAddr>,
     ) -> Result<Self, SipIoError> {
-        if !request.body.is_empty() || destination.get_socketaddr().is_err() {
+        if destination.get_socketaddr().is_err() {
             return Err(SipIoError::InvalidRequest);
         }
         let exchange = InviteExchange::new(request).map_err(|_| SipIoError::InvalidRequest)?;
@@ -629,25 +631,35 @@ impl CallActor {
             self.apply(actions);
         }
         let offer = String::from_utf8_lossy(&response.body);
-        let mut answer =
-            if !self.lifecycle.is_ending() && !self.media.is_closed() && valid_offer(&response) {
-                self.media.negotiate_offer(&offer)
-            } else {
-                None
-            };
+        let initial_offer = !self.exchange.request().body.is_empty();
+        let mut answer = if !initial_offer
+            && !self.lifecycle.is_ending()
+            && !self.media.is_closed()
+            && valid_offer(&response)
+        {
+            self.media.negotiate_offer(&offer)
+        } else {
+            None
+        };
         if self.hangup.is_cancelled() {
             let actions = self.lifecycle.hangup();
             self.apply(actions);
         }
-        let accepted = answer
-            .as_ref()
-            .is_some_and(|answer| !answer.trim().is_empty())
-            && !self.media.failed();
+        let accepted = (if initial_offer {
+            !self.lifecycle.is_ending()
+                && !self.media.is_closed()
+                && valid_offer(&response)
+                && self.media.accept_answer(&offer)
+        } else {
+            answer
+                .as_ref()
+                .is_some_and(|answer| !answer.trim().is_empty())
+        }) && !self.media.failed();
         let action = self
             .lifecycle
             .negotiated(accepted, self.media.is_closed())
             .map_err(|_| SipIoError::InvalidRequest)?;
-        if action == (CallAction::Acknowledge { reject_media: true }) {
+        if !initial_offer && action == (CallAction::Acknowledge { reject_media: true }) {
             answer = if bounded_sdp(&offer) {
                 self.media.rejected_answer(&offer)
             } else {

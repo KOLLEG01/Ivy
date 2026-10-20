@@ -156,6 +156,9 @@ pub struct NativeConfigurationParts {
     pub micro: Option<NativeMicroSettings>,
 }
 impl NativeSipConfiguration {
+    pub(crate) fn registration_settings(&self) -> Option<SipRegistrationSettings> {
+        self.registration.as_ref().map(|p| p.settings().clone())
+    }
     pub fn binding(&self) -> &NativeSipBinding {
         &self.binding
     }

@@ -148,6 +148,19 @@ impl NativeSipCommands {
             let snapshot = self.owner.configure_features(&call, challenge)?.json();
             return Ok(Box::pin(async move { NativeOutcome::result(snapshot) }));
         }
+        if request.method() == "call.dial" {
+            let input = crate::native_dial::NativeDial::parse(&request)?;
+            let call = selected
+                .and_then(|id| self.owner.find(&id))
+                .ok_or(SipHostError::NotReady)?;
+            let work = self.owner.dial(&call, input)?;
+            return Ok(Box::pin(async move {
+                match work.wait().await {
+                    Ok(json) => NativeOutcome::result(json),
+                    Err(error) => failed(error.into()),
+                }
+            }));
+        }
         if fields.len() != 1 || request.params().get("callId").is_none() {
             return Err(SipHostError::InvalidRequest.into());
         }
@@ -219,6 +232,7 @@ impl NativeHandler for NativeSipCommands {
                 | "status"
                 | "heartbeat"
                 | "call.prepare"
+                | "call.dial"
                 | "call.hangup"
                 | "call.release"
                 | "registration.reconnect"

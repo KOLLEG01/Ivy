@@ -199,6 +199,9 @@ impl DelayedInviteMedia for NoMedia {
     fn failed(&self) -> bool {
         false
     }
+    fn accept_answer(&self, _: &str) -> bool {
+        false
+    }
     fn negotiate_offer(&self, _: &str) -> Option<String> {
         panic!("No offer expected")
     }

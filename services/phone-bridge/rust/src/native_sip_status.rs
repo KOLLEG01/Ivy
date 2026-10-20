@@ -4,7 +4,7 @@ use crate::{
     media::native_view,
     native_registration::{registration_json, utc_time},
     native_sip::{NativeSipCall, NativeSipError, NativeSipStatusSnapshot},
-    sip::{CallOutcome, SipHostCallPhase, SipHostError, SipSignallingObservation},
+    sip::{SipHostCallPhase, SipHostError, SipSignallingObservation},
 };
 use ivy_contracts::json::{parse, stringify};
 use std::sync::Arc;
@@ -54,19 +54,7 @@ pub fn call_json(call: &NativeSipCall) -> Result<String, NativeSipError> {
         SipHostCallPhase::LocalEnded => "local_ended",
         SipHostCallPhase::OutcomeUnknown => "outcome_unknown",
     };
-    let error = if s.phase == SipHostCallPhase::OutcomeUnknown {
-        Some("sip_operation_outcome_unknown")
-    } else if call.media().is_some_and(|m| m.observation().failed) {
-        Some("media_failed")
-    } else if s.attempted
-        && !s.ending
-        && s.signalling
-            .is_some_and(|s| s.outcome == Some(CallOutcome::Ended))
-    {
-        Some("sip_dial_not_connected")
-    } else {
-        None
-    };
+    let error = call.error();
     // NativeSipOperations currently admits outgoing calls only. Incoming
     // admission must carry its original direction/context before using this view.
     Ok(format!(

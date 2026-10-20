@@ -10,10 +10,12 @@ use crate::{
         NativeCodecSettings, NativeConfigError, NativeIncomingPeers, NativeMicroSettings,
         NativeSipBinding, NativeSipConfiguration,
     },
+    native_dial::NativeDial,
     native_rpc::NativeRequest,
     sip::{
-        HostedSipMedia, RegistrationObservation, SipHost, SipHostCall, SipHostCallObservation,
-        SipHostError, SipHostObservation,
+        CallOutcome, HostedSipMedia, RegistrationObservation, SipHost, SipHostCall,
+        SipHostCallObservation, SipHostCallPhase, SipHostError, SipHostObservation,
+        SipRegistrationSettings,
     },
 };
 use std::{
@@ -100,7 +102,7 @@ pub struct NativeCallConfiguration {
     binding: NativeSipBinding,
     codecs: NativeCodecSettings,
     incoming: NativeIncomingPeers,
-    registration: bool,
+    registration: Option<SipRegistrationSettings>,
 }
 impl NativeCallConfiguration {
     pub fn binding(&self) -> &NativeSipBinding {
@@ -113,7 +115,7 @@ impl NativeCallConfiguration {
         &self.incoming
     }
     pub fn has_registration(&self) -> bool {
-        self.registration
+        self.registration.is_some()
     }
     /// The call owner supplies its original entropy and resolved SDP address.
     /// Construct these only inside the admitted factory, before RTP startup.
@@ -154,7 +156,7 @@ mod tests {
             binding: parts.binding,
             codecs: parts.codecs,
             incoming: parts.incoming,
-            registration: false,
+            registration: None,
         };
         let mut expected = configuration.binding().endpoint();
         expected.set_port(0);
@@ -189,7 +191,14 @@ struct Call {
     original: SipHostCall,
     media: Arc<OnceLock<SipMediaSession>>,
     features: PhoneCallFeatures,
+    result: Mutex<CallResult>,
     releasing: Mutex<Option<NativeSipOperation<()>>>,
+}
+#[derive(Default)]
+struct CallResult {
+    ending: bool,
+    unknown: bool,
+    error: Option<&'static str>,
 }
 #[derive(Clone)]
 pub struct NativeSipCall(Arc<Call>);
@@ -204,7 +213,24 @@ impl NativeSipCall {
         self.0.features.clone()
     }
     pub fn observation(&self) -> SipHostCallObservation {
-        self.0.original.observation()
+        let mut observed = self.0.original.observation();
+        let mut result = self.0.result.lock().unwrap();
+        if observed.phase == SipHostCallPhase::OutcomeUnknown {
+            result.unknown = true;
+            result.ending = true;
+            result.error = Some("sip_operation_outcome_unknown");
+        } else if !result.unknown && self.media().is_some_and(|m| m.observation().failed) {
+            result.error = Some("media_failed");
+        }
+        if result.unknown {
+            observed.phase = SipHostCallPhase::OutcomeUnknown;
+        }
+        observed.ending |= result.ending;
+        observed
+    }
+    pub(crate) fn error(&self) -> Option<&'static str> {
+        self.observation();
+        self.0.result.lock().unwrap().error
     }
     pub async fn prepared(&self) -> Result<(), SipHostError> {
         self.0.original.prepared().await
@@ -302,7 +328,7 @@ impl NativeSipOperations {
         let parsed = NativeSipConfiguration::parse(request)?;
         tokio::runtime::Handle::try_current().map_err(|_| SipHostError::NotReady)?;
         state.configured = true;
-        let registration = parsed.has_registration();
+        let registration = parsed.registration_settings();
         let parts = parsed.into_parts()?;
         state.configuration = Some(Arc::new(NativeCallConfiguration {
             binding: parts.binding,
@@ -412,6 +438,7 @@ impl NativeSipOperations {
             original,
             media,
             features,
+            result: Mutex::new(CallResult::default()),
             releasing: Mutex::new(None),
         }));
         let _ = original_slot.set(Arc::downgrade(&call.0));
@@ -469,7 +496,100 @@ impl NativeSipOperations {
     pub fn hangup(&self, expected: &NativeSipCall) -> Result<SipHostCallObservation, SipHostError> {
         let state = self.0.state.lock().unwrap();
         Self::original(&state, expected)?;
-        self.0.host.hangup(&expected.0.original)
+        expected.0.result.lock().unwrap().ending = true;
+        self.0.host.hangup(&expected.0.original)?;
+        Ok(expected.observation())
+    }
+    pub(crate) fn dial(
+        &self,
+        expected: &NativeSipCall,
+        input: NativeDial,
+    ) -> Result<NativeSipOperation<String>, NativeSipError> {
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        let config = state.configuration.as_ref().ok_or(SipHostError::NotReady)?;
+        let descriptor = input.descriptor(config.registration.as_ref())?;
+        let observation = expected.observation();
+        if observation.attempted || observation.ending {
+            return Err(NativeConfigError::OutcomeUnknown.into());
+        }
+        let media = expected.media().ok_or(SipHostError::NotReady)?;
+        let delayed = config.binding.offer_mode() == crate::native_config::OfferMode::Delayed
+            || config.binding.offer_mode() == crate::native_config::OfferMode::Auto
+                && config.codecs.preferences()[0] == crate::media::Codec::Evs;
+        let body = if delayed {
+            String::new()
+        } else {
+            media
+                .create_offer()
+                .ok_or(NativeConfigError::OutcomeUnknown)?
+                .to_sdp()
+        };
+        let request = descriptor.request(
+            &observation.id,
+            self.0
+                .host
+                .observation()
+                .endpoint
+                .ok_or(SipHostError::NotReady)?,
+            config.binding.transport(),
+            body,
+        );
+        // The original BeginWaiting precedes dispatch; it does not grant live
+        // caller audio or start a replacement sender.
+        if input.waiting {
+            media
+                .begin_waiting()
+                .map_err(|_| NativeConfigError::OutcomeUnknown)?;
+        }
+        let pending = self.0.host.begin_dial(
+            &expected.0.original,
+            request,
+            descriptor.next_hop,
+            descriptor.credentials,
+            input.ring_seconds as u32,
+        )?;
+        let owner = self.clone();
+        let call = expected.clone();
+        Ok(retained(async move {
+            let completed = tokio::time::timeout(
+                std::time::Duration::from_secs(input.ring_seconds as u64 + 15),
+                pending,
+            )
+            .await;
+            let original = call.0.original.observation();
+            {
+                let mut result = call.0.result.lock().unwrap();
+                match completed {
+                    Ok(Ok(CallOutcome::Unknown)) => {
+                        result.unknown=true;result.ending=true;result.error=Some("sip_operation_outcome_unknown");
+                    },
+                    Ok(Ok(CallOutcome::Connected))
+                        if !result.ending
+                            && !result.unknown
+                            && original.phase == SipHostCallPhase::Connected =>
+                    {
+                        call.0.features.connected()
+                    }
+                    Ok(Ok(CallOutcome::Ended | CallOutcome::Connected))
+                        if !result.ending && !result.unknown =>
+                    {
+                        result.ending = true;
+                        result.error = Some("sip_dial_not_connected");
+                    }
+                    Ok(Ok(_)) if result.ending || result.unknown => (),
+                    _ => {
+                        result.unknown = true;
+                        result.ending = true;
+                        result.error = Some("sip_operation_outcome_unknown");
+                    }
+                }
+            }
+            if call.0.result.lock().unwrap().ending {
+                let _ = owner.0.host.hangup(&call.0.original);
+            }
+            crate::native_sip_status::call_json(&call).map_err(|_| SipHostError::CleanupUnconfirmed)
+        }))
     }
     pub fn configure_features(
         &self,
@@ -500,6 +620,7 @@ impl NativeSipOperations {
         let owner = self.clone();
         let call = expected.clone();
         // Revoke even if no observer polls the retained disposal operation.
+        expected.0.result.lock().unwrap().ending = true;
         self.0.host.hangup(&expected.0.original)?;
         expected.0.features.dispose();
         let operation = retained(async move {
@@ -523,6 +644,7 @@ impl NativeSipOperations {
         }
         state.stopping = true;
         for call in state.calls.iter() {
+            call.0.result.lock().unwrap().ending = true;
             let _ = self.0.host.hangup(&call.0.original);
             call.0.features.dispose();
         }

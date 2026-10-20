@@ -129,7 +129,8 @@ mod tests {
         fn failed(&self) -> bool {
             false
         }
-        fn negotiate_offer(&self, offer: &str) -> Option<String> {
+        fn accept_answer(&self, _: &str) -> bool { false }
+    fn negotiate_offer(&self, offer: &str) -> Option<String> {
             self.negotiated.fetch_add(1, Ordering::SeqCst);
             (offer == OFFER).then(|| ANSWER.to_owned())
         }

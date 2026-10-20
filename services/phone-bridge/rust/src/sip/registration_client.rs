@@ -58,6 +58,9 @@ pub struct SipRegistrationSettings {
     protocol: Transport,
 }
 impl SipRegistrationSettings {
+    pub(crate) fn dial_identity(&self) -> (&Uri, &str, &str) {
+        (&self.account, &self.contact_user, &self.auth_username)
+    }
     pub(super) fn protocol(&self) -> Transport {
         self.protocol
     }

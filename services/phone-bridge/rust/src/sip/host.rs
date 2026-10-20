@@ -87,6 +87,9 @@ pub struct SipRegistrationPlan {
     password: String,
 }
 impl SipRegistrationPlan {
+    pub(crate) fn settings(&self) -> &SipRegistrationSettings {
+        &self.settings
+    }
     pub fn new(settings: SipRegistrationSettings, password: String) -> Result<Self, SipHostError> {
         if !bounded_secret(&password, 4096) {
             return Err(SipHostError::InvalidRequest);
@@ -551,10 +554,24 @@ impl SipHost {
         credentials: Option<DigestCredentials>,
         ring_seconds: u32,
     ) -> Result<CallOutcome, SipHostError> {
-        if !(1..=120).contains(&ring_seconds)
-            || !request.body.is_empty()
-            || InviteExchange::new(request.clone()).is_err()
-        {
+        if !request.body.is_empty() {
+            return Err(SipHostError::InvalidRequest);
+        }
+        self.begin_dial(expected, request, next_hop, credentials, ring_seconds)?
+            .await
+    }
+    /// Reserve the original attempt before returning a cancellable observer.
+    /// Initial and delayed offers share this transaction/dialog owner.
+    pub(crate) fn begin_dial(
+        &self,
+        expected: &SipHostCall,
+        request: Request,
+        next_hop: SipAddr,
+        credentials: Option<DigestCredentials>,
+        ring_seconds: u32,
+    ) -> Result<impl Future<Output = Result<CallOutcome, SipHostError>> + Send + use<>, SipHostError>
+    {
+        if !(1..=120).contains(&ring_seconds) || InviteExchange::new(request.clone()).is_err() {
             return Err(SipHostError::InvalidRequest);
         }
         let completion = {
@@ -644,7 +661,7 @@ impl SipHost {
             });
             completion
         };
-        completion.wait().await
+        Ok(async move { completion.wait().await })
     }
     pub fn hangup(&self, expected: &SipHostCall) -> Result<SipHostCallObservation, SipHostError> {
         let state = self.shared().lock().unwrap();
