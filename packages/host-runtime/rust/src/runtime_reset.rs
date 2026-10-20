@@ -5,6 +5,11 @@ use ivy_contracts::JsString;
 use std::{collections::BTreeSet, future::Future};
 mod plan;
 pub use plan::local_runtime_reset_plan;
+mod local;
+pub use local::{
+    complete_reset_record, confirm_reset_record, prepare_reset_hold, prove_reset_locks_released,
+    reset_record_path, restored_bootstrap_target, saved_reset_runtime,
+};
 fn truthy(value: &J) -> bool {
     match value {
         J::Null => false,
