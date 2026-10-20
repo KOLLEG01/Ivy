@@ -27,6 +27,9 @@ impl RtcpRuntime for Clock {
     }
 }
 async fn media(port: CallAudioPort) -> SipMediaSession {
+    media_events(port, Arc::new(Events::default())).await
+}
+async fn media_events(port: CallAudioPort, events: Arc<dyn SipReceiveEvents>) -> SipMediaSession {
     SipMediaSession::bind(
         SipMediaSettings {
             call_id: CALL.into(),
@@ -47,7 +50,7 @@ async fn media(port: CallAudioPort) -> SipMediaSession {
         port,
         None,
         Arc::new(Clock),
-        Arc::new(Events::default()),
+        events,
     )
     .await
     .unwrap()
@@ -245,16 +248,59 @@ fn description(s: Option<SdpDocument>, port: u16) -> IvyJson {
             ("version", IvyJson::Number(s.origin().version() as f64)),
             (
                 "port",
-                if s.media()[0].port() == i32::from(port) {
-                    "local".into()
-                } else {
-                    s.media()[0].port().to_string().into()
-                },
+                s.media()
+                    .first()
+                    .map(|m| {
+                        if m.port() == i32::from(port) {
+                            "local".into()
+                        } else {
+                            m.port().to_string().into()
+                        }
+                    })
+                    .unwrap_or(IvyJson::Null),
             ),
-            ("direction", direction(s.media()[0].direction().unwrap())),
+            (
+                "direction",
+                s.media()
+                    .first()
+                    .map(|m| direction(m.direction().unwrap()))
+                    .unwrap_or(IvyJson::Null),
+            ),
+            ("tracks", tracks(&s, port)),
         ])
     })
     .unwrap_or(IvyJson::Null)
+}
+fn tracks(s: &SdpDocument, port: u16) -> IvyJson {
+    IvyJson::Array(
+        s.media()
+            .iter()
+            .map(|m| {
+                IvyJson::object([
+                    ("kind", m.kind().as_str().into()),
+                    ("mid", m.mid().map(Into::into).unwrap_or(IvyJson::Null)),
+                    (
+                        "port",
+                        if m.port() == i32::from(port) {
+                            "local".into()
+                        } else {
+                            m.port().to_string().into()
+                        },
+                    ),
+                    ("direction", direction(m.direction().unwrap())),
+                    (
+                        "formats",
+                        IvyJson::Array(
+                            m.formats()
+                                .iter()
+                                .map(|f| n(f.payload() as usize))
+                                .collect(),
+                        ),
+                    ),
+                ])
+            })
+            .collect(),
+    )
 }
 fn original_session(inputs: &[IvyJson]) -> Option<IvyJson> {
     if std::env::var_os("IVY_PHONE_CONFIG_ORACLE_DIR").is_none() {
@@ -298,6 +344,274 @@ fn original_session(inputs: &[IvyJson]) -> Option<IvyJson> {
         )
         .unwrap(),
     )
+}
+fn step_result(result: std::result::Result<(), SipMediaError>) -> IvyJson {
+    match result {
+        Ok(()) => "OK".into(),
+        Err(SipMediaError::Negotiation(error)) => error.as_str().into(),
+        Err(error) => panic!("unexpected session failure: {error:?}"),
+    }
+}
+fn perform_step(
+    m: &SipMediaSession,
+    step: &IvyJson,
+    remote: u16,
+    local: u16,
+) -> (IvyJson, IvyJson) {
+    match step.get("op").unwrap().as_str().unwrap().as_str() {
+        "set" => {
+            let text = step
+                .get("sdp")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .replace("$PORT", &remote.to_string());
+            let kind = if step.get("answer").and_then(IvyJson::as_bool) == Some(true) {
+                SdpType::Answer
+            } else {
+                SdpType::Offer
+            };
+            (
+                step_result(m.set_remote_description(kind, &SdpDocument::parse(&text).unwrap())),
+                IvyJson::Null,
+            )
+        }
+        "offer" => (IvyJson::Null, description(m.create_offer(), local)),
+        "answer" => (IvyJson::Null, description(m.create_answer(), local)),
+        "status" => {
+            m.set_stream_status(SdpDirection::RecvOnly).unwrap();
+            (IvyJson::Null, IvyJson::Null)
+        }
+        _ => unreachable!(),
+    }
+}
+fn full_shape(m: &SipMediaSession, peer: u16) -> IvyJson {
+    let mut state = shape(m, peer);
+    state.insert("closed", m.is_closed().into());
+    let remote = m.remote_description();
+    state.insert(
+        "remoteDescription",
+        remote
+            .as_ref()
+            .map(|s| IvyJson::Array(s.media().iter().map(|t| t.kind().as_str().into()).collect()))
+            .unwrap_or(IvyJson::Null),
+    );
+    state.insert(
+        "remotePayloads",
+        remote
+            .as_ref()
+            .map(|s| {
+                IvyJson::Array(
+                    s.media()
+                        .iter()
+                        .map(|t| {
+                            IvyJson::Array(
+                                t.formats()
+                                    .iter()
+                                    .map(|f| n(f.payload() as usize))
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .unwrap_or(IvyJson::Null),
+    );
+    state.insert(
+        "localFormats",
+        IvyJson::Array(
+            m.local_sdp_formats()
+                .iter()
+                .map(|f| n(f.payload() as usize))
+                .collect(),
+        ),
+    );
+    state
+}
+fn project_state(state: &IvyJson) -> IvyJson {
+    IvyJson::object(
+        [
+            "rtp",
+            "rtcp",
+            "local",
+            "remote",
+            "controlClosed",
+            "sendCodec",
+            "failed",
+            "declared",
+            "eventPayload",
+            "closed",
+            "remoteDescription",
+            "remotePayloads",
+            "localFormats",
+        ]
+        .map(|key| (key, state.get(key).unwrap().clone())),
+    )
+}
+struct DescriptionEvents {
+    owner: std::sync::Weak<Mutex<Option<SipMediaSession>>>,
+    callback: Option<IvyJson>,
+    peer: u16,
+    local: Mutex<u16>,
+    enabled: AtomicBool,
+    fired: AtomicBool,
+    rows: Mutex<Vec<IvyJson>>,
+}
+impl SipReceiveEvents for DescriptionEvents {
+    fn digit(&self, _: char, _: InputSource) {}
+    fn failed(&self) {}
+    fn report_sent(&self, _: &[u8]) {
+        if !self.enabled.load(Ordering::Acquire) {
+            return;
+        }
+        let owner = self.owner.upgrade().unwrap();
+        let m = owner.lock().unwrap().as_ref().unwrap().clone();
+        let before = full_shape(&m, self.peer);
+        let mut result = IvyJson::Null;
+        if !self.fired.swap(true, Ordering::AcqRel) {
+            if let Some(callback) = &self.callback {
+                let op = callback.get("op").unwrap().as_str().unwrap();
+                if op == "throw" {
+                    self.rows.lock().unwrap().push(IvyJson::object([
+                        ("before", before),
+                        ("result", result),
+                        ("after", IvyJson::Null),
+                    ]));
+                    panic!("synthetic report callback failure");
+                }
+                result = match op.as_str() {
+                    "offer" => m
+                        .create_offer()
+                        .map(|d| tracks(&d, *self.local.lock().unwrap()))
+                        .unwrap_or(IvyJson::Null),
+                    "status" => {
+                        m.set_stream_status(SdpDirection::RecvOnly).unwrap();
+                        IvyJson::Null
+                    }
+                    "set" => perform_step(&m, callback, self.peer, *self.local.lock().unwrap()).0,
+                    _ => unreachable!(),
+                };
+            }
+        }
+        self.rows.lock().unwrap().push(IvyJson::object([
+            ("before", before),
+            ("result", result),
+            ("after", full_shape(&m, self.peer)),
+        ]));
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_media_rejection_and_reentrant_report_callbacks_match_original_session() {
+    let inputs = parse(
+        include_str!("../fixtures/phone-session-edges.json"),
+        1_000_000,
+    )
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .to_vec();
+    let Some(original) = original_session(&inputs) else {
+        return;
+    };
+    trace(
+        "session-original-edges-inputs",
+        IvyJson::object([
+            ("inputs", IvyJson::Array(inputs.clone())),
+            ("original", original.clone()),
+        ]),
+    );
+    let mut rows = Vec::new();
+    for (input, expected) in inputs.iter().zip(original.as_array().unwrap()) {
+        assert_eq!(
+            expected.get("ok").unwrap().as_bool(),
+            Some(true),
+            "{input:?}: {expected:?}"
+        );
+        let (peer, _control) = pair().await;
+        let peer = peer.local_addr().unwrap().port();
+        let owner = Arc::new(Mutex::new(None));
+        let events = Arc::new(DescriptionEvents {
+            owner: Arc::downgrade(&owner),
+            callback: input.get("callback").cloned(),
+            peer,
+            local: Mutex::new(0),
+            enabled: AtomicBool::new(true),
+            fired: AtomicBool::new(false),
+            rows: Mutex::new(Vec::new()),
+        });
+        let port = CallAudioPort::new(CALL.into(), Arc::new(Factory::routes(vec![]))).unwrap();
+        let m = media_events(port, events.clone()).await;
+        *owner.lock().unwrap() = Some(m.clone());
+        m.create_offer().unwrap();
+        let local = m.observation().receive.transport.local_rtp.port();
+        *events.local.lock().unwrap() = local;
+        for (step, expected) in input
+            .get("steps")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(expected.get("trace").unwrap().as_array().unwrap())
+        {
+            let (result, body) = perform_step(&m, step, peer, local);
+            assert_eq!(
+                result,
+                *expected.get("result").unwrap(),
+                "{input:?}: {step:?}"
+            );
+            assert_eq!(
+                body,
+                *expected.get("description").unwrap(),
+                "{input:?}: {step:?}"
+            );
+            let state = full_shape(&m, peer);
+            assert_eq!(
+                state,
+                project_state(expected.get("state").unwrap()),
+                "{input:?}: {step:?}"
+            );
+            let callbacks = IvyJson::Array(events.rows.lock().unwrap().clone());
+            let want = IvyJson::Array(
+                expected
+                    .get("reportCallbacks")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|cb| {
+                        IvyJson::object([
+                            ("before", project_state(cb.get("before").unwrap())),
+                            ("result", cb.get("result").unwrap().clone()),
+                            (
+                                "after",
+                                if cb.get("after").unwrap().is_null() {
+                                    IvyJson::Null
+                                } else {
+                                    project_state(cb.get("after").unwrap())
+                                },
+                            ),
+                        ])
+                    })
+                    .collect(),
+            );
+            assert_eq!(callbacks, want, "{input:?}: {step:?}");
+            rows.push(IvyJson::object([
+                ("state", state),
+                ("callbacks", callbacks),
+            ]));
+        }
+        events.enabled.store(false, Ordering::Release);
+        owner.lock().unwrap().take();
+        m.close().await.unwrap();
+    }
+    trace(
+        "session-original-edges",
+        IvyJson::object([
+            ("inputs", IvyJson::Array(inputs)),
+            ("original", original),
+            ("rust", IvyJson::Array(rows)),
+        ]),
+    );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn descriptions_retain_original_endpoint_direction_rejection_and_version_effects() {

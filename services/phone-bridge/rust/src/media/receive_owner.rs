@@ -598,12 +598,14 @@ impl SipRtpReceiver {
                 rtp: Some(peer.rtp()),
                 rtcp: Some(peer.rtcp()),
             },
+            true,
         )
     }
     pub(super) fn configure_description(
         &self,
         plan: &AudioNegotiation,
         destinations: MediaDestinations,
+        replace_remote: bool,
     ) -> Result<(), ReceiveError> {
         let inner = &self.handle.0;
         if inner.closed.load(Ordering::Acquire) {
@@ -642,7 +644,11 @@ impl SipRtpReceiver {
         state.formats = plan.receive_formats().to_vec();
         state.event_payloads = plan.offered_event_payloads().to_vec();
         state.selected_event = plan.selected_event_payload();
-        reports.admission.configure(plan.remote_sources());
+        if replace_remote {
+            reports
+                .admission
+                .replace_remote(plan.remote_sources_option());
+        }
         sender.revision += 1;
         sender.format = Some(plan.sender().clone());
         sender.codec = Some(codec);

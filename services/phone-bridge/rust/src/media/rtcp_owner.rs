@@ -41,10 +41,6 @@ impl RtcpReceiveOwner {
         self.observation.local_source = Some(source);
         true
     }
-    pub fn configure(&mut self, declared: &[u32]) {
-        self.observation.learned_source = Some(0);
-        self.observation.declared_sources = declared.to_vec();
-    }
     pub fn replace_remote(&mut self, declared: Option<&[u32]>) {
         self.observation.learned_source = declared.map(|_| 0);
         self.observation.declared_sources = declared.unwrap_or(&[]).to_vec();

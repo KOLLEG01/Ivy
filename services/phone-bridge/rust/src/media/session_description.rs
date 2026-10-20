@@ -1,4 +1,5 @@
 //! Original SIP session endpoint/direction effects around codec negotiation.
+use super::negotiation::{DescriptionUpdate, incompatible};
 use super::transport::MediaDestinations;
 use super::{
     AudioNegotiator, Codec, NegotiationError, SdpDirection, SdpDocument, SdpIdentity, SdpMediaKind,
@@ -12,9 +13,22 @@ pub(super) struct Descriptions {
     pub local_direction: SdpDirection,
     pub remote_direction: Option<SdpDirection>,
     pub version: u64,
-    pub close_control: bool,
     pub remote_changed: bool,
     pub remote_sources: Option<Vec<u32>>,
+}
+pub(super) struct Applying {
+    codecs: DescriptionUpdate,
+    global: Option<SocketAddr>,
+    pending: Option<Primary>,
+}
+struct Primary {
+    rtp: Option<SocketAddr>,
+    remote_direction: SdpDirection,
+    compatible: bool,
+}
+pub(super) enum Advance {
+    Audio { inactive: bool },
+    Complete,
 }
 impl Descriptions {
     pub fn new(preferences: &[Codec]) -> Result<Self, super::FormatError> {
@@ -24,7 +38,6 @@ impl Descriptions {
             local_direction: SdpDirection::SendRecv,
             remote_direction: None,
             version: 0,
-            close_control: false,
             remote_changed: false,
             remote_sources: None,
         })
@@ -65,88 +78,121 @@ impl Descriptions {
         }
         Some(answer)
     }
-    /// A failed codec offer can still alter the original destination/direction.
-    /// Rejected codec state itself is retained by AudioNegotiator.
-    pub fn apply(
+    /// Application rollback and SDK stream effects are separate. A suspended
+    /// RTCP notification can re-enter this owner before endpoints or codecs
+    /// are committed; its changes remain visible to the outer continuation.
+    pub fn begin(
         &mut self,
         kind: SdpType,
         description: &SdpDocument,
-    ) -> Result<(), NegotiationError> {
-        self.close_control = false;
-        self.remote_changed = false;
-        let remote = description.normalized()?;
-        if remote.media.is_empty() {
-            return Err(NegotiationError::NoRemoteMedia);
-        }
-        if remote.media.len() == 1 && remote.media[0].kind != SdpMediaKind::Audio {
-            return Err(NegotiationError::NoMatchingMediaType);
-        }
-        if remote
-            .media
-            .iter()
-            .filter(|m| m.kind == SdpMediaKind::Audio)
-            .flat_map(|m| &m.formats)
-            .any(|f| f.name().is_none())
-        {
-            return Err(NegotiationError::InvalidSdp);
-        }
-        // IPAddress.Parse is used before clearing remote tracks, even when a
-        // media connection overrides the session's invalid address. No DNS.
-        let global = remote
-            .connection
-            .as_ref()
-            .filter(|c| !c.address().is_empty())
-            .map(|c| address(c.address(), 0))
-            .transpose()?;
+    ) -> Result<Applying, NegotiationError> {
+        let codecs = self.negotiation.begin_description(kind, description)?;
+        let global = (|| {
+            self.negotiation.preflight(&codecs)?;
+            codecs
+                .remote
+                .connection
+                .as_ref()
+                .filter(|c| !c.address().is_empty())
+                .map(|c| address(c.address(), 0))
+                .transpose()
+        })();
+        let global = match global {
+            Ok(global) => global,
+            Err(error) => {
+                self.negotiation.reject_description(codecs);
+                return Err(error);
+            }
+        };
         self.remote_direction = None;
-        self.remote_changed = true;
         self.remote_sources = None;
-        let Some(track) = remote.media.iter().find(|m| m.kind == SdpMediaKind::Audio) else {
-            return Err(NegotiationError::NoMatchingMediaType);
-        };
-        self.remote_direction = Some(track.direction.unwrap_or(SdpDirection::SendRecv));
-        self.remote_sources = Some(track.sources());
-        let mut candidate = self.negotiation.clone();
-        let compatible = candidate.set_remote_description(kind, &remote);
-        self.negotiation.retain_event_selection(&candidate);
-        let ip = track
-            .connection
-            .as_ref()
-            .map(|c| address(c.address(), 0))
-            .transpose()?
-            .or(global);
-        let rtp = ip.map(|mut ip| {
-            ip.set_port(u16::try_from(track.port).unwrap_or(9));
-            ip
-        });
-        if self.local_direction == SdpDirection::Inactive {
-            self.local_direction = SdpDirection::SendRecv;
-        }
-        if self.remote_direction == Some(SdpDirection::Inactive)
-            || rtp.is_some_and(|p| p.port() == 0 || p.ip().is_unspecified() && p.port() != 9)
-        {
-            self.local_direction = SdpDirection::Inactive;
-        }
-        self.close_control = self.local_direction == SdpDirection::Inactive;
-        let control = if self.remote_direction != Some(SdpDirection::Inactive)
-            && self.local_direction != SdpDirection::Inactive
-        {
-            let mut p = rtp.ok_or(NegotiationError::Endpoint)?;
-            p.set_port(p.port().checked_add(1).ok_or(NegotiationError::Endpoint)?);
-            Some(p)
-        } else {
-            None
-        };
-        if let Some(p) = rtp.filter(|p| p.port() != 9) {
-            self.destinations.rtp = Some(p);
-        }
-        if let Some(p) = control.filter(|p| p.port() != 9) {
-            self.destinations.rtcp = Some(p);
-        }
-        compatible?;
-        self.negotiation = candidate;
-        Ok(())
+        self.remote_changed = true;
+        Ok(Applying {
+            codecs,
+            global,
+            pending: None,
+        })
     }
+    pub fn advance(&mut self, applying: &mut Applying) -> Result<Advance, NegotiationError> {
+        if let Some(primary) = applying.pending.take() {
+            let control = if primary.remote_direction != SdpDirection::Inactive
+                && self.local_direction != SdpDirection::Inactive
+            {
+                let mut p = primary.rtp.ok_or(NegotiationError::Endpoint)?;
+                p.set_port(p.port().checked_add(1).ok_or(NegotiationError::Endpoint)?);
+                Some(p)
+            } else {
+                None
+            };
+            if let Some(p) = primary.rtp.filter(|p| p.port() != 9) {
+                self.destinations.rtp = Some(p);
+            }
+            if let Some(p) = control.filter(|p| p.port() != 9) {
+                self.destinations.rtcp = Some(p);
+            }
+            if !primary.compatible {
+                return Err(NegotiationError::AudioIncompatible);
+            }
+        }
+        while let Some(next) = self.negotiation.next_track(&mut applying.codecs) {
+            if next.primary {
+                let remote_direction = next.track.direction.unwrap_or(SdpDirection::SendRecv);
+                self.remote_direction = Some(remote_direction);
+                self.remote_sources = Some(next.track.sources());
+                self.remote_changed = true;
+                let rtp = destination(&next.track, applying.global)?;
+                if self.local_direction == SdpDirection::Inactive {
+                    self.local_direction = SdpDirection::SendRecv;
+                }
+                if remote_direction == SdpDirection::Inactive
+                    || rtp
+                        .is_some_and(|p| p.port() == 0 || p.ip().is_unspecified() && p.port() != 9)
+                {
+                    self.local_direction = SdpDirection::Inactive;
+                }
+                applying.pending = Some(Primary {
+                    rtp,
+                    remote_direction,
+                    compatible: next.compatible,
+                });
+                return Ok(Advance::Audio {
+                    inactive: self.local_direction == SdpDirection::Inactive,
+                });
+            }
+            // A newly unsupported stream gets an inactive local track without
+            // opening RTP/RTCP. Subsequent descriptions still validate its IP.
+            if next.existing {
+                let _ = destination(&next.track, applying.global)?;
+            }
+            if !next.compatible {
+                return Err(incompatible(next.track.kind));
+            }
+        }
+        self.negotiation
+            .negotiate_current(&applying.codecs, self.remote_sources.as_deref())?;
+        Ok(Advance::Complete)
+    }
+    pub fn publish(&mut self, applying: Applying) {
+        self.negotiation.publish_description(applying.codecs);
+    }
+    pub fn reject(&mut self, applying: Applying) {
+        self.negotiation.reject_description(applying.codecs);
+    }
+}
+fn destination(
+    track: &super::SdpMedia,
+    global: Option<SocketAddr>,
+) -> Result<Option<SocketAddr>, NegotiationError> {
+    let ip = track
+        .connection
+        .as_ref()
+        .map(|c| address(c.address(), 0))
+        .transpose()?
+        .or(global);
+    Ok(ip.map(|mut ip| {
+        ip.set_port(u16::try_from(track.port).unwrap_or(9));
+        ip
+    }))
 }
 /// IPAddress.Parse's legacy IPv4 forms; never resolve a host name or contact a
 /// resolver. IPv6 numeric scopes remain part of the original endpoint identity.

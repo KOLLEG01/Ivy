@@ -1,5 +1,5 @@
 //! One original SIP media session, its SDP, PCM ports and retained disposal.
-use super::session_description::Descriptions;
+use super::session_description::{Advance, Descriptions};
 use super::{
     AudioAttachmentStatus, AudioDesktopIdentity, AudioOperation, AudioSendHealth, AudioSettings,
     CallAudioError, CallAudioPort, CallWaitingAudio, Codec, CodecError, EvsLibrary, MediaCodec,
@@ -237,6 +237,26 @@ impl Core {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.events.failed()));
         }
     }
+    fn description_effects(
+        &self,
+        s: &mut State,
+        inactive: bool,
+    ) -> std::result::Result<Option<Vec<u8>>, ReceiveError> {
+        let d = &mut s.descriptions;
+        let report = self.receiver().description_effects(
+            d.destinations,
+            d.can_send(),
+            inactive,
+            d.remote_changed.then(|| {
+                (
+                    d.remote_sources.as_deref(),
+                    d.negotiation.negotiated_event_payload(),
+                )
+            }),
+        )?;
+        d.remote_changed = false;
+        Ok(report)
+    }
     fn identity(&self, version: u64) -> Result<SdpIdentity> {
         let mut local = self.receiver().observation().transport.local_rtp;
         local.set_ip(self.settings.connection_address);
@@ -453,53 +473,103 @@ impl SipMediaSession {
             c.receiver().observation().transport.local_rtp.port(),
         )
     }
+    pub fn local_sdp_formats(&self) -> Vec<super::SdpFormat> {
+        self.handle
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .descriptions
+            .negotiation
+            .local_formats()
+            .to_vec()
+    }
+    pub fn remote_description(&self) -> Option<SdpDocument> {
+        self.handle
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .descriptions
+            .negotiation
+            .remote_description()
+            .cloned()
+    }
     pub fn set_remote_description(&self, kind: SdpType, description: &SdpDocument) -> Result<()> {
         let c = &self.handle.0;
-        let (result, report) = {
+        let mut applying = {
             let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
             if c.closed.load(Ordering::Acquire) {
                 return Err(SipMediaError::Closed);
             }
-            let result = s.descriptions.apply(kind, description);
-            let report = c.receiver().description_effects(
-                s.descriptions.destinations,
-                s.descriptions.can_send(),
-                s.descriptions.close_control,
-                s.descriptions.remote_changed.then(|| {
-                    (
-                        s.descriptions.remote_sources.as_deref(),
-                        s.descriptions.negotiation.negotiated_event_payload(),
-                    )
-                }),
-            )?;
-            let result = match result {
-                Ok(()) => c
-                    .receiver()
-                    .configure_description(
-                        s.descriptions.negotiation.state().unwrap(),
-                        s.descriptions.destinations,
-                    )
-                    .map_err(Into::into),
-                Err(error) => Err(error.into()),
-            };
-            (result, report)
+            let applying = s.descriptions.begin(kind, description)?;
+            if let Err(error) = c.description_effects(&mut s, false) {
+                s.descriptions.reject(applying);
+                return Err(error.into());
+            }
+            applying
         };
-        if let Some(bytes) = report {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                c.events.report_sent(&bytes)
-            }))
-            .is_err()
-            {
-                c.fail();
-                return Err(SipMediaError::Receive(ReceiveError::Codec(
-                    CodecError::Failed,
-                )));
+        loop {
+            let report = {
+                let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
+                if c.closed.load(Ordering::Acquire) {
+                    s.descriptions.reject(applying);
+                    return Err(SipMediaError::Closed);
+                }
+                match s.descriptions.advance(&mut applying) {
+                    Ok(Advance::Audio { inactive }) => {
+                        match c.description_effects(&mut s, inactive) {
+                            Ok(report) => report,
+                            Err(error) => {
+                                s.descriptions.reject(applying);
+                                return Err(error.into());
+                            }
+                        }
+                    }
+                    Ok(Advance::Complete) => {
+                        if let Err(error) = c.description_effects(&mut s, false) {
+                            s.descriptions.reject(applying);
+                            return Err(error.into());
+                        }
+                        let result = c.receiver().configure_description(
+                            s.descriptions.negotiation.state().unwrap(),
+                            s.descriptions.destinations,
+                            false,
+                        );
+                        match result {
+                            Ok(()) => {
+                                s.descriptions.publish(applying);
+                                return Ok(());
+                            }
+                            Err(error) => {
+                                s.descriptions.reject(applying);
+                                drop(s);
+                                c.fail();
+                                return Err(error.into());
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        s.descriptions.reject(applying);
+                        c.description_effects(&mut s, false)?;
+                        return Err(error.into());
+                    }
+                }
+            };
+            if let Some(bytes) = report {
+                // The original notification occurs after RTCP closes, before
+                // endpoint/codec publication. No session lock crosses it.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    c.events.report_sent(&bytes)
+                }))
+                .is_err()
+                {
+                    let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
+                    s.descriptions.reject(applying);
+                    return Err(NegotiationError::Endpoint.into());
+                }
             }
         }
-        if matches!(result, Err(SipMediaError::Receive(_))) {
-            c.fail();
-        }
-        result
     }
     pub fn set_stream_status(&self, status: SdpDirection) -> Result<()> {
         let c = &self.handle.0;

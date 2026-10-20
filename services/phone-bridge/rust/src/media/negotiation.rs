@@ -19,6 +19,8 @@ pub enum NegotiationError {
     NoRemoteMedia,
     NoMatchingMediaType,
     AudioIncompatible,
+    VideoIncompatible,
+    TextIncompatible,
     Endpoint,
 }
 impl NegotiationError {
@@ -28,6 +30,8 @@ impl NegotiationError {
             Self::NoRemoteMedia => "NoRemoteMedia",
             Self::NoMatchingMediaType => "NoMatchingMediaType",
             Self::AudioIncompatible => "AudioIncompatible",
+            Self::VideoIncompatible => "VideoIncompatible",
+            Self::TextIncompatible => "TextIncompatible",
             Self::Endpoint => "Error",
         }
     }
@@ -118,6 +122,7 @@ pub struct AudioNegotiation {
     offered_events: Vec<u8>,
     remote_events: Vec<TelephoneEventFormat>,
     remote_sources: Vec<u32>,
+    remote_track: bool,
     selected_event: u8,
 }
 impl AudioNegotiation {
@@ -136,6 +141,9 @@ impl AudioNegotiation {
     pub fn remote_sources(&self) -> &[u32] {
         &self.remote_sources
     }
+    pub(super) fn remote_sources_option(&self) -> Option<&[u32]> {
+        self.remote_track.then_some(self.remote_sources.as_slice())
+    }
     pub fn selected_event_payload(&self) -> u8 {
         self.selected_event
     }
@@ -152,6 +160,29 @@ pub struct AudioNegotiator {
     evs_answers: HashMap<u8, AudioFormat>,
     event_payload: u8,
     local_events: Vec<TelephoneEventFormat>,
+    inactive: Vec<InactiveTrack>,
+}
+#[derive(Clone)]
+struct InactiveTrack {
+    kind: SdpMediaKind,
+    ordinal: usize,
+    formats: Vec<SdpFormat>,
+}
+/// Saved application rollback state surrounds the SDK's incremental track
+/// effects. Secondary tracks and selected events survive a rejected offer.
+pub(super) struct DescriptionUpdate {
+    pub remote: SdpDocument,
+    kind: SdpType,
+    next: usize,
+    counts: [usize; 3],
+    previous_formats: Vec<SdpFormat>,
+    previous_answers: HashMap<u8, AudioFormat>,
+}
+pub(super) struct TrackUpdate {
+    pub track: SdpMedia,
+    pub primary: bool,
+    pub existing: bool,
+    pub compatible: bool,
 }
 impl AudioNegotiator {
     pub fn new(preference: &[Codec]) -> Result<Self, FormatError> {
@@ -202,6 +233,7 @@ impl AudioNegotiator {
             evs_answers: HashMap::new(),
             event_payload: 101,
             local_events: Vec::new(),
+            inactive: Vec::new(),
         })
     }
     pub fn state(&self) -> Option<&AudioNegotiation> {
@@ -212,9 +244,6 @@ impl AudioNegotiator {
     }
     pub fn negotiated_event_payload(&self) -> u8 {
         self.event_payload
-    }
-    pub(super) fn retain_event_selection(&mut self, other: &Self) {
-        self.event_payload = other.event_payload;
     }
     pub fn local_event_formats(&self) -> &[TelephoneEventFormat] {
         &self.local_events
@@ -240,13 +269,85 @@ impl AudioNegotiator {
                 format.parameters = evs_offer_parameters(channels).ok().map(Into::into);
             }
         }
-        let mut media = SdpMedia::audio(identity.local.port(), self.local.clone());
-        media.mid = Some("0".into());
-        media.set_ssrc(identity.source, &identity.cname);
-        media.evs_packet_time();
-        let document = identity.document(vec![media]);
+        let mut media = vec![self.describe_track(
+            SdpMediaKind::Audio,
+            0,
+            identity,
+            true,
+            self.mid(SdpMediaKind::Audio, 0, 0),
+            false,
+        )];
+        for (index, track) in self.inactive.iter().enumerate() {
+            media.push(self.describe_track(
+                track.kind,
+                track.ordinal,
+                identity,
+                false,
+                self.mid(track.kind, track.ordinal, index + 1),
+                false,
+            ));
+        }
+        let document = identity.document(media);
         self.local_events = event_formats(&document);
         document
+    }
+    fn mid(&self, kind: SdpMediaKind, ordinal: usize, index: usize) -> Option<String> {
+        match &self.remote {
+            Some(remote) => remote
+                .media
+                .iter()
+                .filter(|m| m.kind == kind)
+                .nth(ordinal)
+                .and_then(|m| m.mid.clone()),
+            None => Some(index.to_string()),
+        }
+    }
+    fn describe_track(
+        &self,
+        kind: SdpMediaKind,
+        ordinal: usize,
+        identity: &SdpIdentity,
+        active: bool,
+        mid: Option<String>,
+        answer: bool,
+    ) -> SdpMedia {
+        let primary = kind == SdpMediaKind::Audio && ordinal == 0;
+        let mut formats = if primary {
+            self.local.clone()
+        } else {
+            self.inactive
+                .iter()
+                .find(|m| m.kind == kind && m.ordinal == ordinal)
+                .map(|m| m.formats.clone())
+                .unwrap_or_default()
+        };
+        if answer && kind == SdpMediaKind::Audio {
+            for format in &mut formats {
+                if let Some(answer) = self.evs_answers.get(&format.payload) {
+                    format.parameters = answer.parameters().map(Into::into);
+                }
+            }
+        }
+        let mut track = SdpMedia::local(
+            kind,
+            if active && !formats.is_empty() {
+                identity.local.port()
+            } else {
+                0
+            },
+            formats,
+        );
+        track.direction = Some(if active {
+            SdpDirection::SendRecv
+        } else {
+            SdpDirection::Inactive
+        });
+        track.mid = mid;
+        if primary {
+            track.set_ssrc(identity.source, &identity.cname);
+        }
+        track.evs_packet_time();
+        track
     }
     fn rank(&self, name: &str) -> usize {
         self.preference
@@ -262,21 +363,15 @@ impl AudioNegotiator {
                 }
             })
     }
-    pub fn set_remote_description(
+    pub(super) fn begin_description(
         &mut self,
         kind: SdpType,
         description: &SdpDocument,
-    ) -> Result<(), NegotiationError> {
+    ) -> Result<DescriptionUpdate, NegotiationError> {
         let mut remote = description.normalized()?;
         if remote.media.is_empty() {
             return Err(NegotiationError::NoRemoteMedia);
         }
-        let mut offered_events: Vec<_> = event_formats(&remote)
-            .into_iter()
-            .map(|format| format.payload)
-            .collect();
-        offered_events.sort_unstable();
-        offered_events.dedup();
         let mut answers = HashMap::new();
         let mut maps = HashMap::new();
         for track in remote
@@ -340,62 +435,113 @@ impl AudioNegotiator {
                 )
             });
         }
-        let Some(index) = remote
-            .media
-            .iter()
-            .position(|track| track.kind == SdpMediaKind::Audio)
-        else {
-            return Err(NegotiationError::NoMatchingMediaType);
-        };
-        let track = &remote.media[index];
-        let base = if kind == SdpType::Offer && !self.challenge {
-            &self.configured
-        } else {
-            &self.local
-        };
-        let mut base = base.clone();
-        for format in &mut base {
+        let previous_formats = self.local.clone();
+        let previous_answers = std::mem::replace(&mut self.evs_answers, answers);
+        if kind == SdpType::Offer && !self.challenge {
+            self.local = self.configured.clone();
+        }
+        for format in &mut self.local {
             if let Some(map) = maps.get(&evs_channels(Some(&format.rtpmap))) {
                 format.rtpmap = map.clone();
             }
         }
-        let selected_event = track
-            .formats
-            .iter()
-            .find(|format| is_name(format, "telephone-event"));
-        // The base stack updates this selection even for an incompatible offer.
-        if let Some(format) = selected_event {
-            self.event_payload = format.payload;
+        Ok(DescriptionUpdate {
+            remote,
+            kind,
+            next: 0,
+            counts: [0; 3],
+            previous_formats,
+            previous_answers,
+        })
+    }
+    pub(super) fn preflight(&self, update: &DescriptionUpdate) -> Result<(), NegotiationError> {
+        if update.remote.media.len() == 1 {
+            let kind = update.remote.media[0].kind;
+            if matches!(kind, SdpMediaKind::Video | SdpMediaKind::Text)
+                && !self
+                    .inactive
+                    .iter()
+                    .any(|track| track.kind == kind && track.ordinal == 0)
+            {
+                return Err(NegotiationError::NoMatchingMediaType);
+            }
         }
-        if track.port == 65_535 {
-            return Err(NegotiationError::Endpoint);
+        Ok(())
+    }
+    pub(super) fn next_track(&mut self, update: &mut DescriptionUpdate) -> Option<TrackUpdate> {
+        while let Some(track) = update.remote.media.get(update.next).cloned() {
+            update.next += 1;
+            let kind = match track.kind {
+                SdpMediaKind::Audio => 0,
+                SdpMediaKind::Video => 1,
+                SdpMediaKind::Text => 2,
+                _ => continue,
+            };
+            let ordinal = update.counts[kind];
+            update.counts[kind] += 1;
+            if kind == 0 && ordinal == 0 {
+                let (formats, compatible, event) = match_track(&track, &self.local, update.kind);
+                self.local = formats;
+                if let Some(event) = event {
+                    self.event_payload = event;
+                }
+                return Some(TrackUpdate {
+                    track,
+                    primary: true,
+                    existing: true,
+                    compatible,
+                });
+            }
+            if let Some(local) = self
+                .inactive
+                .iter_mut()
+                .find(|local| local.kind == track.kind && local.ordinal == ordinal)
+            {
+                let (formats, compatible, _) = match_track(&track, &local.formats, update.kind);
+                local.formats = formats;
+                return Some(TrackUpdate {
+                    track,
+                    primary: false,
+                    existing: true,
+                    compatible,
+                });
+            }
+            let mut formats = track.formats.clone();
+            if kind == 0 && !formats.iter().any(|f| f.payload == 101) {
+                formats.push(event_format());
+            }
+            let compatible = formats
+                .iter()
+                .any(|f| kind != 0 || !is_name(f, "telephone-event"));
+            self.inactive.push(InactiveTrack {
+                kind: track.kind,
+                ordinal,
+                formats,
+            });
+            return Some(TrackUpdate {
+                track,
+                primary: false,
+                existing: false,
+                compatible,
+            });
         }
-        let mut agreed: Vec<_> = track
-            .formats
-            .iter()
-            .filter(|format| {
-                !is_name(format, "telephone-event")
-                    && base
-                        .iter()
-                        .any(|local| local.rtpmap.eq_ignore_ascii_case(&format.rtpmap))
-            })
-            .cloned()
-            .collect();
-        if agreed.is_empty() {
-            return Err(NegotiationError::AudioIncompatible);
-        }
-        agreed.push(selected_event.cloned().unwrap_or_else(|| {
-            base.iter()
-                .find(|format| is_name(format, "telephone-event"))
-                .cloned()
-                .unwrap_or_else(event_format)
-        }));
+        None
+    }
+    pub(super) fn reject_description(&mut self, update: DescriptionUpdate) {
+        self.local = update.previous_formats;
+        self.evs_answers = update.previous_answers;
+    }
+    pub(super) fn negotiate_current(
+        &mut self,
+        update: &DescriptionUpdate,
+        sources: Option<&[u32]>,
+    ) -> Result<(), NegotiationError> {
         let mut receive = Vec::new();
-        for format in &agreed {
+        for format in &self.local {
             if is_name(format, "telephone-event") {
                 continue;
             }
-            if let Some(selected) = answers.get(&format.payload) {
+            if let Some(selected) = self.evs_answers.get(&format.payload) {
                 receive.push(selected.clone());
                 continue;
             }
@@ -424,79 +570,175 @@ impl AudioNegotiator {
             .min_by_key(|format| (self.rank(format.name()), format.channels()))
             .ok_or(NegotiationError::AudioIncompatible)?
             .clone();
+        let remote_events = event_formats(&update.remote);
+        let mut offered_events: Vec<_> = remote_events.iter().map(|f| f.payload).collect();
+        offered_events.sort_unstable();
+        offered_events.dedup();
         self.state = Some(AudioNegotiation {
             sender,
             receive,
             offered_events,
-            remote_events: event_formats(&remote),
-            remote_sources: track.sources(),
+            remote_events,
+            remote_sources: sources.unwrap_or(&[]).to_vec(),
+            remote_track: sources.is_some(),
             selected_event: self.event_payload,
         });
-        self.local = agreed;
-        self.remote = Some(remote);
-        self.evs_answers = answers;
         Ok(())
+    }
+    pub(super) fn publish_description(&mut self, update: DescriptionUpdate) {
+        self.remote = Some(update.remote);
+    }
+    pub fn set_remote_description(
+        &mut self,
+        kind: SdpType,
+        description: &SdpDocument,
+    ) -> Result<(), NegotiationError> {
+        let mut update = self.begin_description(kind, description)?;
+        let result = (|| {
+            self.preflight(&update)?;
+            let mut sources = None;
+            while let Some(next) = self.next_track(&mut update) {
+                if next.primary {
+                    sources = Some(next.track.sources());
+                    if next.track.port == 65_535 {
+                        return Err(NegotiationError::Endpoint);
+                    }
+                }
+                if !next.compatible {
+                    return Err(incompatible(next.track.kind));
+                }
+            }
+            self.negotiate_current(&update, sources.as_deref())
+        })();
+        if result.is_ok() {
+            self.publish_description(update);
+        } else {
+            self.reject_description(update);
+        }
+        result
     }
     pub fn create_answer(&mut self, identity: &SdpIdentity) -> Option<SdpDocument> {
         let remote = self.remote.as_ref()?;
-        let mut accepted_audio = false;
-        let media = remote
-            .media
-            .iter()
-            .enumerate()
-            .filter(|(_, offered)| {
-                matches!(offered.kind, SdpMediaKind::Audio | SdpMediaKind::Video)
-            })
-            .map(|(index, offered)| {
-                let accepted = offered.kind == SdpMediaKind::Audio && !accepted_audio;
-                if accepted {
-                    accepted_audio = true;
-                }
-                let mut formats = if accepted {
-                    self.local.clone()
-                } else {
-                    offered.formats.clone()
-                };
-                if offered.kind == SdpMediaKind::Audio
-                    && !formats
-                        .iter()
-                        .any(|format| is_name(format, "telephone-event"))
-                {
-                    formats.push(event_format());
-                }
-                for format in &mut formats {
-                    if let Some(answer) = self.evs_answers.get(&format.payload) {
-                        format.parameters = answer.parameters().map(Into::into);
-                    }
-                }
-                let inactive = !accepted
-                    || offered.port == 0
-                    || offered.direction == Some(SdpDirection::Inactive)
-                    || remote
-                        .media_connection(index)
-                        .is_some_and(|connection| matches!(connection.address(), "0.0.0.0" | "::"));
-                let mut track = SdpMedia::local(
-                    offered.kind,
-                    if inactive { 0 } else { identity.local.port() },
-                    formats,
-                );
-                track.direction = Some(if inactive {
-                    SdpDirection::Inactive
-                } else {
-                    SdpDirection::SendRecv
-                });
-                track.mid = offered.mid.clone();
-                if accepted {
-                    track.set_ssrc(identity.source, &identity.cname);
-                }
-                track.evs_packet_time();
-                track
-            })
-            .collect();
+        let mut counts = [0; 3];
+        let mut media = Vec::new();
+        for (index, offered) in remote.media.iter().enumerate() {
+            let kind = match offered.kind {
+                SdpMediaKind::Audio => 0,
+                SdpMediaKind::Video => 1,
+                SdpMediaKind::Text => 2,
+                _ => continue,
+            };
+            let ordinal = counts[kind];
+            counts[kind] += 1;
+            let active = kind == 0
+                && ordinal == 0
+                && offered.port != 0
+                && offered.direction != Some(SdpDirection::Inactive)
+                && !remote
+                    .media_connection(index)
+                    .is_some_and(|c| matches!(c.address(), "0.0.0.0" | "::"));
+            media.push(self.describe_track(
+                offered.kind,
+                ordinal,
+                identity,
+                active,
+                offered.mid.clone(),
+                true,
+            ));
+        }
         let answer = identity.document(media);
         self.local_events = event_formats(&answer);
         Some(answer)
     }
+}
+
+pub(super) fn incompatible(kind: SdpMediaKind) -> NegotiationError {
+    match kind {
+        SdpMediaKind::Video => NegotiationError::VideoIncompatible,
+        SdpMediaKind::Text => NegotiationError::TextIncompatible,
+        _ => NegotiationError::AudioIncompatible,
+    }
+}
+// SDP format matching follows the retained SDK policy, including static IDs
+// and the video packetization-mode check; FMTP otherwise does not match codecs.
+fn match_track(
+    track: &SdpMedia,
+    local: &[SdpFormat],
+    kind: SdpType,
+) -> (Vec<SdpFormat>, bool, Option<u8>) {
+    let mut agreed: Vec<_> = track
+        .formats
+        .iter()
+        .filter(|remote| {
+            local.iter().any(|local| {
+                !remote.rtpmap.is_empty()
+                    && !local.rtpmap.is_empty()
+                    && remote
+                        .rtpmap
+                        .trim()
+                        .eq_ignore_ascii_case(local.rtpmap.trim())
+                    || remote.payload < 96
+                        && remote.payload == local.payload
+                        && remote
+                            .name()
+                            .zip(local.name())
+                            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+            }) && compatible_parameters(remote)
+        })
+        .cloned()
+        .collect();
+    let priority = if kind == SdpType::Offer {
+        &track.formats
+    } else {
+        local
+    };
+    agreed.sort_by_key(|f| {
+        priority
+            .iter()
+            .position(|p| p.payload == f.payload)
+            .unwrap_or(usize::MAX)
+    });
+    let audio = track.kind == SdpMediaKind::Audio;
+    let compatible = agreed
+        .iter()
+        .any(|f| !audio || !is_name(f, "telephone-event"));
+    let mut event = None;
+    if audio {
+        let previous = agreed
+            .iter()
+            .find(|f| is_name(f, "telephone-event"))
+            .cloned()
+            .unwrap_or_else(event_format);
+        agreed.retain(|f| !is_name(f, "telephone-event"));
+        let selected = track
+            .formats
+            .iter()
+            .find(|f| is_name(f, "telephone-event"))
+            .cloned();
+        event = selected.as_ref().map(|f| f.payload);
+        agreed.push(selected.unwrap_or(previous));
+    }
+    (agreed, compatible, event)
+}
+fn compatible_parameters(format: &SdpFormat) -> bool {
+    if !["H264", "H265", "JPEG"].iter().any(|name| {
+        format
+            .rtpmap
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with(&name.to_ascii_lowercase())
+    }) {
+        return true;
+    }
+    // Last duplicate parameter wins in the original parser.
+    format
+        .parameters()
+        .unwrap_or("")
+        .split(';')
+        .filter_map(|part| part.split_once('='))
+        .filter(|(key, _)| key.trim().eq_ignore_ascii_case("packetization-mode"))
+        .last()
+        .is_none_or(|(_, value)| value.trim() == "1")
 }
 fn event_format() -> SdpFormat {
     SdpFormat::new(101, "telephone-event/8000".into(), Some("0-16".into()))
