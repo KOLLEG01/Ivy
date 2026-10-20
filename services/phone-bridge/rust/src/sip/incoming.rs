@@ -278,16 +278,10 @@ fn unknown<T>(_: T) -> CallError {
 }
 fn sdp(request: &Request) -> Option<&str> {
     let body = std::str::from_utf8(&request.body).ok()?;
-    if !crate::media::bounded_sdp(body)
-        || !request.content_type_header().is_ok_and(|h| {
-            h.value()
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .eq_ignore_ascii_case("application/sdp")
-        })
-    {
+    if !request.headers.iter().any(|header| {
+        matches!(header,Header::ContentType(value)
+        if crate::media::valid_sdp(Some(value.value()),body))
+    }) {
         return None;
     }
     Some(body)
@@ -439,7 +433,7 @@ impl IncomingActor {
         self.end();
         Ok(())
     }
-    async fn control_request(&mut self, mut transaction: Transaction) -> Result<(), CallError> {
+    async fn control_request(&mut self, transaction: Transaction) -> Result<(), CallError> {
         let id = self
             .identity
             .as_ref()
@@ -453,9 +447,9 @@ impl IncomingActor {
             .ok_or(CallError::CleanupUnconfirmed)?;
         let branch = request
             .via_header()
-            .and_then(|h| h.branch())
+            .and_then(|h| h.typed())
             .ok()
-            .map(|b| b.value().to_owned())
+            .and_then(|h| h.branch().map(|b| b.value().to_owned()))
             .unwrap_or_default();
         let checked = DialogRequest {
             call_id: &id.wire,
@@ -614,6 +608,7 @@ impl IncomingActor {
                 }
                 return Ok(());
             }
+            let reinvite_deadline = self.reinvite.as_ref().map(|p| p.deadline);
             tokio::select! {
                 _ = self.control.changed.notified()=>(),
                 transaction=self.commands.recv()=>{let Some(transaction)=transaction else{return Err(CallError::CleanupUnconfirmed);};self.control_request(transaction).await?;},
@@ -644,7 +639,7 @@ impl IncomingActor {
                         Some(_)=>(),None=>return Err(CallError::CleanupUnconfirmed),
                     }
                 },
-                _ = async{match &self.reinvite{Some(p)=>sleep_until(p.deadline).await,None=>pending().await}}=>return Err(CallError::CleanupUnconfirmed),
+                _ = async{match reinvite_deadline{Some(deadline)=>sleep_until(deadline).await,None=>pending().await}}=>return Err(CallError::CleanupUnconfirmed),
             }
         }
     }

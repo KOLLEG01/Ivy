@@ -817,7 +817,7 @@ impl NativeSipOperations {
         }
         expected.0.result.lock().unwrap().attempted = true;
         let media = expected.media().ok_or(SipHostError::NotReady)?;
-        let pending = match self.0.host.begin_answer(&expected.0.original, || {
+        let pending = match self.0.host.begin_answer(&expected.0.original, move || {
             if waiting {
                 media
                     .begin_waiting()

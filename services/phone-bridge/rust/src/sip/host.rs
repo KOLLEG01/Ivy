@@ -648,11 +648,11 @@ impl SipHost {
             .cloned()
             .map(SipHostCall)
     }
-    pub(crate) fn begin_answer(
+    pub(crate) fn begin_answer<F: FnOnce() -> Result<(), SipHostError>>(
         &self,
         expected: &SipHostCall,
-        before: impl FnOnce() -> Result<(), SipHostError>,
-    ) -> Result<impl Future<Output = Result<CallOutcome, SipHostError>> + Send + use<>, SipHostError>
+        before: F,
+    ) -> Result<impl Future<Output = Result<CallOutcome, SipHostError>> + Send + use<F>, SipHostError>
     {
         let state = self.shared().lock().unwrap();
         ready(&state)?;

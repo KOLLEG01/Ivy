@@ -35,7 +35,7 @@ impl ServerExchange {
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = stopping.clone();
         tokio::spawn(async move {
-            let result = async {
+            let result: Result<(), CallError> = async {
                 loop {
                     while let Ok(reply) = commands.try_recv() {
                         let result = original
