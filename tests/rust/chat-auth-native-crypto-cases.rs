@@ -23,13 +23,17 @@ type NativeResult<T> = Result<T, SignalProtocolError>;
 struct Sessions {
     address: ProtocolAddress,
     encoded: Vec<u8>,
+    incarnation: [u8; 16],
 }
 
 #[async_trait::async_trait]
 impl SessionStore for Sessions {
     async fn load_session(&self, address: &ProtocolAddress) -> NativeResult<Option<SessionRecord>> {
         assert!(address == &self.address, "Synthetic peer address");
-        Ok(Some(SessionRecord::deserialize(&self.encoded)?))
+        Ok(Some(SessionRecord::deserialize_for_store(
+            &self.encoded,
+            &self.incarnation,
+        )?))
     }
 
     async fn has_session(&self, address: &ProtocolAddress) -> NativeResult<bool> {
@@ -42,7 +46,7 @@ impl SessionStore for Sessions {
         record: SessionRecord,
     ) -> NativeResult<()> {
         assert!(address == &self.address, "Synthetic peer address");
-        self.encoded = record.serialize()?;
+        record.serialize_into_for_store(&mut self.encoded, &self.incarnation);
         Ok(())
     }
 }
@@ -115,6 +119,7 @@ impl Peer {
             sessions: Sessions {
                 address: address.clone(),
                 encoded: record.serialize().unwrap(),
+                incarnation: *uuid::Uuid::new_v4().as_bytes(),
             },
             identity: Identity {
                 pair,
@@ -155,18 +160,86 @@ impl Peer {
         Ok(result.plaintext)
     }
 
-    fn reopen(&mut self, checkpoint: &[u8]) {
-        let record = SessionRecord::deserialize(checkpoint).unwrap();
+    fn reopen(&mut self, checkpoint: &[u8]) -> Json {
+        let record =
+            SessionRecord::deserialize_for_store(checkpoint, &self.sessions.incarnation).unwrap();
         assert_eq!(
             record.previous_session_count(),
             1,
             "Current and archived sessions survive persistence"
         );
-        self.sessions.encoded = record.serialize().unwrap();
+        let ceiling = record.reserved_sender_chain_index();
+        let before = record.clone().into_components().unwrap();
+        let mut encoded = Vec::new();
+        record.serialize_into_for_store(&mut encoded, &self.sessions.incarnation);
         assert!(
-            self.sessions.encoded == checkpoint,
-            "Exact native checkpoint round trip"
+            SessionRecord::deserialize_for_store(&encoded, &self.sessions.incarnation)
+                .unwrap()
+                .into_components()
+                .unwrap()
+                == before,
+            "Clean reload preserves every protocol component"
         );
+
+        self.sessions.incarnation = *uuid::Uuid::new_v4().as_bytes();
+        let recovered =
+            SessionRecord::deserialize_for_store(checkpoint, &self.sessions.incarnation).unwrap();
+        let after = recovered.clone().into_components().unwrap();
+        let before_key = before
+            .current_session
+            .as_ref()
+            .unwrap()
+            .sender_chain
+            .as_ref()
+            .unwrap()
+            .chain_key
+            .as_ref()
+            .unwrap();
+        let after_key = after
+            .current_session
+            .as_ref()
+            .unwrap()
+            .sender_chain
+            .as_ref()
+            .unwrap()
+            .chain_key
+            .as_ref()
+            .unwrap();
+        let before_index = before_key.index.unwrap();
+        let after_index = after_key.index.unwrap();
+        assert_eq!(
+            after_index,
+            before_index.max(ceiling),
+            "Untrusted recovery burns the reserved sender range"
+        );
+        if after_index > before_index {
+            assert!(
+                after_key.key != before_key.key,
+                "Recovery advances the sender key"
+            );
+        }
+        let mut expected = before.clone();
+        expected
+            .current_session
+            .as_mut()
+            .unwrap()
+            .sender_chain
+            .as_mut()
+            .unwrap()
+            .chain_key = Some(after_key.clone());
+        assert!(
+            after == expected,
+            "Recovery preserves every other current/archived protocol component"
+        );
+        recovered.serialize_into_for_store(&mut self.sessions.encoded, &self.sessions.incarnation);
+        Json::object([
+            ("cleanReloadPreserved", true.into()),
+            ("freshIncarnation", true.into()),
+            ("senderIndexBefore", Json::Number(before_index as f64)),
+            ("reservedCeiling", Json::Number(ceiling as f64)),
+            ("senderIndexRecovered", Json::Number(after_index as f64)),
+            ("allOtherProtocolFieldsPreserved", true.into()),
+        ])
     }
 }
 
@@ -198,9 +271,10 @@ fn pending(value: &Json, category: &'static str, index: usize) -> Vec<u8> {
 /// encoded rows and never write this projection into an authentication store.
 fn export_gate(peer: &Peer, original: &[AuthEntry]) -> Json {
     let before = canonical(&rows(original), usize::MAX).unwrap();
-    let projected = SessionRecord::deserialize(&peer.sessions.encoded)
-        .unwrap()
-        .into_legacy_session_v1_operational();
+    let projected =
+        SessionRecord::deserialize_for_store(&peer.sessions.encoded, &peer.sessions.incarnation)
+            .unwrap()
+            .into_legacy_session_v1_operational();
     let reason = match projected {
         Ok(projected) => {
             let original = decode(&source(original).0).unwrap();
@@ -318,7 +392,7 @@ async fn native_crypto_evolution_preserves_raw_state_and_rejects_lossy_writeback
     let original_followup = phase("crypto-reply", &root);
     let followup = wire(field(&original_followup, "wire").unwrap());
     assert_eq!(bob.decrypt(&followup).await.unwrap(), b"original-follow-up");
-    bob.reopen(&fs::read(root.join("native-checkpoint.bin")).unwrap());
+    let current_recovery = bob.reopen(&fs::read(root.join("native-checkpoint.bin")).unwrap());
     assert_eq!(
         bob.decrypt(&followup).await.unwrap(),
         b"original-follow-up",
@@ -353,7 +427,7 @@ async fn native_crypto_evolution_preserves_raw_state_and_rejects_lossy_writeback
         b"native-archived-ack"
     );
     let archived_checkpoint = archived_bob.sessions.encoded.clone();
-    archived_bob.reopen(&archived_checkpoint);
+    let archived_recovery = archived_bob.reopen(&archived_checkpoint);
     assert_eq!(
         archived_bob.decrypt(&archived1).await.unwrap(),
         b"archived-1"
@@ -406,6 +480,8 @@ async fn native_crypto_evolution_preserves_raw_state_and_rejects_lossy_writeback
         ("originalPeerDecryptsNativeReply", true.into()),
         ("nativeDecryptsOriginalFollowup", true.into()),
         ("rollbackReopenQualified", true.into()),
+        ("currentRecovery", current_recovery),
+        ("archivedRecovery", archived_recovery),
         ("failedMacAndReplayPreserveState", true.into()),
         ("archivedBidirectionalEvolution", true.into()),
         ("newerSessionRetained", true.into()),
