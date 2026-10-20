@@ -279,6 +279,16 @@ async fn outgoing(
     let original_call = owner.find(CALL).unwrap();
     let media = original_call.media().unwrap();
     let local_media = media.observation().receive.transport.local_rtp;
+    let feature_params = format!(r#"{{"callId":"{CALL}","challenge":null}}"#);
+    let configured = dispatcher
+        .execute(command(
+            "call.features",
+            &feature_params,
+            operation + 4,
+            operation + 4,
+        ))
+        .await;
+    assert!(configured.outcome().error_code().is_none());
     let original = dispatcher.clone();
     let request = command("call.dial", &params, operation, operation);
     let pending = tokio::spawn(async move { original.execute(request).await });

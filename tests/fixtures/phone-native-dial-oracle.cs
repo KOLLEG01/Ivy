@@ -40,6 +40,7 @@ public static class PhoneNativeDialOracle {
         using(rtp)using(rtcp) {
             bool telephone=args.TryGetProperty("destination",out var target);
             string destination=telephone?target.GetString():$"sip:peer@{peer.Client.LocalEndPoint}";
+            await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
             var pending=owner.InvokeAsync("call.dial",Args(new{callId=id,destination,username=telephone?null:"fixture-user",password=telephone?null:"fixture-only",ringSeconds=5,waiting=false}));
             var (invite,remote)=await Receive(peer);
             object hungup=null;
@@ -49,7 +50,11 @@ public static class PhoneNativeDialOracle {
             var (ack,ackRemote)=await ReceiveDialog(peer);
             if(ack.Method!=SIPMethodsEnum.ACK)throw new Exception("Original ACK unavailable");
             object call=await pending.WaitAsync(TimeSpan.FromSeconds(5));
-            if(scenario=="connected")foreach(char digit in "*0#")Host(owner).FindCall(id).Features.Digit(digit,DtmfInputSource.SipInfo);
+            if(scenario=="connected") {
+                var digitMethod=typeof(PhoneCallFeatures).GetMethod("Digit",BindingFlags.Instance|BindingFlags.NonPublic);
+                var source=Enum.Parse(digitMethod.GetParameters()[1].ParameterType,"SipInfo");
+                foreach(char digit in "*0#")digitMethod.Invoke(Host(owner).FindCall(id).Features,new object[]{digit,source});
+            }
             var policy=Host(owner).FindCall(id).Features.Observation;
             if(scenario!="refused") {
                 await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
