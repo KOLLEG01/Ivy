@@ -599,5 +599,65 @@
         "op": "answer"
       }
     ]
+  },
+  {
+    "label": "static-clock-overflow-fallback",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/2147483648\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-name-fallback",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 G722/not-a-number\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "inactive-secondary-clock-not-evaluated",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=audio $PORT RTP/AVP 0\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0\r\na=ssrc:111 cname:audio\r\nm=audio $PORT RTP/AVP 0\r\na=ssrc:111 cname:audio\r\na=rtpmap:0 PCMU/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "inactive-video-clock-not-evaluated",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\nm=video $PORT RTP/AVP 96\r\na=rtpmap:96 VP8/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
   }
 ]

@@ -539,15 +539,20 @@ impl AudioNegotiator {
         sources: Option<&[u32]>,
         media_open: bool,
     ) -> Result<bool, NegotiationError> {
+        // Closure detaches the SDK format callback, so its arguments are not
+        // evaluated by the null-conditional event invocation.
+        if !media_open {
+            return Ok(true);
+        }
         // All SDK metadata is converted before its callback checks closure
         // or constructs a codec. A later invalid clock still rejects the SDP.
         for format in self.local.iter().filter(|f| !is_name(f, "telephone-event")) {
-            if format.clock_rate() <= 0 || format.channels() <= 0 {
+            if format
+                .audio_metadata()
+                .is_some_and(|(rate, channels)| rate <= 0 || channels <= 0)
+            {
                 return Err(NegotiationError::Endpoint);
             }
-        }
-        if !media_open {
-            return Ok(true);
         }
         let mut receive = Vec::new();
         for format in &self.local {
@@ -568,14 +573,10 @@ impl AudioNegotiator {
             // Static IDs can match before metadata construction. The SDK
             // throws for invalid clocks before its application callback;
             // unsupported positive formats fail the media constructor there.
-            let rate = u32::try_from(format.clock_rate())
-                .ok()
-                .filter(|r| *r > 0)
-                .ok_or(NegotiationError::Endpoint)?;
-            let channels = format.channels();
-            if channels <= 0 {
-                return Err(NegotiationError::Endpoint);
-            }
+            let Some((rate, channels)) = format.audio_metadata() else {
+                return Ok(false);
+            };
+            let rate = u32::try_from(rate).map_err(|_| NegotiationError::Endpoint)?;
             let pcm = if codec == Codec::Evs {
                 48000
             } else if codec == Codec::G722 && rate == 8000 {
@@ -592,7 +593,11 @@ impl AudioNegotiator {
                 pcm,
                 rate,
                 channels,
-                format.parameters(),
+                if format.parsed_rtpmap().is_some() {
+                    format.parameters()
+                } else {
+                    None
+                },
             ) else {
                 return Ok(false);
             };

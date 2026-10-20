@@ -151,7 +151,43 @@ impl SdpFormat {
         self.parameters.as_deref()
     }
     pub fn name(&self) -> Option<&str> {
-        self.rtpmap.split_once('/').map(|parts| parts.0.trim())
+        self.parsed_rtpmap().map(|parts| parts.0).or_else(|| {
+            Some(match self.payload {
+                6 => "DVI4_16K",
+                10 => "L16_2",
+                11 => "L16",
+                16 => "DVI4_11K",
+                17 => "DVI4_22K",
+                payload => static_map(payload)?.split_once('/')?.0,
+            })
+        })
+    }
+    pub(super) fn parsed_rtpmap(&self) -> Option<(&str, i32, i32)> {
+        let mut fields = self.rtpmap.trim().split('/').map(str::trim);
+        let name = fields.next()?;
+        let rate = fields.next()?.parse().ok()?;
+        let channels = match fields.next() {
+            Some("") | None => 1,
+            Some(channels) => channels.parse().ok()?,
+        };
+        Some((name, rate, channels))
+    }
+    pub(super) fn audio_metadata(&self) -> Option<(i32, i32)> {
+        self.parsed_rtpmap()
+            .map(|(_, rate, channels)| (rate, channels))
+            .or_else(|| {
+                // The SDK falls back to a static audio declaration when RTPMAP
+                // parsing fails. Static video formats convert to empty audio.
+                if self.payload >= 24 {
+                    return None;
+                }
+                let mut fields = static_map(self.payload)?.split('/');
+                fields.next()?;
+                Some((
+                    fields.next()?.parse().ok()?,
+                    fields.next().unwrap_or("1").parse().ok()?,
+                ))
+            })
     }
     pub fn clock_rate(&self) -> i32 {
         self.rtpmap
