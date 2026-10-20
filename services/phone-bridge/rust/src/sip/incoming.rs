@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 struct Intent {
     answer: bool,
     ending: bool,
+    late_connection: bool,
 }
 struct Control {
     intent: Mutex<Intent>,
@@ -208,7 +209,11 @@ impl IncomingInvite {
     }
     pub fn observation(&self) -> CallObservation {
         let mut current = *self.observation.borrow();
-        current.ending |= self.control.intent.lock().unwrap().ending;
+        let intent = self.control.intent.lock().unwrap();
+        current.ending |= intent.ending;
+        if intent.ending && !intent.late_connection {
+            current.active = false;
+        }
         if self.done.has_changed().is_err() && self.done.borrow().is_none() {
             current.uncertain = true;
             current.ending = true;
@@ -289,7 +294,9 @@ impl IncomingActor {
         self.observations.send_replace(self.current);
     }
     fn end(&mut self) {
-        self.current.active = false;
+        if !self.control.intent.lock().unwrap().late_connection || self.remote_ended {
+            self.current.active = false;
+        }
         self.current.ending = true;
         self.current.outcome.get_or_insert(CallOutcome::Ended);
         self.publish();
@@ -389,8 +396,16 @@ impl IncomingActor {
                 event=self.exchange.as_mut().unwrap().next()=>match event{
                     Some(ack) if ack.method==Method::Ack=>{
                         if !identity.matches(&ack){continue;}
-                        self.established=self.control.intent.lock().unwrap().ending||!delayed||sdp(&ack).is_some_and(|body|media.accept_answer(body));
+                        let local_ending=self.control.intent.lock().unwrap().ending;
+                        self.established=local_ending||!delayed||sdp(&ack).is_some_and(|body|media.accept_answer(body));
                         if !self.established{self.end();}
+                        else if local_ending {
+                            // The original late ACK restores its SIP-active
+                            // observation after hangup. Audio authority stays
+                            // revoked, and BYE retirement still owns the fence.
+                            self.control.intent.lock().unwrap().late_connection=true;
+                            self.current.active=true;self.current.outcome=Some(CallOutcome::Connected);self.publish();
+                        }
                         break;
                     },
                     None=>return Err(CallError::CleanupUnconfirmed),_=>(),

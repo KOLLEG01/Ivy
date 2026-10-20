@@ -285,6 +285,12 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             .unwrap()
             .unwrap();
         let answered = outcome(answer.outcome());
+        if scenario.ends_with("hangup_before_ack") {
+            assert!(
+                !media.observation().started,
+                "Late SIP connection cannot revive original media"
+            );
+        }
         let saved = answer
             .outcome()
             .result_json()
