@@ -55,3 +55,7 @@ path = "../../../tests/rust/hive_worker_client.rs"
 [[test]]
 name = "hive-push-native"
 path = "../../../tests/rust/hive_push_native.rs"
+
+[[test]]
+name = "hive-push-profile"
+path = "../../../tests/rust/hive_push_profile.rs"

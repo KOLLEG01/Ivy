@@ -9,6 +9,7 @@ use std::{
     collections::HashMap,
     future::Future,
     io,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -16,7 +17,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::TcpStream,
+    net::{TcpStream, lookup_host},
     runtime::Handle,
     sync::watch,
     task::JoinHandle,
@@ -29,6 +30,118 @@ use tokio_rustls::{
 
 const FREE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_FREE_PER_ORIGIN: usize = 256;
+
+pub type LookupFuture = Pin<Box<dyn Future<Output = io::Result<Vec<SocketAddr>>> + Send>>;
+/// The service supplies the resolver belonging to its qualified runtime profile.
+pub trait Lookup: Send + Sync {
+    fn addresses(&self, host: String, port: u16) -> LookupFuture;
+}
+pub struct SystemLookup;
+impl Lookup for SystemLookup {
+    fn addresses(&self, host: String, port: u16) -> LookupFuture {
+        Box::pin(async move {
+            lookup_host((host.as_str(), port))
+                .await
+                .map(Iterator::collect)
+        })
+    }
+}
+#[derive(Clone, Copy)]
+pub enum AddressOrder {
+    Verbatim,
+    Ipv4First,
+    Ipv6First,
+}
+#[derive(Clone, Copy)]
+/// Base network options. Production callers must provide their effective runtime
+/// options and resolver explicitly; this type does not discover process inputs.
+pub struct NetworkProfile {
+    pub auto_select_family: bool,
+    pub attempt_timeout: Duration,
+    pub address_order: AddressOrder,
+}
+impl Default for NetworkProfile {
+    fn default() -> Self {
+        Self {
+            auto_select_family: true,
+            attempt_timeout: Duration::from_millis(250),
+            address_order: AddressOrder::Verbatim,
+        }
+    }
+}
+fn ordered_addresses(mut addresses: Vec<SocketAddr>, profile: NetworkProfile) -> Vec<SocketAddr> {
+    match profile.address_order {
+        AddressOrder::Verbatim => (),
+        AddressOrder::Ipv4First => addresses.sort_by_key(SocketAddr::is_ipv6),
+        AddressOrder::Ipv6First => addresses.sort_by_key(SocketAddr::is_ipv4),
+    }
+    if !profile.auto_select_family {
+        addresses.truncate(1);
+        return addresses;
+    }
+    let Some(first) = addresses.first() else {
+        return addresses;
+    };
+    let preferred_v6 = first.is_ipv6();
+    let mut preferred = Vec::new();
+    let mut other = Vec::new();
+    for address in addresses {
+        let group = if address.is_ipv6() == preferred_v6 {
+            &mut preferred
+        } else {
+            &mut other
+        };
+        if !group.contains(&address) {
+            group.push(address);
+        }
+    }
+    let mut ordered = Vec::new();
+    for i in 0..preferred.len().max(other.len()) {
+        if let Some(address) = preferred.get(i) {
+            ordered.push(*address);
+        }
+        if let Some(address) = other.get(i) {
+            ordered.push(*address);
+        }
+    }
+    ordered
+}
+async fn connect_tcp(
+    host: &str,
+    port: u16,
+    lookup: &dyn Lookup,
+    profile: NetworkProfile,
+) -> IvyResult<TcpStream> {
+    let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        timeout(SOCKET_TIMEOUT, lookup.addresses(host.to_string(), port))
+            .await
+            .map_err(|_| IvyError::internal())?
+            .map_err(|_| IvyError::internal())?
+    };
+    let addresses = ordered_addresses(addresses, profile);
+    // Node refreshes its socket timer after lookup. Each nonfinal family attempt
+    // is canceled at the configured interval; the final one uses the remaining
+    // socket timeout. It does not leave parallel attempts alive.
+    let deadline = Instant::now() + SOCKET_TIMEOUT;
+    for (index, address) in addresses.iter().enumerate() {
+        let attempt_deadline = if profile.auto_select_family && index + 1 < addresses.len() {
+            (Instant::now() + profile.attempt_timeout.max(Duration::from_millis(10))).min(deadline)
+        } else {
+            deadline
+        };
+        if let Ok(Ok(stream)) =
+            tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address)).await
+        {
+            return Ok(stream);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    Err(IvyError::internal())
+}
 
 #[derive(Clone, Copy)]
 struct Timer {
@@ -134,6 +247,8 @@ impl Connection {
 struct Inner {
     runtime: Handle,
     tls: Arc<ClientConfig>,
+    lookup: Arc<dyn Lookup>,
+    network: NetworkProfile,
     free: Mutex<HashMap<String, Vec<Connection>>>,
 }
 
@@ -144,6 +259,19 @@ struct Inner {
 pub struct NativeHttps(Arc<Inner>);
 impl NativeHttps {
     pub fn new(runtime: Handle, tls: Arc<ClientConfig>) -> IvyResult<Self> {
+        Self::with_network_profile(
+            runtime,
+            tls,
+            Arc::new(SystemLookup),
+            NetworkProfile::default(),
+        )
+    }
+    pub fn with_network_profile(
+        runtime: Handle,
+        tls: Arc<ClientConfig>,
+        lookup: Arc<dyn Lookup>,
+        network: NetworkProfile,
+    ) -> IvyResult<Self> {
         // The original https.request does not negotiate HTTP/2.
         if !tls.alpn_protocols.is_empty() {
             return Err(IvyError::internal());
@@ -151,15 +279,14 @@ impl NativeHttps {
         Ok(Self(Arc::new(Inner {
             runtime,
             tls,
+            lookup,
+            network,
             free: Mutex::new(HashMap::new()),
         })))
     }
 
     async fn connect(&self, host: &str, port: u16) -> IvyResult<Connection> {
-        let stream = timeout(SOCKET_TIMEOUT, TcpStream::connect((host, port)))
-            .await
-            .map_err(|_| IvyError::internal())?
-            .map_err(|_| IvyError::internal())?;
+        let stream = connect_tcp(host, port, self.0.lookup.as_ref(), self.0.network).await?;
         stream.set_nodelay(true).map_err(|_| IvyError::internal())?;
         let (timer, watched) = watch::channel(Timer::new(SOCKET_TIMEOUT));
         let socket = Socket {

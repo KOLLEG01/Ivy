@@ -16,5 +16,3 @@ mod original;
 use original::original_output;
 #[path = "hive_push_crypto.rs"]
 mod native_crypto;
-#[path = "hive_push_https.rs"]
-mod native_https;
