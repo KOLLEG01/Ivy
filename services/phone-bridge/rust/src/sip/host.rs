@@ -174,9 +174,15 @@ struct Call {
     id: String,
     host: Weak<Mutex<State>>,
     state: Mutex<CallState>,
-    media: Arc<dyn HostedSipMedia>,
+    media: OnceLock<Arc<dyn HostedSipMedia>>,
+    initializing: Option<Arc<Completion<()>>>,
 }
 impl Call {
+    fn request_media_close(&self) {
+        if let Some(media) = self.media.get() {
+            media.request_close();
+        }
+    }
     fn observation(&self) -> SipHostCallObservation {
         let state = self.state.lock().unwrap();
         let signalling = state.invite.as_ref().map(DelayedInvite::observation);
@@ -205,7 +211,7 @@ impl Call {
     fn hangup(&self) {
         let mut state = self.state.lock().unwrap();
         state.ending = true;
-        self.media.request_close();
+        self.request_media_close();
         if let Some(invite) = &state.invite {
             invite.request_hangup();
         }
@@ -218,6 +224,19 @@ pub struct SipHostCall(Arc<Call>);
 impl SipHostCall {
     pub fn observation(&self) -> SipHostCallObservation {
         self.0.observation()
+    }
+    /// Observe the original startup. Dropping this waiter does not cancel it,
+    /// return its slot or grant a later object authority over the same ID.
+    pub async fn prepared(&self) -> Result<(), SipHostError> {
+        if let Some(initializing) = &self.0.initializing {
+            initializing.wait().await?;
+        }
+        let state = self.0.state.lock().unwrap();
+        if state.ending || self.0.media.get().is_none() {
+            Err(SipHostError::NotReady)
+        } else {
+            Ok(())
+        }
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -401,16 +420,7 @@ impl SipHost {
             return Err(SipHostError::InvalidRequest);
         }
         let mut state = self.shared().lock().unwrap();
-        ready(&state)?;
-        if state
-            .reconnecting
-            .as_ref()
-            .is_some_and(|work| work.pending())
-            || state.calls.len() >= state.configuration.as_ref().unwrap().binding.maximum_calls
-            || state.calls.iter().any(|call| call.id == id)
-        {
-            return Err(SipHostError::OperationConflict);
-        }
+        admission(&state, &id)?;
         let media = create()?;
         let call = Arc::new(Call {
             id,
@@ -423,9 +433,69 @@ impl SipHost {
                 preparing: None,
                 releasing: None,
             }),
-            media,
+            media: OnceLock::from(media),
+            initializing: None,
         });
         state.calls.push(call.clone());
+        Ok(SipHostCall(call))
+    }
+    /// Reserve and publish the original slot before invoking asynchronous
+    /// RTP/audio construction. The factory runs once outside host ownership;
+    /// its failure must confirm cleanup, or return CleanupUnconfirmed. A panic
+    /// is uncertain and keeps the slot, including through release/host close.
+    pub fn prepare_async<F, S>(&self, id: String, create: S) -> Result<SipHostCall, SipHostError>
+    where
+        F: Future<Output = Result<Arc<dyn HostedSipMedia>, SipHostError>> + Send + 'static,
+        S: FnOnce() -> F + Send + 'static,
+    {
+        if !super::super::native_rpc::guid_d(&id) {
+            return Err(SipHostError::InvalidRequest);
+        }
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| SipHostError::NotReady)?;
+        let initializing = Completion::new();
+        let call = {
+            let mut state = self.shared().lock().unwrap();
+            admission(&state, &id)?;
+            let call = Arc::new(Call {
+                id,
+                host: Arc::downgrade(self.shared()),
+                state: Mutex::new(CallState {
+                    attempted: false,
+                    ending: false,
+                    failed_before_send: false,
+                    invite: None,
+                    preparing: None,
+                    releasing: None,
+                }),
+                media: OnceLock::new(),
+                initializing: Some(initializing.clone()),
+            });
+            state.calls.push(call.clone());
+            call
+        };
+        let original = call.clone();
+        runtime.spawn(async move {
+            let result = tokio::spawn(async move { create().await })
+                .await
+                .unwrap_or(Err(SipHostError::CleanupUnconfirmed));
+            let mut state = original.state.lock().unwrap();
+            let result = match result {
+                Ok(media) => {
+                    // Hangup/release may have arrived while the original
+                    // constructor was suspended. Revoke before publication.
+                    if state.ending {
+                        media.request_close();
+                    }
+                    let _ = original.media.set(media);
+                    Ok(())
+                }
+                Err(error) => {
+                    state.failed_before_send = true;
+                    Err(error)
+                }
+            };
+            initializing.finish(result);
+        });
         Ok(SipHostCall(call))
     }
     pub fn find(&self, id: &str) -> Option<SipHostCall> {
@@ -464,6 +534,12 @@ impl SipHost {
             if call_state.attempted || call_state.ending {
                 return Err(SipHostError::OperationConflict);
             }
+            let media = expected
+                .0
+                .media
+                .get()
+                .ok_or(SipHostError::NotReady)?
+                .clone();
             call_state.attempted = true;
             let preparing = Completion::new();
             call_state.preparing = Some(preparing.clone());
@@ -488,7 +564,7 @@ impl SipHost {
                         prepared,
                         credentials,
                         ring_seconds,
-                        call.media.clone(),
+                        media,
                     )
                     .map_err(SipHostError::Signalling)?;
                     state.invite = Some(invite.clone());
@@ -507,13 +583,13 @@ impl SipHost {
                                     || observation.uncertain
                                     || observation.outcome.is_some() && !observation.active
                                 {
-                                    original.media.request_close();
+                                    original.request_media_close();
                                 }
                                 if observation.closed {
                                     break;
                                 }
                                 if changes.changed().await.is_err() {
-                                    original.media.request_close();
+                                    original.request_media_close();
                                     break;
                                 }
                             }
@@ -527,7 +603,7 @@ impl SipHost {
                     }
                     Err(error) => {
                         call.state.lock().unwrap().failed_before_send = true;
-                        call.media.request_close();
+                        call.request_media_close();
                         preparing.finish(Ok(()));
                         done.finish(Err(error));
                     }
@@ -645,6 +721,20 @@ fn ready(state: &State) -> Result<(), SipHostError> {
         Ok(())
     }
 }
+fn admission(state: &State, id: &str) -> Result<(), SipHostError> {
+    ready(state)?;
+    if state
+        .reconnecting
+        .as_ref()
+        .is_some_and(|work| work.pending())
+        || state.calls.len() >= state.configuration.as_ref().unwrap().binding.maximum_calls
+        || state.calls.iter().any(|call| call.id == id)
+    {
+        Err(SipHostError::OperationConflict)
+    } else {
+        Ok(())
+    }
+}
 fn original(state: &State, owner: &Shared, call: &SipHostCall) -> Result<(), SipHostError> {
     if !Weak::ptr_eq(&call.0.host, &Arc::downgrade(owner))
         || !state
@@ -663,7 +753,7 @@ fn begin_release(owner: &Shared, call: &Arc<Call>) -> Arc<Completion<()>> {
         return releasing.clone();
     }
     state.ending = true;
-    call.media.request_close();
+    call.request_media_close();
     if let Some(invite) = &state.invite {
         invite.request_hangup();
     }
@@ -674,19 +764,32 @@ fn begin_release(owner: &Shared, call: &Arc<Call>) -> Arc<Completion<()>> {
     let call = call.clone();
     let owner = owner.clone();
     tokio::spawn(async move {
-        if let Some(preparing) = preparing {
-            let _ = preparing.wait().await;
-        }
-        let invite = call.state.lock().unwrap().invite.clone();
-        let signalling = match invite {
-            Some(invite) => invite
-                .close()
-                .await
-                .map_err(|_: CallError| SipHostError::CleanupUnconfirmed),
-            None => Ok(()),
-        };
-        let media = call.media.close().await;
-        let result = signalling.and(media);
+        let original = call.clone();
+        let result = tokio::spawn(async move {
+            if let Some(initializing) = &original.initializing {
+                if initializing.wait().await == Err(SipHostError::CleanupUnconfirmed) {
+                    return Err(SipHostError::CleanupUnconfirmed);
+                }
+            }
+            if let Some(preparing) = preparing {
+                let _ = preparing.wait().await;
+            }
+            let invite = original.state.lock().unwrap().invite.clone();
+            let signalling = match invite {
+                Some(invite) => invite
+                    .close()
+                    .await
+                    .map_err(|_: CallError| SipHostError::CleanupUnconfirmed),
+                None => Ok(()),
+            };
+            let media = match original.media.get() {
+                Some(media) => media.close().await,
+                None => Ok(()),
+            };
+            signalling.and(media)
+        })
+        .await
+        .unwrap_or(Err(SipHostError::CleanupUnconfirmed));
         if result.is_ok() {
             owner
                 .lock()

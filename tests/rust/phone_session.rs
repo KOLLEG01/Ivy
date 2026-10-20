@@ -696,12 +696,23 @@ async fn host_slot_waits_for_late_preparation_and_retains_uncertain_media_cleanu
 async fn concrete_hosted_media_answers_delayed_invite_and_sends_on_its_original_pair() {
     use super::super::sip_host::{configuration, invite, received, response, send};
     use rsipstack::sip::{Method, prelude::*};
-    let port = CallAudioPort::new(CALL.into(), Arc::new(Factory::routes(vec![]))).unwrap();
-    let m = Arc::new(media(port).await);
-    let local_rtp = m.observation().receive.transport.local_rtp;
     let host = SipHost::new();
     let local = host.configure(configuration(1, None)).await.unwrap();
-    let call = host.prepare(CALL.into(), || Ok(m.clone())).unwrap();
+    let retained = Arc::new(std::sync::OnceLock::new());
+    let original = retained.clone();
+    let creating_host = host.clone();
+    let call = host
+        .prepare_async(CALL.into(), move || async move {
+            assert_eq!(creating_host.observation().calls.len(), 1);
+            let port = CallAudioPort::new(CALL.into(), Arc::new(Factory::routes(vec![]))).unwrap();
+            let m = Arc::new(media(port).await);
+            assert!(original.set(m.clone()).is_ok());
+            Ok(m as Arc<dyn ivy_phone_bridge::sip::HostedSipMedia>)
+        })
+        .unwrap();
+    call.prepared().await.unwrap();
+    let m = retained.get().unwrap();
+    let local_rtp = m.observation().receive.transport.local_rtp;
     let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let remote = peer.local_addr().unwrap();
     let (rtp, _control) = pair().await;
@@ -759,6 +770,7 @@ async fn concrete_hosted_media_answers_delayed_invite_and_sends_on_its_original_
             ("actualInviteAckBye", true.into()),
             ("realSdpAnswer", true.into()),
             ("actualRtp", true.into()),
+            ("slotReservedBeforeAsyncMediaConstruction", true.into()),
             ("sameSignallingAndMediaSockets", true.into()),
             ("cleanupConfirmed", true.into()),
         ]),

@@ -352,6 +352,145 @@ async fn admission_waits_for_original_media_cleanup_and_rejects_stale_or_foreign
 }
 
 #[tokio::test]
+async fn async_media_admission_precedes_factory_and_owns_late_result_after_waiters_leave() {
+    let host = SipHost::new();
+    let local = host.configure(configuration(1, None)).await.unwrap();
+    let gate = Arc::new(Semaphore::new(0));
+    let media = Media::new(0, false);
+    let started = Arc::new(AtomicUsize::new(0));
+    let creating_host = host.clone();
+    let creating_gate = gate.clone();
+    let creating_media = media.clone();
+    let creating_count = started.clone();
+    let original = host
+        .prepare_async(ID.into(), move || async move {
+            assert_eq!(
+                creating_host.observation().calls.len(),
+                1,
+                "slot published before factory; no host lock held"
+            );
+            creating_count.fetch_add(1, Ordering::AcqRel);
+            creating_gate.acquire().await.unwrap().forget();
+            Ok(creating_media as Arc<dyn HostedSipMedia>)
+        })
+        .unwrap();
+    assert_eq!(host.observation().calls.len(), 1);
+    cancel_observer(original.prepared()).await;
+    until(|| started.load(Ordering::Acquire) == 1).await;
+    assert!(matches!(
+        host.prepare_async(OTHER.into(), || async {
+            panic!("full reservation cannot construct media")
+        }),
+        Err(SipHostError::OperationConflict)
+    ));
+    assert!(matches!(
+        host.prepare_async("bad-id".into(), || async {
+            panic!("invalid ID cannot construct media")
+        }),
+        Err(SipHostError::InvalidRequest)
+    ));
+    assert_eq!(
+        host.reconnect_registration().await,
+        Err(SipHostError::OperationConflict)
+    );
+    assert_eq!(
+        host.dial_delayed(
+            &original,
+            invite(local),
+            local.into(),
+            None,
+            1
+        )
+        .await,
+        Err(SipHostError::NotReady)
+    );
+    assert!(!original.observation().attempted);
+    host.hangup(&original).unwrap();
+    cancel_observer(host.release(&original)).await;
+    cancel_observer(host.close()).await;
+    assert!(UdpSocket::bind(local).await.is_err());
+    assert_eq!(
+        media.closes.load(Ordering::Acquire),
+        0,
+        "pending constructor owns its work"
+    );
+    gate.add_permits(1);
+    until(|| media.closes.load(Ordering::Acquire) == 1).await;
+    assert!(
+        media.closing.load(Ordering::Acquire),
+        "late result revoked before its startup completes"
+    );
+    assert_eq!(original.prepared().await, Err(SipHostError::NotReady));
+    assert_eq!(host.observation().calls.len(), 1);
+    media.drain.add_permits(1);
+    host.close().await.unwrap();
+    assert_eq!(started.load(Ordering::Acquire), 1);
+    assert_eq!(media.closes.load(Ordering::Acquire), 1);
+    assert!(host.observation().calls.is_empty());
+    assert!(UdpSocket::bind(local).await.is_ok());
+}
+
+#[tokio::test]
+async fn async_factory_failure_or_panic_cannot_silently_return_an_uncertain_slot() {
+    for failure in 0..4 {
+        let host = SipHost::new();
+        let local = host.configure(configuration(1, None)).await.unwrap();
+        let original = host
+            .prepare_async(ID.into(), move || {
+                if failure == 2 {
+                    panic!("synthetic factory entry failure");
+                }
+                async move {
+                    if failure == 3 {
+                        panic!("synthetic async construction failure");
+                    }
+                    Err(if failure == 0 {
+                        SipHostError::InvalidRequest
+                    } else {
+                        SipHostError::CleanupUnconfirmed
+                    })
+                }
+            })
+            .unwrap();
+        let error = if failure == 0 {
+            SipHostError::InvalidRequest
+        } else {
+            SipHostError::CleanupUnconfirmed
+        };
+        assert_eq!(original.prepared().await, Err(error));
+        assert_eq!(original.observation().phase, SipHostCallPhase::LocalEnded);
+        assert_eq!(host.observation().calls.len(), 1);
+        assert!(matches!(
+            host.prepare_async(ID.into(), || async {
+                panic!("failure retains original ID")
+            }),
+            Err(SipHostError::OperationConflict)
+        ));
+        let released = host.release(&original).await;
+        if failure == 0 {
+            released.unwrap();
+            assert!(host.observation().calls.is_empty());
+            let next = host
+                .prepare_async(ID.into(), || async {
+                    Ok(Media::new(1, false) as Arc<dyn HostedSipMedia>)
+                })
+                .unwrap();
+            next.prepared().await.unwrap();
+            assert_eq!(host.hangup(&original), Err(SipHostError::NotReady));
+            host.close().await.unwrap();
+            assert!(UdpSocket::bind(local).await.is_ok());
+        } else {
+            assert_eq!(released, Err(SipHostError::CleanupUnconfirmed));
+            assert_eq!(host.release(&original).await, released);
+            assert_eq!(host.close().await, released);
+            assert_eq!(host.observation().calls.len(), 1);
+            assert!(!host.observation().closed);
+            assert!(UdpSocket::bind(local).await.is_err());
+        }
+    }
+}
+
+#[tokio::test]
 async fn original_maximum_of_thirty_two_slots_preserves_insertion_order() {
     let host = SipHost::new();
     host.configure(configuration(32, None)).await.unwrap();
