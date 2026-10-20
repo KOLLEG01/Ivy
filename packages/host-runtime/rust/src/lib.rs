@@ -73,6 +73,7 @@ pub mod preparation_progress;
 pub mod scheduler;
 pub mod runtime_owner;
 pub mod runtime_maintenance;
+pub mod runtime_reset;
 pub mod source;
 pub mod storage_space;
 pub mod storage_retention;

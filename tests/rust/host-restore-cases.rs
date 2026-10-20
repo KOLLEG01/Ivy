@@ -45,7 +45,11 @@ fn oracle(f: &ServiceFixture, root: &Path, group: &str, case: &str, kind: &str) 
         .args([
             "--experimental-transform-types",
             "--disable-warning=ExperimentalWarning",
-            "tests/fixtures/host-restore-oracle.mjs",
+            if ["payload", "publication", "platform"].contains(&group) {
+                "tests/fixtures/host-restore-publication-oracle.mjs"
+            } else {
+                "tests/fixtures/host-restore-oracle.mjs"
+            },
         ])
         .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .stdin(Stdio::piped())
@@ -146,6 +150,16 @@ async fn compare_case(group: &str, case: &str) -> J {
     let fixture = ServiceFixture::new();
     let root = fixture.0.join("restore");
     let setup = oracle(&fixture, &root, group, case, "setup");
+    if let Some(unavailable) = setup.get("unavailable") {
+        let result = J::object([
+            ("execution", "blocked".into()),
+            ("finding", J::Null),
+            ("unavailable", unavailable.clone()),
+        ]);
+        retain(group, case, setup, result.clone(), J::Null);
+        eprintln!("{group}/{case}: file-symlink fixture unavailable; native/reference behavior not run");
+        return result;
+    }
     let b = bindings(&setup);
     let config = setup.required("config").unwrap().clone();
     let result = match group {
@@ -197,13 +211,25 @@ async fn compare_case(group: &str, case: &str) -> J {
             .await
             .map(|_| J::Null)
         }
+        "platform" => restore::require_restore_platform(
+            setup.required("manifest").unwrap(), &super::fixture_node("24.18.0"),
+        ).map(|_| J::Null),
+        "payload" => restore::copy_restore_payload(
+            field(&setup, "backupRoot"), setup.required("manifest").unwrap().clone(),
+            config.clone(), Arc::new(b), PathBuf::from(std::env::var_os("IVY_BACKUP_JOB").expect("actual Job helper")),
+        ).await.map(J::Number),
+        "publication" => restore::publish_restored_host(
+            config.clone(), setup.required("manifest").unwrap().clone(),
+            setup.required("nativeRecovery").unwrap().clone(), 31,
+            field(&setup, "at"), std::time::Instant::now(), Arc::new(b),
+        ).await.map(|mut value| { value.remove("elapsedMs"); value }),
         _ => panic!("unknown restore group"),
     };
     let actual = J::object([
         ("outcome", wrapped(result)),
         ("state", oracle(&fixture, &root, group, case, "observe")),
     ]);
-    if ["journal", "maintenance", "projects"].contains(&group) {
+    if ["journal", "maintenance", "projects", "payload", "publication"].contains(&group) {
         oracle(&fixture, &root, group, case, "reset");
     }
     let expected = J::object([
@@ -359,5 +385,37 @@ async fn project_restore_relocates_only_the_disposable_backup_index() {
     for case in ["valid", "malformed-index"] {
         let result = compare_case("projects", case).await;
         assert_eq!(ok(&result), case == "valid");
+    }
+}
+
+#[tokio::test]
+async fn restore_payload_copy_preserves_authority_and_reserves_old_recovery_names() {
+    for case in ["valid", "external-area", "legacy-areas", "changed-source", "missing-journal", "existing-root"] {
+        let result=compare_case("payload",case).await;
+        assert_eq!(ok(&result),["valid","external-area","legacy-areas"].contains(&case),"{case}");
+        assert_eq!(result.get("state").unwrap().get("publication"),Some(&J::Null));
+    }
+}
+#[tokio::test]
+async fn restore_final_publication_reconciles_only_working_state_and_stays_disabled() {
+    for case in ["valid", "external-area", "report-accounting", "control-link", "health-directory", "config-publication-failure", "wrong-journal-host"] {
+        let result=compare_case("publication",case).await;
+        if result.get("execution") == Some(&"blocked".into()) {
+            assert_eq!(case, "control-link");
+            assert_eq!(result.get("finding"), Some(&J::Null));
+            continue;
+        }
+        assert_eq!(ok(&result),["valid","external-area","report-accounting","control-link"].contains(&case),"{case}");
+        if ok(&result) {
+            let publication=result.get("state").unwrap().get("publication").unwrap();
+            assert!(publication.get("instances").unwrap().as_array().unwrap().iter().all(|i|i.get("enabled")==Some(&false.into())));
+        }
+    }
+}
+#[tokio::test]
+async fn restore_requires_the_exact_captured_platform_and_node_workload() {
+    for case in ["valid", "wrong-os", "wrong-arch", "wrong-node", "missing-node-prefix"] {
+        let result=compare_case("platform",case).await;
+        assert_eq!(ok(&result),case=="valid","{case}");
     }
 }

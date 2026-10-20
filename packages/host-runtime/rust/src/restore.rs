@@ -24,6 +24,8 @@ mod recovery;
 pub use recovery::{
     hold_restored_bootstrap_maintenance, reconcile_restored_journal, relocate_projects,
 };
+mod publication;
+pub use publication::{copy_restore_payload, publish_restored_host, require_restore_platform};
 
 /// Use one executing-account/path generation and the actual native ownership
 /// policy. A production caller must supply the qualified locale comparator.

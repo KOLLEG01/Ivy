@@ -9,6 +9,8 @@ mod config_write_cases;
 
 #[path = "host-journal-cases.rs"]
 mod journal_cases;
+#[path = "host-reset-coordinator-cases.rs"]
+mod reset_coordinator_cases;
 #[path = "host-artifact-cases.rs"]
 mod artifact_cases;
 #[path = "host-native-dispatch-cases.rs"]
