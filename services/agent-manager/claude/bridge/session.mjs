@@ -29,7 +29,7 @@ export function session(sdk, send) {
     // These functions cannot cross JSON. Rust explicitly chooses whether to
     // install the SDK callback, and supplies its complete SDK result later.
     if (params.permissionCallback) {
-      value.canUseTool = (toolName, input, context) => new Promise(resolve => {
+      value.canUseTool = (toolName, input, context) => new Promise((resolve, reject) => {
         if (entry.closed || context.signal.aborted) {
           resolve({ behavior: 'deny', message: 'turn already finished' });
           return;
@@ -44,7 +44,7 @@ export function session(sdk, send) {
           emit({ type: 'callbackCancelled', turnId: entry.turnId, callbackId });
         };
         const cleanup = () => context.signal.removeEventListener('abort', cancel);
-        callbacks.set(callbackId, { resolve, cleanup, turnId: entry.turnId });
+        callbacks.set(callbackId, { resolve, reject, cleanup, turnId: entry.turnId });
         context.signal.addEventListener('abort', cancel, { once: true });
         emit({ type: 'permission', turnId: entry.turnId, callbackId,
           toolName, input, toolUseId: context.toolUseID ?? null });
@@ -83,7 +83,11 @@ export function session(sdk, send) {
       if (pending) {
         callbacks.delete(params.callbackId);
         pending.cleanup();
-        pending.resolve(params.result);
+        if (params.error) {
+          const error = new Error(String(params.error.message));
+          error.name = params.error.name ?? 'Error';
+          pending.reject(error);
+        } else pending.resolve(params.result);
       }
       return null;
     }

@@ -972,6 +972,33 @@ impl Adapter {
         );
         Ok(out)
     }
+    /// Finalize orphaned children before the original asynchronous final diff
+    /// barrier. A concurrent interrupt still owns the terminal state.
+    pub fn prepare_success(&mut self, turn: &JsString) -> Result<Vec<Effect>> {
+        let mut out = vec![];
+        let Some(mut state) = self.turns.remove(turn) else {
+            return Ok(out);
+        };
+        let thread = string(field(&state.thread, "id"));
+        if self.stopped
+            || self.active.get(&thread) != Some(turn)
+            || !self
+                .store
+                .get_turn(turn)?
+                .is_some_and(|t| is(field(&t, "status"), "inProgress"))
+        {
+            return Ok(out);
+        }
+        let result = self.finalize_subagents(
+            &mut state,
+            turn,
+            "Subagent ended without a terminal task result.",
+            &mut out,
+        );
+        self.turns.insert(turn.clone(), state);
+        result?;
+        Ok(out)
+    }
     pub fn runtime_finished(&mut self, turn: &JsString, result: Result<()>) -> Result<Vec<Effect>> {
         let mut out = vec![];
         let Some(mut state) = self.turns.remove(turn) else {

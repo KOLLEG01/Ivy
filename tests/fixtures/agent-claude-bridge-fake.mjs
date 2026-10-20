@@ -57,6 +57,11 @@ export async function check() {
   await receive('permission/reply', { callbackId, result: { behavior: 'allow', updatedInput: { command: 'changed' } } });
   assert.deepEqual(await first, { behavior: 'allow', updatedInput: { command: 'changed' } });
   await receive('permission/reply', { callbackId, result: { behavior: 'deny', message: 'late' } });
+  const rejected = calls[0].permission('Bash', {}, 'rejected');
+  const rejection = assert.rejects(rejected, { name: 'TypeError', message: 'fixture callback error' });
+  await receive('permission/reply', { callbackId: output.at(-1).callbackId,
+    error: { name: 'TypeError', message: 'fixture callback error' } });
+  await rejection;
   await receive('query/steer', { turnId: 'turn-a', messages });
   assert.deepEqual(await Array.fromAsync(calls[0].steers[0]), messages);
   const interrupted = calls[0].permission('Edit', { file_path: 'a' }, 'edit');
@@ -100,6 +105,7 @@ if (process.argv[2] === '--check') process.stdout.write(JSON.stringify(await che
 if (process.argv[2] === '--transport') {
   const { sdk, calls } = fakeSdk();
   const bridge = session(sdk, value => process.stdout.write(JSON.stringify(value) + '\n'));
+  const turns = new Map(), ready = new Map();
   let text = '';
   for await (const chunk of process.stdin) {
     text += chunk;
@@ -107,10 +113,19 @@ if (process.argv[2] === '--transport') {
     while ((end = text.indexOf('\n')) >= 0) {
       const message = JSON.parse(text.slice(0, end)); text = text.slice(end + 1);
       const reply = result => process.stdout.write(JSON.stringify({ version: 1, id: message.id, result }) + '\n');
-      const entry = () => calls.find(c => c.options.fixtureTag === message.params.turnId && c.closed === 0);
-      if (message.method === 'fixture/emit') { calls.at(-1).push(message.params.message); continue; }
+      const entry = () => calls[turns.get(message.params.turnId)] ?? calls.find(c => c.options.fixtureTag === message.params.turnId && c.closed === 0);
+      if (message.method === 'fixture/awaitTurn') {
+        if (entry()) reply(null);
+        else ready.set(message.params.turnId, reply);
+        continue;
+      }
+      if (message.method === 'fixture/emit') { (message.params.turnId ? entry() : calls.at(-1)).push(message.params.message); reply(null); continue; }
+      if (message.method === 'fixture/end') { entry().finish(message.params.error ? new Error(message.params.error) : undefined); reply(null); continue; }
       if (message.method === 'fixture/permission') {
-        void entry().permission('Bash', { command: 'fixture' }, 'test-tool').then(reply);
+        void entry().permission(message.params.toolName ?? 'Bash', message.params.input ?? { command: 'fixture' }, message.params.toolUseId ?? 'test-tool').then(reply, error => {
+          process.stdout.write(JSON.stringify({ version: 1, id: message.id,
+            error: { name: error.name, message: error.message } }) + '\n');
+        });
         continue;
       }
       if (message.method === 'fixture/burst') {
@@ -122,7 +137,11 @@ if (process.argv[2] === '--transport') {
         continue;
       }
       if (message.method === 'fixture/exit') process.exit(7);
+      if (message.method === 'query/start') turns.set(message.params.turnId, calls.length);
       void bridge.receive(message);
+      if (message.method === 'query/start') {
+        ready.get(message.params.turnId)?.(null); ready.delete(message.params.turnId);
+      }
     }
   }
   await bridge.stop();

@@ -1,8 +1,9 @@
 //! Rust-owned Claude protocol/state and its private pinned SDK transport.
-//! The legacy adapter/catalog identity is unchanged. Host bindings, raw SDK
-//! event translation and packaging are separate from the synchronous owner.
+//! The legacy adapter/catalog identity is unchanged. Host bindings and
+//! packaging are separate from protocol state and the private SDK owner.
 pub mod ask;
 pub mod bridge;
+pub mod driver;
 pub mod error;
 pub mod images;
 mod items;
@@ -12,7 +13,9 @@ pub mod projects;
 pub mod protocol;
 pub mod rate_limits;
 pub mod sdk_options;
+pub mod sdk_events;
 pub mod store;
 mod subagents;
 mod turns;
 mod value;
+pub mod workflow;

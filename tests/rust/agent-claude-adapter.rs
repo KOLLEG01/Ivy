@@ -144,6 +144,10 @@ fn compare(label: &str, actual: J, expected: J) {
 mod protocol_cases;
 #[path = "agent-claude-adapter/sdk.rs"]
 mod sdk_cases;
+#[path = "agent-claude-adapter/events.rs"]
+mod event_cases;
+#[path = "agent-claude-adapter/driver.rs"]
+mod driver_cases;
 fn local(home: &Path, spec: &J) -> J {
     let mutable = Arc::new(Mutex::new((
         f(spec, "now").as_f64().unwrap_or(1700000000123.0),
