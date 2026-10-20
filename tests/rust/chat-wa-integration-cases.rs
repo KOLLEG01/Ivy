@@ -296,9 +296,22 @@ async fn component_desktop_assembly(
         // image, never reach the installed PowerShell/desktop capability.
         let command_bin = std::env::var_os("IVY_CHAT_DESKTOP_TEST_BIN")
             .expect("Supply the isolated inert powershell.exe command directory");
+        // Cargo prepends DLL search directories to PATH for test binaries.
+        // Check executable lookup, including cwd, before any valid command.
+        let path = std::env::var_os("PATH").unwrap();
+        let selected = std::iter::once(std::env::current_dir().unwrap())
+            .chain(std::env::split_paths(&path))
+            .map(|directory| directory.join("powershell.exe"))
+            .find(|candidate| candidate.is_file())
+            .map(|candidate| ivy_host_runtime::paths::realpath(&candidate).unwrap());
         assert_eq!(
-            std::env::split_paths(&std::env::var_os("PATH").unwrap()).next(),
-            Some(std::path::PathBuf::from(command_bin))
+            selected,
+            Some(
+                ivy_host_runtime::paths::realpath(
+                    &std::path::PathBuf::from(command_bin).join("powershell.exe")
+                )
+                .unwrap()
+            )
         );
         let helper = std::env::var_os("IVY_CHAT_DESKTOP_JOB_HELPER")
             .expect("Supply the matching source-pinned Host ivy-job qualification image");
