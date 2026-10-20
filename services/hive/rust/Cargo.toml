@@ -5,6 +5,11 @@ edition = "2024"
 publish = false
 
 [dependencies]
+http-body-util = { version = "=0.1.5", default-features = false }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio"] }
+hyper = { version = "=1.12.0", default-features = false, features = ["client", "http1"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 futures-util.workspace = true
 reqwest.workspace = true
 aws-lc-rs.workspace = true

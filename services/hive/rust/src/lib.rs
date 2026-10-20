@@ -4,6 +4,7 @@ pub mod auth_pages;
 pub mod browser_push;
 pub mod browser_push_http;
 pub mod browser_push_native;
+pub mod browser_push_https;
 pub mod browser_push_store;
 pub mod browser_session;
 pub mod configurations;

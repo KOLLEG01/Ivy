@@ -17,6 +17,9 @@ mod oauth;
 #[path = "hive_push_crypto.rs"]
 mod native_crypto;
 
+#[path = "hive_push_https.rs"]
+mod native_https;
+
 type Posted = (IvyJson, oneshot::Sender<IvyResult<IvyJson>>);
 static CORPUS: Mutex<()> = Mutex::new(());
 fn carrier(value: &IvyJson) -> Value {
