@@ -87,6 +87,39 @@ test('restricted unchanged plans stage exactly their advertised OS and architect
   assert.equal(existsSync(join(f.outputRoot, 'native/win32-x64')), false);
 });
 
+test('runtime libraries and licenses stage once per target without becoming executable helpers', t => {
+  const f = fixture(t);
+  for (const payload of f.payloads) {
+    const names = [payload.platform.startsWith('win32-') ? 'example_runtime.dll' : 'libexample_runtime.so.78', 'LICENSE.example'];
+    payload.runtimeFiles = names.map(name => {
+      const file = join(payload.outputDirectory, name);
+      writeFileSync(file, f.bytes(name));
+      return file;
+    });
+  }
+  const result = f.stage();
+  for (const payload of f.payloads) for (const input of payload.runtimeFiles) {
+    const output = join(f.outputRoot, 'native', payload.platform, basename(input));
+    assert.deepEqual(readFileSync(output), readFileSync(input));
+    assert.equal(result.files.filter(path => path === output).length, 1);
+    assert.equal(result.linuxExecutables.includes(output), false);
+  }
+});
+
+test('invalid or conflicting runtime files cannot leave a partially staged package', t => {
+  for (const change of [
+    f => { f.payloads[0].runtimeFiles = {}; },
+    f => { const p=f.payloads[0], file=join(p.outputDirectory,'libwrong.so.78'); writeFileSync(file,'runtime'); p.runtimeFiles=[file]; },
+    f => { const p=f.payloads[2], file=join(p.outputDirectory,'empty.dll'); writeFileSync(file,''); p.runtimeFiles=[file]; },
+    f => { const p=f.payloads[0]; p.runtimeFiles=[f.payloads[1].files[0]]; },
+    f => { for (const [i,p] of f.payloads.slice(0,2).entries()) {const file=join(p.outputDirectory,'runtime.dll');writeFileSync(file,String(i));p.runtimeFiles=[file];} },
+  ]) {
+    const f=fixture(t);change(f);
+    assert.throws(()=>f.stage());
+    assert.equal(existsSync(f.outputRoot),false);
+  }
+});
+
 function secretaryFixture(t) {
   const f = fixture(t, targets, 'secretary');
   const inputs = new Map([

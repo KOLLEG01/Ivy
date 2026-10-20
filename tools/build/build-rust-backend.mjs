@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { basename, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { buildIdentity } from '../../packages/host-runtime/src/build-identity.mjs';
 import { buildInstructions } from './build-instructions.mjs';
@@ -28,11 +28,20 @@ function runCargo(args, options) {
 /** Compile the selected component's real binaries into an isolated target payload.
  * This is a builder input to universal package assembly, not a release archive or
  * proof that other advertised targets and host readiness helpers are available. */
-export function compileRustBackend({ component, target, root = process.cwd(), identity, cargo = runCargo } = {}) {
+export function compileRustBackend({ component, target, root = process.cwd(), identity, cargo = runCargo, runtimeFiles = [] } = {}) {
   if (!/^[a-z][a-z0-9-]*$/.test(component ?? '')) throw new Error('A component name is required.');
   const platform = typeof target === 'string' && Object.hasOwn(rustBackendTargets, target) ? rustBackendTargets[target] : undefined;
   if (!platform) throw new Error('An explicit supported Rust target is required.');
   root = realpathSync(root);
+  if (!Array.isArray(runtimeFiles)) throw new Error('Explicit native runtime files must be an array.');
+  const runtimeInputs = runtimeFiles.map(file => {
+    const path = resolve(file);
+    if (!within(root, path) || realpathSync(path) !== path || !statSync(path).isFile() || statSync(path).size === 0) throw new Error('Native runtime files must be contained regular files.');
+    const name = basename(path);
+    if (!(platform.startsWith('win32-') ? /^[A-Za-z0-9_-]+\.dll$/ : /^lib[A-Za-z0-9_-]+\.so(?:\.\d+)*$/).test(name) && !/^LICENSE\.[A-Za-z0-9_-]+$/.test(name)) throw new Error('Invalid native runtime filename.');
+    return { path, name };
+  });
+  if (new Set(runtimeInputs.map(f => f.name.toLowerCase())).size !== runtimeInputs.length) throw new Error('Native runtime filename collision.');
   const manifest = resolve(root, component === 'host-executor' ? 'packages/host-runtime/rust/Cargo.toml' : `services/${component}/rust/Cargo.toml`);
   if (!existsSync(manifest) || realpathSync(manifest) !== manifest) throw new Error('The component Rust manifest must exist without directory links.');
   const targetDirectory = resolve(root, '.local', 'cargo', component);
@@ -73,11 +82,18 @@ export function compileRustBackend({ component, target, root = process.cwd(), id
     copyFileSync(artifacts.get(binary.name), destination);
     files.push(destination);
   }
+  const stagedRuntimeFiles = [];
+  for (const {path, name} of runtimeInputs) {
+    const destination = resolve(outputDirectory, name);
+    if (existsSync(destination) && realpathSync(destination) !== destination) throw new Error('Native output must not use file links.');
+    copyFileSync(path, destination);
+    stagedRuntimeFiles.push(destination);
+  }
   const buildInfo = resolve(outputDirectory, 'build-info.json');
   if (existsSync(buildInfo) && realpathSync(buildInfo) !== buildInfo) throw new Error('Native build identity must not use file links.');
   writeFileSync(buildInfo, JSON.stringify(identity, null, 2) + '\n');
   const instructionFiles = buildInstructions({ root, component, outputRoot: resolve(root, '.local', 'build', 'rust', component) });
-  return { component, target, platform, identity, rootInputFingerprint, outputDirectory, files, instructionFiles };
+  return { component, target, platform, identity, rootInputFingerprint, outputDirectory, files, runtimeFiles: stagedRuntimeFiles, instructionFiles };
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

@@ -66,6 +66,23 @@ test('native builds expose shared instruction assets outside target-specific exe
   }, component);
 });
 
+test('explicit target runtime files accompany binaries without entering the executable set', () => fixture(f => {
+  const directory = join(f.root, 'runtime'); mkdirSync(directory);
+  const runtimeFiles = ['example_runtime.dll', 'LICENSE.example'].map(name => {
+    const file = join(directory,name); writeFileSync(file,'runtime '+name); return file;
+  });
+  const result=f.build({runtimeFiles});
+  assert.equal(result.files.length,2);
+  assert.equal(result.runtimeFiles.length,2);
+  for(const [i,file] of result.runtimeFiles.entries()) assert.deepEqual(readFileSync(file),readFileSync(runtimeFiles[i]));
+  const before=f.calls.length;
+  assert.throws(()=>f.build({runtimeFiles:[join(directory,'missing.dll')]}));
+  assert.equal(f.calls.length,before);
+  const wrong=join(directory,'libwrong.so.78');writeFileSync(wrong,'other OS');
+  assert.throws(()=>f.build({runtimeFiles:[wrong]}),/runtime filename/);
+  assert.equal(f.calls.length,before);
+}));
+
 test('libraries and unregistered crates never fall back to TypeScript', () => fixture(f => {
   f.targets.splice(0, 2);
   assert.throws(() => f.build(), /no native service executable/);

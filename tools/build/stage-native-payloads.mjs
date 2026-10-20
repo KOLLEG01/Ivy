@@ -83,6 +83,18 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
       if (group.files.has(folded)) throw Error('Native executable name collision.');
       group.files.set(folded, { source, name });
     }
+    if (!Array.isArray(payload.runtimeFiles ?? [])) throw Error('Native runtime files must be an array.');
+    for (const file of payload.runtimeFiles ?? []) {
+      const source = regular(input, file), name = basename(source);
+      if (dirname(source) !== input || statSync(source).size === 0 ||
+          (!(windows ? /^[A-Za-z0-9_-]+\.dll$/ : /^lib[A-Za-z0-9_-]+\.so(?:\.\d+)*$/).test(name) && !/^LICENSE\.[A-Za-z0-9_-]+$/.test(name))) throw Error('Invalid selected native runtime file.');
+      const folded = name.toLowerCase(), existing = group.files.get(folded);
+      // Multiple binaries in one target may use the same shared runtime. Keep
+      // one exact copy; different bytes must not silently win by input order.
+      if (existing) {
+        if (!existing.runtime || existing.name !== name || !readFileSync(existing.source).equals(readFileSync(source))) throw Error('Native runtime name collision.');
+      } else group.files.set(folded, { source, name, runtime: true });
+    }
     if (payload.component === component) {
       group.primary++;
       if (!payload.files.some(file => basename(file) === 'ivy-' + component + (windows ? '.exe' : ''))) throw Error('Native component service executable is missing.');
@@ -120,10 +132,10 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
   for (const [platform, group] of selected) {
     const directory = resolve(outputRoot, 'native', platform);
     mkdirSync(directory, { recursive: true });
-    for (const { source, name } of group.files.values()) {
+    for (const { source, name, runtime } of group.files.values()) {
       const path = resolve(directory, name);
       copyFileSync(source, path);
-      if (platform.startsWith('linux-')) {
+      if (platform.startsWith('linux-') && !runtime) {
         if (process.platform !== 'win32') chmodSync(path, 0o755);
         linuxExecutables.push(path);
       }
