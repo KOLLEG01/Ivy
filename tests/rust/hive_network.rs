@@ -17,6 +17,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "hive_server_rpc.rs"]
+mod server_rpc;
+#[path = "hive_dispatch_gate.rs"]
+mod dispatch_gate;
+
 trait FixtureMut {
     fn get_mut(&mut self, name: &str) -> Option<&mut IvyJson>;
     fn as_array_mut(&mut self) -> Option<&mut Vec<IvyJson>>;
