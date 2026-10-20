@@ -339,7 +339,18 @@ async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_r
         &codec.encode_20ms(&[0; 160]),
     )
     .await;
-    until(|| media.observation().receive.transport.counters.rtp_received == 1).await;
+    // The next datagram is a causal barrier on this same receive loop. Its
+    // event counter proves the preceding unconfigured audio packet finished.
+    crate::sip_receiver::send(
+        &rtp,
+        transport.local_rtp,
+        0,
+        101,
+        111,
+        &[0, 0x80 | 10, 0, 160],
+    )
+    .await;
+    until(|| media.observation().receive.event_packets == 1).await;
     assert_eq!(media.observation().receive.inband_analyzed_packets, 0);
     owner.configure_features(&call, None).unwrap();
     features.connected(); // Synthetic call notification; this is not a dial-path qualification.
@@ -384,6 +395,7 @@ async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_r
     assert_eq!(features.observation().command_sequence, 1);
     // Initialize analysis again if SDP reset it, then prove that acceptance
     // disables analysis on the next audio packet while PCM remains closed.
+    let before_analyzed = media.observation().receive.inband_analyzed_packets;
     crate::sip_receiver::send(
         &rtp,
         transport.local_rtp,
@@ -393,7 +405,8 @@ async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_r
         &codec.encode_20ms(&[0; 160]),
     )
     .await;
-    until(|| media.observation().receive.inband.is_some()).await;
+    until(|| media.observation().receive.inband_analyzed_packets > before_analyzed).await;
+    assert!(media.observation().receive.inband.is_some());
     let analyzed = media.observation().receive.inband_analyzed_packets;
     features.start_screening().unwrap();
     crate::sip_receiver::send(
@@ -438,7 +451,8 @@ async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_r
     trace(
         "native-call-features-media",
         IvyJson::object([
-            ("actualRtpDigits", n(4)),
+            ("actualRtpDigits", n(5)),
+            ("ignoredBeforeConfiguration", n(1)),
             ("actualInBandDigits", n(1)),
             ("dynamicAnalysisPolicy", true.into()),
             ("samePolicyAfterRenegotiation", true.into()),
