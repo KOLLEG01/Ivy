@@ -43,6 +43,45 @@ cases.push(
   {name: 'upgrade-101', status: 101, headers: [['Connection', 'Upgrade'], ['Upgrade', 'fixture']]},
   {name: 'json-extra-data', status: 200, extra: 'trailing'},
 );
+const mode = process.argv[2] ?? 'response';
+if (mode === 'informational') {
+  cases.length = 0;
+  const upgrade = [['Connection', 'Upgrade'], ['Upgrade', 'fixture']];
+  cases.push(
+    {name: 'upgrade-plain', status: 101},
+    {name: 'upgrade-headers', status: 101, headers: upgrade},
+    {name: 'upgrade-empty', status: 101, empty: true, headers: upgrade},
+    {name: 'upgrade-plain-empty', status: 101, empty: true},
+    {name: 'upgrade-chunked', status: 101, chunked: true, headers: upgrade},
+    {name: 'upgrade-invalid-utf8', status: 101, invalidUtf8: true, headers: upgrade},
+    {name: 'upgrade-invalid-gzip', status: 101, headers: [...upgrade, ['Content-Encoding', 'gzip']]},
+    {name: 'upgrade-location', status: 101, headers: [...upgrade, ['Location', '/must-not-follow']]},
+    {name: 'upgrade-keep-alive', status: 101, headers: [['Connection', 'keep-alive']]},
+    {name: 'upgrade-missing-protocol', status: 101, headers: [['Connection', 'Upgrade']]},
+    {name: 'upgrade-missing-connection', status: 101, headers: [['Upgrade', 'fixture']]},
+    {name: 'upgrade-after-102', status: 101, interim: 102, headers: upgrade},
+    {name: 'upgrade-after-103', status: 101, interim: 103, headers: upgrade},
+    {name: 'upgrade-after-100', status: 101, interim: 100, headers: upgrade},
+    {name: 'upgrade-after-sequence', status: 101, interim: [103, 102, 199], headers: upgrade},
+    {name: 'upgrade-after-100-103', status: 101, interim: [100, 103], headers: upgrade},
+  );
+  for (const interim of [102, 103, 104, 199]) {
+    cases.push({name: 'informational-' + interim, status: 200, interim});
+  }
+  cases.push(
+    {name: 'informational-repeated', status: 200, interim: [103, 103]},
+    {name: 'informational-sequence', status: 200, interim: [102, 103, 104, 199]},
+    {name: 'informational-before-error-status', status: 404, interim: [103, 102]},
+    {name: 'informational-before-no-body', status: 205, interim: 103},
+    {name: 'informational-before-redirect', status: 302, interim: 103},
+    {name: 'continue-100', status: 200, interim: 100, diagnostic: true},
+    {name: 'continue-before-103', status: 200, interim: [100, 103], diagnostic: true},
+    {name: 'continue-after-103', status: 200, interim: [103, 100], diagnostic: true},
+    {name: 'continue-repeated', status: 200, interim: [100, 100], diagnostic: true},
+  );
+} else if (mode !== 'response') {
+  throw Error('Unknown response fixture mode: ' + mode);
+}
 function wire(spec, id) {
   const normal = Buffer.from(JSON.stringify({jsonrpc: '2.0', id,
     result: {name: spec.name, text: 'é😀', raw: '\ud800'}}));
@@ -55,7 +94,8 @@ function wire(spec, id) {
   const fields = [...(spec.headers ?? []),
     ...(!spec.headers?.some(([name]) => name.toLowerCase() === 'connection') ? [['Connection', 'close']] : []),
     ...(spec.chunked ? [['Transfer-Encoding', 'chunked']] : [['Content-Length', '' + (body.length + (spec.lengthDelta ?? 0))]])];
-  const interim = spec.interim ? `HTTP/1.1 ${spec.interim} Fixture\r\n\r\n` : '';
+  const informational = spec.interim == null ? [] : [spec.interim].flat();
+  const interim = informational.map(status => `HTTP/1.1 ${status} Fixture\r\n\r\n`).join('');
   const head = Buffer.from(interim + `HTTP/1.1 ${spec.status} Fixture\r\n` + fields.map(([k,v]) => k + ': ' + v + '\r\n').join('') + '\r\n');
   if (spec.chunked) {
     const chunks = [];
@@ -113,5 +153,5 @@ try {
   await new Promise(resolve => server.close(resolve));
 }
 const source = readFileSync(new URL('../../packages/sdk/src/client.ts', import.meta.url));
-process.stdout.write(JSON.stringify({node: process.version, undici: process.versions.undici,
+process.stdout.write(JSON.stringify({mode, node: process.version, undici: process.versions.undici,
   sourceSha256: sha(source), transport: 'Actual original HiveClient and Node global fetch against loopback TCP bytes; transparent observation only.', rows}));

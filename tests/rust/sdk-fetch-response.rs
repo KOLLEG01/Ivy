@@ -20,11 +20,19 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 fn original() -> J {
-    let bytes = if let Some(path) = std::env::var_os("IVY_TEST_FETCH_RESPONSE_ORACLE") {
+    original_mode("response")
+}
+fn original_mode(mode: &str) -> J {
+    let oracle = if mode == "response" {
+        "IVY_TEST_FETCH_RESPONSE_ORACLE"
+    } else {
+        "IVY_TEST_FETCH_INFORMATIONAL_ORACLE"
+    };
+    let bytes = if let Some(path) = std::env::var_os(oracle) {
         let bytes = std::fs::read(path).unwrap();
         assert_eq!(
             digest(&bytes),
-            std::env::var("IVY_TEST_FETCH_RESPONSE_ORACLE_HASH").unwrap()
+            std::env::var(format!("{oracle}_HASH")).unwrap()
         );
         bytes
     } else {
@@ -33,6 +41,7 @@ fn original() -> J {
                 "--experimental-transform-types",
                 "--disable-warning=ExperimentalWarning",
                 "tests/fixtures/sdk-fetch-response-oracle.mjs",
+                mode,
             ])
             .current_dir(root())
             .output()
@@ -45,6 +54,9 @@ fn original() -> J {
         output.stdout
     };
     let result = parse(std::str::from_utf8(&bytes).unwrap(), usize::MAX).unwrap();
+    if mode != "response" {
+        assert_eq!(result.get("mode"), Some(&mode.into()));
+    }
     assert_eq!(
         result.get("sourceSha256"),
         Some(
@@ -55,12 +67,70 @@ fn original() -> J {
     );
     if let Some(dir) = std::env::var_os("IVY_TEST_RAW_EVIDENCE") {
         std::fs::write(
-            Path::new(&dir).join("sdk-fetch-response-original.json"),
+            Path::new(&dir).join(format!("sdk-fetch-{mode}-original.json")),
             bytes,
         )
         .unwrap();
     }
     result
+}
+
+#[tokio::test]
+async fn global_fetch_informational_and_upgrade_semantics_match_original() {
+    let original = original_mode("informational");
+    let peer = Peer::new(rows(&original).to_vec()).await;
+    let mut evidence = Vec::new();
+    let mut mismatches = Vec::new();
+    for (index, row) in rows(&original).iter().enumerate() {
+        let before = peer.traces.lock().unwrap().len();
+        let client = HiveClient::new_js(
+            &format!("{}/case/{index}", peer.base).as_str().into(),
+            ClientOptions {
+                credential: Some(JsString::from("fixture")),
+                ..ClientOptions::default()
+            },
+        )
+        .unwrap();
+        let actual = peer.call(client, row).await;
+        let requests = peer.traces.lock().unwrap()[before..].to_vec();
+        assert_eq!(requests.len(), 1, "No redirect or replay: {}", name(row));
+        assert_eq!(
+            requests[0].get("path"),
+            row.get("requests").unwrap().as_array().unwrap()[0].get("path")
+        );
+        let qualified = row.get("spec").unwrap().get("diagnostic") != Some(&true.into());
+        if qualified && Some(&actual) != row.get("result") {
+            mismatches.push(name(row));
+        }
+        evidence.push(J::object([
+            ("name", name(row).into()),
+            ("qualified", qualified.into()),
+            ("expected", row.get("result").unwrap().clone()),
+            ("actual", actual),
+            ("requests", J::Array(requests)),
+        ]));
+    }
+    // Upgrade rejection also applies to this entry point without a credential.
+    let row = rows(&original)
+        .iter()
+        .find(|row| name(row) == "upgrade-headers")
+        .unwrap();
+    let client = HiveClient::new_js(&peer.base.as_str().into(), ClientOptions::default()).unwrap();
+    let actual = peer.call(client, row).await;
+    if Some(&actual) != row.get("result") {
+        mismatches.push("without-credential:upgrade-headers".into());
+    }
+    evidence.push(J::object([
+        ("name", "without-credential:upgrade-headers".into()),
+        ("qualified", true.into()),
+        ("expected", row.get("result").unwrap().clone()),
+        ("actual", actual),
+    ]));
+    raw_evidence("sdk-fetch-informational-native.json", J::Array(evidence));
+    assert!(
+        mismatches.is_empty(),
+        "Informational-profile mismatches: {mismatches:?}"
+    );
 }
 fn rows(original: &J) -> &[J] {
     original.get("rows").unwrap().as_array().unwrap()
@@ -167,9 +237,9 @@ async fn global_fetch_response_status_and_body_semantics_match_original() {
             requests[0].get("path"),
             row.get("requests").unwrap().as_array().unwrap()[0].get("path")
         );
-        // These informational/upgrade parser behaviors belong to the separate
-        // pending connection profile. Retain them as observations, not parity.
-        let qualified = !matches!(name(row).as_str(), "interim-100" | "upgrade-101");
+        // Unsolicited100 admission belongs to the pending connection profile.
+        // Retain that observation without treating it as qualified parity.
+        let qualified = name(row) != "interim-100";
         if qualified && Some(&actual) != row.get("result") {
             mismatches.push(name(row));
         }
@@ -219,6 +289,7 @@ async fn existing_string_client_response_profile_is_preserved() {
         ("status-300",IvyError::new("outcome_unknown","The request connection failed or timed out. Reconcile its original operation identity.").with_outcome(ivy_contracts::Outcome::Unknown)),
         ("status-304",IvyError::new("outcome_unknown","The request connection failed or timed out. Reconcile its original operation identity.").with_outcome(ivy_contracts::Outcome::Unknown)),
         ("status-204",IvyError::new("invalid_frame","Hive returned malformed JSON.").with_outcome(ivy_contracts::Outcome::Unknown)),
+        ("upgrade-101",IvyError::new("invalid_frame","Hive returned malformed JSON.").with_outcome(ivy_contracts::Outcome::Unknown)),
     ] {
         let row=rows(&original).iter().find(|row|name(row)==wanted).unwrap();
         let client=HiveClient::new(&peer.base,ClientOptions::default()).unwrap();

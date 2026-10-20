@@ -338,7 +338,7 @@ impl HiveClient {
         let response = request.send().await.map_err(|_| unknown())?;
         if self.inner.global_fetch_response {
             match response.status().as_u16() {
-                301 | 302 | 303 | 307 | 308 => return Err(unknown()),
+                101 | 301 | 302 | 303 | 307 | 308 => return Err(unknown()),
                 204 | 205 | 304 => return Err(invalid("Hive returned no response body.")),
                 _ => (),
             }
