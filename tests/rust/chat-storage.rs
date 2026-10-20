@@ -5,6 +5,8 @@ use rusqlite::{Connection, types::Value};
 mod auth_compat;
 #[path = "chat-auth-native-cases.rs"]
 mod auth_native;
+#[path = "chat-auth-node-cases.rs"]
+mod auth_node;
 #[path = "chat-store-cases.rs"]
 mod chat_store;
 #[path = "chat-store-hive-cases.rs"]

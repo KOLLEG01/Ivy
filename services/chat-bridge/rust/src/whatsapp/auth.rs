@@ -52,9 +52,6 @@ impl AuthStore {
     }
 
     pub fn set(&self, category: &str, id: &str, value: Option<&str>) -> rusqlite::Result<()> {
-        if self.get(category, id)?.as_deref() == value {
-            return Ok(());
-        }
         set(&self.db, category, id, value)
     }
 
@@ -89,6 +86,19 @@ pub struct AuthMutation<'a> {
 }
 
 fn set(db: &Connection, category: &str, id: &str, value: Option<&str>) -> rusqlite::Result<()> {
+    // The original store skips identical values, including inside keys.set.
+    // Check each ordered mutation in the transaction so duplicates and deletes
+    // observe earlier entries, without firing triggers for an unchanged row.
+    let previous: Option<String> = db
+        .query_row(
+            "SELECT value FROM auth WHERE category=? AND id=?",
+            (category, id),
+            |row| row.get(0),
+        )
+        .optional()?;
+    if previous.as_deref() == value {
+        return Ok(());
+    }
     match value {
         Some(value) => db.execute("INSERT INTO auth VALUES(?,?,?) ON CONFLICT(category,id) DO UPDATE SET value=excluded.value", (category, id, value))?,
         None => db.execute("DELETE FROM auth WHERE category=? AND id=?", (category, id))?,

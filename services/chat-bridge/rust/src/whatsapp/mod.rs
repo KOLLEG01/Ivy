@@ -1,5 +1,6 @@
 pub mod audio_processing;
 pub mod auth;
+pub mod auth_node;
 pub mod command_native;
 pub mod commands;
 pub mod config;
