@@ -7,6 +7,8 @@ use std::sync::Arc;
 mod audio_sender;
 #[path = "phone_call_audio.rs"]
 mod call_audio;
+#[path = "phone_call_features.rs"]
+mod call_features;
 #[path = "phone_media_codec.rs"]
 mod media_codec;
 #[path = "phone_media_format.rs"]

@@ -25,6 +25,7 @@ public static class PhoneNativeLifecycleOracle {
                     using var json=JsonDocument.Parse(JsonSerializer.Serialize(result,NativeRpc.Json));
                     var value=json.RootElement;
                     rows.Add(method=="configure" ? new { configured=value.GetProperty("configured").GetBoolean() } :
+                        method=="call.features" ? value.Clone() :
                         method=="call.release" ? (object)new { callId=value.GetProperty("callId").GetString(),released=value.GetProperty("released").GetBoolean() } :
                         new { id=value.GetProperty("id").GetString(),state=value.GetProperty("state").GetString() });
                 } catch(Exception failure) {

@@ -1,4 +1,5 @@
 //! Phone-owned policy and native media state machines.
+pub mod call_features;
 pub mod diagnostics;
 pub mod dtmf;
 pub mod dtmf_access;

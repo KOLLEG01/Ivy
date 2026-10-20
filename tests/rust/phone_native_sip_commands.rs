@@ -128,6 +128,256 @@ fn value(outcome: &NativeOutcome) -> IvyJson {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_features_dto_error_order_and_saved_receipts_match_original_outgoing_calls() {
+    let (owner, factory, routes, params) = actual_owner(52000, 52998);
+    let remaining = Arc::new(Remaining::default());
+    remaining.close_gate.release();
+    let handler = Arc::new(NativeSipCommands::new(
+        owner.clone(),
+        remaining.clone(),
+        |_| Box::pin(async { Ok(()) }),
+        subset,
+    ));
+    let selected = format!(r#"{{"callId":"{CALL}"}}"#);
+    let challenge = |raw: &str| format!(r#"{{"callId":"{CALL}","challenge":{raw}}}"#);
+    let mut steps: Vec<(String, String)> = vec![
+        (
+            "call.features".into(),
+            r#"{"callId":null,"challenge":null}"#.into(),
+        ),
+        ("configure".into(), params),
+        (
+            "call.features".into(),
+            r#"{"callId":null,"challenge":null}"#.into(),
+        ),
+        (
+            "call.features".into(),
+            r#"{"callId":12,"challenge":null}"#.into(),
+        ),
+        (
+            "call.features".into(),
+            r#"{"callId":"missing","challenge":3}"#.into(),
+        ),
+        ("call.prepare".into(), selected.clone()),
+        ("call.features".into(), selected.clone()),
+        (
+            "call.features".into(),
+            format!(r#"{{"callId":"{CALL}","challenge":null,"extra":1}}"#),
+        ),
+    ];
+    for raw in [
+        "3",
+        "[]",
+        "false",
+        r#"{"unknown":true}"#,
+        r#"{"code":3}"#,
+        r#"{"code":"*1#","timeoutSeconds":1.0}"#,
+        r#"{"code":"*1#","timeoutSeconds":1e0}"#,
+        r#"{"code":"*1#","maxFailedAttempts":2147483648}"#,
+        r#"{"code":"*1#","timeoutSeconds":null}"#,
+        r#"{"Code":"*1#"}"#,
+        r#"{}"#,
+        r#"{"code":null}"#,
+        r#"{"code":"*1#"}"#,
+        r#"{"code":"*1#","timeoutSeconds":0}"#,
+    ] {
+        steps.push(("call.features".into(), challenge(raw)));
+    }
+    steps.extend([
+        ("call.features".into(), challenge("null")),
+        ("call.features".into(), challenge("null")),
+        ("call.hangup".into(), selected.clone()),
+        (
+            "call.features".into(),
+            challenge(r#"{"code":"*1#","timeoutSeconds":0}"#),
+        ),
+        (
+            "call.features".into(),
+            challenge(r#"{"code":"*1#","timeoutSeconds":1.0}"#),
+        ),
+        ("call.release".into(), selected),
+    ]);
+    let inputs: Vec<_> = steps
+        .iter()
+        .map(|(method, params)| {
+            IvyJson::object([
+                ("method", method.clone().into()),
+                ("params", parse(params, 65536).unwrap()),
+            ])
+        })
+        .collect();
+    // Keep raw params for fractional/exponent spellings: the original handler
+    // consumes those exact tokens, independently of the test's projection.
+    let raw = format!(
+        "[{}]",
+        steps
+            .iter()
+            .map(|(method, params)| format!(r#"{{"method":"{method}","params":{params}}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let original = if std::env::var_os("IVY_PHONE_CONFIG_ORACLE_DIR").is_some() {
+        let mut child = Command::new("pwsh")
+            .args([
+                "-NoProfile",
+                "-File",
+                "tests/fixtures/phone-native-lifecycle-oracle.ps1",
+            ])
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.."))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(raw.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(
+            parse(
+                std::str::from_utf8(&output.stdout)
+                    .unwrap()
+                    .trim_start_matches('\u{feff}'),
+                1_000_000,
+            )
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    let dispatcher = NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap();
+    let mut rows = Vec::new();
+    let mut saved = None;
+    for (index, (method, params)) in steps.iter().enumerate() {
+        let reply = dispatcher
+            .execute(command(method, params, index as u64 + 1, index as u64 + 1))
+            .await;
+        let row = if let Some(error) = reply.outcome().error_code() {
+            IvyJson::object([("error", error.into())])
+        } else if method == "configure" {
+            IvyJson::object([("configured", true.into())])
+        } else {
+            value(reply.outcome())
+        };
+        if method == "call.features" && reply.outcome().error_code().is_none() {
+            saved = Some((index, reply.outcome().result_json().unwrap().to_owned()));
+        }
+        if let Some(original) = &original {
+            assert_eq!(
+                &row,
+                &original.as_array().unwrap()[index],
+                "feature handler step {index} {method} {params}"
+            );
+        }
+        rows.push(row);
+    }
+    let (index, snapshot) = saved.unwrap();
+    let replay = dispatcher
+        .execute(command(
+            &steps[index].0,
+            &steps[index].1,
+            index as u64 + 1,
+            1000,
+        ))
+        .await;
+    assert_eq!(replay.outcome().result_json(), Some(snapshot.as_str()));
+    assert_eq!(factory.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
+    assert!(remaining.methods.lock().unwrap().is_empty());
+    handler.shutdown().await.unwrap();
+    trace(
+        "native-call-features",
+        IvyJson::object([
+            ("inputs", IvyJson::Array(inputs)),
+            ("rawInputs", raw.into()),
+            ("rust", IvyJson::Array(rows)),
+            ("original", original.unwrap_or(IvyJson::Null)),
+            ("savedSnapshotAfterRelease", true.into()),
+            ("originalFactoryInvocations", n(1)),
+            ("physicalAudioOpens", n(0)),
+        ]),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_retires_it() {
+    let (owner, factory, routes, params) = actual_owner(53000, 53998);
+    owner
+        .configure(&configuration(&params), |_| async { Ok(()) })
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let call = owner.prepare(CALL.into()).unwrap();
+    call.prepared().await.unwrap();
+    owner.configure_features(&call, None).unwrap();
+    let features = call.features();
+    features.connected();
+    let media = call.media().unwrap();
+    let transport = media.observation().receive.transport;
+    let (rtp, rtcp) = pair().await;
+    let peer = rtp.local_addr().unwrap();
+    let offer=SdpDocument::parse(&format!("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n",peer.port())).unwrap();
+    media
+        .set_remote_description(SdpType::Offer, &offer)
+        .unwrap();
+    media.create_answer().unwrap();
+    assert!(ivy_phone_bridge::sip::DelayedInviteMedia::start(&media).await);
+    for (sequence, event) in [10, 0, 11].into_iter().enumerate() {
+        crate::sip_receiver::send(
+            &rtp,
+            transport.local_rtp,
+            sequence as u16,
+            101,
+            111,
+            &[event, 0x80 | 10, 0, 160],
+        )
+        .await;
+    }
+    until(|| features.observation().command_sequence == 1).await;
+    assert_eq!(features.observation().command, Some("new_voice"));
+    // The same original policy is still installed after SDP renegotiation.
+    media
+        .set_remote_description(SdpType::Offer, &offer)
+        .unwrap();
+    media.create_answer().unwrap();
+    assert_eq!(features.observation().command_sequence, 1);
+    owner.hangup(&call).unwrap();
+    assert!(features.needs_inband_dtmf()); // Hangup retains the feature observation until disposal.
+    owner.release(&call).unwrap().wait().await.unwrap();
+    assert!(!features.needs_inband_dtmf());
+    assert_eq!(features.observation().command_sequence, 1);
+    let replacement = owner.prepare(CALL.into()).unwrap();
+    replacement.prepared().await.unwrap();
+    assert_eq!(replacement.features().observation().command_sequence, 0);
+    features.digit('*', InputSource::SipInfo).unwrap();
+    assert_eq!(replacement.features().observation().command_sequence, 0);
+    assert_eq!(factory.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
+    owner.close().wait().await.unwrap();
+    drop((media, call, replacement, rtp, rtcp));
+    trace(
+        "native-call-features-media",
+        IvyJson::object([
+            ("actualRtpDigits", n(3)),
+            ("samePolicyAfterRenegotiation", true.into()),
+            ("retiredAtRelease", true.into()),
+            ("replacementStartsFresh", true.into()),
+            ("originalFactoryInvocations", n(2)),
+            ("physicalAudioOpens", n(0)),
+        ]),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse() {
     let (owner, factory, routes, params) = actual_owner(45000, 45998);
     let setup = Arc::new(Gate::default());

@@ -1,6 +1,7 @@
 //! Native SIP lifecycle commands composed with process-local replay receipts.
 //! The caller retains the complete call view and the remaining native runtime.
 use crate::{
+    call_features::CallAccessSettings,
     native_config::NativeMicroSettings,
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
     native_registration::registration_json,
@@ -22,7 +23,7 @@ pub type NativeMicroSetup =
 type Setup = dyn Fn(Option<NativeMicroSettings>) -> NativeMicroSetup + Send + Sync;
 type CallView = dyn Fn(&NativeSipCall) -> Result<IvyJson, NativeSipError> + Send + Sync;
 
-/// This owns configure/prepare/hangup/release/reconnect. Status, diagnostics, features,
+/// This owns configure/prepare/features/hangup/release/reconnect. Status, diagnostics,
 /// dial/answer and platform commands remain with the required original runtime.
 /// The view must project the supplied original handle; it must not find a call
 /// again by ID or expose credentials. There is no placeholder platform runtime
@@ -107,6 +108,26 @@ impl NativeSipCommands {
                 }
             }));
         }
+        if request.method() == "call.features" {
+            if fields.len() != 2
+                || request.params().get("callId").is_none()
+                || request.params().get("challenge").is_none()
+            {
+                return Err(SipHostError::InvalidRequest.into());
+            }
+            let call = selected
+                .and_then(|id| self.owner.find(&id))
+                .ok_or(SipHostError::NotReady)?;
+            let raw = crate::native_rpc::root_values(request.raw_params());
+            let index = fields
+                .iter()
+                .position(|(key, _)| key == &"challenge".into())
+                .expect("exact challenge");
+            let challenge =
+                CallAccessSettings::parse(request.params().get("challenge").unwrap(), raw[index])?;
+            let snapshot = self.owner.configure_features(&call, challenge)?.json();
+            return Ok(Box::pin(async move { NativeOutcome::result(snapshot) }));
+        }
         if fields.len() != 1 || request.params().get("callId").is_none() {
             return Err(SipHostError::InvalidRequest.into());
         }
@@ -180,6 +201,7 @@ impl NativeHandler for NativeSipCommands {
                 | "call.hangup"
                 | "call.release"
                 | "registration.reconnect"
+                | "call.features"
         ) {
             return self.remaining.invoke(request);
         }

@@ -47,9 +47,13 @@ impl std::fmt::Display for ReceiveError {
 }
 impl std::error::Error for ReceiveError {}
 
-/// A bounded synchronous notification, invoked after releasing the receive
-/// lock. The call owns digit policy and any cross-transport deduplication.
+/// Digit/report notifications run outside the receive lock. The policy-only
+/// query runs during audio admission; it cannot re-enter receive/media work.
 pub trait SipReceiveEvents: Send + Sync + 'static {
+    /// Call policy only; no receive/media operations may re-enter this query.
+    fn needs_inband_dtmf(&self) -> Option<bool> {
+        None
+    }
     fn digit(&self, digit: char, source: InputSource);
     fn failed(&self);
     /// Original negotiated RTCP channel, independent of the PCM permit. The
@@ -286,7 +290,11 @@ impl Inner {
         let mut digits = Vec::new();
         // Analysis precedes the PCM route gate, as in SipMediaSession. This
         // decoder writes only into a private detector with no capture/device.
-        if state.needs_inband {
+        if self
+            .events
+            .needs_inband_dtmf()
+            .unwrap_or(state.needs_inband)
+        {
             state.inband_analyzed_packets += 1;
             let format = state
                 .formats

@@ -1,5 +1,10 @@
 //! Native SIP configuration and the original call's retained media admission.
 use crate::{
+    call_features::{
+        CallAccessSettings, CallFeatureObservation, CallFeatureTime, FeatureError,
+        PhoneCallFeatures, SystemCallFeatureTime,
+    },
+    dtmf_access::FailureLimiter,
     media::{SipMediaIdentity, SipMediaSession, SipMediaSettings},
     native_config::{
         NativeCodecSettings, NativeConfigError, NativeIncomingPeers, NativeMicroSettings,
@@ -21,12 +26,14 @@ use tokio::sync::watch;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeSipError {
+    Features(FeatureError),
     Configuration(NativeConfigError),
     Host(SipHostError),
 }
 impl NativeSipError {
     pub fn code(self) -> &'static str {
         match self {
+            Self::Features(error) => error.code(),
             Self::Configuration(error) => error.code(),
             Self::Host(SipHostError::InvalidRequest) => "invalid_request",
             Self::Host(SipHostError::OperationConflict) => "operation_conflict",
@@ -34,6 +41,11 @@ impl NativeSipError {
             Self::Host(SipHostError::Stopping) => "runtime_stopping",
             Self::Host(_) => "operation_outcome_unknown",
         }
+    }
+}
+impl From<FeatureError> for NativeSipError {
+    fn from(error: FeatureError) -> Self {
+        Self::Features(error)
     }
 }
 impl From<NativeConfigError> for NativeSipError {
@@ -176,11 +188,15 @@ pub trait NativeSipMediaFactory: Send + Sync + 'static {
 struct Call {
     original: SipHostCall,
     media: Arc<OnceLock<SipMediaSession>>,
+    features: PhoneCallFeatures,
     releasing: Mutex<Option<NativeSipOperation<()>>>,
 }
 #[derive(Clone)]
 pub struct NativeSipCall(Arc<Call>);
 impl NativeSipCall {
+    pub fn features(&self) -> PhoneCallFeatures {
+        self.0.features.clone()
+    }
     pub fn observation(&self) -> SipHostCallObservation {
         self.0.original.observation()
     }
@@ -203,11 +219,19 @@ struct Owner {
     state: Mutex<State>,
     host: SipHost,
     media: Arc<dyn NativeSipMediaFactory>,
+    limiter: Arc<Mutex<FailureLimiter>>,
+    feature_time: Arc<dyn CallFeatureTime>,
 }
 #[derive(Clone)]
 pub struct NativeSipOperations(Arc<Owner>);
 impl NativeSipOperations {
     pub fn new(media: Arc<dyn NativeSipMediaFactory>) -> Self {
+        Self::with_feature_time(media, Arc::new(SystemCallFeatureTime::default()))
+    }
+    pub fn with_feature_time(
+        media: Arc<dyn NativeSipMediaFactory>,
+        time: Arc<dyn CallFeatureTime>,
+    ) -> Self {
         Self(Arc::new(Owner {
             state: Mutex::new(State {
                 configured: false,
@@ -219,6 +243,8 @@ impl NativeSipOperations {
             }),
             host: SipHost::new(),
             media,
+            limiter: Arc::new(Mutex::new(FailureLimiter::default())),
+            feature_time: time,
         }))
     }
     /// Exact DTO validation precedes the one-way latch. Micro setup is required
@@ -308,16 +334,41 @@ impl NativeSipOperations {
         let media = Arc::new(OnceLock::new());
         let saved = media.clone();
         let original_id = id.clone();
+        let owner = Arc::downgrade(&self.0);
+        let original_slot = Arc::new(OnceLock::<std::sync::Weak<Call>>::new());
+        let hangup_slot = original_slot.clone();
+        let features = PhoneCallFeatures::new(
+            self.0.limiter.clone(),
+            self.0.feature_time.clone(),
+            move || {
+                if let (Some(owner), Some(call)) = (
+                    owner.upgrade(),
+                    hangup_slot.get().and_then(std::sync::Weak::upgrade),
+                ) {
+                    let _ = NativeSipOperations(owner).hangup(&NativeSipCall(call));
+                }
+            },
+        )
+        .map_err(|_| SipHostError::NotReady)?;
+        let media_features = features.clone();
         let original = self.0.host.prepare_async(id, move || async move {
             let session = factory.create(original_id, configuration).await?;
+            // Publish the exact session even if policy attachment is uncertain;
+            // it must remain fenced for explicit original-call cleanup.
             let _ = saved.set(session.clone());
+            if session.enable_call_features(media_features).is_err() {
+                session.request_close();
+                return Err(SipHostError::CleanupUnconfirmed);
+            }
             Ok(Arc::new(session) as Arc<dyn HostedSipMedia>)
         })?;
         let call = NativeSipCall(Arc::new(Call {
             original,
             media,
+            features,
             releasing: Mutex::new(None),
         }));
+        let _ = original_slot.set(Arc::downgrade(&call.0));
         state.calls.push(call.clone());
         Ok(call)
     }
@@ -374,6 +425,22 @@ impl NativeSipOperations {
         Self::original(&state, expected)?;
         self.0.host.hangup(&expected.0.original)
     }
+    pub fn configure_features(
+        &self,
+        expected: &NativeSipCall,
+        challenge: Option<CallAccessSettings>,
+    ) -> Result<CallFeatureObservation, NativeSipError> {
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        let observation = expected.observation();
+        if observation.attempted || observation.ending {
+            return Err(FeatureError::OutcomeUnknown.into());
+        }
+        // This admission owner currently prepares outgoing calls only. Incoming
+        // admission must supply its original direction before gaining authority.
+        expected.0.features.configure(challenge, false)?;
+        Ok(expected.0.features.observation())
+    }
     pub fn release(
         &self,
         expected: &NativeSipCall,
@@ -388,6 +455,7 @@ impl NativeSipOperations {
         let call = expected.clone();
         // Revoke even if no observer polls the retained disposal operation.
         self.0.host.hangup(&expected.0.original)?;
+        expected.0.features.dispose();
         let operation = retained(async move {
             owner.0.host.release(&call.0.original).await?;
             owner
@@ -410,6 +478,7 @@ impl NativeSipOperations {
         state.stopping = true;
         for call in &state.calls {
             let _ = self.0.host.hangup(&call.0.original);
+            call.0.features.dispose();
         }
         let owner = self.clone();
         let configuring = state.configuring.clone();

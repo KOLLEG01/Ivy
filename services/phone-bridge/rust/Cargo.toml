@@ -16,6 +16,7 @@ rsipstack = { workspace = true }
 tokio-util = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
+subtle = { version = "=2.6.1", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_Foundation", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_Security_Cryptography", "Win32_System_Threading"] }

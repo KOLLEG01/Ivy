@@ -8,6 +8,7 @@ use super::{
     SipReceiveObservation, SipRtpReceiver, SipSdpRoute,
 };
 use crate::{
+    call_features::PhoneCallFeatures,
     dtmf::InputSource,
     sip::{DelayedInviteMedia, HostedSipMedia, SipHostError},
 };
@@ -218,6 +219,7 @@ struct Core {
     send: Arc<SendAudio>,
     receiver: OnceLock<SipRtpReceiver>,
     events: Arc<dyn SipReceiveEvents>,
+    features: OnceLock<PhoneCallFeatures>,
     state: Mutex<State>,
     closed: AtomicBool,
     failed: AtomicBool,
@@ -326,9 +328,20 @@ impl Core {
 }
 struct Events(Weak<Core>);
 impl SipReceiveEvents for Events {
+    fn needs_inband_dtmf(&self) -> Option<bool> {
+        self.0
+            .upgrade()
+            .and_then(|c| c.features.get().map(PhoneCallFeatures::needs_inband_dtmf))
+    }
     fn digit(&self, digit: char, source: InputSource) {
         if let Some(core) = self.0.upgrade() {
             if !core.closed.load(Ordering::Acquire) {
+                if let Some(features) = core.features.get() {
+                    if features.digit(digit, source).is_err() {
+                        core.fail();
+                        return;
+                    }
+                }
                 core.events.digit(digit, source);
             }
         }
@@ -439,6 +452,7 @@ impl SipMediaSession {
             waiting,
             receiver: OnceLock::new(),
             events,
+            features: OnceLock::new(),
             state: Mutex::new(State {
                 descriptions,
                 started: false,
@@ -736,6 +750,14 @@ impl SipMediaSession {
     }
     pub fn set_inband_needed(&self, needed: bool) {
         self.handle.0.receiver().set_inband_needed(needed);
+    }
+    /// Bind the original call's policy once; renegotiation keeps this identity.
+    pub fn enable_call_features(&self, features: PhoneCallFeatures) -> Result<()> {
+        self.handle
+            .0
+            .features
+            .set(features)
+            .map_err(|_| SipMediaError::InvalidRequest)
     }
     pub fn observation(&self) -> SipMediaObservation {
         let c = &self.handle.0;
