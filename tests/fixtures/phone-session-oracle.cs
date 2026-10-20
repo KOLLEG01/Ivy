@@ -34,6 +34,7 @@ public static class PhoneSessionOracle {
             string Endpoint(IPEndPoint ep)=>ep==null?null:ep.Address+":"+(ep.Port==port?"peer":ep.Port==port+1?"control":ep.Port.ToString());
             object State()=>new{rtp=Endpoint(session.AudioDestinationEndPoint),rtcp=Endpoint(session.AudioControlDestinationEndPoint),
                 local=session.AudioLocalTrack.StreamStatus.ToString(),remote=session.AudioStream.RemoteTrack?.StreamStatus.ToString(),
+                declared=session.AudioStream.RemoteTrack?.SdpSsrc?.Keys.ToArray()??Array.Empty<uint>(),eventPayload=session.AudioStream.NegotiatedRtpEventPayloadID,
                 controlClosed=session.AudioRtcpSession.IsClosed,controlStarted=session.AudioRtcpSession.StartedAt!=DateTime.MinValue,
                 sequence=session.AudioLocalTrack.SeqNum,timestamp=session.AudioLocalTrack.Timestamp,
                 packets=session.AudioRtcpSession.PacketsSentCount,sendCodec=session.SendCodec,failed=session.Failed};

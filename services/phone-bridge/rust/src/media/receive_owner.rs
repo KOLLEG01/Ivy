@@ -67,6 +67,7 @@ pub struct SipReceiveObservation {
     pub receive: RtpReceiveStatus,
     pub formats: Vec<AudioFormat>,
     pub event_payloads: Vec<u8>,
+    pub selected_event_payload: u8,
     pub received_packets: u64,
     pub unsupported_payload_packets: u64,
     pub event_packets: u64,
@@ -655,6 +656,7 @@ impl SipRtpReceiver {
         destinations: MediaDestinations,
         enabled: bool,
         inactive: bool,
+        remote: Option<(Option<&[u32]>, u8)>,
     ) -> Result<Option<Vec<u8>>, ReceiveError> {
         let inner = &self.handle.0;
         let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -662,6 +664,10 @@ impl SipRtpReceiver {
         let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
         if sender.closed || reports.closed || inner.closed.load(Ordering::Acquire) {
             return Err(ReceiveError::Closed);
+        }
+        if let Some((declared, event)) = remote {
+            reports.admission.replace_remote(declared);
+            state.selected_event = event;
         }
         let report = if inactive {
             reports
@@ -828,6 +834,7 @@ impl SipRtpReceiver {
             receive: state.queue.status(),
             formats: state.formats.clone(),
             event_payloads: state.event_payloads.clone(),
+            selected_event_payload: state.selected_event,
             received_packets: state.received_packets,
             unsupported_payload_packets: state.unsupported_payload_packets,
             event_packets: state.event_packets,

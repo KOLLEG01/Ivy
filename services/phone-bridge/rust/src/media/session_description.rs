@@ -13,6 +13,8 @@ pub(super) struct Descriptions {
     pub remote_direction: Option<SdpDirection>,
     pub version: u64,
     pub close_control: bool,
+    pub remote_changed: bool,
+    pub remote_sources: Option<Vec<u32>>,
 }
 impl Descriptions {
     pub fn new(preferences: &[Codec]) -> Result<Self, super::FormatError> {
@@ -23,6 +25,8 @@ impl Descriptions {
             remote_direction: None,
             version: 0,
             close_control: false,
+            remote_changed: false,
+            remote_sources: None,
         })
     }
     pub fn can_send(&self) -> bool {
@@ -69,6 +73,7 @@ impl Descriptions {
         description: &SdpDocument,
     ) -> Result<(), NegotiationError> {
         self.close_control = false;
+        self.remote_changed = false;
         let remote = description.normalized()?;
         if remote.media.is_empty() {
             return Err(NegotiationError::NoRemoteMedia);
@@ -94,10 +99,13 @@ impl Descriptions {
             .map(|c| address(c.address(), 0))
             .transpose()?;
         self.remote_direction = None;
+        self.remote_changed = true;
+        self.remote_sources = None;
         let Some(track) = remote.media.iter().find(|m| m.kind == SdpMediaKind::Audio) else {
             return Err(NegotiationError::NoMatchingMediaType);
         };
         self.remote_direction = Some(track.direction.unwrap_or(SdpDirection::SendRecv));
+        self.remote_sources = Some(track.sources());
         let mut candidate = self.negotiation.clone();
         let compatible = candidate.set_remote_description(kind, &remote);
         self.negotiation.retain_event_selection(&candidate);

@@ -117,6 +117,21 @@ fn cases() -> Vec<IvyJson> {
         set("", "$PORT", "0", "127.0.0.1"),
     ]);
     cases.push(vec![
+        set(
+            "a=ssrc:111 cname:old\r\na=rtpmap:101 telephone-event/8000\r\n",
+            "$PORT",
+            "0 101",
+            "127.0.0.1",
+        ),
+        set(
+            "a=ssrc:222 cname:new\r\na=rtpmap:110 telephone-event/8000\r\n",
+            "0",
+            "111 110",
+            "127.0.0.1",
+        ),
+        op("answer"),
+    ]);
+    cases.push(vec![
         IvyJson::object([("op", "status".into()), ("value", "RecvOnly".into())]),
         set("", "$PORT", "0", "127.0.0.1"),
         op("offer"),
@@ -207,6 +222,21 @@ fn shape(s: &SipMediaSession, port: u16) -> IvyJson {
                 .unwrap_or(IvyJson::Null),
         ),
         ("failed", o.failed.into()),
+        (
+            "declared",
+            IvyJson::Array(
+                o.receive
+                    .rtcp
+                    .declared_sources
+                    .iter()
+                    .map(|s| IvyJson::Number(f64::from(*s)))
+                    .collect(),
+            ),
+        ),
+        (
+            "eventPayload",
+            IvyJson::Number(f64::from(o.receive.selected_event_payload)),
+        ),
     ])
 }
 fn description(s: Option<SdpDocument>, port: u16) -> IvyJson {
@@ -337,6 +367,8 @@ async fn descriptions_retain_original_endpoint_direction_rejection_and_version_e
                     "controlClosed",
                     "sendCodec",
                     "failed",
+                    "declared",
+                    "eventPayload",
                 ]
                 .map(|k| (k, state.get(k).unwrap().clone())),
             );
@@ -512,6 +544,61 @@ async fn incompatible_inactive_offer_gates_wire_clock_but_keeps_application_and_
             ("wireClockRetained", true.into()),
             ("closedRtcpStillCountsResumedRtp", true.into()),
             ("oneEmptyReasonBye", true.into()),
+        ]),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_sdp_keeps_codec_but_updates_original_rtcp_source_and_event_selection() {
+    let port = CallAudioPort::new(CALL.into(), Arc::new(Factory::routes(vec![]))).unwrap();
+    let m = media(port).await;
+    let (rtp, control) = pair().await;
+    let remote = rtp.local_addr().unwrap().port();
+    m.negotiate_offer(&offer(remote, "a=ssrc:111 cname:old\r\n"))
+        .unwrap();
+    let bad = offer(
+        0,
+        "a=ssrc:222 cname:new\r\na=rtpmap:110 telephone-event/8000\r\n",
+    )
+    .replace("RTP/AVP 0", "RTP/AVP 111 110");
+    assert!(
+        m.set_remote_description(SdpType::Offer, &SdpDocument::parse(&bad).unwrap())
+            .is_err()
+    );
+    let observed = m.observation();
+    assert_eq!(observed.send_format.unwrap().name(), "PCMU");
+    assert_eq!(observed.receive.rtcp.declared_sources, vec![222]);
+    assert_eq!(observed.receive.selected_event_payload, 110);
+    assert_eq!(observed.receive.rtcp.learned_source, Some(0));
+    let bytes = ivy_phone_bridge::media::RtcpReportBuilder::new(222, "peer")
+        .unwrap()
+        .receiver(&[])
+        .unwrap();
+    control
+        .send_to(&bytes, observed.receive.transport.local_rtcp)
+        .await
+        .unwrap();
+    wait(|| m.observation().receive.rtcp.reports_received == 1).await;
+    let observed = m.observation();
+    assert!(observed.receive.rtcp_session.as_ref().unwrap().closed);
+    assert!(
+        observed
+            .receive
+            .rtcp_session
+            .as_ref()
+            .unwrap()
+            .started_local_ticks
+            .is_some()
+    );
+    assert!(!observed.failed);
+    m.close().await.unwrap();
+    trace(
+        "session-rejected-sources",
+        IvyJson::object([
+            ("codecRetained", true.into()),
+            ("newSourceAdmitted", true.into()),
+            ("newEventSelected", true.into()),
+            ("closedControlStillObservesOriginalReport", true.into()),
         ]),
     );
 }

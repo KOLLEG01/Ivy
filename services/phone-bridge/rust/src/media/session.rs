@@ -439,6 +439,7 @@ impl SipMediaSession {
                 s.descriptions.destinations,
                 s.descriptions.can_send(),
                 false,
+                None,
             )
             .ok()?;
         Some(offer)
@@ -464,6 +465,12 @@ impl SipMediaSession {
                 s.descriptions.destinations,
                 s.descriptions.can_send(),
                 s.descriptions.close_control,
+                s.descriptions.remote_changed.then(|| {
+                    (
+                        s.descriptions.remote_sources.as_deref(),
+                        s.descriptions.negotiation.negotiated_event_payload(),
+                    )
+                }),
             )?;
             let result = match result {
                 Ok(()) => c
@@ -505,6 +512,7 @@ impl SipMediaSession {
             s.descriptions.destinations,
             s.descriptions.can_send(),
             false,
+            None,
         )?;
         Ok(())
     }
