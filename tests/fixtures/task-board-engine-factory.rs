@@ -16,6 +16,8 @@ use ivy_task_board::{
     task_written::{TaskCommentNotices, TaskNoticePolicy},
 };
 use std::{cmp::Ordering, path::PathBuf};
+#[path = "task-board-engine-factory-control.rs"]
+mod control;
 #[path = "task-board-engine-factory-driver.rs"]
 mod driver;
 #[path = "task-board-engine-factory-native.rs"]
@@ -50,6 +52,7 @@ struct Fixture {
     retirement: Option<retirement::Scenario>,
     observations: Option<observations::Scenario>,
     driver: Option<driver::Scenario>,
+    control: Option<control::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -73,6 +76,7 @@ impl Fixture {
             retirement: None,
             observations: None,
             driver: None,
+            control: None,
         }
     }
     fn database(&self) -> Connection {
@@ -147,6 +151,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         }
         if let Some(driver) = &self.driver {
             driver.bind(&policy.context)?;
+        }
+        if let Some(control) = &self.control {
+            control.bind(&policy.context)?;
         }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
@@ -264,7 +271,7 @@ impl TaskNoticePolicy for Policies<'_> {
         if let Some(observations) = &self.fixture.observations {
             return observations.notice(self.context.owner.generation, task, operation);
         }
-        if self.fixture.driver.is_some() {
+        if self.fixture.driver.is_some() || self.fixture.control.is_some() {
             return TaskCommentNotices.comment(task, operation);
         }
         // An applied first Task step with an uncertain observation must retain
@@ -310,6 +317,11 @@ impl LifecyclePages for Policies<'_> {
                 driver.ready.wait().await;
             }
         }
+        if let Some(control) = &self.fixture.control {
+            if key == "task-board/run" && self.context.owner.generation == 1.0 {
+                control.ready.wait().await;
+            }
+        }
         if self.context.owner.generation == 1.0 && options.get("select").is_some() {
             self.fixture.page_waiting.set(true);
             self.fixture.page_held.wait().await;
@@ -328,7 +340,10 @@ impl LifecyclePages for Policies<'_> {
             if let Some(filter) = options.get("where") {
                 if filter.get("op") == Some(&"and".into()) {
                     assert_eq!(key, "task-board/task");
-                    if self.fixture.retirement.is_some() || self.fixture.observations.is_some() {
+                    if self.fixture.retirement.is_some()
+                        || self.fixture.observations.is_some()
+                        || self.fixture.control.is_some()
+                    {
                         assert_eq!(value.get("workflowState"), Some(&"review".into()));
                     } else if self.fixture.native.is_some() || self.fixture.driver.is_some() {
                         assert_eq!(value.get("workflowState"), Some(&"in_progress".into()));
@@ -415,7 +430,11 @@ impl CurrentPolicies for Policies<'_> {
         }
         panic!("No Run")
     }
-    fn claimed_workflow_state(&self, _: &Json) -> IvyResult<JsString> {
+    fn claimed_workflow_state(&self, waiting: &Json) -> IvyResult<JsString> {
+        if self.fixture.control.is_some() {
+            assert!(waiting.is_null() || waiting.get("reason") == Some(&"external_outcome".into()));
+            return Ok("in_progress".into());
+        }
         panic!("No claim")
     }
 }

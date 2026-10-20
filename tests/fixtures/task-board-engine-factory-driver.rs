@@ -96,10 +96,10 @@ impl Scenario {
         Ok(prompt())
     }
 }
-fn count(fixture: &Fixture, sql: &str) -> i64 {
+pub(super) fn count(fixture: &Fixture, sql: &str) -> i64 {
     fixture.database().query_row(sql, [], |r| r.get(0)).unwrap()
 }
-fn frames(peer: &Peer, kind: &str) -> Vec<Json> {
+pub(super) fn frames(peer: &Peer, kind: &str) -> Vec<Json> {
     peer.frames
         .lock()
         .unwrap()
@@ -108,7 +108,12 @@ fn frames(peer: &Peer, kind: &str) -> Vec<Json> {
         .cloned()
         .collect()
 }
-async fn reached(fixture: &Fixture, peer: &Peer, stage: &str, mut condition: impl FnMut() -> bool) {
+pub(super) async fn reached(
+    fixture: &Fixture,
+    peer: &Peer,
+    stage: &str,
+    mut condition: impl FnMut() -> bool,
+) {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -167,7 +172,7 @@ async fn reached(fixture: &Fixture, peer: &Peer, stage: &str, mut condition: imp
         .unwrap()
     );
 }
-fn evidence(fixture: &Fixture) -> Vec<(String, String, Json)> {
+pub(super) fn evidence(fixture: &Fixture) -> Vec<(String, String, Json)> {
     let db = fixture.database();
     let mut stmt=db.prepare("SELECT d.id,d.parent_id,r.value_json FROM documents d JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision WHERE d.key='task-board/native-evidence' ORDER BY d.id").unwrap();
     stmt.query_map([], |r| {
@@ -177,12 +182,12 @@ fn evidence(fixture: &Fixture) -> Vec<(String, String, Json)> {
     .map(Result::unwrap)
     .collect()
 }
-fn exact_evidence(fixture: &Fixture, peer: &Peer) {
+pub(super) fn exact_evidence(fixture: &Fixture, peer: &Peer, expected: usize) {
     let manifests = evidence(fixture);
-    assert_eq!(manifests.len(), 2);
+    assert_eq!(manifests.len(), expected);
     let calls = fixture.rows("task-board/native-call");
     let originals = frames(peer, "committed-operation");
-    assert_eq!(originals.len(), 2);
+    assert_eq!(originals.len(), expected);
     for (id, parent, manifest) in manifests {
         let call = &calls.iter().find(|r| r.0 == parent).unwrap().2;
         assert_eq!(
@@ -406,7 +411,7 @@ async fn production_factory_recovers_committed_native_calls_without_redispatch_a
                     hash_json(f(&first_calls[0].2, key)).unwrap()
                 );
             }
-            exact_evidence(&fixture, &peer);
+            exact_evidence(&fixture, &peer, 2);
             let task = fixture.rows("task-board/task")[0].clone();
             assert_eq!(task.1, 9);
             assert_eq!(f(f(&task.2, "claim"), "run"), &pin("run", 5.0));
@@ -501,7 +506,7 @@ async fn production_factory_recovers_committed_native_calls_without_redispatch_a
             assert_eq!(frames(&peer, "committed-operation").len(), 2);
             assert_eq!(frames(&peer, "original-operation").len(), 1);
             assert_eq!(scenario.prompts.get(), 1);
-            exact_evidence(&fixture, &peer);
+            exact_evidence(&fixture, &peer, 2);
             bounded(service.close()).await.unwrap();
         };
         let (result, ()) = tokio::join!(owner.run(&factory), script);
