@@ -356,7 +356,18 @@ impl NativeSipOperations {
             // Publish the exact session even if policy attachment is uncertain;
             // it must remain fenced for explicit original-call cleanup.
             let _ = saved.set(session.clone());
-            if session.enable_call_features(media_features).is_err() {
+            let needed = media_features.clone();
+            if session
+                .enable_dtmf(
+                    move |digit, source| {
+                        media_features
+                            .digit(digit, source)
+                            .map_err(|_| crate::media::SipMediaError::InvalidRequest)
+                    },
+                    move || needed.needs_inband_dtmf(),
+                )
+                .is_err()
+            {
                 session.request_close();
                 return Err(SipHostError::CleanupUnconfirmed);
             }

@@ -8,7 +8,6 @@ use super::{
     SipReceiveObservation, SipRtpReceiver, SipSdpRoute,
 };
 use crate::{
-    call_features::PhoneCallFeatures,
     dtmf::InputSource,
     sip::{DelayedInviteMedia, HostedSipMedia, SipHostError},
 };
@@ -211,6 +210,10 @@ struct State {
     screening: Option<Arc<ScreeningAudio>>,
     disposal: Option<Arc<Completion>>,
 }
+struct DtmfCallbacks {
+    digit: Box<dyn Fn(char, InputSource) -> Result<()> + Send + Sync>,
+    needed: Box<dyn Fn() -> bool + Send + Sync>,
+}
 struct Core {
     settings: SipMediaSettings,
     routes: Option<Arc<dyn SipSdpRoute>>,
@@ -219,7 +222,7 @@ struct Core {
     send: Arc<SendAudio>,
     receiver: OnceLock<SipRtpReceiver>,
     events: Arc<dyn SipReceiveEvents>,
-    features: OnceLock<PhoneCallFeatures>,
+    dtmf: OnceLock<DtmfCallbacks>,
     state: Mutex<State>,
     closed: AtomicBool,
     failed: AtomicBool,
@@ -331,13 +334,13 @@ impl SipReceiveEvents for Events {
     fn needs_inband_dtmf(&self) -> Option<bool> {
         self.0
             .upgrade()
-            .and_then(|c| c.features.get().map(PhoneCallFeatures::needs_inband_dtmf))
+            .and_then(|c| c.dtmf.get().map(|dtmf| (dtmf.needed)()))
     }
     fn digit(&self, digit: char, source: InputSource) {
         if let Some(core) = self.0.upgrade() {
             if !core.closed.load(Ordering::Acquire) {
-                if let Some(features) = core.features.get() {
-                    if features.digit(digit, source).is_err() {
+                if let Some(dtmf) = core.dtmf.get() {
+                    if (dtmf.digit)(digit, source).is_err() {
                         core.fail();
                         return;
                     }
@@ -452,7 +455,7 @@ impl SipMediaSession {
             waiting,
             receiver: OnceLock::new(),
             events,
-            features: OnceLock::new(),
+            dtmf: OnceLock::new(),
             state: Mutex::new(State {
                 descriptions,
                 started: false,
@@ -752,11 +755,18 @@ impl SipMediaSession {
         self.handle.0.receiver().set_inband_needed(needed);
     }
     /// Bind the original call's policy once; renegotiation keeps this identity.
-    pub fn enable_call_features(&self, features: PhoneCallFeatures) -> Result<()> {
+    pub fn enable_dtmf(
+        &self,
+        digit: impl Fn(char, InputSource) -> Result<()> + Send + Sync + 'static,
+        needed: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Result<()> {
         self.handle
             .0
-            .features
-            .set(features)
+            .dtmf
+            .set(DtmfCallbacks {
+                digit: Box::new(digit),
+                needed: Box::new(needed),
+            })
             .map_err(|_| SipMediaError::InvalidRequest)
     }
     pub fn observation(&self) -> SipMediaObservation {

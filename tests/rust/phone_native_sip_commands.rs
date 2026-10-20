@@ -318,9 +318,7 @@ async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_r
         .unwrap();
     let call = owner.prepare(CALL.into()).unwrap();
     call.prepared().await.unwrap();
-    owner.configure_features(&call, None).unwrap();
     let features = call.features();
-    features.connected();
     let media = call.media().unwrap();
     let transport = media.observation().receive.transport;
     let (rtp, rtcp) = pair().await;
@@ -331,11 +329,45 @@ async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_r
         .unwrap();
     media.create_answer().unwrap();
     assert!(ivy_phone_bridge::sip::DelayedInviteMedia::start(&media).await);
+    let codec = ivy_phone_bridge::media::G711Codec::new(&Codec::Pcma.offered_formats()[0]).unwrap();
+    crate::sip_receiver::send(
+        &rtp,
+        transport.local_rtp,
+        0,
+        8,
+        111,
+        &codec.encode_20ms(&[0; 160]),
+    )
+    .await;
+    until(|| media.observation().receive.transport.counters.rtp_received == 1).await;
+    assert_eq!(media.observation().receive.inband_analyzed_packets, 0);
+    owner.configure_features(&call, None).unwrap();
+    features.connected(); // Synthetic call notification; this is not a dial-path qualification.
+    for frame in 0..10 {
+        let pcm = std::array::from_fn(|i| {
+            let t = (usize::from(frame) * 160 + i) as f64 / 8000.0;
+            (((770.0 * std::f64::consts::TAU * t).sin()
+                + (1336.0 * std::f64::consts::TAU * t).sin())
+                * 6000.0) as i16
+        });
+        crate::sip_receiver::send(
+            &rtp,
+            transport.local_rtp,
+            frame + 1,
+            8,
+            111,
+            &codec.encode_20ms(&pcm),
+        )
+        .await;
+        until(|| media.observation().receive.inband_analyzed_packets == u64::from(frame) + 1).await;
+    }
+    until(|| media.observation().receive.inband_detected_digits == 1).await;
+    assert_eq!(features.observation().command_sequence, 0);
     for (sequence, event) in [10, 0, 11].into_iter().enumerate() {
         crate::sip_receiver::send(
             &rtp,
             transport.local_rtp,
-            sequence as u16,
+            sequence as u16 + 11,
             101,
             111,
             &[event, 0x80 | 10, 0, 160],
@@ -350,8 +382,47 @@ async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_r
         .unwrap();
     media.create_answer().unwrap();
     assert_eq!(features.observation().command_sequence, 1);
+    // Initialize analysis again if SDP reset it, then prove that acceptance
+    // disables analysis on the next audio packet while PCM remains closed.
+    crate::sip_receiver::send(
+        &rtp,
+        transport.local_rtp,
+        14,
+        8,
+        111,
+        &codec.encode_20ms(&[0; 160]),
+    )
+    .await;
+    until(|| media.observation().receive.inband.is_some()).await;
+    let analyzed = media.observation().receive.inband_analyzed_packets;
+    features.start_screening().unwrap();
+    crate::sip_receiver::send(
+        &rtp,
+        transport.local_rtp,
+        15,
+        101,
+        111,
+        &[1, 0x80 | 10, 0, 160],
+    )
+    .await;
+    until(|| features.observation().screening == "accepted").await;
+    crate::sip_receiver::send(
+        &rtp,
+        transport.local_rtp,
+        16,
+        8,
+        111,
+        &codec.encode_20ms(&[0; 160]),
+    )
+    .await;
+    until(|| media.observation().receive.inband.is_none()).await;
+    assert_eq!(
+        media.observation().receive.inband_analyzed_packets,
+        analyzed
+    );
+    let before = features.observation();
     owner.hangup(&call).unwrap();
-    assert!(features.needs_inband_dtmf()); // Hangup retains the feature observation until disposal.
+    assert_eq!(features.observation(), before); // Hangup retains feature observations.
     owner.release(&call).unwrap().wait().await.unwrap();
     assert!(!features.needs_inband_dtmf());
     assert_eq!(features.observation().command_sequence, 1);
@@ -367,7 +438,9 @@ async fn admitted_media_delivers_actual_rtp_digits_to_the_same_call_policy_and_r
     trace(
         "native-call-features-media",
         IvyJson::object([
-            ("actualRtpDigits", n(3)),
+            ("actualRtpDigits", n(4)),
+            ("actualInBandDigits", n(1)),
+            ("dynamicAnalysisPolicy", true.into()),
             ("samePolicyAfterRenegotiation", true.into()),
             ("retiredAtRelease", true.into()),
             ("replacementStartsFresh", true.into()),
