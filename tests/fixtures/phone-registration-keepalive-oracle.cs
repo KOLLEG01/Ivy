@@ -13,13 +13,18 @@ using SIPSorcery.SIP;
 // Exercise the original registration method with controlled transport tasks.
 // No SIP agent, account, periodic timer, device or network socket is started.
 public static class PhoneRegistrationKeepaliveOracle {
-    // A separate owned loopback probe: the real original SDK returns the
-    // local socket's failure code before any datagram can be transmitted.
+    // A separate owned loopback probe records SDK admission and the direct
+    // local socket result independently; deferred completions can differ.
     public static void SocketFailure() {
         using var channel=new SIPUDPChannel(new IPEndPoint(IPAddress.Loopback,0));
         var target=new SIPEndPoint(SIPProtocolsEnum.udp,new IPEndPoint(IPAddress.IPv6Loopback,9));
         var result=channel.SendAsync(target,new byte[]{13,10,13,10},false,null).GetAwaiter().GetResult();
-        Console.Write(JsonSerializer.Serialize(new {code=(int)result,label=result.ToString()},NativeRpc.Json));
+        using var socket=new Socket(AddressFamily.InterNetwork,SocketType.Dgram,ProtocolType.Udp);
+        socket.Bind(new IPEndPoint(IPAddress.Loopback,0));
+        SocketError direct=SocketError.Success;
+        try { socket.SendTo(new byte[]{13,10,13,10},new IPEndPoint(IPAddress.IPv6Loopback,9)); }
+        catch(SocketException error) { direct=error.SocketErrorCode; }
+        Console.Write(JsonSerializer.Serialize(new {code=(int)result,label=result.ToString(),directCode=(int)direct,directLabel=direct.ToString()},NativeRpc.Json));
     }
     sealed class Clock : TimeProvider {
         public long Ticks;
