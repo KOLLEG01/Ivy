@@ -58,6 +58,20 @@ pub struct ChatHealth {
     pub write: Arc<dyn Fn(HealthObservation) -> ServiceFuture<()> + Send + Sync>,
     pub control: Arc<dyn Fn() -> ServiceFuture<bool> + Send + Sync>,
 }
+
+pub(crate) fn service_settings(config: &Json) -> IvyResult<&Json> {
+    let settings = config.required("settings")?;
+    validate_chat("Settings", settings)?;
+    if config.get("componentId") != Some(&Json::from("chat-bridge"))
+        || !config.get("credential").is_some_and(truthy)
+    {
+        return Err(IvyError::new(
+            "invalid_arguments",
+            "ChatBridge requires its own component identity and Hive credential.",
+        ));
+    }
+    Ok(settings)
+}
 /// The account and media owners open these resources before service startup.
 /// Component admission and helper layout remain explicit at this boundary.
 pub struct WhatsAppServiceParts {
@@ -679,16 +693,7 @@ impl ChatService {
         generation: &ChatGenerationConfig,
         transport: bool,
     ) -> IvyResult<()> {
-        let settings = config.required("settings")?;
-        validate_chat("Settings", settings)?;
-        if config.get("componentId") != Some(&Json::from("chat-bridge"))
-            || !config.get("credential").is_some_and(truthy)
-        {
-            return Err(IvyError::new(
-                "invalid_arguments",
-                "ChatBridge requires its own component identity and Hive credential.",
-            ));
-        }
+        let settings = service_settings(config)?;
         if canonical(settings.required("definition")?, MANAGEMENT_FRAME_BYTES)?
             != canonical(generation.admission.definition(), MANAGEMENT_FRAME_BYTES)?
             || config.get("serviceNodeId")

@@ -27,6 +27,8 @@ use tokio::{
 };
 #[path = "chat-service-active-cases.rs"]
 mod active;
+#[path = "chat-startup-cases.rs"]
+mod startup;
 #[path = "chat-wa-integration-cases.rs"]
 mod whatsapp;
 fn field<'a>(v: &'a Json, key: &str) -> &'a Json {

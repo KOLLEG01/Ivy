@@ -11,6 +11,13 @@ import{WebSocketServer}from"ws";
 const error=e=>{e=IvyError.from(e);return{code:e.code,message:e.message,outcome:e.outcome};};
 const result=async f=>{try{return{value:await f()??null};}catch(e){return{error:error(e)};}};
 const until=async(f,label)=>{for(let i=0;i<2000;i++){const value=await f();if(value)return value;await delay(5);}throw Error('Timed out: '+label);};
+// Host-file startup consumes the original Main seed without repeating the
+// unrelated service-lifecycle cases or substituting its configuration owner.
+if(process.argv[2]==='startup-seed'){
+ const seed=starting['0.154.0'];
+ process.stdout.write(JSON.stringify({definition:seed.definition,database:seed.database,instructions,noticeInstructions}));
+ process.exit(0);
+}
 let selected,sockets=new Map(),pending=new Map(),requestId=0;
 const cases=Object.keys(starting).filter(v=>/^0\./.test(v)).map(version=>({label:'catalog-'+version,version,transport:version!=='0.154.0'}));
 // Assembly checks consume only the first original seed, not the unrelated
