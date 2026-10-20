@@ -42,15 +42,17 @@ public static class PhoneNativeDialOracle {
             bool telephone=args.TryGetProperty("destination",out var target);
             string destination=telephone?target.GetString():$"sip:peer@{peer.Client.LocalEndPoint}";
             await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
+            var failureCallbacks=new List<object>();var originalCall=Host(owner).FindCall(id);originalCall.Media.MediaFailed+=()=>{failureCallbacks.Add(originalCall.Observation);throw new InvalidOperationException("Synthetic external failure listener");};
             var pending=owner.InvokeAsync("call.dial",Args(new{callId=id,destination,username=telephone?null:"fixture-user",password=telephone?null:"fixture-only",ringSeconds=5,waiting=false}));
             var (invite,remote)=await Receive(peer);
             object hungup=null;
             if(scenario=="hangup_before_answer")hungup=await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
             string sdp=$"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {((IPEndPoint)rtp.Client.LocalEndPoint).Port} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n";
-            Reply(peer,invite,remote,scenario=="refused"?486:200,scenario=="refused"?"":sdp);
+            Reply(peer,invite,remote,scenario=="refused"?486:200,scenario=="refused"?"":scenario=="media_failure_answer"?sdp.Replace("PCMA/8000","PCMA/8000/2"):sdp);
             var (ack,ackRemote)=await ReceiveDialog(peer);
             if(ack.Method!=SIPMethodsEnum.ACK)throw new Exception("Original ACK unavailable");
             object call=await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            if(scenario=="media_failure_connected"){originalCall.Media.SetRemoteDescription(SIPSorcery.Net.SdpType.offer,SIPSorcery.Net.SDP.ParseSDPDescription(sdp.Replace("PCMA/8000","PCMA/8000/2")));if(!originalCall.Media.Failed)throw new Exception("Original media failure unavailable");}
             if(scenario=="connected") {
                 var digitMethod=typeof(PhoneCallFeatures).GetMethod("Digit",BindingFlags.Instance|BindingFlags.NonPublic);
                 var source=Enum.Parse(digitMethod.GetParameters()[1].ParameterType,"SipInfo");
@@ -70,16 +72,17 @@ public static class PhoneNativeDialOracle {
                 while(Host(owner).FindCall(id).Observation.State=="connected"&&DateTime.UtcNow<until)await Task.Delay(1);
                 ended=Host(owner).FindCall(id).Observation;
             } else if(scenario!="refused") {
-                await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
+                if(!scenario.StartsWith("media_failure"))await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
                 var (bye,byeRemote)=await ReceiveDialog(peer);
                 if(bye.Method!=SIPMethodsEnum.BYE)throw new Exception("Original BYE unavailable");
                 Reply(peer,bye,byeRemote,200,"");
+                if(scenario.StartsWith("media_failure"))ended=originalCall.Observation;
             }
             await owner.InvokeAsync("call.release",Args(new{callId=id}));
-            if(scenario=="remote_bye")return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
-                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,ended};
+            if(scenario=="remote_bye"||scenario.StartsWith("media_failure"))return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
+                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,ended,failureCallbacks};
             return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
-                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null};
+                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,failureCallbacks};
         }
     }
     static async Task<object> ProxyDial(NativeSipOperations owner,JsonElement args) {
@@ -197,16 +200,20 @@ public static class PhoneNativeAnswerOracle {
             await Send("INVITE",1,"z9hG4bK-owned-answer",scenario.EndsWith("invalid_offer")?"invalid-sdp":delayed?"":sdp);
             var ring=SIPResponse.ParseSIPResponse(await Receive(peer));if((int)ring.Status!=180)throw new Exception("Original answer ringing unavailable");
             await Wait(()=>Host(owner).Calls.Any(c=>c.Observation.SipCallId==wire));var call=Host(owner).Calls.Single(c=>c.Observation.SipCallId==wire);var media=call.Media;string id=call.Observation.Id;
+            var failureCallbacks=new List<object>();media.MediaFailed+=()=>{failureCallbacks.Add(call.Observation);throw new InvalidOperationException("Synthetic external failure listener");};
+            void FailMedia(){media.SetRemoteDescription(SIPSorcery.Net.SdpType.offer,SIPSorcery.Net.SDP.ParseSDPDescription(sdp.Replace("PCMA/8000","PCMA/8000/2")));if(!media.Failed)throw new Exception("Original media failure unavailable");}
             await owner.InvokeAsync("call.claim",Args(new{callId=id}));await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
             var pending=Invoke(owner,"call.answer",new{callId=id,waiting});
             var final=SIPResponse.ParseSIPResponse(await Receive(peer));int status=(int)final.Status;tag=final.Header.To.ToTag;
             object hungup=null;string endRequest=null;var controls=new List<int>();
             if(status==200){
                 if(scenario.EndsWith("hangup_before_ack"))hungup=await Invoke(owner,"call.hangup",new{callId=id});
+                if(scenario.EndsWith("media_failure_before_ack"))FailMedia();
                 if(scenario.EndsWith("slow_ack")){await Task.Delay(1250);try{for(;;)if((int)SIPResponse.ParseSIPResponse(await Receive(peer,50)).Status!=200)throw new Exception("Original ring timer was not retired by answer");}catch(OperationCanceledException){}}
                 await Send("ACK",1,"z9hG4bK-owned-ack",delayed?(scenario.EndsWith("invalid_ack")?"invalid-sdp":sdp):"");
             }else{await Send("ACK",1,"z9hG4bK-owned-answer","");}
             object answered=await pending.WaitAsync(TimeSpan.FromSeconds(6));
+            if(scenario.EndsWith("media_failure_after_start"))FailMedia();
             if(status==200&&scenario.EndsWith("reinvite")){
                 await Send("INVITE",2,"z9hG4bK-owned-reinvite",delayed?"":sdp);var re=SIPResponse.ParseSIPResponse(await Receive(peer));controls.Add((int)re.Status);
                 await Send("INVITE",3,"z9hG4bK-owned-overlap",sdp);controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);
@@ -218,13 +225,13 @@ public static class PhoneNativeAnswerOracle {
                 for(int n=0;n<2;n++){await Send("BYE",5,"z9hG4bK-owned-bye","");controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);}
                 await Wait(()=>(call.Observation.State=="local_ended"||call.Observation.State=="outcome_unknown"));
             }else if(status==200){
-                if(hungup==null&&!scenario.EndsWith("invalid_ack"))hungup=await Invoke(owner,"call.hangup",new{callId=id});
+                if(hungup==null&&!scenario.EndsWith("invalid_ack")&&!scenario.Contains("media_failure"))hungup=await Invoke(owner,"call.hangup",new{callId=id});
                 try{var bye=SIPRequest.ParseSIPRequest(await Receive(peer,scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:4000));if(bye.Method!=SIPMethodsEnum.BYE)throw new Exception("Original incoming BYE unavailable");endRequest="BYE";
                 var response=SIPResponse.GetResponse(bye,(SIPResponseStatusCodesEnum)200,null);byte[] packet=Encoding.UTF8.GetBytes(response.ToString());await peer.SendAsync(packet,packet.Length,target);}catch(OperationCanceledException)when(scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")){}
             }
             await Wait(()=>(call.Observation.State=="local_ended"||call.Observation.State=="outcome_unknown"));object ended=call.Observation;bool sameMedia=ReferenceEquals(media,call.Media);
             await owner.InvokeAsync("call.release",Args(new{callId=id}));bool released=Host(owner).FindCall(id)==null;await owner.DisposeAsync();
-            return new{status,answered,hungup,ended,controls,endRequest,noByeObservationMs=scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:0,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=true};
+            return new{status,answered,hungup,ended,controls,endRequest,noByeObservationMs=scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:0,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=true,failureCallbacks};
         }
     }
 }

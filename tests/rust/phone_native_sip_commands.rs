@@ -5,6 +5,8 @@ mod answer;
 mod dial;
 #[path = "phone_native_incoming.rs"]
 mod incoming;
+#[path = "phone_native_notifications.rs"]
+mod notifications;
 #[path = "phone_native_registration.rs"]
 mod registration;
 #[path = "phone_native_requests.rs"]
@@ -81,11 +83,22 @@ fn actual_owner(
     Arc<Factory>,
     String,
 ) {
+    actual_owner_with(first, last, Arc::new(Clock), Arc::new(Events::default()))
+}
+fn actual_owner_with(
+    first: u16,
+    last: u16,
+    runtime: Arc<dyn ivy_phone_bridge::media::RtcpRuntime>,
+    events: Arc<dyn SipReceiveEvents>,
+) -> (
+    NativeSipOperations,
+    Arc<CountedFactory>,
+    Arc<Factory>,
+    String,
+) {
     let routes = Arc::new(Factory::routes(vec![]));
     let factory = Arc::new(CountedFactory {
-        inner: NativeSipSessionFactory::new(routes.clone(), None, Arc::new(Clock), |_| {
-            Arc::new(Events::default())
-        }),
+        inner: NativeSipSessionFactory::new(routes.clone(), None, runtime, move |_| events.clone()),
         starts: AtomicUsize::new(0),
     });
     let params = BASE

@@ -209,6 +209,17 @@ struct CallResult {
 #[derive(Clone)]
 pub struct NativeSipCall(Arc<Call>);
 impl NativeSipCall {
+    fn media_failed(&self) {
+        {
+            let mut result = self.0.result.lock().unwrap();
+            if !result.unknown {
+                result.error = Some("media_failed");
+            }
+            result.ending = true;
+        }
+        // A saved callback belongs to this handle even after its ID is reused.
+        self.0.original.request_hangup();
+    }
     pub(crate) fn incoming(&self) -> Option<&crate::native_incoming::NativeIncoming> {
         self.0.incoming.as_ref()
     }
@@ -228,14 +239,14 @@ impl NativeSipCall {
     }
     pub fn observation(&self) -> SipHostCallObservation {
         let mut observed = self.0.original.observation();
+        let remote_ended = self.0.original.remote_ended();
         let mut result = self.0.result.lock().unwrap();
         if observed.phase == SipHostCallPhase::OutcomeUnknown {
             result.unknown = true;
             result.ending = true;
             result.error = Some("sip_operation_outcome_unknown");
-        } else if !result.unknown && self.media().is_some_and(|m| m.observation().failed) {
-            result.error = Some("media_failed");
         }
+        result.ending |= remote_ended;
         if result.unknown {
             observed.phase = SipHostCallPhase::OutcomeUnknown;
         }
@@ -430,6 +441,7 @@ impl NativeSipOperations {
         let owner = Arc::downgrade(&self.0);
         let original_slot = Arc::new(OnceLock::<std::sync::Weak<Call>>::new());
         let hangup_slot = original_slot.clone();
+        let failure_slot = original_slot.clone();
         let features = PhoneCallFeatures::new(
             self.0.limiter.clone(),
             self.0.feature_time.clone(),
@@ -449,6 +461,11 @@ impl NativeSipOperations {
             // Publish the exact session even if policy attachment is uncertain;
             // it must remain fenced for explicit original-call cleanup.
             let _ = saved.set(session.clone());
+            session.on_failure(move || {
+                if let Some(call) = failure_slot.get().and_then(std::sync::Weak::upgrade) {
+                    NativeSipCall(call).media_failed();
+                }
+            });
             let needed = media_features.clone();
             if session
                 .enable_dtmf(
@@ -483,6 +500,13 @@ impl NativeSipOperations {
             releasing: Mutex::new(None),
         }));
         let _ = original_slot.set(Arc::downgrade(&call.0));
+        // Construction can finish before its native weak handle is published.
+        if call
+            .media()
+            .is_some_and(|m| crate::sip::DelayedInviteMedia::failed(&m))
+        {
+            call.media_failed();
+        }
         state.calls.push(call.clone());
         Ok(call)
     }
@@ -768,7 +792,7 @@ impl NativeSipOperations {
                 pending,
             )
             .await;
-            let original = call.0.original.observation();
+            let original = call.observation();
             {
                 let mut result = call.0.result.lock().unwrap();
                 match completed {
@@ -832,7 +856,7 @@ impl NativeSipOperations {
         let call = expected.clone();
         Ok(retained(async move {
             let completed = tokio::time::timeout(std::time::Duration::from_secs(15), pending).await;
-            let original = call.0.original.observation();
+            let original = call.observation();
             {
                 let mut result = call.0.result.lock().unwrap();
                 match completed {

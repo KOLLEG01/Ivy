@@ -242,6 +242,20 @@ impl Call {
 #[derive(Clone)]
 pub struct SipHostCall(Arc<Call>);
 impl SipHostCall {
+    pub(crate) fn request_hangup(&self) {
+        self.0.hangup();
+    }
+    pub(crate) fn remote_ended(&self) -> bool {
+        let state = self.0.state.lock().unwrap();
+        state
+            .incoming
+            .as_ref()
+            .is_some_and(|call| call.observation().remote_ended)
+            || state
+                .invite
+                .as_ref()
+                .is_some_and(|call| call.observation().remote_ended)
+    }
     pub(super) fn hosted_media(&self) -> Option<Arc<dyn HostedSipMedia>> {
         self.0.media.get().cloned()
     }

@@ -250,6 +250,7 @@ async fn outgoing(
     operation: u64,
     supplied_peer: Option<UdpSocket>,
     target: Option<&str>,
+    failure_events: Option<Arc<super::notifications::FailureEvents>>,
 ) -> IvyJson {
     let peer = match supplied_peer {
         Some(peer) => peer,
@@ -277,6 +278,10 @@ async fn outgoing(
         "false",
     );
     let original_call = owner.find(CALL).unwrap();
+    if let Some(events) = &failure_events {
+        events.receipts.lock().unwrap().clear();
+        *events.call.lock().unwrap() = Some(original_call.clone());
+    }
     let media = original_call.media().unwrap();
     let local_media = media.observation().receive.transport.local_rtp;
     let feature_params = format!(r#"{{"callId":"{CALL}","challenge":null}}"#);
@@ -315,7 +320,12 @@ async fn outgoing(
         rtp.local_addr().unwrap().port()
     );
     let code = if scenario == "refused" { 486 } else { 200 };
-    let body = if code == 200 { sdp.as_str() } else { "" };
+    let reply_sdp = if scenario == "media_failure_answer" {
+        sdp.replace("PCMA/8000", "PCMA/8000/2")
+    } else {
+        sdp.clone()
+    };
+    let body = if code == 200 { reply_sdp.as_str() } else { "" };
     let extra = if code == 200 {
         format!(
             "Contact: <sip:peer@{}>\r\nContent-Type: application/sdp\r\n",
@@ -338,6 +348,9 @@ async fn outgoing(
         .unwrap();
     let call = value(answer.outcome());
     let saved = answer.outcome().result_json().unwrap().to_owned();
+    if scenario == "media_failure_connected" {
+        super::notifications::fail_media(&media, &sdp);
+    }
     if scenario == "connected" {
         for digit in ['*', '0', '#'] {
             original_call
@@ -396,15 +409,24 @@ async fn outgoing(
             .unwrap(),
         );
     } else if scenario != "refused" {
-        let h = dispatcher
-            .execute(command(
-                "call.hangup",
-                &selected,
-                operation + 2,
-                operation + 2,
-            ))
-            .await;
-        assert!(h.outcome().error_code().is_none());
+        let h = if !scenario.starts_with("media_failure") {
+            Some(
+                dispatcher
+                    .execute(command(
+                        "call.hangup",
+                        &selected,
+                        operation + 2,
+                        operation + 2,
+                    ))
+                    .await,
+            )
+        } else {
+            None
+        };
+        assert!(
+            h.as_ref()
+                .is_none_or(|h| h.outcome().error_code().is_none())
+        );
         let (bye, bye_remote) = received(&peer).await;
         assert_eq!(bye.method, Method::Bye);
         crate::sip_host::send(
@@ -413,6 +435,22 @@ async fn outgoing(
             &crate::sip_host::response(&bye, 200, "", ""),
         )
         .await;
+        if scenario.starts_with("media_failure") {
+            ended = Some(
+                parse(
+                    &ivy_phone_bridge::native_sip_status::call_json(&original_call).unwrap(),
+                    65536,
+                )
+                .unwrap(),
+            );
+        }
+    }
+    let failure_callbacks = failure_events
+        .as_ref()
+        .map(|e| e.receipts.lock().unwrap().clone())
+        .unwrap_or_default();
+    if let Some(events) = &failure_events {
+        events.call.lock().unwrap().take();
     }
     let release = dispatcher
         .execute(command(
@@ -457,6 +495,7 @@ async fn outgoing(
                 .into(),
         ),
         ("released", owner.find(CALL).is_none().into()),
+        ("failureCallbacks", IvyJson::Array(failure_callbacks)),
     ]);
     if let (Some(ended), IvyJson::Object(fields)) = (ended, &mut result) {
         fields.push(("ended".into(), ended));
@@ -466,7 +505,9 @@ async fn outgoing(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_receipts() {
     for mode in ["initial", "delayed"] {
-        let (owner, factory, routes, params) = actual_owner(50000, 50998);
+        let events = Arc::new(super::notifications::FailureEvents::default());
+        let (owner, factory, routes, params) =
+            actual_owner_with(50000, 50998, Arc::new(Clock), events.clone());
         let params = params.replace(
             "\"transport\":\"udp\"",
             &format!("\"transport\":\"udp\",\"outgoingOfferMode\":\"{mode}\""),
@@ -483,7 +524,14 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
             Arc::new(NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap());
         let selected = format!(r#"{{"callId":"{CALL}"}}"#);
         let mut steps = vec![("configure".into(), params.clone())];
-        for scenario in ["connected", "refused", "hangup_before_answer", "remote_bye"] {
+        for scenario in [
+            "connected",
+            "refused",
+            "hangup_before_answer",
+            "remote_bye",
+            "media_failure_answer",
+            "media_failure_connected",
+        ] {
             steps.push(("call.prepare".into(), selected.clone()));
             steps.push((
                 "fixture.outgoing".into(),
@@ -506,6 +554,7 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
                     100 + 10 * i as u64,
                     None,
                     None,
+                    Some(events.clone()),
                 )
                 .await
             } else {
@@ -528,7 +577,7 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
             ]),
         );
         compare(&rows, &original, &steps);
-        assert_eq!(factory.starts.load(Ordering::SeqCst), 4);
+        assert_eq!(factory.starts.load(Ordering::SeqCst), 6);
         assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
         assert!(remaining.methods.lock().unwrap().is_empty());
         handler.shutdown().await.unwrap();
@@ -653,6 +702,7 @@ async fn native_telephone_uri_uses_only_the_configured_owned_proxy() {
             100,
             Some(peer),
             Some("tel:123"),
+            None,
         )
         .await;
         let rows = vec![IvyJson::object([(

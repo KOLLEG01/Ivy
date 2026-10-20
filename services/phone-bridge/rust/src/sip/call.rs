@@ -110,6 +110,7 @@ pub struct CallObservation {
     pub phase: FinalPhase,
     pub active: bool,
     pub ending: bool,
+    pub remote_ended: bool,
     pub uncertain: bool,
     pub cleanup_confirmed: bool,
     pub quiescent: bool,
@@ -214,6 +215,7 @@ impl DelayedInvite {
             phase: FinalPhase::Waiting,
             active: false,
             ending: false,
+            remote_ended: false,
             uncertain: false,
             cleanup_confirmed: false,
             quiescent: true,
@@ -244,6 +246,7 @@ impl DelayedInvite {
             commands: receiver,
             hangup: hangup.clone(),
             hangup_seen: false,
+            remote_ended: false,
             commands_open: true,
             identity,
             observations,
@@ -421,6 +424,7 @@ struct CallActor {
     commands: mpsc::Receiver<Command>,
     hangup: CancellationToken,
     hangup_seen: bool,
+    remote_ended: bool,
     commands_open: bool,
     identity: watch::Sender<Option<Identity>>,
     observations: watch::Sender<CallObservation>,
@@ -445,6 +449,7 @@ impl CallActor {
             phase: self.lifecycle.phase(),
             active: self.lifecycle.is_active(),
             ending: self.lifecycle.is_ending(),
+            remote_ended: self.remote_ended,
             uncertain: self.uncertain,
             cleanup_confirmed: self.lifecycle.cleanup_confirmed(),
             quiescent: self.ack.is_none() && self.media_start.is_none() && self.replies.is_empty(),
@@ -766,6 +771,7 @@ impl CallActor {
                 return;
             };
             if status == 200 {
+                self.remote_ended = true;
                 let actions = self.lifecycle.remote_bye();
                 self.apply(actions);
                 self.ring_deadline = None;

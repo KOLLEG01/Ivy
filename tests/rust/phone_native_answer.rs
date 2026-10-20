@@ -93,7 +93,7 @@ fn raw(
         body.len()
     )
 }
-async fn send(
+pub(super) async fn send(
     peer: &UdpSocket,
     target: std::net::SocketAddr,
     method: &str,
@@ -133,10 +133,16 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
         "delayed_hangup_before_ack",
         "initial_reinvite",
         "delayed_reinvite",
+        "initial_media_failure_before_ack",
+        "delayed_media_failure_before_ack",
+        "initial_media_failure_after_start",
+        "delayed_media_failure_after_start",
     ] {
         let delayed = scenario.starts_with("delayed");
         let waiting = scenario.ends_with("waiting");
-        let (owner, factory, routes, params) = actual_owner(40000, 41998);
+        let events = Arc::new(super::notifications::FailureEvents::default());
+        let (owner, factory, routes, params) =
+            actual_owner_with(40000, 41998, Arc::new(Clock), events.clone());
         let config = params.replace(
             "\"transport\":\"udp\"",
             "\"transport\":\"udp\",\"incomingRingSeconds\":1",
@@ -237,6 +243,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                 0
             };
         let mut controls = vec![];
+        *events.call.lock().unwrap() = Some(call.clone());
         if status == 200 {
             assert!(!pending.is_finished(), "Answer must await the original ACK");
             if scenario.ends_with("hangup_before_ack") {
@@ -257,6 +264,9 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                         "Answer retired the original ring timer"
                     );
                 }
+            }
+            if scenario.ends_with("media_failure_before_ack") {
+                super::notifications::fail_media(&media, &sdp);
             }
             send(
                 &peer,
@@ -285,7 +295,8 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             .unwrap()
             .unwrap();
         let answered = outcome(answer.outcome());
-        if scenario.ends_with("hangup_before_ack") {
+        if scenario.ends_with("hangup_before_ack") || scenario.ends_with("media_failure_before_ack")
+        {
             assert!(
                 !media.observation().started,
                 "Late SIP connection cannot revive original media"
@@ -296,6 +307,10 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             .result_json()
             .expect("Native answer outcome snapshot")
             .to_owned();
+        if scenario.ends_with("media_failure_after_start") {
+            assert!(media.observation().started);
+            super::notifications::fail_media(&media, &sdp);
+        }
         if status == 200 && scenario.ends_with("reinvite") {
             send(
                 &peer,
@@ -374,7 +389,10 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                 controls.push(receive(&peer, 4000).await.unwrap().status_code.code());
             }
         } else if status == 200 {
-            if hungup.is_null() && !scenario.ends_with("invalid_ack") {
+            if hungup.is_null()
+                && !scenario.ends_with("invalid_ack")
+                && !scenario.contains("media_failure")
+            {
                 hungup = outcome(
                     dispatcher
                         .execute(command("call.hangup", &selected, 5, 5))
@@ -416,6 +434,8 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             65536,
         )
         .unwrap();
+        let failure_callbacks = events.receipts.lock().unwrap().clone();
+        events.call.lock().unwrap().take();
         owner.release(&call).unwrap().wait().await.unwrap();
         // Reusing the ID cannot lend the original saved answer another handle.
         let replacement = owner.prepare(id.clone()).unwrap();
@@ -469,6 +489,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             ("sameMedia", true.into()),
             ("released", released.into()),
             ("closed", true.into()),
+            ("failureCallbacks", IvyJson::Array(failure_callbacks)),
         ]);
         let mut actual = result.clone();
         normalize(&mut actual, &id);

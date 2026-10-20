@@ -122,6 +122,7 @@ impl IncomingInvite {
             phase: FinalPhase::Waiting,
             active: false,
             ending: false,
+            remote_ended: false,
             uncertain: false,
             cleanup_confirmed: false,
             quiescent: false,
@@ -294,6 +295,7 @@ impl IncomingActor {
         self.observations.send_replace(self.current);
     }
     fn end(&mut self) {
+        self.current.remote_ended |= self.remote_ended;
         if !self.control.intent.lock().unwrap().late_connection || self.remote_ended {
             self.current.active = false;
         }
@@ -355,7 +357,7 @@ impl IncomingActor {
                 _ = self.control.changed.notified()=>(),
                 transaction=self.commands.recv()=>{let Some(transaction)=transaction else{return Err(CallError::CleanupUnconfirmed);};self.control_request(transaction).await?;},
                 event=self.exchange.as_mut().unwrap().next()=>match event{
-                    Some(request) if request.method==Method::Cancel=>{self.control.ring_stop.cancel();let _=timer.await;return self.finish_response(StatusCode::RequestTerminated).await;},
+                    Some(request) if request.method==Method::Cancel=>{self.remote_ended=true;self.current.remote_ended=true;self.control.ring_stop.cancel();let _=timer.await;return self.finish_response(StatusCode::RequestTerminated).await;},
                     None=>return Err(CallError::CleanupUnconfirmed),_=>(),
                 },
             }

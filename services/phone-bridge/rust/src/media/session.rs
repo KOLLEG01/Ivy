@@ -238,6 +238,8 @@ struct Core {
     send: Arc<SendAudio>,
     receiver: OnceLock<SipRtpReceiver>,
     events: Arc<dyn SipReceiveEvents>,
+    failure_handler: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    failure_notified: AtomicBool,
     dtmf: OnceLock<DtmfCallbacks>,
     state: Mutex<State>,
     closed: AtomicBool,
@@ -257,7 +259,16 @@ impl Core {
     fn fail(&self) {
         if !self.failed.swap(true, Ordering::AcqRel) {
             self.request_close();
+            self.notify_failure();
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.events.failed()));
+        }
+    }
+    fn notify_failure(&self) {
+        if self.failed.load(Ordering::Acquire)
+            && let Some(handler) = self.failure_handler.get()
+            && !self.failure_notified.swap(true, Ordering::AcqRel)
+        {
+            handler();
         }
     }
     fn description_effects(
@@ -476,6 +487,8 @@ impl SipMediaSession {
             waiting,
             receiver: OnceLock::new(),
             events,
+            failure_handler: OnceLock::new(),
+            failure_notified: AtomicBool::new(false),
             dtmf: OnceLock::new(),
             state: Mutex::new(State {
                 descriptions,
@@ -535,6 +548,12 @@ impl SipMediaSession {
     }
     pub fn call_audio(&self) -> &CallAudioPort {
         &self.handle.0.audio
+    }
+    /// The original call receives failure before external media listeners.
+    /// Installing its single handler also observes failure during construction.
+    pub(crate) fn on_failure(&self, handler: impl Fn() + Send + Sync + 'static) {
+        assert!(self.handle.0.failure_handler.set(Box::new(handler)).is_ok());
+        self.handle.0.notify_failure();
     }
     pub fn create_offer(&self) -> Option<SdpDocument> {
         let c = &self.handle.0;
