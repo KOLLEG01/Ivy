@@ -61,7 +61,15 @@ fn endpoint(peer: Option<RegistrationPeer>) -> Result<String, RegistrationViewEr
         RegistrationTransport::Tcp => "tcp",
         RegistrationTransport::Tls => "tls",
     };
-    quote(&format!("{protocol}:{}", peer.address))
+    let address = match peer.address {
+        std::net::SocketAddr::V6(v6) => v6
+            .ip()
+            .to_ipv4_mapped()
+            .map(|ip| std::net::SocketAddr::new(ip.into(), v6.port()))
+            .unwrap_or(peer.address),
+        address => address,
+    };
+    quote(&format!("{protocol}:{address}"))
 }
 fn utc_millis(ms: i64) -> Result<String, RegistrationViewError> {
     // DateTimeOffset.FromUnixTimeMilliseconds range, including negative epochs.
