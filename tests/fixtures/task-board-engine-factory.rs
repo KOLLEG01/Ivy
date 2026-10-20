@@ -292,7 +292,10 @@ impl DeliveryPolicies for Policies<'_> {
         }
         panic!("No contact handoff")
     }
-    fn voice_prompt(&self, _: &Json, _: &Json) -> IvyResult<JsString> {
+    fn voice_prompt(&self, task: &Json, comment: &Json) -> IvyResult<JsString> {
+        if let Some(delivery) = &self.fixture.delivery {
+            return delivery.voice_prompt(task, comment);
+        }
         panic!("No phone prompt")
     }
 }

@@ -29,6 +29,7 @@ add('phone original configuration is retained',{mode:'phonePrepared',phoneTarget
 for(const outcome of ['not_executed','unknown'])add('phone admission failure '+outcome,{mode:'phonePrepared',fault:{where:'phone.request',code:'service_unavailable',outcome}});
 add('phone admission write refusal follows original fallback',{mode:'phonePrepared',fault:{where:'write',code:'revision_conflict'}});
 add('phone unknown repeats only original',{mode:'phonePrepared',fault:{where:'phone.request',code:'service_unavailable',outcome:'unknown',always:true},passes:3});
+add('factory phone question lost admission recovers confirmed',{mode:'phonePrepared',fault:{where:'phone.request',code:'service_unavailable',outcome:'unknown'},passes:3,comment:{purpose:'question',body:'Saved question\ud800'}});
 add('phone forwarded pending',{mode:'phoneCalled',forward:'submitted'});add('phone forwarded confirmed',{mode:'phoneCalled',forward:'result'});add('phone forwarded unknown',{mode:'phoneCalled',forward:'outcome_unknown'});add('phone forwarded negative receipt',{mode:'phoneCalled',forward:'result',forwardReceipt:{ok:false,result:{state:'sent'}}});add('phone forwarded prompt mismatch',{mode:'phoneCalled',forward:'result',forwardIntent:{prompt:'other'}});
 for(const dial of ['missing','submitted','outcome_unknown','failed','connected'])add('phone dial '+dial,{mode:'phoneCalled',dial});
 for(const prompt of ['missing','submitted','outcome_unknown','failed','result'])add('phone voice '+prompt,{mode:'phoneCalled',prompt});

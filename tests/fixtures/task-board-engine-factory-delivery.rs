@@ -3,6 +3,7 @@ use driver::{count, frames, reached};
 
 pub(super) struct Scenario {
     row: Json,
+    phone: bool,
     pub(super) ready: Gate,
 }
 fn f<'a>(value: &'a Json, key: &str) -> &'a Json {
@@ -33,7 +34,7 @@ fn publication(fixture: &Fixture) -> (String, u64, Json) {
     rows.into_iter().next().unwrap()
 }
 impl Scenario {
-    fn new() -> Self {
+    fn new(phone: bool) -> Self {
         let output = std::process::Command::new("node")
             .args([
                 "--experimental-transform-types",
@@ -49,15 +50,21 @@ impl Scenario {
             String::from_utf8_lossy(&output.stderr)
         );
         let rows = json(std::str::from_utf8(&output.stdout).unwrap());
+        let name = if phone {
+            "factory phone question lost admission recovers confirmed"
+        } else {
+            "factory question lost notify recovers confirmed"
+        };
         let row = rows
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| f(row, "name") == &"factory question lost notify recovers confirmed".into())
+            .find(|row| f(row, "name") == &Json::from(name))
             .unwrap()
             .clone();
         Self {
             row,
+            phone,
             ready: Gate::default(),
         }
     }
@@ -70,8 +77,29 @@ impl Scenario {
     fn source_request(&self) -> &Json {
         f(
             f(f(f(&self.row, "initial"), "current"), "value"),
-            "chatRequest",
+            self.request_key(),
         )
+    }
+    fn request_key(&self) -> &'static str {
+        if self.phone {
+            "phoneRequest"
+        } else {
+            "chatRequest"
+        }
+    }
+    fn target_key(&self) -> &'static str {
+        if self.phone {
+            "phoneTarget"
+        } else {
+            "chatTarget"
+        }
+    }
+    fn phone_target(&self) -> Json {
+        if self.phone {
+            f(f(f(&self.row, "initial"), "first"), "phoneTarget").clone()
+        } else {
+            Json::Null
+        }
     }
     fn records(&self) -> Vec<(&'static str, Json, &'static str)> {
         let mut records: Vec<_> = retirement::reviewed_records()
@@ -94,7 +122,10 @@ impl Scenario {
         }
         let mut fields = f(&task, "fields").clone();
         fields.insert("control", "user".into());
-        fields.insert("userContact", "chat".into());
+        fields.insert(
+            "userContact",
+            if self.phone { "phone" } else { "chat" }.into(),
+        );
         fields.insert("executionRequirement", Json::Null);
         task.insert("fields", fields);
         records.push(("task-board/task", task, "contact-task"));
@@ -141,10 +172,27 @@ impl Scenario {
         ]))
     }
     pub(super) fn chat_readable_version(&self, version: &JsString) -> bool {
+        assert!(!self.phone);
         assert_eq!(version, &JsString::from("1.3.0"));
         true
     }
     pub(super) fn handoff(&self, task: &Json, comment: &Json) -> IvyResult<JsString> {
+        assert!(!self.phone);
+        self.verify_prompt(task, comment);
+        Ok(f(self.source_request(), "text")
+            .as_js_string()
+            .unwrap()
+            .clone())
+    }
+    pub(super) fn voice_prompt(&self, task: &Json, comment: &Json) -> IvyResult<JsString> {
+        assert!(self.phone);
+        self.verify_prompt(task, comment);
+        Ok(f(self.source_request(), "voicePrompt")
+            .as_js_string()
+            .unwrap()
+            .clone())
+    }
+    fn verify_prompt(&self, task: &Json, comment: &Json) {
         assert_eq!(f(task, "taskKey"), f(self.source_task(), "taskKey"));
         for key in [
             "commentId",
@@ -157,10 +205,6 @@ impl Scenario {
             assert_eq!(f(comment, key), f(self.source_comment(), key));
         }
         assert!(!f(task, "lastHistory").is_null());
-        Ok(f(self.source_request(), "text")
-            .as_js_string()
-            .unwrap()
-            .clone())
     }
     fn comment_request(&self) -> Json {
         let request = Json::object([
@@ -223,12 +267,18 @@ impl Scenario {
 fn verify_request(scenario: &Scenario, retained: &Json, history: &Json) {
     let mut expected = scenario.source_request().clone();
     expected.insert("operationId", f(retained, "operationId").clone());
-    expected.insert("source", history.clone());
-    let mut bridge = f(&expected, "expectedBridge").clone();
-    bridge.insert("callerPrincipalId", "fixture-principal".into());
-    expected.insert("expectedBridge", bridge);
+    if !scenario.phone {
+        expected.insert("source", history.clone());
+        let mut bridge = f(&expected, "expectedBridge").clone();
+        bridge.insert("callerPrincipalId", "fixture-principal".into());
+        expected.insert("expectedBridge", bridge);
+    }
     assert_eq!(hash_json(retained).unwrap(), hash_json(&expected).unwrap());
     let id = f(retained, "operationId").as_str().unwrap();
+    if scenario.phone {
+        assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 4);
+        return;
+    }
     let parts: Vec<_> = id.split(':').collect();
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0], "11111111-1111-4111-8111-111111111111");
@@ -236,18 +286,20 @@ fn verify_request(scenario: &Scenario, retained: &Json, history: &Json) {
     assert!(uuid::Uuid::parse_str(parts[2]).is_ok());
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn delivery_recovers_original_chat_after_lost_notify_without_answering_question_or_replacing_review()
- {
+async fn run_delivery(phone: bool) {
     let peer = Peer::start_mode(Some("--factory-delivery")).await;
     let mut fixture = Fixture::new(false);
-    fixture.delivery = Some(Scenario::new());
+    fixture.delivery = Some(Scenario::new(phone));
     let scenario = fixture.delivery.as_ref().unwrap();
     let contracts = ContractsBinding;
     let catalogs =
         CheckedNativeContracts::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."));
     let factory = make_factory(&fixture, &contracts, &catalogs);
-    let (service, owner) = make_service(configured(&peer), &contracts).unwrap();
+    let mut setup = configured(&peer);
+    setup
+        .settings
+        .insert("phoneTarget", scenario.phone_target());
+    let (service, owner) = make_service(setup, &contracts).unwrap();
     let original = scenario.comment_request();
     let script = async {
         service.start();
@@ -306,7 +358,7 @@ async fn delivery_recovers_original_chat_after_lost_notify_without_answering_que
         let mut expected_initial = f(f(&scenario.row, "initial"), "first").clone();
         expected_initial.insert("taskId", "contact-task".into());
         expected_initial.insert("publication", pin(&published.0, 1));
-        expected_initial.insert("phoneTarget", Json::Null);
+        expected_initial.insert("phoneTarget", scenario.phone_target());
         assert_eq!(
             hash_json(&initial.2).unwrap(),
             hash_json(&expected_initial).unwrap()
@@ -317,23 +369,43 @@ async fn delivery_recovers_original_chat_after_lost_notify_without_answering_que
         assert_eq!(f(&outcome, "task"), &pin("contact-task", 3));
         scenario.preserved(&fixture, &written_task);
         scenario.ready.release();
-        reached(&fixture, &peer, "lost original notify receipt", || {
-            delivery(&fixture).is_some_and(|row| f(&row.2, "state") == &"outcome_unknown".into())
-        })
+        reached(
+            &fixture,
+            &peer,
+            "lost original channel admission receipt",
+            || {
+                delivery(&fixture)
+                    .is_some_and(|row| f(&row.2, "state") == &"outcome_unknown".into())
+            },
+        )
         .await;
         let uncertain = delivery(&fixture).unwrap();
         assert_eq!(uncertain.0, initial.0);
         assert_eq!(uncertain.1, 3);
-        assert_eq!(f(&uncertain.2, "code"), &"outcome_unknown".into());
-        let request = f(&uncertain.2, "chatRequest").clone();
+        assert_eq!(
+            f(&uncertain.2, "code"),
+            &Json::from(if phone {
+                "service_unavailable"
+            } else {
+                "outcome_unknown"
+            })
+        );
+        let request = f(&uncertain.2, scenario.request_key()).clone();
         verify_request(scenario, &request, f(&written_task, "lastHistory"));
         assert_eq!(f(&uncertain.2, "operationId"), f(&request, "operationId"));
-        let notifications = frames(&peer, "delivery-notify");
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(
-            hash_json(f(&notifications[0], "request")).unwrap(),
-            hash_json(&request).unwrap()
-        );
+        if phone {
+            assert_eq!(frames(&peer, "delivery-phone-first-admission").len(), 1);
+            assert_eq!(f(&uncertain.2, "phoneCallId"), &Json::Null);
+            assert_eq!(f(&uncertain.2, "activeRoute"), &"phone".into());
+            assert!(f(&uncertain.2, "chatRequest").is_null());
+        } else {
+            let notifications = frames(&peer, "delivery-notify");
+            assert_eq!(notifications.len(), 1);
+            assert_eq!(
+                hash_json(f(&notifications[0], "request")).unwrap(),
+                hash_json(&request).unwrap()
+            );
+        }
         scenario.preserved(&fixture, &written_task);
         rpc(
             &first,
@@ -348,13 +420,13 @@ async fn delivery_recovers_original_chat_after_lost_notify_without_answering_que
         reached(
             &fixture,
             &peer,
-            "original chat proof confirmation after reconnect",
+            "original channel receipt confirmation after reconnect",
             || delivery(&fixture).is_some_and(|row| f(&row.2, "state") == &"confirmed".into()),
         )
         .await;
         let confirmed = delivery(&fixture).unwrap();
         assert_eq!(confirmed.0, initial.0);
-        assert_eq!(confirmed.1, 4);
+        assert_eq!(confirmed.1, if phone { 5 } else { 4 });
         for key in [
             "schemaVersion",
             "taskId",
@@ -365,7 +437,7 @@ async fn delivery_recovers_original_chat_after_lost_notify_without_answering_que
         ] {
             assert_eq!(f(&confirmed.2, key), f(&initial.2, key));
         }
-        for key in ["operationId", "chatRequest", "chatTarget"] {
+        for key in ["operationId", scenario.request_key(), scenario.target_key()] {
             assert_eq!(
                 hash_json(f(&confirmed.2, key)).unwrap(),
                 hash_json(f(&uncertain.2, key)).unwrap()
@@ -381,24 +453,31 @@ async fn delivery_recovers_original_chat_after_lost_notify_without_answering_que
             )
         );
         assert_eq!(f(&confirmed.2, "code"), &Json::Null);
-        let proofs = frames(&peer, "delivery-proof");
-        assert_eq!(proofs.len(), 2);
-        assert!(
-            proofs
-                .iter()
-                .all(|p| f(p, "generation") == &Json::Number(2.0))
-        );
-        let operations = frames(&peer, "delivery-operation");
-        assert_eq!(operations.len(), 1);
-        let operation = f(&operations[0], "operation");
-        assert_eq!(
-            hash_json(f(operation, "request")).unwrap(),
-            hash_json(&request).unwrap()
-        );
-        assert_eq!(
-            f(operation, "requestHash"),
-            &hash_json(&request).unwrap().into()
-        );
+        if phone {
+            verify_phone_receipts(scenario, &peer, &request);
+            assert_eq!(f(&confirmed.2, "phoneCallId"), &"call".into());
+            assert_eq!(f(&confirmed.2, "activeRoute"), &"phone".into());
+            assert!(f(&confirmed.2, "chatRequest").is_null());
+        } else {
+            let proofs = frames(&peer, "delivery-proof");
+            assert_eq!(proofs.len(), 2);
+            assert!(
+                proofs
+                    .iter()
+                    .all(|p| f(p, "generation") == &Json::Number(2.0))
+            );
+            let operations = frames(&peer, "delivery-operation");
+            assert_eq!(operations.len(), 1);
+            let operation = f(&operations[0], "operation");
+            assert_eq!(
+                hash_json(f(operation, "request")).unwrap(),
+                hash_json(&request).unwrap()
+            );
+            assert_eq!(
+                f(operation, "requestHash"),
+                &hash_json(&request).unwrap().into()
+            );
+        }
         assert_eq!(
             hash_json(&publication(&fixture).2).unwrap(),
             hash_json(&published.2).unwrap()
@@ -430,7 +509,13 @@ async fn delivery_recovers_original_chat_after_lost_notify_without_answering_que
             hash_json(&delivery(&fixture).unwrap().2).unwrap(),
             hash_json(&confirmed.2).unwrap()
         );
-        assert_eq!(frames(&peer, "delivery-notify").len(), 1);
+        assert_eq!(
+            frames(&peer, "delivery-notify").len(),
+            if phone { 0 } else { 1 }
+        );
+        if phone {
+            verify_phone_receipts(scenario, &peer, &request);
+        }
         assert!(
             peer.frames
                 .lock()
@@ -440,7 +525,7 @@ async fn delivery_recovers_original_chat_after_lost_notify_without_answering_que
                 .all(|frame| f(f(frame, "params"), "qualifiedName")
                     .as_str()
                     .unwrap()
-                    .starts_with("chat.")
+                    .starts_with(if phone { "phone." } else { "chat." })
                     && f(frame, "generation") != &Json::Number(3.0))
         );
         scenario.preserved(&fixture, &written_task);
@@ -451,4 +536,88 @@ async fn delivery_recovers_original_chat_after_lost_notify_without_answering_que
     assert_eq!(fixture.drops.borrow().as_slice(), [1, 2, 3]);
     assert_eq!(count(&fixture, "SELECT count(*) FROM active_gates"), 0);
     peer.finish().await;
+}
+
+fn verify_phone_receipts(scenario: &Scenario, peer: &Peer, request: &Json) {
+    let admissions = frames(peer, "delivery-phone-request");
+    assert!(admissions.len() >= 2);
+    assert_eq!(frames(peer, "delivery-phone-first-admission").len(), 1);
+    for generation in [1.0, 2.0] {
+        assert!(
+            admissions
+                .iter()
+                .any(|frame| f(frame, "generation") == &Json::Number(generation))
+        );
+    }
+    for frame in admissions {
+        assert_ne!(f(&frame, "generation"), &Json::Number(3.0));
+        assert_eq!(
+            hash_json(f(&frame, "request")).unwrap(),
+            hash_json(request).unwrap()
+        );
+    }
+    let replies = frames(peer, "delivery-phone-admission-reply");
+    assert_eq!(replies.len(), 1);
+    assert_eq!(f(&replies[0], "generation"), &Json::Number(2.0));
+    let original = f(&scenario.row, "boundaries")
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| {
+            f(b, "kind") == &"rpc".into()
+                && f(b, "args").as_array().is_some_and(|args| {
+                    args[0] == "tools.call".into()
+                        && f(&args[1], "qualifiedName") == &"phone.request".into()
+                })
+                && b.get("value").is_some()
+        })
+        .unwrap();
+    let mut expected_reply = f(original, "value").clone();
+    expected_reply.insert("operationId", f(request, "operationId").clone());
+    assert_eq!(
+        hash_json(f(&replies[0], "value")).unwrap(),
+        hash_json(&expected_reply).unwrap()
+    );
+    let operations = frames(peer, "delivery-phone-operation");
+    let source: Vec<_> = f(&scenario.row, "boundaries")
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| {
+            f(b, "kind") == &"rpc".into()
+                && f(b, "args").as_array().is_some_and(|args| {
+                    args[0] == "tools.call".into()
+                        && f(&args[1], "qualifiedName") == &"phone.operation".into()
+                })
+        })
+        .collect();
+    assert_eq!(operations.len(), 3);
+    assert_eq!(operations.len(), source.len());
+    for (frame, expected) in operations.iter().zip(source) {
+        assert_eq!(f(frame, "generation"), &Json::Number(2.0));
+        let mut args = f(&f(expected, "args").as_array().unwrap()[1], "arguments").clone();
+        if args.get("operationId").is_some() {
+            args.insert("operationId", f(request, "operationId").clone());
+        }
+        assert_eq!(
+            hash_json(f(frame, "arguments")).unwrap(),
+            hash_json(&args).unwrap()
+        );
+        assert_eq!(
+            hash_json(f(frame, "value")).unwrap(),
+            hash_json(f(expected, "value")).unwrap()
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delivery_recovers_original_chat_after_lost_notify_without_answering_question_or_replacing_review()
+ {
+    run_delivery(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delivery_recovers_original_phone_after_lost_admission_without_answering_question_or_replacing_review()
+ {
+    run_delivery(true).await;
 }
