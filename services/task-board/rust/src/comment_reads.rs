@@ -1,5 +1,6 @@
 //! Current bounded Task read projections. Persistence and execution-condition
 //! precedence remain explicit owner bindings; no legacy full-reader default.
+use super::conversation::cross_agent_comment as cross_agent;
 use crate::coordination::next_steps::{
     NextStepPolicies, NextStepStore, assess_steps, next_step_time, step_condition,
 };
@@ -73,14 +74,6 @@ fn optional_number(value: &Json, key: &str, default: usize) -> IvyResult<usize> 
         .map(number)
         .unwrap_or(Ok(default))
 }
-fn cross_agent(comment: &Json, task_id: &JsString) -> bool {
-    is(field(comment, "recipient"), "kind", "task")
-        || truthy(field(comment, "questionSource"))
-        || is(comment, "authorKind", "agent")
-            && truthy(field(comment, "sourceTaskId"))
-            && field(comment, "sourceTaskId").as_js_string() != Some(task_id)
-}
-
 pub fn comment_summary<P: NextStepPolicies>(
     policies: &P,
     task: &Json,

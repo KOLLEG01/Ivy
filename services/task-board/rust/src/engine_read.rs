@@ -14,6 +14,8 @@ use std::collections::HashSet;
 pub mod comment_reads;
 #[path = "condition.rs"]
 pub mod condition_policy;
+#[path = "conversation.rs"]
+pub mod conversation;
 
 #[allow(async_fn_in_trait)]
 pub trait EngineReadRuntime {

@@ -1,0 +1,4960 @@
+{
+  "schemaVersion": 1,
+  "at": "2026-10-20T12:00:00.000Z",
+  "sourceFiles": [
+    {
+      "path": "services/task-board/src/runtime/conversation.js",
+      "byteLength": 2174,
+      "contentHash": "sha256:2707b03636ba79b82d925217231b32212e3482d008522696ce1d1af3fb73b571"
+    },
+    {
+      "path": "packages/contracts/src/task-board-questions.js",
+      "byteLength": 1034,
+      "contentHash": "sha256:b2157d3e844fba177885fbb154a665ab1398c3cf922be79221c22e127df1ac2c"
+    },
+    {
+      "path": "services/task-board/src/runtime/comment-store.js",
+      "byteLength": 12275,
+      "contentHash": "sha256:8aefe674b7d5803b9348145b59556ac3fff1761c1cab09c93752493a890fc7b7"
+    },
+    {
+      "path": "services/task-board/src/runtime/next-steps.js",
+      "byteLength": 8992,
+      "contentHash": "sha256:3a8d0559c4e4f6b7f0c4d1ed7e6541e2b178296ebff6664e7e574cb103ad37ef"
+    },
+    {
+      "path": "services/task-board/src/runtime/engine.js",
+      "byteLength": 90021,
+      "contentHash": "sha256:eae8345b94df88646d8605913f41ba8a9fdb2b60ce611de8612bc1e8a26621e7"
+    }
+  ],
+  "cases": [
+    {
+      "kind": "cross",
+      "name": "own agent",
+      "input": {
+        "comment": {
+          "commentId": "c1",
+          "sequence": 1,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null
+        },
+        "taskId": "self"
+      },
+      "output": false
+    },
+    {
+      "kind": "cross",
+      "name": "own source",
+      "input": {
+        "comment": {
+          "commentId": "c2",
+          "sequence": 2,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "sourceTaskId": "self"
+        },
+        "taskId": "self"
+      },
+      "output": false
+    },
+    {
+      "kind": "cross",
+      "name": "foreign source",
+      "input": {
+        "comment": {
+          "commentId": "c3",
+          "sequence": 3,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "sourceTaskId": "other"
+        },
+        "taskId": "self"
+      },
+      "output": true
+    },
+    {
+      "kind": "cross",
+      "name": "empty source",
+      "input": {
+        "comment": {
+          "commentId": "c4",
+          "sequence": 4,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "sourceTaskId": ""
+        },
+        "taskId": "self"
+      },
+      "output": false
+    },
+    {
+      "kind": "cross",
+      "name": "foreign source on user",
+      "input": {
+        "comment": {
+          "commentId": "c5",
+          "sequence": 5,
+          "authorKind": "user",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "sourceTaskId": "other"
+        },
+        "taskId": "self"
+      },
+      "output": false
+    },
+    {
+      "kind": "cross",
+      "name": "task recipient own",
+      "input": {
+        "comment": {
+          "commentId": "c6",
+          "sequence": 6,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "recipient": {
+            "kind": "task",
+            "taskId": "self"
+          }
+        },
+        "taskId": "self"
+      },
+      "output": true
+    },
+    {
+      "kind": "cross",
+      "name": "user recipient foreign",
+      "input": {
+        "comment": {
+          "commentId": "c7",
+          "sequence": 7,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "recipient": {
+            "kind": "user"
+          },
+          "sourceTaskId": "other"
+        },
+        "taskId": "self"
+      },
+      "output": true
+    },
+    {
+      "kind": "cross",
+      "name": "mirrored question on user",
+      "input": {
+        "comment": {
+          "commentId": "c8",
+          "sequence": 8,
+          "authorKind": "user",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "questionSource": {
+            "taskId": "other",
+            "commentId": "q"
+          }
+        },
+        "taskId": "self"
+      },
+      "output": true
+    },
+    {
+      "kind": "cross",
+      "name": "null mirrored source",
+      "input": {
+        "comment": {
+          "commentId": "c9",
+          "sequence": 9,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "questionSource": null
+        },
+        "taskId": "self"
+      },
+      "output": false
+    },
+    {
+      "kind": "cross",
+      "name": "empty object mirrored source",
+      "input": {
+        "comment": {
+          "commentId": "c10",
+          "sequence": 10,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "questionSource": {}
+        },
+        "taskId": "self"
+      },
+      "output": true
+    },
+    {
+      "kind": "cross",
+      "name": "lossless exact source",
+      "input": {
+        "comment": {
+          "commentId": "c11",
+          "sequence": 11,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "sourceTaskId": "self-\ud800"
+        },
+        "taskId": "self-\ud800"
+      },
+      "output": false
+    },
+    {
+      "kind": "cross",
+      "name": "lossless different source",
+      "input": {
+        "comment": {
+          "commentId": "c12",
+          "sequence": 12,
+          "authorKind": "agent",
+          "purpose": "update",
+          "body": "Fixture",
+          "requests": [],
+          "responses": [],
+          "replyTo": null,
+          "sourceTaskId": "self-\udfff"
+        },
+        "taskId": "self-\ud800"
+      },
+      "output": true
+    },
+    {
+      "kind": "unread",
+      "name": "unread all",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self"
+      },
+      "output": {
+        "unreadAgentComments": 6,
+        "unreadDirectAgentComments": 3
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "explicit zero",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readAgentCommentCount": 0,
+          "readDirectAgentCommentCount": 0
+        }
+      },
+      "output": {
+        "unreadAgentComments": 6,
+        "unreadDirectAgentComments": 3
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "legacy first direct",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readAgentCommentCount": 1
+        }
+      },
+      "output": {
+        "unreadAgentComments": 5,
+        "unreadDirectAgentComments": 2
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "legacy includes cross and self",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readAgentCommentCount": 3
+        }
+      },
+      "output": {
+        "unreadAgentComments": 3,
+        "unreadDirectAgentComments": 1
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "legacy whole prefix",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readAgentCommentCount": 99
+        }
+      },
+      "output": {
+        "unreadAgentComments": 0,
+        "unreadDirectAgentComments": 0
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "direct cursor independent",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readDirectAgentCommentCount": 2
+        }
+      },
+      "output": {
+        "unreadAgentComments": 4,
+        "unreadDirectAgentComments": 1
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "direct cursor exceeds total",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readDirectAgentCommentCount": 99
+        }
+      },
+      "output": {
+        "unreadAgentComments": 3,
+        "unreadDirectAgentComments": 0
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "max of both cursors",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readAgentCommentCount": 3,
+          "readDirectAgentCommentCount": 1
+        }
+      },
+      "output": {
+        "unreadAgentComments": 3,
+        "unreadDirectAgentComments": 1
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "cross unread after direct cursor",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c13",
+              "sequence": 13,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c14",
+              "sequence": 14,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c15",
+              "sequence": 15,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "other"
+            },
+            {
+              "commentId": "c16",
+              "sequence": 16,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c17",
+              "sequence": 17,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "sourceTaskId": "self"
+            },
+            {
+              "commentId": "c18",
+              "sequence": 18,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c19",
+              "sequence": 19,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "questionSource": {
+                "taskId": "other"
+              }
+            },
+            {
+              "commentId": "c20",
+              "sequence": 20,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readAgentCommentCount": 2,
+          "readDirectAgentCommentCount": 99
+        }
+      },
+      "output": {
+        "unreadAgentComments": 2,
+        "unreadDirectAgentComments": 0
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "empty comments",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self",
+        "state": {
+          "readAgentCommentCount": 1
+        }
+      },
+      "output": {
+        "unreadAgentComments": 0,
+        "unreadDirectAgentComments": 0
+      }
+    },
+    {
+      "kind": "unread",
+      "name": "no agent comments",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c21",
+              "sequence": 21,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c22",
+              "sequence": 22,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self"
+      },
+      "output": {
+        "unreadAgentComments": 0,
+        "unreadDirectAgentComments": 0
+      }
+    },
+    {
+      "kind": "handoff",
+      "name": "no handoff",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c23",
+              "sequence": 23,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": null
+    },
+    {
+      "kind": "handoff",
+      "name": "exact run excludes others",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c24",
+              "sequence": 24,
+              "authorKind": "agent",
+              "purpose": "handoff",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "run": {
+                "objectId": "other",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c25",
+              "sequence": 25,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": null
+    },
+    {
+      "kind": "handoff",
+      "name": "last array entry wins across revision and author",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c26",
+              "sequence": 26,
+              "authorKind": "agent",
+              "purpose": "handoff",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "run": {
+                "objectId": "run",
+                "revision": 9
+              }
+            },
+            {
+              "commentId": "c27",
+              "sequence": 1,
+              "authorKind": "user",
+              "purpose": "handoff",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "commentId": "c27",
+        "sequence": 1,
+        "authorKind": "user",
+        "purpose": "handoff",
+        "body": "Fixture",
+        "requests": [],
+        "responses": [],
+        "replyTo": null,
+        "run": {
+          "objectId": "run",
+          "revision": 1
+        }
+      }
+    },
+    {
+      "kind": "handoff",
+      "name": "lossless handoff run",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c28",
+              "sequence": 28,
+              "authorKind": "agent",
+              "purpose": "handoff",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "run": {
+                "objectId": "run-\ud800",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run-\ud800"
+      },
+      "output": {
+        "commentId": "c28",
+        "sequence": 28,
+        "authorKind": "agent",
+        "purpose": "handoff",
+        "body": "Fixture",
+        "requests": [],
+        "responses": [],
+        "replyTo": null,
+        "run": {
+          "objectId": "run-\ud800",
+          "revision": 1
+        }
+      }
+    },
+    {
+      "kind": "queuedUser",
+      "name": "empty",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": false
+    },
+    {
+      "kind": "queuedUser",
+      "name": "queued user",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c29",
+              "sequence": 29,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c29",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": true
+    },
+    {
+      "kind": "queuedUser",
+      "name": "delivered user",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c29",
+              "sequence": 29,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c29",
+              "state": "delivered"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": false
+    },
+    {
+      "kind": "queuedUser",
+      "name": "queued agent",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c30",
+              "sequence": 30,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c30",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": false
+    },
+    {
+      "kind": "queuedUser",
+      "name": "missing user comment",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c29",
+              "sequence": 29,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "missing",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": false
+    },
+    {
+      "kind": "queuedUser",
+      "name": "mixed user queue",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c29",
+              "sequence": 29,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c30",
+              "sequence": 30,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c30",
+              "state": "queued"
+            },
+            {
+              "commentId": "c29",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": true
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "empty",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": []
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "exact edit",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c31",
+              "sequence": 31,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c31",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": [
+        "c31"
+      ]
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "delivered edit",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c31",
+              "sequence": 31,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c31",
+              "state": "delivered"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": []
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "agent text is not edit",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c32",
+              "sequence": 32,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c32",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": []
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "native marker excluded",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c33",
+              "sequence": 33,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              }
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c33",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": []
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "case sensitive edit",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c34",
+              "sequence": 34,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c34",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": []
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "missing edit comment",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c31",
+              "sequence": 31,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "missing",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": []
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "delivery order and duplicates",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c31",
+              "sequence": 31,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c34",
+              "sequence": 34,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c31",
+              "state": "queued"
+            },
+            {
+              "commentId": "c34",
+              "state": "queued"
+            },
+            {
+              "commentId": "c31",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": [
+        "c31",
+        "c31"
+      ]
+    },
+    {
+      "kind": "queuedEdits",
+      "name": "null native marker",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c31",
+              "sequence": 31,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Ticket edited",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": null
+            }
+          ],
+          "commentDeliveries": [
+            {
+              "commentId": "c31",
+              "state": "queued"
+            }
+          ],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        }
+      },
+      "output": [
+        "c31"
+      ]
+    },
+    {
+      "kind": "questions",
+      "name": "empty",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "own user question",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c35"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "foreign source question",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              },
+              "sourceTaskId": "other"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "user addressed answer",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c39",
+              "sequence": 39,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c35"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "worker answer does not close user question",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c40",
+              "sequence": 40,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c35"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c35"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "unrelated handoff does not answer",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c41",
+              "sequence": 41,
+              "authorKind": "agent",
+              "purpose": "handoff",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c35"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "earlier reply cannot close later question",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c42",
+              "sequence": 42,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c35"
+            },
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c35"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "explicit resolution closes",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c43",
+              "sequence": 43,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "resolvesQuestions": [
+                "c35"
+              ]
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "task recipient remains open on user reply",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c36",
+              "sequence": 36,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            },
+            {
+              "commentId": "c44",
+              "sequence": 44,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c36"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c36"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "task recipient exact source reply",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c36",
+              "sequence": 36,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            },
+            {
+              "commentId": "c45",
+              "sequence": 45,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c36",
+              "sourceTaskId": "parent"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "wrong source does not close task question",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c36",
+              "sequence": 36,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            },
+            {
+              "commentId": "c46",
+              "sequence": 46,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c36",
+              "sourceTaskId": "other"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c36"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "requests all answered across later comments",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c38",
+              "sequence": 38,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [
+                {
+                  "requestId": "r1"
+                },
+                {
+                  "requestId": "r2"
+                }
+              ],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c47",
+              "sequence": 47,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [
+                {
+                  "requestId": "r1"
+                }
+              ],
+              "replyTo": null
+            },
+            {
+              "commentId": "c48",
+              "sequence": 48,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [
+                {
+                  "requestId": "r2"
+                }
+              ],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "partial request coverage remains open",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c38",
+              "sequence": 38,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [
+                {
+                  "requestId": "r1"
+                },
+                {
+                  "requestId": "r2"
+                }
+              ],
+              "responses": [],
+              "replyTo": null
+            },
+            {
+              "commentId": "c49",
+              "sequence": 49,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [
+                {
+                  "requestId": "r1"
+                }
+              ],
+              "replyTo": null
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c38"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c38",
+            "sequence": 38,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [
+              {
+                "requestId": "r1"
+              },
+              {
+                "requestId": "r2"
+              }
+            ],
+            "responses": [],
+            "replyTo": null
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c38",
+            "sequence": 38,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [
+              {
+                "requestId": "r1"
+              },
+              {
+                "requestId": "r2"
+              }
+            ],
+            "responses": [],
+            "replyTo": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "native same run open",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c37",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c37"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "native other run filtered",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c37",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "other"
+      },
+      "output": {
+        "openIds": [
+          "c37"
+        ],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "empty run does not filter",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c37",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": ""
+      },
+      "output": {
+        "openIds": [
+          "c37"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "native addressed answer",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c37",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c50",
+              "sequence": 50,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c37",
+              "nativeInput": {
+                "state": "answered",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "native expiration",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c37",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c51",
+              "sequence": 51,
+              "authorKind": "system",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c37",
+              "nativeInput": {
+                "state": "expired",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [],
+        "unanswered": false
+      },
+      "resolverViews": {
+        "all": [],
+        "run": []
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "native plain user reply is not native completion",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c37",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c52",
+              "sequence": 52,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c37"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c37"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "native wrong state remains open",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c37",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c53",
+              "sequence": 53,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c37",
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c37"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "native explicit resolution alone stays open",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c37",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c54",
+              "sequence": 54,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "resolvesQuestions": [
+                "c37"
+              ]
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run"
+      },
+      "output": {
+        "openIds": [
+          "c37"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c37",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "normal question survives different run filter",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "other"
+      },
+      "output": {
+        "openIds": [
+          "c35"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "questions",
+      "name": "lossless question and run identity",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "q-\udfff",
+              "sequence": 37,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "nativeInput": {
+                "state": "pending",
+                "serviceNodeId": "agent",
+                "requestId": "input",
+                "connectionEpoch": "epoch",
+                "inputToken": "token"
+              },
+              "run": {
+                "objectId": "run-\ud800",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "runId": "run-\ud800"
+      },
+      "output": {
+        "openIds": [
+          "q-\udfff"
+        ],
+        "unanswered": true
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "q-\udfff",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run-\ud800",
+              "revision": 1
+            }
+          }
+        ],
+        "run": [
+          {
+            "commentId": "q-\udfff",
+            "sequence": 37,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "nativeInput": {
+              "state": "pending",
+              "serviceNodeId": "agent",
+              "requestId": "input",
+              "connectionEpoch": "epoch",
+              "inputToken": "token"
+            },
+            "run": {
+              "objectId": "run-\ud800",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "bridge",
+      "name": "open local user gate",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c35"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self"
+      },
+      "output": {
+        "summary": {
+          "directCount": 1,
+          "questions": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "open": true,
+              "recipient": {
+                "kind": "user"
+              }
+            }
+          ]
+        },
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c35"
+                }
+              ]
+            },
+            "fingerprint": "sha256:a78d34b36311662d677ed3aa2ba6511ed96437dba86171e45b20326110117f1e",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "question",
+                "questionId": "c35"
+              }
+            ],
+            "needsUser": true
+          }
+        ],
+        "condition": {
+          "state": "needs_user",
+          "detail": "The remaining next steps require an answer to this ticket's own question."
+        }
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "bridge",
+      "name": "answered local user gate",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            },
+            {
+              "commentId": "c55",
+              "sequence": 55,
+              "authorKind": "user",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c35"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c35"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self"
+      },
+      "output": {
+        "summary": {
+          "directCount": 2,
+          "questions": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "open": false,
+              "recipient": {
+                "kind": "user"
+              }
+            }
+          ]
+        },
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c35"
+                }
+              ]
+            },
+            "fingerprint": "sha256:b5f63ba44b235f65dbc06214505602be169119feec19321e372d7d04eb753201",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "resolverViews": {
+        "all": []
+      }
+    },
+    {
+      "kind": "bridge",
+      "name": "open addressed task gate",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c36",
+              "sequence": 36,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c36"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self"
+      },
+      "output": {
+        "summary": {
+          "directCount": 0,
+          "questions": [
+            {
+              "commentId": "c36",
+              "sequence": 36,
+              "open": true,
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            }
+          ]
+        },
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c36"
+                }
+              ]
+            },
+            "fingerprint": "sha256:1f9917d13520a98fae60f91f8473cb71f9ee5309caed26bad8ab9609a3082fc7",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "question",
+                "questionId": "c36"
+              }
+            ],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "blocked_dependency",
+          "detail": "Waiting for another ticket or its named delivery."
+        }
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c36",
+            "sequence": 36,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "task",
+              "taskId": "parent"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "bridge",
+      "name": "answered task gate",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c36",
+              "sequence": 36,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            },
+            {
+              "commentId": "c56",
+              "sequence": 56,
+              "authorKind": "agent",
+              "purpose": "update",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": "c36",
+              "sourceTaskId": "parent"
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c36"
+                }
+              ]
+            }
+          ],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self"
+      },
+      "output": {
+        "summary": {
+          "directCount": 0,
+          "questions": [
+            {
+              "commentId": "c36",
+              "sequence": 36,
+              "open": false,
+              "recipient": {
+                "kind": "task",
+                "taskId": "parent"
+              }
+            }
+          ]
+        },
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c36"
+                }
+              ]
+            },
+            "fingerprint": "sha256:efcc2a1339b0aa6ee2abf72a11276ef726ed5ab01931a89c3b03f97a38db53a6",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "resolverViews": {
+        "all": []
+      }
+    },
+    {
+      "kind": "bridge",
+      "name": "independent step with open question",
+      "input": {
+        "task": {
+          "taskKey": "TASK-0001",
+          "workflowState": "todo",
+          "fields": {
+            "title": "Fixture",
+            "category": null,
+            "control": "agent",
+            "priority": 2,
+            "executionRequirement": null,
+            "dueAt": null
+          },
+          "comments": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "authorKind": "agent",
+              "purpose": "question",
+              "body": "Fixture",
+              "requests": [],
+              "responses": [],
+              "replyTo": null,
+              "recipient": {
+                "kind": "user"
+              },
+              "run": {
+                "objectId": "run",
+                "revision": 1
+              }
+            }
+          ],
+          "commentDeliveries": [],
+          "nextSteps": [
+            {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c35"
+                }
+              ]
+            },
+            {
+              "id": "independent",
+              "scope": "Independent authorized work.",
+              "requires": []
+            }
+          ],
+          "consumedSteps": [],
+          "claim": null,
+          "publication": null,
+          "runtimeWait": null,
+          "completionIssue": null
+        },
+        "taskId": "self"
+      },
+      "output": {
+        "summary": {
+          "directCount": 1,
+          "questions": [
+            {
+              "commentId": "c35",
+              "sequence": 35,
+              "open": true,
+              "recipient": {
+                "kind": "user"
+              }
+            }
+          ]
+        },
+        "assessments": [
+          {
+            "step": {
+              "id": "question",
+              "scope": "Address this question.",
+              "requires": [
+                {
+                  "kind": "question",
+                  "questionId": "c35"
+                }
+              ]
+            },
+            "fingerprint": "sha256:a78d34b36311662d677ed3aa2ba6511ed96437dba86171e45b20326110117f1e",
+            "ready": false,
+            "consumed": false,
+            "pending": [
+              {
+                "kind": "question",
+                "questionId": "c35"
+              }
+            ],
+            "needsUser": true
+          },
+          {
+            "step": {
+              "id": "independent",
+              "scope": "Independent authorized work.",
+              "requires": []
+            },
+            "fingerprint": "sha256:c03bdd50feeb2df6b5aebecef283524bd9ac2736e1c9eab750d4cef7e34f20dd",
+            "ready": true,
+            "consumed": false,
+            "pending": [],
+            "needsUser": false
+          }
+        ],
+        "condition": {
+          "state": "queued",
+          "detail": "An authorized next step is ready."
+        }
+      },
+      "resolverViews": {
+        "all": [
+          {
+            "commentId": "c35",
+            "sequence": 35,
+            "authorKind": "agent",
+            "purpose": "question",
+            "body": "Fixture",
+            "requests": [],
+            "responses": [],
+            "replyTo": null,
+            "recipient": {
+              "kind": "user"
+            },
+            "run": {
+              "objectId": "run",
+              "revision": 1
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

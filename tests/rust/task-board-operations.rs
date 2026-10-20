@@ -35,6 +35,8 @@ mod next_steps;
 mod comment_reads;
 #[path = "../fixtures/task-board-condition.rs"]
 mod condition_policy;
+#[path = "../fixtures/task-board-conversation.rs"]
+mod conversation_policy;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()
