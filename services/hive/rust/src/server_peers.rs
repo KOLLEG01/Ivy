@@ -846,6 +846,62 @@ impl Peers {
         }
         Ok(())
     }
+    pub fn clear_authentication(&self) {
+        (self.0.owners.clear_authentication)();
+    }
+    pub fn restore_diagnostics(&self, values: &IvyJson) -> IvyResult<()> {
+        self.0
+            .owners
+            .diagnostics
+            .lock()
+            .unwrap()
+            .restore(values.as_array().ok_or_else(IvyError::internal)?)
+    }
+    /// The storage client already owns private notification admission.
+    pub fn routing_update(&self, value: &IvyJson) -> IvyResult<()> {
+        self.0.owners.routing.lock().unwrap().update(
+            value.required("node")?,
+            value.get("generation").and_then(IvyJson::as_f64),
+            value.get("catalog"),
+        )
+    }
+    /// Invoked only after storage accepts the replacement and the HTTP cache,
+    /// configured credentials and OAuth indexes have changed in that order.
+    pub fn retire_credentials(&self, credentials: &[crate::store::Credential]) -> IvyResult<()> {
+        self.0
+            .owners
+            .routing
+            .lock()
+            .unwrap()
+            .retire_unconfigured_principals(
+                &credentials
+                    .iter()
+                    .map(|value| value.principal_id.clone())
+                    .collect::<Vec<_>>(),
+            );
+        for peer in self.members() {
+            let context = peer.context();
+            if !credentials.iter().any(|value| {
+                context.get("credentialDigest") == Some(&IvyJson::String(value.digest.clone()))
+            }) {
+                if truthy(context.get("serviceNodeId")) && truthy(context.get("generation")) {
+                    if let (Some(id), Some(generation)) = (
+                        context.get("serviceNodeId").and_then(IvyJson::as_js_string),
+                        context.get("generation").and_then(IvyJson::as_f64),
+                    ) {
+                        self.0
+                            .owners
+                            .routing
+                            .lock()
+                            .unwrap()
+                            .disconnect(id, generation);
+                    }
+                }
+                peer.terminate()?;
+            }
+        }
+        Ok(())
+    }
     /// Returns true only when the executor must schedule a publication turn.
     /// Browser push is awakened even for an invalid hint or a stopped server.
     pub fn events_available(&self, through: f64) -> bool {
