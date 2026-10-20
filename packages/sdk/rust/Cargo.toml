@@ -55,6 +55,10 @@ name = "sdk-fetch-credentials"
 path = "../../../tests/rust/sdk-fetch-credentials.rs"
 
 [[test]]
+name = "sdk-fetch-response"
+path = "../../../tests/rust/sdk-fetch-response.rs"
+
+[[test]]
 name = "sdk-native-project"
 path = "../../../tests/rust/sdk-native-project.rs"
 

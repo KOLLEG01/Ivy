@@ -218,6 +218,7 @@ struct Inner {
     base: reqwest::Url,
     http: reqwest::Client,
     credential: Option<Credential>,
+    global_fetch_response: bool,
     queue: Option<Arc<RequestQueue>>,
     active: Arc<Semaphore>,
 }
@@ -228,10 +229,10 @@ pub struct HiveClient {
 }
 impl HiveClient {
     pub fn new(value: &str, options: ClientOptions) -> IvyResult<Self> {
-        Self::configured(value, options, Credential::Text)
+        Self::configured(value, options, Credential::Text, false)
     }
-    /// Retain JavaScript credential units until each fetch-style dispatch.
-    /// Other HTTP/TLS behavior uses the shared native transport.
+    /// Retain JavaScript credentials until fetch-style dispatch and preserve
+    /// fetch redirect/null-body handling. Other HTTP/TLS behavior is shared.
     pub fn new_js(
         value: &crate::JsString,
         options: ClientOptions<crate::JsString>,
@@ -240,12 +241,14 @@ impl HiveClient {
             &String::from_utf16_lossy(&value.0),
             options,
             Credential::Fetch,
+            true,
         )
     }
     fn configured<C>(
         value: &str,
         options: ClientOptions<C>,
         credential: impl FnOnce(C) -> Credential,
+        global_fetch_response: bool,
     ) -> IvyResult<Self> {
         let base = base_url(value)?;
         let maximum = options
@@ -277,6 +280,7 @@ impl HiveClient {
             base,
             http,
             credential: options.credential.map(credential),
+            global_fetch_response,
             queue,
             active: Arc::new(Semaphore::new(CONNECTION_IN_FLIGHT_REQUESTS)),
         });
@@ -332,7 +336,13 @@ impl HiveClient {
             _ => (),
         }
         let response = request.send().await.map_err(|_| unknown())?;
-        if response.status().is_redirection() {
+        if self.inner.global_fetch_response {
+            match response.status().as_u16() {
+                301 | 302 | 303 | 307 | 308 => return Err(unknown()),
+                204 | 205 | 304 => return Err(invalid("Hive returned no response body.")),
+                _ => (),
+            }
+        } else if response.status().is_redirection() {
             return Err(unknown());
         }
         let mut stream = response.bytes_stream();
