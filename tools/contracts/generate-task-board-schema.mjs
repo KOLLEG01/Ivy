@@ -134,7 +134,8 @@ Object.assign(defs, {
   OperationReceiptQuery: obj({ operationId: id, receiptOnly: { const: true } }),
   CategoriesQuery: obj({ categories: { const: true } }), CategoriesResult: obj({ categories: array(str(128, 1), 256) }),
   TaskQuery: obj({ task: { anyOf: [id, obj({ taskKey: id })] }, view: { const: 'card' },
-    comments: obj({ offset: integer(), limit: integer(1, 100), questionsOnly: bool }, ['offset', 'limit']) }, ['task']),
+    comments: { ...obj({ offset: integer(), before: integer(1), limit: integer(1, 100), questionsOnly: bool }, ['limit']),
+      description: 'Defaults to the latest 50 comments, newest first. Use before=commentPage.nextBefore to read older messages without gaps when new messages arrive. null nextBefore ends the history. questionsOnly selects unresolved questions; offset retains ascending positional reads.' } }, ['task']),
   TaskListQuery: obj({
     parentTaskId: { ...id, description: 'List unarchived tasks delegated by this parent task, including separate worktrees and hosts.' },
     relatedTo: { ...id, description: 'Find other allocated tasks sharing this task canonical working directory and host. Separate worktrees do not match. Read peer tickets before coordinating.' },
@@ -148,12 +149,14 @@ Object.assign(defs, {
   MarkCommentsReadRequest: obj({ operationId: id, taskId: id, expectedTaskRevision: integer(1), includeCrossAgent: bool }, ['operationId', 'taskId', 'expectedTaskRevision']),
   MarkCommentsReadResult: obj({ task: ref('ObjectPin'), readState: ref('ObjectPin'), unreadAgentComments: integer(), unreadDirectAgentComments: integer() }),
   ExecutionCondition: obj({ state: { enum: ['idle', 'queued', 'allocating', 'starting', 'active', 'needs_user', 'deferred', 'blocked_dependency', 'blocked_environment', 'recovering', 'outcome_unknown', 'publishing', 'workflow_attention', 'failed'] }, detail: str(2048) }),
-  TaskView: obj({ object: ref('ObjectPin'), task: ref('Task'), executionCondition: ref('ExecutionCondition'), unreadAgentComments: integer(), unreadDirectAgentComments: integer() }),
+  TaskView: obj({ object: ref('ObjectPin'), task: ref('Task'), executionCondition: ref('ExecutionCondition'),
+    archived: bool }, ['object', 'task', 'executionCondition']),
   TaskCard: obj({ taskKey: id, fields: ref('TaskCardFields'), workflowState: { enum: workflowStates },
-    claim: nullable(ref('Claim')), publication: nullable(ref('ObjectPin')), latestResult: nullable(ref('ObjectPin')),
-    openQuestionCount: integer() }),
+    claim: nullable(obj({ phase: { enum: ['claimed', 'run_created', 'starting', 'running', 'waiting_input', 'publishing_result', 'cancel_requested', 'outcome_unknown'] }, target: ref('Target') })),
+    publication: nullable(ref('ObjectPin')), latestResult: nullable(ref('ObjectPin')),
+    openQuestionCount: integer(), nextStepAt: nullable(timestamp) }),
   TaskCardView: obj({ object: ref('ObjectPin'), task: ref('TaskCard'), executionCondition: ref('ExecutionCondition'),
-    unreadAgentComments: integer(), unreadDirectAgentComments: integer(), commentCount: integer(), directCommentCount: integer() }),
+    commentCount: integer(), directCommentCount: integer() }),
   ReadResult: { anyOf: [ref('TaskView'), ref('TaskCardView')] },
 });
 defs.CommentActionRequest.required = defs.CommentActionRequest.required.filter(key => key !== 'agentDelivery');
@@ -358,8 +361,8 @@ defs.RuntimeWait = obj({ reason: { enum: ['host', 'capability', 'workspace', 'ex
 Object.assign(defs.Task.properties, { nextSteps: array(ref('NextStep'), 32), runtimeWait: nullable(ref('RuntimeWait')),
   consumedSteps: array(ref('StepObservation'), 64) });
 defs.Task.required.push('nextSteps', 'runtimeWait');
-Object.assign(defs.TaskCard.properties, { nextSteps: array(ref('NextStep'), 32), runtimeWait: nullable(ref('RuntimeWait')) });
-defs.TaskCard.required.push('nextSteps', 'runtimeWait');
+Object.assign(defs.TaskCard.properties, { runtimeWait: nullable(ref('RuntimeWait')) });
+defs.TaskCard.required.push('runtimeWait');
 defs.Handoff = obj({ workflowState: { enum: ['review', 'waiting', 'todo'] }, nextSteps: array(ref('NextStep'), 32),
   deliveries: array(ref('WorkDelivery'), 32) }, ['workflowState', 'nextSteps']);
 defs.Comment.properties.handoff = ref('Handoff');
@@ -374,10 +377,14 @@ for (const name of ['StartRequest', 'ContinueRequest']) {
 defs.ExecutionContext = obj({ workflowState: { enum: workflowStates }, nextSteps: array(ref('NextStep'), 32),
   latestResult: nullable(ref('ObjectPin')), acceptedReview: nullable(ref('ObjectPin')) });
 defs.Run.properties.executionContext = ref('ExecutionContext');
-contractVersions.task = '2.2.0';
+contractVersions.task = '2.3.0';
+defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0');
+// Exact evidence pins are already paged; the ticket metadata byte budget is the storage bound.
+delete defs.Task.properties.attachments.maxItems;
 contractVersions.run = '2.2.0';
 contractVersions.result = '2.2.0';
-defs.TaskView.properties.commentPage = obj({ total: integer(), offset: integer(), nextOffset: nullable(integer()) });
+defs.TaskView.properties.commentPage = obj({ total: integer(), offset: integer(), nextOffset: nullable(integer()),
+  nextBefore: nullable(integer(1)), order: { enum: ['asc', 'desc'] } }, ['total', 'offset', 'nextOffset']);
 defs.TaskView.properties.openQuestions = array(ref('Comment'));
 const when = (key, value, properties) => ({ if: { properties: { [key]: { const: value } } }, then: { properties } });
 defs.Task.allOf = [

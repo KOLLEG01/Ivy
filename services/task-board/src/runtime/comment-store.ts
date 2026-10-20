@@ -2,13 +2,29 @@ import { canonical, hashJson, jsonObjectContentBytes, requireThat } from '../../
 import type { TaskBoard, Wire } from '../../../../packages/sdk/src/node.js';
 import type { RpcClient } from '../../../../packages/sdk/src/client.js';
 import { CommentReader, commentNodeKey } from '../../../../packages/sdk/src/task-comments.js';
-import type { CommentNode, CommentIndex, CommentTree } from '../../../../packages/sdk/src/task-comments.js';
+import type { CommentNode, CommentIndex, CommentTree, CommentSummary } from '../../../../packages/sdk/src/task-comments.js';
+import { crossAgentComment, openQuestions } from './conversation.js';
 
 export const commentContractKey = 'task-board/comments';
 type CommentState = Pick<TaskBoard.Comment, 'commentId' | 'nativeInput' | 'handoff' | 'delivery'>;
 type CommentReference = { objectId: string; length: number; nativeInputs: CommentState[] };
 type StoredTask = TaskBoard.Task & { commentStore?: CommentReference };
 type TreeTask = TaskBoard.Task & { commentStore: CommentTree };
+const referencedQuestions = (task: TaskBoard.Task) => task.nextSteps.flatMap(step => step.requires.flatMap(condition =>
+  condition.kind === 'question' || condition.kind === 'user' ? [condition.questionId] : []));
+
+export function commentSummary(task: TaskBoard.Task, taskId: string): CommentSummary {
+  const open = new Set(openQuestions(task).map(question => question.commentId));
+  const referenced = new Set(referencedQuestions(task));
+  return {
+    directCount: task.comments.filter(comment => !crossAgentComment(comment, taskId)).length,
+    questions: task.comments.filter(comment => comment.purpose === 'question' && !comment.sourceTaskId &&
+      (open.has(comment.commentId) || referenced.has(comment.commentId))).map(comment => ({
+        commentId: comment.commentId, sequence: comment.sequence, open: open.has(comment.commentId),
+        ...(comment.recipient ? { recipient: comment.recipient } : {}),
+      })),
+  };
+}
 
 function taskHeader(task: TaskBoard.Task, commentObjectId: string): StoredTask {
   return { ...task, comments: [], commentStore: { objectId: commentObjectId, length: task.comments.length,
@@ -28,6 +44,15 @@ export function validateTaskContent(task: TaskBoard.Task, taskId: string): void 
 export class TaskComments {
   private readonly reader: CommentReader;
   private readonly pins = new Map<string, TaskBoard.ObjectPin>();
+  // Active runs may retain the previous header contract until their next publication.
+  // Cache only small projections, keyed by immutable history and the referenced gates.
+  private readonly summaries = new Map<string, CommentSummary>();
+  private summaryKey(task: TaskBoard.Task, tree: CommentTree, taskId: string) {
+    return hashJson({ taskId, root: tree.root, questions: [...new Set(referencedQuestions(task))].sort() });
+  }
+  summary(task: TaskBoard.Task, tree: CommentTree, taskId: string): CommentSummary | undefined {
+    return tree.summary ?? this.summaries.get(this.summaryKey(task, tree, taskId));
+  }
   constructor(private readonly client: RpcClient, private readonly identity: (scope: string) => Promise<string>) {
     this.reader = new CommentReader(client);
     const read = this.reader.node.bind(this.reader);
@@ -42,14 +67,26 @@ export class TaskComments {
     this.pins.set(hash, pin);
   }
 
+  range(tree: CommentTree, taskId: string, start: number, end: number) {
+    return this.reader.range(tree, taskId, start, end);
+  }
+
   async read(value: Wire.Json, taskId: string): Promise<TaskBoard.Task> {
     const task = value as unknown as StoredTask;
     if (!task.commentStore) return task;
     if ('kind' in task.commentStore) {
       const { commentStore, ...header } = task as unknown as TreeTask;
       const entries = await this.reader.range(commentStore, taskId);
-      return { ...header, comments: entries.map(entry => entry.comment),
+      const full = { ...header, comments: entries.map(entry => entry.comment),
         commentDeliveries: entries.flatMap(entry => entry.receipt ? [entry.receipt] : []) };
+      if (!commentStore.summary) {
+        const summary = commentSummary(full, taskId);
+        if (Buffer.byteLength(JSON.stringify(summary)) <= 64 * 1024) {
+          if (this.summaries.size >= 128) this.summaries.delete(this.summaries.keys().next().value!);
+          this.summaries.set(this.summaryKey(full, commentStore, taskId), summary);
+        }
+      }
+      return full;
     }
     const { commentStore: reference, ...header } = task;
     const object = await this.client.request('objects.read', { objectId: reference.objectId });
@@ -67,8 +104,8 @@ export class TaskComments {
     return { ...header, comments };
   }
 
-  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '2.2.0'): Promise<StoredTask | TreeTask> {
-    if (contractVersion !== '2.2.0') return this.writeRetained(task, taskId, scope, contractVersion);
+  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '2.3.0'): Promise<StoredTask | TreeTask> {
+    if (!['2.2.0', '2.3.0'].includes(contractVersion)) return this.writeRetained(task, taskId, scope, contractVersion);
     const current = await this.client.request('objects.read', { objectId: taskId });
     requireThat(current.content.encoding === 'json' && current.object.contractKey === 'task-board/task',
       'task_board_contract_mismatch', 'A conversation needs its owning ticket.');
@@ -120,7 +157,8 @@ export class TaskComments {
       level = parents;
     }
     return { ...task, comments: [], commentDeliveries: [],
-      commentStore: { kind: 'tree', root: level[0] ?? null, length: task.comments.length } };
+      commentStore: { kind: 'tree', root: level[0] ?? null, length: task.comments.length,
+        ...(contractVersion === '2.3.0' ? { summary: commentSummary(task, taskId) } : {}) } };
   }
 
   private async writeRetained(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string): Promise<StoredTask> {

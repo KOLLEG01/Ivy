@@ -28,14 +28,13 @@ import {
   StatusBadge,
 } from "@ivy/ui";
 import { usePage } from "../../../packages/ui-client/src/runtime";
-import { nativeRead } from "../../../packages/ui-client/src/native";
+import { readCard } from './card-read';
 import { mapConcurrent } from '../../../packages/ui-client/src/concurrency';
 import { useCommentVisibility } from './comment-visibility';
 import { and, base, client, taskContractVersions, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
 import {
-  nextStepTime,
   conditionLabel,
   conditionTone,
   noteworthyCondition,
@@ -118,7 +117,7 @@ const pages = usePage(async (signal, cursor) => {
     result.items.push(...page.items); result.nextCursor = page.nextCursor;
   }
   const items = await mapConcurrent(result.items, async item => {
-    const view = await nativeRead(client, props.workspace.serviceNodeId, 'task-board.read', { task: item.objectId, view: 'card' }, signal) as TaskBoard.TaskCardView;
+    const view = await readCard(props.workspace.serviceNodeId, item.objectId, item.revision, signal);
     const task = view.task, fields = task.fields;
     return {
       id: item.objectId, taskKey: task.taskKey, title: fields.title, category: fields.category ?? '',
@@ -126,9 +125,8 @@ const pages = usePage(async (signal, cursor) => {
       requestedEnvironment: fields.executionRequirement?.kind === 'host' ? fields.executionRequirement.hostId : '',
       resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
       conditionDetail: view.executionCondition.detail, openQuestionCount: task.openQuestionCount ?? 0,
-      nextReviewAt: nextStepTime(task) ?? '', dueAt: fields.dueAt ?? '',
+      nextReviewAt: task.nextStepAt ?? '', dueAt: fields.dueAt ?? '',
       commentCount: view.commentCount, directCommentCount: view.directCommentCount,
-      unreadAgentComments: view.unreadAgentComments, unreadDirectAgentComments: view.unreadDirectAgentComments,
       group: waiting ? waitingGroup(task, view.executionCondition) : '',
       context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,
         waiting: task.runtimeWait?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
@@ -161,7 +159,6 @@ const endDrag = () => {
 const lane = (category: string) => category || "Uncategorized";
 const items = computed(() => (pages.value.value?.items ?? []).map(item => ({ ...item,
   commentCount: showCrossAgent.value ? item.commentCount : item.directCommentCount,
-  unreadAgentComments: showCrossAgent.value ? item.unreadAgentComments : item.unreadDirectAgentComments,
 })));
 const groups = computed(() => props.column.id === 'waiting' && !props.archived
   ? waitingGroups.map(group => ({ ...group, items: items.value.filter(item => item.group === group.id) }))
@@ -383,13 +380,7 @@ defineExpose({ refresh: pages.refresh });
             <span
               v-if="task.commentCount"
               class="inline-flex items-center gap-1"
-              :class="task.unreadAgentComments ? 'font-medium text-foreground' : ''"
               :title="task.commentCount + ' comments'"
-              :aria-label="
-                task.unreadAgentComments +
-                ' unread agent comment' +
-                (task.unreadAgentComments === 1 ? '' : 's')
-              "
               ><MessageSquare class="size-3.5" aria-hidden="true" />{{
                 task.commentCount
               }}</span

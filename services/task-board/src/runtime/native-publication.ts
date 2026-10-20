@@ -412,13 +412,9 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
           finalTask.runtimeWait = { reason: 'host', detail: rateLimitWaitingDetail(completion.retryAt), since: at, retryAt: completion.retryAt };
         }
       } else if (completion.state === 'succeeded' && handoffIntent) {
-        if (initial.workflowState === 'review' && !ready) {
-          finalTask.workflowState = 'review'; finalTask.latestResult = initial.latestResult; finalTask.acceptedReview = initial.acceptedReview;
-        } else {
-          finalTask.latestResult = recoveryOnly && !ready ? task.value.latestResult : outcome.result;
-          finalTask.acceptedReview = null;
-          if (!ready) finalTask.workflowState = (await assessSteps(store, finalTask, at)).some(value => value.ready) ? 'todo' : 'waiting';
-        }
+        finalTask.latestResult = recoveryOnly && !ready ? task.value.latestResult : outcome.result;
+        finalTask.acceptedReview = null;
+        if (!ready) finalTask.workflowState = (await assessSteps(store, finalTask, at)).some(value => value.ready) ? 'todo' : 'waiting';
       } else {
         finalTask.latestResult = task.value.latestResult ?? (recoveryOnly ? null : outcome.result);
         finalTask.workflowState = initial.workflowState === 'review' ? 'review' : 'waiting';

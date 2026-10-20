@@ -53,7 +53,7 @@ test('findings in older handoffs survive conversion to next steps', () => {
 });
 
 test('published Task contract definitions stay stable when tool descriptions change', () => {
-  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0'].includes(value.version));
+  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0'].includes(value.version));
   assert.deepEqual(Object.fromEntries(contracts.map(value => [value.version, hashJson(value)])), {
     '1.9.0': 'sha256:d77cdc4472e267298847aed6fa7f207d546fbe96afadc1a379c5a886961164ff',
     '1.8.0': 'sha256:00a22238b737fc5e1f178c5dd239b88aaa2467220c103bf7ff3094772cc70db7',

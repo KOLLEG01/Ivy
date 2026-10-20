@@ -24,7 +24,7 @@ const descriptions: Record<string, string> = {
   archive: 'Archive a ticket and its Codex tasks, or restore it. Restoration reuses the native task when possible and creates a new one only after confirmed failure.',
   operation: 'Read the compact caller-bound original action outcome and submitted request hash by operationId. Native payloads remain at their owning service; a receipt never authorizes replay.',
   operationReceipt: 'Use operationId with receiptOnly=true to read a compact identity-bound outcome even after terminal payload retention. A receipt never authorizes replay.',
-  read: 'Read task content, the latest 50 comments and execution status by object ID or task key. Use comments={offset,limit} to page older messages; questionsOnly=true selects unresolved questions. commentPage carries pagination metadata. view=card returns compact board facts and filtered comment counts without conversation bodies.',
+  read: 'Read task content, execution status and the latest 50 comments, newest first. To read older messages, pass comments={before:commentPage.nextBefore,limit:50}; null nextBefore ends the history. New appends do not shift this sequence cursor. questionsOnly=true pages unresolved questions. view=card reads compact board facts without conversation bodies or per-user read tracking.',
   list: 'List tasks with pagination and optional workflow status, category or parentTaskId filters. parentTaskId finds delegated children across hosts and worktrees. Use relatedTo=<task object ID> to find peers allocated to the same actual working directory on the same host. Separate worktrees are independent.',
   categories: 'List the task categories used in this workspace.',
   workspace: 'Find the Kanban workspace root, caller role and readiness.',

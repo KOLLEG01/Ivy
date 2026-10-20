@@ -90,3 +90,5 @@ export * from "./components/sidebar";
 export * from "./components/combobox";
 export * from "./components/toggle";
 export * from "./components/toggle-group";
+export { default as ScrollLoader } from './patterns/ScrollLoader.vue';
+export { preserveScrollAnchor } from './lib/scroll-anchor';

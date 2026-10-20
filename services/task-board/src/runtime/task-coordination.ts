@@ -22,7 +22,7 @@ export async function peerState(store: TaskBoardStore, task: TaskBoard.Task, tas
     const page = await store.page('task-board/task', { limit: 100, ...(cursor ? { cursor } : {}),
       where: { op: 'in', field: 'data:/workflowState', value: ['todo', 'in_progress', 'waiting', 'review'] } });
     for (const item of page.items) if (item.objectId !== taskId) {
-      const peer = (await store.read('task-board/task', { objectId: item.objectId, revision: item.revision })).value;
+      const peer = (await store.read('task-board/task', { objectId: item.objectId, revision: item.revision }, true, false, true)).value;
       if (await workspaceIdentity(store, peer) === identity) states.push(item.objectId + ':' + peer.workflowState);
     }
     cursor = page.nextCursor ?? undefined;

@@ -19,6 +19,21 @@ const later = () => new Date(Date.now() + 6 * 60 * 60_000).toISOString();
 const appointment = (at = later()): TaskBoard.Handoff => ({ workflowState: 'waiting', nextSteps: [
   { id: 'approval-observation', scope: 'Read external approval status; do not publish or bypass login.', requires: [{ kind: 'time', at }] },
 ] });
+
+test('real work after Review can declare remaining work and return to Waiting', async context => {
+  const workflow = await nativeWorkflow(context); await workflow.running();
+  const first = await finish(workflow, { workflowState: 'review', nextSteps: [
+    { id: 'scheduled-followup', scope: 'Collect a fresh observation before acceptance.', requires: [] },
+  ] });
+  const outcome = await new TaskBoardScheduler(workflow.f.second).task(workflow.state().task.objectId);
+  assert.ok(outcome?.run); workflow.adopt(outcome);
+  await workflow.running();
+  const after = await finish(workflow, appointment());
+  assert.equal(after.workflowState, 'waiting');
+  assert.notDeepEqual(after.latestResult, first.latestResult);
+  assert.equal(after.acceptedReview, null);
+  assert.equal(stepCondition(await assessSteps(workflow.f.first.store, after, new Date().toISOString())).state, 'deferred');
+});
 async function comment(workflow: Workflow, values: Partial<TaskBoard.CommentActionRequest>) {
   await workflow.refresh();
   const { task } = workflow.state();

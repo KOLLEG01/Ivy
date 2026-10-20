@@ -2,6 +2,7 @@ import { hashJson, requireThat, validateTaskBoard } from '../../../../packages/s
 import type { TaskBoard } from '../../../../packages/sdk/src/node.js';
 import type { TaskBoardStore } from './store.js';
 import { openQuestions } from './conversation.js';
+import type { QuestionIndex } from '../../../../packages/sdk/src/task-comments.js';
 
 export interface StepAssessment {
   step: TaskBoard.NextStep;
@@ -12,8 +13,10 @@ export interface StepAssessment {
   needsUser?: boolean;
 }
 
-export async function assessSteps(store: TaskBoardStore, task: TaskBoard.Task, at: string, overrides = new Map<string, TaskBoard.Task>()): Promise<StepAssessment[]> {
-  const questions = new Set(openQuestions(task).map(question => question.commentId));
+export async function assessSteps(store: TaskBoardStore, task: TaskBoard.Task, at: string, overrides = new Map<string, TaskBoard.Task>(), index?: QuestionIndex[]): Promise<StepAssessment[]> {
+  const questions = new Set(index ? index.filter(question => question.open).map(question => question.commentId) :
+    openQuestions(task).map(question => question.commentId));
+  const ownQuestions = index ?? task.comments.filter(comment => comment.purpose === 'question' && !comment.sourceTaskId);
   const sources = new Map<string, Promise<TaskBoard.Task>>();
   const source = (taskId: string) => {
     if (overrides.has(taskId)) return Promise.resolve(overrides.get(taskId)!);
@@ -28,7 +31,7 @@ export async function assessSteps(store: TaskBoardStore, task: TaskBoard.Task, a
       let satisfied = false, observation: unknown = condition;
       if (condition.kind === 'time') satisfied = condition.at <= at;
       else if (condition.kind === 'user' || condition.kind === 'question') {
-        requireThat(task.comments.some(comment => comment.commentId === condition.questionId && comment.purpose === 'question' && !comment.sourceTaskId),
+        requireThat(ownQuestions.some(comment => comment.commentId === condition.questionId),
           'task_board_comment_mismatch', 'A user condition must identify a question owned by this ticket.');
         satisfied = !questions.has(condition.questionId);
         observation = { condition, resolved: satisfied };
@@ -50,7 +53,7 @@ export async function assessSteps(store: TaskBoardStore, task: TaskBoard.Task, a
     const fingerprint = hashJson({ step, observations });
     const consumed = task.consumedSteps?.some(value => value.stepId === step.id && value.fingerprint === fingerprint) ?? false;
     const needsUser = pending.some(condition => (condition.kind === 'user' || condition.kind === 'question') &&
-      task.comments.find(comment => comment.commentId === condition.questionId)?.recipient?.kind !== 'task');
+      ownQuestions.find(comment => comment.commentId === condition.questionId)?.recipient?.kind !== 'task');
     return { step, fingerprint, ready: pending.length === 0 && !consumed, consumed, pending, needsUser };
   }));
 }

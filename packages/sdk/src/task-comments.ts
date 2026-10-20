@@ -3,7 +3,9 @@ import type { RpcClient } from './client.js';
 
 export type CommentEntry = { comment: TaskBoard.Comment; receipt: TaskBoard.CommentDelivery | null };
 export type CommentIndex = { object: TaskBoard.ObjectPin; length: number };
-export type CommentTree = { kind: 'tree'; root: CommentIndex | null; length: number };
+export type QuestionIndex = { commentId: string; sequence: number; recipient?: TaskBoard.Comment['recipient']; open: boolean };
+export type CommentSummary = { directCount: number; questions: QuestionIndex[] };
+export type CommentTree = { kind: 'tree'; root: CommentIndex | null; length: number; summary?: CommentSummary };
 export type CommentNode = { schemaVersion: 1; taskId: string } & (
   { kind: 'comment'; entry: CommentEntry } | { kind: 'page'; children: CommentIndex[] });
 export const commentNodeKey = 'task-board/comment-node';

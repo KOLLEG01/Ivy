@@ -14,7 +14,7 @@ import { TaskBoardOperations } from "./operations.js";
 import { publishNative } from "./native-publication.js";
 import { verifyNativeTranscript } from "./full-turn-evidence.js";
 import type { ContractValues } from "./schema.js";
-import { contractVersion, upgradeRecord } from './schema.js';
+import { contractVersion, readableVersions, upgradeRecord } from './schema.js';
 import { mutation, TaskBoardStore } from "./store.js";
 import type { Document } from "./store.js";
 import { initialDelivery } from "./deliveries.js";
@@ -35,6 +35,7 @@ import { unstartedArchivedContext } from './native-recovery.js';
 import { failedRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
 import { crossAgentComment, openQuestions, queuedTaskEdits, queuedUserInput, unreadComments } from './conversation.js';
 import { operationReceipt } from './operation-receipt.js';
+import { readTask } from './task-read.js';
 import { executionMode, missingHandoff, nextExecutionMode } from './execution-mode.js';
 import { validateTaskContent } from './comment-store.js';
 import { sameAssignment } from './handoff.js';
@@ -365,11 +366,12 @@ export class TaskBoardEngine {
   }
   private async taskDocument(
     query: TaskBoard.TaskQuery,
+    headerOnly = false,
   ): Promise<Document<"task-board/task">> {
     let document: Document<"task-board/task">;
     if (typeof query.task === "string")
       // Explicit read-only links and archive cards retain access to the same primary ticket.
-      document = await this.store.read("task-board/task", query.task, true, true);
+      document = await this.store.read("task-board/task", query.task, true, true, headerOnly);
     else {
       const page = await this.store.page("task-board/task", {
         where: { op: "eq", field: "data:/taskKey", value: query.task.taskKey },
@@ -383,6 +385,7 @@ export class TaskBoardEngine {
       document = await this.store.read(
         "task-board/task",
         page.items[0]!.objectId,
+        true, true, headerOnly,
       );
     }
     return document;
@@ -396,7 +399,7 @@ export class TaskBoardEngine {
   private async unreadAgentComments(
     document: Document<"task-board/task">,
     principalId: string,
-  ): Promise<Pick<TaskBoard.TaskView, 'unreadAgentComments' | 'unreadDirectAgentComments'>> {
+  ): Promise<{ unreadAgentComments: number; unreadDirectAgentComments: number }> {
     const state = await this.store.named(
       "task-board/comment-read-state",
       this.readStateName(principalId, document.pin.objectId),
@@ -413,7 +416,7 @@ export class TaskBoardEngine {
   async task(
     query: TaskBoard.TaskQuery,
     principalId: string,
-  ): Promise<TaskBoard.TaskView> {
+  ): Promise<TaskBoard.TaskView & { unreadAgentComments: number; unreadDirectAgentComments: number }> {
     const document = await this.taskDocument(query);
     const steps = document.value.claim || document.value.publication ? undefined :
       stepCondition(await assessSteps(this.store, document.value, new Date().toISOString()));
@@ -427,23 +430,30 @@ export class TaskBoardEngine {
       ),
     };
   }
+  async read(query: TaskBoard.TaskQuery): Promise<TaskBoard.ReadResult> {
+    return readTask(this.store, await this.taskDocument(query, true), query, this.condition.bind(this));
+  }
   async list(query: TaskBoard.TaskListQuery): Promise<TaskBoard.TaskListResult> {
     validateTaskBoard("TaskListQuery", query);
     const filters: Wire.QueryPredicate[] = [];
-    const relatedWorkspace = query.relatedTo ? await workspaceIdentity(this.store, (await this.store.read('task-board/task', query.relatedTo)).value) : null;
+    const relatedWorkspace = query.relatedTo ? await workspaceIdentity(this.store, (await this.store.read('task-board/task', query.relatedTo, true, false, true)).value) : null;
     if (query.status) filters.push({ op: "eq", field: "data:/workflowState", value: query.status });
     if (query.category) filters.push({ op: "eq", field: "data:/fields/category", value: query.category });
     if (query.parentTaskId) filters.push({ op: 'eq', field: 'data:/parentTaskId', value: query.parentTaskId });
     const page = await this.store.page("task-board/task", {
       limit: query.limit ?? 50,
-      ...(query.parentTaskId ? { contractVersions: [contractVersion('task-board/task')] } : {}),
+      // parentTaskId became queryable in 1.8; include retained children, not only the current writer.
+      ...(query.parentTaskId ? { contractVersions: readableVersions('task-board/task').filter(value => {
+        const [major, minor] = value.split('.').map(Number);
+        return major! > 1 || minor! >= 8;
+      }) } : {}),
       ...(query.cursor ? { cursor: query.cursor } : {}),
       ...(filters.length ? { where: filters.length === 1 ? filters[0] : { op: "and", args: filters } } : {}),
       select: ["data:/taskKey", "data:/fields/title", "data:/workflowState", "data:/fields/category"],
     });
     const peers = new Set<string>();
     if (relatedWorkspace) for (const item of page.items) {
-      if (item.objectId !== query.relatedTo && await workspaceIdentity(this.store, (await this.store.read('task-board/task', { objectId: item.objectId, revision: item.revision })).value) === relatedWorkspace) peers.add(item.objectId);
+      if (item.objectId !== query.relatedTo && await workspaceIdentity(this.store, (await this.store.read('task-board/task', { objectId: item.objectId, revision: item.revision }, true, false, true)).value) === relatedWorkspace) peers.add(item.objectId);
     }
     return {
       items: page.items.filter(item => !query.relatedTo || peers.has(item.objectId)).map(item => {
@@ -1885,8 +1895,6 @@ export class TaskBoardEngine {
         }
         break;
       case "uploadAttachment":
-        requireThat(task.attachments.length < 256,
-          "limit_exceeded", "A Task can retain at most 256 uploaded attachments.");
         {
           const bytes = Buffer.from(request.bytesBase64, "base64");
           requireThat(bytes.length <= 8 * 1024 * 1024 && bytes.toString("base64") === request.bytesBase64,

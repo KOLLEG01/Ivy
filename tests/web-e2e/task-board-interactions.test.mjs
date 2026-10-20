@@ -234,21 +234,61 @@ test('approval responses use one optimistic message and retain the composer draf
   assert.deepEqual(f.pageErrors, []);
 });
 
+for (const width of [1440, 390]) test(`a paged conversation loads older messages on scroll at ${width}px`, { timeout: 120000 }, async t => {
+  const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
+  const created = await f.invoke({ action: 'create', fields: fields('Paged conversation') }), id = created.task.objectId;
+  const store = f.taskBoard().runtime.engine.store, current = await store.read('task-board/task', id);
+  const comments = Array.from({ length: 120 }, (_, index) => ({
+    commentId: 'paged-' + (index + 1), sequence: index + 1,
+    author: { principalId: 'browser-fixture', serviceNodeId: 'browser-task-board', source: 'user', generation: 1 },
+    authorKind: 'user', body: 'Message ' + (index + 1), requests: [], responses: [], attachments: [], delivery: null,
+    run: null, turnId: null, replyTo: null, createdAt: current.value.createdAt, operationId: 'paged-' + (index + 1),
+  }));
+  await store.write('task-board/task', { ...current.value, comments }, randomUUID(),
+    { objectId: id, expectedRevision: current.pin.revision });
+  const olderReads = [];
+  f.page.on('request', request => {
+    if (!request.url().endsWith('/api/v1/rpc') || request.method() !== 'POST') return;
+    for (const body of [].concat(request.postDataJSON())) if (body?.params?.qualifiedName === 'task-board.read' &&
+      body.params.arguments?.task === id && body.params.arguments.comments?.before)
+      olderReads.push(body.params.arguments.comments);
+  });
+  await f.open(routeTo(id));
+  const messages = f.page.locator('[data-slot=conversation-message]');
+  await expect(messages).toHaveCount(50);
+  await expect(f.page.locator('#comment-paged-120')).toBeVisible();
+  assert.deepEqual(olderReads, []);
+  const loader = f.page.getByRole('button', { name: 'Load older messages', exact: true });
+  await loader.evaluate(element => element.scrollIntoView({ block: 'center' }));
+  await expect(messages).toHaveCount(100);
+  assert.deepEqual(olderReads, [{ before: 71, limit: 50 }]);
+  await loader.evaluate(element => element.scrollIntoView({ block: 'center' }));
+  await expect(messages).toHaveCount(120);
+  await expect(loader).toHaveCount(0);
+  assert.deepEqual(olderReads, [{ before: 71, limit: 50 }, { before: 21, limit: 50 }]);
+  assert.equal(new Set(await messages.evaluateAll(elements => elements.map(element => element.closest('[id]')?.id))).size, 120);
+  assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  assert.deepEqual(f.pageErrors, []);
+});
+
 for (const width of [1440, 390]) test(`the common overlay, filtered counters and all Waiting groups work at ${width}px`, { timeout: 180000 }, async t => {
   const f = await taskBoardFixture(t, { native: true, viewport: { width, height: 900 } });
   const create = async (title, changes = {}, rest = {}) => (await f.invoke({ action: 'create', fields: { ...fields(title), ...changes }, ...rest })).task;
   const user = await create('User feedback');
   const dependency = await create('Dependency wait', {}, { nextSteps: [{ id: 'dependency', scope: 'Wait for the first ticket.', requires: [{ kind: 'task', taskId: user.objectId, until: 'done' }] }] });
   const runtime = await create('Runtime wait');
-  await f.invoke({ action: 'defer', taskId: runtime.objectId, expectedRevision: runtime.revision,
+  const store = f.taskBoard().runtime.engine.store;
+  const runtimeTask = await store.read('task-board/task', runtime.objectId);
+  await store.write('task-board/task', { ...runtimeTask.value, workflowState: 'waiting',
     nextSteps: [{ id: 'resume', scope: 'Resume when the workspace returns.', requires: [] }],
-    runtimeWait: { reason: 'workspace', detail: 'Workspace is unavailable.', since: new Date().toISOString() } });
+    runtimeWait: { reason: 'workspace', detail: 'Workspace is unavailable.', since: new Date().toISOString() } }, randomUUID(),
+    { objectId: runtime.objectId, expectedRevision: runtimeTask.pin.revision });
   await create('Time wait', {}, { workflowState: 'waiting', nextSteps: [{ id: 'appointment', scope: 'Resume on the scheduled date.', requires: [{ kind: 'time', at: '2099-01-01T12:00:00.000Z' }] }] });
   const ready = await create('Ready without a blocker', { control: 'agent' });
   await create('Due is not a restart', { control: 'agent', dueAt: '2099-01-01T12:00:00.000Z' });
   const unscheduled = await create('No restart set', {}, { nextSteps: [] });
-  // Read-state tests use real retained mixed comments; source-task scheduling is tested separately.
-  const store = f.taskBoard().runtime.engine.store, current = await store.read('task-board/task', user.objectId);
+  // Real retained mixed comments exercise visibility without per-user read tracking.
+  const current = await store.read('task-board/task', user.objectId);
   const noDate = await store.read('task-board/task', unscheduled.objectId);
   await store.write('task-board/task', { ...noDate.value, workflowState: 'waiting', nextSteps: [] }, randomUUID(),
     { objectId: noDate.pin.objectId, expectedRevision: noDate.pin.revision });
@@ -274,9 +314,10 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
   await card.getByRole('link', { name: 'User feedback', exact: true }).click();
   await expect(f.page.getByRole('dialog', { name: 'Task details' })).toBeVisible();
   await expect(f.page.getByRole('link', { name: 'Back to board' })).toHaveCount(0);
-  await expect(f.page.getByText('Direct agent answer', { exact: true })).toBeVisible();
+  await expect(f.page.locator('[id="comment-Direct agent answer"]').getByText('Direct agent answer', { exact: true })).toBeVisible();
   await expect(f.page.getByText('Cross-agent note', { exact: true })).toHaveCount(0);
-  await expect.poll(async () => (await f.taskBoard().runtime.engine.task({ task: user.objectId }, 'browser-fixture')).unreadAgentComments).toBe(1);
+  assert.equal((await store.page('task-board/comment-read-state')).items.length, 0);
+  await expect(card.locator('[aria-label*="unread"]')).toHaveCount(0);
   // The retained board is intentionally aria-hidden while the overlay is open.
   const backgroundCard = f.page.locator('[data-slot=task-board-background] article').filter({ hasText: 'User feedback' });
   await toggle.click();
@@ -297,7 +338,7 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
   await f.page.reload(); await expect(f.page.getByRole('button', { name: 'Close', exact: true })).toBeVisible();
   await expect(f.page.getByRole('textbox', { name: 'Comment', exact: true })).toBeEditable();
   await f.page.goto(f.url + routeTo(user.objectId));
-  await expect(f.page.getByText('Direct agent answer', { exact: true })).toBeVisible();
+  await expect(f.page.locator('[id="comment-Direct agent answer"]').getByText('Direct agent answer', { exact: true })).toBeVisible();
   await expect(f.page.locator('[data-slot=task-board-background] .task-item')).toHaveCount(7);
   const screenshots = process.env.IVY_TASKBOARD_SCREENSHOTS;
   for (const theme of ['light', 'dark']) {

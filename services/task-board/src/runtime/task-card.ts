@@ -1,17 +1,20 @@
 import type { TaskBoard } from '../../../../packages/sdk/src/node.js';
 import { crossAgentComment, openQuestions } from './conversation.js';
+import type { CommentSummary } from '../../../../packages/sdk/src/task-comments.js';
+import { nextStepTime } from './next-steps.js';
 
-export function taskCard(view: TaskBoard.TaskView): TaskBoard.TaskCardView {
+export function taskCard(view: TaskBoard.TaskView, summary?: CommentSummary, total = view.task.comments.length): TaskBoard.TaskCardView {
   const task = view.task;
   const fields = Object.fromEntries(['title', 'category', 'control', 'priority', 'executionRequirement', 'dueAt']
     .map(key => [key, task.fields[key as keyof TaskBoard.TaskFields]])) as TaskBoard.TaskCardFields;
   const comments = task.comments;
   return { object: view.object, executionCondition: view.executionCondition,
-    unreadAgentComments: view.unreadAgentComments, unreadDirectAgentComments: view.unreadDirectAgentComments,
-    commentCount: comments.length, directCommentCount: comments.filter(comment => !crossAgentComment(comment, view.object.objectId)).length,
+    commentCount: total, directCommentCount: summary?.directCount ?? comments.filter(comment => !crossAgentComment(comment, view.object.objectId)).length,
     task: { taskKey: task.taskKey, fields, workflowState: task.workflowState, runtimeWait: task.runtimeWait,
-      nextSteps: task.nextSteps, claim: task.claim, publication: task.publication,
-      latestResult: task.latestResult, openQuestionCount: openQuestions(task).filter(question => question.recipient?.kind !== 'task').length } };
+      nextStepAt: nextStepTime(task), claim: task.claim ? { phase: task.claim.phase, target: task.claim.target } : null, publication: task.publication,
+      latestResult: task.latestResult, openQuestionCount: summary
+        ? summary.questions.filter(question => question.open && question.recipient?.kind !== 'task').length
+        : openQuestions(task).filter(question => question.recipient?.kind !== 'task').length } };
 }
 
 /** Public reads are bounded; workflow code retains its exact full snapshot. */

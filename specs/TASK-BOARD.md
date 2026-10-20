@@ -33,10 +33,14 @@ UI requirements: [UI](UI.md).
   64-way index pages preserve exact historical snapshots with bounded range reads. Unchanged
   records are reused; prepared publications retain the compact root rather than copying the
   entire conversation into every journal stage. Existing conversation logs remain readable.
-  Public reads default to the latest 50 comments and expose offset pagination.
-  Comment read markers independently retain the all-agent prefix and direct-agent count;
-  markCommentsRead with includeCrossAgent=false advances only direct-agent visibility.
-  Task reads report both unread totals; hiding directed communication never acknowledges it.
+  Public `read` defaults to the latest 50 comments, newest first. `comments.limit` selects
+  1–100 entries; passing `commentPage.nextBefore` as `comments.before` loads older entries
+  without shifting the page when comments arrive. A null cursor ends the history.
+  `comments.questionsOnly` pages unresolved questions; explicit offset reads remain ascending.
+  Cards use a compact header summary and do not hydrate history or calculate unread totals.
+  The UI loads older comments on scroll, preserves the visible position, and keeps unresolved
+  user questions available outside the loaded page. It neither displays nor writes unread state.
+  Active retained headers reuse bounded in-memory summaries until normal storage backfill.
   Storage backfill also covers archived tickets without changing workflow state and retries
   active or conflicting tickets on later passes. Before readiness enables the new policy,
   current-only migration ledgers protect source revisions of legacy unfinished Runs without

@@ -2956,6 +2956,11 @@
               "minimum": 0,
               "maximum": 9007199254740991
             },
+            "before": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
             "limit": {
               "type": "integer",
               "minimum": 1,
@@ -2966,10 +2971,10 @@
             }
           },
           "required": [
-            "offset",
             "limit"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "description": "Defaults to the latest 50 comments, newest first. Use before=commentPage.nextBefore to read older messages without gaps when new messages arrive. null nextBefore ends the history. questionsOnly selects unresolved questions; offset retains ascending positional reads."
         }
       },
       "required": [
@@ -3198,15 +3203,8 @@
         "executionCondition": {
           "$ref": "#/$defs/ExecutionCondition"
         },
-        "unreadAgentComments": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "unreadDirectAgentComments": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
+        "archived": {
+          "type": "boolean"
         },
         "commentPage": {
           "type": "object",
@@ -3232,6 +3230,24 @@
                   "type": "null"
                 }
               ]
+            },
+            "nextBefore": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "order": {
+              "enum": [
+                "asc",
+                "desc"
+              ]
             }
           },
           "required": [
@@ -3252,9 +3268,7 @@
       "required": [
         "object",
         "task",
-        "executionCondition",
-        "unreadAgentComments",
-        "unreadDirectAgentComments"
+        "executionCondition"
       ],
       "additionalProperties": false
     },
@@ -3281,7 +3295,29 @@
         "claim": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Claim"
+              "type": "object",
+              "properties": {
+                "phase": {
+                  "enum": [
+                    "claimed",
+                    "run_created",
+                    "starting",
+                    "running",
+                    "waiting_input",
+                    "publishing_result",
+                    "cancel_requested",
+                    "outcome_unknown"
+                  ]
+                },
+                "target": {
+                  "$ref": "#/$defs/Target"
+                }
+              },
+              "required": [
+                "phase",
+                "target"
+              ],
+              "additionalProperties": false
             },
             {
               "type": "null"
@@ -3313,12 +3349,18 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "nextSteps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NextStep"
-          },
-          "maxItems": 32
+        "nextStepAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "runtimeWait": {
           "anyOf": [
@@ -3339,7 +3381,7 @@
         "publication",
         "latestResult",
         "openQuestionCount",
-        "nextSteps",
+        "nextStepAt",
         "runtimeWait"
       ],
       "additionalProperties": false
@@ -3356,16 +3398,6 @@
         "executionCondition": {
           "$ref": "#/$defs/ExecutionCondition"
         },
-        "unreadAgentComments": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "unreadDirectAgentComments": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
         "commentCount": {
           "type": "integer",
           "minimum": 0,
@@ -3381,8 +3413,6 @@
         "object",
         "task",
         "executionCondition",
-        "unreadAgentComments",
-        "unreadDirectAgentComments",
         "commentCount",
         "directCommentCount"
       ],
@@ -3822,8 +3852,7 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/TaskAttachment"
-          },
-          "maxItems": 256
+          }
         },
         "createdAt": {
           "type": "string",
@@ -5376,7 +5405,8 @@
             "1.12.0",
             "2.0.0",
             "2.1.0",
-            "2.2.0"
+            "2.2.0",
+            "2.3.0"
           ]
         },
         "payload": {

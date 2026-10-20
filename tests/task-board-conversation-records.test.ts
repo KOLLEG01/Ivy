@@ -14,12 +14,118 @@ import { executionCondition } from '../services/task-board/src/runtime/condition
 import { nextExecutionMode } from '../services/task-board/src/runtime/execution-mode.js';
 import { TaskBoardStore } from '../services/task-board/src/runtime/store.js';
 import { setImmediate } from 'node:timers/promises';
+import { readTask } from '../services/task-board/src/runtime/task-read.js';
 
 const comment = (sequence: number): TaskBoard.Comment => ({ commentId: 'comment-' + sequence, sequence,
   author: { principalId: 'user', serviceNodeId: 'task-board', generation: 1, source: 'user' }, authorKind: 'user',
   body: 'Conversation body '.repeat(1024), requests: [], responses: [], delivery: null, attachments: [], run: null,
   turnId: null, replyTo: null, createdAt: '2026-05-01T12:00:00.000Z', operationId: 'comment-' + sequence });
 
+test('public cards skip history and read tracking; descending cursors read bounded ranges across appends', async t => {
+  const f = taskBoardFixture(t), created = await f.create(), store = f.first.store;
+  const initial = await store.read('task-board/task', created.task!.objectId);
+  const comments = Array.from({ length: 120 }, (_, index) => ({ ...comment(index + 1), body: 'Message ' + (index + 1) }));
+  comments[2] = { ...comments[2]!, purpose: 'question', recipient: { kind: 'task', taskId: 'parent' } };
+  comments[3] = { ...comments[3]!, purpose: 'question', recipient: { kind: 'user' } };
+  const saved = await store.write('task-board/task', { ...initial.value, comments }, 'paged-history',
+    { objectId: initial.pin.objectId, expectedRevision: initial.pin.revision });
+  const reads: string[] = [], queries: string[] = [];
+  const cold = new TaskBoardStore({ request: async (method, params, options) => {
+    if (method === 'objects.read' && 'objectId' in params) reads.push(params.objectId);
+    if (method === 'objects.query' && 'contractKey' in params) queries.push(params.contractKey ?? '');
+    return store.client.request(method, params, options);
+  } } as typeof store.client, store.rootObjectId);
+  t.after(() => cold.close());
+  const header = await cold.read('task-board/task', saved, true, true, true);
+  const card = await readTask(cold, header, { task: saved.objectId, view: 'card' }, f.first.condition.bind(f.first)) as TaskBoard.TaskCardView;
+  assert.deepEqual(reads, [saved.objectId]);
+  assert.equal(queries.length, 0);
+  assert.equal(card.commentCount, 120);
+  assert.equal(card.task.openQuestionCount, 1);
+  assert.equal('unreadAgentComments' in card, false);
+  assert.equal('nextSteps' in card.task, false);
+  const first = await readTask(cold, header, { task: saved.objectId, comments: { limit: 10 } }, f.first.condition.bind(f.first)) as TaskBoard.TaskView;
+  assert.deepEqual(first.task.comments.map(comment => comment.sequence), [120,119,118,117,116,115,114,113,112,111]);
+  assert.equal(first.commentPage!.nextBefore, 111);
+  assert.ok(reads.length <= 16, 'the page reads ten comments, one older user question and their index pages');
+  assert.deepEqual(first.openQuestions!.map(question => question.sequence), [4]);
+  const full = await store.read('task-board/task', saved);
+  await store.write('task-board/task', { ...full.value, comments: [...comments, { ...comment(121), body: 'New append' }] },
+    'append-while-reading', { objectId: saved.objectId, expectedRevision: saved.revision });
+  const nextHeader = await cold.read('task-board/task', saved.objectId, true, true, true);
+  const next = await readTask(cold, nextHeader, { task: saved.objectId, comments: { before: first.commentPage!.nextBefore!, limit: 10 } },
+    f.first.condition.bind(f.first)) as TaskBoard.TaskView;
+  assert.deepEqual(next.task.comments.map(comment => comment.sequence), [110,109,108,107,106,105,104,103,102,101]);
+  assert.equal(next.commentPage!.total, 121);
+  assert.equal(queries.includes('task-board/comment-read-state'), false);
+});
+
+test('active retained headers reuse a bounded summary without repeatedly hydrating history', async t => {
+  const f = taskBoardFixture(t), created = await f.create(), store = f.first.store;
+  const initial = await store.read('task-board/task', created.task!.objectId);
+  const comments = Array.from({ length: 80 }, (_, index) => ({ ...comment(index + 1), body: 'Message ' + (index + 1) }));
+  comments[0] = { ...comments[0]!, purpose: 'question', recipient: { kind: 'user' } };
+  comments[1] = { ...comments[1]!, resolvesQuestions: [comments[0]!.commentId] };
+  const retainedTask = { ...initial.value, taskKey: 'TASK-9000', parentTaskId: initial.pin.objectId, comments };
+  const retained = await store.client.request('objects.write', {
+    create: { name: 'Retained active header', contractKey: 'task-board/task', parentId: store.rootObjectId, ownerObjectId: null },
+    contractVersion: '2.2.0', references: {}, mutationId: await store.preparedMutationId('retained-inline-history'),
+    content: { encoding: 'json', value: retainedTask as never },
+  });
+  const saved = await store.writePrepared('task-board/task', retainedTask,
+    await store.preparedMutationId('retained-active-history'),
+    { objectId: retained.object.id, expectedRevision: retained.revision.revision }, '2.2.0');
+  assert.equal((await f.first.list({ parentTaskId: initial.pin.objectId })).items[0]?.taskId, saved.objectId,
+    'retained child tickets remain discoverable before storage backfill');
+  let hydrated = 0;
+  const cold = new TaskBoardStore(store.client, store.rootObjectId);
+  t.after(() => cold.close());
+  const read = cold.read.bind(cold);
+  cold.read = (async (...args: Parameters<typeof cold.read>) => {
+    if (args[0] === 'task-board/task' && !args[4]) hydrated++;
+    return read(...args);
+  }) as typeof cold.read;
+  const header = await cold.read('task-board/task', saved, true, true, true);
+  const query = { task: saved.objectId, view: 'card' as const };
+  await readTask(cold, header, query, f.first.condition.bind(f.first));
+  assert.equal(hydrated, 1);
+  const card = await readTask(cold, header, query, f.first.condition.bind(f.first)) as TaskBoard.TaskCardView;
+  assert.equal(hydrated, 1);
+  assert.equal(card.commentCount, 80);
+  const page = await readTask(cold, header, { task: saved.objectId, comments: { limit: 5 } },
+    f.first.condition.bind(f.first)) as TaskBoard.TaskView;
+  assert.deepEqual(page.task.comments.map(comment => comment.sequence), [80, 79, 78, 77, 76]);
+  assert.equal(hydrated, 1);
+  // A gate can newly reference an already resolved question without changing the history.
+  const gated = await store.writePrepared('task-board/task', { ...retainedTask, nextSteps: [
+    { id: 'answered', scope: 'Continue after the answer.', requires: [{ kind: 'question', questionId: comments[0]!.commentId }] },
+  ] }, await store.preparedMutationId('retained-gate-change'),
+  { objectId: saved.objectId, expectedRevision: saved.revision }, '2.2.0');
+  const changed = await cold.read('task-board/task', gated, true, true, true);
+  await readTask(cold, changed, query, f.first.condition.bind(f.first));
+  assert.equal(hydrated, 2);
+  await readTask(cold, changed, query, f.first.condition.bind(f.first));
+  assert.equal(hydrated, 2);
+});
+
+test('uploading attachment 257 uses the existing evidence retention and metadata byte budget', async t => {
+  const f = taskBoardFixture(t), created = await f.create(), taskId = created.task!.objectId, store = f.first.store;
+  const first = await f.invoke({ action: 'uploadAttachment', operationId: 'first-upload', taskId,
+    expectedRevision: created.task!.revision, attachmentId: 'first-upload', filename: 'proof.txt', mediaType: 'text/plain',
+    bytesBase64: Buffer.from('retained proof').toString('base64') });
+  const current = await store.read('task-board/task', first.task!);
+  const full = await store.write('task-board/task', { ...current.value, attachments: Array.from({ length: 256 },
+    (_, index) => ({ ...current.value.attachments[0]!, attachmentId: 'retained-' + index })) }, 'retained-attachments',
+  { objectId: taskId, expectedRevision: current.pin.revision });
+  const uploaded = await f.invoke({ action: 'uploadAttachment', operationId: 'next-upload', taskId,
+    expectedRevision: full.revision, attachmentId: 'attachment-257', filename: 'new-proof.txt', mediaType: 'text/plain',
+    bytesBase64: Buffer.from('new proof').toString('base64') });
+  const task = await store.read('task-board/task', uploaded.task!);
+  assert.equal(task.value.attachments.length, 257);
+  assert.equal(task.value.attachments.at(-1)!.attachmentId, 'attachment-257');
+  assert.deepEqual((await store.client.request('objects.read', uploaded.attachment!.object)).content,
+    { encoding: 'base64', value: Buffer.from('new proof').toString('base64') });
+});
 test('conversation exceeds the old object limit, reads bounded pages and survives a lost publication reply', async t => {
   const f = taskBoardFixture(t), created = await f.create(), store = f.first.store;
   const original = await store.read('task-board/task', created.task!.objectId);
@@ -142,6 +248,27 @@ test('dependency status checks do not load the foreign ticket conversation', asy
   assert.equal(assessments[0]?.ready, true);
   assert.equal(headerReads, 1);
   assert.equal(conversationReads, 0);
+});
+
+test('related workspace lookup reads task headers without their conversations', async t => {
+  const w = await nativeWorkflow(t); await w.running();
+  const f = w.f, other = await f.create(), task = await f.first.store.read('task-board/task', other.task!.objectId);
+  await f.first.store.write('task-board/task', { ...task.value, comments: [comment(1), comment(2)] }, 'peer-history',
+    { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
+  const client = f.second.store.client, request = client.request.bind(client);
+  let conversations = 0, headers = 0;
+  client.request = (async (...args: Parameters<typeof client.request>) => {
+    const result = await request(...args);
+    if (args[0] === 'objects.read') {
+      const key = (result as { object: { contractKey: string } }).object.contractKey;
+      if (key === commentNodeKey) conversations++;
+      if (key === 'task-board/task') headers++;
+    }
+    return result;
+  }) as typeof client.request;
+  await f.second.list({ relatedTo: w.state().task.objectId });
+  assert.ok(headers >= 2);
+  assert.equal(conversations, 0);
 });
 
 test('resuming a compact prepared publication preserves the complete conversation and its exact payload hash', async t => {

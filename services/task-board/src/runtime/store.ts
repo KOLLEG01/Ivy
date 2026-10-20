@@ -76,6 +76,12 @@ export class TaskBoardStore {
   private get comments(): TaskComments {
     return this.conversation ??= new TaskComments(this.client, scope => this.preparedMutationId(scope));
   }
+  commentRange(tree: import('../../../../packages/sdk/src/task-comments.js').CommentTree, taskId: string, start: number, end: number) {
+    return this.comments.range(tree, taskId, start, end);
+  }
+  commentSummary(task: TaskBoard.Task, tree: import('../../../../packages/sdk/src/task-comments.js').CommentTree, taskId: string) {
+    return this.comments.summary(task, tree, taskId);
+  }
   async prepareTaskSnapshot(task: TaskBoard.Task, taskId: string, scope: string): Promise<TaskBoard.Task> {
     return this.comments.write(task, taskId, scope);
   }

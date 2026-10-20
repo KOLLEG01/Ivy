@@ -50,7 +50,8 @@ import { attachmentView } from "./attachment-view";
 const props = defineProps<{
   workspace: TaskBoard.WorkspaceInfo;
   available: boolean;
-  task?: Document<"task">;
+  task?: Pick<Document<"task">, 'value' | 'pin'>;
+  questions?: TaskBoard.Comment[];
 }>();
 const emit = defineEmits<{ saved: []; cancel: [] }>();
 const defaults: TaskBoard.TaskFields = {
@@ -74,7 +75,7 @@ const form = ref<TaskBoard.TaskFields>(
 );
 const initialState = ref<TaskBoard.Task['workflowState']>('todo');
 const nextSteps = ref<TaskBoard.NextStep[]>(structuredClone(props.task?.value.nextSteps ?? []));
-const ownQuestions = computed(() => openTaskQuestions({ comments: props.task?.value.comments ?? [] }));
+const ownQuestions = computed(() => props.questions ?? openTaskQuestions({ comments: props.task?.value.comments ?? [] }));
 const initialSummary = ref('');
 const revision = ref(props.task?.pin.revision ?? null),
   baseFields = ref<TaskBoard.TaskFields | null>(

@@ -24,6 +24,8 @@ import {
   PropertyList,
   RemoteState,
   StatusBadge,
+  ScrollLoader,
+  preserveScrollAnchor,
   Tabs,
   TabsContent,
   TabsList,
@@ -118,10 +120,44 @@ const { preferences: commentPreferences } = useCommentPreferences(() => props.wo
 const showCrossAgent = useCommentVisibility();
 const detailRoute = (id: string, values: Record<string, string> = {}) => taskRoute(props.workspace.serviceNodeId, id,
   { ...Object.fromEntries(['q', 'status', 'control', 'host', 'category', 'project'].flatMap(key => props.query.has(key) ? [[key, props.query.get(key)!]] : [])), ...values });
-const commentsBefore = ref<number | undefined>();
-const task = useRemote((signal) =>
-    readDocument("task", props.taskId, props.workspace.rootObjectId, signal,
-      { ...(commentsBefore.value === undefined ? {} : { before: commentsBefore.value }), limit: 50 }), 15000, ["objects/task-board/task"]);
+const olderComments = ref<TaskBoard.Comment[]>([]);
+const olderLoading = ref(false), olderError = ref<string | null>(null);
+const taskRemote = useRemote((signal) => nativeRead(client, props.workspace.serviceNodeId, 'task-board.read',
+  { task: props.taskId }, signal) as Promise<TaskBoard.TaskView>, 15000, ["objects/task-board/task"]);
+const task = { ...taskRemote, value: computed(() => {
+  const view = taskRemote.value.value;
+  if (!view) return null;
+  const comments = [...new Map([...olderComments.value, ...view.task.comments].map(comment => [comment.commentId, comment])).values()]
+    .sort((a, b) => a.sequence - b.sequence);
+  return { value: { ...view.task, comments }, pin: view.object, archived: view.archived ?? false };
+}) };
+watch(taskRemote.value, (_view, previous) => {
+  if (previous) olderComments.value = [...new Map([...olderComments.value, ...previous.task.comments]
+    .map(comment => [comment.commentId, comment])).values()];
+});
+const nextOlder = computed(() => {
+  let sequence = taskRemote.value.value?.commentPage?.total ?? 0;
+  for (const comment of [...task.value.value?.value.comments ?? []].reverse()) {
+    if (comment.sequence !== sequence) break;
+    sequence--;
+  }
+  return sequence > 0 ? sequence + 1 : null;
+});
+const loadOlder = async () => {
+  if (olderLoading.value || !nextOlder.value) return;
+  olderLoading.value = true; olderError.value = null;
+  const anchor = [...document.querySelectorAll<HTMLElement>('[id^="comment-"]')]
+    .find(element => element.getBoundingClientRect().bottom > 100);
+  const restoreScroll = preserveScrollAnchor(anchor);
+  try {
+    const view = await nativeRead(client, props.workspace.serviceNodeId, 'task-board.read',
+      { task: props.taskId, comments: { before: nextOlder.value, limit: 50 } }) as TaskBoard.TaskView;
+    olderComments.value = [...olderComments.value, ...view.task.comments];
+    await nextTick();
+    restoreScroll();
+  } catch (cause) { olderError.value = cause instanceof Error ? cause.message : String(cause); }
+  finally { olderLoading.value = false; }
+};
 const displayComments = computed(() => [...(task.value.value?.value.comments ?? []), ...optimistic.messages.value]
   .filter(comment => showCrossAgent.value || !crossAgentComment(comment, props.taskId)).sort((a, b) =>
   commentPreferences.value.order === "newest-first" ? b.sequence - a.sequence : a.sequence - b.sequence,
@@ -177,14 +213,7 @@ const inherited = (
   fallback: string | null | undefined,
   nativeDefault: string,
 ) => value ?? `${fallback ?? nativeDefault} (default)`;
-const taskView = useRemote((signal) =>
-    nativeRead(
-      client,
-      props.workspace.serviceNodeId,
-      "task-board.read",
-      { task: props.taskId },
-      signal,
-    ) as Promise<TaskBoard.TaskView>, 15000, () => ["objects/task-board", "services/task-board/" + props.workspace.serviceNodeId, "services/agent-manager"]);
+const taskView = taskRemote;
 const action = useAction(() => props.workspace, "task:" + props.taskId);
 const panel = ref(""),
   deleteOpen = ref(false),
@@ -212,7 +241,7 @@ const archive = useObjectArchive(
 const editable = computed(
   () =>
     props.workspace.role === "user" &&
-    !task.value.value?.read.object.effectivelyArchived &&
+    !task.value.value?.archived &&
     !archive.busy.value && !archive.pending.value,
 );
 const writable = computed(() => editable.value && props.available && !task.error.value && !action.locked.value && !task.value.value?.value.publication);
@@ -246,54 +275,6 @@ const unresolvedApprovals = computed(() => {
     )
     .filter((item) => !answered.has(item.request.requestId));
 });
-// Agent comments that were unread when the ticket opened start after a "New" divider.
-const unreadAtOpen = ref<{ all: number; direct: number } | null>(null);
-const markedRevisions = new Set<string>();
-watch(
-  [() => taskView.value.value, showCrossAgent, tab],
-  async ([view, includeCrossAgent, currentTab]) => {
-    const count = view ? includeCrossAgent ? view.unreadAgentComments : view.unreadDirectAgentComments : 0;
-    if (view && unreadAtOpen.value === null) unreadAtOpen.value = { all: view.unreadAgentComments, direct: view.unreadDirectAgentComments };
-    const marker = view ? view.object.revision + ':' + includeCrossAgent : '';
-    if (
-      !view || !count || currentTab !== 'chat' ||
-      props.workspace.role !== "user" ||
-      markedRevisions.has(marker)
-    )
-      return;
-    markedRevisions.add(marker);
-    try {
-      const binding = await discover(client, "task-board.markCommentsRead", {
-        serviceNodeId: props.workspace.serviceNodeId,
-      });
-      const operationId = await newOperationId(client);
-      await callBound(
-        client,
-        binding,
-        {
-          operationId,
-          taskId: props.taskId,
-          expectedTaskRevision: view.object.revision,
-          includeCrossAgent,
-        },
-        operationId,
-      );
-      void taskView.refresh();
-      emit('changed');
-    } catch {
-      markedRevisions.delete(marker);
-    }
-  },
-  { immediate: true },
-);
-const firstUnreadId = computed(() => {
-  const count = (showCrossAgent.value ? unreadAtOpen.value?.all : unreadAtOpen.value?.direct) ?? 0;
-  if (!count) return null;
-  const agentComments = displayComments.value
-    .filter((comment) => comment.authorKind === "agent")
-    .sort((a, b) => a.sequence - b.sequence);
-  return agentComments.at(-count)?.commentId ?? null;
-});
 // Internal messages name their sender or recipient.
 const counterpartId = (comment: TaskBoard.Comment) => comment.sourceTaskId ?? (comment.recipient?.kind === 'task' ? comment.recipient.taskId : '');
 const sourceTaskIds = computed(() => [...new Set((task.value.value?.value.comments ?? [])
@@ -301,7 +282,7 @@ const sourceTaskIds = computed(() => [...new Set((task.value.value?.value.commen
 const sourceTasks = useRemote(async (signal) => Object.fromEntries(await Promise.all(
   sourceTaskIds.value.map(async (id) => {
     try {
-      const value = await readDocument("task", id, props.workspace.rootObjectId, signal);
+      const value = await readDocument("task", id, props.workspace.rootObjectId, signal, { limit: 0 });
       return [id, { key: value.value.taskKey, title: value.value.fields.title }] as const;
     } catch {
       return [id, null] as const;
@@ -344,6 +325,7 @@ const dependencyPage = ref(0),
                 id,
                 props.workspace.rootObjectId,
                 signal,
+                { limit: 0 },
               );
               return {
                 id,
@@ -363,7 +345,6 @@ type ExistingAction = Body<
 >;
 const refresh = () => {
   void task.refresh();
-  void taskView.refresh();
 };
 const optimistic = useOptimisticComment(() => props.workspace, props.taskId, action,
   () => task.value.value?.value, () => { refresh(); emit('changed'); });
@@ -375,6 +356,7 @@ const perform = async (label: string, body: ExistingAction) => {
       "task",
       props.taskId,
       props.workspace.rootObjectId,
+      undefined, { limit: 0 },
     );
     const outcome = await action.start(label, {
       ...body,
@@ -503,7 +485,7 @@ const uploadFile = async (file: File): Promise<UploadedAttachment> => {
   if (!writable.value || optimistic.pending.value) throw new Error("This task cannot be changed right now.");
   uploading.value = true;
   try {
-    const current = await readDocument("task", props.taskId, props.workspace.rootObjectId);
+    const current = await readDocument("task", props.taskId, props.workspace.rootObjectId, undefined, { limit: 0 });
     const attachmentId = crypto.randomUUID();
     const outcome = await action.start(
       "Upload task attachment",
@@ -561,7 +543,7 @@ const setArchived = async () => {
   archive.clearError();
   const result = await archive.run(
     props.taskId,
-    !task.value.value.read.object.effectivelyArchived,
+    !task.value.value.archived,
   );
   if (result) {
     refresh();
@@ -681,7 +663,7 @@ const showArrived = () => {
             <span class="sr-only">{{ task.value.value.value.taskKey }} · </span>{{ task.value.value.value.fields.title }}
           </h1>
           <StatusBadge
-            v-if="task.value.value.read.object.effectivelyArchived"
+            v-if="task.value.value.archived"
             label="Archived"
           />
           <template v-if="wide">
@@ -758,7 +740,7 @@ const showArrived = () => {
                 v-if="!task.value.value.value.claim"
                 @select="setArchived"
                 >{{
-                  task.value.value.read.object.effectivelyArchived
+                  task.value.value.archived
                     ? "Restore task"
                     : "Archive task"
                 }}</DropdownMenuItem
@@ -852,6 +834,7 @@ const showArrived = () => {
           :workspace="workspace"
           :available="available"
           :task="task.value.value"
+          :questions="pendingQuestions"
           @saved="
             panel = '';
             refresh();
@@ -1152,14 +1135,9 @@ const showArrived = () => {
         <div class="mx-auto flex max-w-3xl flex-col gap-1">
           <template v-for="section in commentSections" :key="section">
             <template v-if="section === 'comments'">
-              <div v-if="task.value.value?.commentRange && task.value.value.commentRange.total > 50" class="flex flex-wrap items-center justify-between gap-2 py-2">
-                <Button variant="outline" size="sm" :disabled="task.loading.value || task.value.value.commentRange.start === 0"
-                  @click="commentsBefore = task.value.value!.commentRange!.start; task.refresh()">{{ tr('Ältere Nachrichten', 'Older messages') }}</Button>
-                <span class="text-xs text-muted-foreground">{{ task.value.value.commentRange.start + 1 }}–{{ task.value.value.commentRange.end }} / {{ task.value.value.commentRange.total }}</span>
-                <Button variant="outline" size="sm" :disabled="task.loading.value || task.value.value.commentRange.end === task.value.value.commentRange.total"
-                  @click="commentsBefore = Math.min(task.value.value!.commentRange!.total, task.value.value!.commentRange!.end + 50); task.refresh()">{{ tr('Neuere Nachrichten', 'Newer messages') }}</Button>
-                <Button v-if="commentsBefore !== undefined" variant="ghost" size="sm" @click="commentsBefore = undefined; task.refresh()">{{ tr('Neueste', 'Latest') }}</Button>
-              </div>
+              <ScrollLoader v-if="nextOlder && commentPreferences.order === 'oldest-first'"
+                :loading="olderLoading" :error="olderError" :enabled="tab === 'chat'"
+                :label="tr('Ältere Nachrichten laden', 'Load older messages')" @load="loadOlder" />
               <p v-if="!displayComments.length" class="py-8 text-center text-sm text-muted-foreground">
                 {{ tr("Noch keine Nachrichten.", "No messages yet.") }}
               </p>
@@ -1170,10 +1148,6 @@ const showArrived = () => {
                   :key="entry.comment.commentId"
                   class="min-w-0 scroll-mt-32"
                 >
-                  <p
-                    v-if="entry.comment.commentId === firstUnreadId"
-                    class="mt-3 flex items-center gap-3 text-xs font-semibold"
-                  ><span class="h-px flex-1 bg-foreground/50" />{{ tr("Neu", "New") }}<span class="h-px flex-1 bg-foreground/50" /></p>
                   <p v-if="entry.stamp" class="ivy-chat-stamp">{{ entry.stamp }}</p>
                   <p
                     v-if="entry.kind === 'event' && !entry.comment.body.includes('\n') && !entry.comment.attachments.length"
@@ -1297,9 +1271,12 @@ const showArrived = () => {
                   </ConversationMessage>
                 </li>
               </ol>
+              <ScrollLoader v-if="nextOlder && commentPreferences.order === 'newest-first'"
+                :loading="olderLoading" :error="olderError" :enabled="tab === 'chat'"
+                :label="tr('Ältere Nachrichten laden', 'Load older messages')" @load="loadOlder" />
             </template>
             <template v-else>
-              <p v-if="task.value.value.read.object.effectivelyArchived" role="status" class="my-3 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
+              <p v-if="task.value.value.archived" role="status" class="my-3 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
                 This task is archived. Restore it from the task actions to comment or change it.
               </p>
               <div
@@ -1406,7 +1383,7 @@ const showArrived = () => {
       @next="stepImage(1)"
       @retry="imagePreviewAttempt++"
     />
-    <ObjectDeleteDialog v-model:open="deleteOpen" :client="client" :object-id="taskId" :expected-revision="task.value.value?.read.object.currentRevision ?? null" :label="'the ticket “' + (task.value.value?.value.taskKey ?? taskId) + '”'" consequence="This also deletes its attachments and related workflow records." :storage-key="'ivy.task-board.delete:' + base.href + ':' + taskId" @deleted="emit('deleted')" />
+    <ObjectDeleteDialog v-model:open="deleteOpen" :client="client" :object-id="taskId" :expected-revision="task.value.value?.pin.revision ?? null" :label="'the ticket “' + (task.value.value?.value.taskKey ?? taskId) + '”'" consequence="This also deletes its attachments and related workflow records." :storage-key="'ivy.task-board.delete:' + base.href + ':' + taskId" @deleted="emit('deleted')" />
   </Tabs>
 </template>
 <style scoped>
