@@ -59,6 +59,287 @@ mod implementation {
             })
         }
 
+        struct StatusClient {
+            first: Mutex<Option<IvyResult<IvyJson>>>,
+            trace: Mutex<Vec<IvyJson>>,
+        }
+        impl StatusClient {
+            fn new(first: IvyResult<IvyJson>) -> Arc<Self> {
+                Arc::new(Self {
+                    first: Mutex::new(Some(first)),
+                    trace: Mutex::new(Vec::new()),
+                })
+            }
+        }
+        impl RpcClient for StatusClient {
+            fn request<'a>(
+                &'a self,
+                method: &'a str,
+                params: IvyJson,
+                _: RequestOptions,
+            ) -> RequestFuture<'a> {
+                Box::pin(async move {
+                    assert_eq!(method, "system.status");
+                    self.trace.lock().unwrap().push(IvyJson::object([
+                        ("method", method.into()),
+                        ("params", params),
+                    ]));
+                    self.first
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap_or_else(|| Ok(IvyJson::object([("runtimeEpoch", "second".into())])))
+                })
+            }
+        }
+        fn wire_result(result: IvyResult<JsString>) -> IvyJson {
+            match result {
+                Ok(value) => {
+                    IvyJson::object([("ok", true.into()), ("value", IvyJson::String(value))])
+                }
+                Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+            }
+        }
+
+        #[tokio::test]
+        async fn malformed_status_identity_errors_coercion_and_cache_match_original() {
+            use ivy_contracts::json::{parse, stringify};
+            let mut rows = Vec::new();
+            let mut add = |name: &str,
+                           status: IvyJson,
+                           time: i64,
+                           nonce: Option<JsString>,
+                           failure: Option<&str>| {
+                let mut row = IvyJson::object([
+                    ("name", name.into()),
+                    ("status", status),
+                    ("time", IvyJson::Number(time as f64)),
+                ]);
+                if let Some(nonce) = nonce {
+                    row.insert("nonce", IvyJson::String(nonce));
+                }
+                if let Some(failure) = failure {
+                    row.insert("failure", failure.into());
+                }
+                rows.push(row);
+            };
+            for (name, status) in [
+                ("missing", "{}"),
+                ("null-receiver", "null"),
+                ("number-receiver", "42"),
+                ("bool-receiver", "true"),
+                ("string-receiver", "\"epoch\""),
+                ("array-receiver", "[]"),
+                (
+                    "inherited-looking-key",
+                    "{\"__proto__\":{\"runtimeEpoch\":\"wrong\"}}",
+                ),
+            ] {
+                add(name, parse(status, 65536).unwrap(), 1000, None, None);
+            }
+            for (name, epoch) in [
+                ("valid", "\"epoch\""),
+                ("raw-unit", "\"e\\ud800\\udfff\\ud800\""),
+                ("empty", "\"\""),
+                ("colon", "\"e:poch\""),
+                ("null", "null"),
+                ("zero", "0"),
+                ("number", "1"),
+                ("false", "false"),
+                ("true", "true"),
+                ("object", "{}"),
+                ("zero-length", "{\"length\":0}"),
+                ("positive-length", "{\"length\":1}"),
+                ("null-includes", "{\"length\":1,\"includes\":null}"),
+                ("string-length", "{\"length\":\" 1 \"}"),
+                ("hex-length", "{\"length\":\"0x1\"}"),
+                ("non-numeric-length", "{\"length\":\"no\"}"),
+                ("boolean-length", "{\"length\":true}"),
+                ("array-length", "{\"length\":[[1]]}"),
+                ("empty-array-length", "{\"length\":[]}"),
+                ("object-length", "{\"length\":{}}"),
+                (
+                    "failed-length-coercion",
+                    "{\"length\":[{\"toString\":null}]}",
+                ),
+                ("empty-array", "[]"),
+                ("null-array", "[null]"),
+                ("nested-empty-array", "[[]]"),
+                ("array", "[\"epoch\"]"),
+                ("joined-array", "[\"a\",null,[\"b\",\"c\"]]"),
+                ("colon-element", "[\":\"]"),
+                ("colon-substring", "[\"e:poch\"]"),
+                ("nested-colon", "[[\":\"]]"),
+                ("object-element", "[{}]"),
+                ("failed-array-coercion", "[{\"toString\":null}]"),
+                ("raw-array", "[\"\\ud800\",\"\\udfff\"]"),
+            ] {
+                add(
+                    name,
+                    IvyJson::object([("runtimeEpoch", parse(epoch, 65536).unwrap())]),
+                    1000,
+                    Some("nonce".into()),
+                    None,
+                );
+            }
+            for (name, status) in [
+                ("missing", "{}"),
+                ("null", "{\"runtimeEpoch\":null}"),
+                ("array-coercion", "{\"runtimeEpoch\":[{\"toString\":null}]}"),
+                ("valid", "{\"runtimeEpoch\":\"epoch\"}"),
+            ] {
+                for (suffix, time, nonce) in [
+                    ("negative-time", -1, "nonce".into()),
+                    ("unsafe-time", 9_007_199_254_740_992, "nonce".into()),
+                    ("empty-nonce", 1000, "".into()),
+                    ("colon-nonce", 1000, "n:once".into()),
+                    ("long-nonce", 1000, "n".repeat(129).into()),
+                    ("raw-nonce", 1000, JsString(vec![0xd800])),
+                ] {
+                    add(
+                        &format!("{name}-{suffix}"),
+                        parse(status, 65536).unwrap(),
+                        time,
+                        Some(nonce),
+                        None,
+                    );
+                }
+            }
+            for outcome in ["not_executed", "unknown", "completed"] {
+                add(outcome, IvyJson::Null, 1000, None, Some(outcome));
+            }
+            let mut actual = Vec::new();
+            for row in &rows {
+                let first_reply = if let Some(outcome) = row.get("failure") {
+                    Err(IvyError::new_js(
+                        "service_unavailable".into(),
+                        JsString(vec![111, 102, 102, 108, 105, 110, 101, 0xd800]),
+                    )
+                    .with_outcome(match outcome.as_str().unwrap().as_str() {
+                        "not_executed" => ivy_sdk::Outcome::NotExecuted,
+                        "unknown" => ivy_sdk::Outcome::Unknown,
+                        _ => ivy_sdk::Outcome::Completed,
+                    })
+                    .with_details(IvyJson::object([(
+                        "unit",
+                        IvyJson::String(JsString(vec![0xdfff])),
+                    )])))
+                } else {
+                    Ok(row.get("status").unwrap().clone())
+                };
+                let client = StatusClient::new(first_reply);
+                let owner = cache(Arc::new(FakeClock(AtomicI64::new(
+                    row.get("time").unwrap().as_f64().unwrap() as i64,
+                ))));
+                let nonce = row.get("nonce").map(|v| v.as_js_string().unwrap().clone());
+                let first = wire_result(owner.new_id(client.clone(), nonce.clone()).await);
+                let second = wire_result(owner.new_id(client.clone(), nonce).await);
+                let scoped =
+                    wire_result(owner.scoped(client.clone(), &"scope".into()).unwrap().await);
+                let repeated =
+                    wire_result(owner.scoped(client.clone(), &"scope".into()).unwrap().await);
+                assert_eq!(
+                    scoped, repeated,
+                    "scoped success must retain its exact nonce"
+                );
+                // Random UUID text is normalized only on successful identities.
+                // The original oracle uses the same fixed valid UUID.
+                let normalize = |mut value: IvyJson, generated: bool| {
+                    if generated {
+                        if let Some(IvyJson::String(text)) = value.get("value") {
+                            let mut text = text.clone();
+                            let colon = text.0.iter().rposition(|u| *u == 58).unwrap();
+                            text.0.truncate(colon + 1);
+                            text.0
+                                .extend("11111111-1111-4111-8111-111111111111".encode_utf16());
+                            value.insert("value", IvyJson::String(text));
+                        }
+                    }
+                    value
+                };
+                actual.push(IvyJson::object([
+                    ("name", row.get("name").unwrap().clone()),
+                    ("first", normalize(first, row.get("nonce").is_none())),
+                    ("second", normalize(second, row.get("nonce").is_none())),
+                    ("scoped", normalize(scoped, true)),
+                    ("repeated", normalize(repeated, true)),
+                    (
+                        "trace",
+                        IvyJson::Array(client.trace.lock().unwrap().clone()),
+                    ),
+                ]));
+            }
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+            let mut child = std::process::Command::new("node")
+                .args([
+                    "--experimental-transform-types",
+                    "--disable-warning=ExperimentalWarning",
+                    "tests/fixtures/operation-ids-malformed-oracle.mjs",
+                ])
+                .current_dir(root)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            {
+                use std::io::Write;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(
+                        stringify(&IvyJson::Array(rows), 1_000_000)
+                            .unwrap()
+                            .as_bytes(),
+                    )
+                    .unwrap();
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let expected = parse(std::str::from_utf8(&output.stdout).unwrap(), 1_000_000).unwrap();
+            for (actual, expected) in actual.iter().zip(expected.as_array().unwrap()) {
+                assert_eq!(
+                    canonical(actual, 65536).unwrap(),
+                    canonical(expected, 65536).unwrap(),
+                    "{}",
+                    actual.get("name").unwrap().as_str().unwrap()
+                );
+            }
+            assert_eq!(actual.len(), expected.as_array().unwrap().len());
+        }
+
+        #[tokio::test]
+        async fn public_typed_epoch_errors_do_not_evict_a_successful_status_lookup() {
+            use ivy_sdk::operation_ids::{new_operation_id, runtime_epoch, scoped_operation_id};
+            let client = StatusClient::new(Ok(IvyJson::object(Vec::<(String, IvyJson)>::new())));
+            assert_eq!(
+                runtime_epoch(client.clone()).await.unwrap_err().code,
+                "invalid_arguments"
+            );
+            assert_eq!(
+                new_operation_id(client.clone(), None).await.unwrap_err(),
+                IvyError::internal()
+            );
+            assert_eq!(
+                scoped_operation_id(client.clone(), &"scope".into())
+                    .await
+                    .unwrap_err(),
+                IvyError::internal()
+            );
+            assert_eq!(
+                scoped_operation_id(client.clone(), &"scope".into())
+                    .await
+                    .unwrap_err(),
+                IvyError::internal()
+            );
+            assert_eq!(client.trace.lock().unwrap().len(), 1);
+        }
+
         #[tokio::test]
         async fn cache_lifetime_expiry_and_failures_match_typescript() {
             let clock = Arc::new(FakeClock(AtomicI64::new(1000)));
