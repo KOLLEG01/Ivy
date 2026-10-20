@@ -1,4 +1,6 @@
 use super::*;
+#[path = "phone_native_sip_commands.rs"]
+mod commands;
 use ivy_phone_bridge::{
     media::{SipMediaEntropy, SystemSipSdpRoute},
     native_rpc::NativeRequest,

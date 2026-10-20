@@ -66,7 +66,7 @@ impl<T: Clone> NativeSipOperation<T> {
         }
     }
 }
-fn retained<T, F>(work: F) -> NativeSipOperation<T>
+pub(crate) fn retained<T, F>(work: F) -> NativeSipOperation<T>
 where
     T: Clone + Send + Sync + 'static,
     F: Future<Output = Result<T, SipHostError>> + Send + 'static,
