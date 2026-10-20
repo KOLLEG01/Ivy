@@ -21,6 +21,9 @@ public static class PhoneSipUdpOracle {
         // starting a receive loop, SIP agent, account or background timer.
         var channel=(SIPUDPChannel)RuntimeHelpers.GetUninitializedObject(typeof(SIPUDPChannel));
         typeof(SIPUDPChannel).GetField("m_udpSocket",BindingFlags.Instance|BindingFlags.NonPublic).SetValue(channel,socket);
+        for(var type=typeof(SIPUDPChannel);type!=null;type=type.BaseType)
+            foreach(var field in type.GetFields(BindingFlags.Instance|BindingFlags.NonPublic|BindingFlags.Public|BindingFlags.DeclaredOnly))
+                if(field.FieldType==typeof(Microsoft.Extensions.Logging.ILogger))field.SetValue(channel,Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
         return channel;
     }
     static Socket Socket() {var value=new Socket(AddressFamily.InterNetwork,SocketType.Dgram,ProtocolType.Udp);value.Bind(new IPEndPoint(IPAddress.Loopback,0));return value;}
