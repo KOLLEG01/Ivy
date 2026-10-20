@@ -230,6 +230,52 @@ fn endpoint_identity_keeps_scope_and_port_without_ipv6_flow_information() {
 }
 
 #[tokio::test]
+async fn native_udp_send_uses_original_ipv6_and_mapped_ipv4_endpoint_layouts() {
+    let mut cases = Vec::new();
+    for (binding, mapped) in [("127.0.0.1:0", true), ("[::1]:0", false)] {
+        let raw = Arc::new(UdpSocket::bind(binding).await.unwrap());
+        let local = raw.local_addr().unwrap();
+        let weak = Arc::downgrade(&raw);
+        let owner = SipUdpSocket::with_policy(
+            raw,
+            Arc::new(FailedDestinations::default()),
+            Arc::new(|| Ok(1)),
+        )
+        .unwrap();
+        let peer = UdpSocket::bind(binding).await.unwrap();
+        let destination = if mapped {
+            let SocketAddr::V4(address) = peer.local_addr().unwrap() else {
+                unreachable!()
+            };
+            std::net::SocketAddrV6::new(address.ip().to_ipv6_mapped(), address.port(), 0, 0).into()
+        } else {
+            peer.local_addr().unwrap()
+        };
+        owner.begin_send(b"\r\n\r\n", destination).unwrap();
+        let mut bytes = [0; 8];
+        let (size, source) =
+            tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&bytes[..size], b"\r\n\r\n");
+        assert_eq!(source, local);
+        assert_eq!(owner.completions().await, vec![Some(Ok(4))]);
+        owner.request_stop();
+        owner.drain().await.unwrap();
+        drop(owner);
+        assert_eq!(weak.strong_count(), 0);
+        let _rebound = UdpSocket::bind(local).await.unwrap();
+        cases.push(IvyJson::object([
+            ("mappedIpv4", mapped.into()),
+            ("originalSource", true.into()),
+            ("bindingReleased", true.into()),
+        ]));
+    }
+    trace("native-udp-addresses", IvyJson::Array(cases));
+}
+
+#[tokio::test]
 async fn both_channel_owners_share_failure_admission_before_close_and_keep_the_original_socket() {
     let cache = Arc::new(FailedDestinations::default());
     let clock: LocalClock = Arc::new(|| Ok(10_000_000_000));
