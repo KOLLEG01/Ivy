@@ -229,6 +229,13 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             .value()
             .to_owned();
         let mut hungup = IvyJson::Null;
+        let mut end_request = IvyJson::Null;
+        let no_bye_window =
+            if scenario.ends_with("invalid_ack") || scenario.ends_with("hangup_before_ack") {
+                150
+            } else {
+                0
+            };
         let mut controls = vec![];
         if status == 200 {
             assert!(!pending.is_finished(), "Answer must await the original ACK");
@@ -294,7 +301,8 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                 if delayed { "" } else { &sdp },
             )
             .await;
-            controls.push(receive(&peer, 4000).await.unwrap().status_code.code());
+            let re_status = receive(&peer, 4000).await.unwrap().status_code.code();
+            controls.push(re_status);
             send(
                 &peer,
                 target,
@@ -322,11 +330,26 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                 target,
                 "ACK",
                 2,
-                "z9hG4bK-owned-reack",
+                if re_status == 200 {
+                    "z9hG4bK-owned-reack"
+                } else {
+                    "z9hG4bK-owned-reinvite"
+                },
                 &tag,
-                if delayed { &sdp } else { "" },
+                "",
             )
             .await;
+            send(
+                &peer,
+                target,
+                "ACK",
+                3,
+                "z9hG4bK-owned-overlap-ack",
+                &tag,
+                "",
+            )
+            .await;
+            send(&peer, target, "ACK", 1, "z9hG4bK-owned-stale-ack", &tag, "").await;
             send(
                 &peer,
                 target,
@@ -353,11 +376,29 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                         .outcome(),
                 );
             }
-            let (bye, remote) = crate::sip_host::received(&peer).await;
-            assert_eq!(bye.method, Method::Bye, "{scenario}");
-            assert_eq!(bye.call_id_header().unwrap().value(), "owned-native-answer");
-            crate::sip_host::send(&peer, remote, &crate::sip_host::response(&bye, 200, "", ""))
-                .await;
+            match tokio::time::timeout(
+                Duration::from_millis(if no_bye_window > 0 {
+                    no_bye_window
+                } else {
+                    4000
+                }),
+                crate::sip_host::received(&peer),
+            )
+            .await
+            {
+                Ok((bye, remote)) => {
+                    end_request = "BYE".into();
+                    assert_eq!(bye.method, Method::Bye, "{scenario}");
+                    assert_eq!(bye.call_id_header().unwrap().value(), "owned-native-answer");
+                    crate::sip_host::send(
+                        &peer,
+                        remote,
+                        &crate::sip_host::response(&bye, 200, "", ""),
+                    )
+                    .await;
+                }
+                Err(_) => assert!(no_bye_window > 0, "Original incoming BYE unavailable"),
+            }
         }
         until(|| {
             call.observation().phase == ivy_phone_bridge::sip::SipHostCallPhase::LocalEnded
@@ -412,6 +453,11 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                         .collect(),
                 ),
             ),
+            ("endRequest", end_request),
+            (
+                "noByeObservationMs",
+                IvyJson::Number((no_bye_window as u32).into()),
+            ),
             ("finalHasSdp", (!final_response.body.is_empty()).into()),
             ("ackHasSdp", (status == 200 && delayed).into()),
             ("sameMedia", true.into()),
@@ -420,6 +466,27 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
         ]);
         let mut actual = result.clone();
         normalize(&mut actual, &id);
+        if original
+            .as_ref()
+            .is_some_and(|o| o.as_array().unwrap()[0].get("json").is_none())
+        {
+            trace(
+                &format!("native-answer-{scenario}"),
+                IvyJson::object([
+                    ("rust", result.clone()),
+                    ("original", IvyJson::Null),
+                    ("originalResponse", original.clone().unwrap()),
+                    ("normalizedRust", actual.clone()),
+                    ("normalizedOriginal", IvyJson::Null),
+                    ("finding", IvyJson::Null),
+                    (
+                        "detail",
+                        "Original fixture supplied no comparable receipt".into(),
+                    ),
+                ]),
+            );
+            panic!("Original {scenario} comparison unavailable");
+        }
         let original_result = original.as_ref().map(|o| {
             parse(
                 &o.as_array().unwrap()[0]

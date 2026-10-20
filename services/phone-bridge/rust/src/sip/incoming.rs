@@ -1,8 +1,7 @@
 //! Original incoming transaction, answer and accepted dialog ownership.
 use super::{
     CallError, CallObservation, CallOutcome, Dialog, DialogRequest, FinalPhase, HostedSipMedia,
-    ReinviteAdmission, SipEndpoint, SipHostCall, SipHostError, endpoint::DialogFlow,
-    server::ServerExchange,
+    SipEndpoint, SipHostCall, SipHostError, endpoint::DialogFlow, server::ServerExchange,
 };
 use rsipstack::{
     sip::{Header, Method, Request, StatusCode, headers::*, prelude::*},
@@ -144,9 +143,9 @@ impl IncomingInvite {
             media_start: None,
             bye: None,
             remote_ended: false,
+            established: false,
             dialog: None,
-            reinvite: None,
-            next_token: 1,
+            reinvite: std::collections::VecDeque::new(),
             failed_controls: vec![],
         };
         tokio::spawn(async move {
@@ -249,9 +248,8 @@ impl IncomingInvite {
     }
 }
 struct Negotiation {
-    token: u64,
+    sequence: i32,
     server: ServerExchange,
-    delayed: bool,
     deadline: Instant,
 }
 struct IncomingActor {
@@ -268,9 +266,9 @@ struct IncomingActor {
     media_start: Option<JoinHandle<bool>>,
     bye: Option<super::ClientExchange>,
     remote_ended: bool,
+    established: bool,
     dialog: Option<Dialog>,
-    reinvite: Option<Negotiation>,
-    next_token: u64,
+    reinvite: std::collections::VecDeque<Negotiation>,
     failed_controls: Vec<Transaction>,
 }
 fn unknown<T>(_: T) -> CallError {
@@ -391,7 +389,8 @@ impl IncomingActor {
                 event=self.exchange.as_mut().unwrap().next()=>match event{
                     Some(ack) if ack.method==Method::Ack=>{
                         if !identity.matches(&ack){continue;}
-                        if delayed&&!sdp(&ack).is_some_and(|body|media.accept_answer(body)){self.end();}
+                        self.established=self.control.intent.lock().unwrap().ending||!delayed||sdp(&ack).is_some_and(|body|media.accept_answer(body));
+                        if !self.established{self.end();}
                         break;
                     },
                     None=>return Err(CallError::CleanupUnconfirmed),_=>(),
@@ -445,48 +444,25 @@ impl IncomingActor {
             .ok()
             .and_then(|s| i32::try_from(s).ok())
             .ok_or(CallError::CleanupUnconfirmed)?;
-        let branch = request
-            .via_header()
-            .and_then(|h| h.typed())
-            .ok()
-            .and_then(|h| h.branch().map(|b| b.value().to_owned()))
-            .unwrap_or_default();
         let checked = DialogRequest {
             call_id: &id.wire,
             from_tag: &id.remote,
             to_tag: &id.local,
             sequence,
-            branch: &branch,
+            branch: "",
         };
         if request.method == Method::Invite {
-            let token = self.next_token;
-            self.next_token = self
-                .next_token
-                .checked_add(1)
-                .ok_or(CallError::CleanupUnconfirmed)?;
-            let active = self.current.active && !self.ending();
-            let admission = self
-                .dialog
-                .as_mut()
-                .ok_or(CallError::CleanupUnconfirmed)?
-                .begin_reinvite(&checked, token, active);
-            let status = match admission {
-                ReinviteAdmission::Refused(code) => Some(StatusCode::from(code)),
-                ReinviteAdmission::Foreign => return Err(CallError::CleanupUnconfirmed),
-                ReinviteAdmission::Accepted => None,
-            };
-            if let Some(status) = status {
-                return self.reply_control(transaction, status).await;
+            if !self.current.active || self.ending() {
+                return self
+                    .reply_control(transaction, StatusCode::CallTransactionDoesNotExist)
+                    .await;
             }
+            // The original incoming SDK accepts stale/overlapping offers. Its
+            // bodyless re-INVITE returns 406; the outgoing policy is separate.
             let request = transaction.original.clone();
             let server = ServerExchange::start(transaction);
-            let delayed = request.body.is_empty();
-            let media = self.media.as_ref().unwrap();
-            let body = if delayed {
-                media.initial_offer()
-            } else {
-                sdp(&request).and_then(|body| media.negotiate_offer(body))
-            };
+            let body =
+                sdp(&request).and_then(|body| self.media.as_ref().unwrap().negotiate_offer(body));
             if let Some(body) = body {
                 server
                     .reply(
@@ -495,18 +471,14 @@ impl IncomingActor {
                         Some(body.into_bytes()),
                     )
                     .await?;
-                self.reinvite = Some(Negotiation {
-                    token,
+                self.reinvite.push_back(Negotiation {
+                    sequence,
                     server,
-                    delayed,
                     deadline: Instant::now() + Duration::from_secs(32),
                 });
             } else {
-                server
-                    .reply(StatusCode::NotAcceptableHere, vec![], None)
-                    .await?;
+                server.reply(StatusCode::from(406), vec![], None).await?;
                 server.close().await?;
-                self.dialog.as_mut().unwrap().finish_reinvite(token);
             }
             return Ok(());
         }
@@ -590,7 +562,7 @@ impl IncomingActor {
             if self.ending() && !stopping {
                 stopping = true;
                 self.end();
-                if !self.remote_ended {
+                if self.established && !self.remote_ended {
                     self.bye = Some(
                         self.endpoint
                             .dialog_client(self.bye_request(&request)?, &flow, None)
@@ -603,12 +575,12 @@ impl IncomingActor {
                 while let Some(original) = self.commands.recv().await {
                     self.control_request(original).await?;
                 }
-                if let Some(pending) = self.reinvite.take() {
+                while let Some(pending) = self.reinvite.pop_front() {
                     pending.server.close().await?;
                 }
                 return Ok(());
             }
-            let reinvite_deadline = self.reinvite.as_ref().map(|p| p.deadline);
+            let reinvite_deadline = self.reinvite.front().map(|p| p.deadline);
             tokio::select! {
                 _ = self.control.changed.notified()=>(),
                 transaction=self.commands.recv()=>{let Some(transaction)=transaction else{return Err(CallError::CleanupUnconfirmed);};self.control_request(transaction).await?;},
@@ -623,17 +595,14 @@ impl IncomingActor {
                         self.bye.take().unwrap().retire().await.map_err(unknown)?;
                     }
                 },
-                event=async{self.reinvite.as_mut().unwrap().server.next().await},if self.reinvite.is_some()=>{
-                    let pending=self.reinvite.as_ref().unwrap();
+                event=async{self.reinvite.front_mut().unwrap().server.next().await},if !self.reinvite.is_empty()=>{
+                    let pending=self.reinvite.front().unwrap();
                     match event {
                         Some(ack) if ack.method==Method::Ack=>{
                             let id=self.identity.as_ref().unwrap();
                             let sequence=ack.cseq_header().and_then(|h|h.seq()).ok().and_then(|s|i32::try_from(s).ok()).ok_or(CallError::CleanupUnconfirmed)?;
-                            let checked=DialogRequest{call_id:&id.wire,from_tag:&id.remote,to_tag:&id.local,sequence,branch:""};
-                            if !id.matches(&ack)||!self.dialog.as_mut().unwrap().acknowledge_reinvite(pending.token,&checked){continue;}
-                            let valid=!pending.delayed||sdp(&ack).is_some_and(|body|self.media.as_ref().unwrap().accept_answer(body));
-                            let pending=self.reinvite.take().unwrap();pending.server.close().await?;
-                            self.dialog.as_mut().unwrap().finish_reinvite(pending.token);if !valid{self.end();}
+                            if !id.matches(&ack)||sequence!=pending.sequence{continue;}
+                            let pending=self.reinvite.pop_front().unwrap();pending.server.close().await?;
                         },
                         Some(cancel) if cancel.method==Method::Cancel=>{pending.server.reply(StatusCode::RequestTerminated,vec![],None).await?;self.end();},
                         Some(_)=>(),None=>return Err(CallError::CleanupUnconfirmed),

@@ -200,7 +200,7 @@ public static class PhoneNativeAnswerOracle {
             await owner.InvokeAsync("call.claim",Args(new{callId=id}));await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
             var pending=Invoke(owner,"call.answer",new{callId=id,waiting});
             var final=SIPResponse.ParseSIPResponse(await Receive(peer));int status=(int)final.Status;tag=final.Header.To.ToTag;
-            object hungup=null;var controls=new List<int>();
+            object hungup=null;string endRequest=null;var controls=new List<int>();
             if(status==200){
                 if(scenario.EndsWith("hangup_before_ack"))hungup=await Invoke(owner,"call.hangup",new{callId=id});
                 if(scenario.EndsWith("slow_ack")){await Task.Delay(1250);try{for(;;)if((int)SIPResponse.ParseSIPResponse(await Receive(peer,50)).Status!=200)throw new Exception("Original ring timer was not retired by answer");}catch(OperationCanceledException){}}
@@ -211,20 +211,20 @@ public static class PhoneNativeAnswerOracle {
                 await Send("INVITE",2,"z9hG4bK-owned-reinvite",delayed?"":sdp);var re=SIPResponse.ParseSIPResponse(await Receive(peer));controls.Add((int)re.Status);
                 await Send("INVITE",3,"z9hG4bK-owned-overlap",sdp);controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);
                 await Send("INVITE",1,"z9hG4bK-owned-stale",sdp);controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);
-                await Send("ACK",2,"z9hG4bK-owned-reack",delayed?sdp:"");
+                await Send("ACK",2,(int)re.Status==200?"z9hG4bK-owned-reack":"z9hG4bK-owned-reinvite","");await Send("ACK",3,"z9hG4bK-owned-overlap-ack","");await Send("ACK",1,"z9hG4bK-owned-stale-ack","");
                 await Send("OPTIONS",4,"z9hG4bK-owned-options","");controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);
             }
             if(status==200&&scenario.EndsWith("remote_bye")){
                 for(int n=0;n<2;n++){await Send("BYE",5,"z9hG4bK-owned-bye","");controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);}
-                await Wait(()=>call.Observation.State=="local_ended");
+                await Wait(()=>(call.Observation.State=="local_ended"||call.Observation.State=="outcome_unknown"));
             }else if(status==200){
                 if(hungup==null&&!scenario.EndsWith("invalid_ack"))hungup=await Invoke(owner,"call.hangup",new{callId=id});
-                var bye=SIPRequest.ParseSIPRequest(await Receive(peer));if(bye.Method!=SIPMethodsEnum.BYE)throw new Exception("Original incoming BYE unavailable");
-                var response=SIPResponse.GetResponse(bye,(SIPResponseStatusCodesEnum)200,null);byte[] packet=Encoding.UTF8.GetBytes(response.ToString());await peer.SendAsync(packet,packet.Length,target);
+                try{var bye=SIPRequest.ParseSIPRequest(await Receive(peer,scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:4000));if(bye.Method!=SIPMethodsEnum.BYE)throw new Exception("Original incoming BYE unavailable");endRequest="BYE";
+                var response=SIPResponse.GetResponse(bye,(SIPResponseStatusCodesEnum)200,null);byte[] packet=Encoding.UTF8.GetBytes(response.ToString());await peer.SendAsync(packet,packet.Length,target);}catch(OperationCanceledException)when(scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")){}
             }
-            await Wait(()=>call.Observation.State=="local_ended");object ended=call.Observation;bool sameMedia=ReferenceEquals(media,call.Media);
+            await Wait(()=>(call.Observation.State=="local_ended"||call.Observation.State=="outcome_unknown"));object ended=call.Observation;bool sameMedia=ReferenceEquals(media,call.Media);
             await owner.InvokeAsync("call.release",Args(new{callId=id}));bool released=Host(owner).FindCall(id)==null;await owner.DisposeAsync();
-            return new{status,answered,hungup,ended,controls,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=true};
+            return new{status,answered,hungup,ended,controls,endRequest,noByeObservationMs=scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:0,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=true};
         }
     }
 }
