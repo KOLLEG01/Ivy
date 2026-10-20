@@ -20,4 +20,6 @@ const record=(component,names)=>({component,target,platform,identity,outputDirec
 const blocked=join(root,'universal-must-refuse');
 assert.throws(()=>stageNativePayloads({component:'secretary',root,outputRoot:blocked,identity,payloads:[record('secretary',['ivy-secretary']),record('host-executor',programs.slice(1).map(([name])=>name))],requiredBinaries:{win32:['ivy-job']}}),/Every advertised target requires/);
 assert.equal(existsSync(blocked),false);
-console.log(JSON.stringify({main:join(dist,'services/secretary/src/main.js'),health:join(dist,'packages/host-runtime/src/health.js'),job:process.platform==='win32'?join(native,'ivy-job.exe'):null,platform,missingMatrixRefused:true,files:result.files.map(path=>({path,sha256:createHash('sha256').update(readFileSync(path)).digest('hex')}))}));
+const runtimeAssets=process.env.IVY_SECRETARY_RUNTIME_ASSETS
+  ?(await import('./runtime-assets-fixture.mjs')).installRuntimeAssets(root,process.env.IVY_SECRETARY_RUNTIME_ASSETS):null;
+console.log(JSON.stringify({main:join(dist,'services/secretary/src/main.js'),health:join(dist,'packages/host-runtime/src/health.js'),job:process.platform==='win32'?join(native,'ivy-job.exe'):null,platform,missingMatrixRefused:true,runtimeAssets,files:result.files.map(path=>({path,sha256:createHash('sha256').update(readFileSync(path)).digest('hex')}))}));

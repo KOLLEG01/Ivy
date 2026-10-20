@@ -21,6 +21,29 @@ function choices(value, fallback, allowed) {
   return value;
 }
 
+function runtimeAssets(component, root) {
+  if (component !== 'secretary') return [];
+  const assets = [];
+  const visit = directory => {
+    if (realpathSync(directory) !== directory) throw Error('Native catalog inputs must not use links.');
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const source = resolve(directory, entry.name);
+      if (entry.isDirectory()) visit(source);
+      else if (entry.name.endsWith('.json') || entry.name === 'LICENSE.codex') {
+        assets.push({ path: relative(root, source), bytes: readFileSync(regular(root, source)) });
+      } else if (entry.isSymbolicLink()) throw Error('Native catalog inputs must not use links.');
+    }
+  };
+  visit(resolve(root, 'specs/native'));
+  if (!assets.some(asset => /(?:^|[\\/])catalog(?:\.[^\\/]*)?\.json$/.test(asset.path))) throw Error('Native runtime catalogs are missing.');
+  // This approved library adapter is the sole Node worker in the Rust package.
+  // The existing preparation path resolves its literal PDF.js import through
+  // the pinned npm lock and materializes all supported platform dependencies.
+  assets.push({ path: 'services/secretary/pdf-worker.mjs',
+    bytes: readFileSync(regular(root, resolve(root, 'services/secretary/rust/pdf-worker.mjs'))) });
+  return assets;
+}
+
 /** Assemble prebuilt component/helper records from compileRustBackend. The exact
  * advertised matrix is mandatory; this does not compile, qualify or archive it.
  * Callers declare extra required helper names by OS. Linux executable paths are
@@ -83,6 +106,7 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
     instructions ??= group.instructions;
     if (instructions.size !== group.instructions.size || [...instructions].some(([name, value]) => !group.instructions.get(name)?.bytes.equals(value.bytes))) throw Error('Native targets have different shared instruction assets.');
   }
+  const assets = runtimeAssets(component, root);
   outputRoot = resolve(outputRoot);
   let parent = outputRoot;
   while (!existsSync(parent)) parent = dirname(parent);
@@ -112,6 +136,11 @@ export function stageNativePayloads({ component, root = process.cwd(), outputRoo
     const path = resolve(outputRoot, 'instructions', name);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, value.bytes); files.push(path);
+  }
+  for (const asset of assets) {
+    const path = resolve(outputRoot, asset.path);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, asset.bytes); files.push(path);
   }
   const info = resolve(outputRoot, 'build-info.json');
   writeFileSync(info, stampText); files.push(info);
