@@ -2,14 +2,12 @@ use ivy_contracts::{
     IvyJson, IvyResult, JsString,
     json::{canonical, parse},
 };
-pub use ivy_host_runtime::{codex_home, layout, node_path};
-// Production publication awaits the Host-owned contract/module index cut. This
-// target compiles the actual owned source against the delivered Host layout.
-#[path = "../../packages/host-runtime/rust/src/native_backup_paths.rs"]
-mod native_backup_paths;
-use layout::StorageContext;
-use native_backup_paths::NativeBackupPolicy;
-use node_path::{Context, Style};
+use ivy_host_runtime::{
+    layout::StorageContext,
+    native_backup_paths::NativeBackupPolicy,
+    native_backup_policy::NativeBackupPaths,
+    node_path::{Context, Style},
+};
 use std::{
     collections::BTreeMap,
     io::Write,
@@ -88,7 +86,7 @@ fn compare_group(group: &str) {
     {
         let platform = text(row, "platform").to_utf8().unwrap();
         let comparisons = comparisons.clone();
-        let policy = NativeBackupPolicy::new(
+        let policy: Arc<dyn NativeBackupPaths> = Arc::new(NativeBackupPolicy::new(
             StorageContext {
                 paths: Context {
                     style: if platform == "win32" {
@@ -111,7 +109,7 @@ fn compare_group(group: &str) {
             },
             map(field(row, "environment")),
             text(context, "processCwd").clone(),
-        );
+        ));
         let config = field(row, "config");
         let actual = IvyJson::object([
             ("exclusions", capture(policy.exclusions(config))),

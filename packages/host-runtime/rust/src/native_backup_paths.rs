@@ -137,6 +137,14 @@ impl NativeBackupPolicy {
         Ok(())
     }
 }
+impl crate::native_backup_policy::NativeBackupPaths for NativeBackupPolicy {
+    fn exclusions(&self, config: &IvyJson) -> IvyResult<Vec<IvyJson>> {
+        NativeBackupPolicy::exclusions(self, config)
+    }
+    fn shared_homes(&self, config: &IvyJson) -> IvyResult<Vec<IvyJson>> {
+        NativeBackupPolicy::shared_homes(self, config)
+    }
+}
 fn text(value: Option<&IvyJson>) -> IvyResult<&JsString> {
     value
         .and_then(IvyJson::as_js_string)
