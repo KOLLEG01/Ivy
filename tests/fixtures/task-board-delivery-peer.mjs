@@ -5,10 +5,11 @@ import {toolDefinitionHash} from '../../packages/contracts/src/tool-definition.t
 
 // Only the isolated factory mode enters this finite, original-source-backed peer.
 export function deliveryBoundary(){
- let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null;
+ let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null,forwardReads=0;
  const definitions=new Map();
  const phone=()=>row.input.mode==='phonePrepared';
- const fallback=()=>phone()&&row.input.fault.outcome==='not_executed';
+ const fallback=()=>phone()&&row.input.fault?.outcome==='not_executed';
+ const forwarded=()=>phone()&&row.input.differentAdmission===true;
  const template=()=>row.initial.current.value.chatRequest??row.boundaries.find(b=>b.kind==='write'&&b.args[1].chatRequest)?.args[1].chatRequest;
  const expected=()=>({...template().expectedBridge,callerPrincipalId:'fixture-principal'});
  const channel=()=>structuredClone(template().channel);
@@ -24,7 +25,7 @@ export function deliveryBoundary(){
   const fail=(code,message,outcome='not_executed')=>send({jsonrpc:'2.0',id,error:{code:-32000,message,data:{code,outcome}}});
   if(method==='test.deliveryFixture'){
    assert.equal(row,null);row=structuredClone(params.row);
-   assert.equal(row.name,fallback()?'factory phone refused question falls back and recovers original chat':phone()?'factory phone question lost admission recovers confirmed':'factory question lost notify recovers confirmed');
+   assert.equal(row.name,forwarded()?'factory phone different admission recovers original forwarded prompt':fallback()?'factory phone refused question falls back and recovers original chat':phone()?'factory phone question lost admission recovers confirmed':'factory question lost notify recovers confirmed');
    assert.equal(row.expected.final.value.state,'confirmed');
    if(phone()&&!fallback()){reply(id,{});return true;}
    const raw=key=>row.boundaries.find(b=>b.kind==='rpc'&&b.args[0]==='objects.read'&&b.value.object.contractKey===key).value;
@@ -77,11 +78,23 @@ export function deliveryBoundary(){
      emit({kind:'delivery-phone-refusal',error:structuredClone(original.error)});
      fail(original.error.code,original.error.message,original.error.outcome);return true;
     }
-    if(selected===1){fail('service_unavailable','Fixture failure.','unknown');return true;}
+    if(selected===1&&!forwarded()){fail('service_unavailable','Fixture failure.','unknown');return true;}
     const original=row.boundaries.find(b=>b.kind==='rpc'&&b.args[0]==='tools.call'&&b.args[1].qualifiedName==='phone.request'&&b.value);
-    const value={...structuredClone(original.value),operationId:phoneRequest.operationId};
+    if(forwarded()){assert.equal(selected,1);assert.equal(forwardReads,0);}
+    const value={...structuredClone(original.value),...(forwarded()?{}:{operationId:phoneRequest.operationId})};
     emit({kind:'delivery-phone-admission-reply',value});reply(id,value);
    }else if(params.qualifiedName==='phone.operation'){
+    if(forwarded()){
+     assert.ok(phoneRequest);assert.ok(selected===1||selected===2);
+     const original=row.boundaries.filter(b=>b.kind==='rpc'&&b.args[0]==='tools.call'&&b.args[1].qualifiedName==='phone.operation')[selected===2?2:forwardReads===0?0:1];
+     assert.ok(original);assert.equal(original.value.intent.operationId,row.initial.current.value.phoneRequest.operationId);
+     assert.deepEqual(args,{...original.args[1].arguments,operationId:phoneRequest.operationId});
+     assert.deepEqual(Object.keys(args).sort(),['callId','operationId']);
+     assert.equal(params.operationId,undefined);
+     const value=structuredClone(original.value);value.intent.operationId=phoneRequest.operationId;
+     assert.equal(value.intent.prompt,phoneRequest.voicePrompt);assert.equal(value.intent.callId,args.callId);assert.equal(value.intent.method,'call.forwardVoice');
+     forwardReads++;emit({kind:'delivery-phone-forwarded',arguments:structuredClone(args),value});reply(id,value);return true;
+    }
     assert.ok(phoneRequest);assert.equal(selected,2);
     const sourceArgs={...args};if('operationId'in sourceArgs)sourceArgs.operationId=row.initial.current.value.phoneRequest.operationId;
     const original=row.boundaries.find(b=>b.kind==='rpc'&&b.args[0]==='tools.call'&&b.args[1].qualifiedName==='phone.operation'&&hashJson(b.args[1].arguments)===hashJson(sourceArgs));

@@ -316,5 +316,5 @@ async fn retained_chat_and_phone_deliveries_match_original_exact_effects_and_rep
             s(row, "name")
         );
     }
-    assert_eq!((cases, steps, boundaries, rpc), (107, 125, 1530, 426));
+    assert_eq!((cases, steps, boundaries, rpc), (108, 128, 1573, 438));
 }

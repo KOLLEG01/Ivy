@@ -31,6 +31,7 @@ add('phone admission write refusal follows original fallback',{mode:'phonePrepar
 add('phone unknown repeats only original',{mode:'phonePrepared',fault:{where:'phone.request',code:'service_unavailable',outcome:'unknown',always:true},passes:3});
 add('factory phone question lost admission recovers confirmed',{mode:'phonePrepared',fault:{where:'phone.request',code:'service_unavailable',outcome:'unknown'},passes:3,comment:{purpose:'question',body:'Saved question\ud800'}});
 add('factory phone refused question falls back and recovers original chat',{mode:'phonePrepared',fault:{where:'phone.request',code:'service_unavailable',outcome:'not_executed'},preparedChat:true,phase:'succeeded',replyState:'confirmed',notFound:1,loseNotify:true,passes:4,comment:{purpose:'question',body:'Saved question\ud800'}});
+add('factory phone different admission recovers original forwarded prompt',{mode:'phonePrepared',differentAdmission:true,forwardPhases:['submitted','outcome_unknown','result'],passes:3,comment:{purpose:'question',body:'Saved question\ud800'}});
 add('phone forwarded pending',{mode:'phoneCalled',forward:'submitted'});add('phone forwarded confirmed',{mode:'phoneCalled',forward:'result'});add('phone forwarded unknown',{mode:'phoneCalled',forward:'outcome_unknown'});add('phone forwarded negative receipt',{mode:'phoneCalled',forward:'result',forwardReceipt:{ok:false,result:{state:'sent'}}});add('phone forwarded prompt mismatch',{mode:'phoneCalled',forward:'result',forwardIntent:{prompt:'other'}});
 for(const dial of ['missing','submitted','outcome_unknown','failed','connected'])add('phone dial '+dial,{mode:'phoneCalled',dial});
 for(const prompt of ['missing','submitted','outcome_unknown','failed','result'])add('phone voice '+prompt,{mode:'phoneCalled',prompt});
@@ -56,7 +57,7 @@ for(const row of rows){
   if(name==='chat.notify'){notified=true;if(i.preparedChat)raws.get(id(801)).content.value.operationId=current.value.chatRequest.operationId;if(i.loseNotify)throw new IvyError('outcome_unknown','Lost original response.','unknown');return chatOperation();}
   if(name==='chat.notice')return{object:pin(800),data:raws.get(id(800)).content.value};
   if(name==='phone.request')return{callId:'call',operationId:i.differentAdmission?'other':current.value.phoneRequest.operationId};
-  if(name==='phone.operation'){const a=args.arguments;if(a.operationId){if(!i.forward)return null;return{phase:i.forward,intent:{method:'call.forwardVoice',callId:'call',operationId:current.value.phoneRequest.operationId,prompt:current.value.phoneRequest.voicePrompt,...i.forwardIntent},receipt:i.forwardReceipt??{ok:true,result:{state:'sent'}}};}
+  if(name==='phone.operation'){const a=args.arguments;if(a.operationId){const forward=i.forwardPhases?.[pass]??i.forward;if(!forward)return null;return{phase:forward,intent:{method:'call.forwardVoice',callId:'call',operationId:current.value.phoneRequest.operationId,prompt:current.value.phoneRequest.voicePrompt,...i.forwardIntent},receipt:i.forwardReceipt??{ok:true,result:{state:'sent'}}};}
     const kind=a.method==='call.dial'?(i.dial??'connected'):(i.prompt??'result');if(kind==='missing')return null;return{phase:['submitted','outcome_unknown'].includes(kind)?kind:'result',receipt:{ok:kind!=='failed',result:{state:a.method==='call.dial'?kind:'sent'}}};}
   throw Error('Unexpected '+name);
  }};
@@ -85,5 +86,6 @@ for(const row of rows){
  if(['prepare original chat','prepare original phone','confirm chat proof','phone forwarded confirmed'].includes(row.name))assert.ok(outcomes.every(o=>'ok'in o),row.name+JSON.stringify(outcomes));
  if(row.name==='confirm chat proof')assert.equal(current.value.state,'confirmed');
  if(i.preparedChat){assert.equal(current.value.state,'confirmed');assert.equal(current.pin.revision,6);assert.equal(current.value.activeRoute,'chat');assert.equal(current.value.requestedRoute,'phone');assert.equal(current.value.phoneCallId,null);assert.equal(current.value.phoneRequest.operationId,'original');assert.notEqual(current.value.chatRequest.operationId,'original');}
+ if(i.forwardPhases){assert.equal(current.value.state,'confirmed');assert.equal(current.pin.revision,5);assert.equal(current.value.activeRoute,'phone');assert.equal(current.value.phoneCallId,'call');assert.equal(current.value.operationId,'original');assert.equal(current.value.phoneRequest.operationId,'original');assert.equal(current.value.chatRequest,null);}
 }
 process.stdout.write(JSON.stringify(rows));
