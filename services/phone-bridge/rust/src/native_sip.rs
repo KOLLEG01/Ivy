@@ -229,7 +229,12 @@ impl NativeSipOperations {
             .and_then(NativeSipOperation::result)
     }
     pub fn observation(&self) -> SipHostObservation {
-        self.0.host.observation()
+        let state = self.0.state.lock().unwrap();
+        let mut observation = self.0.host.observation();
+        observation.configured = state.configured;
+        observation.stopping |= state.stopping;
+        observation.calls = state.calls.iter().map(NativeSipCall::observation).collect();
+        observation
     }
     pub fn configuration(&self) -> Option<Arc<NativeCallConfiguration>> {
         self.0.state.lock().unwrap().configuration.clone()
@@ -251,6 +256,11 @@ impl NativeSipOperations {
             return Err(SipHostError::NotReady);
         }
         let configuration = state.configuration.clone().ok_or(SipHostError::NotReady)?;
+        // Host disposal completes before its native completion is published.
+        // Preserve this owner's ID until the same retained work retires it.
+        if state.calls.iter().any(|call| call.observation().id == id) {
+            return Err(SipHostError::OperationConflict);
+        }
         let factory = self.0.media.clone();
         let media = Arc::new(OnceLock::new());
         let saved = media.clone();
