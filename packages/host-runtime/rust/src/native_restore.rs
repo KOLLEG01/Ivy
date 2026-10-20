@@ -52,10 +52,20 @@ fn ordinary(value: ValueRef<'_>) -> IvyResult<IvyJson> {
         }
         ValueRef::Real(value) => IvyJson::Number(value),
         ValueRef::Text(value) => text(value).into(),
-        // These ordinary schema/migration queries never select a blob. Path
-        // values retain their SQLite type separately rather than JSON-coercing it.
+        // Schema fields are scalar. Migration blobs and path values retain
+        // their SQLite type at their respective validation boundaries below.
         ValueRef::Blob(_) => return Err(IvyError::internal()),
     })
+}
+
+fn migration_value(value: ValueRef<'_>) -> IvyResult<(IvyJson, bool)> {
+    // A SQLite blob is a Uint8Array in the original. It fails JSON validation
+    // at its value's position. NaN reserves the same failing node so the shared
+    // canonical encoder still owns byte/node limits and traversal order.
+    match value {
+        ValueRef::Blob(_) => Ok((IvyJson::Number(f64::NAN), true)),
+        value => Ok((ordinary(value)?, false)),
+    }
 }
 
 pub fn verify_layout(db: &Connection, layout: &IvyJson) -> IvyResult<()> {
@@ -88,11 +98,28 @@ pub fn verify_layout(db: &Connection, layout: &IvyJson) -> IvyResult<()> {
     let mut rows = sqlite(statement.query([]))?;
     let mut migrations = Vec::new();
     let mut complete = true;
+    let mut first_invalid_is_blob = None;
     while let Some(row) = sqlite(rows.next())? {
-        let version = ordinary(sqlite(row.get_ref(0))?)?;
-        let description = ordinary(sqlite(row.get_ref(1))?)?;
+        let (version, version_blob) = migration_value(sqlite(row.get_ref(0))?)?;
+        let (description, description_blob) = migration_value(sqlite(row.get_ref(1))?)?;
         let checksum = ordinary(sqlite(row.get_ref(2))?)?;
-        complete &= ordinary(sqlite(row.get_ref(3))?)? == IvyJson::Number(1.0);
+        let success = sqlite(row.get_ref(3))?;
+        complete &=
+            !matches!(success, ValueRef::Blob(_)) && ordinary(success)? == IvyJson::Number(1.0);
+        // Canonical keys are checksum, description, version; SQLite fetch
+        // failures must still precede this deferred JSON-domain rejection.
+        for (value, blob) in [
+            (&checksum, false),
+            (&description, description_blob),
+            (&version, version_blob),
+        ] {
+            if first_invalid_is_blob.is_none()
+                && matches!(value, IvyJson::Number(number)
+                if !number.is_finite() || (number.fract()==0.0 && number.abs()>9_007_199_254_740_991.0))
+            {
+                first_invalid_is_blob = Some(blob);
+            }
+        }
         migrations.push(IvyJson::object([
             ("version", version),
             ("description", description),
@@ -100,9 +127,22 @@ pub fn verify_layout(db: &Connection, layout: &IvyJson) -> IvyResult<()> {
         ]));
     }
     require(
-        complete
-            && hash_json(&IvyJson::Array(migrations))?
-                == hash_json(layout.required("migrations")?)?,
+        complete,
+        "unsupported_storage",
+        "Native migration checksums or completion differ from the pinned build.",
+    )?;
+    let observed = hash_json(&IvyJson::Array(migrations)).map_err(|error| {
+        if first_invalid_is_blob == Some(true)
+            && error.code == "invalid_arguments"
+            && error.message == "Numbers must be finite and integers must be safe."
+        {
+            IvyError::new("invalid_arguments", "JSON objects must be plain objects.")
+        } else {
+            error
+        }
+    })?;
+    require(
+        observed == hash_json(layout.required("migrations")?)?,
         "unsupported_storage",
         "Native migration checksums or completion differ from the pinned build.",
     )

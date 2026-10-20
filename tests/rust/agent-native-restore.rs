@@ -107,6 +107,24 @@ fn copied_sqlite_transactions_match_original_layout_digest_and_failure_boundarie
     let root = Root::new();
     let cases = node(&root.0, "prepare");
     let expected = node(&root.0, "original");
+    let positive: Vec<_> = expected
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| value(value(case, "reply"), "ok").as_bool() == Some(true))
+        .map(|case| string(case, "name"))
+        .collect();
+    assert_eq!(
+        positive,
+        [
+            "0.154.0",
+            "0.158.0",
+            "0.159.2",
+            "optional-outside",
+            "typed-values",
+            "invalid-utf8"
+        ]
+    );
     node(&root.0, "reset");
     let mappings = node(&root.0, "mappings");
     let mut replies = Vec::new();
@@ -114,6 +132,16 @@ fn copied_sqlite_transactions_match_original_layout_digest_and_failure_boundarie
         let name = string(case, "name");
         let home = PathBuf::from(string(case, "newHome"));
         let database = home.join("state_5.sqlite");
+        if name.starts_with("0.") {
+            assert!(
+                value(value(case, "manifest"), "files")
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|file| string(file, "path").ends_with("/state_5.sqlite-wal")
+                        && value(file, "bytes").as_f64().unwrap() > 0.0)
+            );
+        }
         assert!(paths::inside(&root.0, &paths::realpath(&database).unwrap()).unwrap());
         assert!(
             !fs::symlink_metadata(&database)

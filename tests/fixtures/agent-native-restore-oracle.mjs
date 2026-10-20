@@ -5,10 +5,10 @@ import * as fs from 'node:fs/promises';
 import {readFileSync} from 'node:fs';
 import {dirname,join,relative,resolve,isAbsolute,sep} from 'node:path';
 import {stripTypeScriptTypes} from 'node:module';
+import {pathToFileURL} from 'node:url';
 import {canonical,hashJson} from '../../dist/packages/contracts/src/canonical.js';
 import {IvyError,requireThat} from '../../dist/packages/contracts/src/errors.js';
 import {jsonFile,inside} from '../../dist/packages/host-runtime/src/config.js';
-import {copyVerified,exists,inventoryFiles,relativeFile} from '../../dist/packages/host-runtime/src/backup-files.js';
 import {fileHash} from '../../dist/packages/host-runtime/src/artifact.js';
 
 const input=JSON.parse(readFileSync(0,'utf8')),parent=await fs.realpath(input.root);
@@ -20,6 +20,15 @@ async function guard(path){
  let ancestor=resolve(path);
  while(true){try{const actual=await fs.realpath(ancestor);assert(actual===parent||within(parent,actual),'Fixture ancestor leaves its real temporary root');break;}catch(error){if(error.code!=='ENOENT')throw error;ancestor=dirname(ancestor);}}
 }
+// The Agent backend build does not include these Host-only fixture helpers.
+// Load their actual source, changing only relative module specifiers to the
+// already-built shared modules. The helper body is not reimplemented here.
+const backupSource=readFileSync('packages/host-runtime/src/backup-files.ts','utf8');
+const backupBase=new URL('../../dist/packages/host-runtime/src/',import.meta.url);
+const backupModule=stripTypeScriptTypes(backupSource,{mode:'transform'}).replace(/from\s+(['"])(\.{1,2}\/[^'"]+)\1/g,(_match,quote,specifier)=>'from '+quote+new URL(specifier,backupBase).href+quote);
+const backupPath=join(parent,'original-backup-files.mjs');await guard(backupPath);
+try{await fs.writeFile(backupPath,backupModule,{flag:'wx'});}catch(error){if(error.code!=='EEXIST')throw error;assert.equal(await fs.readFile(backupPath,'utf8'),backupModule);}
+const {copyVerified,exists,inventoryFiles,relativeFile}=await import(pathToFileURL(backupPath).href);
 const source=readFileSync('packages/host-runtime/src/native-restore.ts','utf8');
 const helpers=source.slice(source.indexOf('const sqlName'),source.indexOf('/** Called only'));
 const start=source.indexOf('    const database = join(newHome'),end=source.indexOf('    report.instances.push(',start);
@@ -47,7 +56,7 @@ async function applyPost(row){
   await fs.symlink(external,sessions,process.platform==='win32'?'junction':'dir');
  }
 }
-const names=['0.154.0','0.158.0','0.159.2','user-version','schema','checksum','migration-failed','migration-unsafe','missing-pointer','outside-pointer','optional-outside','nontext-pointer','unsafe-pointer','blob-pointer','duplicate-target','existing-target','nonpath-trigger','foreign-key','missing-column','typed-values','invalid-utf8','changed-target','missing-target','physical-escape','checkpoint-busy'];
+const names=['0.154.0','0.158.0','0.159.2','user-version','schema','checksum','migration-failed','migration-unsafe','migration-blob','success-blob','success-unsafe','migration-blob-incomplete','migration-blob-unsafe','migration-number-before-blob','migration-blob-with-number','missing-pointer','outside-pointer','optional-outside','nontext-pointer','unsafe-pointer','blob-pointer','duplicate-target','existing-target','nonpath-trigger','foreign-key','missing-column','typed-values','invalid-utf8','changed-target','missing-target','physical-escape','checkpoint-busy'];
 if(input.action==='prepare'){
  const cases=[];
  for(const name of names){
@@ -62,9 +71,21 @@ if(input.action==='prepare'){
    if(name==='checksum')db.exec("UPDATE _sqlx_migrations SET checksum=X'00' WHERE version=1");
    if(name==='migration-failed')db.exec('UPDATE _sqlx_migrations SET success=0 WHERE version=1');
    if(name==='migration-unsafe')db.exec('UPDATE _sqlx_migrations SET version=9007199254740993 WHERE version=1');
+   if(['migration-blob','migration-blob-incomplete','migration-blob-unsafe','migration-blob-with-number'].includes(name))db.exec("UPDATE _sqlx_migrations SET description=X'00' WHERE version=1");
+   if(name==='success-blob')db.exec("UPDATE _sqlx_migrations SET success=X'00' WHERE version=1");
+   if(name==='success-unsafe')db.exec('UPDATE _sqlx_migrations SET success=9007199254740993 WHERE version=1');
+   if(name==='migration-blob-incomplete')db.exec('UPDATE _sqlx_migrations SET success=0 WHERE version=2');
+   if(name==='migration-blob-unsafe')db.exec('UPDATE _sqlx_migrations SET success=9007199254740993 WHERE version=2');
+   if(name==='migration-number-before-blob')db.exec("UPDATE _sqlx_migrations SET version=-1e100 WHERE version=1; UPDATE _sqlx_migrations SET description=X'00' WHERE version=2");
+   if(name==='migration-blob-with-number')db.exec('UPDATE _sqlx_migrations SET version=-1e100 WHERE version=1');
    if(name==='missing-pointer')db.prepare("UPDATE threads SET rollout_path=? WHERE id='paginated'").run(join(row.oldHome,'sessions/not-captured.jsonl'));
    if(name==='outside-pointer')db.prepare("UPDATE threads SET rollout_path=? WHERE id='paginated'").run(join(row.root,'external.jsonl'));
-   if(name==='optional-outside')db.prepare("UPDATE agent_jobs SET input_csv_path=? WHERE id='owned'").run('relative/file.csv');
+   if(['optional-outside','existing-target'].includes(name)){
+    db.exec('CREATE TABLE pointer_values(path TEXT);');
+    const paths=name==='optional-outside'?['relative/file.csv',join(row.root,'external/input.csv'),join(row.oldHome,'jobs/input.csv'),join(row.oldHome,'jobs/not-created.csv')]:[join(row.oldHome,'jobs/input.csv'),join(row.newHome,'jobs/input.csv')];
+    for(const path of paths)db.prepare('INSERT INTO pointer_values VALUES (?)').run(path);
+    row.layout.pathColumns.push({table:'pointer_values',column:'path',scope:'optional-owned-file'});
+   }
    if(name==='nontext-pointer')db.exec("UPDATE threads SET rollout_path=17 WHERE id='paginated'");
    // A non-STRICT fixture table retains actual non-text pointer types.
    if(['unsafe-pointer','blob-pointer'].includes(name)){
@@ -72,16 +93,15 @@ if(input.action==='prepare'){
     row.layout.pathColumns.push({table:'pointer_values',column:'path',scope:'optional-owned-file'});
    }
    if(name==='duplicate-target')db.prepare("UPDATE threads SET rollout_path=? WHERE id='paginated'").run(row.oldHome.replaceAll('\\','/')+'/sessions//legacy.jsonl');
-   if(name==='existing-target')db.prepare("UPDATE agent_jobs SET output_csv_path=? WHERE id='owned'").run(join(row.newHome,'jobs/input.csv'));
    if(name==='nonpath-trigger')db.exec("CREATE TRIGGER retained_change AFTER UPDATE OF rollout_path ON threads BEGIN UPDATE threads SET title='changed' WHERE id=NEW.id; END");
-   if(name==='foreign-key'){db.exec('PRAGMA foreign_keys=OFF');db.exec("INSERT INTO thread_spawn_edges VALUES ('missing','paginated','completed')");}
+   if(name==='foreign-key'){db.exec("PRAGMA foreign_keys=OFF; CREATE TABLE invalid_references(thread_id TEXT REFERENCES threads(id)); INSERT INTO invalid_references VALUES ('missing')");}
    if(name==='missing-column')row.layout.pathColumns[0].column='not_present';
    if(name==='typed-values'){
     db.exec('CREATE TABLE digest_values("10", "2", "ordinary", "0", "01", "__proto__", "constructor", "😀");');
     db.prepare('INSERT INTO digest_values VALUES (?,?,?,?,?,?,?,?)').run(9223372036854775807n,-9223372036854775808n,Buffer.from([0,1,127,255]),null,1.25,'Unicode 😀','retained',-0);
    }
    if(name==='invalid-utf8')db.exec("CREATE TABLE text_values(value TEXT); INSERT INTO text_values VALUES(CAST(X'EDA080FF' AS TEXT))");
-   if(['unsafe-pointer','blob-pointer','nonpath-trigger','typed-values','invalid-utf8'].includes(name))row.layout.schema=db.prepare("SELECT type,name,tbl_name AS tableName,sql FROM sqlite_master WHERE sql IS NOT NULL AND name <> '_sqlx_migrations' ORDER BY type,name").all().map(value=>({...value,sql:String(value.sql).replaceAll('\r\n','\n')}));
+   if(['optional-outside','existing-target','foreign-key','unsafe-pointer','blob-pointer','nonpath-trigger','typed-values','invalid-utf8'].includes(name))row.layout.schema=db.prepare("SELECT type,name,tbl_name AS tableName,sql FROM sqlite_master WHERE sql IS NOT NULL AND name <> '_sqlx_migrations' ORDER BY type,name").all().map(value=>({...value,sql:String(value.sql).replaceAll('\r\n','\n')}));
   }finally{db.close();}}
   // Re-seal only the mutated copied SQLite observation; no source or backup changes.
   const copied=await inventoryFiles(join(row.root,'target'));
@@ -109,7 +129,14 @@ if(input.action==='prepare'){
    await fs.rm(target,{recursive:true,force:true});await safeCopy(row.template,target);await applyPost(row);
   }else if(input.action==='inspect')results.push({name:row.name,...await observation(row)});
   else if(input.action==='mappings'){
-   const mappings=[],db=new DatabaseSync(join(row.newHome,'state_5.sqlite'),{readOnly:true});
+   // Observe paths from a separate SQLite copy. Node must not recover or
+   // checkpoint the fresh working copy before the Rust owner opens it.
+   const observationHome=join(row.root,'mapping-observation');await guard(observationHome);
+   for(const suffix of ['','-wal','-shm']){
+    const from=join(row.newHome,'state_5.sqlite'+suffix),to=join(observationHome,'state_5.sqlite'+suffix);
+    if(await exists(from)){await guard(from);await guard(to);await copyVerified(from,to);}
+   }
+   const mappings=[],db=new DatabaseSync(join(observationHome,'state_5.sqlite'),{readOnly:true});
    try{for(const definition of row.layout.pathColumns){
     const quote=name=>'"'+name.replaceAll('"','""')+'"';let values;
     try{const statement=db.prepare('SELECT DISTINCT '+quote(definition.column)+' AS path FROM '+quote(definition.table)+' WHERE '+quote(definition.column)+' IS NOT NULL LIMIT 1000001');statement.setReadBigInts(true);values=statement.all();}catch{continue;}
