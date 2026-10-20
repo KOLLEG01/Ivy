@@ -3,6 +3,11 @@ use driver::{count, frames};
 use ivy_task_board::{generation::GenerationClock, service::ServiceControl};
 use std::{io::Write, rc::Rc};
 
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Case {
+    RowPressure,
+    RemoteReadFailure,
+}
 #[derive(Clone, Default)]
 pub(super) struct FactoryClock(Option<Rc<ManualClock>>);
 #[derive(Default)]
@@ -187,16 +192,26 @@ pub(super) async fn checkpoint(
     connection: &ServiceConnection,
     stage: &str,
 ) {
+    collect(fixture, peer, connection, stage, None, None).await;
+}
+async fn collect(
+    fixture: &Fixture,
+    peer: &Peer,
+    connection: &ServiceConnection,
+    stage: &str,
+    error: Option<Json>,
+    control: Option<&ServiceControl>,
+) {
     let raw = raw_delivery(fixture);
-    rpc(
-        connection,
-        "test.retentionDelivery",
-        Json::object([("raw", raw.clone())]),
-    )
-    .await
-    .unwrap();
+    let mut remote = Json::object([("raw", raw.clone())]);
+    if let Some(error) = &error {
+        remote.insert("error", error.clone());
+    }
+    rpc(connection, "test.retentionDelivery", remote)
+        .await
+        .unwrap();
     let before = tables(fixture);
-    let input = Json::object([
+    let mut input = Json::object([
         ("tables", before.clone()),
         (
             "limits",
@@ -213,7 +228,9 @@ pub(super) async fn checkpoint(
                     .as_js_string()
                     .unwrap()
                     .clone(),
-                raw.clone(),
+                error
+                    .as_ref()
+                    .map_or_else(|| raw.clone(), |e| Json::object([("error", e.clone())])),
             )]),
         ),
         (
@@ -224,6 +241,25 @@ pub(super) async fn checkpoint(
             ])]),
         ),
     ]);
+    let db = fixture.database();
+    let mut roots = db
+        .prepare("SELECT root_id FROM cleanup_roots ORDER BY rowid")
+        .unwrap();
+    let order = roots
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|r| Json::from(r.unwrap()))
+        .collect();
+    input.insert("cleanupOrder", Json::Array(order));
+    if control.is_some() {
+        input.insert(
+            "diagnostic",
+            Json::object([
+                ("source", "fixture-task-board".into()),
+                ("now", clock().into()),
+            ]),
+        );
+    }
     let expected = original(&input);
     let reads = frames(peer, "delivery-retention-read").len();
     let pages = fixture.pages.borrow().len();
@@ -239,9 +275,23 @@ pub(super) async fn checkpoint(
         hash_json(f(&expected, "tables")).unwrap(),
         "Original collection {stage}"
     );
-    let actual = frames(peer, "delivery-retention-read")
+    let observed = frames(peer, "delivery-retention-read")
         .into_iter()
         .skip(reads)
+        .collect::<Vec<_>>();
+    for read in &observed {
+        if let Some(error) = &error {
+            assert_eq!(f(read, "error"), error);
+            assert!(
+                read.get("raw").is_none(),
+                "An unavailable read is not returned evidence"
+            );
+        } else {
+            assert_eq!(f(read, "raw"), &raw);
+        }
+    }
+    let actual = observed
+        .into_iter()
         .map(|read| Json::Array(vec!["objects.read".into(), f(&read, "address").clone()]))
         .collect::<Vec<_>>();
     assert_eq!(
@@ -254,12 +304,33 @@ pub(super) async fn checkpoint(
         &"succeeded".into()
     );
     assert_eq!(count(fixture, "SELECT count(*) FROM active_gates"), 0);
+    let readiness = if let Some(control) = control {
+        let ready = bounded(control.readiness(connection)).await.unwrap();
+        assert_eq!(f(&ready, "ready"), &true.into());
+        assert_eq!(
+            hash_json(f(&ready, "diagnostics")).unwrap(),
+            hash_json(f(&expected, "diagnostics")).unwrap()
+        );
+        if let Some(error) = error
+            .as_ref()
+            .filter(|e| f(e, "code") != &"not_found".into())
+        {
+            assert_eq!(f(&expected, "failure"), error);
+            assert_eq!(hash_json(&before).unwrap(), hash_json(&after).unwrap());
+        } else {
+            assert!(expected.get("failure").is_none());
+        }
+        ready
+    } else {
+        Json::Null
+    };
     proof(
         stage,
         Json::object([
             ("input", input),
             ("original", expected),
             ("actual", after),
+            ("readiness", readiness),
             ("opens", Json::Number(fixture.opens.get() as f64)),
         ]),
     );
@@ -335,6 +406,40 @@ pub(super) async fn pending(
             ("rawDelivery", raw),
         ]),
     );
+    if fixture.retention == Some(Case::RemoteReadFailure) {
+        let unavailable = Json::object([
+            ("code", "service_unavailable".into()),
+            ("message", "Finite retention read unavailable.".into()),
+            ("outcome", "not_executed".into()),
+        ]);
+        collect(
+            fixture,
+            peer,
+            connection,
+            "unavailable-delivery-read",
+            Some(unavailable),
+            Some(control),
+        )
+        .await;
+        assert_eq!(fixture.rows("task-board/operation").len(), 2);
+        assert_eq!(count(fixture, "SELECT count(*) FROM retired_operations"), 0);
+        let absent = Json::object([
+            ("code", "not_found".into()),
+            ("message", "Finite retention delivery absent.".into()),
+            ("outcome", "not_executed".into()),
+        ]);
+        collect(
+            fixture,
+            peer,
+            connection,
+            "missing-delivery-recovery",
+            Some(absent),
+            Some(control),
+        )
+        .await;
+        assert_eq!(fixture.rows("task-board/operation").len(), 1);
+        assert_eq!(count(fixture, "SELECT count(*) FROM retired_operations"), 1);
+    }
     checkpoint(fixture, peer, connection, "completed-control-evicted").await;
     assert_eq!(fixture.rows("task-board/operation").len(), 1);
     let before_expired = tables(fixture);
@@ -432,5 +537,19 @@ pub(super) fn closed(fixture: &Fixture) {
 #[tokio::test(flavor = "current_thread")]
 async fn pending_unknown_and_confirmed_delivery_pins_protect_publication_while_unreferenced_terminal_control_expires()
  {
-    delivery::run_delivery_mode("factory question lost notify recovers confirmed", true).await;
+    delivery::run_delivery_mode(
+        "factory question lost notify recovers confirmed",
+        Some(Case::RowPressure),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unavailable_delivery_read_preserves_cleanup_error_and_graph_until_absent_receipt_recovery()
+{
+    delivery::run_delivery_mode(
+        "factory question lost notify recovers confirmed",
+        Some(Case::RemoteReadFailure),
+    )
+    .await;
 }

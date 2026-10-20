@@ -304,13 +304,14 @@ fn verify_route_request(scenario: &Scenario, retained: &Json, history: &Json, ph
 }
 
 async fn run_delivery(name: &str) {
-    run_delivery_mode(name, false).await;
+    run_delivery_mode(name, None).await;
 }
-pub(super) async fn run_delivery_mode(name: &str, retention: bool) {
+pub(super) async fn run_delivery_mode(name: &str, case: Option<super::retention::Case>) {
     let peer = Peer::start_mode(Some("--factory-delivery")).await;
     let mut fixture = Fixture::new(false);
     fixture.delivery = Some(Scenario::new(name));
-    fixture.retention = retention;
+    fixture.retention = case;
+    let retention = case.is_some();
     if retention {
         fixture.clock = super::retention::FactoryClock::manual();
     }

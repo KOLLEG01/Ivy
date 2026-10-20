@@ -5,7 +5,7 @@ import {toolDefinitionHash} from '../../packages/contracts/src/tool-definition.t
 
 // Only the isolated factory mode enters this finite, original-source-backed peer.
 export function deliveryBoundary(){
- let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null,forwardReads=0,retainedDelivery=null;
+ let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null,forwardReads=0,retainedDelivery=null,retentionError=null;
  const definitions=new Map();
  const phone=()=>row.input.mode==='phonePrepared';
  const fallback=()=>phone()&&row.input.fault?.outcome==='not_executed';
@@ -38,14 +38,17 @@ export function deliveryBoundary(){
    emit({kind:'delivery-browser-notice',params});reply(id,{});return true;
   }
   if(method==='test.retentionDelivery'){
-   assert.ok(row);assert.deepEqual(Object.keys(params).sort(),['raw']);
+   assert.ok(row);assert.deepEqual(Object.keys(params).sort(),'error'in params?['error','raw']:['raw']);
    const raw=params.raw;assert.equal(raw.object.contractKey,'task-board/delivery');assert.equal(raw.content.encoding,'json');
    assert.ok(['pending','outcome_unknown','confirmed'].includes(raw.content.value.state));
-   retainedDelivery=structuredClone(raw);reply(id,{});return true;
+   retainedDelivery=structuredClone(raw);retentionError=params.error??null;
+   if(retentionError){assert.deepEqual(Object.keys(retentionError).sort(),['code','message','outcome']);assert.ok(['service_unavailable','not_found'].includes(retentionError.code));assert.equal(retentionError.outcome,'not_executed');}
+   reply(id,{});return true;
   }
   if(method==='objects.read'&&retainedDelivery&&params.objectId===retainedDelivery.object.objectId){
    assert.deepEqual(params,{objectId:retainedDelivery.object.objectId});
-   emit({kind:'delivery-retention-read',address:params,raw:retainedDelivery});reply(id,retainedDelivery);return true;
+   if(retentionError){emit({kind:'delivery-retention-read',address:params,error:retentionError});fail(retentionError.code,retentionError.message,retentionError.outcome);}
+   else{emit({kind:'delivery-retention-read',address:params,raw:retainedDelivery});reply(id,retainedDelivery);}return true;
   }
   if(method==='serviceNodes.get'&&params.serviceNodeId==='chat-node'){
    assert.ok(row);assert.ok(!phone()||fallback());reply(id,{serviceNodeId:'chat-node',serviceName:'chat-bridge',principalId:expected().principalId,connected:true,synced:true,ready:true});return true;

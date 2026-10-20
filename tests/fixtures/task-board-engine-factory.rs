@@ -67,7 +67,7 @@ struct Fixture {
     scheduler: Option<scheduler::Scenario>,
     delivery: Option<delivery::Scenario>,
     lifecycle: Option<lifecycle::Scenario>,
-    retention: bool,
+    retention: Option<retention::Case>,
     clock: retention::FactoryClock,
 }
 impl Fixture {
@@ -97,7 +97,7 @@ impl Fixture {
             scheduler: None,
             delivery: None,
             lifecycle: None,
-            retention: false,
+            retention: None,
             clock: retention::FactoryClock::default(),
         }
     }
@@ -128,7 +128,7 @@ impl Fixture {
         self.opens.set(count);
         Ok(OpenedJournal {
             connection: self.database(),
-            limits: if self.retention {
+            limits: if self.retention.is_some() {
                 HistoryLimits {
                     count: 0,
                     ..HistoryLimits::default()
@@ -385,9 +385,14 @@ impl LifecyclePages for Policies<'_> {
         if let Some(delivery) = &self.fixture.delivery {
             if key == "task-board/delivery" {
                 delivery.check_page(options)?;
-                if self.fixture.retention && !delivery.ready.open.get() {
+                if self.fixture.retention.is_some() && !delivery.ready.open.get() {
                     // The finite current paging port withholds the delivery
                     // until its pending retention checkpoint has completed.
+                    self.fixture.pages.borrow_mut().push((
+                        self.context.owner.generation as u64,
+                        key.into(),
+                        options.clone(),
+                    ));
                     return Ok(Json::object([
                         ("items", Json::Array(vec![])),
                         ("nextCursor", Json::Null),
