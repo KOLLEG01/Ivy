@@ -97,6 +97,7 @@ pub(super) struct IncomingInvite {
     identity: Option<Identity>,
     observation: watch::Receiver<CallObservation>,
     done: watch::Receiver<Option<Result<(), CallError>>>,
+    info_before_ack: bool,
 }
 impl IncomingInvite {
     pub fn start(
@@ -114,6 +115,7 @@ impl IncomingInvite {
             }
         }
         let identity = Identity::parse(&transaction.original);
+        let info_before_ack = !transaction.original.body.is_empty();
         let control = Arc::new(Control {
             intent: Mutex::new(Intent::default()),
             changed: Notify::new(),
@@ -190,6 +192,7 @@ impl IncomingInvite {
             identity,
             observation,
             done,
+            info_before_ack,
         }
     }
     pub fn request_hangup(&self) {
@@ -235,6 +238,19 @@ impl IncomingInvite {
     }
     pub fn observations(&self) -> watch::Receiver<CallObservation> {
         self.observation.clone()
+    }
+    pub(super) fn matches_info(&self, request: &Request) -> bool {
+        let current = self.observation();
+        !current.ending
+            && !current.closed
+            && (matches!(
+                current.phase,
+                FinalPhase::StartingMedia | FinalPhase::Confirmed
+            ) || self.info_before_ack && current.phase == FinalPhase::Acknowledging)
+            && self
+                .identity
+                .as_ref()
+                .is_some_and(|identity| identity.matches(request))
     }
     pub async fn wait_answer(&self) -> CallOutcome {
         let mut observed = self.observation.clone();

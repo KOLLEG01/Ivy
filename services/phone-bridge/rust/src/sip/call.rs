@@ -164,6 +164,7 @@ pub struct DelayedInvite {
     observation: watch::Receiver<CallObservation>,
     identity: watch::Receiver<Option<Identity>>,
     stopped: watch::Receiver<bool>,
+    retained_info: bool,
 }
 impl DelayedInvite {
     /// Call only after native admission and original intent were persisted.
@@ -184,6 +185,7 @@ impl DelayedInvite {
             proxy,
             connection,
         } = prepared;
+        let retained_info = exchange.request().body.is_empty();
         let connection = match connection {
             Some((owner, connection)) if Arc::ptr_eq(&owner, &endpoint) => Some(connection),
             Some(_) => return Err(SipIoError::InvalidRequest),
@@ -272,6 +274,7 @@ impl DelayedInvite {
             observation,
             identity: identity_rx,
             stopped: stopped_rx,
+            retained_info,
         })
     }
     pub fn request_hangup(&self) {
@@ -302,6 +305,16 @@ impl DelayedInvite {
             current.outcome.get_or_insert(CallOutcome::Unknown);
         }
         current
+    }
+    pub(super) fn matches_info(&self, request: &Request, ending: bool) -> bool {
+        let observed = self.observation();
+        !observed.closed
+            && (self.retained_info || !ending && !observed.ending)
+            && self
+                .identity
+                .borrow()
+                .as_ref()
+                .is_some_and(|identity| identity.matches(request))
     }
     pub fn observations(&self) -> watch::Receiver<CallObservation> {
         self.observation.clone()

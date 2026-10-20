@@ -207,6 +207,7 @@ struct CallResult {
     claimed: bool,
     retiring: bool,
     feedback_sequences: std::collections::HashSet<i64>,
+    info_sequences: crate::dtmf::SipInfoTracker,
     screening_timeout: Option<u16>,
     screening_deadline: Option<tokio_util::sync::CancellationToken>,
     windows_connected: bool,
@@ -375,7 +376,7 @@ impl NativeSipOperations {
                 .await?;
             host.start_requests(Arc::new(move |transaction, source| {
                 let owner = incoming_owner.clone();
-                Box::pin(async move { Self::receive_incoming(owner, transaction, source).await })
+                Box::pin(async move { Self::receive_request(owner, transaction, source).await })
             }))?;
             Ok(endpoint)
         });
@@ -514,6 +515,64 @@ impl NativeSipOperations {
         }
         state.calls.push(call.clone());
         Ok(call)
+    }
+    async fn receive_request(
+        owner: std::sync::Weak<Owner>,
+        mut transaction: rsipstack::transaction::Transaction,
+        source: Option<rsipstack::transport::SipAddr>,
+    ) -> Result<(), rsipstack::transaction::Transaction> {
+        use rsipstack::sip::{Method, StatusCode, prelude::HeadersExt};
+        if transaction.original.method != Method::Info {
+            return Self::receive_incoming(owner, transaction, source).await;
+        }
+        let Some(owner) = owner.upgrade() else {
+            return Err(transaction);
+        };
+        let original = owner
+            .state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .find(|call| call.0.original.matches_info(&transaction.original))
+            .cloned();
+        let Some(original) = original else {
+            return Ok(());
+        };
+        let Some(digit) = crate::native_info::digit(&transaction.original) else {
+            return Ok(());
+        };
+        let Some(sequence) = transaction
+            .original
+            .cseq_header()
+            .ok()
+            .and_then(|h| h.value().split_whitespace().next())
+            .and_then(|s| s.parse::<i32>().ok())
+        else {
+            return Ok(());
+        };
+        let fresh = original
+            .0
+            .result
+            .lock()
+            .unwrap()
+            .info_sequences
+            .is_new(sequence);
+        // No owner/result lock crosses feature processing: rejection may ask
+        // this same original call to hang up. PCM closure does not gate INFO.
+        if fresh
+            && original
+                .features()
+                .digit(digit, crate::dtmf::InputSource::SipInfo)
+                .is_err()
+        {
+            return Ok(());
+        }
+        transaction.destination = source;
+        match transaction.reply(StatusCode::OK).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(transaction),
+        }
     }
     async fn receive_incoming(
         owner: std::sync::Weak<Owner>,

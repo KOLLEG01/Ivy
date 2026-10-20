@@ -7,6 +7,8 @@ mod dial;
 mod feedback;
 #[path = "phone_native_incoming.rs"]
 mod incoming;
+#[path = "phone_native_info.rs"]
+mod info;
 #[path = "phone_native_notifications.rs"]
 mod notifications;
 #[path = "phone_native_registration.rs"]

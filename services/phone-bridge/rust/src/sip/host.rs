@@ -240,6 +240,17 @@ impl Call {
 #[derive(Clone)]
 pub struct SipHostCall(Arc<Call>);
 impl SipHostCall {
+    pub(crate) fn matches_info(&self, request: &Request) -> bool {
+        let state = self.0.state.lock().unwrap();
+        state
+            .incoming
+            .as_ref()
+            .is_some_and(|call| call.matches_info(request))
+            || state
+                .invite
+                .as_ref()
+                .is_some_and(|call| call.matches_info(request, state.ending))
+    }
     pub(crate) fn request_codec_upgrade(&self) -> Result<(), SipHostError> {
         self.0
             .state
@@ -338,7 +349,7 @@ struct ManagedRequests {
     stop: CancellationToken,
     done: Arc<Completion<()>>,
 }
-pub(crate) type IncomingHandler = Arc<
+pub(crate) type SipRequestHandler = Arc<
     dyn Fn(
             Transaction,
             Option<SipAddr>,
@@ -910,7 +921,7 @@ impl SipHost {
     }
     /// Own the original TU stream through call/registration teardown. The native
     /// admission callback must adopt or finish each original incoming INVITE.
-    pub(crate) fn start_requests(&self, incoming: IncomingHandler) -> Result<(), SipHostError> {
+    pub(crate) fn start_requests(&self, incoming: SipRequestHandler) -> Result<(), SipHostError> {
         let mut state = self.shared().lock().unwrap();
         ready(&state)?;
         if state.requests.is_some() {
@@ -984,7 +995,7 @@ async fn dispatch_requests(
     owner: Weak<Mutex<State>>,
     mut receiver: TransactionReceiver,
     stop: CancellationToken,
-    incoming: IncomingHandler,
+    incoming: SipRequestHandler,
 ) -> Result<(), SipHostError> {
     use rsipstack::sip::{Method, StatusCode, prelude::HeadersExt};
     let mut replies = JoinSet::new();
@@ -1019,12 +1030,7 @@ async fn dispatch_requests(
                 let request = &transaction.original;
                 let in_dialog = request.from_header().ok().and_then(|h| h.tag().ok().flatten()).is_some()
                     && request.to_header().ok().and_then(|h| h.tag().ok().flatten()).is_some();
-                if request.method == Method::Invite {
-                    if in_dialog {
-                        // A re-INVITE still requires its original negotiation
-                        // owner; do not bypass that unfinished cleanup fence.
-                        host.lock().unwrap().unhandled_requests.push(transaction);
-                    } else {
+                if request.method == Method::Invite && !in_dialog || request.method == Method::Info && in_dialog {
                         let incoming = incoming.clone();
                         let owner = owner.clone();
                         replies.spawn(async move {
@@ -1036,7 +1042,12 @@ async fn dispatch_requests(
                                 }
                             }
                         });
-                    }
+                    continue;
+                }
+                if request.method == Method::Invite {
+                    // A re-INVITE still requires its original negotiation
+                    // owner; do not bypass that unfinished cleanup fence.
+                    host.lock().unwrap().unhandled_requests.push(transaction);
                     continue;
                 }
                 let status = if in_dialog { None } else { match request.method {
