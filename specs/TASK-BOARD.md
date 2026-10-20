@@ -164,7 +164,9 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   retained; the successor resumes that thread before the prepared turn is sent. Unavailable
   owners retain In progress with an automatic recovery condition and capped backoff.
   Claimed recovery and result publication stay In progress; requests for user input remain Blocked.
-- The concise English start prompt identifies the Task and owning service through Ivy MCP.
+- Initial starts, scheduled wake-ups and comment updates use the same concise English prompt
+  identifying the Task and owning service through Ivy MCP. It asks the agent to read the ticket
+  and decide what to do; it never assigns a next-step ID or repeats the general workflow guide.
   Agents reread the current ticket/settings/comments at every turn, work in the assigned workspace,
   post meaningful progress/questions with `authorKind=agent`, and publish non-Git files as Task attachments.
 - Comments are the single conversation and handoff surface. Ordinary decisions need no separate
@@ -193,9 +195,14 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   for the same primary's next turn. Event wakeups and periodic reconciliation share this path.
 - Ordinary agent updates never wake their author. Messages with sourceTaskId queue delivery
   by default, just like user comments; agentDelivery=none explicitly records without waking.
-- Independent next steps have id, scope and requires: AND within a step, OR across steps. Conditions
-  are time, task idle/done, named delivery and own user question. Automatic paths take precedence over User.
-  No cross-ticket question gate or work/check mode exists. Comment processing preserves existing prerequisites.
+- Agents own their work planning and coordination from the current ticket. `nextSteps` records
+  requests for another turn: id identifies the request, scope briefly explains the wake-up and
+  requires determines when to wake (AND within a request, OR across requests). A selected request
+  is internal scheduling evidence, not an instruction limiting the turn to one work item.
+  Keep the work description in the ticket; do not duplicate it as an exhaustive structured plan.
+  Conditions are time, task idle/done, named delivery and own user question. Automatic paths take
+  precedence over User. No cross-ticket question gate or work/check mode exists. Comment processing
+  preserves existing prerequisites.
 - Questions remain local and open until an addressed answer or explained resolution. All cards with
   own pending questions have a yellow border. Full pending questions stay at the bottom above the composer.
 - Verification findings, execution errors and unavailable evidence belong in ordinary result text,

@@ -44,7 +44,9 @@ test("scheduler allocates a Todo Task and retains one prepared attempt", async (
   const ticket = JSON.stringify(run.value.plan.turnStart);
   assert.match(ticket, /TaskBoard TASK-/);
   assert.match(ticket, /Ivy MCP service task-board-one/);
-  assert.match(ticket, /Read the current ticket/);
+  assert.match(ticket, /Read the ticket and new comments/);
+  assert.match(ticket, /Decide from the current ticket whether to reply, continue work or wait/);
+  assert.doesNotMatch(ticket, /nextSteps|Execute only|purpose=handoff/);
   assert.doesNotMatch(ticket, /A real Hive-persisted workflow fixture/);
   assert.ok(
     await f.first.store.named(
@@ -96,7 +98,7 @@ test("scheduler automatically allocates an unrestricted Task to a ready PC", asy
   assert.equal(run.value.target.hostId, "fixture-host");
   assert.match(
     JSON.stringify(run.value.plan.turnStart),
-    /assigned workspace/,
+    /Read the ticket and new comments/,
   );
 });
 

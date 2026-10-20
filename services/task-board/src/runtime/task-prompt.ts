@@ -1,13 +1,7 @@
 import type { TaskBoard } from '../../../../packages/sdk/src/node.js';
 
-export function taskUpdatePrompt(task: TaskBoard.Task, serviceNodeId: string): string {
-  return 'TaskBoard ' + task.taskKey + ' was updated. Read the ticket and new comments via Ivy MCP service ' + serviceNodeId +
-    '. Decide from the current ticket whether to reply, continue work or wait, and act in this turn.';
-}
-
-export function taskPrompt(task: TaskBoard.Task, serviceNodeId: string, recoveryOnly = false, nextStepId?: string | null): string {
-  const reference = 'TaskBoard ' + task.taskKey + ', Ivy MCP service ' + serviceNodeId + '. Read the current ticket and comments now and after updates.';
+export function taskPrompt(task: TaskBoard.Task, serviceNodeId: string, recoveryOnly = false): string {
+  const reference = 'TaskBoard ' + task.taskKey + ', Ivy MCP service ' + serviceNodeId + '. Read the ticket and new comments.';
   if (recoveryOnly) return reference + ' Recover the original missing completion intent from retained evidence in this same context. Do not repeat implementation, external effects or uncertain original operations. Publish one agent handoff with nextSteps and actual readiness. Keep genuine own questions open.';
-  if (!nextStepId) return taskUpdatePrompt(task, serviceNodeId);
-  return reference + ' Execute only nextSteps entry ' + nextStepId + ' after verifying all its conditions. scope is the allowed next action; unrelated own questions do not block independent steps. Conditions within a step are AND; different steps are independent. Work in the assigned workspace and preserve others\' changes. Own questions use purpose=question with explicit recipient={kind:user} or recipient={kind:task,taskId}. TaskBoard automatically routes task questions; answer them in the sender ticket using sourceTaskId and replyTo. Own questions and must be answered or explicitly resolved in this ticket. Native requests are answered at their owning AgentManager. Other work is a task/delivery prerequisite; an addressed question uses a local question prerequisite. Send directed task messages with authorKind=agent and sourceTaskId; delivery is queued by default. When delegating, set parentTaskId; review saved child results, accept them Done and archive them before your overall final result. Publish one authorKind=agent purpose=handoff with handoff.nextSteps and workflowState review only for overall readiness, otherwise waiting or todo. A completed step does not finish the whole ticket. A time condition carries the next UTC appointment; renew a recurring appointment explicitly after its attempt. Describe verification findings and unavailable evidence in ordinary comments or result text, with exact attachments. A negative finding is not an execution failure. Attach non-Git outputs and exact code references. Then stop for confirmed native completion.';
+  return reference + ' Decide from the current ticket whether to reply, continue work or wait, and act in this turn.';
 }

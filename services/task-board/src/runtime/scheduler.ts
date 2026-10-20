@@ -379,7 +379,7 @@ export class TaskBoardScheduler {
     const commentIds = recoveryFor ? [] : value.commentDeliveries.filter(item => item.state === 'queued')
       .filter(item => value.comments.some(comment => comment.commentId === item.commentId && (comment.authorKind === 'user' || peerComment(comment))))
       .slice(0, 256).map(item => item.commentId);
-    const feedback = taskPrompt(value, this.engine.owner.serviceNodeId, !!recoveryFor, selected?.step.id ?? null);
+    const feedback = taskPrompt(value, this.engine.owner.serviceNodeId, !!recoveryFor);
     try {
       await requireExecutionCapacity(this.engine.store, this.engine.settings);
       const allocation = await this.allocate(task, operationId, feedback, hasComments);

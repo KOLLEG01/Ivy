@@ -117,6 +117,11 @@ test(`${sender} comments reach ${idle ? 'an idle' : 'a running'} agent without a
   assert.equal(boardScans, 0, 'Delivery must not enumerate unrelated tickets.');
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, starts + (idle ? 1 : 0));
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/steer').length, steers + (idle ? 0 : 1));
+  const initial = f.f.frames.find(frame => frame['method'] === 'turn/start')!;
+  const delivered = f.f.frames.filter(frame => frame['method'] === (idle ? 'turn/start' : 'turn/steer')).at(-1)!;
+  const text = (frame: Wire.Json) => (nativeRecord(nativeRecord(frame)['params'])['input'] as Array<{ text: string }>).at(-1)!.text;
+  assert.equal(text(delivered), text(initial), 'Initial work, scheduled continuations and comment wakes leave planning to the agent.');
+  assert.doesNotMatch(text(delivered), /nextSteps|Execute only|purpose=handoff/);
 });
 
 for (const status of ['interrupted', 'failed', 'completed']) test(`a ${status} start acknowledgement does not close a native turn that is still running`, async t => {
