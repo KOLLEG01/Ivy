@@ -92,3 +92,7 @@ path = "../../../tests/rust/sdk-native-owner.rs"
 [[test]]
 name = "sdk-native-plan"
 path = "../../../tests/rust/sdk-native-plan.rs"
+
+[[test]]
+name = "task-board-questions"
+path = "../../../tests/rust/task-board-questions.rs"
