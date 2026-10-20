@@ -34,6 +34,28 @@ pub(super) fn create(
 }
 
 pub(super) struct NativeFiles;
+
+/// Match libuv's Unix close boundary: the consumed descriptor is never retried.
+/// Only raw EINTR/EINPROGRESS mean that close is already completing.
+#[cfg(any(unix, test))]
+pub(super) fn unix_close_once(
+    fd: i32,
+    interrupted: i32,
+    in_progress: i32,
+    close: impl FnOnce(i32) -> io::Result<()>,
+) -> io::Result<()> {
+    match close(fd) {
+        Err(error)
+            if error
+                .raw_os_error()
+                .is_some_and(|code| code == interrupted || code == in_progress) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 impl Files for NativeFiles {
     type Handle = fs::File;
     fn create(&self, path: &Path, mode: u32) -> io::Result<fs::File> {
@@ -65,11 +87,13 @@ impl Handle for fs::File {
         #[cfg(unix)]
         {
             use std::os::fd::IntoRawFd;
-            if unsafe { libc::close(self.into_raw_fd()) } == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
+            unix_close_once(self.into_raw_fd(), libc::EINTR, libc::EINPROGRESS, |fd| {
+                if unsafe { libc::close(fd) } == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            })
         }
         #[cfg(windows)]
         {

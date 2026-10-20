@@ -4,6 +4,8 @@ use std::{path::Path, sync::Condvar, time::Duration};
 #[path = "../../packages/host-runtime/rust/src/linux_host/durable_create.rs"]
 mod durable_create;
 use durable_create::{Files, Handle};
+#[path = "host-linux-unix-close-cases.rs"]
+mod unix_close_cases;
 
 struct Gate {
     path: JsString,
