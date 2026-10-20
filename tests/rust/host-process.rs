@@ -481,3 +481,6 @@ mod retirement {
         drop(observer);
     }
 }
+
+#[path = "host-exec-file-cases.rs"]
+mod exec_file_cases;

@@ -84,6 +84,46 @@ pub fn is_absolute(style: Style, path: &JsString) -> bool {
     path.0.first().is_some_and(|c| style.separator(*c)) || style == Style::Windows && path.0.len() > 2
         && letter(path.0[0]) && path.0[1] == 58 && style.separator(path.0[2])
 }
+/// The directory spelling is retained, including root separators and UNC roots.
+pub fn dirname(style: Style, path: &JsString) -> JsString {
+    let p = &path.0;
+    if p.is_empty() { return ".".into(); }
+    let (mut root, mut offset) = (None, 0);
+    if style == Style::Windows {
+        if p.len() == 1 { return if style.separator(p[0]) { path.clone() } else { ".".into() }; }
+        if style.separator(p[0]) {
+            root = Some(1); offset = 1;
+            if style.separator(p[1]) {
+                let mut j = 2;
+                while j < p.len() && !style.separator(p[j]) { j += 1; }
+                if j < p.len() && j != 2 {
+                    let last = j;
+                    while j < p.len() && style.separator(p[j]) { j += 1; }
+                    if j < p.len() && j != last {
+                        let last = j;
+                        while j < p.len() && !style.separator(p[j]) { j += 1; }
+                        if j == p.len() { return path.clone(); }
+                        if j != last { root = Some(j + 1); offset = j + 1; }
+                    }
+                }
+            }
+        } else if letter(p[0]) && p[1] == 58 {
+            offset = if p.get(2).is_some_and(|c| style.separator(*c)) { 3 } else { 2 };
+            root = Some(offset);
+        }
+    } else { offset = 1; }
+    let mut trailing = true;
+    for i in (offset..p.len()).rev() {
+        if style.separator(p[i]) {
+            if !trailing {
+                let end = if style == Style::Posix && p[0] == 47 && i == 1 { 2 } else { i };
+                return JsString(p[..end].to_vec());
+            }
+        } else { trailing = false; }
+    }
+    if style == Style::Posix && p[0] == 47 { "/".into() }
+    else { root.map_or_else(|| ".".into(), |end| JsString(p[..end].to_vec())) }
+}
 pub fn normalize(style: Style, path: &JsString) -> JsString {
     let path = &path.0;
     if path.is_empty() { return JsString::from("."); }
@@ -208,3 +248,6 @@ pub fn to_native(path: &JsString) -> PathBuf {
     #[cfg(windows)] { use std::os::windows::ffi::OsStringExt; std::ffi::OsString::from_wide(&path.0).into() }
     #[cfg(not(windows))] { String::from_utf16_lossy(&path.0).into() }
 }
+/// Node fs string arguments cross a UTF-8 boundary before native filesystem I/O.
+/// Lexical paths, JSON and direct native arguments still use lossless to_native.
+pub fn filesystem_path(path: &JsString) -> PathBuf { String::from_utf16_lossy(&path.0).into() }

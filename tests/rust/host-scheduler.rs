@@ -53,3 +53,6 @@ fn source_preparation_and_verified_hive_kind_are_exclusive() {
     );
     assert!(parallel_deployments(&[entry("next", "next", false)], &[build], 2).is_empty());
 }
+
+#[path = "host-linux-platform-cases.rs"]
+mod linux_platform_cases;
