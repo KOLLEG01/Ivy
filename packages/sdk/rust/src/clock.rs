@@ -1,7 +1,8 @@
 use crate::{IvyError, IvyResult};
 pub use crate::date_parse::{parse_date, parse_date_in_zone, parse_with_local_offset};
 pub use crate::date_format::date_to_iso;
-pub use crate::date_arithmetic::{date_add_local_seconds, date_add_local_seconds_in_zone, date_utc};
+pub use crate::date_arithmetic::date_utc;
+pub use crate::date_local_seconds::{date_add_local_seconds, date_add_local_seconds_in_zone};
 use chrono::{Datelike, TimeZone as _, Timelike, Utc};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{
