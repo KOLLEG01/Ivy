@@ -410,7 +410,7 @@ async fn component_desktop_assembly(
         ("missingTargetRejected", Json::Bool(cfg!(windows))),
         ("physicalResultReused", Json::Bool(cfg!(windows))),
         ("attemptFence", unknown.code.into()),
-        ("localizedValidation", invalid.message_js().into()),
+        ("localizedValidation", Json::String(invalid.message_js())),
         ("desktopActivation", false.into()),
     ])
 }
