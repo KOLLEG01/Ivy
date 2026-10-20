@@ -25,8 +25,9 @@ pub use host::{
 };
 pub use invite::{InviteExchange, SipError};
 pub use registration::{
-    IncomingPeers, RegistrationFlow, RegistrationLease, RegistrationObservation, RegistrationPeer,
-    RegistrationPhase, RegistrationTransport, registration_expiry,
+    IncomingPeers, RegistrationFlow, RegistrationKeepaliveError, RegistrationLease,
+    RegistrationObservation, RegistrationPeer, RegistrationPhase, RegistrationTransport,
+    registration_expiry,
 };
 pub use registration_client::{
     RegistrationError, SipRegistration, SipRegistrationObserver, SipRegistrationSettings,

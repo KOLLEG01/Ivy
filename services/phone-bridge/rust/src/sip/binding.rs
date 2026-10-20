@@ -1,6 +1,9 @@
 //! Native SIP sockets stay bound from preparation through confirmed shutdown.
 //! The host supplies already parsed literal endpoints and owns call admission.
-use super::{ClientExchange, PreparedInvite, SipEndpoint, SipIoError, tls::TlsClient};
+use super::{
+    ClientExchange, PreparedInvite, RegistrationKeepaliveError, SipEndpoint, SipIoError,
+    tls::TlsClient,
+};
 use rsipstack::{
     sip::{Request, Transport},
     transaction::endpoint::EndpointOption,
@@ -89,6 +92,7 @@ pub struct SipBoundFlow {
     proxy: Option<SipAddr>,
     local: SocketAddr,
     remote: SocketAddr,
+    udp_socket: Option<Weak<tokio::net::UdpSocket>>,
 }
 impl SipBoundFlow {
     pub fn local_addr(&self) -> SocketAddr {
@@ -141,14 +145,31 @@ impl SipBoundFlow {
         confirmed.destination = source;
         Ok(confirmed)
     }
-    pub(crate) async fn keepalive(&self) -> Result<(), BindError> {
-        let SipConnection::Udp(connection) = &self.connection else {
-            return Err(BindError::InvalidDestination);
+    pub(crate) async fn keepalive(&self) -> Result<(), RegistrationKeepaliveError> {
+        if !matches!(self.connection, SipConnection::Udp(_)) {
+            return Err(RegistrationKeepaliveError::SendFailed);
+        }
+        let Some(socket) = self.udp_socket.as_ref().and_then(Weak::upgrade) else {
+            return Err(RegistrationKeepaliveError::SocketError(10101));
         };
-        connection
-            .send_raw(b"\r\n\r\n", &self.destination)
+        // rsipstack's send_raw erases io::Error into a localized string. Use
+        // the very same bound socket, with no new socket or transport owner.
+        socket
+            .send_to(b"\r\n\r\n", self.remote)
             .await
-            .map_err(|_| BindError::ConnectFailed)
+            .map(|_| ())
+            .map_err(keepalive_error)
+    }
+}
+
+fn keepalive_error(error: std::io::Error) -> RegistrationKeepaliveError {
+    #[cfg(windows)]
+    {
+        RegistrationKeepaliveError::SocketError(error.raw_os_error().unwrap_or(10014))
+    }
+    #[cfg(not(windows))]
+    {
+        RegistrationKeepaliveError::UnmappedSocketError(error.raw_os_error())
     }
 }
 
@@ -178,6 +199,7 @@ pub struct BoundSipTransport {
     reserved: Option<TcpSocket>,
     tls: Option<TlsClient>,
     datagram: Option<SipConnection>,
+    udp_socket: Option<Weak<tokio::net::UdpSocket>>,
     connections: Connections,
     sockets: SocketOwners,
     accepting: Option<JoinHandle<()>>,
@@ -195,6 +217,7 @@ impl BoundSipTransport {
                 .map_err(|_| BindError::BindFailed)?,
         );
         let local = socket.local_addr().map_err(|_| BindError::BindFailed)?;
+        let udp_socket = Arc::downgrade(&socket);
         let released = observed_owner(socket.clone());
         let connection = UdpConnection::from_socket(socket, None, Some(stop.child_token()))
             .await
@@ -213,6 +236,7 @@ impl BoundSipTransport {
             reserved: None,
             tls: None,
             datagram: Some(connection),
+            udp_socket: Some(udp_socket),
             connections: Arc::new(Mutex::new(HashMap::new())),
             accepting: None,
             sockets: Arc::new(Mutex::new(vec![released])),
@@ -284,6 +308,7 @@ impl BoundSipTransport {
             reserved: None,
             tls: None,
             datagram: None,
+            udp_socket: None,
             connections,
             sockets,
             accepting: Some(accepting),
@@ -313,6 +338,7 @@ impl BoundSipTransport {
             reserved: Some(socket),
             tls: Some(client),
             datagram: None,
+            udp_socket: None,
             connections: Arc::new(Mutex::new(HashMap::new())),
             sockets: Arc::new(Mutex::new(Vec::new())),
             accepting: None,
@@ -478,6 +504,7 @@ impl BoundSipTransport {
             proxy,
             local,
             remote,
+            udp_socket: self.udp_socket.clone(),
         })
     }
 

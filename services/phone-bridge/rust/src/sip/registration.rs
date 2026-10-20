@@ -62,6 +62,15 @@ impl RegistrationFlow {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegistrationKeepaliveError {
+    /// The original .NET SocketError numeric contract (Winsock values).
+    SocketError(i32),
+    SendFailed,
+    /// Retain unavailable platform evidence without guessing a SocketError.
+    UnmappedSocketError(Option<i32>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegistrationObservation {
     pub phase: RegistrationPhase,
     pub response_code: Option<u16>,
@@ -69,9 +78,9 @@ pub struct RegistrationObservation {
     pub local: Option<RegistrationPeer>,
     pub remote: Option<RegistrationPeer>,
     pub granted_expiry_seconds: Option<u64>,
-    /// UTC milliseconds, supplied by the owner only for diagnostics.
-    pub last_keepalive_at: Option<i64>,
-    pub keepalive_failed: bool,
+    /// UTC 100 ns ticks since 0001-01-01, used only for diagnostics.
+    pub last_keepalive_utc_ticks: Option<i64>,
+    pub last_keepalive_error: Option<RegistrationKeepaliveError>,
 }
 
 /// All methods run under the original registration owner's serialization.
@@ -94,8 +103,8 @@ impl Default for RegistrationLease {
                 local: None,
                 remote: None,
                 granted_expiry_seconds: None,
-                last_keepalive_at: None,
-                keepalive_failed: false,
+                last_keepalive_utc_ticks: None,
+                last_keepalive_error: None,
             },
             confirmed_at: Duration::ZERO,
             valid_for: Duration::ZERO,
@@ -196,17 +205,17 @@ impl RegistrationLease {
     pub fn keepalive_completed(
         &mut self,
         original: RegistrationFlow,
-        utc_milliseconds: i64,
-        success: bool,
+        utc_ticks: i64,
+        error: Option<RegistrationKeepaliveError>,
     ) {
         if self.observation.phase == RegistrationPhase::Stopped
             || self.flow.as_ref() != Some(&original)
         {
             return;
         }
-        self.observation.keepalive_failed = !success;
-        if success {
-            self.observation.last_keepalive_at = Some(utc_milliseconds);
+        self.observation.last_keepalive_error = error;
+        if error.is_none() {
+            self.observation.last_keepalive_utc_ticks = Some(utc_ticks);
         }
     }
 

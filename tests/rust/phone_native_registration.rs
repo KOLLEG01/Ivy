@@ -3,8 +3,8 @@ use crate::sip_host::{received, response, send};
 use ivy_phone_bridge::{
     native_registration::registration_json,
     sip::{
-        RegistrationLease, RegistrationObservation, RegistrationPeer, RegistrationPhase,
-        RegistrationTransport,
+        RegistrationKeepaliveError, RegistrationLease, RegistrationObservation, RegistrationPeer,
+        RegistrationPhase, RegistrationTransport,
     },
 };
 use rsipstack::sip::prelude::*;
@@ -53,12 +53,25 @@ fn input(view: &RegistrationObservation) -> IvyJson {
                 .unwrap_or(IvyJson::Null),
         ),
         (
-            "lastKeepAliveUnixMs",
-            view.last_keepalive_at
-                .map(|n| IvyJson::Number(n as f64))
+            "lastKeepAliveUtcTicks",
+            view.last_keepalive_utc_ticks
+                .map(|n| n.to_string().into())
                 .unwrap_or(IvyJson::Null),
         ),
-        ("lastKeepAliveError", IvyJson::Null),
+        (
+            "lastKeepAliveError",
+            match view.last_keepalive_error {
+                Some(RegistrationKeepaliveError::SendFailed) => "keepalive_send_failed".into(),
+                _ => IvyJson::Null,
+            },
+        ),
+        (
+            "socketError",
+            match view.last_keepalive_error {
+                Some(RegistrationKeepaliveError::SocketError(code)) => code.to_string().into(),
+                _ => IvyJson::Null,
+            },
+        ),
     ])
 }
 #[test]
@@ -118,10 +131,93 @@ fn native_registration_projection_matches_original_dto_without_integer_or_date_l
     ] {
         views.push(RegistrationObservation {
             phase: RegistrationPhase::Registered,
-            last_keepalive_at: Some(ms),
+            last_keepalive_utc_ticks: Some(ms * 10_000 + 621_355_968_000_000_000),
             ..blank
         });
     }
+    for ticks in [
+        0,
+        1,
+        9,
+        10,
+        99,
+        100,
+        999,
+        1000,
+        9999,
+        621_355_967_999_999_999,
+        621_355_968_000_000_001,
+        621_355_968_001_234_567,
+        3_155_378_975_999_999_999,
+    ] {
+        views.push(RegistrationObservation {
+            last_keepalive_utc_ticks: Some(ticks),
+            ..blank
+        });
+    }
+    // Every named SocketError member plus unrecognized enum values. The
+    // original managed enum, not copied expected strings, supplies the oracle.
+    for code in [
+        0,
+        -1,
+        995,
+        997,
+        10004,
+        10013,
+        10014,
+        10022,
+        10024,
+        10035,
+        10036,
+        10037,
+        10038,
+        10039,
+        10040,
+        10041,
+        10042,
+        10043,
+        10044,
+        10045,
+        10046,
+        10047,
+        10048,
+        10049,
+        10050,
+        10051,
+        10052,
+        10053,
+        10054,
+        10055,
+        10056,
+        10057,
+        10058,
+        10060,
+        10061,
+        10064,
+        10065,
+        10067,
+        10091,
+        10092,
+        10093,
+        10101,
+        10109,
+        11001,
+        11002,
+        11003,
+        11004,
+        i32::MIN,
+        10059,
+        i32::MAX,
+    ] {
+        views.push(RegistrationObservation {
+            last_keepalive_error: Some(RegistrationKeepaliveError::SocketError(code)),
+            ..blank
+        });
+    }
+    views.push(RegistrationObservation {
+        last_keepalive_error: Some(RegistrationKeepaliveError::SendFailed),
+        ..blank
+    });
     for expiry in [
         0,
         u64::from(u32::MAX) + 17,
@@ -169,11 +265,11 @@ fn native_registration_projection_matches_original_dto_without_integer_or_date_l
     }
     for invalid in [
         RegistrationObservation {
-            last_keepalive_at: Some(-62_135_596_800_001),
+            last_keepalive_utc_ticks: Some(-1),
             ..blank
         },
         RegistrationObservation {
-            last_keepalive_at: Some(253_402_300_800_000),
+            last_keepalive_utc_ticks: Some(3_155_378_976_000_000_000),
             ..blank
         },
         RegistrationObservation {
@@ -181,7 +277,7 @@ fn native_registration_projection_matches_original_dto_without_integer_or_date_l
             ..blank
         },
         RegistrationObservation {
-            keepalive_failed: true,
+            last_keepalive_error: Some(RegistrationKeepaliveError::UnmappedSocketError(Some(111))),
             ..blank
         },
     ] {
@@ -194,6 +290,95 @@ fn native_registration_projection_matches_original_dto_without_integer_or_date_l
             ("rust", IvyJson::Array(rows)),
             ("original", original.unwrap_or(IvyJson::Null)),
             ("unrepresentableViewsRejected", n(4)),
+        ]),
+    );
+}
+
+#[test]
+fn retained_keepalive_errors_ticks_and_late_completions_match_original_owner() {
+    let mut lease = RegistrationLease::default();
+    let local = RegistrationPeer {
+        address: "127.0.0.1:5098".parse().unwrap(),
+        transport: RegistrationTransport::Udp,
+    };
+    let remote = RegistrationPeer {
+        address: "127.0.0.1:5099".parse().unwrap(),
+        transport: RegistrationTransport::Udp,
+    };
+    lease.confirmed(Duration::ZERO, 200, 120, local, remote);
+    let epoch = 621_355_968_000_000_000;
+    let actions = [
+        ("observe", epoch, None),
+        ("send", epoch + 1_234_567, None),
+        ("send", epoch + 2, Some(10061)),
+        ("send", epoch + 3, Some(i32::MIN)),
+        ("throw", epoch + 4, None),
+        ("send", epoch - 1, None),
+        ("late-confirm", epoch + 5, None),
+        ("late-confirm", epoch + 6, Some(10013)),
+        ("send", 3_155_378_975_999_999_999, None),
+        ("late-stop", epoch + 7, Some(10022)),
+        ("send", epoch + 8, None),
+    ];
+    let inputs: Vec<_> = actions
+        .iter()
+        .map(|(op, ticks, code)| {
+            let mut fields = vec![("op", (*op).into()), ("ticks", ticks.to_string().into())];
+            if let Some(code) = code {
+                fields.push(("code", IvyJson::Number(*code as f64)));
+            }
+            IvyJson::object(fields)
+        })
+        .collect();
+    let original = original_session_fixture(
+        "tests/fixtures/phone-registration-keepalive-oracle.ps1",
+        &inputs,
+    );
+    let mut rows = Vec::new();
+    let mut sends = 0;
+    for (index, (op, ticks, code)) in actions.into_iter().enumerate() {
+        if op != "observe" {
+            if let Some(token) = lease.keepalive_flow(Duration::ZERO) {
+                sends += 1;
+                if op == "late-confirm" {
+                    lease.confirmed(Duration::ZERO, 200, 120, local, remote);
+                }
+                if op == "late-stop" {
+                    lease.stop();
+                }
+                let error = if op == "throw" {
+                    Some(RegistrationKeepaliveError::SendFailed)
+                } else {
+                    code.map(RegistrationKeepaliveError::SocketError)
+                };
+                lease.keepalive_completed(token, ticks, error);
+            }
+        }
+        let view = registration_json(&lease.observation(Duration::ZERO)).unwrap();
+        let row = IvyJson::object([("observation", view.clone().into()), ("sends", n(sends))]);
+        if let Some(original) = &original {
+            let expected = &original.as_array().unwrap()[index];
+            assert_eq!(
+                parse(&view, 65536).unwrap(),
+                parse(
+                    expected.get("observation").unwrap().as_str().unwrap(),
+                    65536
+                )
+                .unwrap(),
+                "action {index}"
+            );
+            assert_eq!(row.get("sends"), expected.get("sends"));
+        }
+        rows.push(row);
+    }
+    trace(
+        "native-registration-keepalive",
+        IvyJson::object([
+            ("inputs", IvyJson::Array(inputs)),
+            ("rust", IvyJson::Array(rows)),
+            ("original", original.unwrap_or(IvyJson::Null)),
+            ("physicalAudioOpens", n(0)),
+            ("networkSocketOpens", n(0)),
         ]),
     );
 }

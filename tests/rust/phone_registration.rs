@@ -132,22 +132,41 @@ fn keepalive_completion_is_diagnostic_and_fenced_to_the_original_flow() {
     let first = lease.keepalive_flow(at(100)).unwrap();
     assert_eq!(first.local().address.port(), 40000);
     assert_eq!(first.remote().address.port(), 5060);
-    lease.keepalive_completed(first.clone(), 1000, true);
-    assert_eq!(lease.observation(at(101)).last_keepalive_at, Some(1000));
-    lease.keepalive_completed(first.clone(), 1001, false);
-    assert!(lease.observation(at(101)).keepalive_failed);
-    assert_eq!(lease.observation(at(101)).last_keepalive_at, Some(1000));
+    lease.keepalive_completed(first.clone(), 1000, None);
+    assert_eq!(
+        lease.observation(at(101)).last_keepalive_utc_ticks,
+        Some(1000)
+    );
+    lease.keepalive_completed(
+        first.clone(),
+        1001,
+        Some(RegistrationKeepaliveError::SocketError(10061)),
+    );
+    assert_eq!(
+        lease.observation(at(101)).last_keepalive_error,
+        Some(RegistrationKeepaliveError::SocketError(10061))
+    );
+    assert_eq!(
+        lease.observation(at(101)).last_keepalive_utc_ticks,
+        Some(1000)
+    );
 
     // The same endpoint spelling in a new REGISTER must not accept old work.
     lease.confirmed(at(110), 200, 120, first.local(), first.remote());
     let second = lease.keepalive_flow(at(110)).unwrap();
     assert_ne!(first, second);
-    lease.keepalive_completed(first, 2000, true);
-    assert_eq!(lease.observation(at(111)).last_keepalive_at, Some(1000));
-    lease.keepalive_completed(second.clone(), 3000, true);
-    assert!(!lease.observation(at(111)).keepalive_failed);
-    assert_eq!(lease.observation(at(111)).last_keepalive_at, Some(3000));
-    lease.keepalive_completed(second, 100_000, true);
+    lease.keepalive_completed(first, 2000, None);
+    assert_eq!(
+        lease.observation(at(111)).last_keepalive_utc_ticks,
+        Some(1000)
+    );
+    lease.keepalive_completed(second.clone(), 3000, None);
+    assert_eq!(lease.observation(at(111)).last_keepalive_error, None);
+    assert_eq!(
+        lease.observation(at(111)).last_keepalive_utc_ticks,
+        Some(3000)
+    );
+    lease.keepalive_completed(second, 100_000, None);
     assert_eq!(lease.observation(at(230)).phase, RegistrationPhase::Failed);
     assert!(lease.keepalive_flow(at(230)).is_none());
     assert!(
@@ -176,8 +195,8 @@ fn local_stop_cannot_claim_remote_removal_or_accept_another_owners_completion() 
     lease.removal_confirmed(&foreign, 200);
     lease.removal_confirmed(&original, 408);
     assert_eq!(lease.observation(at(102)).remote_removed, None);
-    lease.keepalive_completed(original.clone(), 1000, true);
-    assert_eq!(lease.observation(at(102)).last_keepalive_at, None);
+    lease.keepalive_completed(original.clone(), 1000, None);
+    assert_eq!(lease.observation(at(102)).last_keepalive_utc_ticks, None);
     lease.confirmed(at(103), 200, 60, original.local(), original.remote());
     lease.failed(Some(403));
     assert_eq!(lease.observation(at(103)).phase, RegistrationPhase::Stopped);

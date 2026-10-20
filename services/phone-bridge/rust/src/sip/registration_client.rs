@@ -148,17 +148,73 @@ impl Shared {
                 .and_then(|token| state.flow.clone().map(|flow| (token, flow)))
         };
         if let Some((token, flow)) = selected {
-            let success = flow.keepalive().await.is_ok();
-            let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
-                Ok(time) => i64::try_from(time.as_millis()).unwrap_or(i64::MAX),
-                Err(time) => -i64::try_from(time.duration().as_millis()).unwrap_or(i64::MAX),
-            };
+            let error = flow.keepalive().await.err();
+            let now = utc_ticks(SystemTime::now());
             self.state
                 .lock()
                 .unwrap()
                 .lease
-                .keepalive_completed(token, now, success);
+                .keepalive_completed(token, now, error);
         }
+    }
+}
+
+fn utc_ticks(now: SystemTime) -> i64 {
+    const UNIX_TICKS: i128 = 621_355_968_000_000_000;
+    let nanos = match now.duration_since(UNIX_EPOCH) {
+        Ok(time) => i128::try_from(time.as_nanos()).ok(),
+        Err(time) => i128::try_from(time.duration().as_nanos()).ok().map(|n| -n),
+    };
+    // An out-of-range clock remains invalid for the native formatter; do not
+    // clamp it into a plausible DateTimeOffset or silently lose precision.
+    nanos
+        .and_then(|n| n.div_euclid(100).checked_add(UNIX_TICKS))
+        .and_then(|n| i64::try_from(n).ok())
+        .unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn keepalive_wall_clock_retains_datetimeoffset_ticks_on_both_sides_of_epoch() {
+        let epoch = 621_355_968_000_000_000;
+        for (nanos, before, expected) in [
+            (0, false, epoch),
+            (1, false, epoch),
+            (99, false, epoch),
+            (100, false, epoch + 1),
+            (123_456_700, false, epoch + 1_234_567),
+            (1, true, epoch - 1),
+            (99, true, epoch - 1),
+            (100, true, epoch - 1),
+            (123_456_700, true, epoch - 1_234_567),
+        ] {
+            let delta = Duration::from_nanos(nanos);
+            let time = if before {
+                UNIX_EPOCH - delta
+            } else {
+                UNIX_EPOCH + delta
+            };
+            assert_eq!(utc_ticks(time), expected);
+        }
+        assert_eq!(
+            utc_ticks(UNIX_EPOCH - Duration::from_secs(62_135_596_800)),
+            0
+        );
+        assert_eq!(
+            utc_ticks(
+                UNIX_EPOCH
+                    + Duration::from_secs(253_402_300_799)
+                    + Duration::from_nanos(999_999_900)
+            ),
+            3_155_378_975_999_999_999
+        );
+        assert!(
+            utc_ticks(UNIX_EPOCH + Duration::from_secs(253_402_300_800))
+                > 3_155_378_975_999_999_999
+        );
     }
 }
 pub struct SipRegistration {

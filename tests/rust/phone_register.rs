@@ -325,14 +325,14 @@ async fn keepalive_uses_confirmed_source_then_stops_at_public_lease_expiry() {
             assert_eq!(&bytes[..count], b"\r\n\r\n");
             assert_eq!(Some(from), *source);
         }
-        assert!(registration.observation().last_keepalive_at.is_some());
+        assert!(registration.observation().last_keepalive_utc_ticks.is_some());
         // The tick exactly at expiry may race receipt; drain at most one already-sent tick.
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert_eq!(registration.observation().phase, RegistrationPhase::Failed);
-        let diagnostic = registration.observation().last_keepalive_at;
+        let diagnostic = registration.observation().last_keepalive_utc_ticks;
         while tokio::time::timeout(Duration::from_millis(10), socket.recv_from(&mut bytes)).await.is_ok() {}
         tokio::time::sleep(Duration::from_millis(1050)).await;
-        assert_eq!(registration.observation().last_keepalive_at, diagnostic);
+        assert_eq!(registration.observation().last_keepalive_utc_ticks, diagnostic);
         assert!(tokio::time::timeout(Duration::from_millis(20), socket.recv_from(&mut bytes)).await.is_err());
         // Private refresh still follows matching Contact=10 (at five seconds).
         let refresh = peer.receive().await;

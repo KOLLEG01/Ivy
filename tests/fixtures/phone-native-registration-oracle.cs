@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Net.Sockets;
 using System.Text.Json;
 using Ivy.PhoneBridge;
 using SIPSorcery.SIP;
@@ -14,11 +15,12 @@ public static class PhoneNativeRegistrationOracle {
         using var input=JsonDocument.Parse(Console.In.ReadToEnd());var rows=new List<string>();
         foreach(var item in input.RootElement.EnumerateArray()) {
             var response=item.GetProperty("responseCode");var removed=item.GetProperty("remoteRemoved");
-            var milliseconds=item.GetProperty("lastKeepAliveUnixMs");
+            string ticks=Text(item,"lastKeepAliveUtcTicks"),socket=Text(item,"socketError");
             var value=new SipRegistrationObservation(Text(item,"state"),response.ValueKind==JsonValueKind.Null ? null : response.GetInt32(),
                 removed.ValueKind==JsonValueKind.Null ? null : removed.GetBoolean(),Endpoint(item,"localEndpoint"),Endpoint(item,"remoteEndpoint"),
                 Text(item,"grantedExpirySeconds") is string expiry ? long.Parse(expiry,CultureInfo.InvariantCulture) : null,
-                milliseconds.ValueKind==JsonValueKind.Null ? null : DateTimeOffset.FromUnixTimeMilliseconds(milliseconds.GetInt64()),Text(item,"lastKeepAliveError"));
+                ticks==null ? null : new DateTimeOffset(long.Parse(ticks,CultureInfo.InvariantCulture),TimeSpan.Zero),
+                socket==null ? Text(item,"lastKeepAliveError") : ((SocketError)int.Parse(socket,CultureInfo.InvariantCulture)).ToString());
             rows.Add(JsonSerializer.Serialize(value,NativeRpc.Json));
         }
         Console.Write(JsonSerializer.Serialize(rows,NativeRpc.Json));

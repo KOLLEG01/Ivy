@@ -1,6 +1,7 @@
 //! Original registration DTO over the retained SIP lease observation.
 use crate::sip::{
-    RegistrationObservation, RegistrationPeer, RegistrationPhase, RegistrationTransport,
+    RegistrationKeepaliveError, RegistrationObservation, RegistrationPeer, RegistrationPhase,
+    RegistrationTransport,
 };
 use ivy_contracts::{IvyJson, json::stringify};
 
@@ -13,12 +14,8 @@ pub enum RegistrationViewError {
 }
 
 /// Preserve integer lexemes, nullable fields, endpoint protocol and UTC offset.
-/// The lease currently retains millisecond time and a coarse keepalive failure;
-/// this cannot recover the original socket-error label or submillisecond ticks.
+/// Socket errors and time are retained by the original registration owner.
 pub fn registration_json(view: &RegistrationObservation) -> Result<String, RegistrationViewError> {
-    if view.keepalive_failed {
-        return Err(RegistrationViewError::UnavailableKeepaliveError);
-    }
     let state = match view.phase {
         RegistrationPhase::Registering => "registering",
         RegistrationPhase::Registered => "registered",
@@ -40,13 +37,76 @@ pub fn registration_json(view: &RegistrationObservation) -> Result<String, Regis
         .unwrap_or_else(|| "null".into());
     let local = endpoint(view.local)?;
     let remote = endpoint(view.remote)?;
-    let keepalive = match view.last_keepalive_at {
-        Some(ms) => quote(&utc_millis(ms)?)?,
+    let keepalive = match view.last_keepalive_utc_ticks {
+        Some(ticks) => quote(&utc_ticks(ticks)?)?,
         None => "null".into(),
     };
+    let error = match view.last_keepalive_error {
+        None => "null".into(),
+        Some(RegistrationKeepaliveError::SendFailed) => quote("keepalive_send_failed")?,
+        Some(RegistrationKeepaliveError::SocketError(code)) => quote(&socket_error(code))?,
+        Some(RegistrationKeepaliveError::UnmappedSocketError(_)) => {
+            return Err(RegistrationViewError::UnavailableKeepaliveError);
+        }
+    };
     Ok(format!(
-        "{{\"state\":\"{state}\",\"responseCode\":{response},\"remoteRemoved\":{removed},\"localEndpoint\":{local},\"remoteEndpoint\":{remote},\"grantedExpirySeconds\":{expiry},\"lastKeepAliveAt\":{keepalive},\"lastKeepAliveError\":null}}"
+        "{{\"state\":\"{state}\",\"responseCode\":{response},\"remoteRemoved\":{removed},\"localEndpoint\":{local},\"remoteEndpoint\":{remote},\"grantedExpirySeconds\":{expiry},\"lastKeepAliveAt\":{keepalive},\"lastKeepAliveError\":{error}}}"
     ))
+}
+fn socket_error(code: i32) -> String {
+    // Public System.Net.Sockets.SocketError contract. Unknown enum values
+    // stringify as their invariant decimal integer, never as OS error text.
+    match code {
+        0 => "Success",
+        -1 => "SocketError",
+        995 => "OperationAborted",
+        997 => "IOPending",
+        10004 => "Interrupted",
+        10013 => "AccessDenied",
+        10014 => "Fault",
+        10022 => "InvalidArgument",
+        10024 => "TooManyOpenSockets",
+        10035 => "WouldBlock",
+        10036 => "InProgress",
+        10037 => "AlreadyInProgress",
+        10038 => "NotSocket",
+        10039 => "DestinationAddressRequired",
+        10040 => "MessageSize",
+        10041 => "ProtocolType",
+        10042 => "ProtocolOption",
+        10043 => "ProtocolNotSupported",
+        10044 => "SocketNotSupported",
+        10045 => "OperationNotSupported",
+        10046 => "ProtocolFamilyNotSupported",
+        10047 => "AddressFamilyNotSupported",
+        10048 => "AddressAlreadyInUse",
+        10049 => "AddressNotAvailable",
+        10050 => "NetworkDown",
+        10051 => "NetworkUnreachable",
+        10052 => "NetworkReset",
+        10053 => "ConnectionAborted",
+        10054 => "ConnectionReset",
+        10055 => "NoBufferSpaceAvailable",
+        10056 => "IsConnected",
+        10057 => "NotConnected",
+        10058 => "Shutdown",
+        10060 => "TimedOut",
+        10061 => "ConnectionRefused",
+        10064 => "HostDown",
+        10065 => "HostUnreachable",
+        10067 => "ProcessLimit",
+        10091 => "SystemNotReady",
+        10092 => "VersionNotSupported",
+        10093 => "NotInitialized",
+        10101 => "Disconnecting",
+        10109 => "TypeNotFound",
+        11001 => "HostNotFound",
+        11002 => "TryAgain",
+        11003 => "NoRecovery",
+        11004 => "NoData",
+        _ => return code.to_string(),
+    }
+    .into()
 }
 fn quote(value: &str) -> Result<String, RegistrationViewError> {
     stringify(&IvyJson::String(value.into()), crate::ipc::FRAME_BYTES)
@@ -71,14 +131,15 @@ fn endpoint(peer: Option<RegistrationPeer>) -> Result<String, RegistrationViewEr
     };
     quote(&format!("{protocol}:{address}"))
 }
-fn utc_millis(ms: i64) -> Result<String, RegistrationViewError> {
-    // DateTimeOffset.FromUnixTimeMilliseconds range, including negative epochs.
-    if !(-62_135_596_800_000..=253_402_300_799_999).contains(&ms) {
+fn utc_ticks(ticks: i64) -> Result<String, RegistrationViewError> {
+    if !(0..=3_155_378_975_999_999_999).contains(&ticks) {
         return Err(RegistrationViewError::InvalidTimestamp);
     }
+    const SECOND: i64 = 10_000_000;
+    let seconds = ticks / SECOND - 62_135_596_800;
     // Gregorian civil date from an epoch day; division is Euclidean for dates
     // before 1970. All intermediates are bounded by the DateTimeOffset range.
-    let z = ms.div_euclid(86_400_000) + 719_468;
+    let z = seconds.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -88,14 +149,14 @@ fn utc_millis(ms: i64) -> Result<String, RegistrationViewError> {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = mp + if mp < 10 { 3 } else { -9 };
     let year = year + if month <= 2 { 1 } else { 0 };
-    let time = ms.rem_euclid(86_400_000);
-    let hour = time / 3_600_000;
-    let minute = time / 60_000 % 60;
-    let second = time / 1000 % 60;
-    let fraction = if ms.rem_euclid(1000) == 0 {
+    let time = seconds.rem_euclid(86_400);
+    let hour = time / 3_600;
+    let minute = time / 60 % 60;
+    let second = time % 60;
+    let fraction = if ticks % SECOND == 0 {
         String::new()
     } else {
-        format!(".{:03}", ms.rem_euclid(1000))
+        format!(".{:07}", ticks % SECOND)
             .trim_end_matches('0')
             .into()
     };

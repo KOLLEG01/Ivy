@@ -29,6 +29,85 @@ const EXPIRED: &[u8] = include_bytes!("../fixtures/phone-sip-tls-expired.der");
 const WRONG: &[u8] = include_bytes!("../fixtures/phone-sip-tls-wrong-name.der");
 const SELF_SIGNED: &[u8] = include_bytes!("../fixtures/phone-sip-tls-self-signed.der");
 
+#[tokio::test]
+async fn keepalive_retains_the_original_udp_socket_and_typed_failure_until_close() {
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut host =
+        BoundSipTransport::udp("127.0.0.1:0".parse().unwrap(), EndpointOption::default())
+            .await
+            .unwrap();
+    let mut flow = host
+        .connect_next_hop(
+            sip_address(peer.local_addr().unwrap(), Transport::Udp),
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(Weak::ptr_eq(
+        host.udp_socket.as_ref().unwrap(),
+        flow.udp_socket.as_ref().unwrap()
+    ));
+    let local = host.local_addr();
+    flow.keepalive().await.unwrap();
+    let mut bytes = [0; 8];
+    let (count, source) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes[..count], b"\r\n\r\n");
+    assert_eq!(source, local);
+    // Port zero is rejected locally. No packet reaches an unowned endpoint.
+    flow.remote.set_port(0);
+    let failure = flow.keepalive().await.unwrap_err();
+    #[cfg(windows)]
+    assert_eq!(failure, RegistrationKeepaliveError::SocketError(10022));
+    #[cfg(not(windows))]
+    assert!(matches!(
+        failure,
+        RegistrationKeepaliveError::UnmappedSocketError(_)
+    ));
+    assert_eq!(
+        host.close().await,
+        Err(BindError::Endpoint(SipIoError::InUse))
+    );
+    assert!(tokio::net::UdpSocket::bind(local).await.is_err());
+    drop(flow);
+    host.close().await.unwrap();
+    let _rebound = tokio::net::UdpSocket::bind(local).await.unwrap();
+    if let Some(directory) = std::env::var_os("IVY_PHONE_CALL_AUDIO_TRACE_DIR") {
+        let error = match failure {
+            RegistrationKeepaliveError::SocketError(code) => format!("{code}"),
+            _ => "null".into(),
+        };
+        std::fs::write(std::path::PathBuf::from(directory).join("native-registration-keepalive-socket.json"), format!("{{\"sameBoundSocket\":true,\"crlfBytes\":4,\"invalidPortErrorCode\":{error},\"retainedFlowFencedClose\":true,\"originalBindingReleased\":true,\"replacementSockets\":0}}")).unwrap();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn keepalive_failure_retains_winsock_codes_without_localized_error_strings() {
+    for code in [
+        995,
+        997,
+        10013,
+        10022,
+        10049,
+        10054,
+        10061,
+        i32::MIN,
+        i32::MAX,
+    ] {
+        assert_eq!(
+            keepalive_error(std::io::Error::from_raw_os_error(code)),
+            RegistrationKeepaliveError::SocketError(code)
+        );
+    }
+    assert_eq!(
+        keepalive_error(std::io::Error::other("synthetic private error detail")),
+        RegistrationKeepaliveError::SocketError(10014)
+    );
+}
+
 fn verifier() -> Arc<dyn rustls::client::danger::ServerCertVerifier> {
     Arc::new(
         rustls_platform_verifier::Verifier::new_with_extra_roots(
