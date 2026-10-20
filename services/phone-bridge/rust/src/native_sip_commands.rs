@@ -61,9 +61,8 @@ impl NativeSipCommands {
             request
                 .params()
                 .get("callId")
-                .map(string_or_null)
+                .map(selected_id)
                 .transpose()?
-                .flatten()
         } else {
             None
         };
@@ -135,13 +134,13 @@ impl NativeSipCommands {
         }))
     }
 }
-fn string_or_null(value: &IvyJson) -> Result<Option<String>, NativeSipError> {
+fn selected_id(value: &IvyJson) -> Result<String, NativeSipError> {
     if value.is_null() {
-        return Ok(None);
+        // GetString accepts null, but the original dictionary lookup rejects it.
+        return Err(SipHostError::InvalidRequest.into());
     }
     value
         .as_str()
-        .map(Some)
         .map_err(|_| crate::native_config::NativeConfigError::OutcomeUnknown.into())
 }
 fn result(value: IvyJson) -> NativeOutcome {

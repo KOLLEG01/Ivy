@@ -418,8 +418,10 @@ async fn native_lifecycle_dto_and_error_order_match_original_handler_subset() {
     let steps: Vec<(&str, String)> = vec![
         ("call.prepare", "{}".into()),
         ("call.hangup", "{\"callId\":42}".into()),
+        ("call.release", "{\"callId\":null}".into()),
         ("configure", "{}".into()),
         ("configure", params.clone()),
+        ("configure", "{\"callId\":null}".into()),
         ("configure", "{}".into()),
         ("configure", "{\"callId\":42}".into()),
         ("call.prepare", "{}".into()),
@@ -427,6 +429,9 @@ async fn native_lifecycle_dto_and_error_order_match_original_handler_subset() {
         ("call.prepare", "{\"callId\":42}".into()),
         ("call.prepare", "{\"callId\":\"bad\"}".into()),
         ("call.hangup", "{\"callId\":null}".into()),
+        ("call.release", "{\"callId\":null}".into()),
+        ("call.release", "{\"callId\":\"\"}".into()),
+        ("call.hangup", "{\"callId\":\"\"}".into()),
         ("call.release", "{\"callId\":\"bad\"}".into()),
         ("call.prepare", selected.clone()),
         ("call.prepare", selected.clone()),
@@ -450,6 +455,9 @@ async fn native_lifecycle_dto_and_error_order_match_original_handler_subset() {
     );
     let original =
         original_session_fixture("tests/fixtures/phone-native-lifecycle-oracle.ps1", &inputs);
+    if let Some(value) = &original {
+        trace("native-lifecycle-original", value.clone());
+    }
     let dispatcher = NativeDispatcher::new(CALL.into(), 64, handler.clone()).unwrap();
     let mut rows = Vec::new();
     for (index, (method, params)) in steps.iter().enumerate() {
