@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 const input=JSON.parse(fs.readFileSync(0,'utf8'));
-if(input.operation==='paths'){
+if(input.operation==='logical-paths'){
+ process.stdout.write(JSON.stringify(input.cases.map(value=>Buffer.from(value,'utf8').toString('utf8'))));
+}else if(input.operation==='paths'){
  const cwd=process.cwd,env=process.env;
  try{
   process.stdout.write(JSON.stringify(input.cases.map(c=>{

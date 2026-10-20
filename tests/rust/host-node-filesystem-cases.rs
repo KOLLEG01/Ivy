@@ -59,6 +59,30 @@ fn pair(case: &str, actual: IvyJson, expected: IvyJson) {
 }
 
 #[test]
+fn logical_filesystem_spelling_preserves_legacy_paths_without_namespace_conversion() {
+    let values: Vec<JsString> = vec![
+        "".into(), ".".into(), "relative/../file- ".into(), "C:".into(),
+        "C:child".into(), "\\child".into(), "C:\\owned\\file-..".into(),
+        "C:/owned/../file- ".into(), "C:\\owned\\file-..\\".into(),
+        "\\\\server\\share\\file-..".into(), "//server/share/file- ".into(),
+        "\\\\?\\C:\\owned\\a\\..\\file-..".into(),
+        "\\\\?\\UNC\\server\\share\\file- ".into(), "\\\\.\\pipe\\named".into(),
+        "/owned/../file-..".into(), "C:\\owned\\non-ascii-\u{1f642}".into(),
+        JsString(vec![67, 58, 92, 0xd800, 92, 0xdc00]),
+        JsString(vec![67, 58, 92, 0xd800, 0xdc00]),
+        JsString(vec![67, 58, 92, 0]),
+        format!("C:\\{}file-..", "long-segment\\".repeat(32)).into(),
+    ];
+    let actual = values.iter().map(|value| {
+        IvyJson::String(node_path::from_native(&node_path::filesystem_path(value)))
+    }).collect();
+    pair("legacy-logical-spelling", IvyJson::Array(actual), call(&IvyJson::object([
+        ("operation", "logical-paths".into()),
+        ("cases", IvyJson::Array(values.into_iter().map(IvyJson::String).collect())),
+    ])));
+}
+
+#[test]
 fn filesystem_mapping_matches_node_dos_unc_verbatim_long_and_utf8_boundaries() {
     let values: Vec<JsString> = vec![
         "".into(),
@@ -241,7 +265,10 @@ fn actual_file_creation(fixture: &ServiceFixture, case_name: &str) {
         drop(file);
         assert_eq!(fs::read(&physical).unwrap(), [1, 2, 3]);
         assert_eq!(logical, saved);
-        assert_eq!(node_path::filesystem_path(&logical), physical);
+        assert_eq!(
+            node_path::from_native(&node_path::filesystem_path(&logical)),
+            JsString::from(String::from_utf16_lossy(&logical.0))
+        );
     }
     let physical = node_path::node_filesystem_path(&root_js).unwrap();
     let mut values = Vec::new();
