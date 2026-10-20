@@ -14,6 +14,8 @@ mod authentication;
 mod http;
 #[path = "hive_oauth.rs"]
 mod oauth;
+#[path = "hive_push_crypto.rs"]
+mod native_crypto;
 
 type Posted = (IvyJson, oneshot::Sender<IvyResult<IvyJson>>);
 static CORPUS: Mutex<()> = Mutex::new(());

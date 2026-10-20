@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
+futures-util.workspace = true
+reqwest.workspace = true
+aws-lc-rs.workspace = true
 ivy-contracts.workspace = true
 ivy-host-runtime.workspace = true
 rusqlite = { workspace = true, features = ["backup", "functions", "hooks"] }
