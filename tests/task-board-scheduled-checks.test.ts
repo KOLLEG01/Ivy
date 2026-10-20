@@ -35,7 +35,7 @@ async function finish(workflow: Workflow, handoff?: TaskBoard.Handoff) {
 
 test('time paths remain independent from own questions and publish only after native completion', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
-  await comment(workflow, { purpose: 'question', commentId: 'login-choice', body: 'Which login should be used for publishing?' });
+  await comment(workflow, { purpose: 'question', recipient: { kind: 'user' }, commentId: 'login-choice', body: 'Which login should be used for publishing?' });
   const handoff = appointment();
   await comment(workflow, { purpose: 'handoff', handoff });
   const active = (await workflow.f.first.store.read('task-board/task', workflow.state().task)).value;
@@ -53,7 +53,7 @@ test('time paths remain independent from own questions and publish only after na
 
 test('a due step restarts once without work/check modes and renews through its next time condition', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
-  await comment(workflow, { purpose: 'question', commentId: 'login-choice', body: 'Choose a login.' });
+  await comment(workflow, { purpose: 'question', recipient: { kind: 'user' }, commentId: 'login-choice', body: 'Choose a login.' });
   const task = await finish(workflow, appointment());
   const at = task.nextSteps[0]!.requires[0]!;
   assert.equal(at.kind, 'time');

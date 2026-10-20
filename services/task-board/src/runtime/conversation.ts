@@ -3,6 +3,7 @@ import type { TaskBoard } from '../../../../packages/sdk/src/node.js';
 
 /** Directed comments from a different ticket; a ticket's own worker stays visible. */
 export const crossAgentComment = (comment: TaskBoard.Comment, taskId: string): boolean =>
+  comment.recipient?.kind === 'task' || !!comment.questionSource ||
   comment.authorKind === 'agent' && !!comment.sourceTaskId && comment.sourceTaskId !== taskId;
 
 export function unreadComments(task: Pick<TaskBoard.Task, 'comments'>, taskId: string, state?: TaskBoard.CommentReadState) {

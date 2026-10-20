@@ -1,11 +1,14 @@
 import { canonical, hashJson, jsonObjectContentBytes, requireThat } from '../../../../packages/sdk/src/node.js';
 import type { TaskBoard, Wire } from '../../../../packages/sdk/src/node.js';
 import type { RpcClient } from '../../../../packages/sdk/src/client.js';
+import { CommentReader, commentNodeKey } from '../../../../packages/sdk/src/task-comments.js';
+import type { CommentNode, CommentIndex, CommentTree } from '../../../../packages/sdk/src/task-comments.js';
 
 export const commentContractKey = 'task-board/comments';
 type CommentState = Pick<TaskBoard.Comment, 'commentId' | 'nativeInput' | 'handoff' | 'delivery'>;
 type CommentReference = { objectId: string; length: number; nativeInputs: CommentState[] };
 type StoredTask = TaskBoard.Task & { commentStore?: CommentReference };
+type TreeTask = TaskBoard.Task & { commentStore: CommentTree };
 
 function taskHeader(task: TaskBoard.Task, commentObjectId: string): StoredTask {
   return { ...task, comments: [], commentStore: { objectId: commentObjectId, length: task.comments.length,
@@ -14,17 +17,40 @@ function taskHeader(task: TaskBoard.Task, commentObjectId: string): StoredTask {
 }
 
 export function validateTaskContent(task: TaskBoard.Task, taskId: string): void {
-  canonical(taskHeader(task, taskId), jsonObjectContentBytes - 1024);
-  canonical({ schemaVersion: 1, taskId, comments: task.comments }, jsonObjectContentBytes - 1024);
+  canonical({ ...task, comments: [], commentDeliveries: [], commentStore: { kind: 'tree', root: null, length: 0 } }, jsonObjectContentBytes - 1024);
+  const receipts = new Map(task.commentDeliveries.map(receipt => [receipt.commentId, receipt]));
+  for (const comment of task.comments) canonical({ schemaVersion: 1, taskId, kind: 'comment', entry: {
+    comment, receipt: receipts.get(comment.commentId) ?? null,
+  } }, jsonObjectContentBytes - 1024);
 }
 
 /** The ticket pins a conversation prefix, not an obsolete revision of its append-only body. */
 export class TaskComments {
-  constructor(private readonly client: RpcClient, private readonly identity: (scope: string) => Promise<string>) {}
+  private readonly reader: CommentReader;
+  private readonly pins = new Map<string, TaskBoard.ObjectPin>();
+  constructor(private readonly client: RpcClient, private readonly identity: (scope: string) => Promise<string>) {
+    this.reader = new CommentReader(client);
+    const read = this.reader.node.bind(this.reader);
+    this.reader.node = async (pin, taskId, signal) => {
+      const node = await read(pin, taskId, signal);
+      this.remember(hashJson(node), pin);
+      return node;
+    };
+  }
+  private remember(hash: string, pin: TaskBoard.ObjectPin): void {
+    if (this.pins.size >= 16384) this.pins.delete(this.pins.keys().next().value!);
+    this.pins.set(hash, pin);
+  }
 
   async read(value: Wire.Json, taskId: string): Promise<TaskBoard.Task> {
     const task = value as unknown as StoredTask;
     if (!task.commentStore) return task;
+    if ('kind' in task.commentStore) {
+      const { commentStore, ...header } = task as unknown as TreeTask;
+      const entries = await this.reader.range(commentStore, taskId);
+      return { ...header, comments: entries.map(entry => entry.comment),
+        commentDeliveries: entries.flatMap(entry => entry.receipt ? [entry.receipt] : []) };
+    }
     const { commentStore: reference, ...header } = task;
     const object = await this.client.request('objects.read', { objectId: reference.objectId });
     requireThat(object.object.contractKey === commentContractKey && object.object.ownerObjectId === null &&
@@ -41,7 +67,63 @@ export class TaskComments {
     return { ...header, comments };
   }
 
-  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '2.1.0'): Promise<StoredTask> {
+  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '2.2.0'): Promise<StoredTask | TreeTask> {
+    if (contractVersion !== '2.2.0') return this.writeRetained(task, taskId, scope, contractVersion);
+    const current = await this.client.request('objects.read', { objectId: taskId });
+    requireThat(current.content.encoding === 'json' && current.object.contractKey === 'task-board/task',
+      'task_board_contract_mismatch', 'A conversation needs its owning ticket.');
+    const prior = await this.read(current.content.value, taskId);
+    const immutable = ({ nativeInput: _input, handoff: _handoff, delivery: _delivery, recipient: _recipient, ...body }: TaskBoard.Comment) => body;
+    for (let index = 0; index < Math.min(prior.comments.length, task.comments.length); index++)
+      requireThat(hashJson(immutable(prior.comments[index]!)) === hashJson(immutable(task.comments[index]!)),
+        'task_board_comment_mismatch', 'Published comment content is immutable.');
+    const receipts = new Map(task.commentDeliveries.map(receipt => [receipt.commentId, receipt]));
+    const save = async (node: CommentNode): Promise<TaskBoard.ObjectPin> => {
+      const hash = hashJson(node), cached = this.pins.get(hash);
+      if (cached) return cached;
+      const name = 'Conversation ' + hash.slice(7);
+      const existing = await this.client.request('objects.query', { contractKey: commentNodeKey,
+        where: { op: 'and', args: [{ field: 'object.parentId', op: 'eq', value: taskId },
+          { field: 'object.name', op: 'eq', value: name }] }, limit: 1, includeArchived: true });
+      let pin: TaskBoard.ObjectPin;
+      if (existing.items[0]) {
+        pin = { objectId: existing.items[0].objectId, revision: existing.items[0].revision };
+        requireThat(hashJson(await this.reader.node(pin, taskId)) === hash,
+          'task_board_evidence_mismatch', 'The immutable conversation record differs from its identity.');
+      } else {
+        const references = node.kind === 'page' ? Object.fromEntries(node.children.map((child, i) => ['child-' + i, child.object])) : {};
+        const saved = await this.client.request('objects.write', { contractVersion: '1.0.0',
+          mutationId: await this.identity('conversation:' + taskId + ':' + hash), references,
+          create: { name, parentId: taskId, ownerObjectId: taskId, contractKey: commentNodeKey },
+          content: { encoding: 'json', value: node as unknown as Wire.Json } });
+        pin = { objectId: saved.object.id, revision: saved.revision.revision };
+      }
+      this.remember(hash, pin); this.reader.remember(pin, node);
+      return pin;
+    };
+    let level: CommentIndex[] = [];
+    for (let offset = 0; offset < task.comments.length; offset += 8) {
+      const batch = await Promise.all(task.comments.slice(offset, offset + 8).map(async (comment, index) => {
+        requireThat(comment.sequence === offset + index + 1, 'task_board_comment_mismatch', 'Conversation sequence must remain contiguous.');
+        return { object: await save({ schemaVersion: 1, taskId, kind: 'comment',
+          entry: { comment, receipt: receipts.get(comment.commentId) ?? null } }), length: 1 };
+      }));
+      level.push(...batch);
+    }
+    while (level.length > 1) {
+      const parents: CommentIndex[] = [];
+      for (let offset = 0; offset < level.length; offset += 64) {
+        const children = level.slice(offset, offset + 64);
+        parents.push({ object: await save({ schemaVersion: 1, taskId, kind: 'page', children }),
+          length: children.reduce((sum, child) => sum + child.length, 0) });
+      }
+      level = parents;
+    }
+    return { ...task, comments: [], commentDeliveries: [],
+      commentStore: { kind: 'tree', root: level[0] ?? null, length: task.comments.length } };
+  }
+
+  private async writeRetained(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string): Promise<StoredTask> {
     const page = await this.client.request('objects.query', { contractKey: commentContractKey,
       where: { op: 'and', args: [{ field: 'object.parentId', op: 'eq', value: taskId },
         { field: 'object.name', op: 'eq', value: 'Comments' }] }, limit: 2, includeArchived: true });

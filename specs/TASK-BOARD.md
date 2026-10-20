@@ -6,6 +6,16 @@ UI requirements: [UI](UI.md).
 
 ## Work and allocation
 
+- Questions explicitly address `user` or a task ID. Task questions remain canonical in the
+  sender ticket and are relayed once through durable comments to the recipient. An answer
+  names that recipient in `sourceTaskId` and the original question in `replyTo`. Internal
+  questions never produce user question badges or contact notifications. A local `question`
+  prerequisite waits for its answer without blocking other steps. Escalating to a human
+  requires a separate explicit user question.
+- Failed completion/publication is an execution error with its retained cause and a central
+  Hive error diagnostic. A storage refusal is not a missing handoff and does not trigger
+  repeated agent recovery attempts. Exhausted handoff recovery is also shown as a failure.
+
 - A Task is the durable ticket; Runs are execution attempts. Its stable task key also identifies
   per-task output directories. Workflow state, execution condition and user/agent control are separate.
   Category is organizational metadata, not a capability or execution target.
@@ -18,10 +28,12 @@ UI requirements: [UI](UI.md).
   Task, initial manual Result and history publish through one retained Create operation;
   an unfinished publication cannot schedule work. Offline host/capability waits retain valid
   registered selections and defer unavailable live model validation until allocation.
-- Tickets retain the latest 50 revisions. Each ticket has one retained `task-board/comments`
-  child with current-only revisions; immutable comment bodies are stored there once. Ticket
-  snapshots select the conversation prefix and preserve mutable delivery, native-input and
-  handoff observations. Reads, including historical reads, restore that exact comment view.
+- Tickets retain the latest 50 revisions. Each ticket pins an immutable conversation tree.
+  `task-board/comment-node` children store individual comments with delivery observations;
+  64-way index pages preserve exact historical snapshots with bounded range reads. Unchanged
+  records are reused; prepared publications retain the compact root rather than copying the
+  entire conversation into every journal stage. Existing conversation logs remain readable.
+  Public reads default to the latest 50 comments and expose offset pagination.
   Comment read markers independently retain the all-agent prefix and direct-agent count;
   markCommentsRead with includeCrossAgent=false advances only direct-agent visibility.
   Task reads report both unread totals; hiding directed communication never acknowledges it.

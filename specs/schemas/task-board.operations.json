@@ -10,17 +10,17 @@
     },
     {
       "key": "task-board/task",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "definition": "#/$defs/Task"
     },
     {
       "key": "task-board/run",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "definition": "#/$defs/Run"
     },
     {
       "key": "task-board/result",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "definition": "#/$defs/Result"
     },
     {
@@ -159,6 +159,11 @@
     },
     "edit": {
       "input": "#/$defs/EditRequest",
+      "output": "#/$defs/ActionOutcome",
+      "mutation": true
+    },
+    "retargetQuestion": {
+      "input": "#/$defs/RetargetQuestionRequest",
       "output": "#/$defs/ActionOutcome",
       "mutation": true
     },

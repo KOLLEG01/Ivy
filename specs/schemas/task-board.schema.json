@@ -1222,6 +1222,54 @@
         "sourceTaskId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
         },
+        "recipient": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "user"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "task"
+                },
+                "taskId": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                }
+              },
+              "required": [
+                "kind",
+                "taskId"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "questionSource": {
+          "type": "object",
+          "properties": {
+            "taskId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "commentId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            }
+          },
+          "required": [
+            "taskId",
+            "commentId"
+          ],
+          "additionalProperties": false
+        },
         "handoff": {
           "$ref": "#/$defs/Handoff"
         },
@@ -1960,6 +2008,72 @@
       ],
       "additionalProperties": false
     },
+    "RetargetQuestionRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "retargetQuestion"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "taskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "questionId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "recipient": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "user"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "task"
+                },
+                "taskId": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                }
+              },
+              "required": [
+                "kind",
+                "taskId"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "taskId",
+        "expectedRevision",
+        "questionId",
+        "recipient"
+      ],
+      "additionalProperties": false
+    },
     "TransitionRequest": {
       "type": "object",
       "properties": {
@@ -2530,6 +2644,54 @@
           ],
           "description": "For a user comment on an agent-controlled task, queue asks TaskBoard to start or resume agent work; none records the comment without scheduling it. Omitted means queue. Worker comments use the task userContact route instead."
         },
+        "recipient": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "user"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "task"
+                },
+                "taskId": {
+                  "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+                }
+              },
+              "required": [
+                "kind",
+                "taskId"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "questionSource": {
+          "type": "object",
+          "properties": {
+            "taskId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "commentId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            }
+          },
+          "required": [
+            "taskId",
+            "commentId"
+          ],
+          "additionalProperties": false
+        },
         "sourceTaskId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier",
           "description": "For a directed agent message, identify the different sending task and explicitly set authorKind=agent and agentDelivery=queue. Ordinary worker updates never wake themselves."
@@ -2586,7 +2748,35 @@
         "attachments",
         "replyTo"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "purpose": {
+                "const": "question"
+              }
+            },
+            "required": [
+              "purpose"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "recipient"
+                ]
+              },
+              {
+                "required": [
+                  "nativeInput"
+                ]
+              }
+            ]
+          }
+        }
+      ]
     },
     "UploadAttachmentRequest": {
       "type": "object",
@@ -2757,6 +2947,29 @@
         },
         "view": {
           "const": "card"
+        },
+        "comments": {
+          "type": "object",
+          "properties": {
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "questionsOnly": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "offset",
+            "limit"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -2957,7 +3170,8 @@
             "recovering",
             "outcome_unknown",
             "publishing",
-            "workflow_attention"
+            "workflow_attention",
+            "failed"
           ]
         },
         "detail": {
@@ -2993,6 +3207,46 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991
+        },
+        "commentPage": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "nextOffset": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "total",
+            "offset",
+            "nextOffset"
+          ],
+          "additionalProperties": false
+        },
+        "openQuestions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Comment"
+          },
+          "maxItems": 256
         }
       },
       "required": [
@@ -3281,6 +3535,9 @@
           "$ref": "#/$defs/EditRequest"
         },
         {
+          "$ref": "#/$defs/RetargetQuestionRequest"
+        },
+        {
           "$ref": "#/$defs/TransitionRequest"
         },
         {
@@ -3322,6 +3579,9 @@
         },
         {
           "$ref": "#/$defs/EditRequest"
+        },
+        {
+          "$ref": "#/$defs/RetargetQuestionRequest"
         },
         {
           "$ref": "#/$defs/TransitionRequest"
@@ -5115,7 +5375,8 @@
             "1.11.0",
             "1.12.0",
             "2.0.0",
-            "2.1.0"
+            "2.1.0",
+            "2.2.0"
           ]
         },
         "payload": {
@@ -6840,6 +7101,22 @@
           "properties": {
             "kind": {
               "const": "user"
+            },
+            "questionId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            }
+          },
+          "required": [
+            "kind",
+            "questionId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "question"
             },
             "questionId": {
               "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"

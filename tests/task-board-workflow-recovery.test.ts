@@ -200,7 +200,7 @@ test('a foreign question is not inherited and only its concrete delivery gates t
   const w = await nativeWorkflow(t); await w.running();
   const parent = await w.f.planned('agent');
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: parent.task.objectId, expectedRevision: parent.task.revision,
-    commentId: 'parent-approval', authorKind: 'agent', purpose: 'question', body: 'May the lab be provisioned?', requests: [], responses: [], attachments: [], replyTo: null });
+    commentId: 'parent-approval', authorKind: 'agent', purpose: 'question', recipient: { kind: 'user' }, body: 'May the lab be provisioned?', requests: [], responses: [], attachments: [], replyTo: null });
   const done = await finish(w, { workflowState: 'waiting', nextSteps: [
     { id: 'lab', scope: 'Qualify the actual lab after it is supplied.', requires: [{ kind: 'delivery', taskId: parent.task.objectId, key: 'isolated-lab-ready' }] },
     { id: 'independent', scope: 'Read independently at the next appointment.', requires: [{ kind: 'time', at: new Date(Date.now() + 60000).toISOString() }] },
@@ -280,7 +280,7 @@ test('recovery retains exact native evidence under collection pressure and respe
   const originalRun = await w.f.first.store.read('task-board/run', w.state().run);
   await w.refresh();
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision,
-    commentId: 'real-question', authorKind: 'agent', purpose: 'question', body: 'Which existing target should be used?', requests: [], responses: [], attachments: [], replyTo: null });
+    commentId: 'real-question', authorKind: 'agent', purpose: 'question', recipient: { kind: 'user' }, body: 'Which existing target should be used?', requests: [], responses: [], attachments: [], replyTo: null });
   await w.refresh(); const closed = await finish(w);
   w.f.first.store.historyLimits.count = 0; await w.f.first.store.collectLocal();
   assert.ok(await w.f.first.store.read('task-board/native-call', originalRun.value.calls.thread!));
@@ -361,7 +361,7 @@ test('recovery attempts survive scheduler replacement and stop after two unusabl
     now += 31_000; t.mock.timers.setTime(now);
   }
   const after = await w.f.first.store.read('task-board/task', w.state().task.objectId);
-  assert.equal(w.f.first.condition(after.value).state, 'workflow_attention');
+  assert.equal(w.f.first.condition(after.value).state, 'failed');
   assert.equal(after.value.openQuestionCount, 0);
   assert.equal(after.value.commentDeliveries.find(value => value.commentId === 'prior-feedback')?.state, 'delivered');
   assert.equal(await new TaskBoardScheduler(w.f.second).task(after.pin.objectId), null);
@@ -407,7 +407,7 @@ test('a lost original context before recovery dispatch becomes attention without
   await w.observe('thread', call, { error: { code: -32600, message: 'no rollout found for native-primary' } }, 'failed');
   const after = await w.f.first.store.read('task-board/task', w.state().task.objectId);
   assert.equal(after.value.completionIssue?.code, 'task_board_recovery_context_unavailable');
-  assert.equal(w.f.first.condition(after.value).state, 'workflow_attention');
+  assert.equal(w.f.first.condition(after.value).state, 'failed');
   assert.equal(await new TaskBoardScheduler(w.f.second).task(after.pin.objectId), null);
 });
 

@@ -2,6 +2,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { hashJson } from '../packages/contracts/src/canonical.js';
 import type { TaskBoard, Wire } from '../packages/contracts/src/generated.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import { TaskBoardNativeOrchestrator } from '../services/task-board/src/runtime/native-orchestrator.js';
@@ -142,10 +143,36 @@ test('quota recovery preserves an unanswered ticket question', async t => {
   await f.first.drain(f.runId);
   let task = await engine.store.read('task-board/task', (await f.current()).value.taskId);
   await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision,
-    commentId: 'quota-question', authorKind: 'agent', purpose: 'question', body: 'Which input should be used?', requests: [], responses: [], attachments: [], replyTo: null });
+    commentId: 'quota-question', authorKind: 'agent', purpose: 'question', recipient: { kind: 'user' }, body: 'Which input should be used?', requests: [], responses: [], attachments: [], replyTo: null });
   f.error({ message: "You've hit your session limit" }); f.status('failed'); f.outputs([]); await f.first.drain(f.runId);
   task = await engine.store.read('task-board/task', task.pin.objectId);
   assert.equal(task.value.openQuestionCount, 1); assert.ok(task.value.runtimeWait?.retryAt);
+  assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
+});
+
+test('a failed handoff publication remains a complete error when the native turn also reaches its quota', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  await f.first.drain(f.runId);
+  const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
+  const { priority: _priority, dueAt: _due, userContact: _contact, ...fields } = task.value.fields;
+  const request: TaskBoard.CommentActionRequest = { action: 'comment', operationId: 'refused-handoff-before-quota',
+    taskId: task.pin.objectId, expectedRevision: task.pin.revision, commentId: 'refused-handoff',
+    purpose: 'handoff', authorKind: 'agent', body: 'Completed work.', handoff: { workflowState: 'review', nextSteps: [] },
+    requests: [], responses: [], attachments: [], replyTo: null };
+  const operation = await engine.operations.begin(request, { ...engine.owner, principalId: 'worker', source: 'worker' },
+    async () => ({ run: run.pin, work: { claimOperationId: task.value.claim!.operationId,
+      workRevision: task.value.workRevision, primaryResourceRef: task.value.primaryResourceRef,
+      contentHash: hashJson({ fields, parentTaskId: task.value.parentTaskId ?? null }) } }));
+  await engine.operations.failure(operation.pin.objectId, new IvyError('storage_full', 'The completion could not be stored.', 'not_executed'), false);
+  f.error({ message: "You've hit your session limit" }); f.status('failed'); f.outputs([]);
+  await f.first.drain(f.runId);
+  const failed = await engine.store.read('task-board/task', task.pin.objectId);
+  assert.equal(failed.value.completionIssue?.code, 'storage_full');
+  assert.equal(failed.value.completionIssue?.run.objectId, run.pin.objectId);
+  assert.equal(failed.value.completionIssue?.operationId, request.operationId);
+  assert.equal(failed.value.completionIssue?.retryAt, null);
+  assert.equal(failed.value.runtimeWait, null);
+  assert.equal(engine.condition(failed.value).state, 'failed');
   assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
 });
 
@@ -556,8 +583,9 @@ async function missingUnstarted(t: TestContext) {
   await f.first.step(f.runId); await f.first.step(f.runId); f.f.restart();
   await f.first.step(f.runId); await f.first.step(f.runId);
   let restored = false, loseStart = false, active = false;
-  const reply = (id: string) => ({ result: { thread: { ...f.f.w.nativeThread([], { type: 'idle' }), id, sessionId: id },
-    cwd: '/fixture', model: 'fixture-model', modelProvider: 'openai', approvalPolicy: 'on-request', approvalsReviewer: 'user',
+  const cwd = f.f.w.planned.workspace.canonicalCwd;
+  const reply = (id: string) => ({ result: { thread: { ...f.f.w.nativeThread([], { type: 'idle' }), id, sessionId: id, cwd },
+    cwd, model: 'fixture-model', modelProvider: 'openai', approvalPolicy: 'on-request', approvalsReviewer: 'user',
     sandbox: { type: 'readOnly' }, reasoningEffort: 'high' } });
   f.f.reply(frame => {
     const params = nativeRecord(frame['params']);
@@ -570,7 +598,7 @@ async function missingUnstarted(t: TestContext) {
       if (loseStart) { loseStart = false; f.f.loseReply(); }
       return reply('recovered-primary');
     }
-    if (frame['method'] === 'thread/read') return { result: { thread: { ...f.f.w.nativeThread([], active ? { type: 'active', activeFlags: [] } : { type: 'idle' }), id: String(params['threadId']) } } };
+    if (frame['method'] === 'thread/read') return { result: { thread: { ...f.f.w.nativeThread([], active ? { type: 'active', activeFlags: [] } : { type: 'idle' }), id: String(params['threadId']), cwd } } };
     if (frame['method'] === 'turn/start') { active = true; return { result: { turn: f.f.w.turn() } }; }
     return;
   });
@@ -591,7 +619,7 @@ test('missing unstarted context recovers once across lost native and publication
   // An already blocked ticket can have an additional failed continuation from before this fix.
   const queued = await engine.store.read('task-board/task', f.task.pin.objectId), allocation = await new TaskBoardScheduler(engine).allocate(queued, randomUUID());
   const continuation = await engine.schedule({ action: 'continue', operationId: randomUUID(), taskId: queued.pin.objectId,
-    expectedRevision: queued.pin.revision, ...allocation, feedback: 'Continue the current ticket.', commentIds: [commentId] });
+    expectedRevision: queued.pin.revision, ...allocation, feedback: 'Process the queued ticket input.', commentIds: [commentId], coordinationOnly: true });
   await f.second.drain(continuation.run!.objectId);
   const before = await engine.store.read('task-board/task', f.task.pin.objectId), failed = await engine.store.read('task-board/run', continuation.run!.objectId);
   const clock = () => new Date(Date.now() + 31000);
@@ -631,7 +659,7 @@ test('missing unstarted context recovers once across lost native and publication
 test('recovery reuses a restored original context and respects an unanswered ticket question', async t => {
   const f = await missingUnstarted(t), engine = f.f.w.f.first;
   await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: f.task.pin.objectId, expectedRevision: f.task.pin.revision,
-    commentId: 'open-recovery-question', authorKind: 'agent', purpose: 'question', body: 'Which input should be used?', requests: [], responses: [], attachments: [], replyTo: null });
+    commentId: 'open-recovery-question', authorKind: 'agent', purpose: 'question', recipient: { kind: 'user' }, body: 'Which input should be used?', requests: [], responses: [], attachments: [], replyTo: null });
   assert.equal(await new TaskBoardScheduler(engine, f.clock).task(f.task.pin.objectId), null);
   const waiting = await engine.store.read('task-board/task', f.task.pin.objectId);
   await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: waiting.pin.objectId, expectedRevision: waiting.pin.revision,
@@ -642,6 +670,7 @@ test('recovery reuses a restored original context and respects an unanswered tic
   await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision,
     commentId: 'after-restoration', body: 'Also retain this follow-up.', requests: [], responses: [], attachments: [], replyTo: null });
   const next = await new TaskBoardScheduler(f.f.w.f.second, f.clock).task(task.pin.objectId);
+  assert.ok(next?.run);
   await f.second.drain(next!.run!.objectId);
   assert.equal((await engine.store.read('task-board/run', next!.run!.objectId)).value.phase, 'running');
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/start').length, 1);
@@ -650,6 +679,11 @@ test('recovery reuses a restored original context and respects an unanswered tic
 
 test('a queued fresh recovery cannot silently move its retained workspace', async t => {
   const f = await missingUnstarted(t), engine = f.f.w.f.first;
+  // A terminal failure alone remains an error. Queue an explicit continuation request.
+  assert.equal(await new TaskBoardScheduler(engine, f.clock).task(f.task.pin.objectId), null);
+  await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: f.task.pin.objectId, expectedRevision: f.task.pin.revision,
+    commentId: 'retry-in-original-workspace', body: 'Resume the original context in its saved workspace.',
+    requests: [], responses: [], attachments: [], replyTo: null });
   const recovered = await new TaskBoardScheduler(engine, f.clock).task(f.task.pin.objectId);
   const task = await engine.store.read('task-board/task', recovered!.task!);
   assert.equal(task.value.primaryResourceRef, null);

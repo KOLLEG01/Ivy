@@ -200,6 +200,8 @@ export class TaskBoardOperations {
       "New writes must append to the unfinished operation in order.",
     );
     proposed = await this.store.upgradeStored(key, proposed);
+    if (key === 'task-board/task' && !('create' in destination))
+      proposed = await this.store.prepareTaskSnapshot(proposed as TaskBoard.Task, destination.objectId, id + ':' + index) as ContractValues[K];
     const hash = hashJson(proposed),
       name = "Prepared " + index + " " + hash.slice(7),
       payloadId = mutation(id, "payload:" + index + ":" + hash);

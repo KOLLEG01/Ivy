@@ -39,7 +39,7 @@ class QueryBuilder {
       const selected = metadata[field.slice(7)];
       requireThat(selected, 'invalid_arguments', 'Unknown Object query field.');
       const rank = selected.types.includes('boolean') ? 1 : selected.types.includes('integer') ? 2 : 3;
-      expression = { value: selected.column, type: `CASE WHEN ${selected.column} IS NULL THEN 9 ELSE ${rank} END`, isNull: `${selected.column} IS NULL` };
+      expression = { value: selected.column, type: selected.types.includes('null') ? `CASE WHEN ${selected.column} IS NULL THEN 9 ELSE ${rank} END` : String(rank), isNull: `${selected.column} IS NULL` };
       definitions = [new Set(selected.types)];
     } else {
       requireThat(field.startsWith('data:/'), 'invalid_arguments', 'Query data fields require a JSON pointer.');
@@ -75,6 +75,14 @@ class QueryBuilder {
       if (value === null) return '0';
       const type = typeof value === 'boolean' ? 1 : typeof value === 'number' ? 2 : 3;
       const bound = this.bind(typeof value === 'boolean' ? Number(value) : value);
+      if (predicate.field.startsWith('object.')) {
+        const selected = metadata[predicate.field.slice(7)]!;
+        const expected = selected.types.includes('boolean') ? 1 : selected.types.includes('integer') ? 2 : 3;
+        if (type !== expected) return '0';
+        // Keep indexed metadata comparisons visible to SQLite. The explicit null guard
+        // preserves the definite-false semantics used by NOT without wrapping the index key.
+        return `(${field.value} IS NOT NULL AND ${field.value} COLLATE BINARY ${operator} ${bound})`;
+      }
       // Type equality makes NULL comparisons definite false and distinguishes false from numeric 0.
       return `(${field.type}=${type} AND COALESCE(${field.value} COLLATE BINARY ${operator} ${bound},0))`;
     }).join(' OR ') + ')';
@@ -125,7 +133,9 @@ export function queryObjects(
   const term = (expression: string) => continueTerms.push('(' + [...equalPrefix, expression].join(' AND ') + ')');
   ordering.forEach((order, i) => {
     const direction = order.direction === 'desc' ? 'DESC' : 'ASC';
-    sorting.push(`k${i}t ASC`, `k${i}v COLLATE BINARY ${direction}`);
+    const selected = order.field.startsWith('object.') ? metadata[order.field.slice(7)] : undefined;
+    if (!selected || selected.types.includes('null')) sorting.push(`k${i}t ASC`);
+    sorting.push(`k${i}v COLLATE BINARY ${direction}`);
     if (!boundary) return;
     const key = boundary.sort[i]!;
     const type = builder.bind(key.type), value = builder.bind(typeof key.value === 'boolean' ? Number(key.value) : key.value);

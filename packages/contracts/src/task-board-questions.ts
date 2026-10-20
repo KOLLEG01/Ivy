@@ -8,7 +8,8 @@ export function openTaskQuestions(task: Pick<TaskBoard.Task, 'comments'>, runId?
       return !task.comments.slice(index + 1).some(reply => reply.replyTo === comment.commentId && !!reply.nativeInput && ['answered', 'expired'].includes(reply.nativeInput.state));
     }
     return !task.comments.slice(index + 1).some(reply => reply.resolvesQuestions?.includes(comment.commentId) ||
-      reply.authorKind === 'user' && reply.replyTo === comment.commentId ||
+      reply.replyTo === comment.commentId && (comment.recipient?.kind === 'task'
+        ? reply.sourceTaskId === comment.recipient.taskId : reply.authorKind === 'user') ||
       comment.requests.length > 0 && comment.requests.every(request => task.comments.slice(index + 1).some(answer => answer.responses.some(response => response.requestId === request.requestId))));
   });
 }

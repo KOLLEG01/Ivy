@@ -18,7 +18,7 @@ const localDate = (value: string) => { if (!value) return ''; const date = new D
 const replaceCondition = (stepIndex: number, conditionIndex: number, kind: string) => change(steps => {
   const condition: TaskBoard.Condition = kind === 'time' ? { kind, at: new Date(Date.now() + 3600_000).toISOString() } :
     kind === 'task' ? { kind, taskId: props.tasks?.[0]?.value ?? '', until: 'done' } :
-    kind === 'delivery' ? { kind, taskId: props.tasks?.[0]?.value ?? '', key: '' } : { kind: 'user', questionId: props.questions?.[0]?.commentId ?? '' };
+    kind === 'delivery' ? { kind, taskId: props.tasks?.[0]?.value ?? '', key: '' } : { kind: 'question', questionId: props.questions?.[0]?.commentId ?? '' };
   steps[stepIndex]!.requires[conditionIndex] = condition;
 });
 const addStep = () => change(steps => steps.push({ id: crypto.randomUUID(), scope: '', requires: [] }));
@@ -42,9 +42,9 @@ const updateCondition = (stepIndex: number, conditionIndex: number, values: Reco
       <div v-for="(condition, conditionIndex) in step.requires" :key="conditionIndex" class="flex flex-wrap items-end gap-2">
         <Field class="min-w-36 flex-1">
           <Label>{{ tr('Voraussetzung', 'Condition') }}</Label>
-          <OptionSelect :model-value="condition.kind" :disabled="disabled" @update:model-value="replaceCondition(stepIndex, conditionIndex, String($event))">
+          <OptionSelect :model-value="condition.kind === 'user' ? 'question' : condition.kind" :disabled="disabled" @update:model-value="replaceCondition(stepIndex, conditionIndex, String($event))">
             <option value="time">{{ tr('Termin', 'Appointment') }}</option><option value="task">{{ tr('Anderes Ticket', 'Another ticket') }}</option>
-            <option value="delivery">{{ tr('Benanntes Ergebnis', 'Named delivery') }}</option><option value="user" :disabled="!questions?.length">{{ tr('Eigene Nutzerfrage', 'Own user question') }}</option>
+            <option value="delivery">{{ tr('Benanntes Ergebnis', 'Named delivery') }}</option><option value="question" :disabled="!questions?.length">{{ tr('Antwort auf eigene Frage', 'Answer to own question') }}</option>
           </OptionSelect>
         </Field>
         <Field v-if="condition.kind === 'time'" class="min-w-44 flex-1"><Label>{{ tr('Zeitpunkt', 'Time') }}</Label><Input type="datetime-local" :model-value="localDate(condition.at)" :disabled="disabled" required @change="changeTime(stepIndex, conditionIndex, $event)" /></Field>

@@ -433,12 +433,14 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
             completion.state === 'failed' ? completion.summary.slice(0, 2048) : 'The original execution needs its structured completion intent.',
           run: original?.run ?? request.run, operationId: original?.operationId ?? request.operationId,
           attempts, retryAt: contextUnavailable ? null : completion.retryAt ?? (recoveryOnly && attempts < 2 ? new Date(Date.parse(at) + 30_000).toISOString() : null) };
-        if (completion.retryAt && !recoveryOnly) {
+        const publicationError = store.failedHandoff(request.run.objectId);
+        if (completion.retryAt && !recoveryOnly && !handoffIssue && !publicationError) {
           delete finalTask.completionIssue;
           finalTask.consumedSteps = (finalTask.consumedSteps ?? []).filter(value => value.stepId !== run.originalRequest.nextStepId);
           finalTask.runtimeWait = { reason: 'host', detail: rateLimitWaitingDetail(completion.retryAt), since: at, retryAt: completion.retryAt };
         }
         if (handoffIssue) finalTask.completionIssue = { ...finalTask.completionIssue!, ...handoffIssue, retryAt: null };
+        if (publicationError) finalTask.completionIssue = { ...finalTask.completionIssue!, ...publicationError, retryAt: null };
       }
       if (completion.state !== 'cancelled') {
         const handoff = coordinationOnly ? undefined : runHandoff(finalTask, request.run.objectId);
@@ -462,11 +464,12 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       const phase: TaskBoard.Claim['phase'] = runtimeWait?.reason === 'host' || runtimeWait?.reason === 'external_outcome' || next.phase === 'outcome_unknown' ? 'outcome_unknown' : next.phase === 'cancel_requested' ? 'cancel_requested' : next.phase === 'waiting_input' ? 'waiting_input' : next.phase === 'publishing_result' ? 'publishing_result' : next.phase === 'running' ? 'running' : 'starting';
       finalTask = { ...finalTask, claim: { ...task.value.claim!, phase, run: outcome.run }, primaryResourceRef: next.primaryResourceRef, lastRun: outcome.run, workflowState, runtimeWait: runtimeWait,
         commentDeliveries: next.phase === 'running'
-          ? finalTask.commentDeliveries.map(value => next.originalRequest.commentIds.includes(value.commentId) ? { ...value, state: 'delivered' as const, updatedAt: at, code: null } : value)
+          ? finalTask.commentDeliveries.map(value => next.originalRequest.commentIds.includes(value.commentId) &&
+              (value.state !== 'delivered' || value.code !== null) ? { ...value, state: 'delivered' as const, updatedAt: at, code: null } : value)
           : finalTask.commentDeliveries };
     }
   } else if (task.value.lastRun?.objectId === request.run.objectId) finalTask.lastRun = outcome.run;
-  finalTask.openQuestionCount = openQuestions(finalTask).length;
+  finalTask.openQuestionCount = openQuestions(finalTask).filter(question => question.recipient?.kind !== 'task').length;
   if (completion || runtimeWait?.reason !== task.value.runtimeWait?.reason) outcome.history = await steps.create('task-board/history', { schemaVersion: 1, taskId: request.taskId, operationId: request.operationId, actor: operation.value.actor, createdAt: at, kind, detail,
     previousTask: task.pin, previousHistory: task.value.lastHistory, priorRun: request.run, fromTarget: null, toTarget: null, result: outcome.result, review: null }, 'Native history');
   outcome.task = await steps.write('task-board/task', { ...finalTask, publication: null, lastHistory: outcome.history ?? task.value.lastHistory }, { objectId: request.taskId, expectedRevision: reserved.revision });

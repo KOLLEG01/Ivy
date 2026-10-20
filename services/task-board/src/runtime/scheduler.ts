@@ -389,7 +389,7 @@ export class TaskBoardScheduler {
           ...(mode === 'conversation' ? { coordinationOnly: true } : {}) };
     } catch (cause) {
       const failure = IvyError.from(cause);
-      const reason: TaskBoard.RuntimeWait['reason'] = ['task_board_project_unavailable', 'task_board_workspace_conflict', 'task_board_workspace_reserved', 'target_conflict', 'not_found'].includes(failure.code) ? 'workspace' :
+      const reason: TaskBoard.RuntimeWait['reason'] = ['task_board_project_unavailable', 'task_board_workspace_mismatch', 'task_board_workspace_conflict', 'task_board_workspace_reserved', 'target_conflict', 'not_found'].includes(failure.code) ? 'workspace' :
         failure.code === 'task_board_capability_unavailable' ? 'capability' : 'host';
       const runtimeWait: TaskBoard.RuntimeWait = { reason, detail: failure.message.slice(0, 2048), since: value.runtimeWait?.since ?? at,
         retryAt: rateLimitRetryAt ?? new Date(this.now().getTime() + 30_000).toISOString() };

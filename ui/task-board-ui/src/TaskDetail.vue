@@ -118,15 +118,18 @@ const { preferences: commentPreferences } = useCommentPreferences(() => props.wo
 const showCrossAgent = useCommentVisibility();
 const detailRoute = (id: string, values: Record<string, string> = {}) => taskRoute(props.workspace.serviceNodeId, id,
   { ...Object.fromEntries(['q', 'status', 'control', 'host', 'category', 'project'].flatMap(key => props.query.has(key) ? [[key, props.query.get(key)!]] : [])), ...values });
+const commentsBefore = ref<number | undefined>();
 const task = useRemote((signal) =>
-    readDocument("task", props.taskId, props.workspace.rootObjectId, signal), 15000, ["objects/task-board/task"]);
+    readDocument("task", props.taskId, props.workspace.rootObjectId, signal,
+      { ...(commentsBefore.value === undefined ? {} : { before: commentsBefore.value }), limit: 50 }), 15000, ["objects/task-board/task"]);
 const displayComments = computed(() => [...(task.value.value?.value.comments ?? []), ...optimistic.messages.value]
   .filter(comment => showCrossAgent.value || !crossAgentComment(comment, props.taskId)).sort((a, b) =>
   commentPreferences.value.order === "newest-first" ? b.sequence - a.sequence : a.sequence - b.sequence,
 ));
-const pendingQuestions = computed(() => openQuestions({ comments: task.value.value?.value.comments ?? [] }));
+const pendingQuestions = computed(() => taskView.value.value?.openQuestions ??
+  openQuestions({ comments: task.value.value?.value.comments ?? [] }).filter(question => question.recipient?.kind !== 'task'));
 const replyTarget = ref<string | null>(null), commentComposer = ref<HTMLElement[]>([]);
-const replyingTo = computed(() => task.value.value?.value.comments.find(comment => comment.commentId === replyTarget.value));
+const replyingTo = computed(() => [...(task.value.value?.value.comments ?? []), ...pendingQuestions.value].find(comment => comment.commentId === replyTarget.value));
 const answerQuestion = async (id: string) => { tab.value = 'chat'; replyTarget.value = id; await nextTick(); commentComposer.value[0]?.scrollIntoView({ block: 'center' }); };
 const newestCommentId = computed(() => displayComments.value
   .reduce<TaskBoard.Comment | undefined>((latest, comment) =>
@@ -291,9 +294,10 @@ const firstUnreadId = computed(() => {
     .sort((a, b) => a.sequence - b.sequence);
   return agentComments.at(-count)?.commentId ?? null;
 });
-// Messages from other tasks name that task by key and title.
+// Internal messages name their sender or recipient.
+const counterpartId = (comment: TaskBoard.Comment) => comment.sourceTaskId ?? (comment.recipient?.kind === 'task' ? comment.recipient.taskId : '');
 const sourceTaskIds = computed(() => [...new Set((task.value.value?.value.comments ?? [])
-  .flatMap((comment) => comment.sourceTaskId ? [comment.sourceTaskId] : []))]);
+  .flatMap((comment) => counterpartId(comment) ? [counterpartId(comment)] : []))]);
 const sourceTasks = useRemote(async (signal) => Object.fromEntries(await Promise.all(
   sourceTaskIds.value.map(async (id) => {
     try {
@@ -311,7 +315,7 @@ const chatKind = (comment: TaskBoard.Comment): ChatKind =>
 const senderName = (comment: TaskBoard.Comment) => {
   const kind = chatKind(comment);
   return kind === "external"
-    ? sourceTask(comment.sourceTaskId!)?.key ?? tr("Anderer Task", "Another task")
+    ? sourceTask(counterpartId(comment))?.key ?? tr("Anderer Task", "Another task")
     : kind === "user" ? tr("Du", "You") : kind === "reply" ? "Agent" : comment.authorKind;
 };
 const minute = 60000;
@@ -980,7 +984,7 @@ const showArrived = () => {
                 <PropertyItem v-if="task.value.value.value.nextSteps.length" :label="tr('Nächste Schritte', 'Next steps')">
                   <ul class="space-y-2"><li v-for="step in task.value.value.value.nextSteps" :key="step.id">
                     <p class="break-words">{{ step.scope }}</p>
-                    <ul class="text-xs text-muted-foreground"><li v-for="(condition, index) in step.requires" :key="index">{{ condition.kind === 'time' ? new Date(condition.at).toLocaleString() : condition.kind === 'user' ? tr('Antwort auf eigene Frage', 'Answer to own question') : condition.kind === 'delivery' ? condition.key : condition.until }}</li></ul>
+                    <ul class="text-xs text-muted-foreground"><li v-for="(condition, index) in step.requires" :key="index">{{ condition.kind === 'time' ? new Date(condition.at).toLocaleString() : (condition.kind === 'user' || condition.kind === 'question') ? tr('Antwort auf eigene Frage', 'Answer to own question') : condition.kind === 'delivery' ? condition.key : condition.until }}</li></ul>
                   </li></ul>
                 </PropertyItem>
                 <PropertyItem label="Updates">{{
@@ -1148,6 +1152,14 @@ const showArrived = () => {
         <div class="mx-auto flex max-w-3xl flex-col gap-1">
           <template v-for="section in commentSections" :key="section">
             <template v-if="section === 'comments'">
+              <div v-if="task.value.value?.commentRange && task.value.value.commentRange.total > 50" class="flex flex-wrap items-center justify-between gap-2 py-2">
+                <Button variant="outline" size="sm" :disabled="task.loading.value || task.value.value.commentRange.start === 0"
+                  @click="commentsBefore = task.value.value!.commentRange!.start; task.refresh()">{{ tr('Ältere Nachrichten', 'Older messages') }}</Button>
+                <span class="text-xs text-muted-foreground">{{ task.value.value.commentRange.start + 1 }}–{{ task.value.value.commentRange.end }} / {{ task.value.value.commentRange.total }}</span>
+                <Button variant="outline" size="sm" :disabled="task.loading.value || task.value.value.commentRange.end === task.value.value.commentRange.total"
+                  @click="commentsBefore = Math.min(task.value.value!.commentRange!.total, task.value.value!.commentRange!.end + 50); task.refresh()">{{ tr('Neuere Nachrichten', 'Newer messages') }}</Button>
+                <Button v-if="commentsBefore !== undefined" variant="ghost" size="sm" @click="commentsBefore = undefined; task.refresh()">{{ tr('Neueste', 'Latest') }}</Button>
+              </div>
               <p v-if="!displayComments.length" class="py-8 text-center text-sm text-muted-foreground">
                 {{ tr("Noch keine Nachrichten.", "No messages yet.") }}
               </p>
@@ -1179,10 +1191,10 @@ const showArrived = () => {
                     <template v-if="entry.kind === 'external'" #label>
                       <SquareKanban class="size-3.5 shrink-0" aria-hidden="true" />
                       <a
-                        :href="detailRoute(entry.comment.sourceTaskId!)"
+                        :href="detailRoute(counterpartId(entry.comment))"
                         class="inline-flex min-w-0 items-center gap-1 hover:underline"
                       ><span class="shrink-0 font-semibold text-foreground">{{ senderName(entry.comment) }}</span
-                      ><span v-if="sourceTask(entry.comment.sourceTaskId!)" class="truncate">{{ sourceTask(entry.comment.sourceTaskId!)!.title }}</span
+                      ><span v-if="sourceTask(counterpartId(entry.comment))" class="truncate">{{ sourceTask(counterpartId(entry.comment))!.title }}</span
                       ><ExternalLink class="size-3 shrink-0" aria-hidden="true" /></a>
                     </template>
                     <div class="min-w-0 space-y-3">

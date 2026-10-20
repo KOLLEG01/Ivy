@@ -9,6 +9,7 @@ export interface StepAssessment {
   ready: boolean;
   consumed: boolean;
   pending: TaskBoard.Condition[];
+  needsUser?: boolean;
 }
 
 export async function assessSteps(store: TaskBoardStore, task: TaskBoard.Task, at: string, overrides = new Map<string, TaskBoard.Task>()): Promise<StepAssessment[]> {
@@ -16,7 +17,9 @@ export async function assessSteps(store: TaskBoardStore, task: TaskBoard.Task, a
   const sources = new Map<string, Promise<TaskBoard.Task>>();
   const source = (taskId: string) => {
     if (overrides.has(taskId)) return Promise.resolve(overrides.get(taskId)!);
-    if (!sources.has(taskId)) sources.set(taskId, store.read('task-board/task', taskId, true, true).then(value => value.value));
+    // A foreign dependency only needs state and named deliveries from its header.
+    // Its conversation, including its own questions, is not part of this gate.
+    if (!sources.has(taskId)) sources.set(taskId, store.read('task-board/task', taskId, true, true, true).then(value => value.value));
     return sources.get(taskId)!;
   };
   return await Promise.all(task.nextSteps.map(async step => {
@@ -24,7 +27,7 @@ export async function assessSteps(store: TaskBoardStore, task: TaskBoard.Task, a
     for (const condition of step.requires) {
       let satisfied = false, observation: unknown = condition;
       if (condition.kind === 'time') satisfied = condition.at <= at;
-      else if (condition.kind === 'user') {
+      else if (condition.kind === 'user' || condition.kind === 'question') {
         requireThat(task.comments.some(comment => comment.commentId === condition.questionId && comment.purpose === 'question' && !comment.sourceTaskId),
           'task_board_comment_mismatch', 'A user condition must identify a question owned by this ticket.');
         satisfied = !questions.has(condition.questionId);
@@ -46,22 +49,25 @@ export async function assessSteps(store: TaskBoardStore, task: TaskBoard.Task, a
     }
     const fingerprint = hashJson({ step, observations });
     const consumed = task.consumedSteps?.some(value => value.stepId === step.id && value.fingerprint === fingerprint) ?? false;
-    return { step, fingerprint, ready: pending.length === 0 && !consumed, consumed, pending };
+    const needsUser = pending.some(condition => (condition.kind === 'user' || condition.kind === 'question') &&
+      task.comments.find(comment => comment.commentId === condition.questionId)?.recipient?.kind !== 'task');
+    return { step, fingerprint, ready: pending.length === 0 && !consumed, consumed, pending, needsUser };
   }));
 }
 
 export function stepCondition(assessments: StepAssessment[]): TaskBoard.ExecutionCondition {
   if (assessments.some(value => value.ready)) return { state: 'queued', detail: 'An authorized next step is ready.' };
   const pending = assessments.filter(value => !value.consumed);
-  const automatic = pending.filter(value => !value.pending.some(condition => condition.kind === 'user'));
+  const user = (value: StepAssessment) => value.needsUser ?? value.pending.some(condition => condition.kind === 'user' || condition.kind === 'question');
+  const automatic = pending.filter(value => !user(value));
   const timed = automatic.filter(value => value.pending.every(condition => condition.kind === 'time'));
   if (timed.length) {
     const at = timed.map(value => value.pending.filter(condition => condition.kind === 'time').map(condition => condition.at).sort().at(-1)!).sort()[0];
     return { state: 'deferred', detail: 'Next authorized step is scheduled for ' + at + '.' };
   }
-  if (automatic.some(value => value.pending.some(condition => condition.kind === 'task' || condition.kind === 'delivery')))
+  if (automatic.some(value => value.pending.some(condition => condition.kind !== 'time')))
     return { state: 'blocked_dependency', detail: 'Waiting for another ticket or its named delivery.' };
-  if (pending.some(value => value.pending.some(condition => condition.kind === 'user')))
+  if (pending.some(user))
     return { state: 'needs_user', detail: 'The remaining next steps require an answer to this ticket\'s own question.' };
   return { state: 'workflow_attention', detail: assessments.length ? 'This unchanged next step has already been processed. Publish a new next step or delivery condition.' : 'No next step is recorded.' };
 }
@@ -116,7 +122,7 @@ export async function validateNextSteps(store: TaskBoardStore, taskId: string | 
     validateTaskBoard('NextStep', step);
     for (const condition of step.requires) {
       if (condition.kind === 'time') requireThat(Number.isFinite(Date.parse(condition.at)) && new Date(condition.at).toISOString() === (condition.at.includes('.') ? condition.at : condition.at.replace('Z', '.000Z')), 'task_board_invalid_date', 'A time condition needs a valid UTC timestamp.');
-      if (condition.kind === 'user') requireThat(task?.comments.some(comment => comment.commentId === condition.questionId && comment.purpose === 'question' && !comment.sourceTaskId),
+      if (condition.kind === 'user' || condition.kind === 'question') requireThat(task?.comments.some(comment => comment.commentId === condition.questionId && comment.purpose === 'question' && !comment.sourceTaskId),
         'task_board_comment_mismatch', 'A user condition must reference a question owned by this ticket.');
       if (condition.kind === 'task' || condition.kind === 'delivery') {
         requireThat(condition.taskId !== taskId, 'task_board_dependency_cycle', 'A task cannot wait on itself.');

@@ -54,7 +54,7 @@ async function running(w: Workflow, threadId: string, turnId: string) {
 test('a question replying to a comment remains a prerequisite until that question is answered', async t => {
   const w = await nativeWorkflow(t); await w.running();
   await comment(w, { commentId: 'request', authorKind: 'user', agentDelivery: 'none' });
-  await comment(w, { commentId: 'question', purpose: 'question', replyTo: 'request' });
+  await comment(w, { commentId: 'question', purpose: 'question', recipient: { kind: 'user' }, replyTo: 'request' });
   const task = await finish(w, { workflowState: 'waiting', nextSteps: [
     { id: 'answer', scope: 'Use the answer.', requires: [{ kind: 'user', questionId: 'question' }] },
   ] });

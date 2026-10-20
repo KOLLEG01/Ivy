@@ -27,9 +27,9 @@ export function executionCondition(task: ExecutionFacts): TaskBoard.ExecutionCon
       detail: task.claim.mode === 'conversation' ? 'Processing new comments on ' + task.claim.hostId + '.' : 'Working on ' + task.claim.hostId + '.' };
   }
   if (['backlog', 'done', 'cancelled'].includes(task.workflowState)) return { state: 'idle', detail: 'No task work is scheduled.' };
-  if (task.recovery) return { state: task.recovery.attempts < 2 ? 'recovering' : 'workflow_attention',
+  if (task.recovery) return { state: task.recovery.attempts < 2 ? 'recovering' : 'failed',
     detail: task.completionIssue ?? 'The original completion intent needs reconciliation.' };
-  if (task.completionIssue) return { state: 'workflow_attention', detail: task.completionIssue };
+  if (task.completionIssue) return { state: 'failed', detail: task.completionIssue };
   if (task.runtimeWait) return { state: task.runtimeWait.reason === 'external_outcome' ? 'recovering' : task.runtimeWait.reason === 'workflow' ? 'workflow_attention' : 'blocked_environment',
     detail: task.runtimeWait.detail };
   if (task.workflowState === 'review') return { state: 'needs_user', detail: 'The final result is ready for review.' };

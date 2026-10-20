@@ -18,6 +18,7 @@ import type {
 } from "../../../../packages/sdk/src/node.js";
 import { scopedOperationId } from "../../../../packages/sdk/src/client.js";
 import type { RpcClient } from "../../../../packages/sdk/src/client.js";
+import { RequestQueue } from '../../../../packages/sdk/src/request-queue.js';
 import { contractVersion, localContractKeys, readableVersions, upgradeRecord, version } from "./schema.js";
 import type { ContractKey, ContractValues } from "./schema.js";
 import { TaskComments } from './comment-store.js';
@@ -57,6 +58,7 @@ const workspaceKey = (path: string) => /^[a-z]:[\\/]|^\\\\/i.test(path)
 
 /** Generic persistence of TaskBoard's exact contracts. It does not authorize workflow transitions. */
 export class TaskBoardStore {
+  readonly client: RpcClient;
   private readonly reads = new AsyncLocalStorage<
     Map<string, Document<ContractKey>>
   >();
@@ -70,6 +72,26 @@ export class TaskBoardStore {
   private commentRetryAt = 0;
   private resultCursor: string | null = null;
   private resultsCompacted = false;
+  private conversation: TaskComments | undefined;
+  private get comments(): TaskComments {
+    return this.conversation ??= new TaskComments(this.client, scope => this.preparedMutationId(scope));
+  }
+  async prepareTaskSnapshot(task: TaskBoard.Task, taskId: string, scope: string): Promise<TaskBoard.Task> {
+    return this.comments.write(task, taskId, scope);
+  }
+  /** A refused publication is operational evidence, not a missing agent response. */
+  failedHandoff(runId: string): Pick<TaskBoard.CompletionIssue, 'code' | 'detail' | 'operationId'> | null {
+    const row = this.local.prepare(`SELECT r.value_json FROM documents d
+      JOIN revisions r ON r.id=d.id AND r.revision=d.current_revision
+      WHERE d.key='task-board/operation' AND json_extract(r.value_json,'$.handoffRun.objectId')=?
+        AND json_extract(r.value_json,'$.phase')='failed'
+        AND json_extract(r.value_json,'$.error.code') IN ('content_too_large','storage_full','quota_exceeded','database_error')
+      ORDER BY d.updated_at DESC LIMIT 1`).get(runId);
+    if (!row) return null;
+    const operation = JSON.parse(String(row['value_json'])) as TaskBoard.Operation;
+    return { code: operation.error!.code, detail: 'Die Übergabe konnte nicht gespeichert werden: ' + operation.error!.message.slice(0, 1800),
+      operationId: operation.operationId };
+  }
   async protectRunSources(): Promise<void> {
     await protectRunSources(this.client, this.rootObjectId, scope => this.preparedMutationId(scope));
   }
@@ -89,7 +111,7 @@ export class TaskBoardStore {
         if (item.contractVersion === contractVersion('task-board/task')) continue;
         const task = await this.read('task-board/task', item.objectId, true, true);
         if (task.value.claim || task.value.publication) { this.commentPassPending = true; continue; }
-        const value = await new TaskComments(this.client, scope => this.preparedMutationId(scope))
+        const value = await this.comments
           .write(task.value, task.pin.objectId, 'compact:' + hashJson(task.pin));
         const recoveryRun = task.value.completionIssue ? await this.recoveryReference(task.value.completionIssue.run) : null;
         try {
@@ -97,7 +119,8 @@ export class TaskBoardStore {
             expectedArchived: task.metadata.effectivelyArchived, contractVersion: contractVersion('task-board/task'),
             mutationId: await this.preparedMutationId('compact:' + hashJson(task.pin)),
             references: await taskReferences(this.client, task.pin.objectId,
-              { ...task.revision.references, ...(recoveryRun ? { 'recovery-run': recoveryRun } : {}) },
+              { ...task.revision.references, ...('kind' in value.commentStore! && value.commentStore.root
+                ? { conversation: value.commentStore.root.object } : {}), ...(recoveryRun ? { 'recovery-run': recoveryRun } : {}) },
               taskAttachmentPins(task.value), scope => this.preparedMutationId(scope)),
             content: { encoding: 'json', value: value as unknown as Wire.Json } });
         } catch (error) {
@@ -156,11 +179,19 @@ export class TaskBoardStore {
     return this.reads.getStore() ? work() : this.reads.run(new Map(), work);
   }
   constructor(
-    readonly client: RpcClient,
+    client: RpcClient,
     readonly rootObjectId: string | null,
     dataRoot?: string,
     readonly historyLimits = { count: 10_000, bytes: 256 * 1024 * 1024 },
   ) {
+    // Share admission across all concurrent ticket reads/writes. Per-page batches
+    // alone can multiply beyond the service connection's 64 in-flight requests.
+    const requests = new RequestQueue(48, 16, 512), idleSignal = new AbortController().signal;
+    this.client = { request: async (method, params, options) => {
+      const release = await requests.acquire(method === 'tools.call' || method === 'discovery.call', options?.signal ?? idleSignal);
+      try { return await client.request(method, params, options); }
+      finally { release(); }
+    } };
     this.dataRoot = dataRoot ?? null;
     this.local = new DatabaseSync(
       dataRoot ? join(dataRoot, "task-board.sqlite") : ":memory:",
@@ -735,8 +766,17 @@ export class TaskBoardStore {
     retained = false,
   ): Promise<Document<K>> {
     const objectId = typeof ref === "string" ? ref : ref.objectId;
-    if (localContractKeys.has(key) || this.localKey(objectId) === key)
-      return this.localDocument(key, ref, primary);
+    if (localContractKeys.has(key) || this.localKey(objectId) === key) {
+      const document = this.localDocument(key, ref, primary);
+      if (!retained && key === 'task-board/task' && 'commentStore' in document.value) {
+        const operation = this.localDocument('task-board/operation', document.metadata.parentId!, false);
+        requireThat('taskId' in operation.value.request, 'task_board_scope_mismatch',
+          'A prepared conversation must belong to its original task operation.');
+        document.value = await this.comments.read(document.value as unknown as Wire.Json,
+          operation.value.request.taskId) as ContractValues[K];
+      }
+      return document;
+    }
     const cache = this.reads.getStore(),
       cacheKey =
         typeof ref === "string"
@@ -777,7 +817,7 @@ export class TaskBoardStore {
       key,
       pin: pinOf(result),
       value: retained ? result.content.value as unknown as ContractValues[K] : await this.upgradeStored(key, (key === 'task-board/task'
-        ? await new TaskComments(this.client, scope => this.preparedMutationId(scope)).read(result.content.value, result.object.id)
+        ? await this.comments.read(result.content.value, result.object.id)
         : result.content.value) as ContractValues[K]),
       metadata: result.object,
       revision: result.revision,
@@ -892,6 +932,9 @@ export class TaskBoardStore {
     retainedIdentity: boolean,
     selectedVersion: TaskBoard.PreparedWrite['contractVersion'] = contractVersion(key),
   ): Promise<TaskBoard.ObjectPin> {
+    if (key === 'task-board/task' && !('create' in destination) &&
+        'commentStore' in (value as TaskBoard.Task))
+      value = await this.comments.read(value as unknown as Wire.Json, destination.objectId) as ContractValues[K];
     if (!retainedIdentity) value = await this.upgradeStored(key, value);
     if (
       localContractKeys.has(key) ||
@@ -998,11 +1041,14 @@ export class TaskBoardStore {
     const content: Wire.Content = {
       encoding: "json",
       value: (key === 'task-board/task' && !('create' in destination)
-        ? await new TaskComments(this.client, scope => this.preparedMutationId(scope)).write(value as TaskBoard.Task, destination.objectId, mutationId, selectedVersion)
+        ? await this.comments.write(value as TaskBoard.Task, destination.objectId, mutationId, selectedVersion)
         : value) as Wire.Json,
     };
     let references: Wire.RevisionReferences = {};
     if (key === "task-board/task") {
+      const stored = content.value as unknown as { commentStore?: { kind?: string; root?: { object: TaskBoard.ObjectPin } | null } };
+      if (stored.commentStore?.kind === 'tree' && stored.commentStore.root)
+        references.conversation = stored.commentStore.root.object;
       const task = value as TaskBoard.Task,
         result = task.latestResult;
       if (result) references["result"] = result;

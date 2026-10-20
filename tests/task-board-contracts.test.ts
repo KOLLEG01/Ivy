@@ -9,6 +9,16 @@ import { fields, content } from './fixtures/task-board.js';
 const time = '2026-05-01T12:00:00.000Z';
 const actor = { principalId: 'user', serviceNodeId: 'task-board', generation: 1, source: 'user' as const };
 
+test('deployed 2.1 conversation contracts remain immutable', () => {
+  assert.deepEqual(Object.fromEntries(taskBoardContracts().filter(contract => contract.version === '2.1.0')
+    .map(contract => [contract.key, hashJson(contract)])), {
+    'task-board/task': 'sha256:b2822550deaafe64f22d8963043efd47bb40a922d4f97fe1d4e90a450f0ca700',
+    'task-board/run': 'sha256:dd3aded43b4398b5f491a8bfd8a1e3f310dabfe8a72be6ced2be24bec1fa06b9',
+    'task-board/result': 'sha256:2a4f7c24089bb2ead4e0350d60abb4498a03ca380c6c31a6dff8f200297e4d57',
+    'task-board/comments': 'sha256:daacdd4070a171f1556e7bfca8353e0c1fbcd34fbb6c659533dfe4d2f3cc1b97',
+  });
+});
+
 test('published finding-bearing contracts remain immutable after checks are removed', () => {
   assert.deepEqual(Object.fromEntries(taskBoardContracts().filter(contract => contract.version === '2.0.0')
     .map(contract => [contract.key, hashJson(contract)])), {
@@ -43,7 +53,7 @@ test('findings in older handoffs survive conversion to next steps', () => {
 });
 
 test('published Task contract definitions stay stable when tool descriptions change', () => {
-  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0'].includes(value.version));
+  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0'].includes(value.version));
   assert.deepEqual(Object.fromEntries(contracts.map(value => [value.version, hashJson(value)])), {
     '1.9.0': 'sha256:d77cdc4472e267298847aed6fa7f207d546fbe96afadc1a379c5a886961164ff',
     '1.8.0': 'sha256:00a22238b737fc5e1f178c5dd239b88aaa2467220c103bf7ff3094772cc70db7',

@@ -8,6 +8,7 @@ export const boardColumns = [
   { id: 'done', title: 'Done', states: ['done', 'cancelled'] },
 ];
 export const waitingGroups = [
+  { id: 'error', title: tr('Fehler', 'Errors') },
   { id: 'user', title: tr('Nutzer', 'User') },
   { id: 'dependency', title: tr('Abhängigkeit', 'Dependency') },
   { id: 'runtime', title: tr('Laufzeit', 'Runtime') },
@@ -16,9 +17,10 @@ export const waitingGroups = [
   { id: 'unscheduled', title: tr('Ohne Wiederanlauf', 'Unscheduled') },
 ] as const;
 export function waitingGroup(task: TaskBoard.TaskCard, condition: TaskBoard.ExecutionCondition, dependency = false, now = Date.now()) {
+  if (condition.state === 'failed') return 'error';
   if (condition.state === 'deferred') return 'time';
   if (condition.state === 'blocked_dependency') return 'dependency';
-  if (['blocked_environment', 'outcome_unknown', 'recovering', 'workflow_attention'].includes(condition.state)) return 'runtime';
+  if (['blocked_environment', 'outcome_unknown', 'recovering', 'workflow_attention', 'publishing', 'starting', 'active'].includes(condition.state)) return 'runtime';
   if (condition.state === 'needs_user' || task.claim?.phase === 'waiting_input') return 'user';
   return condition.state === 'queued' ? 'ready' : 'unscheduled';
 }
@@ -42,12 +44,13 @@ export function transitions(task: TransitionContext): Array<{ action: BoardTrans
 
 export type Tone = 'good' | 'bad' | 'warning' | 'neutral';
 const conditionLabels: Record<string, string> = {
+  failed: tr('Ausführungsfehler', 'Execution failed'),
   blocked_environment: 'Environment unavailable', blocked_dependency: 'Blocked', needs_user: 'Needs you', outcome_unknown: 'Recovery required',
   publishing: 'Publishing', starting: 'Starting', active: 'Working', deferred: 'Scheduled', queued: 'Queued', idle: 'Not scheduled',
 };
 export const conditionLabel = (condition: string) => condition === 'recovering' ? tr('Statusabgleich', 'Reconciling status') : condition === 'workflow_attention' ? tr('Übergabe prüfen', 'Workflow needs attention') : conditionLabels[condition] ?? condition.replaceAll('_', ' ');
 export const conditionTone = (condition: string): Tone =>
-  condition.startsWith('blocked') || condition === 'outcome_unknown' ? 'bad' : ['needs_user', 'publishing', 'starting', 'recovering', 'workflow_attention'].includes(condition) ? 'warning' : condition === 'active' ? 'good' : 'neutral';
+  condition.startsWith('blocked') || condition === 'outcome_unknown' || condition === 'failed' ? 'bad' : ['needs_user', 'publishing', 'starting', 'recovering', 'workflow_attention'].includes(condition) ? 'warning' : condition === 'active' ? 'good' : 'neutral';
 /** Cards only surface conditions that ask for attention; the column already states ordinary progress. */
 export const noteworthyCondition = (condition: string) => !['idle', 'active', 'queued'].includes(condition);
 export const stateLabels: Record<string, string> = { backlog: 'Backlog', todo: 'Todo', in_progress: 'In progress', waiting: tr('Wartend', 'Waiting'), review: 'Review', done: 'Done', cancelled: 'Cancelled' };

@@ -1551,6 +1551,7 @@ test("a plain worker question needs no typed request and any user comment resume
     expectedRevision: waiting.task!.revision,
     commentId: "plain-question-comment",
     purpose: "question",
+    recipient: { kind: "user" },
     contactUser: true,
     body: "Which variant should I use?",
     requests: [],

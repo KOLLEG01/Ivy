@@ -347,6 +347,7 @@ export class TaskBoardEngine {
     return receiptOnly ? operationReceipt(operation.value) : operation.value;
   }
   condition(task: TaskBoard.Task, steps?: TaskBoard.ExecutionCondition): TaskBoard.ExecutionCondition {
+    const originalError = task.completionIssue && this.store.failedHandoff(task.completionIssue.run.objectId);
     return executionCondition({
       workflowState: task.workflowState,
       control: task.fields.control,
@@ -357,7 +358,7 @@ export class TaskBoardEngine {
       runtimeWait: task.runtimeWait,
       executionRequirement: task.fields.executionRequirement,
       requiredCapabilities: task.fields.requiredCapabilities,
-      completionIssue: task.completionIssue?.detail,
+      completionIssue: originalError ? originalError.code + ': ' + originalError.detail : task.completionIssue?.detail,
       steps,
       recovery: missingHandoff(task) && task.fields.control === 'agent' && !!task.primaryResourceRef ? { attempts: task.completionIssue?.attempts ?? 0, retryAt: task.completionIssue?.retryAt ?? null } : undefined,
     });
@@ -414,10 +415,12 @@ export class TaskBoardEngine {
     principalId: string,
   ): Promise<TaskBoard.TaskView> {
     const document = await this.taskDocument(query);
+    const steps = document.value.claim || document.value.publication ? undefined :
+      stepCondition(await assessSteps(this.store, document.value, new Date().toISOString()));
     return {
       object: document.pin,
       task: document.value,
-      executionCondition: this.condition(document.value, stepCondition(await assessSteps(this.store, document.value, new Date().toISOString()))),
+      executionCondition: this.condition(document.value, steps),
       ...await this.unreadAgentComments(
         document,
         principalId,
@@ -776,7 +779,7 @@ export class TaskBoardEngine {
           const comment = task.comments.findLast(value => value.authorKind === 'agent' &&
             (value.operationId === request.operationId && value.purpose === 'question' ||
              request.action === 'nativeUpdate' && task.workflowState === 'review' && !!value.delivery && value.purpose === 'handoff' && value.run?.objectId === request.run.objectId));
-          if (comment && task.fields.userContact !== 'ticket' && (comment.purpose !== 'handoff' || !task.parentTaskId)) await publishBrowserNotice(this.store.client, 'task-board', {
+          if (comment && !crossAgentComment(comment, pin.objectId) && task.fields.userContact !== 'ticket' && (comment.purpose !== 'handoff' || !task.parentTaskId)) await publishBrowserNotice(this.store.client, 'task-board', {
             title: 'Ivy · ' + task.fields.title, body: comment.body, tag: hashJson([pin.objectId, comment.commentId]),
             target: { uiId: 'task-board-ui', fragment: '#/tasks?' + new URLSearchParams({ node: this.owner.serviceNodeId, id: pin.objectId }) },
           });
@@ -1007,6 +1010,8 @@ export class TaskBoardEngine {
         commentId: request.commentId, sequence: previous.comments.length + 1, author: actor, authorKind,
         body: request.body, requests: request.requests, responses: request.responses,
         ...(request.purpose ? { purpose: request.purpose } : {}),
+        ...(request.recipient ? { recipient: request.recipient } : {}),
+        ...(request.questionSource ? { questionSource: request.questionSource } : {}),
         ...(request.nativeInput ? { nativeInput: request.nativeInput } : {}),
         ...(request.sourceTaskId ? { sourceTaskId: request.sourceTaskId } : {}),
         ...(request.handoff ? { handoff: request.handoff } : {}),
@@ -1034,6 +1039,14 @@ export class TaskBoardEngine {
       expectedRevision: base.pin.revision,
     });
     switch (request.action) {
+      case "retargetQuestion": {
+        next.comments = previous.comments.map(comment => comment.commentId === request.questionId
+          ? { ...comment, recipient: request.recipient } : comment);
+        kind = 'edited';
+        detail = 'Question ' + request.questionId + ' addressed to ' +
+          (request.recipient.kind === 'user' ? 'the user.' : 'task ' + request.recipient.taskId + '.');
+        break;
+      }
       case "edit": {
         const submitted: TaskBoard.TaskFields = {
           ...request.fields,
@@ -1319,6 +1332,8 @@ export class TaskBoardEngine {
                 : "system",
           body: request.body,
           ...(request.purpose ? { purpose: request.purpose } : {}),
+          ...(request.recipient ? { recipient: request.recipient } : {}),
+          ...(request.questionSource ? { questionSource: request.questionSource } : {}),
           ...(request.nativeInput ? { nativeInput: request.nativeInput } : {}),
           ...(request.sourceTaskId ? { sourceTaskId: request.sourceTaskId } : {}),
           ...(request.handoff ? { handoff: request.handoff } : {}),
@@ -1403,7 +1418,7 @@ export class TaskBoardEngine {
         break;
       }
     }
-    next.openQuestionCount = openQuestions(next).length;
+    next.openQuestionCount = openQuestions(next).filter(question => question.recipient?.kind !== 'task').length;
     const history = this.history(operation, request.taskId, base, kind, detail);
     history.result = outcome.result;
     history.review = outcome.review;
@@ -1478,7 +1493,7 @@ export class TaskBoardEngine {
     }
     requireThat(
       !terminal(task) || (request.action === 'start' || request.action === 'continue') && request.coordinationOnly === true ||
-        (["edit", "comment", "uploadAttachment"].includes(request.action) || request.action === "transition" &&
+        (["edit", "retargetQuestion", "comment", "uploadAttachment"].includes(request.action) || request.action === "transition" &&
           (request.workflowState === "backlog" || task.workflowState === "done" && request.workflowState === "todo")),
       "task_board_invalid_transition",
       "This task is terminal for the requested action.",
@@ -1497,6 +1512,19 @@ export class TaskBoardEngine {
         "Resolve the existing execution claim before this action.",
       );
     switch (request.action) {
+      case "retargetQuestion": {
+        const question = openQuestions(task).find(question => question.commentId === request.questionId && !question.nativeInput);
+        requireThat(question,
+          'task_board_comment_mismatch', 'Only an unresolved ordinary question can change its recipient.');
+        requireThat(actor.source === 'user' || actor.source === 'worker' &&
+          question.authorKind === 'agent' && question.author.principalId === actor.principalId,
+        'task_board_forbidden', 'Only the user or the original agent can correct a question recipient.');
+        if (request.recipient.kind === 'task') {
+          requireThat(request.recipient.taskId !== request.taskId, 'invalid_arguments', 'A question must address a different task.');
+          await this.store.read('task-board/task', request.recipient.taskId);
+        }
+        break;
+      }
       case "edit": {
         const fields: TaskBoard.TaskFields = {
           ...request.fields,
@@ -1755,6 +1783,17 @@ export class TaskBoardEngine {
         }
         break;
       case "comment":
+        requireThat(request.purpose !== 'question' || actor.source === 'native' || !!request.recipient,
+          'invalid_arguments', 'A question must identify its recipient: user or a specific task.');
+        requireThat(!request.recipient || request.purpose === 'question', 'invalid_arguments', 'Only questions declare a recipient.');
+        requireThat(!request.contactUser || request.recipient?.kind !== 'task', 'invalid_arguments', 'Task questions cannot contact the user.');
+        if (request.recipient?.kind === 'task') {
+          requireThat(request.recipient.taskId !== request.taskId && !request.sourceTaskId && !request.nativeInput,
+            'invalid_arguments', 'A task question belongs to its sender and names a different receiving task.');
+          await this.store.read('task-board/task', request.recipient.taskId);
+        }
+        requireThat(!request.questionSource || actor.source === 'native' && request.sourceTaskId === request.questionSource.taskId,
+          'task_board_forbidden', 'Only TaskBoard delivers a canonical task question.');
         if (request.handoff && task.claim) requireThat(executionMode(task.claim.request) !== 'conversation',
           'task_board_coordination_scope', 'A coordination-only turn cannot replace the work handoff.');
         requireThat(!request.handoff || !request.sourceTaskId, 'task_board_handoff_source', 'Omit sourceTaskId on your own handoff; it is only for a directed message to another task.');
@@ -1772,16 +1811,21 @@ export class TaskBoardEngine {
           requireThat(!(handoff.deliveries ?? []).some(delivery => delivery.artifacts.some(artifact => !!this.store.localKey(artifact.object.objectId))),
             'task_board_invalid_reference', 'Named deliveries must identify published artifacts, not local workflow evidence.');
         }
-        for (const id of request.resolvesQuestions ?? []) requireThat(task.comments.some(comment => comment.commentId === id && comment.purpose === 'question' && !comment.nativeInput && !comment.sourceTaskId),
+        for (const id of request.resolvesQuestions ?? []) requireThat(task.comments.some(comment => comment.commentId === id && comment.purpose === 'question' && !comment.nativeInput && !comment.sourceTaskId &&
+          (comment.recipient?.kind !== 'task' || actor.source === 'user' || request.sourceTaskId === comment.recipient.taskId || !request.sourceTaskId)),
           'task_board_comment_mismatch', 'Only existing ordinary ticket questions can be explicitly resolved.');
         if (request.sourceTaskId) {
           requireThat(['worker', 'native'].includes(actor.source) && request.sourceTaskId !== request.taskId && !request.moveToTodo, 'task_board_forbidden', 'Directed agent comments must identify another source task and cannot reopen Done.');
           const source = await this.store.read('task-board/task', request.sourceTaskId);
+          const routedQuestion = request.questionSource && source.value.comments.find(comment =>
+            comment.commentId === request.questionSource!.commentId && comment.purpose === 'question' &&
+            comment.recipient?.kind === 'task' && comment.recipient.taskId === request.taskId);
+          requireThat(!request.questionSource || !!routedQuestion, 'task_board_forbidden', 'The canonical question is not addressed to this task.');
           if (source.value.claim) requireThat(executionMode(source.value.claim.request) !== 'recovery',
             'task_board_recovery_scope', 'A handoff recovery cannot initiate directed business work.');
           if (actor.source === 'native') await this.checks.aggregate(source.value, request.sourceTaskId);
           requireThat(source.value.fields.control === 'agent' && (actor.source === 'native'
-            ? source.value.parentTaskId === request.taskId && source.value.workflowState === 'review' && !!source.value.latestResult && !source.value.claim && !source.value.publication
+            ? !!routedQuestion || source.value.parentTaskId === request.taskId && source.value.workflowState === 'review' && !!source.value.latestResult && !source.value.claim && !source.value.publication
             : !!source.value.claim), 'task_board_forbidden', 'Directed messages require an active source task or its verified delegated result.');
         }
         requireThat(!request.nativeInput || actor.source === 'native', 'task_board_forbidden', 'Native input observations are recorded only by TaskBoard.');

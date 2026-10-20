@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "componentId": "hive",
   "kind": "hive",
-  "version": "0.2.102",
+  "version": "0.2.103",
   "description": "Persistent Hive backend and bundled Console",
   "connectsToHive": false,
   "requirements": {
@@ -81,10 +81,22 @@
         "area": "data",
         "path": "hive.sqlite-shm"
       },
-      { "area": "data", "path": "hive.sqlite.compacting" },
-      { "area": "data", "path": "hive.sqlite.compacting-wal" },
-      { "area": "data", "path": "hive.sqlite.compacting-shm" },
-      { "area": "data", "path": "hive.sqlite.compacting-journal" },
+      {
+        "area": "data",
+        "path": "hive.sqlite.compacting"
+      },
+      {
+        "area": "data",
+        "path": "hive.sqlite.compacting-wal"
+      },
+      {
+        "area": "data",
+        "path": "hive.sqlite.compacting-shm"
+      },
+      {
+        "area": "data",
+        "path": "hive.sqlite.compacting-journal"
+      },
       {
         "area": "data",
         "path": "ui-releases"
