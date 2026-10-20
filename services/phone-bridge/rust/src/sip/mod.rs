@@ -10,6 +10,7 @@ mod incoming;
 mod invite;
 mod registration;
 mod registration_client;
+mod reinvite_client;
 mod server;
 mod signalling;
 mod tls;

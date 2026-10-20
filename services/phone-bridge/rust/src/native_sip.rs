@@ -879,6 +879,62 @@ impl NativeSipOperations {
             Ok(outcome)
         }))
     }
+    pub(crate) fn upgrade_codec(
+        &self,
+        expected: &NativeSipCall,
+    ) -> Result<NativeSipOperation<String>, NativeSipError> {
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        let observed = expected.observation();
+        let result = expected.0.result.lock().unwrap();
+        if observed.ending
+            || result.ending
+            || observed.phase != SipHostCallPhase::Connected
+            || !expected.features().authenticated()
+        {
+            return Err(NativeConfigError::OutcomeUnknown.into());
+        }
+        let features = expected.features().observation();
+        drop(result);
+        drop(state);
+        let media = expected.media().ok_or(SipHostError::NotReady)?;
+        if features.disable_codec_upgrade || features.access == "trusted" {
+            let json = codec_upgrade_json("skipped", media.observation().send_format);
+            return Ok(retained(async move { Ok(json) }));
+        }
+        let mut negotiated = media.negotiations();
+        media.challenge_codecs(false);
+        expected.0.original.request_codec_upgrade()?;
+        let original = expected.clone();
+        Ok(retained(async move {
+            if tokio::time::timeout(std::time::Duration::from_secs(5), negotiated.changed())
+                .await
+                .is_err()
+            {
+                return Ok(codec_upgrade_json(
+                    "fallback",
+                    media.observation().send_format,
+                ));
+            }
+            let before = media.observation().sent_frames;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+            while media.observation().sent_frames <= before
+                && tokio::time::Instant::now() < deadline
+                && original.observation().phase == SipHostCallPhase::Connected
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let sent = media.observation();
+            let upgraded = sent.sent_frames > before
+                && sent.transmitted_format.as_ref().is_some_and(|format| {
+                    format.name().eq_ignore_ascii_case(media.preferred_codec())
+                });
+            Ok(codec_upgrade_json(
+                if upgraded { "upgraded" } else { "fallback" },
+                sent.transmitted_format,
+            ))
+        }))
+    }
     pub(crate) fn end_waiting(&self, expected: &NativeSipCall) -> Result<String, NativeSipError> {
         self.connected_feedback(expected, None)?;
         Ok(format!(
@@ -1195,4 +1251,13 @@ fn native_audio_error(error: crate::media::SipMediaError) -> NativeSipError {
         }
         _ => NativeConfigError::OutcomeUnknown.into(),
     }
+}
+fn codec_upgrade_json(state: &str, format: Option<crate::media::AudioFormat>) -> String {
+    let codec = format
+        .as_ref()
+        .map_or_else(|| "null".into(), |format| format!("\"{}\"", format.name()));
+    let payload = format
+        .as_ref()
+        .map_or_else(|| "null".into(), |format| format.payload().to_string());
+    format!("{{\"state\":\"{state}\",\"codec\":{codec},\"payload\":{payload}}}")
 }

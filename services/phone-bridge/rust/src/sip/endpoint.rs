@@ -200,6 +200,7 @@ pub struct SipEndpoint {
 
 /// The confirmed original flow, retained independently of an ACK send task.
 /// UDP in-dialog requests resolve the selected route; TCP/TLS retain affinity.
+#[derive(Clone)]
 pub(crate) struct DialogFlow {
     endpoint: EndpointInnerRef,
     connection: Option<SipConnection>,

@@ -248,6 +248,7 @@ struct Core {
     state: Mutex<State>,
     closed: AtomicBool,
     failed: AtomicBool,
+    negotiated: tokio::sync::watch::Sender<u64>,
 }
 impl Core {
     fn receiver(&self) -> &SipRtpReceiver {
@@ -504,6 +505,7 @@ impl SipMediaSession {
             }),
             closed: AtomicBool::new(false),
             failed: AtomicBool::new(false),
+            negotiated: tokio::sync::watch::channel(0).0,
         });
         let receiver = SipRtpReceiver::bind(
             core.settings.interface,
@@ -552,6 +554,12 @@ impl SipMediaSession {
     }
     pub fn call_audio(&self) -> &CallAudioPort {
         &self.handle.0.audio
+    }
+    pub(crate) fn negotiations(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.handle.0.negotiated.subscribe()
+    }
+    pub(crate) fn preferred_codec(&self) -> &'static str {
+        self.handle.0.settings.preferences[0].name()
     }
     /// The original call receives failure before external media listeners.
     /// Installing its single handler also observes failure during construction.
@@ -691,6 +699,9 @@ impl SipMediaSession {
                         match result {
                             Ok(()) => {
                                 s.publish(applying);
+                                c.negotiated.send_modify(|generation| {
+                                    *generation = generation.wrapping_add(1)
+                                });
                                 return Ok(());
                             }
                             Err(error) => {

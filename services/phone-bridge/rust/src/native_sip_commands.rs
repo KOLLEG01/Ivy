@@ -298,6 +298,21 @@ impl NativeSipCommands {
                 SipHostError::NotReady.into()
             },
         )?;
+        if request.method() == "call.codec.upgrade" {
+            let owner = self.owner.clone();
+            return Ok(Box::pin(async move {
+                if let Err(error) = call.constructed().await {
+                    return failed(error.into());
+                }
+                match owner.upgrade_codec(&call) {
+                    Ok(work) => match work.wait().await {
+                        Ok(snapshot) => NativeOutcome::result(snapshot),
+                        Err(error) => failed(error.into()),
+                    },
+                    Err(error) => failed(error),
+                }
+            }));
+        }
         if request.method() == "call.waiting.end" {
             let owner = self.owner.clone();
             return Ok(Box::pin(async move {
@@ -384,6 +399,7 @@ impl NativeHandler for NativeSipCommands {
                 | "call.screening.prepare"
                 | "call.screening.bridge"
                 | "call.windows.connect"
+                | "call.codec.upgrade"
         ) {
             return self.remaining.invoke(request);
         }

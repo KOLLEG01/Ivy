@@ -240,6 +240,16 @@ impl Call {
 #[derive(Clone)]
 pub struct SipHostCall(Arc<Call>);
 impl SipHostCall {
+    pub(crate) fn request_codec_upgrade(&self) -> Result<(), SipHostError> {
+        self.0
+            .state
+            .lock()
+            .unwrap()
+            .incoming
+            .as_ref()
+            .ok_or(SipHostError::NotReady)?
+            .request_upgrade()
+    }
     pub(crate) fn request_hangup(&self) {
         self.0.hangup();
     }

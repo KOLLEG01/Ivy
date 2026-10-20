@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::{
     sync::{Notify, mpsc, watch},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Instant, sleep_until},
 };
 use tokio_util::sync::CancellationToken;
@@ -28,10 +28,12 @@ struct Control {
     intent: Mutex<Intent>,
     changed: Notify,
     ring_stop: CancellationToken,
+    stopped: CancellationToken,
 }
 impl Control {
     fn stop(&self) {
         self.intent.lock().unwrap().ending = true;
+        self.stopped.cancel();
         self.changed.notify_one();
     }
     fn answer(&self, before: impl FnOnce() -> Result<(), SipHostError>) -> Result<(), CallError> {
@@ -91,6 +93,7 @@ impl Identity {
 pub(super) struct IncomingInvite {
     control: Arc<Control>,
     commands: mpsc::Sender<Transaction>,
+    upgrades: mpsc::UnboundedSender<()>,
     identity: Option<Identity>,
     observation: watch::Receiver<CallObservation>,
     done: watch::Receiver<Option<Result<(), CallError>>>,
@@ -115,6 +118,7 @@ impl IncomingInvite {
             intent: Mutex::new(Intent::default()),
             changed: Notify::new(),
             ring_stop: CancellationToken::new(),
+            stopped: CancellationToken::new(),
         });
         let initial = CallObservation {
             outcome: None,
@@ -130,6 +134,7 @@ impl IncomingInvite {
         let (observations, observation) = watch::channel(initial);
         let (finished, done) = watch::channel(None);
         let (commands, receiver) = mpsc::channel(8);
+        let (upgrades, upgrade_rx) = mpsc::unbounded_channel();
         let mut actor = IncomingActor {
             original,
             transaction: Some(transaction),
@@ -137,6 +142,9 @@ impl IncomingInvite {
             endpoint,
             control: control.clone(),
             commands: receiver,
+            upgrades: upgrade_rx,
+            outbound: JoinSet::new(),
+            local_sequence: 0,
             identity: identity.clone(),
             observations,
             current: initial,
@@ -178,6 +186,7 @@ impl IncomingInvite {
         Self {
             control,
             commands,
+            upgrades,
             identity,
             observation,
             done,
@@ -185,6 +194,9 @@ impl IncomingInvite {
     }
     pub fn request_hangup(&self) {
         self.control.stop();
+    }
+    pub fn request_upgrade(&self) -> Result<(), SipHostError> {
+        self.upgrades.send(()).map_err(|_| SipHostError::NotReady)
     }
     pub fn request_answer(
         &self,
@@ -264,6 +276,9 @@ struct IncomingActor {
     endpoint: Arc<SipEndpoint>,
     control: Arc<Control>,
     commands: mpsc::Receiver<Transaction>,
+    upgrades: mpsc::UnboundedReceiver<()>,
+    outbound: JoinSet<Result<(), super::SipIoError>>,
+    local_sequence: u32,
     identity: Option<Identity>,
     observations: watch::Sender<CallObservation>,
     current: CallObservation,
@@ -294,6 +309,7 @@ impl IncomingActor {
         self.observations.send_replace(self.current);
     }
     fn end(&mut self) {
+        self.control.stopped.cancel();
         self.current.remote_ended |= self.remote_ended;
         self.current.active = false;
         self.current.ending = true;
@@ -558,7 +574,7 @@ impl IncomingActor {
             From::new(original.to_header().map_err(unknown)?.value()).into(),
             To::new(original.from_header().map_err(unknown)?.value()).into(),
             original.call_id_header().map_err(unknown)?.clone().into(),
-            CSeq::new("1 BYE").into(),
+            CSeq::new(format!("{} BYE", self.local_sequence + 1)).into(),
             MaxForwards::from(70).into(),
             ContentLength::from(0).into(),
             UserAgent::new("IvyPhone").into(),
@@ -596,7 +612,11 @@ impl IncomingActor {
                     );
                 }
             }
-            if stopping && self.bye.is_none() && self.media_start.is_none() {
+            if stopping
+                && self.bye.is_none()
+                && self.media_start.is_none()
+                && self.outbound.is_empty()
+            {
                 self.commands.close();
                 while let Some(original) = self.commands.recv().await {
                     self.control_request(original).await?;
@@ -609,6 +629,24 @@ impl IncomingActor {
             let reinvite_deadline = self.reinvite.front().map(|p| p.deadline);
             tokio::select! {
                 _ = self.control.changed.notified()=>(),
+                upgrade=self.upgrades.recv(),if !stopping=>{
+                    if upgrade.is_none(){return Err(CallError::CleanupUnconfirmed);}
+                    let media=self.media.as_ref().unwrap().clone();
+                    let Some(body)=media.initial_offer() else {continue;};
+                    self.local_sequence=self.local_sequence.max(self.identity.as_ref().unwrap().sequence as u32).checked_add(1).ok_or(CallError::CleanupUnconfirmed)?;
+                    let mut invite=self.bye_request(&request)?;
+                    invite.method=Method::Invite;
+                    invite.body=body.into_bytes();
+                    invite.headers.unique_push(CSeq::new(format!("{} INVITE",self.local_sequence)).into());
+                    invite.headers.unique_push(ContentType::new("application/sdp").into());
+                    invite.headers.unique_push(ContentLength::from(invite.body.len() as u32).into());
+                    let endpoint=self.endpoint.clone();let stopped=self.control.stopped.clone();
+                    let flow=flow.clone();
+                    self.outbound.spawn(async move {super::reinvite_client::run(endpoint,invite,&flow,media,stopped).await});
+                },
+                completed=self.outbound.join_next(),if !self.outbound.is_empty()=>{
+                    if !matches!(completed,Some(Ok(Ok(())))){return Err(CallError::CleanupUnconfirmed);}
+                },
                 transaction=self.commands.recv()=>{let Some(transaction)=transaction else{return Err(CallError::CleanupUnconfirmed);};self.control_request(transaction).await?;},
                 result=async{self.media_start.as_mut().unwrap().await},if self.media_start.is_some()=>self.media_started(result),
                 response=async{self.bye.as_mut().unwrap().next_response().await},if self.bye.is_some()=>{

@@ -17,6 +17,8 @@ mod requests;
 mod screening;
 #[path = "phone_native_status.rs"]
 mod status;
+#[path = "phone_native_upgrade.rs"]
+mod upgrade;
 use ivy_phone_bridge::{
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
     native_rpc::{NativeDispatcher, NativeHandler, NativeInvocation, NativeOutcome},
