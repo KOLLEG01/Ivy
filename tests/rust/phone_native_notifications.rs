@@ -51,7 +51,7 @@ impl RtcpRuntime for StartClock {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notification() {
+async fn native_media_start_failure_and_pre_ack_remote_end_preserve_original_receipts() {
     use rsipstack::sip::{Method, prelude::*};
     for delayed in [false, true] {
         for remote_end in [false, true] {
@@ -141,6 +141,11 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
                 .value()
                 .to_string();
             if remote_end {
+                if !delayed {
+                    // Initial media/receipt have already connected before ACK;
+                    // observe that receipt before introducing the peer end.
+                    until(|| pending.is_finished()).await;
+                }
                 super::answer::send(&peer, target, "BYE", 2, "z9hG4bK-early-bye", &tag, "").await;
                 assert_eq!(
                     super::incoming::receive(&peer, 4000)
