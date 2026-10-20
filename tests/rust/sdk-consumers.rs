@@ -66,6 +66,48 @@ fn query_projection_and_utc_date_match_typescript() {
                 }
                 Err(error) => failure(error),
             }
+        } else if field(&input, "kind").as_str().unwrap() == "utc" {
+            let args: Vec<f64> = value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .unwrap_or_else(|| match value.as_str().unwrap().as_str() {
+                            "NaN" => f64::NAN,
+                            "Infinity" => f64::INFINITY,
+                            "-Infinity" => f64::NEG_INFINITY,
+                            "-0" => -0.0,
+                            _ => panic!("unknown numeric fixture"),
+                        })
+                })
+                .collect();
+            let millis = ivy_sdk::clock::date_utc(
+                args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+            );
+            success(IvyJson::object([
+                (
+                    "millis",
+                    if millis.is_nan() {
+                        "NaN".into()
+                    } else {
+                        IvyJson::Number(millis)
+                    },
+                ),
+                (
+                    "negativeZero",
+                    (millis == 0.0 && millis.is_sign_negative()).into(),
+                ),
+                (
+                    "iso",
+                    if millis.is_nan() {
+                        IvyJson::Null
+                    } else {
+                        IvyJson::String(ivy_sdk::clock::date_to_iso(millis).unwrap())
+                    },
+                ),
+            ]))
         } else {
             let millis = value
                 .as_f64()
