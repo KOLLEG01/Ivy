@@ -1,3 +1,7 @@
+// Reuse the Shared diagnostic corpus with this consumer's existing dependencies.
+#[path = "agent-claude/json_diagnostics.rs"]
+mod json_diagnostic_cases;
+
 use ivy_agent_manager::claude::store::{SessionStore, StoreError, ThreadList, ThreadSort};
 use ivy_contracts::{
     IvyJson, JsString,
@@ -325,7 +329,7 @@ fn scenario_database(
                 "error",
                 IvyJson::object([
                     ("name", e.name.into()),
-                    ("message", e.message.into()),
+                    ("message", IvyJson::String(e.message)),
                     ("code", e.code.map(IvyJson::from).unwrap_or(IvyJson::Null)),
                 ]),
             )]),
@@ -908,71 +912,98 @@ fn sqlite_original_database_round_trips_through_rust_and_original_again() {
 
 #[test]
 fn sqlite_corrupt_json_reports_typed_failure_and_preserves_invalid_bytes() {
-    let original = Root::new();
-    let expected = original_run(
-        &original,
-        "",
-        1_000_000,
-        &[
-            op("upsertThread", vec![thread("a", 100.0)]),
-            op(
-                "upsertTurn",
-                vec![turn("t", "a", IvyJson::Number(200.0), v("[]"))],
-            ),
-            op(
-                "sql",
-                vec![
-                    "UPDATE threads SET status_json='{'; UPDATE turns SET items_json='[invalid]'"
-                        .into(),
-                ],
-            ),
-            op("getThread", vec!["a".into()]),
-            op("getTurn", vec!["t".into()]),
-        ],
-    );
-    let rust = Root::new();
-    let path = rust.0.join("state.sqlite");
-    fs::copy(original.0.join("state.sqlite"), &path).unwrap();
-    let store = SessionStore::with_clock(&rust.0, &path, Arc::new(|| 1000.0)).unwrap();
-    let actual = [
-        store.get_thread(&"a".into()).unwrap_err(),
-        store.get_turn(&"t".into()).unwrap_err(),
-    ];
     let mut findings = Vec::new();
-    for (index, error) in actual.iter().enumerate() {
-        let source = field(
-            &field(&expected, "outputs").as_array().unwrap()[index + 3],
-            "error",
+    let cases = [
+        ("{".to_owned(), "[invalid]".to_owned()),
+        ("😀".to_owned(), "[😀]".to_owned()),
+        (r#"{"😀":true x}"#.to_owned(), "[\"😀\"\r\nx]".to_owned()),
+        (
+            "x12345678😀context beyond twenty-one".to_owned(),
+            format!("[{}😀]", " ".repeat(15)),
+        ),
+        (
+            "{\r\n\"😀\":true,\r\nbad}".to_owned(),
+            "[0,\r\n]".to_owned(),
+        ),
+    ];
+    for (status, items) in cases {
+        let original = Root::new();
+        let sql = format!(
+            "UPDATE threads SET status_json='{}'; UPDATE turns SET items_json='{}'",
+            status.replace('\'', "''"),
+            items.replace('\'', "''")
         );
-        assert_eq!(error.name, "SyntaxError");
-        assert_eq!(&IvyJson::from(error.name), field(source, "name"));
-        findings.push(IvyJson::object([
-            ("original", source.clone()),
-            (
-                "rust",
-                IvyJson::object([
-                    ("name", error.name.into()),
-                    ("message", error.message.clone().into()),
-                ]),
-            ),
-            (
-                "messageParity",
-                (field(source, "message") == &IvyJson::from(error.message.clone())).into(),
-            ),
-        ]));
+        let expected = original_run(
+            &original,
+            "",
+            1_000_000,
+            &[
+                op("upsertThread", vec![thread("a", 100.0)]),
+                op(
+                    "upsertTurn",
+                    vec![turn("t", "a", IvyJson::Number(200.0), v("[]"))],
+                ),
+                op("sql", vec![sql.into()]),
+                op("getThread", vec!["a".into()]),
+                op("getTurn", vec!["t".into()]),
+            ],
+        );
+        let rust = Root::new();
+        let path = rust.0.join("state.sqlite");
+        fs::copy(original.0.join("state.sqlite"), &path).unwrap();
+        let store = SessionStore::with_clock(&rust.0, &path, Arc::new(|| 1000.0)).unwrap();
+        let actual = [
+            store.get_thread(&"a".into()).unwrap_err(),
+            store.get_turn(&"t".into()).unwrap_err(),
+        ];
+        for (index, error) in actual.iter().enumerate() {
+            let source = field(
+                &field(&expected, "outputs").as_array().unwrap()[index + 3],
+                "error",
+            );
+            let message = IvyJson::String(error.message.clone());
+            assert_eq!(error.name, "SyntaxError");
+            assert_eq!(&IvyJson::from(error.name), field(source, "name"));
+            assert_eq!(&message, field(source, "message"));
+            assert_eq!(error.code, None);
+            assert_eq!(
+                parse(&stringify(&message, usize::MAX).unwrap(), usize::MAX).unwrap(),
+                message
+            );
+            findings.push(IvyJson::object([
+                ("input", [status.as_str(), items.as_str()][index].into()),
+                ("sourceIdentity", field(&expected, "sourceIdentity").clone()),
+                ("original", source.clone()),
+                (
+                    "rust",
+                    IvyJson::object([("name", error.name.into()), ("message", message)]),
+                ),
+                ("messageParity", true.into()),
+                ("storedInvalidBytesPreserved", true.into()),
+            ]));
+        }
+        store.close().unwrap();
+        let db = Connection::open(&path).unwrap();
+        for (table, column, input) in [
+            ("threads", "status_json", &status),
+            ("turns", "items_json", &items),
+        ] {
+            let bytes: Vec<u8> = db
+                .query_row(
+                    &format!("SELECT CAST({column} AS BLOB) FROM {table}"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(bytes, input.as_bytes());
+        }
     }
-    store.close().unwrap();
-    let db = Connection::open(&path).unwrap();
-    assert_eq!(
-        query(&db, "SELECT status_json FROM threads"),
-        v(r#"[{"status_json":"{"}]"#)
-    );
-    assert_eq!(
-        query(&db, "SELECT items_json FROM turns"),
-        v(r#"[{"items_json":"[invalid]"}]"#)
-    );
     if let Some(file) = std::env::var_os("IVY_CLAUDE_PROOF") {
-        let proof=IvyJson::object([("test","sqlite_corrupt_json_reports_typed_failure_and_preserves_invalid_bytes".into()),("qualification","Typed failure and stored invalid bytes only; exact parser diagnostics are measured separately".into()),("findings",IvyJson::Array(findings))]);
+        let proof=IvyJson::object([
+            ("test","sqlite_corrupt_json_reports_typed_failure_and_preserves_invalid_bytes".into()),
+            ("qualification","Exact original JSON.parse diagnostics and UTF-16 units, JSON transport and saved invalid column bytes".into()),
+            ("findings",IvyJson::Array(findings)),
+        ]);
         let mut file = fs::OpenOptions::new()
             .append(true)
             .create(true)

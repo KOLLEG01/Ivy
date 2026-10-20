@@ -81,6 +81,10 @@ for (const rawStep of spec.steps) {
     } else if (step.action === 'finish') {
       const turn = active.get(step.turnId); active.delete(step.turnId);
       if (step.error) turn.reject(new Error(step.error)); else turn.resolve();
+    } else if (step.action === 'sql') {
+      assert(step.sql.startsWith('UPDATE threads SET status_json='));
+      const db = new DatabaseSync(dbPath);
+      try { db.exec(step.sql); } finally { db.close(); }
     } else if (step.action === 'disconnect') server.closePeer(peer(step.peer));
     else if (step.action === 'wait') await new Promise(resolve=>setTimeout(resolve,step.millis));
     else if (step.action === 'stop') { await server.stop(); stopped = true; }

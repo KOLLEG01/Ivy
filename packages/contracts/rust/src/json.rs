@@ -1,5 +1,11 @@
 use crate::{IvyError, IvyResult, limits::MANAGEMENT_FRAME_BYTES};
 use std::cmp::Ordering;
+#[path = "json_diagnostics.rs"]
+mod diagnostics;
+#[path = "json_input.rs"]
+mod input;
+use diagnostics::Diagnostic;
+use input::Input;
 #[path = "json_trim.rs"]
 mod trim;
 #[path = "json_value.rs"]
@@ -281,6 +287,25 @@ pub fn parse(text: &str, maximum_bytes: usize) -> IvyResult<IvyJson> {
     parse_with_options(text, maximum_bytes, ParseOptions::default())
 }
 
+/// Parse raw JavaScript text with Node 24 JSON.parse SyntaxError diagnostics.
+/// The caller's byte bound uses UTF-8 replacement size, like Buffer.byteLength;
+/// parsed strings, error positions and wire_message retain exact UTF-16 units.
+/// Existing parse/parse_with_options callers keep their original error API.
+pub fn parse_with_js_diagnostics(text: &JsString, maximum_bytes: usize) -> IvyResult<IvyJson> {
+    let bytes = char::decode_utf16(text.0.iter().copied()).fold(0usize, |n, c| {
+        n.saturating_add(c.unwrap_or(char::REPLACEMENT_CHARACTER).len_utf8())
+    });
+    if bytes > maximum_bytes {
+        return Err(too_large());
+    }
+    Parser {
+        input: Input::Utf16(text),
+        at: 0,
+        options: ParseOptions::default(),
+    }
+    .parse()
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ParseOptions {
     pub reject_duplicate_keys: bool,
@@ -298,55 +323,67 @@ pub fn parse_with_options(
             "JSON exceeds the configured byte limit.",
         ));
     }
-    let mut p = Parser {
-        text,
-        bytes: text.as_bytes(),
+    Parser {
+        input: Input::Utf8(text),
         at: 0,
         options,
-    };
-    let value = p.value()?;
-    p.space();
-    if p.at != p.bytes.len() {
-        return Err(invalid("Unexpected content after JSON value."));
     }
-    Ok(value)
+    .parse()
 }
 struct Parser<'a> {
-    text: &'a str,
-    bytes: &'a [u8],
+    input: Input<'a>,
     at: usize,
     options: ParseOptions,
 }
 impl Parser<'_> {
+    fn parse(mut self) -> IvyResult<IvyJson> {
+        let value = self.value()?;
+        self.space();
+        if self.at != self.input.len() {
+            return Err(self.error("Unexpected content after JSON value.", Diagnostic::Trailing));
+        }
+        Ok(value)
+    }
+    fn error(&self, legacy: &str, kind: Diagnostic) -> IvyError {
+        match &self.input {
+            Input::Utf8(_) => invalid(legacy),
+            Input::Utf16(text) => diagnostics::error(text, self.at, kind),
+        }
+    }
+    fn peek(&self) -> Option<u8> {
+        self.input.token(self.at)
+    }
     fn space(&mut self) {
         while self
-            .bytes
-            .get(self.at)
+            .peek()
             .is_some_and(|b| matches!(b, b' ' | b'\n' | b'\r' | b'\t'))
         {
             self.at += 1;
         }
     }
     fn take(&mut self, b: u8) -> bool {
-        if self.bytes.get(self.at) == Some(&b) {
+        if self.peek() == Some(b) {
             self.at += 1;
             true
         } else {
             false
         }
     }
-    fn expect(&mut self, b: u8) -> IvyResult<()> {
+    fn expect(&mut self, b: u8, kind: Diagnostic) -> IvyResult<()> {
         if self.take(b) {
             Ok(())
         } else {
-            Err(invalid("Invalid JSON syntax."))
+            Err(self.error("Invalid JSON syntax.", kind))
         }
     }
-    fn object_key(&mut self) -> IvyResult<JsString> {
+    fn object_key(&mut self, kind: Diagnostic) -> IvyResult<JsString> {
         self.space();
+        if self.peek() != Some(b'"') {
+            return Err(self.error("Invalid JSON syntax.", kind));
+        }
         let key = self.string()?;
         self.space();
-        self.expect(b':')?;
+        self.expect(b':', Diagnostic::Colon)?;
         Ok(key)
     }
     fn value(&mut self) -> IvyResult<IvyJson> {
@@ -357,7 +394,7 @@ impl Parser<'_> {
         let mut frames = Vec::new();
         loop {
             self.space();
-            if matches!(self.bytes.get(self.at), Some(b'[' | b'{'))
+            if matches!(self.peek(), Some(b'[' | b'{'))
                 && self
                     .options
                     .maximum_container_depth
@@ -365,7 +402,7 @@ impl Parser<'_> {
             {
                 return Err(complexity());
             }
-            let mut value = match self.bytes.get(self.at).copied() {
+            let mut value = match self.peek() {
                 Some(b'"') => IvyJson::String(self.string()?),
                 Some(b'[') => {
                     self.at += 1;
@@ -386,7 +423,7 @@ impl Parser<'_> {
                     } else {
                         frames.push(Frame::Object {
                             value,
-                            key: self.object_key()?,
+                            key: self.object_key(Diagnostic::ObjectStart)?,
                         });
                         continue;
                     }
@@ -404,7 +441,7 @@ impl Parser<'_> {
                     IvyJson::Bool(false)
                 }
                 Some(b'-' | b'0'..=b'9') => self.number()?,
-                _ => return Err(invalid("Invalid JSON syntax.")),
+                _ => return Err(self.error("Invalid JSON syntax.", Diagnostic::Unexpected)),
             };
             loop {
                 let Some(frame) = frames.last_mut() else {
@@ -420,7 +457,7 @@ impl Parser<'_> {
                             };
                             value = IvyJson::Array(values);
                         } else {
-                            self.expect(b',')?;
+                            self.expect(b',', Diagnostic::ArrayDelimiter)?;
                             break;
                         }
                     }
@@ -432,8 +469,8 @@ impl Parser<'_> {
                             };
                             value = object;
                         } else {
-                            self.expect(b',')?;
-                            *key = self.object_key()?;
+                            self.expect(b',', Diagnostic::ObjectDelimiter)?;
+                            *key = self.object_key(Diagnostic::ObjectKey)?;
                             if self.options.reject_duplicate_keys && object.get_key(key).is_some() {
                                 return Err(invalid("Duplicate JSON object property."));
                             }
@@ -445,32 +482,38 @@ impl Parser<'_> {
         }
     }
     fn literal(&mut self, s: &[u8]) -> IvyResult<()> {
-        if self.bytes.get(self.at..self.at + s.len()) == Some(s) {
-            self.at += s.len();
-            Ok(())
-        } else {
-            Err(invalid("Invalid JSON literal."))
+        for b in s {
+            if !self.take(*b) {
+                return Err(self.error("Invalid JSON literal.", Diagnostic::Unexpected));
+            }
         }
+        Ok(())
     }
     fn number(&mut self) -> IvyResult<IvyJson> {
         let start = self.at;
         self.take(b'-');
-        if !self.take(b'0') {
+        if self.take(b'0') {
+            if matches!(self.input, Input::Utf16(_))
+                && self.peek().is_some_and(|b| b.is_ascii_digit())
+            {
+                return Err(self.error("Invalid JSON number.", Diagnostic::Unexpected));
+            }
+        } else {
             let digits = self.at;
-            while self.bytes.get(self.at).is_some_and(u8::is_ascii_digit) {
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 self.at += 1;
             }
             if digits == self.at {
-                return Err(invalid("Invalid JSON number."));
+                return Err(self.error("Invalid JSON number.", Diagnostic::Minus));
             }
         }
         if self.take(b'.') {
             let digits = self.at;
-            while self.bytes.get(self.at).is_some_and(u8::is_ascii_digit) {
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 self.at += 1;
             }
             if digits == self.at {
-                return Err(invalid("Invalid JSON number."));
+                return Err(self.error("Invalid JSON number.", Diagnostic::Fraction));
             }
         }
         if self.take(b'e') || self.take(b'E') {
@@ -478,36 +521,44 @@ impl Parser<'_> {
                 self.take(b'-');
             }
             let digits = self.at;
-            while self.bytes.get(self.at).is_some_and(u8::is_ascii_digit) {
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 self.at += 1;
             }
             if digits == self.at {
-                return Err(invalid("Invalid JSON number."));
+                return Err(self.error("Invalid JSON number.", Diagnostic::Exponent));
             }
         }
-        let value = std::str::from_utf8(&self.bytes[start..self.at])
-            .unwrap()
+        let value = self
+            .input
+            .number(start, self.at)
             .parse::<f64>()
             .map_err(|_| invalid("Invalid JSON number."))?;
         Ok(IvyJson::Number(value))
     }
     fn string(&mut self) -> IvyResult<JsString> {
-        self.expect(b'"')?;
+        self.expect(b'"', Diagnostic::Unexpected)?;
         let mut out = Vec::new();
         loop {
-            let b = *self
-                .bytes
-                .get(self.at)
-                .ok_or_else(|| invalid("Unterminated JSON string."))?;
+            let b = self.peek().ok_or_else(|| {
+                self.error("Unterminated JSON string.", Diagnostic::UnterminatedString)
+            })?;
             self.at += 1;
             match b {
                 b'"' => return Ok(JsString(out)),
-                0..=31 => return Err(invalid("Invalid JSON string control character.")),
+                0..=31 => {
+                    self.at -= 1;
+                    return Err(self.error(
+                        "Invalid JSON string control character.",
+                        Diagnostic::Control,
+                    ));
+                }
                 b'\\' => {
-                    let escaped = *self
-                        .bytes
-                        .get(self.at)
-                        .ok_or_else(|| invalid("Invalid JSON escape."))?;
+                    let escaped = self.peek().ok_or_else(|| {
+                        self.error("Invalid JSON escape.", Diagnostic::Unexpected)
+                    })?;
+                    if matches!(&self.input, Input::Utf16(s) if s.0[self.at] > 255) {
+                        return Err(self.error("Invalid JSON escape.", Diagnostic::Unexpected));
+                    }
                     self.at += 1;
                     out.push(match escaped {
                         b'"' => 34,
@@ -521,31 +572,27 @@ impl Parser<'_> {
                         b'u' => {
                             let mut n = 0;
                             for _ in 0..4 {
-                                let b = *self
-                                    .bytes
-                                    .get(self.at)
-                                    .ok_or_else(|| invalid("Invalid JSON Unicode escape."))?;
+                                let b = self.peek().ok_or_else(|| {
+                                    self.error("Invalid JSON Unicode escape.", Diagnostic::Unicode)
+                                })?;
+                                let digit = (b as char).to_digit(16).ok_or_else(|| {
+                                    self.error("Invalid JSON Unicode escape.", Diagnostic::Unicode)
+                                })?;
                                 self.at += 1;
-                                n = n * 16
-                                    + (b as char)
-                                        .to_digit(16)
-                                        .ok_or_else(|| invalid("Invalid JSON Unicode escape."))?
-                                        as u16;
+                                n = n * 16 + digit as u16;
                             }
                             n
                         }
-                        _ => return Err(invalid("Invalid JSON escape.")),
+                        _ => {
+                            self.at -= 1;
+                            return Err(self.error("Invalid JSON escape.", Diagnostic::Escape));
+                        }
                     });
                 }
                 32..=127 => out.push(b as u16),
                 _ => {
                     self.at -= 1;
-                    // The input is already UTF-8; advance one whole scalar without
-                    // revalidating the remaining document for every non-ASCII byte.
-                    let c = self.text[self.at..].chars().next().unwrap();
-                    self.at += c.len_utf8();
-                    let mut units = [0; 2];
-                    out.extend_from_slice(c.encode_utf16(&mut units));
+                    self.input.string_unit(&mut self.at, &mut out);
                 }
             }
         }

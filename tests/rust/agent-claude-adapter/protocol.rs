@@ -344,6 +344,12 @@ fn native(home: &Path, spec: &J) -> J {
                 driver.adapter.close_peer(&peer);
                 Ok(vec![])
             }
+            "sql" => {
+                let sql = f(step, "sql").as_str().unwrap();
+                assert!(sql.starts_with("UPDATE threads SET status_json="));
+                Connection::open(&db).unwrap().execute_batch(&sql).unwrap();
+                Ok(vec![])
+            }
             "wait" => {
                 let waiting = driver.watchdogs.iter().cloned().collect::<Vec<_>>();
                 for turn in waiting {
@@ -424,6 +430,88 @@ fn paired(label: &str, spec: J) {
             "persisted config bytes: {label}"
         );
     }
+}
+
+#[test]
+fn corrupt_store_diagnostics_reach_native_wire_with_original_utf16_units() {
+    let mut unpaired_messages = 0;
+    for (index, input) in [
+        "{",
+        "[invalid]",
+        "😀",
+        "x12345678😀context beyond twenty-one",
+        "{\r\n\"😀\":true,\r\nbad}",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sql = format!(
+            "UPDATE threads SET status_json='{}' WHERE id='t1'",
+            input.replace('\'', "''")
+        );
+        let mut steps = vec![
+            v(
+                r#"{"action":"request","message":{"id":"start","method":"thread/start","params":{"cwd":"C:/fixture"}}}"#,
+            ),
+            J::object([("action", "sql".into()), ("sql", sql.into())]),
+        ];
+        for method in ["thread/read", "thread/list", "thread/resume"] {
+            steps.push(J::object([
+                ("action", "request".into()),
+                (
+                    "message",
+                    J::object([
+                        ("id", method.into()),
+                        ("method", method.into()),
+                        ("params", J::object([("threadId", "t1".into())])),
+                    ]),
+                ),
+            ]));
+        }
+        let spec = J::object([
+            ("ids", J::Array(vec!["t1".into()])),
+            ("steps", J::Array(steps)),
+        ]);
+        let root = Root::new();
+        let old = root.0.join("original");
+        let new = root.0.join("native");
+        fs::create_dir(&old).unwrap();
+        fs::create_dir(&new).unwrap();
+        let expected = original(&old, &spec);
+        let actual = native(&new, &spec);
+        let state = f(actual.as_array().unwrap().last().unwrap(), "state");
+        assert_eq!(
+            f(&f(state, "threads").as_array().unwrap()[0], "status_json"),
+            &J::from(input)
+        );
+        let messages = f(state, "messages").as_array().unwrap();
+        let mut errors = 0;
+        for item in messages {
+            let message = f(item, "message");
+            if ["thread/read", "thread/list", "thread/resume"]
+                .iter()
+                .any(|id| f(message, "id") == &J::from(*id))
+            {
+                let error = f(message, "error");
+                assert_eq!(f(error, "code"), &J::Number(-32000.0));
+                if s(f(error, "message")).to_utf8().is_err() {
+                    unpaired_messages += 1;
+                }
+                errors += 1;
+            }
+        }
+        assert_eq!(errors, 3);
+        let wire = parse(&stringify(&actual, usize::MAX).unwrap(), usize::MAX).unwrap();
+        compare(
+            &format!("corrupt store native wire {index}"),
+            normalize(&wire, &new),
+            normalize(f(&expected, "records"), &old),
+        );
+    }
+    assert_eq!(
+        unpaired_messages, 6,
+        "both the unexpected token and the context can split a surrogate pair"
+    );
 }
 
 #[test]

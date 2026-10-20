@@ -40,7 +40,7 @@ impl From<std::io::Error> for AdapterError {
 }
 impl From<super::store::StoreError> for AdapterError {
     fn from(error: super::store::StoreError) -> Self {
-        // Exact JSON.parse diagnostics are supplied by the separate parser intake.
+        // Keep the store's exact UTF-16 diagnostic at the protocol boundary.
         Self::typed(error.name, error.message)
     }
 }

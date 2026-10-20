@@ -5,7 +5,7 @@
 //! There is no account-home discovery or provider dependency in this owner.
 use ivy_contracts::{
     IvyJson, JsString,
-    json::{js_string, parse, stringify},
+    json::{js_string, parse, parse_with_js_diagnostics, stringify},
 };
 use ivy_store::rusqlite::{
     self, Connection, OpenFlags,
@@ -29,12 +29,12 @@ static NULL: IvyJson = IvyJson::Null;
 #[derive(Debug)]
 pub struct StoreError {
     pub name: &'static str,
-    pub message: String,
+    pub message: JsString,
     pub code: Option<&'static str>,
 }
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(&String::from_utf16_lossy(&self.message.0))
     }
 }
 impl std::error::Error for StoreError {}
@@ -46,12 +46,12 @@ impl From<rusqlite::Error> for StoreError {
         };
         Self {
             name: "Error",
-            message,
+            message: message.into(),
             code: Some("ERR_SQLITE_ERROR"),
         }
     }
 }
-fn error(message: impl Into<String>) -> StoreError {
+fn error(message: impl Into<JsString>) -> StoreError {
     StoreError {
         name: "Error",
         message: message.into(),
@@ -62,18 +62,19 @@ fn item_array<'a>(turn: &'a IvyJson, method: &str) -> Result<&'a [IvyJson]> {
     let items = field(turn, "items");
     items.as_array().ok_or_else(|| StoreError {
         name: "TypeError",
-        message: if items.is_null() {
+        message: (if items.is_null() {
             format!("Cannot read properties of null (reading '{method}')")
         } else {
             format!("turn.items.{method} is not a function")
-        },
+        })
+        .into(),
         code: None,
     })
 }
 fn json_error(error: ivy_contracts::IvyError) -> StoreError {
     StoreError {
         name: "SyntaxError",
-        message: error.message,
+        message: error.message_js(),
         code: None,
     }
 }
@@ -81,7 +82,7 @@ fn encode(value: &IvyJson) -> Result<String> {
     stringify(value, usize::MAX).map_err(json_error)
 }
 fn decode(value: &IvyJson) -> Result<IvyJson> {
-    parse(&text(value), usize::MAX).map_err(json_error)
+    parse_with_js_diagnostics(&js_string(value), usize::MAX).map_err(json_error)
 }
 fn field<'a>(value: &'a IvyJson, key: &str) -> &'a IvyJson {
     value.get(key).unwrap_or(&NULL)
@@ -208,7 +209,8 @@ fn require_bindings(value: &IvyJson, fields: &[(&str, usize)]) -> Result<()> {
         if value.get(key).is_none() {
             return Err(StoreError {
                 name: "TypeError",
-                message: format!("Provided value cannot be bound to SQLite parameter {position}."),
+                message: format!("Provided value cannot be bound to SQLite parameter {position}.")
+                    .into(),
                 code: Some("ERR_INVALID_ARG_TYPE"),
             });
         }
@@ -238,7 +240,8 @@ fn bind(values: &[IvyJson]) -> Result<Vec<Value>> {
                         message: format!(
                             "Provided value cannot be bound to SQLite parameter {}.",
                             index + 1
-                        ),
+                        )
+                        .into(),
                         code: Some("ERR_INVALID_ARG_TYPE"),
                     });
                 }
@@ -255,7 +258,8 @@ fn cell(value: ValueRef<'_>) -> Result<IvyJson> {
                     name: "RangeError",
                     message: format!(
                         "Value is too large to be represented as a JavaScript number: {v}"
-                    ),
+                    )
+                    .into(),
                     code: Some("ERR_OUT_OF_RANGE"),
                 });
             }
