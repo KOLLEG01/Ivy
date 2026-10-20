@@ -11,6 +11,7 @@ use crate::{
         NativeSipBinding, NativeSipConfiguration,
     },
     native_dial::NativeDial,
+    native_media_settings::{NativeAudioSettings, NativeScreeningSettings},
     native_rpc::NativeRequest,
     sip::{
         CallOutcome, HostedSipMedia, RegistrationObservation, SipHost, SipHostCall,
@@ -206,6 +207,9 @@ struct CallResult {
     claimed: bool,
     retiring: bool,
     feedback_sequences: std::collections::HashSet<i64>,
+    screening_timeout: Option<u16>,
+    screening_deadline: Option<tokio_util::sync::CancellationToken>,
+    windows_connected: bool,
 }
 #[derive(Clone)]
 pub struct NativeSipCall(Arc<Call>);
@@ -730,6 +734,151 @@ impl NativeSipOperations {
         self.0.host.hangup(&expected.0.original)?;
         Ok(expected.observation())
     }
+    pub(crate) fn prepare_screening(
+        &self,
+        expected: &NativeSipCall,
+        settings: Option<NativeScreeningSettings>,
+    ) -> Result<String, NativeSipError> {
+        use crate::media::{ScreeningPreparationError, WavError};
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        let observed = expected.observation();
+        let result = expected.0.result.lock().unwrap();
+        if observed.attempted
+            || observed.ending
+            || result.ending
+            || expected.incoming().is_some()
+            || result.screening_timeout.is_some()
+        {
+            return Err(NativeConfigError::OutcomeUnknown.into());
+        }
+        drop(result);
+        let settings = settings.ok_or(NativeConfigError::InvalidRequest)?;
+        let (timeout, repeats) = settings.bounds()?;
+        let features = expected.features();
+        expected
+            .media()
+            .ok_or(SipHostError::NotReady)?
+            .prepare_screening_policy(
+                &settings.path,
+                &settings.hash,
+                timeout,
+                repeats,
+                move || features.observation().screening == "waiting",
+            )
+            .map_err(|error| match error {
+                ScreeningPreparationError::Announcement(WavError::Io)
+                | ScreeningPreparationError::Media(_) => {
+                    NativeSipError::from(NativeConfigError::OutcomeUnknown)
+                }
+                ScreeningPreparationError::Announcement(_) => {
+                    NativeConfigError::InvalidRequest.into()
+                }
+            })?;
+        expected.0.result.lock().unwrap().screening_timeout = Some(timeout);
+        Ok("{\"prepared\":true}".into())
+    }
+    fn connected(&self, call: &NativeSipCall, result: &mut CallResult) {
+        call.0.features.connected();
+        let Some(seconds) = result.screening_timeout else {
+            return;
+        };
+        if call.0.features.start_screening().is_err() {
+            result.unknown = true;
+            result.ending = true;
+            result.error = Some("sip_operation_outcome_unknown");
+            return;
+        }
+        let deadline = self
+            .0
+            .feature_time
+            .delay(std::time::Duration::from_secs(u64::from(seconds)));
+        let stop = tokio_util::sync::CancellationToken::new();
+        result.screening_deadline = Some(stop.clone());
+        let original = Arc::downgrade(&call.0);
+        tokio::spawn(async move {
+            tokio::select! { biased;
+                _ = stop.cancelled() => return,
+                _ = deadline => {},
+            }
+            if let Some(call) = original.upgrade() {
+                call.features.screening_timeout();
+            }
+        });
+    }
+    pub(crate) fn connect_audio(
+        &self,
+        expected: &NativeSipCall,
+        settings: Option<NativeAudioSettings>,
+        bridge: bool,
+    ) -> Result<NativeSipOperation<Result<String, NativeSipError>>, NativeSipError> {
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        let observed = expected.observation();
+        let result = expected.0.result.lock().unwrap();
+        if bridge && expected.features().observation().screening != "accepted"
+            || observed.ending
+            || result.ending
+            || observed.phase != SipHostCallPhase::Connected
+            || !expected.features().authenticated()
+            || result.windows_connected
+        {
+            return Err(NativeConfigError::OutcomeUnknown.into());
+        }
+        drop(result);
+        drop(state);
+        let media = expected.media().ok_or(SipHostError::NotReady)?;
+        // Media lifetime is checked before settings.Validate in the original.
+        if crate::sip::DelayedInviteMedia::is_closed(&media)
+            || crate::sip::DelayedInviteMedia::failed(&media)
+        {
+            return Err(SipHostError::NotReady.into());
+        }
+        let settings = settings
+            .ok_or(NativeConfigError::InvalidRequest)?
+            .validated()?;
+        let capture = settings.capture_endpoint.clone();
+        let preparing = media
+            .prepare_audio(settings, None, tokio_util::sync::CancellationToken::new())
+            .map_err(native_audio_error)?;
+        let call = expected.clone();
+        Ok(retained(async move {
+            let outcome = async {
+                preparing.wait().await.map_err(|error| {
+                    native_audio_error(crate::media::SipMediaError::Audio(error))
+                })?;
+                call.observation();
+                let mut result = call.0.result.lock().unwrap();
+                if result.ending {
+                    return Err(NativeConfigError::OutcomeUnknown.into());
+                }
+                let port = media.call_audio();
+                port.bind_authority(&capture).map_err(|error| {
+                    native_audio_error(crate::media::SipMediaError::Audio(error))
+                })?;
+                result.windows_connected = true;
+                port.grant_authority().map_err(|error| {
+                    native_audio_error(crate::media::SipMediaError::Audio(error))
+                })?;
+                let json = crate::media::native_view::audio_json(&port.status())
+                    .map_err(|_| NativeConfigError::OutcomeUnknown)?;
+                if bridge {
+                    call.features().bridge_screening()?;
+                }
+                let deadline = result.screening_deadline.clone();
+                drop(result);
+                if bridge {
+                    media.bridge_screening();
+                    if let Some(deadline) = deadline {
+                        deadline.cancel();
+                    }
+                }
+                Ok(json)
+            }
+            .await;
+            Ok(outcome)
+        }))
+    }
     pub(crate) fn end_waiting(&self, expected: &NativeSipCall) -> Result<String, NativeSipError> {
         self.connected_feedback(expected, None)?;
         Ok(format!(
@@ -862,7 +1011,7 @@ impl NativeSipOperations {
                             && !result.unknown
                             && original.phase == SipHostCallPhase::Connected =>
                     {
-                        call.0.features.connected()
+                        owner.connected(&call, &mut result)
                     }
                     Ok(Ok(CallOutcome::Ended | CallOutcome::Connected))
                         if !result.ending && !result.unknown =>
@@ -921,7 +1070,7 @@ impl NativeSipOperations {
                             && !result.unknown
                             && original.phase == SipHostCallPhase::Connected =>
                     {
-                        call.0.features.connected()
+                        owner.connected(&call, &mut result)
                     }
                     Ok(Ok(CallOutcome::Ended | CallOutcome::Connected))
                         if !result.ending && !result.unknown =>
@@ -987,6 +1136,9 @@ impl NativeSipOperations {
         let call = expected.clone();
         // Revoke even if no observer polls the retained disposal operation.
         expected.0.result.lock().unwrap().ending = true;
+        if let Some(deadline) = &expected.0.result.lock().unwrap().screening_deadline {
+            deadline.cancel();
+        }
         self.0.host.hangup(&expected.0.original)?;
         expected.0.features.dispose();
         let operation = retained(async move {
@@ -1011,6 +1163,9 @@ impl NativeSipOperations {
         state.stopping = true;
         for call in state.calls.iter() {
             call.0.result.lock().unwrap().ending = true;
+            if let Some(deadline) = &call.0.result.lock().unwrap().screening_deadline {
+                deadline.cancel();
+            }
             let _ = self.0.host.hangup(&call.0.original);
             call.0.features.dispose();
         }
@@ -1030,5 +1185,14 @@ impl NativeSipOperations {
         });
         state.closing = Some(operation.clone());
         operation
+    }
+}
+fn native_audio_error(error: crate::media::SipMediaError) -> NativeSipError {
+    match error {
+        crate::media::SipMediaError::Closed => SipHostError::NotReady.into(),
+        crate::media::SipMediaError::Audio(crate::media::CallAudioError::InvalidRequest) => {
+            NativeConfigError::InvalidRequest.into()
+        }
+        _ => NativeConfigError::OutcomeUnknown.into(),
     }
 }

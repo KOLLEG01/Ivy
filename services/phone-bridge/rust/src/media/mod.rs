@@ -31,6 +31,7 @@ mod session;
 mod session_description;
 mod startup;
 mod transport;
+pub(crate) use session::ScreeningPreparationError;
 
 pub use audio_frame::RtpAudioFrames;
 pub use call_audio::{

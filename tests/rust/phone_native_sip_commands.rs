@@ -13,6 +13,8 @@ mod notifications;
 mod registration;
 #[path = "phone_native_requests.rs"]
 mod requests;
+#[path = "phone_native_screening.rs"]
+mod screening;
 #[path = "phone_native_status.rs"]
 mod status;
 use ivy_phone_bridge::{

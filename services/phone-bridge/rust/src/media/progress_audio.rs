@@ -360,6 +360,7 @@ impl Drop for Screening {
 pub struct ScreeningAudio {
     normal: CallAudioPort,
     state: Mutex<Screening>,
+    waiting_policy: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 impl ScreeningAudio {
     pub fn new(
@@ -379,6 +380,7 @@ impl ScreeningAudio {
             (usize::from(timeout) * 48000).saturating_sub(samples.len() * remaining) / remaining;
         Ok(Self {
             normal,
+            waiting_policy: OnceLock::new(),
             state: Mutex::new(Screening {
                 samples: Some(samples),
                 offset: 0,
@@ -389,6 +391,14 @@ impl ScreeningAudio {
                 waiting,
             }),
         })
+    }
+    pub(crate) fn follow_waiting(&self, policy: impl Fn() -> bool + Send + Sync + 'static) {
+        let _ = self.waiting_policy.set(Box::new(policy));
+    }
+    fn waiting(&self, state: &Screening) -> bool {
+        self.waiting_policy
+            .get()
+            .map_or(state.waiting, |policy| policy())
     }
     pub fn set_waiting(&self, waiting: bool) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -412,7 +422,7 @@ impl PcmAudioPort for ScreeningAudio {
             state(
                 context,
                 screen.generation,
-                screen.samples.is_some() && screen.waiting,
+                screen.samples.is_some() && self.waiting(&screen),
             )
         })
     }
@@ -423,14 +433,14 @@ impl PcmAudioPort for ScreeningAudio {
             let admitted = state(
                 context,
                 screen.generation,
-                screen.samples.is_some() && screen.waiting,
+                screen.samples.is_some() && self.waiting(&screen),
             );
             if !admitted.open || admitted.generation != generation {
                 return 0;
             }
             if screen.samples.is_none() {
                 capture(context, route, output);
-            } else if screen.waiting {
+            } else if self.waiting(&screen) {
                 for sample in output.iter_mut() {
                     if screen.remaining == 0 {
                         break;
@@ -462,7 +472,7 @@ impl PcmAudioPort for ScreeningAudio {
             if state(
                 context,
                 screen.generation,
-                screen.samples.is_some() && screen.waiting,
+                screen.samples.is_some() && self.waiting(&screen),
             )
             .generation
                 != generation
@@ -484,7 +494,7 @@ impl PcmSendPort for ScreeningAudio {
             if state(
                 context,
                 screen.generation,
-                screen.samples.is_some() && screen.waiting,
+                screen.samples.is_some() && self.waiting(&screen),
             ) != admitted
             {
                 return false;

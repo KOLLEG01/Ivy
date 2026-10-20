@@ -57,6 +57,10 @@ impl std::fmt::Display for SipMediaError {
 }
 impl std::error::Error for SipMediaError {}
 type Result<T> = std::result::Result<T, SipMediaError>;
+pub(crate) enum ScreeningPreparationError {
+    Media(SipMediaError),
+    Announcement(super::WavError),
+}
 
 /// Identity comes from the original call admission, not renegotiation. The
 /// native owner supplies its original source/sequence/timestamp/session ID once.
@@ -778,17 +782,46 @@ impl SipMediaSession {
         repeats: u8,
         waiting: bool,
     ) -> Result<()> {
+        self.install_screening(path, hash, timeout, repeats, waiting, None)
+            .map_err(|error| match error {
+                ScreeningPreparationError::Media(error) => error,
+                ScreeningPreparationError::Announcement(_) => SipMediaError::InvalidRequest,
+            })
+    }
+    pub(crate) fn prepare_screening_policy(
+        &self,
+        path: &Path,
+        hash: &str,
+        timeout: u16,
+        repeats: u8,
+        waiting: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> std::result::Result<(), ScreeningPreparationError> {
+        self.install_screening(path, hash, timeout, repeats, false, Some(Box::new(waiting)))
+    }
+    fn install_screening(
+        &self,
+        path: &Path,
+        hash: &str,
+        timeout: u16,
+        repeats: u8,
+        waiting: bool,
+        policy: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+    ) -> std::result::Result<(), ScreeningPreparationError> {
         let c = &self.handle.0;
         let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
         if c.closed.load(Ordering::Acquire) || s.screening.is_some() {
-            return Err(SipMediaError::Closed);
+            return Err(ScreeningPreparationError::Media(SipMediaError::Closed));
         }
         let screen = Arc::new(
             ScreeningAudio::new(c.audio.clone(), path, hash, timeout, repeats, waiting)
-                .map_err(|_| SipMediaError::InvalidRequest)?,
+                .map_err(ScreeningPreparationError::Announcement)?,
         );
+        if let Some(policy) = policy {
+            screen.follow_waiting(policy);
+        }
         c.receiver()
-            .change_send_audio(|| c.send.select(screen.clone()))?;
+            .change_send_audio(|| c.send.select(screen.clone()))
+            .map_err(|error| ScreeningPreparationError::Media(error.into()))?;
         s.screening = Some(screen);
         Ok(())
     }

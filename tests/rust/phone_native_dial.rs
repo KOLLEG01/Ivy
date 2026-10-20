@@ -251,6 +251,7 @@ pub(super) async fn outgoing(
     supplied_peer: Option<UdpSocket>,
     target: Option<&str>,
     failure_events: Option<Arc<super::notifications::FailureEvents>>,
+    screening: Option<super::screening::Scenario<'_>>,
 ) -> IvyJson {
     let peer = match supplied_peer {
         Some(peer) => peer,
@@ -282,6 +283,11 @@ pub(super) async fn outgoing(
         },
     );
     let original_call = owner.find(CALL).unwrap();
+    let mut screening_actions = if let Some(screening) = &screening {
+        Some(super::screening::prepare(&dispatcher, screening.settings, operation + 200).await)
+    } else {
+        None
+    };
     if let Some(events) = &failure_events {
         events.receipts.lock().unwrap().clear();
         *events.call.lock().unwrap() = Some(original_call.clone());
@@ -352,6 +358,18 @@ pub(super) async fn outgoing(
         .unwrap();
     let call = value(answer.outcome());
     let saved = answer.outcome().result_json().unwrap().to_owned();
+    if let (Some(screening), Some(actions)) = (&screening, &mut screening_actions) {
+        super::screening::connected(
+            &original_call,
+            &dispatcher,
+            &rtp,
+            scenario,
+            screening,
+            operation + 200,
+            actions,
+        )
+        .await;
+    }
     if scenario == "feedback_capacity" {
         media.request_close();
     }
@@ -429,20 +447,21 @@ pub(super) async fn outgoing(
             .unwrap(),
         );
     } else if scenario != "refused" {
-        let h = if !scenario.starts_with("media_failure") {
-            Some(
-                dispatcher
-                    .execute(command(
-                        "call.hangup",
-                        &selected,
-                        operation + 2,
-                        operation + 2,
-                    ))
-                    .await,
-            )
-        } else {
-            None
-        };
+        let h =
+            if !scenario.starts_with("media_failure") && !super::screening::ends_itself(scenario) {
+                Some(
+                    dispatcher
+                        .execute(command(
+                            "call.hangup",
+                            &selected,
+                            operation + 2,
+                            operation + 2,
+                        ))
+                        .await,
+                )
+            } else {
+                None
+            };
         assert!(
             h.as_ref()
                 .is_none_or(|h| h.outcome().error_code().is_none())
@@ -521,6 +540,34 @@ pub(super) async fn outgoing(
             .await;
         assert!(release.outcome().error_code().is_none());
     }
+    if let Some(actions) = &screening_actions {
+        let prepare = dispatcher
+            .execute(command(
+                "call.prepare",
+                &selected,
+                operation + 7,
+                operation + 7,
+            ))
+            .await;
+        assert!(prepare.outcome().error_code().is_none());
+        let replacement = owner.find(CALL).unwrap();
+        super::feedback::replay(&dispatcher, operation + 200, actions).await;
+        if scenario == "screening_retired" {
+            sleep(Duration::from_millis(1200)).await;
+        }
+        assert!(!replacement.observation().ending);
+        assert_eq!(replacement.features().observation().screening, "none");
+        assert!(!replacement.media().unwrap().observation().closed);
+        let release = dispatcher
+            .execute(command(
+                "call.release",
+                &selected,
+                operation + 8,
+                operation + 8,
+            ))
+            .await;
+        assert!(release.outcome().error_code().is_none());
+    }
     let mut result = IvyJson::object([
         ("call", call),
         ("hungup", hungup),
@@ -552,6 +599,13 @@ pub(super) async fn outgoing(
     }
     if let (Some(actions), IvyJson::Object(fields)) = (feedback_actions, &mut result) {
         fields.push(("feedbackActions".into(), IvyJson::Array(actions)));
+    }
+    if let (Some(actions), IvyJson::Object(fields)) = (screening_actions, &mut result) {
+        fields.push(("screeningActions".into(), IvyJson::Array(actions)));
+        fields.push((
+            "retiredPolicy".into(),
+            parse(&original_call.features().observation().json(), 65536).unwrap(),
+        ));
     }
     result
 }
@@ -608,6 +662,7 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
                     None,
                     None,
                     Some(events.clone()),
+                    None,
                 )
                 .await
             } else {
@@ -755,6 +810,7 @@ async fn native_telephone_uri_uses_only_the_configured_owned_proxy() {
             100,
             Some(peer),
             Some("tel:123"),
+            None,
             None,
         )
         .await;

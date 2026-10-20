@@ -15,7 +15,7 @@ using SIPSorcery.SIP;
 public static class PhoneNativeDialOracle {
     static SipTransportHost Host(NativeSipOperations owner)=>(SipTransportHost)typeof(NativeSipOperations).GetField("host",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(owner);
     static JsonElement Args(object value)=>JsonSerializer.SerializeToElement(value,NativeRpc.Json);
-    static async Task<object> FeedbackRow(NativeSipOperations owner,string method,object value) {
+    internal static async Task<object> FeedbackRow(NativeSipOperations owner,string method,object value) {
         var args=Args(value);object output;
         try { output=new{json=JsonSerializer.Serialize(await owner.InvokeAsync(method,args),NativeRpc.Json)}; }
         catch(Exception e) { output=new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"}; }
@@ -70,6 +70,12 @@ public static class PhoneNativeDialOracle {
         using(rtp)using(rtcp) {
             bool telephone=args.TryGetProperty("destination",out var target);
             string destination=telephone?target.GetString():$"sip:peer@{peer.Client.LocalEndPoint}";
+            List<object> screeningActions=null;
+            if(args.TryGetProperty("screeningSettings",out var screening)) {
+                screeningActions=new List<object>{await FeedbackRow(owner,"call.screening.prepare",new{callId=id,settings=screening})};
+                screeningActions.Add(await FeedbackRow(owner,"call.screening.prepare",new{callId=id,settings=screening}));
+                PhoneNativeScreeningOracle.Begin(id,scenario);
+            }
             await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
             var failureCallbacks=new List<object>();var originalCall=Host(owner).FindCall(id);originalCall.Media.MediaFailed+=()=>{failureCallbacks.Add(originalCall.Observation);throw new InvalidOperationException("Synthetic external failure listener");};
             var pending=owner.InvokeAsync("call.dial",Args(new{callId=id,destination,username=telephone?null:"fixture-user",password=telephone?null:"fixture-only",ringSeconds=5,waiting=scenario=="feedback_waiting"}));
@@ -81,6 +87,7 @@ public static class PhoneNativeDialOracle {
             var (ack,ackRemote)=await ReceiveDialog(peer);
             if(ack.Method!=SIPMethodsEnum.ACK)throw new Exception("Original ACK unavailable");
             object call=await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            if(screeningActions!=null)await PhoneNativeScreeningOracle.Connected(owner,id,scenario,rtp,screeningActions,args);
             if(scenario=="feedback_capacity")originalCall.Media.Close("owned_capacity_fixture");
             List<object> feedbackActions=scenario.StartsWith("feedback_")?await Feedback(owner,id,scenario=="feedback_capacity"):null;
             if(scenario=="media_failure_connected"){typeof(SipMediaSession).GetMethod("Fail",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(originalCall.Media,Array.Empty<object>());if(!originalCall.Media.Failed)throw new Exception("Original media failure unavailable");}
@@ -103,7 +110,7 @@ public static class PhoneNativeDialOracle {
                 while(Host(owner).FindCall(id).Observation.State=="connected"&&DateTime.UtcNow<until)await Task.Delay(1);
                 ended=Host(owner).FindCall(id).Observation;
             } else if(scenario!="refused") {
-                if(!scenario.StartsWith("media_failure"))await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
+                if(!scenario.StartsWith("media_failure")&&!PhoneNativeScreeningOracle.EndsItself(scenario))await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
                 var (bye,byeRemote)=await ReceiveDialog(peer);
                 if(bye.Method!=SIPMethodsEnum.BYE)throw new Exception("Original BYE unavailable");
                 Reply(peer,bye,byeRemote,200,"");
@@ -114,6 +121,11 @@ public static class PhoneNativeDialOracle {
                 feedbackActions.Add(await FeedbackRow(owner,"call.command.feedback",new{callId=id,commandSequence=3L,success=true}));
             }
             await owner.InvokeAsync("call.release",Args(new{callId=id}));
+            if(screeningActions!=null) {
+                if(scenario=="screening_retired")await Task.Delay(1200);
+                return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
+                    requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,failureCallbacks,screeningActions,retiredPolicy=originalCall.Features.Observation};
+            }
             if(feedbackActions!=null)return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
                 requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,failureCallbacks,feedbackActions};
             if(scenario=="remote_bye"||scenario.StartsWith("media_failure"))return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
@@ -151,7 +163,7 @@ public static class PhoneNativeDialOracle {
         return new{requests=rows,closed=true};
     }
     public static void Run() {
-        using var input=JsonDocument.Parse(Console.In.ReadToEnd());var owner=new NativeSipOperations(id=>new CallAudioPort(id,new AudioPermit()));
+        using var input=JsonDocument.Parse(Console.In.ReadToEnd());var owner=new NativeSipOperations(PhoneNativeScreeningOracle.Audio);
         var rows=new List<object>();
         try {foreach(var step in input.RootElement.EnumerateArray()) {
             try {string method=step.GetProperty("method").GetString();var args=step.GetProperty("params");

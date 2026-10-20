@@ -4,7 +4,12 @@ use ivy_phone_bridge::native_sip::NativeSipCall;
 fn feedback(sequence: &str, success: &str) -> String {
     format!(r#"{{"callId":"{CALL}","commandSequence":{sequence},"success":{success}}}"#)
 }
-async fn row(dispatcher: &NativeDispatcher, method: &str, params: &str, operation: u64) -> IvyJson {
+pub(super) async fn row(
+    dispatcher: &NativeDispatcher,
+    method: &str,
+    params: &str,
+    operation: u64,
+) -> IvyJson {
     let reply = dispatcher
         .execute(command(method, params, operation, operation))
         .await;
@@ -312,6 +317,7 @@ async fn native_connected_waiting_and_feedback_keep_original_receipts_after_repl
                     dispatcher.clone(),
                     &scenario,
                     1000 + 1000 * index as u64,
+                    None,
                     None,
                     None,
                     None,

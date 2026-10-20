@@ -3,6 +3,7 @@
 use crate::{
     call_features::CallAccessSettings,
     native_config::NativeMicroSettings,
+    native_media_settings::{NativeAudioSettings, NativeScreeningSettings},
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
     native_registration::registration_json,
     native_rpc::{NativeHandler, NativeInvocation, NativeOutcome, NativeRequest},
@@ -125,6 +126,54 @@ impl NativeSipCommands {
                         Err(_) => NativeOutcome::error("operation_outcome_unknown"),
                     },
                     Err(error) => failed(error.into()),
+                }
+            }));
+        }
+        if matches!(
+            request.method(),
+            "call.screening.prepare" | "call.screening.bridge" | "call.windows.connect"
+        ) {
+            if fields.len() != 2
+                || request.params().get("callId").is_none()
+                || request.params().get("settings").is_none()
+            {
+                return Err(SipHostError::InvalidRequest.into());
+            }
+            let call = selected
+                .and_then(|id| self.owner.find(&id))
+                .ok_or(SipHostError::NotReady)?;
+            let raw = crate::native_rpc::root_values(request.raw_params());
+            let index = fields
+                .iter()
+                .position(|(key, _)| key == &"settings".into())
+                .expect("exact settings");
+            let settings = request.params().get("settings").unwrap();
+            let owner = self.owner.clone();
+            if request.method() == "call.screening.prepare" {
+                let settings = NativeScreeningSettings::parse(settings, raw[index])?;
+                return Ok(Box::pin(async move {
+                    if let Err(error) = call.constructed().await {
+                        return failed(error.into());
+                    }
+                    match owner.prepare_screening(&call, settings) {
+                        Ok(snapshot) => NativeOutcome::result(snapshot),
+                        Err(error) => failed(error),
+                    }
+                }));
+            }
+            let settings = NativeAudioSettings::parse(settings, raw[index])?;
+            let bridge = request.method() == "call.screening.bridge";
+            return Ok(Box::pin(async move {
+                if let Err(error) = call.constructed().await {
+                    return failed(error.into());
+                }
+                match owner.connect_audio(&call, settings, bridge) {
+                    Ok(work) => match work.wait().await {
+                        Ok(Ok(snapshot)) => NativeOutcome::result(snapshot),
+                        Ok(Err(error)) => failed(error),
+                        Err(error) => failed(error.into()),
+                    },
+                    Err(error) => failed(error),
                 }
             }));
         }
@@ -332,6 +381,9 @@ impl NativeHandler for NativeSipCommands {
                 | "call.features"
                 | "call.waiting.end"
                 | "call.command.feedback"
+                | "call.screening.prepare"
+                | "call.screening.bridge"
+                | "call.windows.connect"
         ) {
             return self.remaining.invoke(request);
         }
