@@ -448,6 +448,16 @@ fn project_state(state: &IvyJson) -> IvyJson {
         .map(|key| (key, state.get(key).unwrap().clone())),
     )
 }
+fn assert_json(actual: &IvyJson, expected: &IvyJson, input: &IvyJson, step: &IvyJson) {
+    assert!(
+        actual == expected,
+        "{} {}\nactual: {}\nexpected: {}",
+        input.get("label").unwrap().as_str().unwrap(),
+        step.get("op").unwrap().as_str().unwrap(),
+        stringify(actual, 1_000_000).unwrap(),
+        stringify(expected, 1_000_000).unwrap()
+    );
+}
 struct DescriptionEvents {
     owner: std::sync::Weak<Mutex<Option<SipMediaSession>>>,
     callback: Option<IvyJson>,
@@ -559,21 +569,14 @@ async fn multi_media_rejection_and_reentrant_report_callbacks_match_original_ses
             .zip(expected.get("trace").unwrap().as_array().unwrap())
         {
             let (result, body) = perform_step(&m, step, peer, local);
-            assert_eq!(
-                result,
-                *expected.get("result").unwrap(),
-                "{input:?}: {step:?}"
-            );
-            assert_eq!(
-                body,
-                *expected.get("description").unwrap(),
-                "{input:?}: {step:?}"
-            );
+            assert_json(&result, expected.get("result").unwrap(), input, step);
+            assert_json(&body, expected.get("description").unwrap(), input, step);
             let state = full_shape(&m, peer);
-            assert_eq!(
-                state,
-                project_state(expected.get("state").unwrap()),
-                "{input:?}: {step:?}"
+            assert_json(
+                &state,
+                &project_state(expected.get("state").unwrap()),
+                input,
+                step,
             );
             let callbacks = IvyJson::Array(events.rows.lock().unwrap().clone());
             let want = IvyJson::Array(
@@ -599,7 +602,7 @@ async fn multi_media_rejection_and_reentrant_report_callbacks_match_original_ses
                     })
                     .collect(),
             );
-            assert_eq!(callbacks, want, "{input:?}: {step:?}");
+            assert_json(&callbacks, &want, input, step);
             rows.push(IvyJson::object([
                 ("state", state),
                 ("callbacks", callbacks),

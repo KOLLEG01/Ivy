@@ -172,12 +172,11 @@ impl Descriptions {
                 return Err(incompatible(next.track.kind));
             }
         }
-        let media_valid = if media_open {
-            self.negotiation
-                .negotiate_current(&applying.codecs, self.remote_sources.as_deref())?
-        } else {
-            true
-        };
+        let media_valid = self.negotiation.negotiate_current(
+            &applying.codecs,
+            self.remote_sources.as_deref(),
+            media_open,
+        )?;
         Ok(Advance::Complete { media_valid })
     }
     pub fn publish(&mut self, applying: Applying) {

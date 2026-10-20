@@ -298,7 +298,8 @@ impl AudioNegotiator {
                 .iter()
                 .filter(|m| m.kind == kind)
                 .nth(ordinal)
-                .and_then(|m| m.mid.clone()),
+                .map(|m| m.mid.clone())
+                .unwrap_or_else(|| Some(String::new())),
             None => Some(index.to_string()),
         }
     }
@@ -535,7 +536,18 @@ impl AudioNegotiator {
         &mut self,
         update: &DescriptionUpdate,
         sources: Option<&[u32]>,
+        media_open: bool,
     ) -> Result<bool, NegotiationError> {
+        // All SDK metadata is converted before its callback checks closure
+        // or constructs a codec. A later invalid clock still rejects the SDP.
+        for format in self.local.iter().filter(|f| !is_name(f, "telephone-event")) {
+            if format.clock_rate() <= 0 || format.channels() <= 0 {
+                return Err(NegotiationError::Endpoint);
+            }
+        }
+        if !media_open {
+            return Ok(true);
+        }
         let mut receive = Vec::new();
         for format in &self.local {
             if is_name(format, "telephone-event") {
@@ -628,7 +640,7 @@ impl AudioNegotiator {
                     return Err(incompatible(next.track.kind));
                 }
             }
-            self.negotiate_current(&update, sources.as_deref())
+            self.negotiate_current(&update, sources.as_deref(), true)
                 .map(|_| ())
         })();
         if result.is_ok() {

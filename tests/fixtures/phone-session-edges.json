@@ -516,5 +516,88 @@
         "op": "offer"
       }
     ]
+  },
+  {
+    "label": "later-invalid-clock-precedes-codec-failure",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 0 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:0 PCMU/16000\r\na=rtpmap:8 PCMA/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "callback-close-invalid-clock",
+    "callback": {
+      "op": "close"
+    },
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=inactive\r\na=rtpmap:8 PCMA/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-channel-0",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/8000/0\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-channel--1",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/8000/-1\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
+  },
+  {
+    "label": "static-channel-256",
+    "steps": [
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\n"
+      },
+      {
+        "op": "set",
+        "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio $PORT RTP/AVP 8\r\na=ssrc:111 cname:audio\r\na=rtpmap:8 PCMA/8000/256\r\n"
+      },
+      {
+        "op": "answer"
+      }
+    ]
   }
 ]
