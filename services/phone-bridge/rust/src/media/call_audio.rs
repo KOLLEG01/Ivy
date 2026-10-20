@@ -642,7 +642,7 @@ impl CallAudioPort {
                 }
             };
             let valid = !route.state().open
-                && route.status().get("state").and_then(IvyJson::as_str) == Some("suspended")
+                && route.status().get("state") == Some(&IvyJson::from("suspended"))
                 && original_capture();
             let adopted = {
                 let mut state = work.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -751,7 +751,7 @@ async fn prepare_core(
         {
             Err(CallAudioError::Cancelled)
         } else if route.state().open
-            || route.status().get("state").and_then(IvyJson::as_str) != Some("suspended")
+            || route.status().get("state") != Some(&IvyJson::from("suspended"))
         {
             Err(CallAudioError::NotReady)
         } else {
