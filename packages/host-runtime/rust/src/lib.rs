@@ -41,6 +41,7 @@ pub mod node_runtime;
 mod native_dispatch;
 pub mod native_catalog_compatibility;
 pub mod native_account;
+pub mod native_restore;
 pub mod package_archive;
 pub mod package_receive;
 pub mod package_validation;
