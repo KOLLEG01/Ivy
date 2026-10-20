@@ -85,7 +85,7 @@ test('completion dependencies resume after acceptance and reject closed cycles',
   assert.equal((await assessSteps(w.f.first.store, { ...blocked.value, nextSteps: [{ id: 'accepted', scope: 'Wait for acceptance.', requires: [{ kind: 'task', taskId: w.state().task.objectId, until: 'done' }] }] }, new Date().toISOString()))[0]!.ready, true);
 });
 
-for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a blocked task' : 'review'} for coordination, while ordinary agent comments stay quiet`, async t => {
+for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a blocked task' : 'review'} for a normal turn, while ordinary agent comments stay quiet`, async t => {
   const w = await nativeWorkflow(t); await w.running();
   await w.handoff();
   const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
@@ -110,6 +110,7 @@ for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a
   task = await w.f.first.store.read('task-board/task', task.pin.objectId);
   await send(true); assert.equal(task.value.workflowState, blocked ? 'waiting' : 'review');
   const next = await scheduler.task(task.pin.objectId); assert.ok(next?.run);
+  assert.equal((await w.f.first.store.read('task-board/task', task.pin.objectId)).value.workflowState, 'in_progress');
   const run = (await w.f.first.store.read('task-board/run', next.run)).value;
   assert.equal(run.originalRequest.action, 'continue');
   assert.equal(run.originalRequest.coordinationOnly, undefined);
@@ -119,6 +120,7 @@ for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a
   assert.doesNotMatch(JSON.stringify(prompt.request.params), /Please coordinate the next change/);
   w.adopt(next);
   await w.running();
+  assert.equal((await w.f.first.store.read('task-board/task', task.pin.objectId)).value.workflowState, 'in_progress');
   const update = randomUUID();
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId,
     expectedRevision: w.state().task.revision, commentId: update, body: 'Another directed coordination update.',

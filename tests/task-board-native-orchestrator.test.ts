@@ -23,10 +23,11 @@ async function fixture(t: TestContext) {
   f.w.nativeThread = (turns = [], status = { type: 'idle' }) =>
     ({ ...nativeThread(turns, status), cwd: f.w.planned.workspace.canonicalCwd });
   let outputItems: Wire.Json[] = [{ id: 'two', type: 'agentMessage', phase: 'final_answer', text: 'Second' }];
-  let turnError: Wire.Json = null, completedAt: number | null = null, startReplyStatus: string | null = null;
+  let turnError: Wire.Json = null, completedAt: number | null = null, startReplyStatus: string | null = null, rejectedStart: string | null = null;
   f.reply(frame => {
     if (readFailed && frame['method'] === 'thread/turns/list') return { error: { code: -32000, message: 'Temporary native read failure.' } };
     if (frame['method'] === 'turn/start') {
+      if (rejectedStart) return { error: { code: -32000, message: rejectedStart, data: { codexErrorInfo: 'serverOverloaded' } } };
       started = true; status = 'inProgress';
       if (startReplyStatus) return { result: { turn: f.w.turn(startReplyStatus) } };
     }
@@ -56,6 +57,7 @@ async function fixture(t: TestContext) {
   const first = new TaskBoardNativeOrchestrator(f.w.f.first), second = new TaskBoardNativeOrchestrator(f.w.f.second), runId = f.w.state().run.objectId;
   return { f, first, second, runId, status: (value: string) => { status = value; }, failRead: (value: boolean) => { readFailed = value; },
     startReply: (value: string) => { startReplyStatus = value; },
+    rejectStart: (value: string | null) => { rejectedStart = value; },
     archive: () => { archived = true; },
     largeResume: () => { largeResume = true; },
     outputs: (items: Wire.Json[]) => { outputItems = items; }, outputError: (code: number) => { outputError = code; },
@@ -111,6 +113,7 @@ test(`${sender} comments reach ${idle ? 'an idle' : 'a running'} agent without a
   const after = await engine.store.read('task-board/task', before.pin.objectId);
   const delivery = after.value.commentDeliveries.find(item => item.commentId === commentId)!;
   assert.equal(delivery.state, 'delivered', JSON.stringify({ wait: after.value.runtimeWait, diagnostics: runtime.diagnostics }));
+  assert.equal(after.value.workflowState, 'in_progress');
   assert.equal(boardScans, 0, 'Delivery must not enumerate unrelated tickets.');
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, starts + (idle ? 1 : 0));
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/steer').length, steers + (idle ? 0 : 1));
@@ -139,12 +142,40 @@ test('native capacity failures retry after one minute without treating assistant
   assert.equal(nativeRateLimitRetryAt({ status: 'completed', error: { message } }, '2026-10-12T13:02:58.000Z'), null);
   assert.equal(nativeRateLimitRetryAt({ status: 'failed', items: [{ type: 'agentMessage', text: message }] }, '2026-10-12T13:02:58.000Z'), null);
   assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: `Please handle ${message}` } }, '2026-10-12T13:02:58.000Z'), null);
+  assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: 'Retry later.', codexErrorInfo: 'rateLimitExceeded' } }, '2026-10-12T13:02:58.000Z'), '2026-10-12T13:03:58.000Z');
+  for (const httpStatusCode of [401, 403, 408, 429, 503]) {
+    assert.equal(nativeRateLimitRetryAt({ status: 'failed', error: { message: 'Connection failed.', codexErrorInfo: { httpConnectionFailed: { httpStatusCode } } } },
+      '2026-10-12T13:02:58.000Z'), httpStatusCode === 401 || httpStatusCode === 403 ? null : '2026-10-12T13:03:58.000Z');
+  }
+});
+
+test('a conclusively rejected turn start retries in the same context after capacity recovers', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  f.rejectStart('Selected model is at capacity. Please try a different model.');
+  await f.first.drain(f.runId);
+  const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
+  assert.equal(run.value.phase, 'failed'); assert.equal(run.value.turnId, null);
+  assert.equal(task.value.claim, null); assert.ok(task.value.runtimeWait?.retryAt);
+  assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(task.value.runtimeWait!.retryAt!) + 1 });
+  f.rejectStart(null);
+  const retry = await new TaskBoardScheduler(engine).task(task.pin.objectId);
+  assert.ok(retry?.run); await f.second.drain(retry.run.objectId);
+  const after = await engine.store.read('task-board/task', task.pin.objectId);
+  assert.equal(after.value.claim?.phase, 'running'); assert.equal(after.value.workflowState, 'in_progress');
+  assert.deepEqual(after.value.primaryResourceRef, task.value.primaryResourceRef);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/start').length, 1);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 2);
 });
 
 for (const capacity of [false, true]) test(`${capacity ? 'capacity' : 'quota'} failures wait and automatically continue the same native context exactly once`, async t => {
   const f = await fixture(t), engine = f.f.w.f.first, reset = new Date(Date.now() + 120000).toISOString();
   await f.first.drain(f.runId);
   const message = capacity ? 'Selected model is at capacity. Please try a different model.' : `Claude five hour limit reached. Resets at ${reset}.`;
+  if (capacity) {
+    f.status('interrupted'); await f.first.step(f.runId);
+    assert.equal((await f.current()).value.externalOutcome.code, 'native_interrupted');
+  }
   f.error({ message }); f.status('failed'); f.outputs([]);
   await f.first.drain(f.runId);
   const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);

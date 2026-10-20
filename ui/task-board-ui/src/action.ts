@@ -38,7 +38,8 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
     const replay = saved.value.phase !== 'prepared';
     busy.value = true; error.value = null;
     try {
-      await checkCurrentIdentity();
+      // expectedWorkspace binds caller and owner in the mutation itself. A separate
+      // read here could time out before dispatch and leave a phantom unknown action.
       saved.value.phase = 'unknown'; saved.value.detail = 'Waiting for the original workflow operation.'; persist();
       let value = await client.request('tools.call', saved.value.call) as TaskBoard.ActionOutcome;
       // Archive returns Object metadata; its workflow receipt is retained under the same operation.
@@ -72,6 +73,7 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
   const reconcile = async () => {
     if (!saved.value || busy.value || !identityMatches()) return;
     busy.value = true; error.value = null;
+    let resumeOriginal = false;
     try {
       await checkCurrentIdentity();
       if (saved.value.call.qualifiedName === 'task-board.archive') {
@@ -86,7 +88,15 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
         }
         return;
       }
-      const operation = await readOperation();
+      let operation: TaskBoard.OperationReceipt;
+      try { operation = await readOperation(); }
+      catch (cause) {
+        if (!(cause instanceof IvyError) || cause.code !== 'not_found') throw cause;
+        // Absence is not proof of non-execution. Resubmit the exact retained call:
+        // TaskBoard deduplicates its caller/operation identity, including late arrivals.
+        resumeOriginal = true;
+        return;
+      }
       saved.value.phase = operation.phase === 'succeeded' ? 'succeeded' : operation.phase === 'failed' ? 'failed' : 'pending';
       saved.value.outcome = operation.outcome; saved.value.detail = operation.error?.message ?? 'Original operation: ' + operation.phase + '.'; persist();
     } catch (cause) {
@@ -98,10 +108,10 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
         try { persist(); } catch (problem) { error.value = String(problem); }
       } else error.value = cause instanceof Error ? cause.message : 'The original outcome is unavailable.';
     }
-    finally { busy.value = false; }
+    finally { busy.value = false; if (resumeOriginal) await execute(); }
   };
   // A lost HTTP reply must not leave this tab locked after the owner finishes.
-  // Observe the original identity; only an explicit resume replays its request.
+  // Observe the original identity and resume its exact request if it has no receipt.
   let reconciliation: ReturnType<typeof setTimeout> | undefined;
   watch([() => saved.value?.phase, busy], ([phase, running]) => {
     if (reconciliation) clearTimeout(reconciliation);

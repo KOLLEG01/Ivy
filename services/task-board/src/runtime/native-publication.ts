@@ -14,7 +14,7 @@ import { boundedOutputSummary, missingOutputSummary, TaskBoardTurnEvidence } fro
 import type { verifyNativeTranscript } from './full-turn-evidence.js';
 import { initialDelivery } from './deliveries.js';
 import { BoundToolClient } from '../../../../packages/sdk/src/client.js';
-import { nativeRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
+import { nativeErrorRetryAt, nativeRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
 import { executionMode, triggeredByComments } from './execution-mode.js';
 
 export const finishedRun = (run: TaskBoard.Run): boolean => ['completed', 'failed', 'cancelled'].includes(run.phase);
@@ -25,7 +25,11 @@ function readOutcome(run: TaskBoard.Run, status: string): Pick<TaskBoard.Run['ex
   const state = status === 'completed' ? 'succeeded' : status === 'failed' ? 'failed' : status === 'interrupted'
     ? run.externalOutcome.state === 'failed' ? 'failed' : run.cancellation ? 'cancelled' : 'failed' : 'active';
   const code = status === 'inProgress' || status === 'completed' ? null : 'native_' + status;
-  requireThat(!['succeeded', 'failed', 'cancelled'].includes(run.externalOutcome.state) || state === run.externalOutcome.state && code === run.externalOutcome.code,
+  // Codex can first expose interruption and then attach the actual terminal error.
+  // This refines the same failed turn; it must never reopen or cancel a finished turn.
+  const refinedFailure = !run.cancellation && run.externalOutcome.state === 'failed' &&
+    run.externalOutcome.code === 'native_interrupted' && state === 'failed' && code === 'native_failed';
+  requireThat(!['succeeded', 'failed', 'cancelled'].includes(run.externalOutcome.state) || state === run.externalOutcome.state && code === run.externalOutcome.code || refinedFailure,
     'task_board_native_state_changed', 'A native read cannot regress or reclassify an already known terminal outcome.');
   return { state, code };
 }
@@ -81,6 +85,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   let next: TaskBoard.Run = { ...run, calls: { ...run.calls }, updatedAt: at }, completion: Completion | null = null;
   let runtimeWait: TaskBoard.RuntimeWait | null = null, detail = '', kind: TaskBoard.History['kind'] = 'recovered';
   let steeredComments: string[] = [];
+  const retryAt = (turn: Record<string, Wire.Json>) => run.cancellation ? null : nativeRateLimitRetryAt(turn, at);
   const validateCall = (pin: TaskBoard.ObjectPin, _slot: keyof TaskBoard.Run['calls']) => store.read('task-board/native-call', pin);
   const observedCall = async (pin: TaskBoard.ObjectPin, slot: keyof TaskBoard.Run['calls']) => {
     const call = await validateCall(pin, slot);
@@ -93,7 +98,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     requireThat(nativeString(turn['id']) === next.turnId, 'task_board_turn_mismatch', 'A native snapshot cannot substitute another turn for the saved execution identity.');
     const status = nativeString(turn['status']);
     if (!['completed', 'failed', 'interrupted'].includes(status)) { requireThat(status === 'inProgress', 'task_board_native_state_unsupported', 'The native turn has an unsupported state.'); return null; }
-    return { state: status === 'completed' ? 'succeeded' : status === 'interrupted' && !!next.cancellation ? 'cancelled' : 'failed', summary: outputSummary(turn, status), evidence: proof, code: status === 'completed' ? null : 'native_' + status, retryAt: nativeRateLimitRetryAt(turn, at) };
+    return { state: status === 'completed' ? 'succeeded' : status === 'interrupted' && !!next.cancellation ? 'cancelled' : 'failed', summary: outputSummary(turn, status), evidence: proof, code: status === 'completed' ? null : 'native_' + status, retryAt: retryAt(turn) };
   };
   switch (request.change.kind) {
     case 'readSnapshot': {
@@ -113,7 +118,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       const handoff = runHandoff(task.value, request.run.objectId);
       const turn = verified.snapshot.turn;
       completion = { state: observedOutcome.state as Completion['state'], summary: verified.status === 'failed' && nativeString(nativeRecord(turn['error'])['message'])
-        ? outputSummary(turn, verified.status) : handoff?.body ?? verified.summary, evidence: change.snapshot, code: observedOutcome.code, retryAt: nativeRateLimitRetryAt(turn, at) };
+        ? outputSummary(turn, verified.status) : handoff?.body ?? verified.summary, evidence: change.snapshot, code: observedOutcome.code, retryAt: retryAt(turn) };
       break;
     }
     case 'transcript': {
@@ -126,7 +131,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       requireThat(['succeeded', 'failed', 'cancelled'].includes(observedOutcome.state), 'task_board_native_state_changed', 'A transcript must identify a terminal native outcome.');
       const turn = transcript.snapshot.turn;
       completion = { state: observedOutcome.state as Completion['state'], summary: transcript.status === 'failed' && nativeString(nativeRecord(turn['error'])['message'])
-        ? outputSummary(turn, transcript.status) : transcript.summary, evidence: change.evidence, code: observedOutcome.code, retryAt: nativeRateLimitRetryAt(turn, at) };
+        ? outputSummary(turn, transcript.status) : transcript.summary, evidence: change.evidence, code: observedOutcome.code, retryAt: retryAt(turn) };
       break;
     }
     case 'reattachCall': {
@@ -208,7 +213,9 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         if (change.slot === 'interrupt') {
           next.phase = 'cancel_requested'; next.externalOutcome = { ...run.externalOutcome, state: 'unknown', evidence: artifact, observedAt: at, code: observation.code ?? 'native_interrupt_failed' };
           runtimeWait = { reason: 'external_outcome', detail: 'Interruption failed; the native turn still requires terminal observation.', since: at };
-        } else completion = { state: 'failed', summary: 'Native ' + change.slot + ' operation failed.\n\n' + (observation.reply && 'error' in observation.reply ? observation.reply.error.message.slice(0, 16384) : observation.code ?? 'No native success was recorded.'), evidence: artifact, code: observation.code ?? 'native_operation_failed' };
+        } else completion = { state: 'failed', summary: 'Native ' + change.slot + ' operation failed.\n\n' + (observation.reply && 'error' in observation.reply ? observation.reply.error.message.slice(0, 16384) : observation.code ?? 'No native success was recorded.'), evidence: artifact, code: observation.code ?? 'native_operation_failed',
+          retryAt: !run.cancellation && observation.reply && 'error' in observation.reply
+            ? nativeErrorRetryAt(nativeRecord(observation.reply.error), at) : null };
       } else {
         requireThat(observation.reply && 'result' in observation.reply && observation.epoch, 'task_board_native_evidence_required', 'A successful native call needs its original reply and epoch.');
         const result = nativeRecord(observation.reply.result);
@@ -457,7 +464,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         else if (!answered && fits) finalTask = { ...finalTask, comments: [...finalTask.comments, comment], agentCommentCount: finalTask.agentCommentCount + 1 };
       }
     } else {
-      const workflowState = hasComments ? initial.workflowState : next.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(runtimeWait);
+      const workflowState = next.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(runtimeWait);
       const phase: TaskBoard.Claim['phase'] = runtimeWait?.reason === 'host' || runtimeWait?.reason === 'external_outcome' || next.phase === 'outcome_unknown' ? 'outcome_unknown' : next.phase === 'cancel_requested' ? 'cancel_requested' : next.phase === 'waiting_input' ? 'waiting_input' : next.phase === 'publishing_result' ? 'publishing_result' : next.phase === 'running' ? 'running' : 'starting';
       finalTask = { ...finalTask, claim: { ...task.value.claim!, phase, run: outcome.run }, primaryResourceRef: next.primaryResourceRef, lastRun: outcome.run, workflowState, runtimeWait: runtimeWait,
         commentDeliveries: next.phase === 'running'

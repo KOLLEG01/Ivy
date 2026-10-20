@@ -191,7 +191,7 @@ for (const width of [1440, 390]) test(`a retained capacity rejection does not lo
   assert.deepEqual(f.pageErrors, []);
 });
 
-test('definitive failure retries the retained message and unknown outcomes only observe the original identity', { timeout: 240000 }, async t => {
+test('definitive failure retries the retained message and missing receipts resume the exact original identity', { timeout: 240000 }, async t => {
   const f = await taskBoardFixture(t);
   const created = await f.invoke({ action: 'create', fields: fields('Retry conversation') }), id = created.task.objectId;
   await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent', purpose: 'question',
@@ -229,7 +229,10 @@ test('definitive failure retries the retained message and unknown outcomes only 
   await f.page.route('**/api/v1/rpc', route => {
     const body = route.request().postDataJSON();
     if (!isComment(body)) return route.continue();
-    original = body.params; calls++; return route.abort();
+    calls++;
+    if (!original) { original = body.params; return route.abort(); }
+    assert.deepEqual(body.params, original, 'Recovery must replay every original argument and operation identity.');
+    return route.continue();
   });
   await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeDisabled();
   await editor.fill('Unknown original outcome');
@@ -239,19 +242,13 @@ test('definitive failure retries the retained message and unknown outcomes only 
   await expect(unknown.getByRole('button', { name: 'Retry message', exact: true })).toBeVisible();
   await editor.fill('A draft waiting for the original outcome');
   await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeDisabled();
-  await expect(f.page.locator('[data-slot=task-comment-composer]').getByRole('button', { name: 'Check original message', exact: true })).toBeEnabled();
-  await unknown.getByRole('button', { name: 'Retry message', exact: true }).click();
-  assert.equal(calls, 1);
   await f.page.reload();
   await expect(unknown).toHaveCount(1);
-  await unknown.getByRole('button', { name: 'Retry message', exact: true }).click();
-  assert.equal(calls, 1);
-  assert.equal((await f.task(id)).comments.filter(comment => comment.commentId === original.arguments.commentId).length, 0);
-  await f.client.request('tools.call', original); // Resolve the exact lost request, rather than inventing another comment.
-  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect.poll(async () => (await f.task(id)).comments.filter(comment => comment.commentId === original.arguments.commentId).length,
+    { timeout: 20000 }).toBe(1);
   await expect(unknown.getByRole('button', { name: 'Retry message', exact: true })).toHaveCount(0);
   await expect(unknown).toHaveCount(1);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.deepEqual(f.pageErrors, []);
 });
 

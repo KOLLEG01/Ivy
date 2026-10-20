@@ -47,13 +47,25 @@ function localReset(message: string, failedAt: number): number | null {
 /** Only a failed native error can request a retry; assistant prose and usage warnings cannot. */
 export function nativeRateLimitRetryAt(turn: Record<string, Wire.Json>, observedAt: string): string | null {
   if (turn['status'] !== 'failed') return null;
-  const error = nativeRecord(turn['error']), message = nativeString(error['message']);
+  const error = nativeRecord(turn['error']);
   const observed = Date.parse(observedAt), completed = turn['completedAt'];
   const failedAt = typeof completed === 'number' && Number.isFinite(completed) && completed * 1000 <= observed
     ? completed * 1000 : observed;
-  if (error['codexErrorInfo'] === 'serverOverloaded' || /^Selected model is at capacity(?:[.!]|$)/i.test(message))
+  return nativeErrorRetryAt(error, new Date(failedAt).toISOString());
+}
+
+/** A conclusive native failure may retry; unknown dispatch outcomes still require reconciliation. */
+export function nativeErrorRetryAt(error: Record<string, Wire.Json>, observedAt: string): string | null {
+  const failedAt = Date.parse(observedAt), message = nativeString(error['message']);
+  const info = error['codexErrorInfo'] ?? nativeRecord(error['data'])['codexErrorInfo'];
+  const kind = typeof info === 'string' ? info : Object.keys(nativeRecord(info))[0];
+  const httpStatus = kind ? nativeRecord(nativeRecord(info)[kind])['httpStatusCode'] : null;
+  const connectionFailure = ['httpConnectionFailed', 'responseStreamConnectionFailed', 'responseTooManyFailedAttempts'].includes(kind ?? '') &&
+    (httpStatus == null || typeof httpStatus === 'number' && ([408, 425, 429].includes(httpStatus) || httpStatus >= 500));
+  if (connectionFailure || ['serverOverloaded', 'rateLimitExceeded', 'responseStreamDisconnected'].includes(kind ?? '') ||
+    /^Selected model is at capacity(?:[.!]|$)/i.test(message))
     return new Date(failedAt + capacityRetryDelayMs).toISOString();
-  if (error['codexErrorInfo'] !== 'usageLimitExceeded' &&
+  if (kind !== 'usageLimitExceeded' &&
     !/^(?:you['’]ve hit your (?:session|weekly|usage) limit\b|Claude [\w ]{1,64} limit reached\b|rate limit (?:reached|exceeded)\b)/i.test(message)) return null;
   const reset = localReset(message, failedAt);
   return new Date(Math.max(failedAt + resetGraceMs, reset === null || reset < failedAt

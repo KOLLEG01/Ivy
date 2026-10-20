@@ -656,7 +656,7 @@ const drop = (column: string) => {
   </Disclosure>
   </div>
   <Dialog v-model:open="selected" :modal="false"
-    ><DialogContent variant="workspace" :show-close-button="false"
+    ><DialogContent variant="workspace" class="pb-0" :show-close-button="false"
       @interact-outside.prevent @close-auto-focus.prevent
       ><DialogTitle class="sr-only">Task details</DialogTitle
       ><DialogDescription class="sr-only"

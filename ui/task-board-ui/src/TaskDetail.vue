@@ -1297,9 +1297,9 @@ const showArrived = () => {
                 v-else
                 ref="commentComposer"
                 data-slot="task-comment-composer"
-                class="ivy-chat-surface sticky bottom-0 z-10 space-y-1.5 py-3"
+                class="ivy-chat-surface sticky bottom-0 z-10 max-h-[60dvh] space-y-1.5 overflow-y-auto py-3"
               >
-                <ActionState v-if="!optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)" :action="action" @changed="refresh" />
+                <ActionState v-if="!uploading && !optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)" :action="action" @changed="refresh" />
                 <Alert v-if="optimistic.pending.value && optimistic.issue(optimistic.pending.value.request.commentId)" role="status">
                   <AlertTitle>{{ tr('Vorherige Nachricht noch nicht bestätigt', 'Previous message not confirmed') }}</AlertTitle>
                   <AlertDescription class="space-y-2">
@@ -1307,7 +1307,7 @@ const showArrived = () => {
                     <Button size="sm" variant="outline" :disabled="!available || !editable || !optimistic.canRetry(optimistic.pending.value.request.commentId)" @click="optimistic.retry(optimistic.pending.value.request.commentId)">{{ tr('Originalnachricht prüfen', 'Check original message') }}</Button>
                   </AlertDescription>
                 </Alert>
-                <Alert v-if="publicationPending && !optimistic.pending.value && !optimistic.isComment.value" role="status">
+                <Alert v-if="publicationPending && !uploading && !optimistic.pending.value && !optimistic.isComment.value" role="status">
                   <AlertTitle>{{ tr('Änderung wird gespeichert', 'Saving task update') }}</AlertTitle>
                   <AlertDescription>{{ tr('Ein vorheriger Vorgang wird noch abgeschlossen. Dein Text bleibt erhalten.', 'A previous action is still being completed. Your draft is retained.') }}</AlertDescription>
                 </Alert>
@@ -1321,7 +1321,7 @@ const showArrived = () => {
                     <Checkbox v-model="moveToTodo" :disabled="!writable" />
                     {{ tr('Nach Todo verschieben', 'Move to Todo') }}
                   </Label>
-                  <span v-if="uploading" role="status" class="text-muted-foreground">Uploading…</span>
+                  <span v-if="uploading" role="status" class="text-muted-foreground">{{ tr('Bilder und Dateien werden hochgeladen…', 'Uploading files…') }}</span>
                 </div>
                 <TaskQuestions :questions="pendingQuestions" :available="writable" @answer="answerQuestion" @answered="refresh" />
                 <MarkdownEditor

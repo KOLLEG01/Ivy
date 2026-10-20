@@ -71,6 +71,9 @@ for (const width of [1440, 390]) test(`comments accept multiple images and furth
   const f = await taskBoardFixture(t, { viewport: { width, height: 1000 } });
   const created = await f.invoke({ action: 'create', fields: fields('Multiple comment attachments') });
   const id = created.task.objectId;
+  await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent', purpose: 'question',
+    recipient: { kind: 'user' }, commentId: 'long-upload-question', body: 'Which hardware should be used? ' + 'A long question must leave space for the conversation and editor. '.repeat(60),
+    requests: [], responses: [], attachments: [], replyTo: null });
   await f.open('#/tasks?id=' + id + '&node=browser-task-board' + (width === 390 ? '&panel=sheet' : ''));
   const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
   await editor.fill('Comment evidence');
@@ -115,7 +118,14 @@ for (const width of [1440, 390]) test(`comments accept multiple images and furth
   await expect(f.page.getByRole('button', { name: 'Add to message', exact: true })).toBeDisabled();
   await editor.pressSequentially(' while files upload');
   await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
-  await expect(f.page.getByText('A previous action is still being completed. Your draft is retained.', { exact: true })).toBeVisible();
+  await expect(f.page.getByText('Uploading files…', { exact: true })).toBeVisible();
+  await expect(f.page.getByText('Upload task attachment', { exact: true })).toHaveCount(0);
+  await expect(f.page.getByText('A previous action is still being completed. Your draft is retained.', { exact: true })).toHaveCount(0);
+  const composer = f.page.locator('[data-slot=task-comment-composer]');
+  assert.ok((await composer.boundingBox()).height <= 1000 * .6 + 1);
+  const bounds = await composer.boundingBox();
+  assert.ok(bounds.y + bounds.height >= 999, 'The sticky composer must cover the bottom edge without exposing messages beneath it.');
+  await expect(f.page.locator('[data-slot=task-pending-questions]').getByRole('button', { name: 'Show question', exact: true })).toBeVisible();
   releaseUpload();
   await expect(editor.locator('img.ivy-embedded-image')).toHaveCount(2);
   await expect(f.page.getByRole('button', { name: 'Add to message', exact: true })).toBeEnabled();
@@ -137,8 +147,8 @@ for (const width of [1440, 390]) test(`comments accept multiple images and furth
   await editor.pressSequentially(' after all files');
   await expect(editor.locator('a').last()).toHaveText('third.txt');
   await f.page.getByRole('button', { name: 'Add comment', exact: true }).click();
-  await expect.poll(async () => (await f.task(id)).comments.length).toBe(1);
-  const saved = await f.task(id), comment = saved.comments[0];
+  await expect.poll(async () => (await f.task(id)).comments.length).toBe(2);
+  const saved = await f.task(id), comment = saved.comments.at(-1);
   assert.equal(saved.attachments.length, 3);
   assert.deepEqual(comment.attachments.map(attachment => attachment.filename), files.map(file => file.name));
   assert.match(comment.body, /while files upload/);

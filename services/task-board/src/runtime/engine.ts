@@ -982,7 +982,7 @@ export class TaskBoardEngine {
       };
       next = {
         ...next,
-        workflowState: triggeredByComments(request) ? previous.workflowState : "in_progress",
+        workflowState: "in_progress",
         runtimeWait: null,
         claim,
         attemptCount: claim.attempt,

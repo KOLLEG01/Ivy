@@ -44,6 +44,8 @@ UI requirements: [UI](UI.md).
   receipt confirms its comment even outside the loaded page and releases the composer.
   Confirmed writes also release publication gates from older UI snapshots, so a multi-file
   selection continues without waiting for the view to refresh.
+  An absent receipt resumes the exact saved request under its original identity; it never
+  creates a replacement message. The mutation validates its caller/workspace binding itself.
   Active retained headers reuse bounded in-memory summaries until normal storage backfill.
   Storage backfill also covers archived tickets without changing workflow state and retries
   active or conflicting tickets on later passes. Before readiness enables the new policy,
@@ -110,8 +112,10 @@ UI requirements: [UI](UI.md).
   steps do not create future dependency edges. Completion revalidates its next-step graph under
   the shared publication gate and preserves newer assignments instead of overwriting them.
   Confirmed native usage-limit failures defer agent work until the reported reset, with a one-minute
-  grace period. Without a usable reset time, retry after fifteen minutes. Confirmed model-capacity
-  failures retry after one minute. Continue with the same model and context; repeated temporary
+  grace period. Without a usable reset time, retry after fifteen minutes. Confirmed model-capacity,
+  rate and transient connection failures retry after one minute, including rejected turn starts.
+  A terminal interruption may refine to the same turn's actual failure. Cancellation and permanent
+  authorization errors never trigger automatic retries. Continue with the same model and context; repeated temporary
   failures defer again, including the original conversation comment batch. General failures and
   cancellation require intervention; an own user condition gates only its applicable scope,
   including questions posted as replies to another comment.
@@ -176,7 +180,8 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   depend on the size of the board or use a separate periodic polling loop.
   The agent reads the ticket and decides whether to reply, continue work or wait in that turn,
   including on blocked, manual and terminal tickets. There is no conversation-only mode.
-  A reply needs no handoff and preserves the state and result. A declared work handoff applies
+  Every active turn is In progress. A reply needs no handoff and restores the prior idle
+  state and result after completion. A declared work handoff applies
   its actual outcome after confirmed completion. Active assignment fields remain fixed.
   A new message re-arms an availability retry once; a failed attempt retains technical backoff.
   Continuing an existing conversation verifies its native identity, working directory and project

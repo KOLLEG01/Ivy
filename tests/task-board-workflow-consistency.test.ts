@@ -174,6 +174,16 @@ test('capacity failures retry the original conversation after backoff without re
   assert.deepEqual(run.originalRequest.commentIds, ['retry-message']);
 });
 
+test('cancellation prevents a later capacity failure from scheduling another turn', async t => {
+  const w = await nativeWorkflow(t); await w.running(); await w.cancel();
+  const failed = await snapshot(w, 'native-primary', 'native-turn', 'failed',
+    { message: 'Selected model is at capacity.', codexErrorInfo: 'serverOverloaded' });
+  assert.equal(failed.value.claim, null);
+  assert.equal(failed.value.runtimeWait?.retryAt, undefined);
+  assert.equal(failed.value.completionIssue?.retryAt, null);
+  assert.equal(await new TaskBoardScheduler(w.f.first).task(failed.pin.objectId), null);
+});
+
 test('execution slots cover existing Runs and are checked again at admission', async t => {
   const f = taskBoardFixture(t); f.settings.scheduler.maxConcurrentRuns = 2;
   for (let index = 0; index < 3; index++) {

@@ -12,7 +12,6 @@ import { finalOutputText, outputParams, pageCursor, TaskBoardTurnEvidence } from
 import { nativeArray, nativeRecord, nativeString } from "./native-intent.js";
 import type { NativeSlot } from "./native-intent.js";
 import { finishedRun, projectNativeState } from "./native-publication.js";
-import { triggeredByComments } from './execution-mode.js';
 import { claimedWorkflowState } from "./condition.js";
 import { mutation } from "./store.js";
 import type { Document } from "./store.js";
@@ -300,9 +299,7 @@ export class TaskBoardNativeOrchestrator {
         this.progress.observe(runId, run.value.taskId, projection.phase === 'running' && !run.value.cancellation,
           hashJson({ turn, status: thread['status'] }));
         const projectedWaiting = projection.runtimeWait;
-        const workflowState = triggeredByComments(run.value.originalRequest)
-          ? (run.value.executionContext?.workflowState ?? task.value.workflowState)
-          : projection.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(projection.runtimeWait);
+        const workflowState = projection.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(projection.runtimeWait);
         if (
           projection.phase === run.value.phase &&
           projection.externalOutcome.state ===

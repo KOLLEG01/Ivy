@@ -20,7 +20,6 @@ export function claimedWorkflowState(runtimeWait: Pick<TaskBoard.RuntimeWait, 'r
 export function executionCondition(task: ExecutionFacts): TaskBoard.ExecutionCondition {
   if (task.publication) return { state: 'publishing', detail: 'Publishing the current task update.' };
   if (task.claim) {
-    if (task.claim.mode === 'recovery') return { state: 'recovering', detail: 'Restoring the original completion intent.' };
     if (task.claim.phase === 'waiting_input') return { state: 'needs_user', detail: 'The native execution needs an owner-bound answer.' };
     if (['outcome_unknown', 'cancel_requested'].includes(task.claim.phase)) return { state: 'recovering', detail: 'Reconciling the original native execution.' };
     return { state: task.claim.phase === 'publishing_result' ? 'publishing' : ['claimed', 'run_created', 'starting'].includes(task.claim.phase) ? 'starting' : 'active',
