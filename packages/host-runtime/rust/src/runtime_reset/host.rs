@@ -11,6 +11,11 @@ use ivy_contracts::{core_schema::validate_host, json};
 use ivy_sdk::clock::Clock;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 mod phases;
+mod dispatch;
+pub use dispatch::{
+    CoordinatedReset, ResetHostPhase, ResetPhaseArguments, decode_scope_roots, encode_scope_roots,
+    reset_phase_arguments,
+};
 #[cfg(test)]
 #[path = "../../../../../tests/rust/host-reset-release-cases.rs"]
 mod release_cases;

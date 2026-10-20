@@ -1,0 +1,64 @@
+import assert from 'node:assert/strict';
+import {readFileSync,existsSync} from 'node:fs';
+import {mkdir,readFile,readdir,lstat,rm} from 'node:fs/promises';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {registerHooks,createRequire} from 'node:module';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+import {createHash} from 'node:crypto';
+const input=JSON.parse(readFileSync(0,'utf8'));
+registerHooks({resolve(specifier,context,next){if(specifier.startsWith('.')&&specifier.endsWith('.js')){const url=new URL(specifier.slice(0,-3)+'.ts',context.parentURL);if(existsSync(fileURLToPath(url)))return next(url.href,context);}return next(specifier,context);}});
+const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
+const {canonical,hashJson,digest}=await import('../../packages/contracts/src/canonical.ts');
+const {validateHost}=await import('../../packages/contracts/src/host-validation.ts');
+const {atomicJson,jsonFile,instanceConfig,inside}=await import('../../packages/host-runtime/src/config.ts');
+const {HostJournal,ExecutorLock}=await import('../../packages/host-runtime/src/journal.ts');
+const {runtimeResetMarker,hiveResetBootstrapMarker}=await import('../../packages/host-runtime/src/runtime-maintenance.ts');
+const {servicePaths,resolvedFuturePath}=await import('../../packages/host-runtime/src/layout.ts');
+const {stopContainer,startContainer}=await import('../../packages/host-runtime/src/docker.ts');
+const {defaultSystemdAdapter,systemdUnitName}=await import('../../packages/host-runtime/src/systemd.ts');
+const {installationIdentity}=await import('../../packages/host-runtime/src/linux-resources.ts');
+const {sourceBuildPlan}=await import('../../packages/host-runtime/src/source.ts');
+const {releaseManifest}=await import('../../packages/host-runtime/src/artifact.ts');
+const source=readFileSync(new URL('../../packages/host-runtime/src/runtime-reset.ts',import.meta.url),'utf8');
+const ts=createRequire(import.meta.url)(process.env.IVY_TEST_TYPESCRIPT_MODULE??'typescript'),ast=ts.createSourceFile('reset.ts',source,ts.ScriptTarget.ESNext,true);
+const declaration=name=>{const value=ast.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);assert(value,name);return value;};
+const host=declaration('runtimeResetHost'),body=host.body.statements;
+assert(body[0].getText(ast).startsWith('const bundles ='));assert(body[1].getText(ast).startsWith('const bootstrapContracts ='));assert(body[2].getText(ast).startsWith('let plan = await localRuntimeResetPlan'));
+assert(body[6].getText(ast).includes('return prepareLocal('));
+const prefix=body.slice(3,6).map(n=>n.getText(ast)).join('\n');
+const ownedHost=host.getText(ast).replace(/^export\s+/,'').replace(body[0].getText(ast),'').replace(body[1].getText(ast),'');
+const encode=ast.statements.find(n=>ts.isVariableStatement(n)&&n.declarationList.declarations.some(d=>d.name.getText(ast)==='encodeScopeRoots')).getText(ast);
+const invoke=declaration('runtimeReset').body.statements.flatMap(n=>ts.isVariableStatement(n)?[...n.declarationList.declarations]:[]).find(n=>n.name.getText(ast)==='invoke').initializer;
+const calls=[];const visit=node=>{if(ts.isCallExpression(node)&&node.expression.getText(ast)==='remote')calls.push(node);ts.forEachChild(node,visit);};visit(invoke);assert.equal(calls.length,1);
+const argv=calls[0].arguments[2].getText(ast);
+const names=['decodeScopeRoots','requireAdministrator','exists','sendStop','alive','waitStopped','proveLocksReleased','stopHost','savedRuntime','prepareLocal','completeLocal','confirmLocal','bootstrapLocal','releaseLocal','remote','collectScopeRoots','configuredScopeRootIds','treeHash','deployment','componentManifest','areaRoot','localRuntimeResetPlan'];
+const functions=names.map(name=>declaration(name).getText(ast).replace(/^export\s+/,''));
+const variables=ast.statements.filter(n=>ts.isVariableStatement(n)&&n.declarationList.declarations.some(d=>['resetDirectory','recordPath'].includes(d.name.getText(ast)))).map(n=>n.getText(ast));assert.equal(variables.length,2);
+const scope={IvyError,requireThat,canonical,hashJson,digest,validateHost,atomicJson,jsonFile,instanceConfig,inside,HostJournal,ExecutorLock,runtimeResetMarker,hiveResetBootstrapMarker,servicePaths,resolvedFuturePath,stopContainer,startContainer,defaultSystemdAdapter,systemdUnitName,installationIdentity,sourceBuildPlan,releaseManifest,mkdir,readFile,readdir,lstat,rm,execute:promisify(execFile),join:path.join,dirname:path.dirname,resolve:path.resolve,isAbsolute:path.isAbsolute,process,setTimeout};
+const compiled=ts.transpileModule([...variables,encode,...functions,ownedHost,`function admit(plan,phase,resetId,runtimeEpoch,scopeRoots,publisherCredentialDigest){${prefix}\nreturn plan;}`,`function args(phase,resetId,runtimeEpoch,scopeRoots,publisherCredentialDigest){return ${argv};}`,`async function coordinate(config,configPath,distributionRoot,host,phase,resetId,runtimeEpoch,scopeRoots,publisherCredentialDigest){return (${invoke.getText(ast)})(host,phase);}`,'return {encodeScopeRoots,decodeScopeRoots,admit,args,runtimeResetHost,coordinate};'].join('\n'),{compilerOptions:{target:ts.ScriptTarget.ESNext}}).outputText;
+const original=new Function(...Object.keys(scope),compiled)(...Object.values(scope));
+const wrap=async f=>{try{return{ok:true,value:await f()};}catch(error){return{ok:false,error:IvyError.from(error).toWire()};}};
+let result;
+if(input.kind==='pure'){
+ result=[];
+ for(const row of input.cases)result.push(await wrap(()=>{
+  if(row.kind==='encode')return original.encodeScopeRoots(row.ids);
+  if(row.kind==='decode')return original.decodeScopeRoots(row.value);
+  if(row.kind==='complexity')return original.decodeScopeRoots(Buffer.from(JSON.stringify(Array(400_000).fill('a'))).toString('base64url'));
+  if(row.kind==='admit')return original.admit(row.plan,row.phase,row.resetId??undefined,row.runtimeEpoch??undefined,row.scopeRoots??undefined,row.publisherDigest??undefined);
+  if(row.kind==='argv')return original.args(row.phase,row.resetId,row.runtimeEpoch,row.scopeRoots,row.publisherDigest);
+  assert.fail('Unknown pure boundary');
+ }));
+}else{
+ const root=path.resolve(input.fixtureRoot);assert(path.basename(root).startsWith('ivy-config-'));
+ // No preview/clear call is permitted at this post-owner-bundle boundary.
+ assert(['prepare','complete','bootstrap','release','confirm'].includes(input.phase));
+ const values=[input.config,input.configPath,input.distribution];
+ if(input.kind==='invoke')values.push(input.host);
+ values.push(input.phase,input.resetId??undefined,input.runtimeEpoch??undefined,input.scopeRoots??undefined,input.publisherDigest??undefined);
+ result=await wrap(()=>original[input.kind==='invoke'?'coordinate':'runtimeResetHost'](...values));
+}
+const hash=b=>'sha256:'+createHash('sha256').update(b).digest('hex'),samples=['a','A','ä','a\u0308','😀','中'],comparisons=samples.flatMap(a=>samples.map(b=>[a,b,Math.sign(a.localeCompare(b))]));
+process.stdout.write(JSON.stringify({result,sourceHash:hash(source),declarationHash:hash(functions.join('\n')+encode),prefixHash:hash(prefix),invokeHash:hash(invoke.getText(ast)),ownedHostHash:hash(ownedHost),excludedStatements:input.kind==='pure'?['Planner and phase bodies are outside the pure boundary.']:['runtimeResetHost bundles declaration','runtimeResetHost bootstrapContracts declaration'],comparisons,node:{executable:process.execPath,version:process.versions.node,libuv:process.versions.uv}}));
