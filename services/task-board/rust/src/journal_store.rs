@@ -31,6 +31,9 @@ use std::{
     task::{Context, Poll},
 };
 
+#[path = "durable_admission.rs"]
+pub mod durable_admission;
+
 /// Bind this to the accepted TaskBoard contract bundle. Retained public versions
 /// can be admitted as exact records, but are never rewritten during a read.
 pub trait Contracts {

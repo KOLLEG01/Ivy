@@ -37,6 +37,8 @@ mod comment_reads;
 mod condition_policy;
 #[path = "../fixtures/task-board-conversation.rs"]
 mod conversation_policy;
+#[path = "../fixtures/task-board-durable-admission.rs"]
+mod durable_admission;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()
