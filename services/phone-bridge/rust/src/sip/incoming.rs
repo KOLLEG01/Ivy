@@ -399,10 +399,11 @@ impl IncomingActor {
                         let local_ending=self.control.intent.lock().unwrap().ending;
                         self.established=local_ending||!delayed||sdp(&ack).is_some_and(|body|media.accept_answer(body));
                         if !self.established{self.end();}
-                        else if local_ending {
-                            // The original late ACK restores its SIP-active
-                            // observation after hangup. Audio authority stays
-                            // revoked, and BYE retirement still owns the fence.
+                        else if local_ending&&!delayed {
+                            // With an initial offer, the original late ACK
+                            // restores SIP-active observation after hangup.
+                            // The delayed answer stays ended. Audio authority
+                            // stays revoked, and BYE still owns the fence.
                             self.control.intent.lock().unwrap().late_connection=true;
                             self.current.active=true;self.current.outcome=Some(CallOutcome::Connected);self.publish();
                         }
