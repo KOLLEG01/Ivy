@@ -174,7 +174,12 @@ async fn call(node: &mut AuthNode, method: AuthMethod, args: Json) -> Json {
 fn original(mode: &str, root: &Path) -> Json {
     let result = Command::new(&node_fixture().0.executable)
         .current_dir(artifact())
-        .args(["tests/rust/fixtures/chat-auth-node.mjs", mode])
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/rust/fixtures/chat-auth-node.mjs",
+            mode,
+        ])
         .arg(root)
         .output()
         .unwrap();

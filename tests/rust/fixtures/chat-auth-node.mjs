@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
+import './chat-auth-node-loader.mjs';
 import {WhatsAppAuthStore,whatsappAuth,encode,decode} from '../../../services/chat-bridge/src/whatsapp/auth.ts';
-import {ExecutorLock} from '../../../packages/host-runtime/src/journal.ts';
 import {addTransactionCapability} from 'baileys';
 import {makeLibSignalRepository} from 'baileys/lib/Signal/libsignal.js';
 const [mode,root]=process.argv.slice(2), aliceJid='15555550101:1@s.whatsapp.net',bobJid='15555550102:1@s.whatsapp.net';
@@ -16,6 +16,7 @@ function peer(file) {
 }
 async function run() {
   if(mode==='lock') {
+    const {ExecutorLock}=await import('../../../packages/host-runtime/src/journal.ts');
     try{const lock=new ExecutorLock(join(root,'whatsapp-owner'));lock.close();return{acquired:true};}
     catch(error){assert.equal(error.code,'executor_already_running');return{acquired:false};}
   }
