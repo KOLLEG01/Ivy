@@ -753,7 +753,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         else {
                             panic!("Lifecycle observation absent");
                         };
-                        dialog.push(("secondBeforeFinal".into(), true.into()));
+                        dialog.insert(1, ("secondBeforeFinal".into(), true.into()));
                     }
                 }
                 if mixed {
