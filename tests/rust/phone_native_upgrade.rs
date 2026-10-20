@@ -1,5 +1,5 @@
 use super::*;
-use rsipstack::sip::{Header, Method, prelude::*};
+use rsipstack::sip::{Method, prelude::*};
 
 fn normalize(value: &mut IvyJson) {
     match value {
@@ -146,6 +146,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     rtp.local_addr().unwrap().port()
                 )
             };
+            let initial_sdp = sdp("PCMA", 8);
             super::answer::send(
                 &peer,
                 target,
@@ -153,7 +154,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 1,
                 "z9hG4bK-owned-upgrade",
                 "",
-                if delayed { "" } else { &sdp("PCMA", 8) },
+                if delayed { "" } else { &initial_sdp },
             )
             .await;
             assert_eq!(
@@ -217,7 +218,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 1,
                 "z9hG4bK-owned-upgrade-ack",
                 &tag,
-                if delayed { &sdp("PCMA", 8) } else { "" },
+                if delayed { &initial_sdp } else { "" },
             )
             .await;
             assert!(answered.await.unwrap().outcome().error_code().is_none());
@@ -271,6 +272,10 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 ]));
                 // The retained receipt/driver survives abandonment of its first IPC waiter.
                 pending.take().unwrap().abort();
+                let answer_sdp = sdp(
+                    if kind == "fallback" { "PCMA" } else { "PCMU" },
+                    if kind == "fallback" { 8 } else { 0 },
+                );
                 let response = crate::sip_host::response(
                     &invite,
                     if kind == "refused" { 488 } else { 200 },
@@ -278,14 +283,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         "Content-Type: application/sdp\r\nContact: <sip:caller@{}>\r\n",
                         peer.local_addr().unwrap()
                     ),
-                    if kind == "refused" {
-                        ""
-                    } else {
-                        &sdp(
-                            if kind == "fallback" { "PCMA" } else { "PCMU" },
-                            if kind == "fallback" { 8 } else { 0 },
-                        )
-                    },
+                    if kind == "refused" { "" } else { &answer_sdp },
                 );
                 let mut response = response;
                 response

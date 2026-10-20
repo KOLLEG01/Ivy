@@ -1,6 +1,6 @@
 //! An original dialog's outbound offer. IPC timeouts never cancel its driver.
-use super::{DelayedInviteMedia, InviteExchange, SipEndpoint, SipIoError, endpoint::DialogFlow};
-use rsipstack::sip::{Header, Request, prelude::*};
+use super::{InviteExchange, SipEndpoint, SipIoError, endpoint::DialogFlow};
+use rsipstack::sip::{Header, Request};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
