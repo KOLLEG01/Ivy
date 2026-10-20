@@ -78,7 +78,10 @@ impl HostedSipMedia for Media {
         })
     }
 }
-fn configuration(maximum: usize, registration: Option<SocketAddr>) -> SipHostConfiguration {
+pub(super) fn configuration(
+    maximum: usize,
+    registration: Option<SocketAddr>,
+) -> SipHostConfiguration {
     let registration = registration.map(|remote| {
         SipRegistrationPlan::new(
             SipRegistrationSettings::new(
@@ -118,7 +121,7 @@ async fn until(ready: impl Fn() -> bool) {
     .await
     .expect("host transition deadline");
 }
-async fn received(peer: &UdpSocket) -> (Request, SocketAddr) {
+pub(super) async fn received(peer: &UdpSocket) -> (Request, SocketAddr) {
     let mut bytes = [0; 8192];
     let (count, remote) = tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut bytes))
         .await
@@ -132,7 +135,7 @@ async fn received(peer: &UdpSocket) -> (Request, SocketAddr) {
         remote,
     )
 }
-fn response(request: &Request, code: u16, extra: &str, body: &str) -> Response {
+pub(super) fn response(request: &Request, code: u16, extra: &str, body: &str) -> Response {
     let via = request.top_via_header().unwrap();
     let from = request.from_header().unwrap().value();
     let to = request.to_header().unwrap().value();
@@ -140,12 +143,12 @@ fn response(request: &Request, code: u16, extra: &str, body: &str) -> Response {
     let cseq = request.cseq_header().unwrap().value();
     format!("SIP/2.0 {code} Fixture\r\nVia: {}\r\nFrom: {from}\r\nTo: {to};tag=remote\r\nCall-ID: {call}\r\nCSeq: {cseq}\r\n{extra}Content-Length: {}\r\n\r\n{body}",via.value(),body.len()).try_into().unwrap()
 }
-async fn send(peer: &UdpSocket, remote: SocketAddr, response: &Response) {
+pub(super) async fn send(peer: &UdpSocket, remote: SocketAddr, response: &Response) {
     peer.send_to(response.to_string().as_bytes(), remote)
         .await
         .unwrap();
 }
-fn invite(local: SocketAddr) -> Request {
+pub(super) fn invite(local: SocketAddr) -> Request {
     format!("INVITE sip:callee@call.example.test SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-host-fixture;rport\r\nFrom: <sip:caller@account.example.test>;tag=host-fixture\r\nTo: <sip:callee@call.example.test>\r\nCall-ID: host-call-fixture\r\nCSeq: 1 INVITE\r\nContact: <sip:caller@{local}>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n").try_into().unwrap()
 }
 async fn cancel_observer<F: Future>(future: F) {

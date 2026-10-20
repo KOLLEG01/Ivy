@@ -42,6 +42,7 @@ pub(super) struct SendState {
     pub frames: Option<RtpAudioFrames>,
     pub transmitted: Option<AudioFormat>,
     pub sent: u64,
+    pub rtp_enabled: bool,
     #[cfg(test)]
     pub hook: Option<SendHook>,
 }
@@ -64,6 +65,7 @@ impl Default for Sender {
                 frames: None,
                 transmitted: None,
                 sent: 0,
+                rtp_enabled: true,
                 #[cfg(test)]
                 hook: None,
             }),
@@ -258,14 +260,18 @@ fn pump(inner: &Arc<Inner>, audio: Arc<dyn PcmSendPort>) -> Result<(), ReceiveEr
                 // Lock order: transmit -> route authority -> reports -> socket.
                 // Keep every chunk and ALL bookkeeping inside both guards.
                 published = audio.with_send_state(admitted, &mut || {
-                    result = inner.send_frame(
-                        state.frames.as_mut().unwrap(),
-                        codec.format(),
-                        &packet.0,
-                        #[cfg(test)]
-                        hook.as_ref(),
-                        admitted,
-                    );
+                    result = if state.rtp_enabled {
+                        inner.send_frame(
+                            state.frames.as_mut().unwrap(),
+                            codec.format(),
+                            &packet.0,
+                            #[cfg(test)]
+                            hook.as_ref(),
+                            admitted,
+                        )
+                    } else {
+                        Ok(())
+                    };
                     if result.is_ok() {
                         if state.transmitted.as_ref() != Some(codec.format()) {
                             state.transmitted = Some(codec.format().clone());

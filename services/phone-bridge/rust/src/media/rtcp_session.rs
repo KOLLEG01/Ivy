@@ -92,9 +92,6 @@ impl RtcpSession {
         self.payload_sample_rate = value;
     }
     pub fn start(&mut self, now: impl FnOnce() -> Duration) -> Result<bool, MediaError> {
-        if self.closed {
-            return Err(MediaError::Revoked);
-        }
         if self.started.is_some() {
             return Ok(false);
         }
@@ -102,6 +99,11 @@ impl RtcpSession {
         // there does not make later packet activity restart the broken timer.
         self.started = Some(self.runtime.now()?.local_ticks());
         let interval = self.runtime.interval_ms()?;
+        // The original accepts late RTP/report bookkeeping after SDP has
+        // closed RTCP. Start still samples time/entropy; its closed timer is inert.
+        if self.closed {
+            return Ok(true);
+        }
         self.schedule.start(now(), interval)
     }
     pub fn received(&mut self, header: RtpHeader, octets: usize) -> Result<(), MediaError> {
@@ -199,13 +201,19 @@ impl RtcpSession {
         self.schedule.stop_timer();
     }
     pub fn close(&mut self) -> Result<Option<Vec<u8>>, MediaError> {
+        self.close_with_reason("phone_media_closed")
+    }
+    pub(super) fn close_with_reason(
+        &mut self,
+        reason: &str,
+    ) -> Result<Option<Vec<u8>>, MediaError> {
         if self.closed {
             return Ok(None);
         }
         self.closed = true;
         self.schedule.close();
         let mut report = self.report()?;
-        report.extend_from_slice(&self.builder.bye_packet("phone_media_closed"));
+        report.extend_from_slice(&self.builder.bye_packet(reason));
         Ok(Some(report))
     }
 }

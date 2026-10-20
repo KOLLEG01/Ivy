@@ -3,6 +3,7 @@
 use super::receive_analysis::ReceiveAnalysis;
 use super::rtcp_owner::{RtcpReceiveEffect, RtcpReceiveOwner};
 use super::sender::{self, Sender};
+use super::transport::MediaDestinations;
 use super::{
     AudioFormat, AudioNegotiation, CodecError, EvsLibrary, MediaCodec, MediaError, PcmAudioPort,
     PcmAudioState, PcmSendPort, RtcpCompound, RtcpReceiveObservation, RtcpRuntime, RtcpSession,
@@ -80,7 +81,7 @@ pub struct SipReceiveObservation {
     pub rtcp_session: Option<RtcpSessionObservation>,
 }
 struct State {
-    peer: Option<RtpPeer>,
+    destinations: MediaDestinations,
     formats: Vec<AudioFormat>,
     event_payloads: Vec<u8>,
     selected_event: u8,
@@ -230,9 +231,11 @@ impl Inner {
         }
         // Keep the peer boundary in the media owner as well as the socket:
         // a renegotiation may have replaced it after transport admission.
-        if !state.peer.is_some_and(|peer| {
-            peer.rtp().port() == source.port() && crate::sip::same_ip(peer.rtp(), source)
-        }) {
+        if !state
+            .destinations
+            .rtp
+            .is_some_and(|peer| peer.port() == source.port() && crate::sip::same_ip(peer, source))
+        {
             state.queue.reject_peer();
             return Ok(Vec::new());
         }
@@ -330,9 +333,10 @@ impl Inner {
     fn record_received(&self, source: SocketAddr, packet: RtpPacket<'_>) {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if self.closed.load(Ordering::Acquire)
-            || !state.peer.is_some_and(|p| {
-                p.rtp().port() == source.port() && crate::sip::same_ip(p.rtp(), source)
-            })
+            || !state
+                .destinations
+                .rtp
+                .is_some_and(|p| p.port() == source.port() && crate::sip::same_ip(p, source))
             || state.event_payloads.contains(&packet.header.payload_type)
             || !state
                 .formats
@@ -429,9 +433,8 @@ impl RtpDatagramSink for Sink {
             let notification = {
                 let state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
                 let accepted = !inner.closed.load(Ordering::Acquire)
-                    && state.peer.is_some_and(|peer| {
-                        peer.rtcp().port() == source.port()
-                            && crate::sip::same_ip(peer.rtcp(), source)
+                    && state.destinations.rtcp.is_some_and(|peer| {
+                        peer.port() == source.port() && crate::sip::same_ip(peer, source)
                     });
                 if !accepted {
                     return;
@@ -511,7 +514,7 @@ impl SipRtpReceiver {
         let queue = RtpReceiveQueue::new(reorder_ms)?;
         let inner = Arc::new(Inner {
             state: Mutex::new(State {
-                peer: None,
+                destinations: MediaDestinations::default(),
                 formats: Vec::new(),
                 event_payloads: Vec::new(),
                 selected_event: 101,
@@ -588,6 +591,19 @@ impl SipRtpReceiver {
     /// Apply only an accepted SDP negotiation, under the same receive lock as
     /// queue admission. Probe real codecs before committing the new peer/plan.
     pub fn configure(&self, plan: &AudioNegotiation, peer: RtpPeer) -> Result<(), ReceiveError> {
+        self.configure_description(
+            plan,
+            MediaDestinations {
+                rtp: Some(peer.rtp()),
+                rtcp: Some(peer.rtcp()),
+            },
+        )
+    }
+    pub(super) fn configure_description(
+        &self,
+        plan: &AudioNegotiation,
+        destinations: MediaDestinations,
+    ) -> Result<(), ReceiveError> {
         let inner = &self.handle.0;
         if inner.closed.load(Ordering::Acquire) {
             return Err(ReceiveError::Closed);
@@ -616,12 +632,12 @@ impl SipRtpReceiver {
             .transport
             .get()
             .unwrap()
-            .set_peer(Some(peer))
+            .set_destinations(destinations.rtp, destinations.rtcp)
             .map_err(ReceiveError::Transport)?;
         state.queue.clear();
         state.receiver = None;
         state.observed = None;
-        state.peer = Some(peer);
+        state.destinations = destinations;
         state.formats = plan.receive_formats().to_vec();
         state.event_payloads = plan.offered_event_payloads().to_vec();
         state.selected_event = plan.selected_event_payload();
@@ -629,6 +645,70 @@ impl SipRtpReceiver {
         sender.revision += 1;
         sender.format = Some(plan.sender().clone());
         sender.codec = Some(codec);
+        Ok(())
+    }
+    /// Endpoint/direction effects precede codec compatibility in the original
+    /// SDP stack, even for a rejected offer. Inactive closes RTCP against its
+    /// previous control destination; the original pair and counters survive.
+    pub(super) fn description_effects(
+        &self,
+        destinations: MediaDestinations,
+        enabled: bool,
+        inactive: bool,
+    ) -> Result<Option<Vec<u8>>, ReceiveError> {
+        let inner = &self.handle.0;
+        let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut sender = inner.sender.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
+        if sender.closed || reports.closed || inner.closed.load(Ordering::Acquire) {
+            return Err(ReceiveError::Closed);
+        }
+        let report = if inactive {
+            reports
+                .session
+                .as_mut()
+                .map(|s| s.close_with_reason(""))
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        if let Some(bytes) = &report {
+            let _ = inner.transport.get().unwrap().send_rtcp(bytes);
+            reports.admission.sent();
+            inner.report_pending.notify_one();
+        }
+        inner
+            .transport
+            .get()
+            .unwrap()
+            .set_destinations(destinations.rtp, destinations.rtcp)
+            .map_err(ReceiveError::Transport)?;
+        state.destinations = destinations;
+        sender.rtp_enabled = enabled;
+        Ok(report)
+    }
+    /// Only the session can switch from its waiting port to its original
+    /// screening port. Keep the sender/thread/socket and invalidate old work.
+    pub(super) fn change_send_audio(&self, change: impl FnOnce()) -> Result<(), ReceiveError> {
+        let inner = &self.handle.0;
+        let mut sender = inner.sender.state.lock().unwrap_or_else(|p| p.into_inner());
+        if sender.closed {
+            return Err(ReceiveError::Closed);
+        }
+        let audio: Arc<dyn PcmAudioPort> = sender
+            .audio
+            .as_ref()
+            .map(|a| a.clone() as Arc<dyn PcmAudioPort>)
+            .unwrap_or_else(|| inner.audio.clone());
+        let codec = sender
+            .format
+            .as_ref()
+            .map(|format| MediaCodec::new(format.clone(), audio, inner.evs.clone()))
+            .transpose()?;
+        change();
+        sender.revision += 1;
+        sender.codec = codec;
         Ok(())
     }
     /// Start once on the original call/audio owner. SDP configuration replaces
@@ -662,6 +742,16 @@ impl SipRtpReceiver {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         (state.transmitted.clone(), state.sent)
+    }
+    pub(super) fn selected_send_format(&self) -> Option<AudioFormat> {
+        self.handle
+            .0
+            .sender
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .format
+            .clone()
     }
     #[cfg(test)]
     pub(super) fn sender_state(&self) -> &Sender {

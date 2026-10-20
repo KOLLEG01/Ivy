@@ -2,6 +2,8 @@ use ivy_contracts::{
     IvyJson,
     json::{parse, stringify},
 };
+#[path = "phone_session.rs"]
+mod session;
 use ivy_phone_bridge::{
     dtmf::InputSource,
     media::{

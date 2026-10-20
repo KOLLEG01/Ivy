@@ -52,6 +52,7 @@ pub struct TelephoneEventFormat {
 
 /// All identifiers come from the original media owner, including the bound RTP
 /// port and its actual RTP source. No second transport is created for SDP.
+#[derive(Clone)]
 pub struct SdpIdentity {
     local: SocketAddr,
     session_id: u32,
@@ -110,6 +111,7 @@ impl SdpIdentity {
 
 /// Negotiated codec state is replaced only by an accepted description. Remote
 /// telephone-event declarations are retained separately from the selected one.
+#[derive(Clone)]
 pub struct AudioNegotiation {
     sender: AudioFormat,
     receive: Vec<AudioFormat>,
@@ -139,6 +141,7 @@ impl AudioNegotiation {
     }
 }
 
+#[derive(Clone)]
 pub struct AudioNegotiator {
     preference: Vec<Codec>,
     configured: Vec<SdpFormat>,
@@ -209,6 +212,9 @@ impl AudioNegotiator {
     }
     pub fn negotiated_event_payload(&self) -> u8 {
         self.event_payload
+    }
+    pub(super) fn retain_event_selection(&mut self, other: &Self) {
+        self.event_payload = other.event_payload;
     }
     pub fn local_event_formats(&self) -> &[TelephoneEventFormat] {
         &self.local_events
@@ -342,9 +348,6 @@ impl AudioNegotiator {
             return Err(NegotiationError::NoMatchingMediaType);
         };
         let track = &remote.media[index];
-        if track.port == 65_535 {
-            return Err(NegotiationError::Endpoint);
-        }
         let base = if kind == SdpType::Offer && !self.challenge {
             &self.configured
         } else {
@@ -363,6 +366,9 @@ impl AudioNegotiator {
         // The base stack updates this selection even for an incompatible offer.
         if let Some(format) = selected_event {
             self.event_payload = format.payload;
+        }
+        if track.port == 65_535 {
+            return Err(NegotiationError::Endpoint);
         }
         let mut agreed: Vec<_> = track
             .formats

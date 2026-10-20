@@ -31,6 +31,13 @@ pub struct RtpPeer {
     rtp: SocketAddr,
     rtcp: SocketAddr,
 }
+/// SDP can retain only one destination, including a rejected RTP port0.
+/// The validated public pair remains a convenience for already active peers.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct MediaDestinations {
+    pub rtp: Option<SocketAddr>,
+    pub rtcp: Option<SocketAddr>,
+}
 impl RtpPeer {
     pub fn new(rtp: SocketAddr, rtcp: SocketAddr) -> Result<Self, RtpTransportError> {
         if rtp.port() == 0 || rtcp.port() == 0 {
@@ -82,6 +89,8 @@ struct ReceiveSockets {
 struct State {
     sockets: Option<ReceiveSockets>,
     peer: Option<RtpPeer>,
+    rtp_destination: Option<SocketAddr>,
+    rtcp_destination: Option<SocketAddr>,
     closed: bool,
     failed: bool,
     counters: RtpTransportCounters,
@@ -177,6 +186,8 @@ impl RtpTransport {
                     rtcp: sockets.rtcp.clone(),
                 }),
                 peer: None,
+                rtp_destination: None,
+                rtcp_destination: None,
                 closed: false,
                 failed: false,
                 counters: Default::default(),
@@ -217,6 +228,13 @@ impl RtpTransport {
         }
     }
     pub fn set_peer(&self, peer: Option<RtpPeer>) -> Result<(), RtpTransportError> {
+        self.set_destinations(peer.map(RtpPeer::rtp), peer.map(RtpPeer::rtcp))
+    }
+    pub(super) fn set_destinations(
+        &self,
+        rtp: Option<SocketAddr>,
+        rtcp: Option<SocketAddr>,
+    ) -> Result<(), RtpTransportError> {
         let mut state = self
             .handle
             .inner
@@ -226,7 +244,9 @@ impl RtpTransport {
         if state.closed {
             return Err(RtpTransportError::Closed);
         }
-        state.peer = peer;
+        state.rtp_destination = rtp;
+        state.rtcp_destination = rtcp;
+        state.peer = rtp.zip(rtcp).and_then(|(a, b)| RtpPeer::new(a, b).ok());
         Ok(())
     }
     pub fn send_rtp(&self, header: RtpHeader, payload: &[u8]) -> Result<(), RtpTransportError> {
@@ -259,13 +279,14 @@ impl RtpTransport {
         if state.closed {
             return Err(RtpTransportError::Closed);
         }
-        let peer = state.peer.ok_or(RtpTransportError::PeerUnavailable)?;
-        let sockets = state.sockets.as_ref().ok_or(RtpTransportError::Closed)?;
-        let (socket, destination) = if control {
-            (&sockets.rtcp, peer.rtcp)
+        let destination = if control {
+            state.rtcp_destination
         } else {
-            (&sockets.rtp, peer.rtp)
-        };
+            state.rtp_destination
+        }
+        .ok_or(RtpTransportError::PeerUnavailable)?;
+        let sockets = state.sockets.as_ref().ok_or(RtpTransportError::Closed)?;
+        let socket = if control { &sockets.rtcp } else { &sockets.rtp };
         // A synchronous nonblocking send and close share this short lock. No
         // packet can be newly dispatched after request_close has returned.
         let sent = send_to(socket, datagram, destination).map_err(|error| {
@@ -361,9 +382,12 @@ async fn receive(
             } else {
                 state.counters.rtp_received += 1;
             }
-            let accepted = state.peer.is_some_and(|peer| {
-                same_endpoint(source, if control { peer.rtcp } else { peer.rtp })
-            });
+            let accepted = (if control {
+                state.rtcp_destination
+            } else {
+                state.rtp_destination
+            })
+            .is_some_and(|peer| same_endpoint(source, peer));
             if !accepted {
                 if control {
                     state.counters.foreign_rtcp += 1;

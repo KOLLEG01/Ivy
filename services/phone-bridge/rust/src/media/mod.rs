@@ -24,6 +24,8 @@ mod rtp;
 mod sdp;
 mod send_clock;
 mod sender;
+mod session;
+mod session_description;
 mod startup;
 mod transport;
 
@@ -54,6 +56,9 @@ pub use sdp::{
 };
 pub use send_clock::RtpSendClock;
 pub use sender::{AudioSendHealth, PcmSendPort};
+pub use session::{
+    SipMediaError, SipMediaIdentity, SipMediaObservation, SipMediaSession, SipMediaSettings,
+};
 pub use startup::RtpStartupGate;
 
 pub const SAMPLE_RATE: usize = 48_000;
