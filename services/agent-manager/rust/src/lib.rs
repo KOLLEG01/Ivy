@@ -4,6 +4,7 @@ pub mod browser_notices;
 pub mod capabilities;
 pub mod control;
 pub mod claude_mcp;
+pub mod claude;
 pub mod claude_launch;
 pub mod directories;
 pub mod environment;
