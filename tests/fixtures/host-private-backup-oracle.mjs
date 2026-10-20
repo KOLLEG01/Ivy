@@ -20,7 +20,22 @@ if(input.kind==='layout'){
   const root=path.resolve(input.fixtureRoot);
   if(!path.basename(root).startsWith('ivy-config-'))throw Error('Expected disposable fixture root');
   for(const p of [input.source,input.destination,input.configPath].filter(Boolean)){const local=path.relative(root,path.resolve(p));if(local==='..'||local.startsWith('..'+path.sep)||path.isAbsolute(local))throw Error('Backup fixture leaves disposable root');}
-  if(input.kind==='snapshot'){
+  if(input.kind==='nativePolicy'){
+    // Execute the original public policy with only disposable account inputs.
+    delete process.env.CODEX_HOME;
+    if(Object.hasOwn(input.environment??{},'CODEX_HOME'))process.env.CODEX_HOME=input.environment.CODEX_HOME;
+    const {nativeBackupExclusions,sharedNativeHomes}=await import('../../packages/host-runtime/src/native-backup-paths.ts');
+    const rows=[],words=new Set(input.names??[]);
+    for(const entry of input.cases){
+      const exclusions=await wrap(()=>nativeBackupExclusions(entry.config));
+      const sharedHomes=await wrap(()=>sharedNativeHomes(entry.config));
+      const ordered=await wrap(()=>({ephemeralNativePaths:nativeBackupExclusions(entry.config),sharedNativeHomes:sharedNativeHomes(entry.config)}));
+      rows.push({name:entry.name,exclusions,sharedHomes,ordered});
+      for(const instance of entry.config.instances??[])if(typeof instance?.instanceId==='string')words.add(instance.instanceId);
+      for(const value of [exclusions,sharedHomes])for(const row of value.value??[])if(typeof row.path==='string')words.add(row.path);
+    }
+    process.stdout.write(JSON.stringify({rows,localeOrder:[...words].sort((a,b)=>a.localeCompare(b))}));
+  }else if(input.kind==='snapshot'){
     // Exact private function body, with only its built-in imports supplied. No
     // policy rewrite or copied snapshot implementation is used by the oracle.
     const source=readFileSync(new URL('../../packages/host-runtime/src/private-backup.ts',import.meta.url),'utf8');

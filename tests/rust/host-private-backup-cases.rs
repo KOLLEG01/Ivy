@@ -611,6 +611,134 @@ struct PolicyGate {
     wake: std::sync::Condvar,
     calls: Mutex<Vec<&'static str>>,
 }
+
+fn native_policy_request(f: &ServiceFixture, cases: Vec<J>) -> J {
+    let mut input = request(f, "nativePolicy");
+    input.insert("style", if cfg!(windows) { "win32" } else { "posix" }.into());
+    input.insert("home", jp(&f.0.join("account")));
+    input.insert("cwd", jp(&std::env::current_dir().unwrap()));
+    input.insert("cases", J::Array(cases));
+    input
+}
+fn actual_native_policy(f: &ServiceFixture, compare: FileCompare) -> Arc<dyn NativeBackupPaths> {
+    Arc::new(ivy_host_runtime::native_backup_paths::NativeBackupPolicy::new(
+        StorageContext {
+            paths: Context::current().unwrap(),
+            account_home: node_path::from_native(&f.0.join("account")),
+            compare,
+        },
+        Default::default(),
+        node_path::from_native(&std::env::current_dir().unwrap()),
+    ))
+}
+fn native_agent(f: &ServiceFixture, id: &str, owned: bool) -> J {
+    let data = f.0.join("state/instances").join(id).join("data");
+    J::object([
+        ("instanceId", id.into()), ("serviceNodeId", format!("fixture.{id}").into()),
+        ("componentId", "agent-manager".into()), ("engine", "process".into()),
+        ("enabled", false.into()),
+        ("settings", J::object([
+            ("internalProjectRoot", jp(&f.0.join("projects").join(id))),
+            ("appServer", if owned { J::object([("mode", "owned-stdio".into())]) }
+                else { J::object([("mode", "external-proxy".into()), ("expectedCodexHome", jp(&f.0.join("shared-user")))]) }),
+            ("codexHome", jp(&if owned { data.join("home") } else { f.0.join("ignored-external-setting") })),
+        ])),
+    ])
+}
+fn policy_field_mut<'a>(value: &'a mut J, name: &str) -> &'a mut J {
+    let J::Object(fields) = value else { panic!("Expected policy fixture object") };
+    &mut fields.iter_mut().find(|(key, _)| *key == JsString::from(name)).unwrap().1
+}
+
+#[test]
+fn actual_native_policy_preserves_original_raw_branch_and_error_order() {
+    let f = ServiceFixture::new();
+    let base = host_configuration(&f);
+    let mut cases = Vec::new();
+    let mut add = |name: &str, instance: J, artifact: Option<J>| {
+        let mut c = base.clone(); c.insert("instances", J::Array(vec![instance]));
+        if let Some(value) = artifact { c.insert("artifactRoot", value); }
+        cases.push(J::object([("name", name.into()), ("config", c)]));
+    };
+    add("owned", native_agent(&f, "owned", true), None);
+    let mut external = native_agent(&f, "external", false);
+    policy_field_mut(&mut external, "settings").insert("nativeHome", false.into());
+    policy_field_mut(&mut external, "settings").insert("codexHome", "relative-ignored".into());
+    add("external-skips-explicit-home-errors", external.clone(), None);
+    policy_field_mut(policy_field_mut(&mut external, "settings"), "appServer").insert("expectedCodexHome", J::Null);
+    add("external-null-home-conflict", external, None);
+    for (name, home) in [("implicit-skips-bad-data", None), ("invalid-home-before-bad-data", Some("relative".into())), ("resolved-home-reaches-bad-data", Some(jp(&f.0.join("state/instances/raw/data/home"))))] {
+        let mut raw = native_agent(&f, "raw", true);
+        raw.insert("paths", J::object([("data", false.into())]));
+        if let Some(home) = home { policy_field_mut(&mut raw, "settings").insert("codexHome", home); }
+        else { policy_field_mut(&mut raw, "settings").remove("codexHome"); }
+        add(name, raw, None);
+    }
+    let mut overlap = native_agent(&f, "overlap", false);
+    policy_field_mut(policy_field_mut(&mut overlap, "settings"), "appServer").insert("expectedCodexHome", jp(&f.0.join("state/child")));
+    add("overlap-before-invalid-artifact", overlap, Some(false.into()));
+    add("disjoint-reaches-invalid-artifact", native_agent(&f, "outside", false), Some(false.into()));
+    let mut claude = native_agent(&f, "claude", true);
+    policy_field_mut(policy_field_mut(&mut claude, "settings"), "appServer").insert("mode", "claude-adapter".into());
+    add("claude-explicit-owned-home", claude, None);
+    drop(add);
+    let mut sorted = base.clone(); sorted.insert("instances", J::Array(["z", "A", "ä"].map(|id| native_agent(&f, id, true)).to_vec()));
+    cases.push(J::object([("name", "actual-default-locale-sort".into()), ("config", sorted)]));
+    let input = native_policy_request(&f, cases.clone()); let expected = oracle(&input);
+    let policy = actual_native_policy(&f, comparator(expected.required("localeOrder").unwrap().as_array().unwrap()));
+    for (entry, row) in cases.iter().zip(expected.required("rows").unwrap().as_array().unwrap()) {
+        let c = entry.required("config").unwrap();
+        let actual = J::object([
+            ("exclusions", wrapped(policy.exclusions(c).map(J::Array))),
+            ("sharedHomes", wrapped(policy.shared_homes(c).map(J::Array))),
+            ("ordered", wrapped(policy.exclusions(c).and_then(|e| policy.shared_homes(c).map(|s| J::object([("ephemeralNativePaths", J::Array(e)), ("sharedNativeHomes", J::Array(s))]))))),
+        ]);
+        let expected = J::object([("exclusions", row.required("exclusions").unwrap().clone()), ("sharedHomes", row.required("sharedHomes").unwrap().clone()), ("ordered", row.required("ordered").unwrap().clone())]);
+        retain(&entry.required("name").unwrap().as_str().unwrap(), c.clone(), actual.clone(), expected.clone());
+        assert_json_eq(&actual, &expected);
+    }
+}
+
+struct ObservedNativePolicy { actual: Arc<dyn NativeBackupPaths>, calls: Mutex<Vec<&'static str>> }
+impl NativeBackupPaths for ObservedNativePolicy {
+    fn exclusions(&self, config: &J) -> IvyResult<Vec<J>> { self.calls.lock().unwrap().push("exclusions"); self.actual.exclusions(config) }
+    fn shared_homes(&self, config: &J) -> IvyResult<Vec<J>> { self.calls.lock().unwrap().push("shared_homes"); self.actual.shared_homes(config) }
+}
+
+#[tokio::test]
+async fn actual_native_policy_drives_backup_manifest_cache_exclusion_and_restore_identity() {
+    let f = ServiceFixture::new(); let (_, b) = setup(&f).await;
+    let mut c = host_configuration(&f);
+    c.insert("executables", J::object([("node", jp(&b.node.executable))]));
+    c.insert("instances", J::Array(vec![native_agent(&f, "owned", true), native_agent(&f, "shared", false)]));
+    config::atomic_json(f.0.join("host.json"), c).await.unwrap();
+    let c = host_config::host_config(f.0.join("host.json")).await.unwrap();
+    let owned_home = f.0.join("state/instances/owned/data/home");
+    fs::create_dir_all(owned_home.join("tmp/arg0/session")).unwrap();
+    fs::write(owned_home.join("tmp/arg0/session/cache.txt"), b"ephemeral helper cache").unwrap();
+    fs::write(owned_home.join("tmp/keep.txt"), b"durable neighboring file").unwrap();
+    fs::create_dir_all(f.0.join("shared-user")).unwrap(); fs::write(f.0.join("shared-user/private.txt"), b"external reference only").unwrap();
+    let input = native_policy_request(&f, vec![J::object([("name", "manifest".into()), ("config", c.clone())])]);
+    let expected = oracle(&input); let row = &expected.required("rows").unwrap().as_array().unwrap()[0];
+    let locale = comparator(expected.required("localeOrder").unwrap().as_array().unwrap());
+    let observed = Arc::new(ObservedNativePolicy { actual: actual_native_policy(&f, locale.clone()), calls: Default::default() });
+    let policy: Arc<dyn NativeBackupPaths> = observed.clone();
+    let bindings = Arc::new(BackupBindings { compare: locale.clone(), native_paths: policy.clone(), node: b.node.clone(), distribution_root: b.distribution_root.clone(), clock: b.clock.clone() });
+    let result = private_backup::backup_host(f.0.join("host.json"), f.0.join("actual-policy-backup"), bindings).await.unwrap();
+    assert_eq!(*observed.calls.lock().unwrap(), vec!["exclusions", "shared_homes"]);
+    let manifest = config::json_file(f.0.join("actual-policy-backup/backup.json"), 12 * 1024 * 1024).await.unwrap();
+    let actual = wrapped(Ok(J::object([("ephemeralNativePaths", manifest.required("ephemeralNativePaths").unwrap().clone()), ("sharedNativeHomes", manifest.required("sharedNativeHomes").unwrap().clone())])));
+    retain("actual production policy manifest", c.clone(), actual.clone(), row.required("ordered").unwrap().clone()); assert_json_eq(&actual, row.required("ordered").unwrap());
+    assert!(!f.0.join("actual-policy-backup/state/instances/owned/data/home/tmp/arg0").exists());
+    assert_eq!(fs::read(f.0.join("actual-policy-backup/state/instances/owned/data/home/tmp/keep.txt")).unwrap(), b"durable neighboring file");
+    assert!(!f.0.join("actual-policy-backup/shared-user").exists());
+    assert_eq!(fs::read(f.0.join("shared-user/private.txt")).unwrap(), b"external reference only");
+    let restore = ivy_host_runtime::restore::RestoreBindings { storage: StorageContext { paths: Context::current().unwrap(), account_home: node_path::from_native(&f.0.join("account")), compare: locale }, environment: Default::default(), native_paths: policy.clone() };
+    assert!(Arc::ptr_eq(&restore.native_paths, &policy));
+    let shared = wrapped(restore.native_paths.shared_homes(&c).map(J::Array)); retain("actual policy through RestoreBindings", c.clone(), shared.clone(), row.required("sharedHomes").unwrap().clone()); assert_json_eq(&shared, row.required("sharedHomes").unwrap());
+    let mut verify = request(&f, "verify"); verify.insert("destination", jp(&f.0.join("actual-policy-backup"))); verify.insert("manifestHash", result.required("manifestHash").unwrap().clone());
+    compare("original reader verifies actual-policy backup", verify, Ok(manifest));
+}
 impl PolicyGate {
     fn release(&self) {
         *self.released.lock().unwrap() = true;

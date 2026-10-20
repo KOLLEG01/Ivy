@@ -92,6 +92,7 @@ pub mod bootstrap_auto_worker;
 pub mod bootstrap_maintenance;
 pub mod bootstrap_os;
 pub mod backup_files;
+pub mod native_backup_paths;
 pub mod native_backup_policy;
 pub mod private_backup;
 pub mod restore;
