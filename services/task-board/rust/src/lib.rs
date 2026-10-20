@@ -12,6 +12,7 @@ pub mod engine_service;
 pub mod service_bridge;
 pub mod generation;
 pub mod service;
+pub mod host_service;
 pub mod engine_actions;
 pub mod engine_validation;
 pub mod engine_publication;

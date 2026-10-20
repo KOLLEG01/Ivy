@@ -6,6 +6,8 @@ use std::{path::Path, process::Command};
 
 #[path = "../fixtures/task-board-frozen-contracts.rs"]
 mod frozen_contracts;
+#[path = "../fixtures/task-board-host-service.rs"]
+mod host_service;
 #[path = "../fixtures/task-board-inspector.rs"]
 mod inspector;
 #[path = "../fixtures/task-board-signals.rs"]

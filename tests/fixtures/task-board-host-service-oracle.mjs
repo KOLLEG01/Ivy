@@ -1,0 +1,51 @@
+import {registerHooks} from 'node:module';
+import {existsSync,readFileSync} from 'node:fs';
+import {mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import assert from 'node:assert/strict';
+registerHooks({resolve(s,c,n){if(s.startsWith('.')&&s.endsWith('.js')&&c.parentURL){const u=new URL(s.slice(0,-3)+'.ts',c.parentURL);if(existsSync(fileURLToPath(u)))return n(u.href,c);}return n(s,c);}});
+const {instanceConfig}=await import('../../packages/host-runtime/src/config.ts');
+const {HealthFile}=await import('../../packages/host-runtime/src/health.ts');
+const {validateTaskBoard}=await import('../../packages/contracts/src/task-board-validation.ts');
+const {hashJson}=await import('../../packages/contracts/src/canonical.ts');
+const {IvyError,requireThat}=await import('../../packages/contracts/src/errors.ts');
+const source=readFileSync('services/task-board/src/main.ts','utf8');
+const first=source.slice(source.indexOf('  const config = await instanceConfig(path);'),source.indexOf('  const settings = config.settings'));
+assert.ok(first.includes("config.componentId === 'task-board' && config.credential"));
+const admit=new Function('instanceConfig','validateTaskBoard','requireThat','return async function(path){'+first+'return config;}')(instanceConfig,validateTaskBoard,requireThat);
+const root=resolve(process.argv[2]),build={buildId:'sha256:'+'a'.repeat(64),version:'1.0.0'},rows=[];
+const effects=c=>({data:existsSync(c.dataRoot),work:existsSync(c.workRoot),logs:existsSync(c.logsRoot),health:existsSync(join(c.dataRoot,'health.json'))});
+const outcome=async work=>{try{return {ok:await work()};}catch(e){return {error:IvyError.from(e).code};}};
+for(const name of ['valid','wrong component','missing credential','invalid settings','build mismatch','overlapping roots','logs inside artifacts','missing build','UTF16 owner']){
+ const base=join(root,'case-'+rows.length),artifactRoot=join(base,'artifact');
+ const config={schemaVersion:1,hostId:'fixture-host',instanceId:'fixture-instance',serviceNodeId:'fixture-task-board',componentId:'task-board',publicBaseUrl:'http://127.0.0.1:1/',dataRoot:join(base,'data'),workRoot:join(base,'work'),logsRoot:join(base,'logs'),artifactRoot,...build,credential:'fixture-token',settings:{principalId:'fixture-principal',rootObjectId:null,scheduler:{enabled:false,intervalMs:1000,pageSize:50},phoneTarget:null}};
+ if(name==='wrong component')config.componentId='other';
+ if(name==='missing credential')delete config.credential;
+ if(name==='invalid settings')config.settings.scheduler.intervalMs=0;
+ if(name==='overlapping roots')config.dataRoot=join(artifactRoot,'data');
+ if(name==='logs inside artifacts')config.logsRoot=join(artifactRoot,'logs');
+ if(name==='UTF16 owner')config.settings.principalId='owner\ud800';
+ const savedBuild=name==='missing build'?null:{...build,...name==='build mismatch'?{version:'other'}:{}};
+ const path=join(base,'instance.json');await mkdir(join(artifactRoot,'dist'),{recursive:true});
+ if(savedBuild)await writeFile(join(artifactRoot,'dist/build-info.json'),JSON.stringify(savedBuild));
+ await writeFile(path,JSON.stringify(config));
+ const result=await outcome(async()=>hashJson(await admit(path)));
+ rows.push({name,path,config,build:savedBuild,result,effects:effects(config)});
+ await rm(base,{recursive:true,force:true});
+}
+const config=structuredClone(rows[0].config);config.dataRoot=join(root,'health-data');
+const health=new HealthFile(config),healthRows=[];
+await health.write(true,'x'.repeat(4095)+'\ud83d\ude00',7);
+const written=JSON.parse(await readFile(join(config.dataRoot,'health.json'),'utf8'));
+assert.equal(written.instanceId,config.instanceId);assert.equal(written.componentId,'task-board');assert.equal(written.buildId,build.buildId);assert.equal(written.pid,process.pid);assert.ok(written.bootId);assert.ok(written.startedAt);assert.ok(written.observedAt);assert.equal(written.launchId,'fixture-launch');
+const bootId=written.bootId;for(const key of ['pid','bootId','startedAt','observedAt'])delete written[key];
+healthRows.push({name:'missing control',result:await outcome(()=>health.control())});
+const control={schemaVersion:1,instanceId:config.instanceId,launchId:'fixture-launch',bootId,action:'drain',requestedAt:'2026-01-02T03:04:05.006Z'};
+for(const [name,change]of [['foreign instance',{instanceId:'other'}],['foreign boot',{bootId:'other'}],['foreign launch',{launchId:'other'}],['exact drain',{}],['exact shutdown',{action:'shutdown'}],['invalid control',{action:'other'}]]){
+ const value={...control,...change};await writeFile(join(config.dataRoot,'control.json'),JSON.stringify(value));
+ const result=await outcome(()=>health.control());if(result.ok?.bootId===bootId)result.ok.bootId='$BOOT';
+ healthRows.push({name,value:{...value,bootId:value.bootId===bootId?'$BOOT':value.bootId},result});
+}
+await rm(config.dataRoot,{recursive:true,force:true});
+process.stdout.write(JSON.stringify({rows,health:{config,written,rows:healthRows}}));
