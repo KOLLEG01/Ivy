@@ -1,5 +1,79 @@
 use super::*;
-use rsipstack::sip::{Method, prelude::*};
+use rsipstack::sip::{Method, Request, prelude::*};
+
+fn invite_row(invite: &Request, tag: &str) -> IvyJson {
+    let body = String::from_utf8(invite.body.clone()).unwrap();
+    IvyJson::object([
+        ("method", "INVITE".into()),
+        (
+            "sequence",
+            n(invite.cseq_header().unwrap().seq().unwrap() as usize),
+        ),
+        (
+            "sameCallId",
+            (invite.call_id_header().unwrap().value() == "owned-native-answer").into(),
+        ),
+        (
+            "sameTags",
+            (invite
+                .from_header()
+                .unwrap()
+                .tag()
+                .unwrap()
+                .unwrap()
+                .value()
+                == tag
+                && invite.to_header().unwrap().tag().unwrap().unwrap().value() == "caller-tag")
+                .into(),
+        ),
+        ("hasPcma", body.contains("PCMA/8000").into()),
+        ("hasPcmu", body.contains("PCMU/8000").into()),
+        ("hasSendrecv", body.contains("sendrecv").into()),
+    ])
+}
+fn ack_row(ack: &Request) -> IvyJson {
+    IvyJson::object([
+        ("method", "ACK".into()),
+        (
+            "sequence",
+            n(ack.cseq_header().unwrap().seq().unwrap() as usize),
+        ),
+        (
+            "sameCallId",
+            (ack.call_id_header().unwrap().value() == "owned-native-answer").into(),
+        ),
+    ])
+}
+async fn next(peer: &UdpSocket, method: Method) -> (Request, std::net::SocketAddr) {
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let (request, remote) = crate::sip_host::received(peer).await;
+            if request.method == method {
+                return (request, remote);
+            }
+            // Late finals can follow queued retransmissions of the same offer.
+            // Only the selected INVITE/ACK controls are compared, not retry timing.
+            assert_eq!(request.method, Method::Invite);
+            assert_ne!(method, Method::Invite);
+        }
+    })
+    .await
+    .expect("Original dialog control unavailable")
+}
+async fn end(dispatcher: &NativeDispatcher, selected: &str, peer: &UdpSocket) -> u32 {
+    assert!(
+        dispatcher
+            .execute(command("call.hangup", selected, 6, 6))
+            .await
+            .outcome()
+            .error_code()
+            .is_none()
+    );
+    let (bye, remote) = next(peer, Method::Bye).await;
+    let sequence = bye.cseq_header().unwrap().seq().unwrap();
+    crate::sip_host::send(peer, remote, &crate::sip_host::response(&bye, 200, "", "")).await;
+    sequence
+}
 
 fn normalize(value: &mut IvyJson) {
     match value {
@@ -103,7 +177,16 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 "disabled",
                 "unauthenticated",
                 "trusted",
+                "late",
+                "repeated",
+                "retransmitted",
+                "pending_hangup",
             ] {
+                let lifecycle =
+                    ["late", "repeated", "retransmitted", "pending_hangup"].contains(&kind);
+                if lifecycle && preferred != "PCMU" {
+                    continue;
+                }
                 let scenario = format!("{mode}_{preferred}_{kind}");
                 let delayed = mode == "delayed";
                 let (owner, factory, routes, config) = actual_owner(40000, 41998);
@@ -260,78 +343,106 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 let mut pending =
                     Some(tokio::spawn(async move { dispatch.execute(request).await }));
                 let mut requests = vec![];
+                let mut early = None;
+                let mut again = None;
+                let mut bye_sequence = None;
                 if !["disabled", "unauthenticated", "trusted"].contains(&kind) {
-                    let (invite, remote) = crate::sip_host::received(&peer).await;
+                    let (invite, remote) = next(&peer, Method::Invite).await;
                     assert_eq!(invite.method, Method::Invite);
-                    let body = String::from_utf8(invite.body.clone()).unwrap();
-                    requests.push(IvyJson::object([
-                        ("method", "INVITE".into()),
-                        (
-                            "sequence",
-                            n(invite.cseq_header().unwrap().seq().unwrap() as usize),
-                        ),
-                        (
-                            "sameCallId",
-                            (invite.call_id_header().unwrap().value() == "owned-native-answer")
-                                .into(),
-                        ),
-                        (
-                            "sameTags",
-                            (invite
-                                .from_header()
-                                .unwrap()
-                                .tag()
-                                .unwrap()
-                                .unwrap()
-                                .value()
-                                == tag
-                                && invite.to_header().unwrap().tag().unwrap().unwrap().value()
-                                    == "caller-tag")
-                                .into(),
-                        ),
-                        ("hasPcma", body.contains("PCMA/8000").into()),
-                        ("hasPcmu", body.contains("PCMU/8000").into()),
-                        ("hasSendrecv", body.contains("sendrecv").into()),
-                    ]));
+                    requests.push(invite_row(&invite, &tag));
                     // The retained receipt/driver survives abandonment of its first IPC waiter.
                     pending.take().unwrap().abort();
+                    if kind == "late" {
+                        early = Some(
+                            super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5)
+                                .await,
+                        );
+                    }
+                    if kind == "pending_hangup" {
+                        bye_sequence = Some(end(&dispatcher, &selected, &peer).await);
+                    }
                     let answer_sdp = sdp(
                         if kind == "fallback" { "PCMA" } else { "PCMU" },
                         if kind == "fallback" { 8 } else { 0 },
                     );
                     let response = crate::sip_host::response(
                         &invite,
-                        if kind == "refused" { 488 } else { 200 },
+                        if ["refused", "pending_hangup"].contains(&kind) {
+                            488
+                        } else {
+                            200
+                        },
                         &format!(
                             "Content-Type: application/sdp\r\nContact: <sip:caller@{}>\r\n",
                             peer.local_addr().unwrap()
                         ),
-                        if kind == "refused" { "" } else { &answer_sdp },
+                        if ["refused", "pending_hangup"].contains(&kind) {
+                            ""
+                        } else {
+                            &answer_sdp
+                        },
                     );
                     let mut response = response;
                     response
                         .headers
                         .unique_push(invite.to_header().unwrap().clone().into());
                     crate::sip_host::send(&peer, remote, &response).await;
-                    let (ack, _) = crate::sip_host::received(&peer).await;
+                    let (ack, _) = next(&peer, Method::Ack).await;
                     assert_eq!(ack.method, Method::Ack);
-                    requests.push(IvyJson::object([
-                        ("method", "ACK".into()),
-                        (
-                            "sequence",
-                            n(ack.cseq_header().unwrap().seq().unwrap() as usize),
-                        ),
-                        (
-                            "sameCallId",
-                            (ack.call_id_header().unwrap().value() == "owned-native-answer").into(),
-                        ),
-                    ]));
+                    requests.push(ack_row(&ack));
+                    if kind == "retransmitted" {
+                        crate::sip_host::send(&peer, remote, &response).await;
+                        let (repeated_ack, _) = next(&peer, Method::Ack).await;
+                        assert_eq!(ack.to_string(), repeated_ack.to_string());
+                        requests.push(ack_row(&repeated_ack));
+                    }
+                    if kind == "repeated" {
+                        // A fresh operation gets new protocol work on this same call.
+                        early = Some(
+                            super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5)
+                                .await,
+                        );
+                        let dispatch = dispatcher.clone();
+                        let params = selected.clone();
+                        let pending = tokio::spawn(async move {
+                            dispatch
+                                .execute(command("call.codec.upgrade", &params, 8, 8))
+                                .await
+                        });
+                        let (invite, remote) = next(&peer, Method::Invite).await;
+                        requests.push(invite_row(&invite, &tag));
+                        let accepted_sdp = sdp("PCMU", 0);
+                        let mut response = crate::sip_host::response(
+                            &invite,
+                            200,
+                            &format!(
+                                "Content-Type: application/sdp\r\nContact: <sip:caller@{}>\r\n",
+                                peer.local_addr().unwrap()
+                            ),
+                            &accepted_sdp,
+                        );
+                        response
+                            .headers
+                            .unique_push(invite.to_header().unwrap().clone().into());
+                        crate::sip_host::send(&peer, remote, &response).await;
+                        let (ack, _) = next(&peer, Method::Ack).await;
+                        requests.push(ack_row(&ack));
+                        pending.await.unwrap();
+                        again = Some(
+                            super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 8)
+                                .await,
+                        );
+                    }
                 }
                 if let Some(pending) = pending {
                     pending.await.unwrap();
                 }
-                let first =
-                    super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5).await;
+                let first = match early {
+                    Some(saved) => saved,
+                    None => {
+                        super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5).await
+                    }
+                };
                 if kind != "unauthenticated" {
                     let result = parse(
                         &first
@@ -344,10 +455,16 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         65536,
                     )
                     .unwrap();
-                    let sent = if kind == "upgraded" { "PCMU" } else { "PCMA" };
+                    let sent = if ["upgraded", "repeated", "retransmitted"].contains(&kind) {
+                        "PCMU"
+                    } else {
+                        "PCMA"
+                    };
                     let state = if ["disabled", "trusted"].contains(&kind) {
                         "skipped"
-                    } else if kind != "refused" && sent == preferred {
+                    } else if !["refused", "pending_hangup", "late"].contains(&kind)
+                        && sent == preferred
+                    {
                         "upgraded"
                     } else {
                         "fallback"
@@ -364,18 +481,23 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     );
                 }
                 let mut rows = vec![first.clone()];
-                assert!(
-                    dispatcher
-                        .execute(command("call.hangup", &selected, 6, 6))
-                        .await
-                        .outcome()
-                        .error_code()
-                        .is_none()
-                );
-                let (bye, remote) = crate::sip_host::received(&peer).await;
-                assert_eq!(bye.method, Method::Bye);
-                crate::sip_host::send(&peer, remote, &crate::sip_host::response(&bye, 200, "", ""))
+                if let Some(again) = again {
+                    rows.push(again);
+                }
+                if kind == "late" {
+                    until(|| {
+                        media
+                            .observation()
+                            .send_format
+                            .is_some_and(|f| f.name() == "PCMU")
+                    })
                     .await;
+                }
+                let send_codec = media.observation().send_format.map(|f| f.name().to_owned());
+                let bye_sequence = match bye_sequence {
+                    Some(sequence) => sequence,
+                    None => end(&dispatcher, &selected, &peer).await,
+                };
                 rows.push(
                     super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 7).await,
                 );
@@ -406,6 +528,22 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     ("sameMedia", true.into()),
                     ("release", IvyJson::object([("released", true.into())])),
                 ]);
+                if lifecycle {
+                    if let IvyJson::Object(fields) = &mut result {
+                        fields.push((
+                            "dialog".into(),
+                            IvyJson::object([
+                                ("firstBeforeFinal", (kind == "late").into()),
+                                ("hangupBeforeFinal", (kind == "pending_hangup").into()),
+                                (
+                                    "sendCodecBeforeEnd",
+                                    send_codec.map_or(IvyJson::Null, Into::into),
+                                ),
+                                ("byeSequence", n(bye_sequence as usize)),
+                            ]),
+                        ));
+                    }
+                }
                 trace(
                     &format!("native-upgrade-{scenario}"),
                     IvyJson::object([
