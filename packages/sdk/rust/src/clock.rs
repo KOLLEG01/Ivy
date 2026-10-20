@@ -1,3 +1,5 @@
+pub use crate::date_arithmetic::date_utc;
+pub use crate::date_format::date_to_iso;
 use crate::{IvyError, IvyResult};
 pub use crate::date_parse::{parse_date, parse_date_in_zone, parse_with_local_offset};
 use chrono::{Datelike, TimeZone as _, Timelike, Utc};
