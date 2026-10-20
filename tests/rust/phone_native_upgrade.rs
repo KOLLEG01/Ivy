@@ -1,5 +1,5 @@
 use super::*;
-use rsipstack::sip::{Method, Request, prelude::*};
+use rsipstack::sip::{Method, Request, Response, prelude::*};
 
 fn invite_row(invite: &Request, tag: &str) -> IvyJson {
     let body = String::from_utf8(invite.body.clone()).unwrap();
@@ -41,6 +41,33 @@ fn ack_row(ack: &Request) -> IvyJson {
         (
             "sameCallId",
             (ack.call_id_header().unwrap().value() == "owned-native-answer").into(),
+        ),
+    ])
+}
+fn final_row(response: &Response, rtp_port: u16) -> IvyJson {
+    IvyJson::object([
+        ("status", n(response.status_code.code() as usize)),
+        (
+            "sequence",
+            n(response.cseq_header().unwrap().seq().unwrap() as usize),
+        ),
+        (
+            "contentType",
+            response
+                .headers
+                .iter()
+                .find_map(|header| match header {
+                    rsipstack::sip::Header::ContentType(value) => Some(value.value().into()),
+                    _ => None,
+                })
+                .unwrap_or(IvyJson::Null),
+        ),
+        (
+            "body",
+            String::from_utf8(response.body.clone())
+                .unwrap()
+                .replace(&format!("m=audio {rtp_port}"), "m=audio owned-rtp")
+                .into(),
         ),
     ])
 }
@@ -186,8 +213,14 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 "repeat_downgrade",
                 "hangup_success",
                 "pending_release",
+                "concurrent_refused_first",
+                "concurrent_refused_second",
+                "concurrent_missing_type",
+                "concurrent_other_type",
+                "concurrent_malformed",
             ] {
-                let concurrent = ["concurrent", "concurrent_reverse"].contains(&kind);
+                let mixed = kind.starts_with("concurrent_") && kind != "concurrent_reverse";
+                let concurrent = ["concurrent", "concurrent_reverse"].contains(&kind) || mixed;
                 let repeated = ["repeated", "repeat_downgrade"].contains(&kind);
                 let early_end =
                     ["pending_hangup", "hangup_success", "pending_release"].contains(&kind);
@@ -202,8 +235,9 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     "hangup_success",
                     "pending_release",
                 ]
-                .contains(&kind);
-                if lifecycle && preferred != "PCMU" {
+                .contains(&kind)
+                    || mixed;
+                if lifecycle && preferred != "PCMU" && !mixed {
                     continue;
                 }
                 let scenario = format!("{mode}_{preferred}_{kind}");
@@ -362,6 +396,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 let mut pending =
                     Some(tokio::spawn(async move { dispatch.execute(request).await }));
                 let mut requests = vec![];
+                let mut finals = vec![];
                 let mut early = None;
                 let mut again = None;
                 let mut bye_sequence = None;
@@ -411,36 +446,79 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         );
                         release = Some(work);
                     }
-                    let answer_sdp = sdp(
-                        if kind == "fallback" { "PCMA" } else { "PCMU" },
-                        if kind == "fallback" { 8 } else { 0 },
-                    );
+                    let answer_sdp = if kind == "concurrent_malformed" {
+                        "invalid-sdp".to_owned()
+                    } else {
+                        sdp(
+                            if kind == "fallback" { "PCMA" } else { "PCMU" },
+                            if kind == "fallback" { 8 } else { 0 },
+                        )
+                    };
+                    let refused =
+                        ["refused", "pending_hangup", "concurrent_refused_first"].contains(&kind);
+                    let content_type = if refused || kind == "concurrent_missing_type" {
+                        ""
+                    } else if kind == "concurrent_other_type" {
+                        "Content-Type: application/octet-stream\r\n"
+                    } else {
+                        "Content-Type: application/sdp\r\n"
+                    };
                     let response = crate::sip_host::response(
                         &invite,
-                        if ["refused", "pending_hangup"].contains(&kind) {
-                            488
-                        } else {
-                            200
-                        },
+                        if refused { 488 } else { 200 },
                         &format!(
-                            "Content-Type: application/sdp\r\nContact: <sip:caller@{}>\r\n",
+                            "{content_type}Contact: <sip:caller@{}>\r\n",
                             peer.local_addr().unwrap()
                         ),
-                        if ["refused", "pending_hangup"].contains(&kind) {
-                            ""
-                        } else {
-                            &answer_sdp
-                        },
+                        if refused { "" } else { &answer_sdp },
                     );
                     let mut response = response;
                     response
                         .headers
                         .unique_push(invite.to_header().unwrap().clone().into());
+                    if mixed {
+                        finals.push(final_row(&response, rtp.local_addr().unwrap().port()));
+                    }
                     crate::sip_host::send(&peer, remote, &response).await;
                     let (ack, _) = next(&peer, Method::Ack).await;
                     assert_eq!(ack.method, Method::Ack);
                     requests.push(ack_row(&ack));
                     if concurrent {
+                        let other = other_invite.unwrap();
+                        let pcma = !mixed
+                            || ["concurrent_missing_type", "concurrent_other_type"].contains(&kind);
+                        let body = if kind == "concurrent_refused_second" {
+                            String::new()
+                        } else {
+                            sdp(if pcma { "PCMA" } else { "PCMU" }, if pcma { 8 } else { 0 })
+                        };
+                        let content_type = if kind == "concurrent_refused_second" {
+                            ""
+                        } else {
+                            "Content-Type: application/sdp\r\n"
+                        };
+                        let mut accepted = crate::sip_host::response(
+                            &other,
+                            if kind == "concurrent_refused_second" {
+                                488
+                            } else {
+                                200
+                            },
+                            &format!(
+                                "{content_type}Contact: <sip:caller@{}>\r\n",
+                                peer.local_addr().unwrap()
+                            ),
+                            &body,
+                        );
+                        accepted
+                            .headers
+                            .unique_push(other.to_header().unwrap().clone().into());
+                        if mixed {
+                            finals.push(final_row(&accepted, rtp.local_addr().unwrap().port()));
+                            crate::sip_host::send(&peer, remote, &accepted).await;
+                            let (ack, _) = next(&peer, Method::Ack).await;
+                            requests.push(ack_row(&ack));
+                        }
                         early = Some(
                             super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5)
                                 .await,
@@ -450,23 +528,11 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                             super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 8)
                                 .await,
                         );
-                        let other = other_invite.unwrap();
-                        let body = sdp("PCMA", 8);
-                        let mut response = crate::sip_host::response(
-                            &other,
-                            200,
-                            &format!(
-                                "Content-Type: application/sdp\r\nContact: <sip:caller@{}>\r\n",
-                                peer.local_addr().unwrap()
-                            ),
-                            &body,
-                        );
-                        response
-                            .headers
-                            .unique_push(other.to_header().unwrap().clone().into());
-                        crate::sip_host::send(&peer, remote, &response).await;
-                        let (ack, _) = next(&peer, Method::Ack).await;
-                        requests.push(ack_row(&ack));
+                        if !mixed {
+                            crate::sip_host::send(&peer, remote, &accepted).await;
+                            let (ack, _) = next(&peer, Method::Ack).await;
+                            requests.push(ack_row(&ack));
+                        }
                     }
                     if kind == "retransmitted" {
                         crate::sip_host::send(&peer, remote, &response).await;
@@ -537,15 +603,16 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         65536,
                     )
                     .unwrap();
-                    let sent = if [
-                        "upgraded",
-                        "repeated",
-                        "retransmitted",
-                        "concurrent",
-                        "concurrent_reverse",
-                        "repeat_downgrade",
-                    ]
-                    .contains(&kind)
+                    let sent = if mixed
+                        || [
+                            "upgraded",
+                            "repeated",
+                            "retransmitted",
+                            "concurrent",
+                            "concurrent_reverse",
+                            "repeat_downgrade",
+                        ]
+                        .contains(&kind)
                     {
                         "PCMU"
                     } else {
@@ -649,6 +716,11 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                             fields.push(("releaseBeforeFinal".into(), release_before_final.into()));
                         }
                         fields.push(("ackAfterFinal".into(), true.into()));
+                    }
+                }
+                if mixed {
+                    if let IvyJson::Object(fields) = &mut result {
+                        fields.push(("finals".into(), IvyJson::Array(finals)));
                     }
                 }
                 trace(

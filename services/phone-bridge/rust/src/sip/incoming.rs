@@ -9,10 +9,7 @@ use rsipstack::{
 };
 use std::{
     future::pending,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
@@ -151,7 +148,7 @@ impl IncomingInvite {
             commands: receiver,
             upgrades: upgrade_rx,
             outbound: JoinSet::new(),
-            renegotiating: Arc::new(AtomicBool::new(false)),
+            renegotiating: Arc::new(Mutex::new(false)),
             release_ready,
             local_sequence: 0,
             identity: identity.clone(),
@@ -330,7 +327,7 @@ struct IncomingActor {
     commands: mpsc::Receiver<Transaction>,
     upgrades: mpsc::UnboundedReceiver<()>,
     outbound: JoinSet<Result<(), super::SipIoError>>,
-    renegotiating: Arc<AtomicBool>,
+    renegotiating: Arc<Mutex<bool>>,
     release_ready: watch::Sender<Option<Result<(), CallError>>>,
     local_sequence: u32,
     identity: Option<Identity>,
@@ -704,7 +701,7 @@ impl IncomingActor {
                     invite.headers.unique_push(CSeq::new(format!("{} INVITE",self.local_sequence)).into());
                     invite.headers.unique_push(ContentType::new("application/sdp").into());
                     invite.headers.unique_push(ContentLength::from(invite.body.len() as u32).into());
-                    self.renegotiating.store(true,Ordering::Release);
+                    *self.renegotiating.lock().unwrap_or_else(|p|p.into_inner())=true;
                     let endpoint=self.endpoint.clone();let stopped=self.control.stopped.clone();let renegotiating=self.renegotiating.clone();
                     let flow=flow.clone();
                     self.outbound.spawn(async move {super::reinvite_client::run(endpoint,invite,&flow,media,stopped,renegotiating).await});
