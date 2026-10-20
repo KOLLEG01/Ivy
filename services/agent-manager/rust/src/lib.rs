@@ -36,6 +36,7 @@ pub mod native_dispatch;
 pub mod native_discovery;
 pub mod native_management;
 pub mod notifications;
+pub mod offline_import;
 pub mod notice_policy;
 pub mod project_policy;
 pub mod process_evidence;

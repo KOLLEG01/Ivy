@@ -1,4 +1,5 @@
 use ivy_agent_manager::{
+    offline_import::OfflineImport,
     skills_files::{SkillsComparator, skills_paths, tree_hash},
     skills_manager::{SkillsManager, SkillsSettings},
     skills_migration::import_skills,
@@ -386,17 +387,27 @@ async fn explicit_skills_import_retains_source_and_metadata_then_uses_current_ru
         let original = fs::read(&source).unwrap();
         let state = field(&prepared, "state");
         let authority = field(state, "authority").as_str().unwrap();
-        let result = import_skills(
-            text(&prepared, "source"),
-            text(&prepared, "target"),
-            authority.clone(),
-            comparator(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(result.unchanged, version == 2 && in_place);
-        assert_eq!(result.copied_skills, if version == 1 { 2 } else { 0 });
-        if let Some(backup) = result.source_backup {
+        let input = IvyJson::object([
+            ("kind", "skills".into()),
+            ("sourceState", field(&prepared, "source").clone()),
+            ("root", field(&prepared, "target").clone()),
+            ("hostId", "fixture".into()),
+            ("hiveUrl", "https://fixture.example".into()),
+        ]);
+        let result = OfflineImport::from_snapshot(&input)
+            .unwrap()
+            .run(comparator())
+            .await
+            .unwrap();
+        assert_eq!(
+            result.get("unchanged"),
+            Some(&IvyJson::Bool(version == 2 && in_place))
+        );
+        assert_eq!(
+            result.get("copiedSkills"),
+            Some(&IvyJson::Number(if version == 1 { 2.0 } else { 0.0 }))
+        );
+        if let Some(backup) = result.get("sourceBackup").and_then(IvyJson::as_js_string) {
             assert_eq!(
                 fs::read(node_path::filesystem_path(&backup)).unwrap(),
                 original
@@ -410,7 +421,7 @@ async fn explicit_skills_import_retains_source_and_metadata_then_uses_current_ru
             field(&prepared, "sourceDigest").as_str().unwrap()
         );
         let current = parse(
-            &fs::read_to_string(node_path::filesystem_path(&result.state_path)).unwrap(),
+            &fs::read_to_string(node_path::filesystem_path(&text(&result, "statePath"))).unwrap(),
             4 * 1024 * 1024,
         )
         .unwrap();

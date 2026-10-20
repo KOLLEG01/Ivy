@@ -2,6 +2,7 @@ use ivy_agent_manager::{
     mcp_files::apply_mcp,
     mcp_import::import_mcp,
     mcp_prepare::{PreparedMcp, prepare_mcp_import_snapshot},
+    offline_import::{McpImport, OfflineImport},
 };
 use ivy_contracts::{
     IvyError, IvyJson, JsString,
@@ -13,6 +14,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Arc,
 };
 
 struct Root(PathBuf);
@@ -115,7 +117,14 @@ async fn explicit_import_on_original_copies_retains_bytes_values_and_current_run
     {
         let home = root.0.join(index.to_string());
         let (config, old_state) = install(&home, row);
-        let imported = import_mcp(home.clone(), prepare(row)).await;
+        let mut input = request(&home, row);
+        input.insert("kind", "mcp".into());
+        let imported = OfflineImport::from_snapshot(&input)
+            .unwrap()
+            .run(Arc::new(|_, _| {
+                panic!("MCP import must not use Skills ordering")
+            }))
+            .await;
         if let Some(expected) = field(row, "expected").get("error") {
             let error = imported
                 .err()
@@ -130,12 +139,20 @@ async fn explicit_import_on_original_copies_retains_bytes_values_and_current_run
             continue;
         }
         let imported = imported.unwrap_or_else(|error| panic!("case {index}: {error:?}"));
-        assert!(imported.changed, "case {index}");
-        let backup = imported.source_backup.unwrap();
+        assert_eq!(
+            imported.get("changed"),
+            Some(&IvyJson::Bool(true)),
+            "case {index}"
+        );
+        let backup = ivy_host_runtime::node_path::filesystem_path(js(&imported, "sourceBackup"));
         assert_eq!(fs::read(backup.join("config.toml")).unwrap(), config);
         assert_eq!(fs::read(backup.join("state.json")).ok(), old_state);
         let current = parse(
-            &fs::read_to_string(&imported.state_path).unwrap(),
+            &fs::read_to_string(ivy_host_runtime::node_path::filesystem_path(js(
+                &imported,
+                "statePath",
+            )))
+            .unwrap(),
             4 * 1024 * 1024,
         )
         .unwrap();
@@ -154,7 +171,10 @@ async fn explicit_import_on_original_copies_retains_bytes_values_and_current_run
         }
         let expected = field(field(row, "expected"), "result");
         assert_eq!(
-            fs::read_to_string(&imported.target).unwrap(),
+            fs::read_to_string(ivy_host_runtime::node_path::filesystem_path(js(
+                &imported, "target"
+            )))
+            .unwrap(),
             text(expected, "text"),
             "converted case {index}"
         );
@@ -189,6 +209,82 @@ async fn explicit_import_on_original_copies_retains_bytes_values_and_current_run
     }
     assert_eq!(successes, 30);
     assert_eq!(conflicts, 74);
+}
+
+#[test]
+fn offline_import_preflight_rejects_mixed_or_incomplete_requests_before_touching_paths() {
+    let root = Root::new();
+    let path = IvyJson::String(ivy_host_runtime::node_path::from_native(
+        &root.0.join("absent"),
+    ));
+    let skills = IvyJson::object([
+        ("kind", "skills".into()),
+        ("sourceState", path.clone()),
+        ("root", path.clone()),
+        ("hostId", "fixture".into()),
+        ("hiveUrl", "https://fixture.example".into()),
+    ]);
+    assert!(OfflineImport::from_snapshot(&skills).is_ok());
+    for mode in [
+        "unknown-kind",
+        "null-kind",
+        "extra",
+        "cross-kind",
+        "relative-source",
+        "relative-root",
+        "null-host",
+        "long-host",
+        "long-url",
+    ] {
+        let mut input = skills.clone();
+        match mode {
+            "unknown-kind" => input.insert("kind", "other".into()),
+            "null-kind" => input.insert("kind", IvyJson::Null),
+            "extra" => input.insert("credential", "must-not-be-used".into()),
+            "cross-kind" => input.insert("kind", "mcp".into()),
+            "relative-source" => input.insert("sourceState", "relative".into()),
+            "relative-root" => input.insert("root", "relative".into()),
+            "null-host" => input.insert("hostId", IvyJson::Null),
+            "long-host" => input.insert("hostId", "😀".repeat(129).into()),
+            "long-url" => input.insert("hiveUrl", "x".repeat(2049).into()),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            OfflineImport::from_snapshot(&input).err().unwrap().code,
+            "invalid_arguments",
+            "{mode}"
+        );
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0, "{mode}");
+    }
+    for input in [
+        IvyJson::Null,
+        IvyJson::Array(vec![]),
+        IvyJson::object([("kind", "skills".into())]),
+    ] {
+        assert_eq!(
+            OfflineImport::from_snapshot(&input).err().unwrap().code,
+            "invalid_arguments"
+        );
+    }
+    // Legacy MCP input has no kind field, and preflight needs neither a home
+    // nor an owner lock. A tagged request must not silently enter that boundary.
+    let row = super::mcp_output_cases::original()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            matches!(
+                field(row, "document").get("enabled"),
+                Some(IvyJson::Bool(_))
+            ) && field(row, "expected").get("result").is_some()
+        })
+        .unwrap();
+    let mut mcp = request(&root.0.join("mcp"), row);
+    assert!(McpImport::from_snapshot(&mcp).is_ok());
+    mcp.insert("kind", "mcp".into());
+    assert!(McpImport::from_snapshot(&mcp).is_err());
+    assert!(OfflineImport::from_snapshot(&mcp).is_ok());
+    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 0);
 }
 
 fn invoke(request: &IvyJson, args: &[&str]) -> (i32, IvyJson, String) {
