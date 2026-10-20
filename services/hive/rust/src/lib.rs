@@ -34,6 +34,7 @@ pub mod query;
 pub mod registry;
 pub mod retention;
 pub mod rpc;
+pub mod runtime_reset;
 pub mod server_rpc;
 pub mod server_peers;
 pub mod server_lifecycle;

@@ -3,6 +3,8 @@
 
 #[path = "hive_storage_read.rs"]
 mod storage_read;
+#[path = "hive_reset_storage.rs"]
+mod reset_storage;
 #[path = "hive_store.rs"]
 mod store;
 

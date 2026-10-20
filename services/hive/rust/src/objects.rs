@@ -26,6 +26,9 @@ pub use retention::prune_revisions;
 #[path = "object_contracts.rs"]
 mod contracts;
 pub use contracts::{ContentData, DecodedContent, decode, get_contract, register, register_agent};
+#[path = "object_bootstrap.rs"]
+mod bootstrap;
+pub use bootstrap::{bootstrap_scope_roots, bootstrap_service_contracts};
 #[path = "object_write.rs"]
 mod writing;
 pub use writing::{
