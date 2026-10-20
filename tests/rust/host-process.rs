@@ -1,5 +1,8 @@
 use ivy_host_runtime::process::{self, Command, LaunchContext};
 use std::{collections::BTreeMap, ffi::OsString, io::Write, path::PathBuf, time::Duration};
+#[cfg(windows)]
+#[path = "host-windows-process-cases.rs"]
+mod windows_process_cases;
 
 // Exercise the private retained-handle failure paths through this selected target.
 #[cfg(windows)]
