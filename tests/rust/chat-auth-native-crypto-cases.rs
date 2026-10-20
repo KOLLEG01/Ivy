@@ -169,32 +169,46 @@ impl Peer {
             "Current and archived sessions survive persistence"
         );
         let ceiling = record.reserved_sender_chain_index();
+        // Component export conservatively burns reservations. Read the live
+        // chain first so the recovery check cannot pass through that projection.
+        let before_live = record
+            .session_state()
+            .unwrap()
+            .get_sender_chain_key()
+            .unwrap();
         let before = record.clone().into_components().unwrap();
         let mut encoded = Vec::new();
         record.serialize_into_for_store(&mut encoded, &self.sessions.incarnation);
+        let clean =
+            SessionRecord::deserialize_for_store(&encoded, &self.sessions.incarnation).unwrap();
+        let clean_live = clean
+            .session_state()
+            .unwrap()
+            .get_sender_chain_key()
+            .unwrap();
+        assert_eq!(
+            clean_live.index(),
+            before_live.index(),
+            "Clean reload preserves the active sender counter"
+        );
         assert!(
-            SessionRecord::deserialize_for_store(&encoded, &self.sessions.incarnation)
-                .unwrap()
-                .into_components()
-                .unwrap()
-                == before,
+            clean_live.key() == before_live.key(),
+            "Clean reload preserves the active sender key"
+        );
+        assert!(
+            clean.into_components().unwrap() == before,
             "Clean reload preserves every protocol component"
         );
 
         self.sessions.incarnation = *uuid::Uuid::new_v4().as_bytes();
         let recovered =
             SessionRecord::deserialize_for_store(checkpoint, &self.sessions.incarnation).unwrap();
-        let after = recovered.clone().into_components().unwrap();
-        let before_key = before
-            .current_session
-            .as_ref()
+        let after_live = recovered
+            .session_state()
             .unwrap()
-            .sender_chain
-            .as_ref()
-            .unwrap()
-            .chain_key
-            .as_ref()
+            .get_sender_chain_key()
             .unwrap();
+        let after = recovered.clone().into_components().unwrap();
         let after_key = after
             .current_session
             .as_ref()
@@ -205,8 +219,8 @@ impl Peer {
             .chain_key
             .as_ref()
             .unwrap();
-        let before_index = before_key.index.unwrap();
-        let after_index = after_key.index.unwrap();
+        let before_index = before_live.index();
+        let after_index = after_live.index();
         assert_eq!(
             after_index,
             before_index.max(ceiling),
@@ -214,7 +228,7 @@ impl Peer {
         );
         if after_index > before_index {
             assert!(
-                after_key.key != before_key.key,
+                after_live.key() != before_live.key(),
                 "Recovery advances the sender key"
             );
         }
@@ -238,6 +252,10 @@ impl Peer {
             ("senderIndexBefore", Json::Number(before_index as f64)),
             ("reservedCeiling", Json::Number(ceiling as f64)),
             ("senderIndexRecovered", Json::Number(after_index as f64)),
+            (
+                "activeSenderRangeAdvanced",
+                (after_index > before_index).into(),
+            ),
             ("allOtherProtocolFieldsPreserved", true.into()),
         ])
     }
@@ -393,6 +411,11 @@ async fn native_crypto_evolution_preserves_raw_state_and_rejects_lossy_writeback
     let followup = wire(field(&original_followup, "wire").unwrap());
     assert_eq!(bob.decrypt(&followup).await.unwrap(), b"original-follow-up");
     let current_recovery = bob.reopen(&fs::read(root.join("native-checkpoint.bin")).unwrap());
+    assert!(
+        number(field(&current_recovery, "senderIndexRecovered").unwrap()).unwrap()
+            > number(field(&current_recovery, "senderIndexBefore").unwrap()).unwrap(),
+        "The current checkpoint fixture exercises an actual reserved sender gap"
+    );
     assert_eq!(
         bob.decrypt(&followup).await.unwrap(),
         b"original-follow-up",
