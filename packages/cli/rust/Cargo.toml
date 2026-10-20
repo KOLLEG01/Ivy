@@ -27,3 +27,7 @@ path = "../../../tests/rust/cli-publish-ui.rs"
 [[test]]
 name = "cli-arguments"
 path = "../../../tests/rust/cli-arguments.rs"
+
+[[test]]
+name = "cli-reset-ui"
+path = "../../../tests/rust/cli-reset-ui.rs"

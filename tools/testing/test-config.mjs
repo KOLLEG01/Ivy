@@ -151,6 +151,7 @@ export const rustTests = {
   'tests/rust/native-catalog-path.rs': { package: 'ivy-contracts', test: 'native-catalog-path' },
   'tests/rust/json-coercion.rs': { package: 'ivy-contracts', test: 'json-coercion' },
   'tests/rust/cli-publish-ui.rs': { package: 'ivy-cli', test: 'cli-publish-ui' },
+  'tests/rust/cli-reset-ui.rs': { package: 'ivy-cli', test: 'cli-reset-ui' },
   'tests/rust/cli-arguments.rs': { package: 'ivy-cli', test: 'cli-arguments' },
   'tests/rust/number-string.rs': { package: 'ivy-contracts', test: 'number-string' },
   'tests/rust/ui-route.rs': { package: 'ivy-contracts', test: 'ui-route' },
