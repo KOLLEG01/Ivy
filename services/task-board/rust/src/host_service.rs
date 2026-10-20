@@ -56,7 +56,7 @@ pub async fn prepare<P: Contracts>(
         // URL takes a USVString in the original constructor, unlike JSON
         // identities and credentials. Keep the retained config untouched.
         public_base_url: String::from_utf16_lossy(&text("publicBaseUrl")?.0),
-        credential: credential.to_utf8()?,
+        credential,
         service_node_id: text("serviceNodeId")?,
         host_id: Some(text("hostId")?),
         version: text("version")?,

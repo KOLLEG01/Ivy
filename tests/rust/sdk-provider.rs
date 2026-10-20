@@ -24,6 +24,232 @@ fn json(text: &str) -> IvyJson {
 fn root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
+
+#[path = "../../packages/sdk/rust/src/service_header.rs"]
+mod credential_header;
+
+fn credential_oracle(mode: &str, input: Option<&IvyJson>) -> IvyJson {
+    use std::io::Write;
+    let mut child = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--disable-warning=ExperimentalWarning",
+            "tests/fixtures/sdk-service-credentials-oracle.mjs",
+            mode,
+        ])
+        .current_dir(root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Some(input) = input {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stringify(input, 1_000_000).unwrap().as_bytes())
+            .unwrap();
+    } else {
+        drop(child.stdin.take());
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    json(std::str::from_utf8(&output.stdout).unwrap())
+}
+
+#[test]
+fn credential_header_admission_and_bytes_match_node_for_every_utf16_unit() {
+    let expected = credential_oracle("admission", None);
+    let mut accepted = Vec::new();
+    for unit in 0..=65535u16 {
+        if let Ok(value) = credential_header::authorization(&JsString(vec![unit])) {
+            let mut bytes = b"Bearer ".to_vec();
+            bytes.push(unit as u8);
+            assert_eq!(value.as_bytes(), bytes);
+            accepted.push(IvyJson::Number(f64::from(unit)));
+        }
+    }
+    assert_eq!(
+        IvyJson::Array(accepted),
+        expected.get("accepted").unwrap().clone()
+    );
+    assert_eq!(
+        expected.get("rejections").unwrap(),
+        &json(
+            r#"[{"name":"TypeError","code":"ERR_INVALID_CHAR","message":"Invalid character in header content [\"Authorization\"]"}]"#
+        )
+    );
+}
+
+#[tokio::test]
+async fn raw_credential_lifecycle_bytes_error_normalization_and_phase_match_original() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let cases = credential_oracle("cases", None);
+    let mut actual = Vec::new();
+    for row in cases.as_array().unwrap() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/ivy/", listener.local_addr().unwrap());
+        let headers = Arc::new(Mutex::new(Vec::<IvyJson>::new()));
+        let collected = headers.clone();
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = tokio::select! {biased;_=stopped.cancelled()=>break,accepted=listener.accept()=>accepted.unwrap()};
+                let mut bytes = Vec::new();
+                loop {
+                    let mut part = [0u8; 2048];
+                    let size = tokio::time::timeout(Duration::from_secs(3), socket.read(&mut part))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(size > 0);
+                    bytes.extend_from_slice(&part[..size]);
+                    if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let line = bytes
+                    .split(|b| *b == 10)
+                    .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+                    .find(|line| {
+                        line.len() >= 14 && line[..14].eq_ignore_ascii_case(b"authorization:")
+                    })
+                    .unwrap();
+                let value = &line[15..];
+                let hex: String = value.iter().map(|byte| format!("{byte:02x}")).collect();
+                collected.lock().unwrap().push(hex.into());
+                socket.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let credential = row
+            .get("credential")
+            .and_then(IvyJson::as_js_string)
+            .cloned()
+            .unwrap_or_default();
+        let fail = row.get("failure").map(|v| v.as_str().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = calls.clone();
+        let supplied = credential.clone();
+        let mut options = ServiceOptions::new_js(
+            url.clone(),
+            Arc::new(move || {
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                let supplied = supplied.clone();
+                let fail = fail.clone();
+                Box::pin(async move {
+                    if let Some(outcome) = fail {
+                        let mut message = JsString::from("failure-");
+                        message.0.push(0xd800);
+                        message.0.extend("x".repeat(270).encode_utf16());
+                        Err(
+                            IvyError::new_js("credential_failed".into(), message).with_outcome(
+                                match outcome.as_str() {
+                                    "unknown" => Outcome::Unknown,
+                                    "completed" => Outcome::Completed,
+                                    _ => Outcome::NotExecuted,
+                                },
+                            ),
+                        )
+                    } else {
+                        Ok(supplied)
+                    }
+                })
+            }),
+            json(
+                r#"{"serviceNodeId":"fixture-node","serviceName":"fixture","hostId":"fixture-host","version":"1.0.0","buildId":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","hiveProtocol":1}"#,
+            ),
+            Arc::new(|| Box::pin(async { Ok(object()) })),
+            Arc::new(|_| Box::pin(async { Ok(()) })),
+        );
+        options.reconnect_min = Duration::from_secs(60);
+        options.reconnect_max = Duration::from_secs(60);
+        let states = Arc::new(Mutex::new(Vec::<IvyJson>::new()));
+        let observed = states.clone();
+        let offline = Arc::new(tokio::sync::Notify::new());
+        let finished = offline.clone();
+        options.on_state = Some(Arc::new(move |state| {
+            let mut value = IvyJson::object([("status", state.status.into())]);
+            if let Some(generation) = state.generation {
+                value.insert("generation", IvyJson::Number(generation as f64));
+            }
+            if let Some(code) = state.code {
+                value.insert("code", IvyJson::String(code));
+            }
+            if let Some(message) = state.message {
+                value.insert("message", IvyJson::String(message));
+            }
+            if let Some(phase) = state.phase {
+                value.insert("phase", phase.into());
+            }
+            observed.lock().unwrap().push(value);
+            if state.status == "offline" {
+                finished.notify_one();
+            }
+        }));
+        let client = ServiceClient::new(options).unwrap();
+        let after_constructor = calls.load(Ordering::SeqCst);
+        client.start();
+        tokio::time::timeout(Duration::from_secs(3), offline.notified())
+            .await
+            .unwrap();
+        client.stop().await;
+        let direct = if row.get("failure").is_some() {
+            IvyJson::Null
+        } else {
+            match ServiceConnection::connect_js(
+                &url,
+                &credential,
+                ConnectionOptions::new("fixture-node".into()),
+                CancellationToken::new(),
+            )
+            .await
+            {
+                Ok(connection) => {
+                    connection.close();
+                    IvyJson::object([("ok", true.into())])
+                }
+                Err(error) => IvyJson::object([("ok", false.into()), ("error", error.to_wire())]),
+            }
+        };
+        stop.cancel();
+        server.await.unwrap();
+        actual.push(IvyJson::object([
+            ("name", row.get("name").unwrap().clone()),
+            (
+                "afterConstructor",
+                IvyJson::Number(after_constructor as f64),
+            ),
+            (
+                "calls",
+                IvyJson::Number(calls.load(Ordering::SeqCst) as f64),
+            ),
+            ("states", IvyJson::Array(states.lock().unwrap().clone())),
+            ("headers", IvyJson::Array(headers.lock().unwrap().clone())),
+            ("direct", direct),
+        ]));
+    }
+    let expected = credential_oracle("run", Some(&cases));
+    let expected = expected.get("rows").unwrap().as_array().unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(
+            ivy_contracts::json::canonical(actual, 1_000_000).unwrap(),
+            ivy_contracts::json::canonical(expected, 1_000_000).unwrap(),
+            "{}",
+            actual.get("name").unwrap().as_str().unwrap()
+        );
+    }
+}
 fn peer_command() -> Command {
     let mut command = Command::new("node");
     command

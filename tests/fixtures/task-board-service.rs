@@ -636,7 +636,7 @@ async fn startup_refusal_and_failed_retirement_preserve_exact_errors_without_rep
         refuse: false,
     };
     let mut invalid = setup(&peer, false);
-    invalid.credential.clear();
+    invalid.credential.0.clear();
     assert_eq!(
         make_service(invalid, &admission)
             .err()

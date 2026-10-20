@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub struct ServiceSetup {
     pub component_id: JsString,
     pub public_base_url: String,
-    pub credential: String,
+    pub credential: JsString,
     pub service_node_id: JsString,
     pub host_id: Option<JsString>,
     pub version: JsString,
@@ -458,7 +458,7 @@ pub fn service<P: Contracts>(
     admit_service(
         &setup.settings,
         &setup.component_id,
-        !setup.credential.is_empty(),
+        !setup.credential.0.is_empty(),
         contracts,
     )?;
     admitted_service(setup)
@@ -508,7 +508,7 @@ pub(crate) fn admitted_service(setup: ServiceSetup) -> IvyResult<(TaskBoardServi
         ("buildId", Json::String(setup.build_id)),
         ("hiveProtocol", Json::Number(1.0)),
     ]);
-    let mut options = ServiceOptions::new(
+    let mut options = ServiceOptions::new_js(
         setup.public_base_url,
         Arc::new(move || {
             let value = credential.clone();

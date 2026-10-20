@@ -29,9 +29,9 @@ pub struct ServiceState {
     pub message: Option<JsString>,
     pub phase: Option<&'static str>,
 }
-pub struct ServiceOptions {
+pub struct ServiceOptions<C = String> {
     pub public_base_url: String,
-    pub credential: Dependency<String>,
+    pub credential: Dependency<C>,
     pub identity: IvyJson,
     pub registry: Dependency<IvyJson>,
     pub handlers: HashMap<JsString, ToolHandler>,
@@ -45,10 +45,33 @@ pub struct ServiceOptions {
     pub reconnect_max: Duration,
     pub heartbeat: Duration,
 }
-impl ServiceOptions {
+impl ServiceOptions<String> {
     pub fn new(
         public_base_url: String,
         credential: Dependency<String>,
+        identity: IvyJson,
+        registry: Dependency<IvyJson>,
+        reconcile: ConnectionDependency<()>,
+    ) -> Self {
+        Self::with_credential(public_base_url, credential, identity, registry, reconcile)
+    }
+}
+impl ServiceOptions<JsString> {
+    /// Keep raw JavaScript code units until the credential callback is observed.
+    pub fn new_js(
+        public_base_url: String,
+        credential: Dependency<JsString>,
+        identity: IvyJson,
+        registry: Dependency<IvyJson>,
+        reconcile: ConnectionDependency<()>,
+    ) -> Self {
+        Self::with_credential(public_base_url, credential, identity, registry, reconcile)
+    }
+}
+impl<C> ServiceOptions<C> {
+    fn with_credential(
+        public_base_url: String,
+        credential: Dependency<C>,
         identity: IvyJson,
         registry: Dependency<IvyJson>,
         reconcile: ConnectionDependency<()>,
@@ -71,12 +94,36 @@ impl ServiceOptions {
         }
     }
 }
+impl<C: Into<JsString> + Send + 'static> ServiceOptions<C> {
+    fn into_js(self) -> ServiceOptions<JsString> {
+        let callback = self.credential;
+        ServiceOptions {
+            credential: Arc::new(move || {
+                let pending = callback();
+                Box::pin(async move { pending.await.map(Into::into) })
+            }),
+            public_base_url: self.public_base_url,
+            identity: self.identity,
+            registry: self.registry,
+            handlers: self.handlers,
+            json_handlers: self.json_handlers,
+            reconcile: self.reconcile,
+            readiness: self.readiness,
+            on_state: self.on_state,
+            notification_filters: self.notification_filters,
+            on_notification: self.on_notification,
+            reconnect_min: self.reconnect_min,
+            reconnect_max: self.reconnect_max,
+            heartbeat: self.heartbeat,
+        }
+    }
+}
 struct Current {
     connection: ServiceConnection,
     acknowledged: bool,
 }
 struct Inner {
-    options: Arc<ServiceOptions>,
+    options: Arc<ServiceOptions<JsString>>,
     signal: CancellationToken,
     task: Mutex<Option<JoinHandle<()>>>,
     current: Mutex<Option<Current>>,
@@ -120,11 +167,11 @@ fn jitter(minimum: f64, spread: f64) -> f64 {
     minimum + spread * u64::from_le_bytes(random) as f64 / 281_474_976_710_656.0
 }
 impl ServiceClient {
-    pub fn new(options: ServiceOptions) -> IvyResult<Self> {
+    pub fn new<C: Into<JsString> + Send + 'static>(options: ServiceOptions<C>) -> IvyResult<Self> {
         base_url(&options.public_base_url)?;
         validate_shared("ServiceConnect", &options.identity)?;
         Ok(Self(Arc::new(Inner {
-            options: Arc::new(options),
+            options: Arc::new(options.into_js()),
             signal: CancellationToken::new(),
             task: Mutex::new(None),
             current: Mutex::new(None),
@@ -319,11 +366,12 @@ impl ServiceClient {
                 if self.0.signal.is_cancelled() {
                     return Ok(());
                 }
-                phase = "socket.open";
                 let options = &self.0.options;
-                let established = ServiceConnection::connect(
-                    &options.public_base_url,
-                    &credential,
+                let request = ServiceConnection::prepare_js(&options.public_base_url, &credential)
+                    .map_err(|error| error.into_state_error())?;
+                phase = "socket.open";
+                let established = ServiceConnection::connect_prepared(
+                    request,
                     ConnectionOptions {
                         service_node_id: options
                             .identity
