@@ -1,8 +1,8 @@
 //! Contained-file inventory for package comparison and immutable source identity.
 use crate::{
-    IvyError, IvyJson, IvyResult, concurrency::map_concurrent, node_path, paths, streaming_hash,
+    IvyError, IvyResult, concurrency::map_concurrent, node_path, paths, streaming_hash,
 };
-use ivy_contracts::{JsString, hash::hash_json};
+use ivy_contracts::JsString;
 use std::{
     cmp::Ordering,
     fs,
@@ -14,34 +14,7 @@ use std::{
 /// This owner does not substitute ASCII or Rust string ordering for localeCompare.
 pub type FileCompare = Arc<dyn Fn(&JsString, &JsString) -> Ordering + Send + Sync>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArtifactFile {
-    pub path: JsString,
-    pub hash: String,
-    pub bytes: u64,
-    pub mode: u32,
-}
-impl ArtifactFile {
-    pub fn json(&self) -> IvyJson {
-        let mut value = self.identity();
-        value.insert("mode", IvyJson::Number(self.mode as f64));
-        value
-    }
-    fn identity(&self) -> IvyJson {
-        IvyJson::object([
-            ("path", IvyJson::String(self.path.clone())),
-            ("hash", self.hash.clone().into()),
-            ("bytes", IvyJson::Number(self.bytes as f64)),
-        ])
-    }
-}
-
-/// Candidate source identity deliberately excludes checkout permission bits.
-pub fn artifact_source_identity(files: &[ArtifactFile]) -> IvyResult<String> {
-    hash_json(&IvyJson::Array(
-        files.iter().map(ArtifactFile::identity).collect(),
-    ))
-}
+pub use crate::artifact_file::{ArtifactFile, artifact_source_identity};
 fn internal<T, E>(result: Result<T, E>) -> IvyResult<T> {
     result.map_err(|_| IvyError::internal())
 }

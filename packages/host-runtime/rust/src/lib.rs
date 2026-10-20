@@ -5,6 +5,8 @@ pub mod candidate_identity;
 pub mod accepted_configuration;
 pub mod actions;
 pub mod artifact;
+#[path="artifact/file_record.rs"]
+pub mod artifact_file;
 pub mod artifact_manifest;
 mod artifact_inventory;
 pub mod codex_admission;

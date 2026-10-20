@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-pub use crate::artifact::ArtifactFile as BackupFile;
+pub use crate::artifact_file::ArtifactFile as BackupFile;
 /// Called sequentially in UTF-16 path order, before observing each entry.
 pub type BackupExclusion = Arc<dyn Fn(&JsString) -> IvyResult<bool> + Send + Sync>;
 const MAXIMUM_BYTES: u64 = 64 * 1024 * 1024 * 1024;
