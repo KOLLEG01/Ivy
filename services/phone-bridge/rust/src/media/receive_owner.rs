@@ -1,10 +1,11 @@
-//! SIP media transport/receive composition. The call retains SDP, audio sender
-//! and route disposal; this owner retains its one RTP pair, RTCP and gap pump.
+//! SIP media transport composition. The call retains SDP and route disposal;
+//! this owner retains its one RTP pair, RTCP, gap pump and optional PCM sender.
 use super::receive_analysis::ReceiveAnalysis;
 use super::rtcp_owner::{RtcpReceiveEffect, RtcpReceiveOwner};
+use super::sender::{self, Sender};
 use super::{
     AudioFormat, AudioNegotiation, CodecError, EvsLibrary, MediaCodec, MediaError, PcmAudioPort,
-    PcmAudioState, RtcpCompound, RtcpReceiveObservation, RtcpRuntime, RtcpSession,
+    PcmAudioState, PcmSendPort, RtcpCompound, RtcpReceiveObservation, RtcpRuntime, RtcpSession,
     RtcpSessionObservation, RtpAudioPacket, RtpDatagramSink, RtpPacket, RtpPeer, RtpReceiveQueue,
     RtpReceiveStatus, RtpTransport, RtpTransportError, RtpTransportObservation,
 };
@@ -103,7 +104,7 @@ struct Reports {
     session: Option<RtcpSession>,
     closed: bool,
 }
-struct Inner {
+pub(super) struct Inner {
     state: Mutex<State>,
     reports: Mutex<Reports>,
     audio: Arc<dyn PcmAudioPort>,
@@ -117,12 +118,16 @@ struct Inner {
     completed: OnceLock<()>,
     changed: Notify,
     report_pending: Notify,
+    pub(super) sender: Sender,
 }
 impl Inner {
     fn now(&self) -> Duration {
         self.origin.elapsed()
     }
     fn request_close(&self) {
+        // The same short transmit guard encloses final admission, all chunks
+        // and bookkeeping. It is never held while waiting for capture/encode.
+        self.sender.request_close();
         self.closed.store(true, Ordering::Release);
         // Separate from PCM decoding and all notifications. Concurrent close
         // callers serialize this one BYE before closing the original socket.
@@ -146,7 +151,7 @@ impl Inner {
             transport.request_close();
         }
     }
-    fn fail(&self, error: ReceiveError) {
+    pub(super) fn fail(&self, error: ReceiveError) {
         let first = {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.failure.is_some() {
@@ -350,6 +355,48 @@ impl Inner {
             }
         }
     }
+    pub(super) fn send_frame(
+        &self,
+        frames: &mut super::RtpAudioFrames,
+        format: &AudioFormat,
+        packet: &[u8],
+        #[cfg(test)] hook: Option<&sender::SendHook>,
+        admitted: PcmAudioState,
+    ) -> Result<(), ReceiveError> {
+        let mut reports = self.reports.lock().unwrap_or_else(|p| p.into_inner());
+        let mut report_error = None;
+        let result = frames.send(
+            format.rtp_duration(),
+            format.payload(),
+            packet,
+            |header, part| {
+                // Original socket-send errors are ignored; missing destination and
+                // callback failures keep their separate packetization boundaries.
+                match self.transport.get().unwrap().send_rtp(header, part) {
+                    Ok(()) | Err(RtpTransportError::Io | RtpTransportError::WouldBlock) => (),
+                    Err(error) => return Err(error),
+                }
+                if let Some(session) = reports.session.as_mut() {
+                    if let Err(error) = session.sent(header, part.len(), || self.now()) {
+                        report_error = Some(error);
+                        return Err(RtpTransportError::Io);
+                    }
+                    self.report_pending.notify_one();
+                }
+                #[cfg(test)]
+                if let Some(hook) = hook {
+                    hook(sender::SendPoint::Chunk, admitted, &mut Vec::new());
+                }
+                Ok(())
+            },
+        );
+        #[cfg(not(test))]
+        let _ = admitted;
+        if let Some(error) = report_error {
+            return Err(ReceiveError::Media(error));
+        }
+        result.map_err(ReceiveError::Transport)
+    }
 }
 struct Sink(Weak<Inner>);
 impl RtpDatagramSink for Sink {
@@ -445,8 +492,8 @@ impl Drop for Handle {
 }
 
 /// A running SIP audio receiver with one actual socket pair and bounded gap
-/// wakeups and opt-in RTCP reporting. It does not own the call's audio route,
-/// audio sender or SIP dialog. Final disposal must additionally close that route.
+/// wakeups, opt-in RTCP reporting and a dedicated sender. It does not own the
+/// call's audio route or SIP dialog. Final disposal additionally closes the route.
 #[derive(Clone)]
 pub struct SipRtpReceiver {
     handle: Arc<Handle>,
@@ -494,6 +541,7 @@ impl SipRtpReceiver {
             completed: OnceLock::new(),
             changed: Notify::new(),
             report_pending: Notify::new(),
+            sender: Sender::default(),
         });
         let transport = RtpTransport::bind(
             interface,
@@ -521,6 +569,7 @@ impl SipRtpReceiver {
                 },
             }
             completion.request_close();
+            completion.sender.wait_closed().await;
             let _ = reports.await;
             completion.transport.get().unwrap().close().await;
             {
@@ -550,6 +599,15 @@ impl SipRtpReceiver {
         if inner.closed.load(Ordering::Acquire) {
             return Err(ReceiveError::Closed);
         }
+        let mut sender = inner.sender.state.lock().unwrap_or_else(|p| p.into_inner());
+        if sender.closed {
+            return Err(ReceiveError::Closed);
+        }
+        let send_audio: Arc<dyn PcmAudioPort> = match &sender.audio {
+            Some(audio) => audio.clone(),
+            None => inner.audio.clone(),
+        };
+        let codec = MediaCodec::new(plan.sender().clone(), send_audio, inner.evs.clone())?;
         let mut reports = inner.reports.lock().unwrap_or_else(|p| p.into_inner());
         if reports.closed || inner.closed.load(Ordering::Acquire) {
             return Err(ReceiveError::Closed);
@@ -568,7 +626,46 @@ impl SipRtpReceiver {
         state.event_payloads = plan.offered_event_payloads().to_vec();
         state.selected_event = plan.selected_event_payload();
         reports.admission.configure(plan.remote_sources());
+        sender.revision += 1;
+        sender.format = Some(plan.sender().clone());
+        sender.codec = Some(codec);
         Ok(())
+    }
+    /// Start once on the original call/audio owner. SDP configuration replaces
+    /// its codec under the transmit guard; it never starts a second sender.
+    /// Route disposal/revocation remains the call's responsibility. Close waits
+    /// for the dedicated thread as well as its existing receive/report owners.
+    pub fn start_sending(
+        &self,
+        audio: Arc<dyn PcmSendPort>,
+        source: u32,
+        sequence: u16,
+        timestamp: u32,
+    ) -> Result<bool, ReceiveError> {
+        let inner = &self.handle.0;
+        self.set_local_source(source)?;
+        sender::start(
+            inner.clone(),
+            audio,
+            source,
+            sequence,
+            timestamp,
+            inner.evs.clone(),
+        )
+    }
+    pub fn transmission(&self) -> (Option<AudioFormat>, u64) {
+        let state = self
+            .handle
+            .0
+            .sender
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        (state.transmitted.clone(), state.sent)
+    }
+    #[cfg(test)]
+    pub(super) fn sender_state(&self) -> &Sender {
+        &self.handle.0.sender
     }
     /// Construct once, using the call's SDP/sender identity. Enabling does not
     /// start the timer; explicit Start, an admitted report or RTP send does.

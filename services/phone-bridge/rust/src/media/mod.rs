@@ -21,6 +21,7 @@ mod rtcp_time;
 mod rtp;
 mod sdp;
 mod send_clock;
+mod sender;
 mod startup;
 mod transport;
 
@@ -43,6 +44,7 @@ pub use sdp::{
     SdpMediaKind, SdpOrigin, bounded_sdp, valid_sdp,
 };
 pub use send_clock::RtpSendClock;
+pub use sender::{AudioSendHealth, PcmSendPort};
 pub use startup::RtpStartupGate;
 
 pub const SAMPLE_RATE: usize = 48_000;

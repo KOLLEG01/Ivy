@@ -45,6 +45,8 @@ pub struct MediaCodec {
     observed: PcmAudioState,
     next_receive_timestamp: Option<u32>,
     concealed_samples: u64,
+    #[cfg(test)]
+    pub(super) encode_hook: Option<super::sender::EncodeHook>,
 }
 impl MediaCodec {
     pub fn new(
@@ -69,6 +71,8 @@ impl MediaCodec {
             observed,
             next_receive_timestamp: None,
             concealed_samples: 0,
+            #[cfg(test)]
+            encode_hook: None,
         };
         // Fail availability before a caller advertises/starts this format.
         owner.encoder = Some(owner.make_encoder()?);
@@ -152,17 +156,36 @@ impl MediaCodec {
         }
     }
     pub fn encode(&mut self) -> Result<Vec<u8>, CodecError> {
+        self.encode_frame(true).map(|(_, packet)| packet)
+    }
+    /// The send owner retains this exact pre-capture state until dispatch.
+    /// Unlike the original standalone Encode path, an obsolete admission is
+    /// discarded, including the original mid-encode replacement silence.
+    pub(super) fn encode_admitted(&mut self) -> Result<(PcmAudioState, Vec<u8>), CodecError> {
+        self.encode_frame(false)
+    }
+    fn encode_frame(
+        &mut self,
+        replace_with_silence: bool,
+    ) -> Result<(PcmAudioState, Vec<u8>), CodecError> {
         let open = self.current();
+        let admitted = self.observed;
         let expected = self.observed.generation;
         let mut captured = [0.0; 960];
         let mut mono = [0.0; 960];
         let mut pcm = [0_i16; 960];
         let count = self.pcm_rate() / 50;
         let result = (|| {
+            #[cfg(test)]
+            self.encode_point(super::sender::EncodePoint::Admitted, admitted);
             if open {
                 self.audio.read_captured(&mut captured, expected);
             }
+            #[cfg(test)]
+            self.encode_point(super::sender::EncodePoint::Captured, admitted);
             self.to_codec.process(&captured, &mut mono[..count])?;
+            #[cfg(test)]
+            self.encode_point(super::sender::EncodePoint::Resampled, admitted);
             for (sample, &value) in pcm[..count].iter_mut().zip(&mono[..count]) {
                 if !value.is_finite() {
                     return Err(CodecError::InvalidFrame);
@@ -170,19 +193,31 @@ impl MediaCodec {
                 *sample = (value.clamp(-1.0, 1.0) * 32767.0).round_ties_even() as i16;
             }
             let mut packet = self.encode_pcm(&pcm[..count])?;
-            if open && self.audio.state() != self.observed {
+            #[cfg(test)]
+            self.encode_point(super::sender::EncodePoint::Encoded, admitted);
+            if (open || !replace_with_silence) && self.audio.state() != admitted {
                 packet.fill(0);
                 self.reset();
                 pcm.fill(0);
                 self.observed.open = false;
-                packet = self.encode_pcm(&pcm[..count])?;
+                if replace_with_silence {
+                    packet = self.encode_pcm(&pcm[..count])?;
+                } else {
+                    packet.clear();
+                }
             }
-            Ok(packet)
+            Ok((admitted, packet))
         })();
         captured.fill(0.0);
         mono.fill(0.0);
         pcm.fill(0);
         result
+    }
+    #[cfg(test)]
+    fn encode_point(&self, point: super::sender::EncodePoint, admitted: PcmAudioState) {
+        if let Some(hook) = &self.encode_hook {
+            hook(point, admitted);
+        }
     }
     pub fn decode(&mut self, packet: &[u8], generation: Option<u64>) -> Result<(), CodecError> {
         if !self.current()
