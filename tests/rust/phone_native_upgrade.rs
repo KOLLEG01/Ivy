@@ -648,10 +648,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     };
                     let state = if ["disabled", "trusted"].contains(&kind) {
                         "skipped"
-                    } else if !["refused", "pending_hangup"].contains(&kind)
-                        && !late
-                        && sent == preferred
-                    {
+                    } else if kind != "refused" && !early_end && !late && sent == preferred {
                         "upgraded"
                     } else {
                         "fallback"
