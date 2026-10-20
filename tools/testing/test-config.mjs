@@ -141,6 +141,7 @@ export const rustTests = {
   'tests/rust/contracts.rs': { package: 'ivy-contracts', test: 'contracts' },
   'tests/rust/hash.rs': { package: 'ivy-contracts', test: 'hash' },
   'tests/rust/json-depth.rs': { package: 'ivy-contracts', test: 'json-depth' },
+  'tests/rust/json-diagnostics.rs': { package: 'ivy-contracts', test: 'json-diagnostics' },
   'tests/rust/schema.rs': { package: 'ivy-contracts', test: 'schema' },
   'tests/rust/schema-runtime.rs': { package: 'ivy-contracts', test: 'schema-runtime' },
   'tests/rust/canonical-bundle.rs': { package: 'ivy-contracts', test: 'canonical-bundle' },

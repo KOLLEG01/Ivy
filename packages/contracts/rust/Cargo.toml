@@ -37,6 +37,10 @@ name = "json-depth"
 path = "../../../tests/rust/json-depth.rs"
 
 [[test]]
+name = "json-diagnostics"
+path = "../../../tests/rust/json-diagnostics.rs"
+
+[[test]]
 name = "schema"
 path = "../../../tests/rust/schema.rs"
 
