@@ -1,6 +1,6 @@
 use super::*;
 use ivy_phone_bridge::native_sip::NativeSipCall;
-use rsipstack::sip::{Method, Request, Response, headers::To, prelude::*};
+use rsipstack::sip::{Method, Response, headers::To, prelude::*};
 use std::net::SocketAddr;
 
 fn case(
@@ -610,7 +610,15 @@ async fn native_sip_info_original_dialog_lifetime_grammar_fifo_and_feature_autho
             let id = owner.observation().calls[0].id.clone();
             let call = owner.find(&id).unwrap();
             call.prepared().await.unwrap();
-            owner.claim(&call).unwrap();
+            let selected = format!(r#"{{"callId":"{id}"}}"#);
+            assert!(
+                dispatcher
+                    .execute(command("call.claim", &selected, 4, 4))
+                    .await
+                    .outcome()
+                    .error_code()
+                    .is_none()
+            );
             let features = stringify(
                 &IvyJson::object([("callId", id.clone().into()), ("challenge", challenge_json)]),
                 65536,

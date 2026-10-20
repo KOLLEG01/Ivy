@@ -1,5 +1,5 @@
 //! Original SIP INFO grammar. The admitted call owns sequence suppression.
-use rsipstack::sip::{Header, Request, prelude::*};
+use rsipstack::sip::{Header, Request};
 
 pub(crate) fn digit(request: &Request) -> Option<char> {
     let content_type = request.headers.iter().find_map(|header| match header {
