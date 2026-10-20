@@ -17,12 +17,14 @@ use std::{
     },
 };
 use tokio::sync::Notify;
-#[path = "host-systemd-cases.rs"]
-mod systemd_cases;
-#[path = "host-systemd-bootstrap-cases.rs"]
-mod systemd_bootstrap_cases;
+#[path = "host-linux-close-cases.rs"]
+mod close_cases;
 #[path = "host-docker-cases.rs"]
 mod docker_cases;
+#[path = "host-systemd-bootstrap-cases.rs"]
+mod systemd_bootstrap_cases;
+#[path = "host-systemd-cases.rs"]
+mod systemd_cases;
 static CORPUS: Mutex<()> = Mutex::new(());
 fn v(text: &str) -> IvyJson {
     json::parse(text, usize::MAX).unwrap()
@@ -136,7 +138,7 @@ fn fail(code: &str) -> io::Error {
             "EACCES" => io::ErrorKind::PermissionDenied,
             _ => io::ErrorKind::Other,
         },
-        "Explicit simulated boundary failure",
+        code.to_owned(),
     )
 }
 struct State {
@@ -157,7 +159,10 @@ impl State {
             for mutation in mutations {
                 if mutation.get("op") == event.get("op")
                     && mutation.get("at").and_then(IvyJson::as_f64).unwrap_or(1.0) == count as f64
-                    && mutation.get("path").is_none_or(|path| Some(path) == event.get("path")) {
+                    && mutation
+                        .get("path")
+                        .is_none_or(|path| Some(path) == event.get("path"))
+                {
                     for (path, file) in mutation.required("files").unwrap().as_object().unwrap() {
                         self.files.insert(path.clone(), file.clone());
                     }

@@ -3,12 +3,8 @@
 use crate::{IvyError, IvyResult, exec_file, node_path, process};
 use futures_util::future::BoxFuture;
 use ivy_contracts::JsString;
-use std::{
-    collections::BTreeMap,
-    fs,
-    io::{self, Write},
-    path::PathBuf,
-};
+use std::{collections::BTreeMap, fs, io, path::PathBuf};
+mod durable_create;
 
 pub(crate) fn trimmed(value: &JsString) -> JsString {
     fn space(unit: u16) -> bool {
@@ -143,20 +139,13 @@ impl LinuxHost for NativeLinuxHost {
         parent: JsString,
     ) -> BoxFuture<'static, io::Result<()>> {
         Box::pin(blocking(move || {
-            let mut options = fs::OpenOptions::new();
-            options.create_new(true).write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(mode);
-            }
-            #[cfg(not(unix))]
-            let _ = mode;
-            let mut file = options.open(node_path::filesystem_path(&path))?;
-            let result = file.write_all(&bytes).and_then(|_| file.sync_all());
-            drop(file);
-            result?;
-            fs::File::open(node_path::filesystem_path(&parent))?.sync_all()
+            durable_create::create(
+                &durable_create::NativeFiles,
+                &node_path::filesystem_path(&path),
+                &bytes,
+                mode,
+                &node_path::filesystem_path(&parent),
+            )
         }))
     }
     fn command(

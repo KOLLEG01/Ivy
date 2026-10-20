@@ -29,7 +29,7 @@ registerHooks({resolve(specifier,context,next){
 const {IvyError}=await import('../../packages/contracts/src/errors.ts');
 const modules={resources:'../../packages/host-runtime/src/linux-resources.ts',identity:'../../packages/host-runtime/src/linux-service-identity.ts',bootstrap:'../../packages/host-runtime/src/bootstrap.ts',systemd:'../../packages/host-runtime/src/systemd.ts'};
 const allowed={resources:['installationIdentity','linuxResourceScope','validateLinuxResourceScope','linuxSlice','assertLinuxResourceMembership','ensureLinuxSlice','inspectLinuxSlice','verifyLinuxResourceMembership'],identity:['linuxProcessUser','ensureLinuxProcessIdentity'],bootstrap:['configurationBootstrapPlan','linuxUnit','replaceableSystemdOwner'],systemd:['parseSystemdState','systemdUnitName','renderSystemdUnit']};
-let operation;
+let operation, boundaryError=null;
 try{
  if(input.module==='nativeMetadata'){
   const path=resolve(input.args[0]),local=relative(root,path);
@@ -55,5 +55,5 @@ try{
  operation={ok:true,value};
  }
  }
-}catch(error){operation={ok:false,error:IvyError.from(error).toWire()};}
-process.stdout.write(JSON.stringify({operation,trace:state.trace,files:state.files}));
+}catch(error){boundaryError=typeof error.code==='string'?error.code:null;operation={ok:false,error:IvyError.from(error).toWire()};}
+process.stdout.write(JSON.stringify({operation,trace:state.trace,files:state.files,...(input.captureBoundaryError?{boundaryError}:{})}));
