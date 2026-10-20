@@ -22,7 +22,8 @@ export function useOptimisticComment(workspace: () => TaskBoard.WorkspaceInfo, t
   } catch { /* A retained workflow request below still recovers the original message. */ }
   const ownAction = computed(() => action.saved.value?.call.arguments as Extract<TaskBoard.ActionInput, { action: 'comment' }> | undefined);
   const isComment = computed(() => ownAction.value?.action === 'comment');
-  if (!pending.value && isComment.value && !failed.value.some(message => message.request.commentId === ownAction.value?.commentId)) {
+  if (!pending.value && isComment.value && action.saved.value?.phase !== 'succeeded' &&
+      !failed.value.some(message => message.request.commentId === ownAction.value?.commentId)) {
     const { operationId: _operation, expectedRevision: _revision, taskId: _task, ...request } = ownAction.value!;
     pending.value = { request, createdAt: new Date().toISOString(), error: '' };
   }
@@ -39,6 +40,9 @@ export function useOptimisticComment(workspace: () => TaskBoard.WorkspaceInfo, t
   const sameAction = () => isComment.value && ownAction.value?.commentId === pending.value?.request.commentId;
   watch([() => task(), () => action.saved.value?.phase, action.busy, preparing], () => {
     const confirmed = new Set(task()?.comments.map(comment => comment.commentId));
+    // An authoritative receipt stays confirmed even when pagination no longer
+    // includes that comment. It must not become a new pending send on reopening.
+    if (isComment.value && action.saved.value?.phase === 'succeeded') confirmed.add(ownAction.value!.commentId);
     let nextPending = pending.value && !confirmed.has(pending.value.request.commentId) ? pending.value : null;
     let nextFailed = failed.value.filter(message => !confirmed.has(message.request.commentId));
     const terminal = nextPending && !preparing.value && !action.busy.value &&
@@ -81,9 +85,7 @@ export function useOptimisticComment(workspace: () => TaskBoard.WorkspaceInfo, t
     pending.value.error = '';
     try {
       if (!persist()) return;
-      const current = await readDocument('task', taskId, workspace().rootObjectId);
-      if (!pending.value) return;
-      if (current.value.comments.some(comment => comment.commentId === pending.value!.request.commentId)) {
+      if (task()?.comments.some(comment => comment.commentId === pending.value!.request.commentId)) {
         pending.value = null; persist(); changed(); return;
       }
       if (sameAction() && action.saved.value!.phase === 'prepared') {
@@ -96,6 +98,11 @@ export function useOptimisticComment(workspace: () => TaskBoard.WorkspaceInfo, t
         if (!['failed'].includes(action.saved.value?.phase ?? '')) { changed(); return; }
       }
       if (action.canRetryPreparation.value) action.retryPreparation();
+      // Sending only needs the current revision. Reading the complete conversation
+      // here blocked the composer before the comment request even reached its owner.
+      const current = await readDocument('task', taskId, workspace().rootObjectId,
+        AbortSignal.timeout(15000), { limit: 0 });
+      if (!pending.value) return;
       const outcome = await action.start('Add task comment', { ...pending.value.request, taskId, expectedRevision: current.pin.revision });
       if (outcome) changed();
       else if (pending.value && !sameAction()) pending.value.error = action.error.value ?? tr('Nachricht konnte nicht gesendet werden.', 'The message could not be sent.');

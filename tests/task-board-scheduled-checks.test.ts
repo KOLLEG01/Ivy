@@ -48,6 +48,55 @@ async function finish(workflow: Workflow, handoff?: TaskBoard.Handoff) {
   return (await workflow.f.first.store.read('task-board/task', result.task!)).value;
 }
 
+for (const authorKind of ['user', 'agent'] as const) test(`${authorKind} input can resolve a prerequisite and finish work in the same turn`, async context => {
+  const workflow = await nativeWorkflow(context); await workflow.running();
+  await comment(workflow, { purpose: 'question', recipient: { kind: 'user' }, commentId: 'access-question',
+    body: 'Is access available for the remaining work?' });
+  const waiting = await finish(workflow, { workflowState: 'waiting', nextSteps: [
+    { id: 'verify-access', scope: 'Verify access and finish the requested work.', requires: [{ kind: 'user', questionId: 'access-question' }] },
+  ] });
+  const source = authorKind === 'agent' ? await workflow.f.planned('agent') : null;
+  if (source) await new TaskBoardScheduler(workflow.f.first).task(source.task.objectId);
+  await comment(workflow, { authorKind, commentId: 'access-update', body: 'Access is available now.',
+    ...(source ? { sourceTaskId: source.task.objectId } : {}) });
+  const scheduler = new TaskBoardScheduler(workflow.f.first);
+  const outcome = await scheduler.task(workflow.state().task.objectId);
+  assert.ok(outcome?.run); workflow.adopt(outcome);
+  const run = (await workflow.f.first.store.read('task-board/run', outcome.run)).value;
+  assert.equal(run.originalRequest.coordinationOnly, undefined);
+  assert.equal(run.originalRequest.nextStepId, null);
+  assert.deepEqual(run.primaryResourceRef, waiting.primaryResourceRef);
+  assert.deepEqual(run.originalRequest.commentIds, ['access-update']);
+  assert.match(JSON.stringify(run.plan.turnStart.input), /Decide from the current ticket whether to reply, continue work or wait/);
+  assert.doesNotMatch(JSON.stringify(run.plan.turnStart.input), /Access is available|conversation only|does not start task work|Do not post a work handoff/);
+  await workflow.running();
+  // An ordinary comment needs no Answer button: the worker recognizes and records the answer.
+  await comment(workflow, { resolvesQuestions: ['access-question'], purpose: 'handoff',
+    body: 'The update supplied the prerequisite. Access was verified and the requested work completed in this turn.',
+    handoff: { workflowState: 'review', nextSteps: [] } });
+  const completed = await finish(workflow);
+  assert.equal(completed.workflowState, 'review');
+  assert.equal(completed.openQuestionCount, 0);
+  assert.equal(completed.completionIssue, undefined);
+  assert.equal(completed.attemptCount, waiting.attemptCount + 1);
+  assert.notDeepEqual(completed.latestResult, waiting.latestResult);
+  assert.equal((await workflow.f.first.store.read('task-board/result', completed.latestResult!)).value.kind, 'final');
+  assert.equal(await scheduler.task(workflow.state().task.objectId), null);
+});
+
+test('a failed comment-triggered turn reports an execution error instead of completing as a reply', async context => {
+  const workflow = await nativeWorkflow(context); await workflow.running();
+  const reviewed = await finish(workflow, { workflowState: 'review', nextSteps: [] });
+  await comment(workflow, { authorKind: 'user', body: 'Check the result once more.' });
+  const outcome = await new TaskBoardScheduler(workflow.f.first).task(workflow.state().task.objectId);
+  assert.ok(outcome?.run); workflow.adopt(outcome); await workflow.running();
+  const ended = await workflow.f.first.nativeUpdate(await workflow.snapshot('failed', 'The native turn failed.'));
+  const task = (await workflow.f.first.store.read('task-board/task', ended.task!)).value;
+  assert.ok(task.completionIssue);
+  assert.equal(workflow.f.first.condition(task).state, 'failed');
+  assert.deepEqual(task.latestResult, reviewed.latestResult);
+});
+
 test('time paths remain independent from own questions and publish only after native completion', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
   await comment(workflow, { purpose: 'question', recipient: { kind: 'user' }, commentId: 'login-choice', body: 'Which login should be used for publishing?' });
@@ -117,7 +166,7 @@ test('new comments bypass work conditions, preserve schedules and finish without
   const result = await new TaskBoardScheduler(workflow.f.second).task(workflow.state().task.objectId);
   assert.ok(result?.run); workflow.adopt(result);
   const run = (await workflow.f.first.store.read('task-board/run', result.run)).value;
-  assert.equal(run.originalRequest.coordinationOnly, true);
+  assert.equal(run.originalRequest.coordinationOnly, undefined);
   assert.deepEqual(run.originalRequest.commentIds, ['status-request']);
   assert.deepEqual(run.workspace, workflow.planned.workspace);
   assert.equal(run.primaryResourceRef?.nativeId, 'native-primary');

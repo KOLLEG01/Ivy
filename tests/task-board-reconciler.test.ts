@@ -5,6 +5,7 @@ import { IvyError } from "../packages/contracts/src/errors.js";
 import { TaskBoardReconciler } from "../services/task-board/src/runtime/reconciler.js";
 import { fields, taskBoardFixture } from "./fixtures/task-board.js";
 import { nativeWorkflow } from './fixtures/task-board-native.js';
+import { until } from './fixtures/host.js';
 
 test('an unavailable input owner does not prevent Run recovery', async t => {
   const w = await nativeWorkflow(t); await w.running();
@@ -312,21 +313,25 @@ test("reconciliation admits at most twenty Tasks, resumes its pending page and d
   const runtime = new TaskBoardReconciler(f.first);
   await step(runtime); await step(runtime);
   const releases: (() => void)[] = [];
-  let active = 0, maximum = 0;
+  let active = 0, maximum = 0, closing = false;
   const seen = new Set<string>();
   runtime.scheduler.task = async id => {
+    if (closing) return null;
     assert.ok(!seen.has(id), "Pending rows must progress before repeating the page"); seen.add(id);
     active++; maximum = Math.max(maximum, active);
     await new Promise<void>(resolve => releases.push(resolve)); active--; return null;
   };
   try {
-    for (let pass = 0; pass < 3; pass++) await runtime.tick(); assert.equal(active, 20);
+    await until(async () => { await runtime.tick(); return active === 20; }, 10000);
+    assert.equal(active, 20);
     releases[0]!(); await new Promise<void>(resolve => setImmediate(resolve));
-    for (let pass = 0; pass < 4; pass++) await runtime.tick(); assert.equal(seen.size, 21); assert.equal(active, 20);
+    await until(async () => { await runtime.tick(); return seen.size === 21 && active === 20; }, 10000);
+    assert.equal(seen.size, 21); assert.equal(active, 20);
     let stopped = false;
+    closing = true;
     const stop = runtime.stop().then(() => { stopped = true; });
     await runtime.tick(); assert.equal(seen.size, 21); assert.equal(stopped, false);
     releases.forEach(release => release()); await stop;
     assert.equal(maximum, 20); assert.equal(active, 0);
-  } finally { releases.forEach(release => release()); await runtime.stop(); }
+  } finally { closing = true; releases.forEach(release => release()); await runtime.stop(); }
 });

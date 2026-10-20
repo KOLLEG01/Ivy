@@ -40,6 +40,8 @@ UI requirements: [UI](UI.md).
   Cards use a compact header summary and do not hydrate history or calculate unread totals.
   The UI loads older comments on scroll, preserves the visible position, and keeps unresolved
   user questions available outside the loaded page. It neither displays nor writes unread state.
+  Sending reads the current ticket revision without loading its history. A successful operation
+  receipt confirms its comment even outside the loaded page and releases the composer.
   Active retained headers reuse bounded in-memory summaries until normal storage backfill.
   Storage backfill also covers archived tickets without changing workflow state and retries
   active or conflicting tickets on later passes. Before readiness enables the new policy,
@@ -96,8 +98,8 @@ UI requirements: [UI](UI.md).
   on lookup, reclaim stale reservations from authoritative idle state while preserving unfinished
   admissions, publications and native outcomes. Retain the workspace files themselves.
   Agents discover peers through `task_list relatedTo`, matching the allocated canonical working
-  directory and host rather than the project ID. Separate worktrees do not receive each other's
-  automatic state notifications. Explicit directed messages and dependencies may cross workspaces.
+  directory and host rather than the project ID. Directed messages and dependencies may cross
+  workspaces. Unrelated peer state changes do not inject turns or require board-wide polling.
   Agents coordinate overlapping changes,
   commits and deployments through directed ticket comments; unrelated changes must be preserved.
   Tasks defer through scoped next-step conditions. Closed dependency cycles are rejected while independent progress paths remain available.
@@ -163,7 +165,17 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   approval workflow. Native requests retain their original identities in comments; UI buttons and
   MCP answer them through AgentManager. Responses are mirrored into the same timeline; secret
   answers stay at the native owner.
-- New user comments and directed agent messages are processed independently of work conditions, including on manual, Done and Cancelled tickets. This does not reopen work or replace its final result; `moveToTodo=true` explicitly reopens Done. Active assignment fields remain fixed and metadata changes use revision checks.
+- User comments and directed task messages deliver the same short ticket-update prompt.
+  Active turns receive steering; idle contexts receive a new turn in the same thread.
+  A committed message wakes its ticket immediately without waiting for the periodic board
+  scan. Coalesce concurrent changes per ticket and dispatch a prepared steer in the same
+  pass. Durable scans recover missed wake-ups after restart; unavailable owners retain
+  their backoff. Available owners should receive updates promptly; delivery does not
+  depend on the size of the board or use a separate periodic polling loop.
+  The agent reads the ticket and decides whether to reply, continue work or wait in that turn,
+  including on blocked, manual and terminal tickets. There is no conversation-only mode.
+  A reply needs no handoff and preserves the state and result. A declared work handoff applies
+  its actual outcome after confirmed completion. Active assignment fields remain fixed.
   A new message re-arms an availability retry once; a failed attempt retains technical backoff.
   Continuing an existing conversation verifies its native identity, working directory and project
   against its retained Run instead of reallocating a workspace through complete project inventory.
@@ -172,7 +184,8 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   expected turn ID. Retained operation receipts acknowledge the original comment batch only.
   Unknown receipts are reconciled before another delivery; a failed steer leaves comments queued
   for the same primary's next turn. Event wakeups and periodic reconciliation share this path.
-- Ordinary agent updates never wake their author. Directed messages explicitly name sourceTaskId and queue delivery.
+- Ordinary agent updates never wake their author. Messages with sourceTaskId queue delivery
+  by default, just like user comments; agentDelivery=none explicitly records without waking.
 - Independent next steps have id, scope and requires: AND within a step, OR across steps. Conditions
   are time, task idle/done, named delivery and own user question. Automatic paths take precedence over User.
   No cross-ticket question gate or work/check mode exists. Comment processing preserves existing prerequisites.
@@ -217,8 +230,8 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
 
 ## Recovery and contact
 
-- Technical execution paths are scoped execution, conversation processing and completion recovery.
-  New external comments are processed first without removing recovery evidence or work prerequisites.
+- New external comments start a normal turn without requiring a ready scheduled step.
+  Their arrival alone does not remove recovery evidence or work prerequisites.
   Recover the original accepted publication first. After confirmed native termination, a
   recovery-only continuation reuses the same context to publish existing work, never to repeat
   implementation or uncertain effects. Its original Run and necessary evidence remain protected.

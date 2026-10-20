@@ -238,7 +238,7 @@ test('a missing handoff recovers in the same context after processing new commen
   const scheduler = new TaskBoardScheduler(w.f.second);
   const conversation = await scheduler.task(closed.pin.objectId); assert.ok(conversation?.run);
   const conversationRun = await w.f.first.store.read('task-board/run', conversation.run);
-  assert.equal(conversationRun.value.originalRequest.coordinationOnly, true);
+  assert.equal(conversationRun.value.originalRequest.coordinationOnly, undefined);
   assert.deepEqual(conversationRun.value.originalRequest.commentIds, ['queued-feedback']);
   w.adopt(conversation); await w.running();
   const discussed = await finish(w);
@@ -264,7 +264,7 @@ test('a missing handoff recovers in the same context after processing new commen
   assert.equal(after.value.openQuestionCount, 0);
   const followup = await scheduler.task(after.pin.objectId); assert.ok(followup?.run);
   const followupRun = await w.f.first.store.read('task-board/run', followup.run);
-  assert.equal(followupRun.value.originalRequest.coordinationOnly, true);
+  assert.equal(followupRun.value.originalRequest.coordinationOnly, undefined);
   assert.deepEqual(followupRun.value.primaryResourceRef, closed.value.primaryResourceRef);
   assert.deepEqual(followupRun.value.originalRequest.commentIds, ['during-recovery']);
   w.adopt(followup); await w.running(); await finish(w);

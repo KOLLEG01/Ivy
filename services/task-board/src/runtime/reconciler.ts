@@ -83,6 +83,7 @@ export class TaskBoardReconciler {
   private commentRetryAt = 0;
   private revisionProtectionAt = Date.now() + 15 * 60_000;
   private readonly activeTasks = new Map<string, Promise<void>>();
+  private readonly changedTasks = new Set<string>();
   private readonly pages = new Map<Lane, { ids: string[]; next: string | null; taskChanges: number }>();
   private readonly cursors = new Map<Lane, string | null>();
   private readonly failures = new Map<string, Wire.Diagnostic>();
@@ -92,17 +93,25 @@ export class TaskBoardReconciler {
     this.native = new TaskBoardNativeOrchestrator(engine);
     this.scheduler = new TaskBoardScheduler(engine);
     this.signals = new TaskBoardNativeSignals(engine);
+    engine.onTaskChanged = id => this.taskChanged(id);
   }
   get recovered(): boolean {
     return this.recovering === null;
   }
-  taskChanged(): void {
+  taskChanged(taskId?: string): void {
     this.taskChanges++;
     this.cursors.delete("tasks");
     this.pages.delete("tasks");
+    if (taskId && !this.stopped) {
+      // Coalesce bursts per ticket; the durable scan covers overflow and restarts.
+      if (this.changedTasks.size < 1024) this.changedTasks.add(taskId);
+      this.dispatchChanged();
+    }
   }
   /** Drain already admitted work before its store is closed or its owner replaced. */
-  async settled(): Promise<void> { await Promise.all(this.activeTasks.values()); }
+  async settled(): Promise<void> {
+    while (this.activeTasks.size) await Promise.all(this.activeTasks.values());
+  }
   async stop(): Promise<void> { this.stopped = true; await this.settled(); }
   get diagnostics(): Wire.Diagnostic[] {
     return [...this.failures.values(), ...this.native.progress.diagnostics];
@@ -192,8 +201,26 @@ export class TaskBoardReconciler {
   }
   private startTask(key: string, work: () => Promise<void>): void {
     const current = Promise.resolve().then(work).catch(error => this.record(key, error))
-      .finally(() => { this.activeTasks.delete(key); });
+      .finally(() => { this.activeTasks.delete(key); this.dispatchChanged(); });
     this.activeTasks.set(key, current);
+  }
+  private dispatchChanged(): void {
+    if (this.stopped || !this.recovered) return;
+    for (const id of this.changedTasks) {
+      if (this.activeTasks.size >= maxConcurrentTasks) return;
+      if (this.activeTasks.has(id)) continue;
+      this.changedTasks.delete(id);
+      this.startTask(id, async () => {
+        let task = await this.engine.store.read('task-board/task', id, true, true);
+        if (task.metadata.effectivelyArchived) return;
+        const previousRun = task.value.claim?.run?.objectId;
+        if (previousRun) await this.process('runs', previousRun);
+        await this.process('tasks', id);
+        task = await this.engine.store.read('task-board/task', id, true, true);
+        const nextRun = task.value.claim?.run?.objectId;
+        if (nextRun && nextRun !== previousRun) await this.process('runs', nextRun);
+      });
+    }
   }
   private async recoverOperation(id: string): Promise<void> {
     try {
@@ -318,6 +345,7 @@ export class TaskBoardReconciler {
     this.busy = true;
     try {
       await this.engine.verifyOwner();
+      this.dispatchChanged();
       if (Date.now() - this.lastCleanupAt >= 60_000) {
         this.lastCleanupAt = Date.now();
         try {
@@ -342,6 +370,7 @@ export class TaskBoardReconciler {
         if (this.recoveryScanned && this.activeTasks.size === 0) {
           this.recovering = this.recovering === "operations" ? "runs" : null;
           this.recoveryScanned = false;
+          this.dispatchChanged();
         }
       } else {
         const lane = lanes[this.lane]!;

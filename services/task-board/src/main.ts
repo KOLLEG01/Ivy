@@ -66,11 +66,11 @@ export async function startTaskBoard(path: string) {
     }
     if (tool.name === 'list') { await engine.verifyOwner(); return await engine.list(args as unknown as TaskBoard.TaskListQuery) as unknown as Wire.Json; }
     if (tool.name === 'markCommentsRead') return await engine.markCommentsRead(args as unknown as TaskBoard.MarkCommentsReadRequest, context) as unknown as Wire.Json;
-    if (tool.name === 'archive') { const result = await engine.archive(args as unknown as TaskBoard.ArchiveRequest, context); runtime.taskChanged(); return result as unknown as Wire.Json; }
+    if (tool.name === 'archive') { const result = await engine.archive(args as unknown as TaskBoard.ArchiveRequest, context); kick(); return result as unknown as Wire.Json; }
     if (tool.name === 'categories') { await engine.verifyOwner(); return await engine.categories() as unknown as Wire.Json; }
     const request = args as unknown as TaskBoard.ActionInput;
     requireThat(runtime.recovered || !['start', 'continue'].includes(request.action), 'task_board_recovery_pending', 'Existing Operations and Runs are being reconciled before accepting fresh execution claims.');
-    const outcome = await engine.invoke(request, context); runtime.taskChanged(); kick(); return outcome as unknown as Wire.Json;
+    const outcome = await engine.invoke(request, context); kick(); return outcome as unknown as Wire.Json;
   };
   const service = new ServiceClient({ publicBaseUrl: config.publicBaseUrl, credential: () => config.credential!,
     identity: { serviceNodeId: config.serviceNodeId, serviceName: 'task-board', instanceMode: 'singleton', hostId: config.hostId, version: config.version, buildId: config.buildId, hiveProtocol: 1 },

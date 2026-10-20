@@ -1,6 +1,6 @@
 import { taskPrompt } from './task-prompt.js';
 import { forwardDelegatedReview } from './task-delegation.js';
-import { coordinationPending, peerComment } from './task-coordination.js';
+import { commentsPending, peerComment } from './task-coordination.js';
 import { assessSteps } from './next-steps.js';
 import { hashJson } from "../../../../packages/sdk/src/node.js";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
@@ -364,9 +364,10 @@ export class TaskBoardScheduler {
     const mode = nextExecutionMode(value, at);
     if (!mode) return null;
     if (recoverThread) return { action: 'recoverThread', ...base, run: value.lastRun! };
-    if (value.runtimeWait?.retryAt && value.runtimeWait.retryAt > at && mode !== 'conversation') return null;
-    const selected = mode === 'execution' ? (await assessSteps(this.engine.store, value, at)).find(step => step.ready) : undefined;
-    if (mode === 'execution' && !selected) return null;
+    if (value.runtimeWait?.retryAt && value.runtimeWait.retryAt > at) return null;
+    const hasComments = commentsPending(value);
+    const selected = mode === 'execution' && !hasComments ? (await assessSteps(this.engine.store, value, at)).find(step => step.ready) : undefined;
+    if (mode === 'execution' && !hasComments && !selected) return null;
     const recoveryFor = mode === 'recovery' ? value.completionIssue?.run ?? value.lastRun : null;
     if (mode === 'recovery') {
       requireThat(recoveryFor, 'task_board_recovery_evidence_missing', 'Recovery needs its exact original Run.');
@@ -376,17 +377,16 @@ export class TaskBoardScheduler {
         'task_board_recovery_evidence_missing', 'Reconcile the exact original native outcome before recovering its completion intent.');
     }
     const commentIds = recoveryFor ? [] : value.commentDeliveries.filter(item => item.state === 'queued')
-      .filter(item => mode !== 'conversation' || value.comments.some(comment => comment.commentId === item.commentId && (comment.authorKind === 'user' || peerComment(comment))))
+      .filter(item => value.comments.some(comment => comment.commentId === item.commentId && (comment.authorKind === 'user' || peerComment(comment))))
       .slice(0, 256).map(item => item.commentId);
-    const feedback = taskPrompt(value, this.engine.owner.serviceNodeId, mode === 'conversation', !!recoveryFor, selected?.step.id ?? null);
+    const feedback = taskPrompt(value, this.engine.owner.serviceNodeId, !!recoveryFor, selected?.step.id ?? null);
     try {
       await requireExecutionCapacity(this.engine.store, this.engine.settings);
-      const allocation = await this.allocate(task, operationId, feedback, mode === 'conversation');
+      const allocation = await this.allocate(task, operationId, feedback, hasComments);
       return value.primaryResourceRef
         ? { action: 'continue', ...base, ...allocation, feedback, commentIds, nextStepId: selected?.step.id ?? null,
-          ...(mode === 'conversation' ? { coordinationOnly: true } : {}), ...(recoveryFor ? { recoveryFor } : {}) }
-        : { action: 'start', ...base, ...allocation, commentIds, nextStepId: selected?.step.id ?? null,
-          ...(mode === 'conversation' ? { coordinationOnly: true } : {}) };
+          ...(recoveryFor ? { recoveryFor } : {}) }
+        : { action: 'start', ...base, ...allocation, commentIds, nextStepId: selected?.step.id ?? null };
     } catch (cause) {
       const failure = IvyError.from(cause);
       const reason: TaskBoard.RuntimeWait['reason'] = ['task_board_project_unavailable', 'task_board_workspace_mismatch', 'task_board_workspace_conflict', 'task_board_workspace_reserved', 'target_conflict', 'not_found'].includes(failure.code) ? 'workspace' :
@@ -485,8 +485,8 @@ export class TaskBoardScheduler {
     const mode = nextExecutionMode(value, this.now().toISOString());
     if (!mode) return null;
     if (value.runtimeWait?.retryAt && value.runtimeWait.retryAt > this.now().toISOString()) return null;
-    const assessments = mode === 'execution' ? await assessSteps(store, value, this.now().toISOString()) : [];
-    if (mode === 'execution' && !assessments.some(step => step.ready)) return null;
+    if (mode === 'execution' && !commentsPending(value) &&
+      !(await assessSteps(store, value, this.now().toISOString())).some(step => step.ready)) return null;
     const recoveryAllowed = mode !== 'recovery';
     const recoverThread = recoveryAllowed && await unstartedMissingContext(this.engine, task);
     const restoreArchived = recoveryAllowed && !recoverThread && await unstartedArchivedContext(this.engine, task);

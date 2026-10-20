@@ -170,7 +170,7 @@ test('capacity failures retry the original conversation after backoff without re
   const retry = await new TaskBoardScheduler(w.f.first).task(failed.pin.objectId);
   assert.ok(retry?.run);
   const run = (await w.f.first.store.read('task-board/run', retry.run)).value;
-  assert.equal(run.originalRequest.coordinationOnly, true);
+  assert.equal(run.originalRequest.coordinationOnly, undefined);
   assert.deepEqual(run.originalRequest.commentIds, ['retry-message']);
 });
 

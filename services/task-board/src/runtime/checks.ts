@@ -168,13 +168,13 @@ export class TaskBoardChecks {
       (task ? (await freshContextRecovery(this.store, task))?.target.serviceNodeId : undefined);
     await checkConfiguration(this.store, { schemaVersion: 1, defaults }, serviceNodeId, allowUnavailable);
   }
-  async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution, coordinationOnly = false, recoveryOnly = false, nextStepId?: string | null): Promise<Agent.PlanDraft> {
+  async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution, hasComments = false, recoveryOnly = false, nextStepId?: string | null): Promise<Agent.PlanDraft> {
     requireThat(target && workspace && target.hostId === workspace.hostId && target.serviceNodeId === workspace.serviceNodeId,
       'task_board_execution_plan_required', 'Start must retain one resolved native owner and workspace.');
     const recovery = await freshContextRecovery(this.store, task);
     if (recovery) requireThat(same(target, recovery.target) && workspace.canonicalCwd === recovery.workspace.canonicalCwd && workspace.intendedPath === recovery.workspace.intendedPath,
       'task_board_workspace_mismatch', 'Fresh recovery must retain the original owner and workspace.');
-    if (!coordinationOnly && !recoveryOnly) {
+    if (!hasComments && !recoveryOnly) {
       const selected = (await assessSteps(this.store, task, now)).find(value => value.step.id === nextStepId && value.ready);
       requireThat(selected, 'task_board_input_required', 'The selected next step is not ready under its actual conditions.');
     }

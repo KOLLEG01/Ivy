@@ -12,12 +12,11 @@ import { finalOutputText, outputParams, pageCursor, TaskBoardTurnEvidence } from
 import { nativeArray, nativeRecord, nativeString } from "./native-intent.js";
 import type { NativeSlot } from "./native-intent.js";
 import { finishedRun, projectNativeState } from "./native-publication.js";
-import { executionMode } from './execution-mode.js';
+import { triggeredByComments } from './execution-mode.js';
 import { claimedWorkflowState } from "./condition.js";
 import { mutation } from "./store.js";
 import type { Document } from "./store.js";
 import { syncNativeComments } from './native-comments.js';
-import { peerState } from './task-coordination.js';
 import { NativeProgress } from './native-progress.js';
 
 /** One bounded reconciliation pass. Persisted calls and evidence authorize every next action. */
@@ -115,7 +114,8 @@ export class TaskBoardNativeOrchestrator {
   async drain(runId: string): Promise<boolean> {
     if ((this.retries.get(runId)?.after ?? 0) > Date.now()) return false;
     await this.engine.store.withReadCache(async () => {
-      // Drain immediately progressing starts, cancellation and result publication. Pending work yields.
+      // Dispatch a newly prepared steer in this pass, just like a start.
+      // Unchanged or uncertain native work still yields to normal recovery.
       for (let count = 0; count < 8; count++) {
         const before = await this.engine.store.read("task-board/run", runId);
         try { await this.step(runId); }
@@ -136,9 +136,9 @@ export class TaskBoardNativeOrchestrator {
           this.postpone(runId);
         else this.retries.delete(runId);
         if (
-          !["starting", "publishing_result", "cancel_requested"].includes(
+          (!["starting", "publishing_result", "cancel_requested"].includes(
             after.value.phase,
-          ) ||
+          ) && !await this.unresolved(after, 'steer')) ||
           same(before.pin, after.pin)
         )
           return;
@@ -276,11 +276,10 @@ export class TaskBoardNativeOrchestrator {
         if (active && !run.value.cancellation &&   !(run.value.originalRequest.action === 'continue' && run.value.originalRequest.recoveryFor) && inspection.turns.epoch === run.value.nativeEpoch) {
           const previous = run.value.calls.steer ? (await store.read('task-board/native-call', run.value.calls.steer)).value.origin : null;
           const initial = (await store.read('task-board/task', { objectId: run.value.taskId, revision: run.value.originalRequest.expectedRevision })).value;
-          const peersHash = await peerState(store, task.value, task.pin.objectId);
           const commentIds = task.value.commentDeliveries.filter(value => value.state === 'queued' && !run.value.originalRequest.commentIds.includes(value.commentId)).map(value => value.commentId);
-          const baseline = previous?.kind === 'steer' ? previous : { workRevision: initial.workRevision, peersHash: hashJson([]), commentIds: [] as string[] };
-          if (task.value.workRevision !== baseline.workRevision || peersHash !== baseline.peersHash || commentIds.some(id => !baseline.commentIds.includes(id))) {
-            await this.driver.prepare(runId, 'steer', { kind: 'steer', commentIds, workRevision: task.value.workRevision, peersHash, predecessor: run.value.calls.steer ?? null });
+          const baseline = previous?.kind === 'steer' ? previous : { workRevision: initial.workRevision, commentIds: [] as string[] };
+          if (task.value.workRevision !== baseline.workRevision || commentIds.some(id => !baseline.commentIds.includes(id))) {
+            await this.driver.prepare(runId, 'steer', { kind: 'steer', commentIds, workRevision: task.value.workRevision, peersHash: hashJson([]), predecessor: run.value.calls.steer ?? null });
             return;
           }
         }
@@ -301,7 +300,7 @@ export class TaskBoardNativeOrchestrator {
         this.progress.observe(runId, run.value.taskId, projection.phase === 'running' && !run.value.cancellation,
           hashJson({ turn, status: thread['status'] }));
         const projectedWaiting = projection.runtimeWait;
-        const workflowState = executionMode(run.value.originalRequest) === 'conversation'
+        const workflowState = triggeredByComments(run.value.originalRequest)
           ? (run.value.executionContext?.workflowState ?? task.value.workflowState)
           : projection.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(projection.runtimeWait);
         if (

@@ -90,7 +90,7 @@ async function continuation(f: Awaited<ReturnType<typeof lifecycle>>) {
   const task = await f.current(), allocation = await new TaskBoardScheduler(f.w.f.first).allocate(task, randomUUID());
   const input: TaskBoard.ContinueRequest = { action: 'continue', operationId: randomUUID(), taskId: task.pin.objectId,
     expectedRevision: task.pin.revision, target: allocation.target, workspace: allocation.workspace, intent: allocation.intent,
-    feedback: 'Continue the existing work.', commentIds: ['restore-follow-up'], coordinationOnly: true };
+    feedback: 'Continue the existing work.', commentIds: ['restore-follow-up'] };
   return { task, input };
 }
 
@@ -326,7 +326,7 @@ test('explicit new native work queues Todo and ordinary continuation reuses the 
   const allocation = await new TaskBoardScheduler(f.w.f.first).allocate(task, randomUUID());
   const plan = await readPlan(f.w.f.first.store, allocation.intent);
   assert.ok(JSON.stringify(plan.turnStart).includes(task.value.taskKey));
-  assert.ok(JSON.stringify(plan.turnStart).includes('Read the current ticket and comments'));
+  assert.ok(JSON.stringify(plan.turnStart).includes('Read the ticket and new comments'));
   const continuation = await f.w.f.invoke({ action: 'continue', operationId: randomUUID(), taskId: task.pin.objectId,
     expectedRevision: task.pin.revision, target: allocation.target, workspace: allocation.workspace, intent: allocation.intent, feedback: 'Continue the current ticket.', commentIds: [], nextStepId: 'main' });
   const run = await f.w.f.first.store.read('task-board/run', continuation.run!);

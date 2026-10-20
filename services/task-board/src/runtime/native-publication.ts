@@ -15,7 +15,7 @@ import type { verifyNativeTranscript } from './full-turn-evidence.js';
 import { initialDelivery } from './deliveries.js';
 import { BoundToolClient } from '../../../../packages/sdk/src/client.js';
 import { nativeRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
-import { executionMode } from './execution-mode.js';
+import { executionMode, triggeredByComments } from './execution-mode.js';
 
 export const finishedRun = (run: TaskBoard.Run): boolean => ['completed', 'failed', 'cancelled'].includes(run.phase);
 type Completion = { state: 'succeeded' | 'failed' | 'cancelled'; summary: string; evidence: TaskBoard.Artifact | null; code: string | null; retryAt?: string | null };
@@ -307,7 +307,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   let finalTask: TaskBoard.Task = { ...task.value, updatedAt: at, publication: steps.pin,
     commentDeliveries: task.value.commentDeliveries.map(value => steeredComments.includes(value.commentId) ? { ...value, state: 'delivered', updatedAt: at, code: null } : value) };
   const mode = executionMode(run.originalRequest);
-  const coordinationOnly = mode === 'conversation';
+  const hasComments = triggeredByComments(run.originalRequest);
   const recoveryOnly = mode === 'recovery';
   const initial = run.executionContext ?? {
     workflowState: task.value.workflowState, nextSteps: task.value.nextSteps,
@@ -319,7 +319,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   const handoffComment = runHandoff(finalTask, request.run.objectId);
   let declaredHandoff = recoveryUnchanged ? handoffComment?.handoff : undefined;
   let handoffIssue: { code: string; detail: string } | null = null;
-  if (completion?.state === 'succeeded' && declaredHandoff && handoffComment && !coordinationOnly) {
+  if (completion?.state === 'succeeded' && declaredHandoff && handoffComment) {
     const admission = await engine.operations.find(handoffComment.author.principalId, handoffComment.operationId).catch(error => {
       if (error instanceof IvyError && error.code === 'operation_expired') return null;
       throw error;
@@ -364,7 +364,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       limitations: ['Native completion does not automatically accept the task. Native conversation history remains available from its AgentManager owner while retained there.'] };
     const handoff = declaredHandoff;
     outcome.result = await steps.create('task-board/result', { schemaVersion: 1, taskId: request.taskId, run: request.run,
-      kind: completion.state === 'succeeded' && handoff?.workflowState === 'review' && !coordinationOnly ? 'final' : 'intermediate',
+      kind: completion.state === 'succeeded' && handoff?.workflowState === 'review' ? 'final' : 'intermediate',
       content, createdAt: at, actor: operation.value.actor, operationId: request.operationId }, 'Native result');
     next = { ...next, result: outcome.result, phase: completion.state === 'succeeded' ? 'completed' : completion.state === 'cancelled' ? 'cancelled' : 'failed', finishedAt: at,
       externalOutcome: { state: completion.state, observedAt: at, evidence: completion.evidence, code: completion.code } };
@@ -390,7 +390,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     if (completion) {
       const handoffIntent = declaredHandoff;
       const ready = completion.state === 'succeeded' && handoffIntent?.workflowState === 'review';
-      if (completion.state === 'succeeded' && handoffIntent && !coordinationOnly) {
+      if (completion.state === 'succeeded' && handoffIntent) {
         finalTask = applyHandoff(finalTask, handoffIntent, at);
         delete finalTask.completionIssue;
         if (handoffIntent.deliveries?.length) {
@@ -401,8 +401,10 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         }
       }
       finalTask = { ...finalTask, claim: null, runtimeWait: null, primaryResourceRef: next.primaryResourceRef, lastRun: outcome.run };
+      const publicationError = store.failedHandoff(request.run.objectId);
       if (completion.state === 'cancelled') finalTask.workflowState = 'cancelled';
-      else if (coordinationOnly) {
+      else if (hasComments && !handoffIntent && !handoffIssue && !publicationError &&
+        (completion.state === 'succeeded' || completion.retryAt)) {
         finalTask.workflowState = initial.workflowState;
         finalTask.latestResult = initial.latestResult;
         finalTask.acceptedReview = initial.acceptedReview;
@@ -429,7 +431,6 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
             completion.state === 'failed' ? completion.summary.slice(0, 2048) : 'The original execution needs its structured completion intent.',
           run: original?.run ?? request.run, operationId: original?.operationId ?? request.operationId,
           attempts, retryAt: contextUnavailable ? null : completion.retryAt ?? (recoveryOnly && attempts < 2 ? new Date(Date.parse(at) + 30_000).toISOString() : null) };
-        const publicationError = store.failedHandoff(request.run.objectId);
         if (completion.retryAt && !recoveryOnly && !handoffIssue && !publicationError) {
           delete finalTask.completionIssue;
           finalTask.consumedSteps = (finalTask.consumedSteps ?? []).filter(value => value.stepId !== run.originalRequest.nextStepId);
@@ -439,16 +440,16 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         if (publicationError) finalTask.completionIssue = { ...finalTask.completionIssue!, ...publicationError, retryAt: null };
       }
       if (completion.state !== 'cancelled') {
-        const handoff = coordinationOnly ? undefined : runHandoff(finalTask, request.run.objectId);
-        const answered = coordinationOnly && finalTask.comments.some(comment => comment.authorKind === 'agent' &&
+        const handoff = runHandoff(finalTask, request.run.objectId);
+        const answered = hasComments && finalTask.comments.some(comment => comment.authorKind === 'agent' &&
           comment.run?.objectId === request.run.objectId && !!comment.replyTo && run.originalRequest.commentIds.includes(comment.replyTo));
         let comment: TaskBoard.Comment = handoff ?? { commentId: request.operationId, sequence: finalTask.comments.length + 1,
           author: operation.value.actor, authorKind: 'agent', purpose: 'update',
           body: completion.summary.slice(0, 65536), requests: [], responses: [], delivery: null, attachments: [],
-          run: request.run, turnId: next.turnId, replyTo: coordinationOnly ? run.originalRequest.commentIds.at(-1) ?? null : null,
+          run: request.run, turnId: next.turnId, replyTo: hasComments ? run.originalRequest.commentIds.at(-1) ?? null : null,
           createdAt: at, operationId: request.operationId };
         const fits = !!handoff || resultCommentFits(finalTask, comment, steps.pin, request.taskId);
-        if (fits && ready && !coordinationOnly && !finalTask.parentTaskId && finalTask.fields.userContact !== 'ticket' && !comment.delivery) {
+        if (fits && ready && !finalTask.parentTaskId && finalTask.fields.userContact !== 'ticket' && !comment.delivery) {
           const delivery = await steps.create('task-board/delivery', initialDelivery(engine.settings, steps.pin, request.taskId, comment.commentId, finalTask.fields.userContact, at), 'Handoff notification');
           comment = { ...comment, delivery };
         }
@@ -456,7 +457,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         else if (!answered && fits) finalTask = { ...finalTask, comments: [...finalTask.comments, comment], agentCommentCount: finalTask.agentCommentCount + 1 };
       }
     } else {
-      const workflowState = coordinationOnly ? initial.workflowState : next.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(runtimeWait);
+      const workflowState = hasComments ? initial.workflowState : next.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(runtimeWait);
       const phase: TaskBoard.Claim['phase'] = runtimeWait?.reason === 'host' || runtimeWait?.reason === 'external_outcome' || next.phase === 'outcome_unknown' ? 'outcome_unknown' : next.phase === 'cancel_requested' ? 'cancel_requested' : next.phase === 'waiting_input' ? 'waiting_input' : next.phase === 'publishing_result' ? 'publishing_result' : next.phase === 'running' ? 'running' : 'starting';
       finalTask = { ...finalTask, claim: { ...task.value.claim!, phase, run: outcome.run }, primaryResourceRef: next.primaryResourceRef, lastRun: outcome.run, workflowState, runtimeWait: runtimeWait,
         commentDeliveries: next.phase === 'running'

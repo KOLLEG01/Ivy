@@ -24,7 +24,7 @@ export function executionCondition(task: ExecutionFacts): TaskBoard.ExecutionCon
     if (task.claim.phase === 'waiting_input') return { state: 'needs_user', detail: 'The native execution needs an owner-bound answer.' };
     if (['outcome_unknown', 'cancel_requested'].includes(task.claim.phase)) return { state: 'recovering', detail: 'Reconciling the original native execution.' };
     return { state: task.claim.phase === 'publishing_result' ? 'publishing' : ['claimed', 'run_created', 'starting'].includes(task.claim.phase) ? 'starting' : 'active',
-      detail: task.claim.mode === 'conversation' ? 'Processing new comments on ' + task.claim.hostId + '.' : 'Working on ' + task.claim.hostId + '.' };
+      detail: 'Working on ' + task.claim.hostId + '.' };
   }
   if (['backlog', 'done', 'cancelled'].includes(task.workflowState)) return { state: 'idle', detail: 'No task work is scheduled.' };
   if (task.recovery) return { state: task.recovery.attempts < 2 ? 'recovering' : 'failed',

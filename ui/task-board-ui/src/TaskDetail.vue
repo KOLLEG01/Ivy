@@ -1172,6 +1172,12 @@ const showArrived = () => {
                       ><ExternalLink class="size-3 shrink-0" aria-hidden="true" /></a>
                     </template>
                     <div class="min-w-0 space-y-3">
+                      <StatusBadge
+                        v-if="optimistic.pending.value?.request.commentId === entry.comment.commentId && !optimistic.issue(entry.comment.commentId)"
+                        role="status"
+                        :label="tr('Wird gesendet…', 'Sending…')"
+                        tone="neutral"
+                      />
                       <div v-if="optimistic.issue(entry.comment.commentId)" role="alert" class="space-y-2 text-sm">
                         <p>{{ optimistic.issue(entry.comment.commentId) }}</p>
                         <Button size="sm" variant="secondary" :disabled="!available || !editable || !optimistic.canRetry(entry.comment.commentId)" @click="optimistic.retry(entry.comment.commentId)">

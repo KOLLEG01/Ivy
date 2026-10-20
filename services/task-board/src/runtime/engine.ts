@@ -1,4 +1,4 @@
-import { coordinationPending, peerComment, workspaceIdentity } from './task-coordination.js';
+import { commentsPending, peerComment, workspaceIdentity } from './task-coordination.js';
 import { assessSteps, consumeStep, stepCondition, validateNextSteps } from './next-steps.js';
 import { publishBrowserNotice } from '../../../../packages/sdk/src/node.js';
 import { digest, hashJson } from "../../../../packages/sdk/src/node.js";
@@ -36,7 +36,7 @@ import { failedRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-li
 import { crossAgentComment, openQuestions, queuedTaskEdits, queuedUserInput, unreadComments } from './conversation.js';
 import { operationReceipt } from './operation-receipt.js';
 import { readTask } from './task-read.js';
-import { executionMode, missingHandoff, nextExecutionMode } from './execution-mode.js';
+import { executionMode, missingHandoff, nextExecutionMode, triggeredByComments } from './execution-mode.js';
 import { validateTaskContent } from './comment-store.js';
 import { sameAssignment } from './handoff.js';
 import { requireExecutionCapacity } from './execution-capacity.js';
@@ -114,6 +114,7 @@ export class Publication {
 
 /** Authenticated transitions and durable claim/Run creation. Native execution is a separate observer. */
 export class TaskBoardEngine {
+  onTaskChanged?: (taskId: string) => void;
   readonly operations: TaskBoardOperations;
   readonly coordination: TaskBoardCoordination;
   readonly checks: TaskBoardChecks;
@@ -579,7 +580,16 @@ export class TaskBoardEngine {
     if (existing) return existing;
     const active = this.store.withReadCache(() =>
       this.executeCached(operation),
-    );
+    ).then(outcome => {
+      const request = operation.value.request;
+      // Wake the exact ticket after its publication is committed. Own progress
+      // reports and native bookkeeping must not keep waking the same agent.
+      if (operation.value.phase !== 'succeeded' && outcome.task && request.action !== 'nativeUpdate' &&
+          (request.action !== 'comment' || request.authorKind !== 'agent' ||
+            !!request.sourceTaskId || request.recipient?.kind === 'task'))
+        this.onTaskChanged?.(outcome.task.objectId);
+      return outcome;
+    });
     this.executions.set(operation.pin.objectId, active);
     const clear = () => {
       if (this.executions.get(operation.pin.objectId) === active)
@@ -950,7 +960,7 @@ export class TaskBoardEngine {
     // marker prevent a native observer or another action from using a half-published claim.
     if (request.action === "start" || request.action === "continue") {
       const mode = executionMode(request);
-      if (first && mode === 'execution') {
+      if (first && mode === 'execution' && !triggeredByComments(request)) {
         const selected = (await assessSteps(this.store, previous, at)).find(value => value.step.id === request.nextStepId && value.ready);
         requireThat(selected, 'task_board_input_required', 'The selected next step is no longer ready.');
         next.consumedSteps = consumeStep(previous, selected);
@@ -972,7 +982,7 @@ export class TaskBoardEngine {
       };
       next = {
         ...next,
-        workflowState: mode === 'conversation' ? previous.workflowState : "in_progress",
+        workflowState: triggeredByComments(request) ? previous.workflowState : "in_progress",
         runtimeWait: null,
         claim,
         attemptCount: claim.attempt,
@@ -1030,7 +1040,7 @@ export class TaskBoardEngine {
         attachments: request.attachments, run: previous.lastRun, turnId: null, replyTo: request.replyTo,
         createdAt: at, operationId: request.operationId,
       };
-      const commentDeliveries = (authorKind === "user" || authorKind === 'agent' && !!request.sourceTaskId && request.agentDelivery === 'queue') && request.agentDelivery !== "none"
+      const commentDeliveries = (authorKind === "user" || authorKind === 'agent' && !!request.sourceTaskId) && request.agentDelivery !== "none"
         ? [...previous.commentDeliveries, { commentId: comment.commentId, state: "queued" as const,
             operationId: request.operationId, updatedAt: at, code: null }]
         : previous.commentDeliveries;
@@ -1381,7 +1391,7 @@ export class TaskBoardEngine {
         detail = "Added Task comment.";
         if (comment.authorKind === "agent")
           next.agentCommentCount = previous.agentCommentCount + 1;
-        if ((comment.authorKind === "user" || peerComment(comment) && request.agentDelivery === 'queue')) {
+        if (comment.authorKind === "user" || peerComment(comment)) {
           if (request.agentDelivery !== "none") next.workRevision++;
           if (request.agentDelivery !== "none" && next.runtimeWait && ['host', 'capability', 'workspace'].includes(next.runtimeWait.reason))
             next.runtimeWait = { ...next.runtimeWait, retryAt: null };
@@ -1502,7 +1512,7 @@ export class TaskBoardEngine {
         'task_board_recovery_scope', 'Recovery records agent evidence; it cannot fabricate user input or a new approval question.');
     }
     requireThat(
-      !terminal(task) || (request.action === 'start' || request.action === 'continue') && request.coordinationOnly === true ||
+      !terminal(task) || (request.action === 'start' || request.action === 'continue') && triggeredByComments(request) ||
         (["edit", "retargetQuestion", "comment", "uploadAttachment"].includes(request.action) || request.action === "transition" &&
           (request.workflowState === "backlog" || task.workflowState === "done" && request.workflowState === "todo")),
       "task_board_invalid_transition",
@@ -1510,10 +1520,10 @@ export class TaskBoardEngine {
     );
     const handoffRecovery = (request.action === 'continue' && !!request.recoveryFor ||
       request.action === 'defer' && 'recoveryRetryAt' in request) && nextExecutionMode(task, at) === 'recovery';
-    const conversationRequest = (request.action === 'start' || request.action === 'continue') && request.coordinationOnly === true;
+    const commentRequest = (request.action === 'start' || request.action === 'continue') && triggeredByComments(request);
     if (actor.source === 'scheduler') requireThat(
       ['start', 'continue', 'defer', 'transition'].includes(request.action) &&
-      (task.fields.control === 'agent' || conversationRequest || request.action === 'defer' && coordinationPending(task)),
+      (task.fields.control === 'agent' || commentRequest || request.action === 'defer' && commentsPending(task)),
       'task_board_user_controlled', 'Automatic task work requires agent control; queued discussion remains independently available.');
     const noClaim = () =>
       requireThat(
@@ -1610,7 +1620,7 @@ export class TaskBoardEngine {
         noClaim();
         await requireExecutionCapacity(this.store, this.settings);
         requireThat(
-          ['todo', 'waiting', 'review'].includes(task.workflowState) || handoffRecovery || conversationRequest,
+          ['todo', 'waiting', 'review'].includes(task.workflowState) || handoffRecovery || commentRequest,
           "task_board_invalid_transition",
           "Automatic execution starts from Todo or a resumable wait.",
         );
@@ -1621,13 +1631,12 @@ export class TaskBoardEngine {
             "Continuation requires the saved primary native context.",
           );
         requireThat(
-          (task.fields.control === "agent" || conversationRequest) && actor.source === "scheduler",
+          (task.fields.control === "agent" || commentRequest) && actor.source === "scheduler",
           "task_board_user_controlled",
           "Native Task allocation is automatic for agent-controlled work.",
         );
         {
           const mode = executionMode(request);
-          const coordinationOnly = mode === 'conversation';
           const recoveryOnly = mode === 'recovery';
           if (recoveryOnly && request.action === 'continue') {
             const origin = await this.store.read('task-board/run', request.recoveryFor!.objectId);
@@ -1638,10 +1647,10 @@ export class TaskBoardEngine {
               same(origin.value.primaryResourceRef, task.primaryResourceRef), 'task_board_recovery_evidence_missing',
               'Recovery requires its exact terminal original Run and the unchanged native context.');
           }
-          if (coordinationOnly) requireThat(coordinationPending(task) && request.commentIds.length > 0 &&
+          if (commentRequest) requireThat(commentsPending(task) &&
             request.commentIds.every(id => task.commentDeliveries.some(delivery => delivery.commentId === id && delivery.state === 'queued') &&
               task.comments.some(comment => comment.commentId === id && (comment.authorKind === 'user' || peerComment(comment)))),
-            'task_board_invalid_transition', 'A conversation requires queued external comments.');
+            'task_board_invalid_transition', 'A comment-triggered turn requires queued external comments.');
           const plan = await this.checks.execution(
             task,
             request.intent,
@@ -1649,7 +1658,7 @@ export class TaskBoardEngine {
             at,
             request.target,
             request.workspace,
-            coordinationOnly,
+            commentRequest,
             recoveryOnly,
             request.nextStepId,
           );
@@ -1804,8 +1813,6 @@ export class TaskBoardEngine {
         }
         requireThat(!request.questionSource || actor.source === 'native' && request.sourceTaskId === request.questionSource.taskId,
           'task_board_forbidden', 'Only TaskBoard delivers a canonical task question.');
-        if (request.handoff && task.claim) requireThat(executionMode(task.claim.request) !== 'conversation',
-          'task_board_coordination_scope', 'A coordination-only turn cannot replace the work handoff.');
         requireThat(!request.handoff || !request.sourceTaskId, 'task_board_handoff_source', 'Omit sourceTaskId on your own handoff; it is only for a directed message to another task.');
         requireThat(!request.handoff || actor.source === 'worker' && request.purpose === 'handoff' && !request.sourceTaskId && !!task.claim?.run,
           'task_board_forbidden', 'Only the active worker can declare its own completion intent.');

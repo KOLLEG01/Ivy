@@ -27,8 +27,7 @@ export async function intendedCall(store: TaskBoardStore, run: TaskBoard.Run, sl
       'task_board_native_order', 'Steering requires the exact active native turn.');
     const task = await store.read('task-board/task', run.taskId);
     method = 'turn/steer'; params = { threadId: run.primaryResourceRef.nativeId, expectedTurnId: run.turnId,
-      input: [{ type: 'text', text: taskUpdatePrompt(task.value, run.owner.serviceNodeId,
-        run.originalRequest.coordinationOnly === true), text_elements: [] }] };
+      input: [{ type: 'text', text: taskUpdatePrompt(task.value, run.owner.serviceNodeId), text_elements: [] }] };
   } else if (origin.kind === 'reattach') {
     const primary = run.primaryResourceRef;
     requireThat(slot === 'thread' && primary?.namespace === 'codex' && primary.kind === 'thread' && primary.serviceNodeId === run.target.serviceNodeId,
@@ -43,7 +42,7 @@ export async function intendedCall(store: TaskBoardStore, run: TaskBoard.Run, sl
   } else if (slot === 'turn') {
     requireThat(run.primaryResourceRef && run.nativeEpoch, 'task_board_primary_required', 'Turn preparation requires the saved primary and native epoch.');
     const task = await store.read('task-board/task', { objectId: run.taskId, revision: run.originalRequest.expectedRevision });
-    const taskInput = { type: 'text', text: taskPrompt(task.value, run.owner.serviceNodeId, run.originalRequest.coordinationOnly, run.originalRequest.action === 'continue' && !!run.originalRequest.recoveryFor,
+    const taskInput = { type: 'text', text: taskPrompt(task.value, run.owner.serviceNodeId, run.originalRequest.action === 'continue' && !!run.originalRequest.recoveryFor,
       run.originalRequest.nextStepId), text_elements: [] };
     method = 'turn/start'; definition = 'turnStart'; params = { ...plan.turnStart, threadId: run.primaryResourceRef.nativeId,
       input: run.owner.source === 'scheduler' ? [taskInput] : [...nativeArray(plan.turnStart.input), taskInput] };

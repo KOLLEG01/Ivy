@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { hashJson } from '../packages/contracts/src/canonical.js';
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
 import { intendedCall, resolveNativeRequest } from '../services/task-board/src/runtime/native-intent.js';
-import { peerState, workspaceIdentity } from '../services/task-board/src/runtime/task-coordination.js';
+import { workspaceIdentity } from '../services/task-board/src/runtime/task-coordination.js';
 import { assessSteps } from '../services/task-board/src/runtime/next-steps.js';
 import { nativeWorkflow } from './fixtures/task-board-native.js';
 import { forwardDelegatedReview } from '../services/task-board/src/runtime/task-delegation.js';
@@ -18,7 +19,7 @@ async function steer(w: Awaited<ReturnType<typeof nativeWorkflow>>, commentIds: 
   const task = await w.f.first.store.read('task-board/task', w.state().task);
   const run = await w.f.first.store.read('task-board/run', w.state().run);
   return w.prepare('steer', { kind: 'steer', commentIds, workRevision: task.value.workRevision,
-    peersHash: await peerState(w.f.first.store, task.value, task.pin.objectId), predecessor: run.value.calls.steer ?? null });
+    peersHash: hashJson([]), predecessor: run.value.calls.steer ?? null });
 }
 
 test('steering contains only a ticket reference and acknowledges only its original comment batch', async t => {
@@ -29,7 +30,7 @@ test('steering contains only a ticket reference and acknowledges only its origin
   assert.equal(request.method, 'turn/steer'); assert.equal(request.params.expectedTurnId, 'native-turn');
   assert.match(JSON.stringify(request.params), /TaskBoard TASK-/);
   assert.doesNotMatch(JSON.stringify(request.params), /Secret ticket content/);
-  assert.match(JSON.stringify(request.params), /continue only the selected authorized next step/);
+  assert.match(JSON.stringify(request.params), /Decide from the current ticket whether to reply, continue work or wait/);
   assert.doesNotMatch(JSON.stringify(request.params), /Coordination only|Preserve this ticket's result/);
   assert.ok(JSON.stringify(request.params).length < 500);
   const second = await comment(w, 'Another private correction.');
@@ -51,7 +52,7 @@ test('failed steering preserves the run and queues feedback for the same primary
   const next = (await w.f.first.store.read('task-board/run', continued!.run!)).value;
   assert.deepEqual(next.primaryResourceRef, run.primaryResourceRef);
   assert.deepEqual(next.originalRequest.commentIds, [id]);
-  assert.equal(next.originalRequest.coordinationOnly, true);
+  assert.equal(next.originalRequest.coordinationOnly, undefined);
   assert.equal((await w.f.first.store.read('task-board/task', finished.task!.objectId)).value.commentDeliveries.find(value => value.commentId === id)?.state, 'queued');
 });
 
@@ -63,21 +64,25 @@ test('unknown steering receipts cannot be replaced and acknowledge only after ex
   assert.equal((await w.f.first.store.read('task-board/task', w.state().task)).value.commentDeliveries[0]?.state, 'delivered');
 });
 
-test('explicit task blockers resume automatically after the linked task finishes and reject cycles', async t => {
+test('completion dependencies resume after acceptance and reject closed cycles', async t => {
   const w = await nativeWorkflow(t); await w.running();
   const other = await w.f.planned('agent');
-  const block = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: other.task.objectId, expectedRevision: other.task.revision, nextSteps: [{ id: 'next', scope: 'Waiting for peer.', requires: [{ kind: 'task', taskId: w.state().task.objectId, until: 'idle' }] }] });
+  const block = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: other.task.objectId, expectedRevision: other.task.revision, nextSteps: [{ id: 'next', scope: 'Waiting for peer acceptance.', requires: [{ kind: 'task', taskId: w.state().task.objectId, until: 'done' }] }] });
   assert.equal((await w.f.first.store.read('task-board/task', block.task!)).value.workflowState, 'waiting');
   const scheduler = new TaskBoardScheduler(w.f.first);
   await scheduler.task(other.task.objectId);
   assert.equal((await w.f.first.store.read('task-board/task', other.task.objectId)).value.claim, null);
   await w.refresh();
-  await assert.rejects(w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision, nextSteps: [{ id: 'next', scope: 'Cycle.', requires: [{ kind: 'task', taskId: other.task.objectId, until: 'idle' }] }] }, w.f.settings.principalId), /indirectly/);
-  await w.f.first.nativeUpdate(await w.snapshot('completed'));
+  await assert.rejects(w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision, nextSteps: [{ id: 'next', scope: 'Cycle.', requires: [{ kind: 'task', taskId: other.task.objectId, until: 'done' }] }] }, w.f.settings.principalId), /indirectly/);
+  await w.handoff();
+  const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
+  assert.equal(await scheduler.task(other.task.objectId), null);
+  await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: finished.task!.objectId,
+    expectedRevision: finished.task!.revision, workflowState: 'done', detail: 'The result is accepted.' });
   assert.ok((await scheduler.task(other.task.objectId))?.run);
   assert.equal((await w.f.first.store.read('task-board/task', other.task.objectId)).value.nextSteps[0]?.requires[0]?.kind, 'task');
   const blocked = await w.f.first.store.read('task-board/task', other.task.objectId);
-  assert.equal((await assessSteps(w.f.first.store, { ...blocked.value, nextSteps: [{ id: 'accepted', scope: 'Wait for acceptance.', requires: [{ kind: 'task', taskId: w.state().task.objectId, until: 'done' }] }] }, new Date().toISOString()))[0]!.ready, false);
+  assert.equal((await assessSteps(w.f.first.store, { ...blocked.value, nextSteps: [{ id: 'accepted', scope: 'Wait for acceptance.', requires: [{ kind: 'task', taskId: w.state().task.objectId, until: 'done' }] }] }, new Date().toISOString()))[0]!.ready, true);
 });
 
 for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a blocked task' : 'review'} for coordination, while ordinary agent comments stay quiet`, async t => {
@@ -106,10 +111,11 @@ for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a
   await send(true); assert.equal(task.value.workflowState, blocked ? 'waiting' : 'review');
   const next = await scheduler.task(task.pin.objectId); assert.ok(next?.run);
   const run = (await w.f.first.store.read('task-board/run', next.run)).value;
-  assert.equal(run.originalRequest.action === 'continue' && run.originalRequest.coordinationOnly, true);
+  assert.equal(run.originalRequest.action, 'continue');
+  assert.equal(run.originalRequest.coordinationOnly, undefined);
   const prompt = await intendedCall(w.f.first.store, { ...run, nativeEpoch: 'fixture-epoch' }, 'turn');
-  assert.match(JSON.stringify(prompt.request.params), /Process the queued user comments/);
-  assert.match(JSON.stringify(prompt.request.params), /verify and accept delegated results/);
+  assert.match(JSON.stringify(prompt.request.params), /Read the ticket and new comments/);
+  assert.match(JSON.stringify(prompt.request.params), /Decide from the current ticket whether to reply, continue work or wait/);
   assert.doesNotMatch(JSON.stringify(prompt.request.params), /Please coordinate the next change/);
   w.adopt(next);
   await w.running();
@@ -122,9 +128,7 @@ for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a
   const steeringPin = await steer(w, [update]);
   const steering = await w.f.first.store.read('task-board/native-call', steeringPin);
   const steeringRequest = await resolveNativeRequest(w.f.first.store, steering.value.request);
-  assert.match(JSON.stringify(steeringRequest.params), /Process the new discussion/);
-  assert.match(JSON.stringify(steeringRequest.params), /Preserve nextSteps, results and existing work conditions/);
-  assert.doesNotMatch(JSON.stringify(steeringRequest.params), /Continue the requested work/);
+  assert.deepEqual(steeringRequest.params.input, prompt.request.params.input);
   await w.observe('steer', steeringPin, { result: { turnId: 'native-turn' } });
   const ended = await w.f.first.nativeUpdate(await w.snapshot('completed', 'Coordination answer.'));
   const after = (await w.f.first.store.read('task-board/task', ended.task!)).value;

@@ -55,7 +55,7 @@ for (const failureAt of ["task", "receipt"] as const) {
 }
 
 for (const bound of ["count", "bytes"] as const) {
-  test(`native completion preserves its Result when the extra comment exceeds ${bound}`, async t => {
+  test(`native completion preserves its Result and comment beyond the former inline ${bound} limit`, async t => {
     const w = await nativeWorkflow(t); await w.running();
     const store = w.f.first.store, task = await store.read("task-board/task", w.state().task);
     const comments: TaskBoard.Comment[] = Array.from({ length: bound === "count" ? 512 : 15 }, (_, index) => ({
@@ -72,7 +72,7 @@ for (const bound of ["count", "bytes"] as const) {
     assert.equal(saved.value.publication, null);
     assert.equal(saved.value.workflowState, "waiting");
     assert.deepEqual(saved.value.comments.slice(0, comments.length), comments);
-    assert.equal(saved.value.comments.length, comments.length + (bound === 'count' ? 1 : 0));
+    assert.equal(saved.value.comments.length, comments.length + 1);
     assert.equal((await store.read("task-board/result", outcome.result!)).value.content.summary, summary);
     assert.ok(outcome.history);
   });
@@ -356,10 +356,10 @@ test("a queued comment does not restart an attempt that failed before its first 
   assert.equal(task.value.workflowState, "waiting");
   assert.equal(task.value.claim, null);
   assert.equal(task.value.commentDeliveries.find(value => value.commentId === commentId)?.state, "queued");
-  assert.equal(w.f.first.condition(task.value).state, 'workflow_attention');
+  assert.equal(w.f.first.condition(task.value).state, 'failed');
   const conversation = await new TaskBoardScheduler(w.f.first).task(task.pin.objectId); assert.ok(conversation?.run);
   const conversationRun = await w.f.first.store.read('task-board/run', conversation.run);
-  assert.equal(conversationRun.value.originalRequest.coordinationOnly, true);
+  assert.equal(conversationRun.value.originalRequest.coordinationOnly, undefined);
   assert.deepEqual(conversationRun.value.originalRequest.commentIds, [commentId]);
   w.adopt(conversation); await w.running();
   const ended = await w.f.first.nativeUpdate(await w.snapshot('completed'));
@@ -660,6 +660,7 @@ for (const purpose of ['question', 'handoff'] as const) {
     await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: state.task.objectId,
       expectedRevision: state.task.revision, commentId: 'worker-output', authorKind: 'agent', purpose,
       body: purpose === 'question' ? 'Which option should I use?' : 'Delivered the specification.',
+      ...(purpose === 'question' ? { recipient: { kind: 'user' as const } } : {}),
       ...(purpose === 'handoff' ? { handoff: { workflowState: 'review' as const, nextSteps: [] } } : {}),
       requests: [], responses: [], attachments: [], replyTo: null });
     await w.refresh();
@@ -764,6 +765,7 @@ test('ticket-only questions and final results remain in the ticket without brows
     await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId,
       expectedRevision: w.state().task.revision, commentId: purpose, authorKind: 'agent', purpose,
       body: purpose === 'handoff' ? 'Delivered in the ticket.' : 'Please answer in the ticket.',
+        ...(purpose === 'question' ? { recipient: { kind: 'user' as const } } : {}),
       ...(purpose === 'handoff' ? { handoff: { workflowState: 'review' as const, nextSteps: [] } } : {}),
       requests: [], responses: [], attachments: [], replyTo: null });
     await w.refresh();

@@ -19,6 +19,9 @@ import { nativeRateLimitRetryAt } from '../services/task-board/src/runtime/nativ
 
 async function fixture(t: TestContext) {
   const f = await nativeDriverFixture(t); let status = 'inProgress', started = false, readFailed = false, archived = false, largeResume = false, outputError: number | null = null;
+  const nativeThread = f.w.nativeThread;
+  f.w.nativeThread = (turns = [], status = { type: 'idle' }) =>
+    ({ ...nativeThread(turns, status), cwd: f.w.planned.workspace.canonicalCwd });
   let outputItems: Wire.Json[] = [{ id: 'two', type: 'agentMessage', phase: 'final_answer', text: 'Second' }];
   let turnError: Wire.Json = null, completedAt: number | null = null, startReplyStatus: string | null = null;
   f.reply(frame => {
@@ -35,7 +38,7 @@ async function fixture(t: TestContext) {
     if (frame['method'] === 'thread/resume' && largeResume) {
       const turns = nativeRecord(frame['params'])['excludeTurns'] === true ? [] : [{ ...nativeRecord(f.w.turn('completed')),
         items: [{ id: 'large-history', type: 'agentMessage', phase: 'final_answer', text: 'x'.repeat(25 * 1024 * 1024) }] }];
-      return { result: { thread: f.w.nativeThread(turns), cwd: '/fixture', model: 'fixture-model', modelProvider: 'openai',
+      return { result: { thread: f.w.nativeThread(turns), cwd: f.w.planned.workspace.canonicalCwd, model: 'fixture-model', modelProvider: 'openai',
         approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly' }, reasoningEffort: 'high' } };
     }
     if (frame['method'] === 'thread/unarchive') { archived = false; return { result: { thread: f.w.nativeThread() } }; }
@@ -75,12 +78,51 @@ test('native quota retries use the reported reset and timezone, with delayed ret
   assert.equal(nativeRateLimitRetryAt({ status: 'completed', items: [{ type: 'agentMessage', text: "You've hit your session limit" }] }, '2026-10-09T13:57:31.803Z'), null);
 });
 
+for (const sender of ['user', 'task'] as const) for (const idle of [false, true])
+test(`${sender} comments reach ${idle ? 'an idle' : 'a running'} agent without another scan`, async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  await f.first.drain(f.runId);
+  if (idle) {
+    await f.f.w.refresh(); await f.f.w.handoff();
+    f.status('completed'); await f.first.drain(f.runId);
+  }
+  const runtime = new TaskBoardReconciler(engine);
+  while (!runtime.recovered) { await runtime.tick(); await runtime.settled(); }
+  t.after(() => runtime.stop());
+  const before = await engine.store.read('task-board/task', f.f.w.state().task.objectId);
+  // The sending task has its own owner; only the recipient's native context is simulated here.
+  const source = sender === 'task' ? await f.f.w.f.invoke({ action: 'create', operationId: randomUUID(),
+    fields: before.value.fields }, 'user', f.f.w.f.second) : null;
+  if (source) await new TaskBoardScheduler(f.f.w.f.second).task(source.task!.objectId);
+  const page = engine.store.page.bind(engine.store);
+  let boardScans = 0;
+  engine.store.page = (async (key, query) => {
+    if (key === 'task-board/task') boardScans++;
+    return page(key, query);
+  }) as typeof engine.store.page;
+  const commentId = randomUUID(), starts = f.f.frames.filter(frame => frame['method'] === 'turn/start').length;
+  const steers = f.f.frames.filter(frame => frame['method'] === 'turn/steer').length;
+  await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: before.pin.objectId,
+    expectedRevision: before.pin.revision, commentId, body: 'Read this update and decide what to do.',
+    ...(source ? { authorKind: 'agent', sourceTaskId: source.task!.objectId } : {}),
+    requests: [], responses: [], attachments: [], replyTo: null });
+  // No tick after the message: an event must drive both admission and native dispatch.
+  await runtime.settled();
+  const after = await engine.store.read('task-board/task', before.pin.objectId);
+  const delivery = after.value.commentDeliveries.find(item => item.commentId === commentId)!;
+  assert.equal(delivery.state, 'delivered', JSON.stringify({ wait: after.value.runtimeWait, diagnostics: runtime.diagnostics }));
+  assert.equal(boardScans, 0, 'Delivery must not enumerate unrelated tickets.');
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, starts + (idle ? 1 : 0));
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/steer').length, steers + (idle ? 0 : 1));
+});
+
 for (const status of ['interrupted', 'failed', 'completed']) test(`a ${status} start acknowledgement does not close a native turn that is still running`, async t => {
   const f = await fixture(t), engine = f.f.w.f.first;
   f.startReply(status); await f.first.drain(f.runId);
   const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
   assert.equal(run.value.phase, 'running'); assert.equal(run.value.externalOutcome.state, 'active');
   assert.equal(task.value.workflowState, 'in_progress'); assert.equal(task.value.claim?.run?.objectId, f.runId);
+  await f.f.w.handoff();
   f.status('completed'); await f.first.drain(f.runId);
   assert.equal((await f.current()).value.phase, 'completed');
   assert.equal((await engine.store.read('task-board/task', run.value.taskId)).value.workflowState, 'review');
@@ -236,7 +278,9 @@ test('Run orchestration starts once, leaves unchanged polls ephemeral and comple
   assert.equal(completed.value.phase, 'completed'); assert.equal(result.value.content.summary, 'Second');
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/items/list').length, 1);
   assert.equal((await f.f.w.f.first.store.page('task-board/native-transcript', { limit: 2 })).items.length, 0);
-  assert.equal((await f.f.w.f.first.store.read('task-board/task', completed.value.taskId)).value.workflowState, 'review');
+  const task = (await f.f.w.f.first.store.read('task-board/task', completed.value.taskId)).value;
+  assert.equal(task.workflowState, 'waiting');
+  assert.equal(task.completionIssue?.code, 'task_board_handoff_missing');
   for (const method of ['thread/start', 'turn/start']) assert.equal(f.f.frames.filter(frame => frame['method'] === method).length, 1);
   assert.equal(f.f.journal.status().retained, 2);
   const finalFrames = f.f.frames.length; await f.first.step(f.runId); assert.equal(f.f.frames.length, finalFrames);
@@ -246,7 +290,8 @@ test('a ticket handoff completes without requesting any output history', async t
   const f = await fixture(t); await f.first.drain(f.runId);
   const engine = f.f.w.f.first, task = await engine.store.read('task-board/task', (await f.current()).value.taskId);
   await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision,
-    commentId: 'worker-handoff', authorKind: 'agent', purpose: 'handoff', body: 'Delivered and verified. See the attached result.', requests: [], responses: [], attachments: [], replyTo: null });
+    commentId: 'worker-handoff', authorKind: 'agent', purpose: 'handoff', body: 'Delivered and verified. See the attached result.',
+    handoff: { workflowState: 'review', nextSteps: [] }, requests: [], responses: [], attachments: [], replyTo: null });
   f.outputError(-32000); f.status('completed'); await f.second.drain(f.runId);
   const completed = await f.current(), result = await engine.store.read('task-board/result', completed.value.result!);
   assert.equal(result.value.content.summary, 'Delivered and verified. See the attached result.');
@@ -325,7 +370,9 @@ test('completion replays its saved final read after a lost publication receipt w
   assert.equal(operation!.value.phase, 'needs_attention');
   await engine.store.collectLocal(Date.now() + 8 * 86400000);
   const outcome = await engine.recoverOperation(operation!.pin.objectId);
-  assert.equal((await engine.store.read('task-board/task', outcome.task!)).value.workflowState, 'review');
+  const task = (await engine.store.read('task-board/task', outcome.task!)).value;
+  assert.equal(task.workflowState, 'waiting');
+  assert.equal(task.completionIssue?.code, 'task_board_handoff_missing');
   assert.equal((await engine.store.read('task-board/result', outcome.result!)).value.content.summary, 'Second');
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/items/list').length, 1);
   assert.equal((await engine.store.page('task-board/result', { limit: 2 })).items.length, 1);
@@ -389,7 +436,7 @@ test('continuation obtains a new retained resume receipt before its new turn on 
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 2);
   const sentInput = nativeRecord(f.f.frames.filter(frame => frame['method'] === 'turn/start').at(-1)!['params'])['input'] as Array<{ text: string }>;
   assert.equal(sentInput.length, 1);
-  assert.match(sentInput[0]!.text, /Read the current ticket/);
+  assert.match(sentInput[0]!.text, /Read the ticket and new comments/);
   assert.ok(!sentInput[0]!.text.includes(feedback));
   assert.deepEqual((await f.current()).pin, original.pin, 'The previous completed Run remains immutable during continuation.');
 });
@@ -443,7 +490,8 @@ test('closed provider retains in progress with visible automatic recovery and bo
   let run = await f.current();
   let task = await f.f.w.f.first.store.read('task-board/task', run.value.taskId);
   assert.equal(run.value.phase, 'outcome_unknown');
-  assert.equal(task.value.runtimeWait, null);
+  assert.equal(task.value.runtimeWait?.reason, 'host');
+  assert.match(task.value.runtimeWait!.detail, /Provider connection is closed/);
   assert.equal(task.value.workflowState, 'in_progress');
   assert.equal(task.value.claim?.run?.objectId, f.runId);
   assert.equal(executionCondition({ workflowState: task.value.workflowState, control: task.value.fields.control,
@@ -455,7 +503,8 @@ test('closed provider retains in progress with visible automatic recovery and bo
   await f.second.step(f.runId);
   task = await engine.store.read('task-board/task', run.value.taskId);
   assert.equal(task.value.workflowState, 'in_progress');
-  assert.equal(task.value.runtimeWait, null);
+  assert.equal(task.value.runtimeWait?.reason, 'host');
+  assert.match(task.value.runtimeWait!.detail, /Provider connection is closed/);
   await f.second.step(f.runId);
   assert.deepEqual((await engine.store.read('task-board/task', run.value.taskId)).pin, task.pin);
   const firstCalls = f.f.ownerCalls;
@@ -483,6 +532,7 @@ test('periodic reconciliation recovers completed work after provider loss and a 
   for (let pass = 0; pass < 12 && (await f.current()).value.phase !== 'running'; pass++) await tick();
   assert.equal((await f.current()).value.phase, 'running');
   const identity = (await f.current()).value.primaryResourceRef;
+  await f.f.w.handoff();
   f.f.providerClosed(true);
   for (let pass = 0; pass < 8 && (await f.current()).value.phase !== 'outcome_unknown'; pass++) await tick();
   assert.equal((await f.current()).value.phase, 'outcome_unknown');
@@ -619,7 +669,7 @@ test('missing unstarted context recovers once across lost native and publication
   // An already blocked ticket can have an additional failed continuation from before this fix.
   const queued = await engine.store.read('task-board/task', f.task.pin.objectId), allocation = await new TaskBoardScheduler(engine).allocate(queued, randomUUID());
   const continuation = await engine.schedule({ action: 'continue', operationId: randomUUID(), taskId: queued.pin.objectId,
-    expectedRevision: queued.pin.revision, ...allocation, feedback: 'Process the queued ticket input.', commentIds: [commentId], coordinationOnly: true });
+    expectedRevision: queued.pin.revision, ...allocation, feedback: 'Process the queued ticket input.', commentIds: [commentId] });
   await f.second.drain(continuation.run!.objectId);
   const before = await engine.store.read('task-board/task', f.task.pin.objectId), failed = await engine.store.read('task-board/run', continuation.run!.objectId);
   const clock = () => new Date(Date.now() + 31000);
@@ -782,6 +832,7 @@ test('terminal publication rereads a native answer received after the earlier in
   f.f.journal.accept(operation, 'agent.answer', { identity, reply });
   f.f.journal.dispatchAnswer(operation, identity, reply);
   f.f.journal.resolveInput(identity.epoch, identity.requestId, run.value.primaryResourceRef!.nativeId);
+  await f.f.w.handoff();
   f.status('completed'); await f.first.drain(f.runId);
   const task = (await engine.store.read('task-board/task', run.value.taskId)).value;
   assert.equal(task.workflowState, 'review');
