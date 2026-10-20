@@ -9,6 +9,8 @@ use ivy_contracts::{
 use ivy_sdk::collation::LocaleRuntime;
 use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use std::{path::PathBuf, sync::Mutex};
+#[path = "cli-reset-ui-auth.rs"]
+mod auth;
 
 fn json(text: &str) -> J {
     parse(text, usize::MAX).unwrap()

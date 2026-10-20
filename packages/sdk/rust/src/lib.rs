@@ -21,6 +21,7 @@ pub mod native_operation;
 pub mod native_observations;
 pub mod native_turn_contents;
 pub mod rpc;
+mod fetch_header;
 pub mod tools;
 mod service_connection;
 pub mod service;

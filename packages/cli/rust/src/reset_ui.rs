@@ -5,8 +5,9 @@ use ivy_contracts::{
     IvyError, IvyJson, IvyResult, JsString, json::parse, operation::derive_operation_id_js,
 };
 use ivy_sdk::{
+    clock::Clock,
     collation::LocaleComparator,
-    rpc::{RequestOptions, RpcClient},
+    rpc::{ClientOptions, HiveClient, RequestOptions, RpcClient},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -19,6 +20,66 @@ pub struct ResetUiBundle {
     pub directory: PathBuf,
     pub definition: IvyJson,
     pub checked_bundle: UiBundle,
+}
+
+/// Select from already validated instance definitions without applying the
+/// coordinator's later missing-credential gate or observing another instance.
+pub fn reset_ui_credential(instances: &[IvyJson]) -> IvyResult<Option<JsString>> {
+    for instance in instances {
+        if instance.is_null() {
+            return Err(IvyError::internal());
+        }
+        if let Some(value) = instance.get("credential").filter(|value| truthy(value)) {
+            return value
+                .as_js_string()
+                .cloned()
+                .map(Some)
+                .ok_or_else(IvyError::internal);
+        }
+    }
+    Ok(None)
+}
+
+/// One restore invocation's authenticated client and retained identity.
+/// The host retains credential authority, its separate deadline and retries.
+pub struct ResetUiPublisher {
+    client: HiveClient,
+    mutation_id: JsString,
+}
+impl ResetUiPublisher {
+    pub fn new(
+        public_base_url: &JsString,
+        credential: &JsString,
+        runtime_epoch: &JsString,
+        reset_id: &JsString,
+        clock: &dyn Clock,
+    ) -> IvyResult<Self> {
+        let client = HiveClient::new_js(
+            public_base_url,
+            ClientOptions {
+                credential: Some(credential.clone()),
+                ..ClientOptions::default()
+            },
+        )?;
+        let issued_at = clock.utc_millis();
+        let mut nonce = JsString::from("runtime-reset-uis-");
+        nonce.0.extend_from_slice(&reset_id.0);
+        let issued_at = u64::try_from(issued_at).map_err(|_| {
+            IvyError::new("invalid_arguments", "Invalid operation identity fields.")
+        })?;
+        let mutation_id =
+            ivy_contracts::operation::operation_id_js(runtime_epoch, issued_at, &nonce)?;
+        Ok(Self {
+            client,
+            mutation_id,
+        })
+    }
+    pub fn mutation_id(&self) -> &JsString {
+        &self.mutation_id
+    }
+    pub async fn republish(&self, bundles: &[ResetUiBundle]) -> IvyResult<Vec<JsString>> {
+        republish_reset_uis(&self.client, bundles, &self.mutation_id).await
+    }
 }
 
 fn io<T>(value: std::io::Result<T>) -> IvyResult<T> {
