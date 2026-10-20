@@ -72,7 +72,7 @@ fn node(root: &Path, action: &str) -> IvyJson {
         .spawn()
         .unwrap();
     let request = IvyJson::object([
-        ("root", node_path::from_native(root).into()),
+        ("root", IvyJson::String(node_path::from_native(root))),
         ("action", action.into()),
     ]);
     child

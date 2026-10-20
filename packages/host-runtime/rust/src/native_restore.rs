@@ -51,7 +51,7 @@ fn ordinary(value: ValueRef<'_>) -> IvyResult<IvyJson> {
             IvyJson::Number(value as f64)
         }
         ValueRef::Real(value) => IvyJson::Number(value),
-        ValueRef::Text(value) => text(value).into(),
+        ValueRef::Text(value) => IvyJson::String(text(value)),
         // Schema fields are scalar. Migration blobs and path values retain
         // their SQLite type at their respective validation boundaries below.
         ValueRef::Blob(_) => return Err(IvyError::internal()),
@@ -216,12 +216,12 @@ fn digest(db: &Connection, inverse: &Replacements) -> IvyResult<String> {
                             .and_then(|column| column.get(&before))
                             .unwrap_or(&before)
                             .clone();
-                        ("string", value.into())
+                        ("string", IvyJson::String(value))
                     }
                 };
                 object.insert(
                     name.clone(),
-                    IvyJson::Array(vec![name.clone().into(), kind.into(), value]),
+                    IvyJson::Array(vec![IvyJson::String(name.clone()), kind.into(), value]),
                 );
             }
             // Object.entries enumerates integer-index column names first.
@@ -341,7 +341,7 @@ pub fn relocate_database(
                 .insert(column.clone(), mapping);
             changes.push(IvyJson::object([
                 ("table", table.into()),
-                ("column", column.into()),
+                ("column", IvyJson::String(column)),
                 ("rows", IvyJson::Number(count as f64)),
             ]));
         }
