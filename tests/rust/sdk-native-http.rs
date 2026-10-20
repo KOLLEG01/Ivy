@@ -418,11 +418,25 @@ async fn cancellation_drop_generations_and_logical_owners() {
     let held_id = id(&held);
     let weak_owner = Arc::downgrade(&clone.owner);
     let weak_socket = Arc::downgrade(&held.lease.as_ref().unwrap().socket);
+    let worker_state = held.lease.as_ref().unwrap().state.upgrade().unwrap();
+    let driver = lock(&held.lease.as_ref().unwrap().socket.wire)
+        .driver
+        .as_ref()
+        .unwrap()
+        .abort_handle();
     let mut idle = get(&clone, &peer, "idle-owned").await;
     let idle_id = id(&idle);
     assert_ne!(held_id, idle_id);
     drain(&mut idle).await.unwrap();
     drop(clone);
+    assert!(
+        lock(&held.lease.as_ref().unwrap().socket.wire).io.is_none(),
+        "last logical client closes I/O even while a worker holds ClientState"
+    );
+    assert!(
+        lock(&worker_state.pool).idle.is_empty(),
+        "shutdown clears pooled senders while worker state is retained"
+    );
     assert!(
         weak_owner.upgrade().is_none(),
         "responses and workers are not logical owners"
@@ -430,6 +444,7 @@ async fn cancellation_drop_generations_and_logical_owners() {
     peer.closed(held_id).await;
     peer.closed(idle_id).await;
     release_tasks().await;
+    assert!(driver.is_finished(), "shutdown reclaims the owned driver");
     assert!(
         held.lease
             .as_ref()
@@ -445,12 +460,13 @@ async fn cancellation_drop_generations_and_logical_owners() {
         TransportErrorKind::Cancelled
     );
     drop(held);
+    drop(worker_state);
     release_tasks().await;
     assert!(
         weak_socket.upgrade().is_none(),
         "no physical connection retention cycle"
     );
-    peer.observe("final-owner", json!({"activeId":held_id,"idleId":idle_id,"ownerReleased":true,"physicalReleased":true,"bothClosed":true}));
+    peer.observe("final-owner", json!({"activeId":held_id,"idleId":idle_id,"ownerReleased":true,"physicalReleased":true,"bothClosed":true,"temporaryWorkerStateRetainedDuringShutdown":true,"synchronousIoTake":true,"driverFinished":true}));
     peer.finish().await;
 }
 

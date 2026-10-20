@@ -309,16 +309,22 @@ struct Pool {
     sockets: Vec<Weak<Socket>>,
 }
 struct Owner {
+    state: Arc<ClientState>,
+}
+struct ClientState {
     settings: ConnectionSettings,
     pool: Mutex<Pool>,
 }
 impl Drop for Owner {
     fn drop(&mut self) {
-        // Only Http1Client clones are long-lived strong logical owners. Responses,
-        // cancellation watchers and drivers cannot keep this pool alive.
-        for socket in lock(&self.pool).sockets.iter().filter_map(Weak::upgrade) {
+        // Only client clones own this token. Even a worker temporarily upgrading
+        // ClientState cannot postpone the last logical client's synchronous shutdown.
+        let mut pool = lock(&self.state.pool);
+        for socket in pool.sockets.iter().filter_map(Weak::upgrade) {
             socket.shutdown();
         }
+        pool.idle.clear();
+        pool.sockets.clear();
     }
 }
 
@@ -331,7 +337,7 @@ struct Lease {
     socket: Arc<Socket>,
     sender: Option<http1::SendRequest<RequestBody>>,
     generation: u64,
-    owner: Weak<Owner>,
+    state: Weak<ClientState>,
     key: PoolKey,
     watcher: Option<JoinHandle<()>>,
     idle_timeout: Option<Duration>,
@@ -360,11 +366,11 @@ impl Lease {
     }
 
     fn complete(mut self) -> Result<(), TransportError> {
-        let Some(owner) = self.owner.upgrade() else {
+        let Some(state) = self.state.upgrade() else {
             return Err(TransportError::new(TransportErrorKind::Cancelled));
         };
         // Pool -> wire is also the checkout/expiry order. No I/O poll takes pool.
-        let mut pool = lock(&owner.pool);
+        let mut pool = lock(&state.pool);
         let mut wire = lock(&self.socket.wire);
         if let Some(kind) = wire.terminal {
             return Err(TransportError::new(kind));
@@ -382,13 +388,13 @@ impl Lease {
                 watcher.abort();
             }
             let socket = Arc::downgrade(&self.socket);
-            let pool_owner = Arc::downgrade(&owner);
+            let pool_state = Arc::downgrade(&state);
             let key = self.key.clone();
             let generation = self.generation;
             wire.idle_timer = Some(tokio::spawn(async move {
                 tokio::time::sleep_until(expires).await;
-                if let (Some(owner), Some(socket)) = (pool_owner.upgrade(), socket.upgrade()) {
-                    let mut pool = lock(&owner.pool);
+                if let (Some(state), Some(socket)) = (pool_state.upgrade(), socket.upgrade()) {
+                    let mut pool = lock(&state.pool);
                     let mut wire = lock(&socket.wire);
                     if wire.phase != Phase::Idle || wire.generation != generation {
                         return;
@@ -449,14 +455,16 @@ impl Http1Client {
     pub(crate) fn new(settings: ConnectionSettings) -> Self {
         Self {
             owner: Arc::new(Owner {
-                settings,
-                pool: Mutex::new(Pool::default()),
+                state: Arc::new(ClientState {
+                    settings,
+                    pool: Mutex::new(Pool::default()),
+                }),
             }),
         }
     }
 
     fn checkout(&self, key: &PoolKey) -> Option<Lease> {
-        let mut pool = lock(&self.owner.pool);
+        let mut pool = lock(&self.owner.state.pool);
         let entries = pool.idle.get_mut(key)?;
         while let Some(idle) = entries.pop() {
             let mut wire = lock(&idle.socket.wire);
@@ -485,7 +493,7 @@ impl Http1Client {
                 socket: idle.socket,
                 sender: Some(idle.sender),
                 generation,
-                owner: Arc::downgrade(&self.owner),
+                state: Arc::downgrade(&self.owner.state),
                 key: key.clone(),
                 watcher: None,
                 idle_timeout: None,
@@ -550,7 +558,7 @@ impl Http1Client {
         let request_close = has_token(request.headers(), "connection", "close");
         let connect = async {
             let tls = if scheme == "https" {
-                let tls = self.owner.settings.tls.for_origin(&origin).await?;
+                let tls = self.owner.state.settings.tls.for_origin(&origin).await?;
                 if tls.alpn_protocols != [b"http/1.1".to_vec()] {
                     return Err(TransportError::new(TransportErrorKind::Tls));
                 }
@@ -568,9 +576,9 @@ impl Http1Client {
             let mut http = HttpConnector::new();
             http.enforce_http(false);
             http.set_nodelay(true);
-            http.set_keepalive(Some(self.owner.settings.tcp_keepalive_delay));
-            http.set_connect_timeout(Some(self.owner.settings.connect_timeout));
-            http.set_happy_eyeballs_timeout(Some(self.owner.settings.happy_eyeballs_delay));
+            http.set_keepalive(Some(self.owner.state.settings.tcp_keepalive_delay));
+            http.set_connect_timeout(Some(self.owner.state.settings.connect_timeout));
+            http.set_happy_eyeballs_timeout(Some(self.owner.state.settings.happy_eyeballs_delay));
             let tcp = http
                 .call(origin.clone())
                 .await
@@ -590,7 +598,7 @@ impl Http1Client {
             };
             let socket = Physical::new(io, tls);
             {
-                let mut pool = lock(&self.owner.pool);
+                let mut pool = lock(&self.owner.state.pool);
                 pool.sockets.retain(|socket| socket.strong_count() > 0);
                 pool.sockets.push(Arc::downgrade(&socket));
             }
@@ -598,15 +606,15 @@ impl Http1Client {
                 socket,
                 sender: None,
                 generation: 1,
-                owner: Arc::downgrade(&self.owner),
+                state: Arc::downgrade(&self.owner.state),
                 key,
                 watcher: None,
                 idle_timeout: None,
             };
             let mut builder = http1::Builder::new();
             builder
-                .max_header_size(self.owner.settings.maximum_head_bytes)
-                .max_headers(self.owner.settings.maximum_head_fields);
+                .max_header_size(self.owner.state.settings.maximum_head_bytes)
+                .max_headers(self.owner.state.settings.maximum_head_fields);
             let (sender, connection) = builder
                 .handshake(ManagedIo {
                     socket: Arc::downgrade(&lease.socket),
@@ -626,7 +634,7 @@ impl Http1Client {
         };
         let mut lease = tokio::select! { biased;
             _ = cancellation.cancelled() => return Err(TransportError::new(TransportErrorKind::Cancelled)),
-            connected = tokio::time::timeout(self.owner.settings.connect_timeout, connect) => {
+            connected = tokio::time::timeout(self.owner.state.settings.connect_timeout, connect) => {
                 connected.map_err(|error| TransportError::caused(TransportErrorKind::Timeout, error))??
             }
         };
@@ -674,7 +682,7 @@ impl Http1Client {
                 Err(TransportError::new(TransportErrorKind::Cancelled))
             }
             kind = socket.wait_terminal(generation) => Err(TransportError::new(kind)),
-            result = tokio::time::timeout(self.owner.settings.headers_timeout, head) => match result {
+            result = tokio::time::timeout(self.owner.state.settings.headers_timeout, head) => match result {
                 Ok(result) => result.map_err(|error| TransportError::caused(TransportErrorKind::Protocol, error)),
                 Err(error) => Err(TransportError::caused(TransportErrorKind::Timeout, error)),
             }
@@ -704,7 +712,7 @@ impl Http1Client {
             response.version(),
             response.headers(),
             request_close,
-            &self.owner.settings,
+            &self.owner.state.settings,
         );
         let (head, body) = response.into_parts();
         let mut admitted = Response {
@@ -712,7 +720,7 @@ impl Http1Client {
             headers: head.headers,
             body,
             lease: Some(lease),
-            body_idle_timeout: self.owner.settings.body_idle_timeout,
+            body_idle_timeout: self.owner.state.settings.body_idle_timeout,
             cancellation,
             finished: false,
             failure: None,
