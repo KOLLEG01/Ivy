@@ -463,10 +463,13 @@ async fn original_package_ui_worker_failure_order_and_outcomes() {
         "fail-second-register",
         "fail-deploy",
         "foreign-owner",
-        "invalid-epoch",
     ] {
         compare(mode).await;
     }
+}
+#[tokio::test]
+async fn original_package_ui_malformed_runtime_epoch() {
+    compare("invalid-epoch").await;
 }
 #[tokio::test]
 async fn original_package_ui_changes_after_scan_preserve_private_files() {
