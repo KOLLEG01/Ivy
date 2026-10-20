@@ -430,8 +430,8 @@ async fn production_factory_recovers_committed_native_calls_without_redispatch_a
             }
             assert_eq!(
                 scenario.prompts.get(),
-                2,
-                "Preparation and publication both verify the same original prompt"
+                1,
+                "Turn preparation renders the immutable original Task once"
             );
             assert!(fixture.rows("task-board/result").is_empty());
             assert_eq!(
@@ -500,6 +500,7 @@ async fn production_factory_recovers_committed_native_calls_without_redispatch_a
             assert_eq!(fixture.notices.get(), notices);
             assert_eq!(frames(&peer, "committed-operation").len(), 2);
             assert_eq!(frames(&peer, "original-operation").len(), 1);
+            assert_eq!(scenario.prompts.get(), 1);
             exact_evidence(&fixture, &peer);
             bounded(service.close()).await.unwrap();
         };
