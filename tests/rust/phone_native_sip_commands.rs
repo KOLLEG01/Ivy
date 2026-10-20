@@ -3,6 +3,8 @@ use super::*;
 mod answer;
 #[path = "phone_native_dial.rs"]
 mod dial;
+#[path = "phone_native_feedback.rs"]
+mod feedback;
 #[path = "phone_native_incoming.rs"]
 mod incoming;
 #[path = "phone_native_notifications.rs"]

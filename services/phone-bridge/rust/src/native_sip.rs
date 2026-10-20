@@ -205,6 +205,7 @@ struct CallResult {
     error: Option<&'static str>,
     claimed: bool,
     retiring: bool,
+    feedback_sequences: std::collections::HashSet<i64>,
 }
 #[derive(Clone)]
 pub struct NativeSipCall(Arc<Call>);
@@ -728,6 +729,61 @@ impl NativeSipOperations {
         expected.0.result.lock().unwrap().ending = true;
         self.0.host.hangup(&expected.0.original)?;
         Ok(expected.observation())
+    }
+    pub(crate) fn end_waiting(&self, expected: &NativeSipCall) -> Result<String, NativeSipError> {
+        self.connected_feedback(expected, None)?;
+        Ok(format!(
+            "{{\"callId\":\"{}\",\"ended\":true}}",
+            expected.0.original.id()
+        ))
+    }
+    pub(crate) fn command_feedback(
+        &self,
+        expected: &NativeSipCall,
+        sequence: i64,
+        success: bool,
+    ) -> Result<String, NativeSipError> {
+        self.connected_feedback(expected, Some((sequence, success)))?;
+        Ok(format!(
+            "{{\"callId\":\"{}\",\"commandSequence\":{sequence},\"success\":{success}}",
+            expected.0.original.id()
+        ))
+    }
+    fn connected_feedback(
+        &self,
+        expected: &NativeSipCall,
+        feedback: Option<(i64, bool)>,
+    ) -> Result<(), NativeSipError> {
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        let observed = expected.observation();
+        let mut result = expected.0.result.lock().unwrap();
+        if observed.phase != SipHostCallPhase::Connected
+            || observed.ending
+            || result.ending
+            || result.unknown
+        {
+            return Err(SipHostError::NotReady.into());
+        }
+        let media = expected.media().ok_or(SipHostError::NotReady)?;
+        let action = match feedback {
+            None => media.end_waiting(),
+            Some((sequence, success)) => {
+                if !expected
+                    .features()
+                    .observation()
+                    .commands
+                    .iter()
+                    .any(|command| command.sequence == sequence)
+                    || !result.feedback_sequences.insert(sequence)
+                {
+                    return Err(SipHostError::NotReady.into());
+                }
+                // Consumption precedes audio feedback, as in the original.
+                media.command_feedback(success)
+            }
+        };
+        action.map_err(|_| NativeConfigError::OutcomeUnknown.into())
     }
     pub(crate) fn dial(
         &self,

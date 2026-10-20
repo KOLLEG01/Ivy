@@ -148,6 +148,43 @@ impl NativeSipCommands {
             let snapshot = self.owner.configure_features(&call, challenge)?.json();
             return Ok(Box::pin(async move { NativeOutcome::result(snapshot) }));
         }
+        if request.method() == "call.command.feedback" {
+            if fields.len() != 3
+                || ["callId", "commandSequence", "success"]
+                    .iter()
+                    .any(|name| request.params().get(name).is_none())
+            {
+                return Err(SipHostError::InvalidRequest.into());
+            }
+            let raw = crate::native_rpc::root_values(request.raw_params());
+            let index = fields
+                .iter()
+                .position(|(key, _)| key == &"commandSequence".into())
+                .expect("exact commandSequence");
+            // System.Text.Json Int64 rejects exponent/fraction spellings and
+            // overflow even when the parsed JSON number could be rounded.
+            let sequence = raw[index]
+                .parse::<i64>()
+                .map_err(|_| SipHostError::InvalidRequest)?;
+            let success = request
+                .params()
+                .get("success")
+                .and_then(IvyJson::as_bool)
+                .ok_or(SipHostError::InvalidRequest)?;
+            let call = selected
+                .and_then(|id| self.owner.find(&id))
+                .ok_or(SipHostError::NotReady)?;
+            let owner = self.owner.clone();
+            return Ok(Box::pin(async move {
+                if let Err(error) = call.constructed().await {
+                    return failed(error.into());
+                }
+                match owner.command_feedback(&call, sequence, success) {
+                    Ok(snapshot) => NativeOutcome::result(snapshot),
+                    Err(error) => failed(error),
+                }
+            }));
+        }
         if request.method() == "call.dial" {
             let input = crate::native_dial::NativeDial::parse(&request)?;
             let call = selected
@@ -212,6 +249,18 @@ impl NativeSipCommands {
                 SipHostError::NotReady.into()
             },
         )?;
+        if request.method() == "call.waiting.end" {
+            let owner = self.owner.clone();
+            return Ok(Box::pin(async move {
+                if let Err(error) = call.constructed().await {
+                    return failed(error.into());
+                }
+                match owner.end_waiting(&call) {
+                    Ok(snapshot) => NativeOutcome::result(snapshot),
+                    Err(error) => failed(error),
+                }
+            }));
+        }
         if request.method() == "call.claim" {
             let owner = self.owner.clone();
             return Ok(Box::pin(async move {
@@ -281,6 +330,8 @@ impl NativeHandler for NativeSipCommands {
                 | "call.release"
                 | "registration.reconnect"
                 | "call.features"
+                | "call.waiting.end"
+                | "call.command.feedback"
         ) {
             return self.remaining.invoke(request);
         }

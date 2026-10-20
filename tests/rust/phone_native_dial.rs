@@ -243,7 +243,7 @@ async fn native_dial_exact_dto_lookup_bounds_uri_and_attempt_precedence_match_or
 async fn received(peer: &UdpSocket) -> (Request, SocketAddr) {
     crate::sip_host::received(peer).await
 }
-async fn outgoing(
+pub(super) async fn outgoing(
     owner: &NativeSipOperations,
     dispatcher: Arc<NativeDispatcher>,
     scenario: &str,
@@ -275,7 +275,11 @@ async fn outgoing(
             r#""fixture-only""#
         },
         "5",
-        "false",
+        if scenario == "feedback_waiting" {
+            "true"
+        } else {
+            "false"
+        },
     );
     let original_call = owner.find(CALL).unwrap();
     if let Some(events) = &failure_events {
@@ -348,6 +352,22 @@ async fn outgoing(
         .unwrap();
     let call = value(answer.outcome());
     let saved = answer.outcome().result_json().unwrap().to_owned();
+    if scenario == "feedback_capacity" {
+        media.request_close();
+    }
+    let mut feedback_actions = if scenario.starts_with("feedback_") {
+        Some(
+            super::feedback::actions(
+                &original_call,
+                &dispatcher,
+                operation + 100,
+                scenario == "feedback_capacity",
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     if scenario == "media_failure_connected" {
         super::notifications::fail_media(&media, &sdp);
     }
@@ -445,6 +465,9 @@ async fn outgoing(
             );
         }
     }
+    if let Some(actions) = &mut feedback_actions {
+        super::feedback::after_hangup(&dispatcher, operation + 100, actions).await;
+    }
     let failure_callbacks = failure_events
         .as_ref()
         .map(|e| e.receipts.lock().unwrap().clone())
@@ -471,6 +494,33 @@ async fn outgoing(
     assert_eq!(replay.outcome().result_json(), Some(saved.as_str()));
     assert!(media.observation().closed);
     assert_eq!(media.observation().receive.transport.local_rtp, local_media);
+    if let Some(actions) = &feedback_actions {
+        // Native receipts must not redispatch feedback on a replacement call.
+        let prepare = dispatcher
+            .execute(command(
+                "call.prepare",
+                &selected,
+                operation + 5,
+                operation + 5,
+            ))
+            .await;
+        assert!(prepare.outcome().error_code().is_none());
+        let replacement = owner.find(CALL).unwrap();
+        assert_eq!(replacement.features().observation().command_sequence, 0);
+        super::feedback::replay(&dispatcher, operation + 100, actions).await;
+        assert_eq!(replacement.features().observation().command_sequence, 0);
+        assert!(!replacement.observation().attempted);
+        assert!(!replacement.media().unwrap().observation().closed);
+        let release = dispatcher
+            .execute(command(
+                "call.release",
+                &selected,
+                operation + 6,
+                operation + 6,
+            ))
+            .await;
+        assert!(release.outcome().error_code().is_none());
+    }
     let mut result = IvyJson::object([
         ("call", call),
         ("hungup", hungup),
@@ -499,6 +549,9 @@ async fn outgoing(
     ]);
     if let (Some(ended), IvyJson::Object(fields)) = (ended, &mut result) {
         fields.push(("ended".into(), ended));
+    }
+    if let (Some(actions), IvyJson::Object(fields)) = (feedback_actions, &mut result) {
+        fields.push(("feedbackActions".into(), IvyJson::Array(actions)));
     }
     result
 }

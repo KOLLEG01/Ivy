@@ -15,6 +15,35 @@ using SIPSorcery.SIP;
 public static class PhoneNativeDialOracle {
     static SipTransportHost Host(NativeSipOperations owner)=>(SipTransportHost)typeof(NativeSipOperations).GetField("host",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(owner);
     static JsonElement Args(object value)=>JsonSerializer.SerializeToElement(value,NativeRpc.Json);
+    static async Task<object> FeedbackRow(NativeSipOperations owner,string method,object value) {
+        var args=Args(value);object output;
+        try { output=new{json=JsonSerializer.Serialize(await owner.InvokeAsync(method,args),NativeRpc.Json)}; }
+        catch(Exception e) { output=new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"}; }
+        return new{method,@params=args,output};
+    }
+    static async Task<List<object>> Feedback(NativeSipOperations owner,string id,bool capacity) {
+        var rows=new List<object>();
+        rows.Add(await FeedbackRow(owner,"call.waiting.end",new{callId=id}));
+        rows.Add(await FeedbackRow(owner,"call.waiting.end",new{callId=id}));
+        rows.Add(await FeedbackRow(owner,"call.command.feedback",new{callId=id,commandSequence=1L,success=true}));
+        var features=Host(owner).FindCall(id).Features;
+        var digit=typeof(PhoneCallFeatures).GetMethod("Digit",BindingFlags.Instance|BindingFlags.NonPublic);
+        var source=Enum.Parse(digit.GetParameters()[1].ParameterType,"SipInfo");
+        for(int sequence=1;sequence<=3;sequence++) {
+            foreach(char key in "*0#")digit.Invoke(features,new object[]{key,source});
+            if(sequence==3)break;
+            rows.Add(await FeedbackRow(owner,"call.command.feedback",new{callId=id,commandSequence=(long)sequence,success=sequence==2}));
+            rows.Add(await FeedbackRow(owner,"call.command.feedback",new{callId=id,commandSequence=(long)sequence,success=sequence!=2}));
+        }
+        if(capacity) {
+            for(long sequence=3;sequence<=34;sequence++) {
+                if(sequence>3)foreach(char key in "*0#")digit.Invoke(features,new object[]{key,source});
+                rows.Add(await FeedbackRow(owner,"call.command.feedback",new{callId=id,commandSequence=sequence,success=true}));
+                if(sequence>=33)rows.Add(await FeedbackRow(owner,"call.command.feedback",new{callId=id,commandSequence=sequence,success=false}));
+            }
+        }
+        return rows;
+    }
     static async Task<(SIPRequest,IPEndPoint)> Receive(UdpClient peer) {
         var packet=await peer.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(4));
         return (SIPRequest.ParseSIPRequest(Encoding.UTF8.GetString(packet.Buffer)),packet.RemoteEndPoint);
@@ -43,7 +72,7 @@ public static class PhoneNativeDialOracle {
             string destination=telephone?target.GetString():$"sip:peer@{peer.Client.LocalEndPoint}";
             await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
             var failureCallbacks=new List<object>();var originalCall=Host(owner).FindCall(id);originalCall.Media.MediaFailed+=()=>{failureCallbacks.Add(originalCall.Observation);throw new InvalidOperationException("Synthetic external failure listener");};
-            var pending=owner.InvokeAsync("call.dial",Args(new{callId=id,destination,username=telephone?null:"fixture-user",password=telephone?null:"fixture-only",ringSeconds=5,waiting=false}));
+            var pending=owner.InvokeAsync("call.dial",Args(new{callId=id,destination,username=telephone?null:"fixture-user",password=telephone?null:"fixture-only",ringSeconds=5,waiting=scenario=="feedback_waiting"}));
             var (invite,remote)=await Receive(peer);
             object hungup=null;
             if(scenario=="hangup_before_answer")hungup=await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
@@ -52,6 +81,8 @@ public static class PhoneNativeDialOracle {
             var (ack,ackRemote)=await ReceiveDialog(peer);
             if(ack.Method!=SIPMethodsEnum.ACK)throw new Exception("Original ACK unavailable");
             object call=await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            if(scenario=="feedback_capacity")originalCall.Media.Close("owned_capacity_fixture");
+            List<object> feedbackActions=scenario.StartsWith("feedback_")?await Feedback(owner,id,scenario=="feedback_capacity"):null;
             if(scenario=="media_failure_connected"){typeof(SipMediaSession).GetMethod("Fail",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(originalCall.Media,Array.Empty<object>());if(!originalCall.Media.Failed)throw new Exception("Original media failure unavailable");}
             if(scenario=="connected") {
                 var digitMethod=typeof(PhoneCallFeatures).GetMethod("Digit",BindingFlags.Instance|BindingFlags.NonPublic);
@@ -78,7 +109,13 @@ public static class PhoneNativeDialOracle {
                 Reply(peer,bye,byeRemote,200,"");
                 if(scenario.StartsWith("media_failure"))ended=originalCall.Observation;
             }
+            if(feedbackActions!=null) {
+                feedbackActions.Add(await FeedbackRow(owner,"call.waiting.end",new{callId=id}));
+                feedbackActions.Add(await FeedbackRow(owner,"call.command.feedback",new{callId=id,commandSequence=3L,success=true}));
+            }
             await owner.InvokeAsync("call.release",Args(new{callId=id}));
+            if(feedbackActions!=null)return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
+                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,failureCallbacks,feedbackActions};
             if(scenario=="remote_bye"||scenario.StartsWith("media_failure"))return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
                 requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,failureCallbacks,ended};
             return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
