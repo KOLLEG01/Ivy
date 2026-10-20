@@ -7,6 +7,7 @@ use crate::{
     host_config::HostContext,
     journal::HostJournal,
     layout::{self, StorageArea, StorageContext},
+    native_backup_policy::NativeBackupPaths,
     node_path::{self, Style},
     node_runtime::NodeRuntime,
     process, project_storage, storage_space, streaming_hash,
@@ -20,12 +21,6 @@ use std::{
     sync::Arc,
 };
 
-/// AgentManager supplies its actual native cache/shared-home ownership policy.
-/// It is mandatory even when its result happens to be empty; no fallback policy.
-pub trait NativeBackupPaths: Send + Sync {
-    fn exclusions(&self, config: &J) -> IvyResult<Vec<J>>;
-    fn shared_homes(&self, config: &J) -> IvyResult<Vec<J>>;
-}
 pub struct BackupBindings {
     pub compare: FileCompare,
     pub native_paths: Arc<dyn NativeBackupPaths>,

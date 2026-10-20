@@ -8,7 +8,8 @@ use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 mod snapshot;
 pub use snapshot::snapshot_journal;
 mod host;
-pub use host::{BackupBindings, NativeBackupPaths, backup_host};
+pub use crate::native_backup_policy::NativeBackupPaths;
+pub use host::{BackupBindings, backup_host};
 
 pub struct OfflineOwners(Vec<ExecutorLock>);
 impl OfflineOwners {

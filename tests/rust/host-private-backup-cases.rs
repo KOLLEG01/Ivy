@@ -638,6 +638,27 @@ impl Drop for ReleaseGate {
         self.0.release();
     }
 }
+#[test]
+fn backup_policy_reexport_preserves_trait_identity_and_calls() {
+    use ivy_host_runtime::native_backup_policy::NativeBackupPaths as Policy;
+
+    let gate = Arc::new(PolicyGate {
+        entered: Default::default(),
+        released: Mutex::new(true),
+        wake: Default::default(),
+        calls: Default::default(),
+    });
+    let policy: Arc<dyn Policy> = gate.clone();
+    let compatibility: Arc<dyn NativeBackupPaths> = policy.clone();
+    let roundtrip: Arc<dyn Policy> = compatibility;
+    assert!(Arc::ptr_eq(&policy, &roundtrip));
+    let _: fn(&BackupBindings) -> &Arc<dyn Policy> = |bindings| &bindings.native_paths;
+    let _: fn(&ivy_host_runtime::restore::RestoreBindings) -> &Arc<dyn Policy> =
+        |bindings| &bindings.native_paths;
+    policy.exclusions(&J::Null).unwrap();
+    roundtrip.shared_homes(&J::Null).unwrap();
+    assert_eq!(*gate.calls.lock().unwrap(), vec!["exclusions", "shared_homes"]);
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admitted_backup_keeps_locks_after_waiter_drop_and_rechecks_master_configuration() {
     for change in [false, true] {
