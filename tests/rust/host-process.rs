@@ -10,6 +10,9 @@ mod process_tree_cases;
 mod raw_process_cases;
 #[path="host-ignored-stdio-cases.rs"]
 mod ignored_stdio_cases;
+#[cfg(windows)]
+#[path = "host-windows-process-cases.rs"]
+mod windows_process_cases;
 
 // Exercise the private retained-handle failure paths through this selected target.
 #[cfg(windows)]
