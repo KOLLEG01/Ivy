@@ -158,9 +158,13 @@ async fn pair() -> (UdpSocket, UdpSocket) {
 }
 fn endpoint(p: Option<SocketAddr>, port: u16) -> IvyJson {
     p.map(|p| {
+        let ip = match p {
+            SocketAddr::V6(v) if v.scope_id() != 0 => format!("{}%{}", v.ip(), v.scope_id()),
+            _ => p.ip().to_string(),
+        };
         format!(
             "{}:{}",
-            p.ip(),
+            ip,
             if p.port() == port {
                 "peer".into()
             } else if p.port() == port + 1 {
@@ -271,6 +275,13 @@ async fn descriptions_retain_original_endpoint_direction_rejection_and_version_e
     let Some(old) = original_session(&inputs) else {
         return;
     };
+    trace(
+        "session-original-description-inputs",
+        IvyJson::object([
+            ("inputs", IvyJson::Array(inputs.clone())),
+            ("original", old.clone()),
+        ]),
+    );
     let mut rows = Vec::new();
     for (input, expected) in inputs.iter().zip(old.as_array().unwrap()) {
         assert_eq!(

@@ -143,16 +143,22 @@ impl Descriptions {
 /// IPAddress.Parse's legacy IPv4 forms; never resolve a host name or contact a
 /// resolver. IPv6 numeric scopes remain part of the original endpoint identity.
 fn address(text: &str, port: u16) -> Result<SocketAddr, NegotiationError> {
+    let text = text
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(text);
     if let Ok(ip) = text.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, port));
     }
     if text.contains(':') {
-        let (ip, scope) = text.rsplit_once('%').ok_or(NegotiationError::Endpoint)?;
+        let (ip, scope) = text.split_once('%').ok_or(NegotiationError::Endpoint)?;
         return Ok(SocketAddr::V6(SocketAddrV6::new(
             ip.parse().map_err(|_| NegotiationError::Endpoint)?,
             port,
             0,
-            scope.parse().map_err(|_| NegotiationError::Endpoint)?,
+            // The sealed IPAddress parser retains a numeric scope and treats
+            // an unresolvable textual scope as0; it does not resolve SDP DNS.
+            scope.parse().unwrap_or(0),
         )));
     }
     let parts: Vec<_> = text.split('.').collect();
