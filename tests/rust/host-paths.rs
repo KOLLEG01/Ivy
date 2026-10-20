@@ -59,6 +59,8 @@ mod bootstrap_maintenance_cases;
 mod backup_files_cases;
 #[path = "host-private-backup-cases.rs"]
 mod private_backup_cases;
+#[path = "host-storage-retention-cases.rs"]
+mod storage_retention_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {

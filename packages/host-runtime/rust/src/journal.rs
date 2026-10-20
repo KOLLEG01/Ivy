@@ -68,6 +68,11 @@ pub use crate::executor_lock::ExecutorLock;
 pub struct HistoryLimits { pub count: usize, pub bytes: usize }
 impl Default for HistoryLimits { fn default() -> Self { Self { count: 10_000, bytes: 64 * 1024 * 1024 } } }
 struct State { db: Connection, config: IvyJson, clock: Arc<dyn Clock>, history_limits: HistoryLimits }
+#[derive(Default)]
+struct RetentionIds { seen:BTreeSet<String>, order:Vec<String> }
+impl RetentionIds {
+    fn insert(&mut self,id:String) { if self.seen.insert(id.clone()){self.order.push(id);} }
+}
 /// Clones share one connection and configuration. Call `close` before releasing
 /// the final handle when shutdown must wait for all journal work to finish.
 #[derive(Clone)]
@@ -203,6 +208,30 @@ impl HostJournal {
         self.with(move |s| Ok((s.config.clone(),s.instance_js(&instance_id)?.clone(),s.candidate(&candidate_id)?,s.manifest(&candidate_id)?))).await
     }
     pub async fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> { self.with(|s| s.retention_candidate_ids()).await }
+    pub(crate) async fn retention_candidate_order(&self) -> IvyResult<Vec<String>> { self.with(|s| s.retention_candidate_order()).await }
+    pub(crate) async fn preparation_candidate_references(&self) -> IvyResult<Vec<(String,String)>> {
+        self.with(|s| {
+            let mut query=internal(s.db.prepare("SELECT candidate_id,build_id FROM candidates"))?;
+            let rows=internal(query.query_map([],|row|Ok((row.get(0)?,row.get(1)?))))?;
+            internal(rows.collect())
+        }).await
+    }
+    pub(crate) async fn unfinished_preparation_operations(&self) -> IvyResult<Vec<IvyJson>> {
+        self.with(|s| {
+            let mut query=internal(s.db.prepare("SELECT entry_json FROM operations WHERE phase NOT IN ('succeeded','rolled_back')"))?;
+            let rows=internal(query.query_map([],|row|row.get::<_,String>(0)))?;
+            rows.map(|row|decoded(&internal(row)?)).collect()
+        }).await
+    }
+    pub(crate) async fn storage_retention_candidates(&self) -> IvyResult<Vec<(IvyJson,IvyJson)>> {
+        self.with(|s| {
+            let mut query=internal(s.db.prepare("SELECT candidate_id,manifest_json FROM candidates ORDER BY component_id,candidate_id"))?;
+            let rows=internal(query.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))))?;
+            let rows=internal(rows.collect::<Result<Vec<_>,_>>())?;
+            require(rows.len()<=10000,"limit_exceeded","Host candidate inventory exceeds its retention limit.")?;
+            rows.into_iter().map(|(id,manifest)|Ok((s.candidate(&id)?,decoded(&manifest)?))).collect()
+        }).await
+    }
     pub async fn retire_candidate(&self, candidate_id: &str) -> IvyResult<bool> {
         let id = candidate_id.to_owned(); self.with(move |s| s.transaction(|s| {
             let Some(value) = s.text("SELECT candidate_json FROM candidates WHERE candidate_id=?", &id)? else { return Ok(false) };
@@ -773,16 +802,20 @@ impl State {
         Ok(())
     }
     fn retention_candidate_ids(&self) -> IvyResult<BTreeSet<String>> {
-        let mut live = BTreeSet::new(); let mut protected = BTreeSet::new();
-        let mut installed = BTreeMap::new(); let mut rollback_found = BTreeSet::new(); let mut rollback_selections = BTreeSet::new();
+        Ok(self.retention_candidate_order()?.into_iter().collect())
+    }
+    fn retention_candidate_order(&self) -> IvyResult<Vec<String>> {
+        let mut live = RetentionIds::default(); let mut protected = RetentionIds::default();
+        let mut installed = BTreeMap::new(); let mut installed_order=Vec::new(); let mut rollback_found = BTreeSet::new(); let mut rollback_selections = BTreeSet::new();
         for table in ["installed", "runtime_targets", "observations"] {
             let mut statement = internal(self.db.prepare(&format!("SELECT instance_id,value FROM {table}")))?;
             let rows = internal(statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))))?;
             for row in rows { let (instance, text) = internal(row)?; let value = decoded(&text)?;
-                if truthy(field(&value, "candidateId")) { let id = value.required("candidateId")?.as_str()?; live.insert(id.clone()); protected.insert(id.clone()); if table == "installed" { installed.insert(instance, id); } }
+                if truthy(field(&value, "candidateId")) { let id = value.required("candidateId")?.as_str()?; live.insert(id.clone()); protected.insert(id.clone()); if table == "installed" { installed_order.push(instance.clone()); installed.insert(instance, id); } }
             }
         }
-        for (instance, selected) in &installed {
+        for instance in &installed_order {
+            let selected=installed.get(instance).ok_or_else(IvyError::internal)?;
             if let Some(previous) = self.value("SELECT value FROM meta WHERE key=?", &format!("bootstrap-rollback:{instance}"))? {
                 if previous.get("selectedCandidateId") == Some(&IvyJson::from(selected.clone())) {
                     protected.insert(previous.required("candidateId")?.as_str()?); rollback_found.insert(instance.clone()); rollback_selections.insert(selected.clone());
@@ -815,7 +848,7 @@ impl State {
                 if parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) && (part.len() == 1 || !part.starts_with('0'))) { releases.push((id, component, version)); }
             }
         }
-        for id in &live {
+        for id in &live.order {
             if rollback_selections.contains(id) { continue; }
             let Some(current) = releases.iter().find(|r| &r.0 == id) else { continue };
             let mut previous: Option<&(String, String, String)> = None;
@@ -831,6 +864,6 @@ impl State {
             }
             if let Some(previous) = previous { protected.insert(previous.0.clone()); }
         }
-        Ok(protected)
+        Ok(protected.order)
     }
 }
