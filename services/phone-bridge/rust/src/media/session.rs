@@ -2,7 +2,7 @@
 use super::session_description::{Advance, Descriptions};
 use super::{
     AudioAttachmentStatus, AudioDesktopIdentity, AudioOperation, AudioSendHealth, AudioSettings,
-    CallAudioError, CallAudioPort, CallWaitingAudio, Codec, CodecError, EvsLibrary, MediaCodec,
+    CallAudioError, CallAudioPort, CallWaitingAudio, Codec, EvsLibrary, MediaCodec,
     NegotiationError, PcmAudioPort, PcmAudioState, PcmSendPort, ReceiveError, RtcpRuntime,
     ScreeningAudio, SdpDirection, SdpDocument, SdpIdentity, SdpType, SipReceiveEvents,
     SipReceiveObservation, SipRtpReceiver,
@@ -512,11 +512,9 @@ impl SipMediaSession {
         loop {
             let report = {
                 let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
-                if c.closed.load(Ordering::Acquire) {
-                    s.descriptions.reject(applying);
-                    return Err(SipMediaError::Closed);
-                }
-                match s.descriptions.advance(&mut applying) {
+                let media_open = !c.closed.load(Ordering::Acquire);
+                match s.descriptions.advance(&mut applying, media_open) {
+                    Ok(Advance::Audio { .. }) if !media_open => None,
                     Ok(Advance::Audio { inactive }) => {
                         match c.description_effects(&mut s, inactive) {
                             Ok(report) => report,
@@ -526,10 +524,27 @@ impl SipMediaSession {
                             }
                         }
                     }
-                    Ok(Advance::Complete) => {
+                    Ok(Advance::Complete { media_valid }) => {
+                        // A callback can close the original media. Its outer
+                        // SDP continuation still publishes metadata, without
+                        // configuring a codec, worker or socket again.
+                        if !media_open {
+                            s.descriptions.publish(applying);
+                            return Ok(());
+                        }
                         if let Err(error) = c.description_effects(&mut s, false) {
                             s.descriptions.reject(applying);
                             return Err(error.into());
+                        }
+                        if !media_valid {
+                            drop(s);
+                            c.fail();
+                            c.state
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .descriptions
+                                .publish(applying);
+                            return Ok(());
                         }
                         let result = c.receiver().configure_description(
                             s.descriptions.negotiation.state().unwrap(),
@@ -551,7 +566,9 @@ impl SipMediaSession {
                     }
                     Err(error) => {
                         s.descriptions.reject(applying);
-                        c.description_effects(&mut s, false)?;
+                        if media_open {
+                            c.description_effects(&mut s, false)?;
+                        }
                         return Err(error.into());
                     }
                 }

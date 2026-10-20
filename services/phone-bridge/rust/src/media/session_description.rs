@@ -28,7 +28,7 @@ struct Primary {
 }
 pub(super) enum Advance {
     Audio { inactive: bool },
-    Complete,
+    Complete { media_valid: bool },
 }
 impl Descriptions {
     pub fn new(preferences: &[Codec]) -> Result<Self, super::FormatError> {
@@ -113,7 +113,11 @@ impl Descriptions {
             pending: None,
         })
     }
-    pub fn advance(&mut self, applying: &mut Applying) -> Result<Advance, NegotiationError> {
+    pub fn advance(
+        &mut self,
+        applying: &mut Applying,
+        media_open: bool,
+    ) -> Result<Advance, NegotiationError> {
         if let Some(primary) = applying.pending.take() {
             let control = if primary.remote_direction != SdpDirection::Inactive
                 && self.local_direction != SdpDirection::Inactive
@@ -168,9 +172,13 @@ impl Descriptions {
                 return Err(incompatible(next.track.kind));
             }
         }
-        self.negotiation
-            .negotiate_current(&applying.codecs, self.remote_sources.as_deref())?;
-        Ok(Advance::Complete)
+        let media_valid = if media_open {
+            self.negotiation
+                .negotiate_current(&applying.codecs, self.remote_sources.as_deref())?
+        } else {
+            true
+        };
+        Ok(Advance::Complete { media_valid })
     }
     pub fn publish(&mut self, applying: Applying) {
         self.negotiation.publish_description(applying.codecs);

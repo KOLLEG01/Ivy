@@ -460,6 +460,7 @@ struct DescriptionEvents {
 impl SipReceiveEvents for DescriptionEvents {
     fn digit(&self, _: char, _: InputSource) {}
     fn failed(&self) {}
+    fn rtcp(&self, _: SocketAddr, _: &[u8]) {}
     fn report_sent(&self, _: &[u8]) {
         if !self.enabled.load(Ordering::Acquire) {
             return;
@@ -486,6 +487,10 @@ impl SipReceiveEvents for DescriptionEvents {
                         .unwrap_or(IvyJson::Null),
                     "status" => {
                         m.set_stream_status(SdpDirection::RecvOnly).unwrap();
+                        IvyJson::Null
+                    }
+                    "close" => {
+                        m.request_close();
                         IvyJson::Null
                     }
                     "set" => perform_step(&m, callback, self.peer, *self.local.lock().unwrap()).0,

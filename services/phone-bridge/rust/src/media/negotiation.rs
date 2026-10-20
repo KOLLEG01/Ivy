@@ -535,7 +535,7 @@ impl AudioNegotiator {
         &mut self,
         update: &DescriptionUpdate,
         sources: Option<&[u32]>,
-    ) -> Result<(), NegotiationError> {
+    ) -> Result<bool, NegotiationError> {
         let mut receive = Vec::new();
         for format in &self.local {
             if is_name(format, "telephone-event") {
@@ -552,18 +552,38 @@ impl AudioNegotiator {
                 .find(|codec| is_name(format, codec.name()))
                 .copied()
                 .ok_or(NegotiationError::AudioIncompatible)?;
-            let declared = codec.offered_formats().remove(0);
-            receive.push(
-                AudioFormat::new(
-                    format.payload.into(),
-                    codec.name(),
-                    declared.pcm_rate(),
-                    declared.rtp_rate(),
-                    declared.channels(),
-                    format.parameters(),
-                )
-                .map_err(|_| NegotiationError::AudioIncompatible)?,
-            );
+            // Static IDs can match before metadata construction. The SDK
+            // throws for invalid clocks before its application callback;
+            // unsupported positive formats fail the media constructor there.
+            let rate = u32::try_from(format.clock_rate())
+                .ok()
+                .filter(|r| *r > 0)
+                .ok_or(NegotiationError::Endpoint)?;
+            let channels = format.channels();
+            if channels <= 0 {
+                return Err(NegotiationError::Endpoint);
+            }
+            let pcm = if codec == Codec::Evs {
+                48000
+            } else if codec == Codec::G722 && rate == 8000 {
+                16000
+            } else {
+                rate
+            };
+            let Some(channels) = u8::try_from(channels).ok() else {
+                return Ok(false);
+            };
+            let Ok(format) = AudioFormat::new(
+                format.payload.into(),
+                codec.name(),
+                pcm,
+                rate,
+                channels,
+                format.parameters(),
+            ) else {
+                return Ok(false);
+            };
+            receive.push(format);
         }
         let sender = receive
             .iter()
@@ -583,7 +603,7 @@ impl AudioNegotiator {
             remote_track: sources.is_some(),
             selected_event: self.event_payload,
         });
-        Ok(())
+        Ok(true)
     }
     pub(super) fn publish_description(&mut self, update: DescriptionUpdate) {
         self.remote = Some(update.remote);
@@ -609,6 +629,7 @@ impl AudioNegotiator {
                 }
             }
             self.negotiate_current(&update, sources.as_deref())
+                .map(|_| ())
         })();
         if result.is_ok() {
             self.publish_description(update);
@@ -736,6 +757,7 @@ fn compatible_parameters(format: &SdpFormat) -> bool {
         .unwrap_or("")
         .split(';')
         .filter_map(|part| part.split_once('='))
+        .filter(|(_, value)| !value.contains('='))
         .filter(|(key, _)| key.trim().eq_ignore_ascii_case("packetization-mode"))
         .last()
         .is_none_or(|(_, value)| value.trim() == "1")

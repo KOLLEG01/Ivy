@@ -45,7 +45,7 @@ public static class PhoneSessionOracle {
                     case "offer":result=session.CreateOffer(IPAddress.Loopback).Media.Select(m=>new{kind=m.Media.ToString(),mid=m.MediaID,port=m.Port==local?"local":m.Port.ToString(),direction=m.MediaStreamStatus.ToString(),formats=m.MediaFormats.Keys.ToArray()}).ToArray();break;
                     case "status":session.SetMediaStreamStatus(SDPMediaTypesEnum.audio,MediaStreamStatusEnum.RecvOnly);break;
                     case "set":result=session.SetRemoteDescription(SdpType.offer,SDP.ParseSDPDescription(callback.GetProperty("sdp").GetString().Replace("$PORT",port.ToString()))).ToString();break;
-                    case "close":session.DisposeAsync().AsTask().GetAwaiter().GetResult();break;
+                    case "close":session.Close("synthetic");break;
                     default:throw new ArgumentException();}}
                     after=State();
                 }finally{notifications.Add(new{before,result,after});}};var rows=new List<object>();
