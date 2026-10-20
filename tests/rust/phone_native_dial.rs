@@ -263,8 +263,16 @@ async fn outgoing(
     let params = args(
         &id,
         &destination,
-        r#""fixture-user""#,
-        r#""fixture-only""#,
+        if target.is_some() {
+            "null"
+        } else {
+            r#""fixture-user""#
+        },
+        if target.is_some() {
+            "null"
+        } else {
+            r#""fixture-only""#
+        },
         "5",
         "false",
     );
@@ -320,6 +328,19 @@ async fn outgoing(
         .unwrap();
     let call = value(answer.outcome());
     let saved = answer.outcome().result_json().unwrap().to_owned();
+    if scenario == "connected" {
+        for digit in ['*', '0', '#'] {
+            original_call
+                .features()
+                .digit(digit, ivy_phone_bridge::dtmf::InputSource::SipInfo)
+                .unwrap();
+        }
+    }
+    let policy = original_call.features().observation();
+    if scenario == "connected" {
+        assert_eq!(policy.command, Some("new_voice"));
+        assert_eq!(policy.command_sequence, 1);
+    }
     if scenario != "refused" {
         let h = dispatcher
             .execute(command(
@@ -361,6 +382,7 @@ async fn outgoing(
     IvyJson::object([
         ("call", call),
         ("hungup", hungup),
+        ("policy", parse(&policy.json(), 65536).unwrap()),
         ("inviteHasSdp", (!invite.body.is_empty()).into()),
         ("ackHasSdp", (!ack.body.is_empty()).into()),
         ("requestUri", invite.uri.to_string().into()),

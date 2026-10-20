@@ -49,6 +49,8 @@ public static class PhoneNativeDialOracle {
             var (ack,ackRemote)=await ReceiveDialog(peer);
             if(ack.Method!=SIPMethodsEnum.ACK)throw new Exception("Original ACK unavailable");
             object call=await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            if(scenario=="connected")foreach(char digit in "*0#")Host(owner).FindCall(id).Features.Digit(digit,DtmfInputSource.SipInfo);
+            var policy=Host(owner).FindCall(id).Features.Observation;
             if(scenario!="refused") {
                 await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
                 var (bye,byeRemote)=await ReceiveDialog(peer);
@@ -56,7 +58,7 @@ public static class PhoneNativeDialOracle {
                 Reply(peer,bye,byeRemote,200,"");
             }
             await owner.InvokeAsync("call.release",Args(new{callId=id}));
-            return new{call,hungup,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
+            return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
                 requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null};
         }
     }

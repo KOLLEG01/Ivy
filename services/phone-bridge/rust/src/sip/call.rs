@@ -1,4 +1,4 @@
-//! One original delayed INVITE, independent of native IPC command waiters.
+//! One original initial or delayed INVITE, independent of IPC command waiters.
 //! The host persists admission/intent and owns the PCM/media implementation.
 use super::{
     CallAction, CallError, CallOutcome, ClientExchange, DelayedOfferCall, Dialog, DialogRequest,
@@ -162,7 +162,7 @@ pub struct DelayedInvite {
 }
 impl DelayedInvite {
     /// Call only after native admission and original intent were persisted.
-    /// The request is the original bodyless INVITE, not a replacement call.
+    /// The request retains its initial offer or bodyless delayed-offer intent.
     pub fn start(
         endpoint: Arc<SipEndpoint>,
         prepared: PreparedInvite,
