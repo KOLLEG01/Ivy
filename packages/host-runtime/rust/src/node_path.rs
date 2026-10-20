@@ -279,23 +279,18 @@ pub fn to_native(path: &JsString) -> PathBuf {
     #[cfg(not(windows))] { String::from_utf16_lossy(&path.0).into() }
 }
 fn filesystem_utf8(path:&JsString)->PathBuf{String::from_utf16_lossy(&path.0).into()}
-/// Node-compatible filesystem spelling for fully qualified Windows paths,
-/// including namespace handling that preserves trailing dots/spaces. Relative
-/// paths retain the legacy conversion; use node_filesystem_path or an explicit
-/// Context at a boundary that accepts relative input. Never use this for argv.
+/// UTF-8 filesystem conversion retaining the supplied logical path spelling.
+/// Use node_filesystem_path or an explicit Context for Node I/O namespace rules.
 pub fn filesystem_path(path: &JsString) -> PathBuf {
-    #[cfg(windows)] {
-        let root=windows_root(&path.0,false);
-        if root.absolute&&!root.device.is_empty(){return Context{style:Style::Windows,cwd:JsString::default(),drive_cwds:BTreeMap::new()}.filesystem_path(path);}
-    }
     filesystem_utf8(path)
 }
 /// Fallible current-context boundary for Node filesystem string arguments.
 /// It changes neither logical strings nor containment/admission policy.
 pub fn node_filesystem_path(path:&JsString)->io::Result<PathBuf>{
     #[cfg(windows)] {
+        if path.0.is_empty(){return Ok(filesystem_utf8(path));}
         let root=windows_root(&path.0,false);
-        if path.0.is_empty()||root.absolute&&!root.device.is_empty(){return Ok(filesystem_path(path));}
+        if root.absolute&&!root.device.is_empty(){return Ok(Context{style:Style::Windows,cwd:JsString::default(),drive_cwds:BTreeMap::new()}.filesystem_path(path));}
         Ok(Context::current()?.filesystem_path(path))
     }
     #[cfg(not(windows))] {Ok(filesystem_utf8(path))}
