@@ -35,6 +35,7 @@ pub mod registry;
 pub mod retention;
 pub mod rpc;
 pub mod server_rpc;
+pub mod server_peers;
 pub mod storage_inspector;
 pub mod storage_read;
 pub mod store;

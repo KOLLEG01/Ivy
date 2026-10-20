@@ -21,6 +21,8 @@ use std::{
 mod server_rpc;
 #[path = "hive_dispatch_gate.rs"]
 mod dispatch_gate;
+#[path = "hive_server_peers.rs"]
+mod server_peers;
 
 trait FixtureMut {
     fn get_mut(&mut self, name: &str) -> Option<&mut IvyJson>;

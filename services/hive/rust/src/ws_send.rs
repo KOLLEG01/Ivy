@@ -22,7 +22,11 @@ pub fn encode(value: &IvyJson) -> IvyResult<String> {
     stringify(value, MANAGEMENT_FRAME_BYTES)
 }
 
-pub fn send(socket: &mut impl Socket, value: &IvyJson, encoded: Option<&str>) -> IvyResult<()> {
+pub fn send(
+    socket: &mut (impl Socket + ?Sized),
+    value: &IvyJson,
+    encoded: Option<&str>,
+) -> IvyResult<()> {
     if !socket.is_open() {
         return Ok(());
     }
