@@ -137,7 +137,14 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
         "delayed_media_failure_before_ack",
         "initial_media_failure_after_start",
         "delayed_media_failure_after_start",
+        "initial_media_failure_before_ack_format",
+        "delayed_media_failure_before_ack_format",
+        "initial_media_failure_after_start_format",
+        "delayed_media_failure_after_start_format",
     ] {
+        let trace_scenario = scenario;
+        let format_failure = scenario.ends_with("_format");
+        let scenario = scenario.strip_suffix("_format").unwrap_or(scenario);
         let delayed = scenario.starts_with("delayed");
         let waiting = scenario.ends_with("waiting");
         let events = Arc::new(super::notifications::FailureEvents::default());
@@ -147,12 +154,31 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             "\"transport\":\"udp\"",
             "\"transport\":\"udp\",\"incomingRingSeconds\":1",
         );
-        let fixture = IvyJson::object([
+        let mut fixture = IvyJson::object([
             ("scenario", scenario.into()),
             ("configuration", parse(&config, 65536).unwrap()),
         ]);
-        let steps = vec![("fixture.answer".into(), stringify(&fixture, 65536).unwrap())];
+        if format_failure {
+            if let IvyJson::Object(fields) = &mut fixture {
+                fields.push(("formatFailure".into(), true.into()));
+            }
+        }
+        let steps = vec![(
+            if format_failure {
+                "fixture.disposal"
+            } else {
+                "fixture.answer"
+            }
+            .into(),
+            stringify(&fixture, 65536).unwrap(),
+        )];
         let original = super::dial::original_raw(&steps);
+        if format_failure {
+            trace(
+                &format!("native-answer-original-{trace_scenario}"),
+                original.clone().unwrap_or(IvyJson::Null),
+            );
+        }
         let remaining = Arc::new(Remaining::default());
         remaining.close_gate.release();
         let handler = Arc::new(NativeSipCommands::new(
@@ -450,7 +476,16 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
         .unwrap();
         let failure_callbacks = events.receipts.lock().unwrap().clone();
         events.call.lock().unwrap().take();
-        owner.release(&call).unwrap().wait().await.unwrap();
+        let release_result = if format_failure {
+            let released = dispatcher
+                .execute(command("call.release", &selected, 7, 7))
+                .await;
+            assert!(released.outcome().error_code().is_none());
+            Some(outcome(released.outcome()))
+        } else {
+            owner.release(&call).unwrap().wait().await.unwrap();
+            None
+        };
         // Reusing the ID cannot lend the original saved answer another handle.
         let replacement = owner.prepare(id.clone()).unwrap();
         replacement.prepared().await.unwrap();
@@ -479,7 +514,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                 .await
                 .expect("Original answered binding released"),
         );
-        let result = IvyJson::object([
+        let mut result = IvyJson::object([
             ("status", IvyJson::Number(status.into())),
             ("answered", answered),
             ("hungup", hungup),
@@ -510,6 +545,11 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             ),
             ("mediaStartedBeforeAck", media_started_before_ack.into()),
         ]);
+        if let Some(release_result) = release_result {
+            if let IvyJson::Object(fields) = &mut result {
+                fields.push(("releaseResult".into(), release_result));
+            }
+        }
         let mut actual = result.clone();
         normalize(&mut actual, &id);
         if original
@@ -517,7 +557,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             .is_some_and(|o| o.as_array().unwrap()[0].get("json").is_none())
         {
             trace(
-                &format!("native-answer-{scenario}"),
+                &format!("native-answer-{trace_scenario}"),
                 IvyJson::object([
                     ("rust", result.clone()),
                     ("original", IvyJson::Null),
@@ -534,7 +574,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             panic!("Original {scenario} comparison unavailable");
         }
         let original_result = original.as_ref().map(|o| {
-            parse(
+            let result = parse(
                 &o.as_array().unwrap()[0]
                     .get("json")
                     .unwrap_or_else(|| panic!("{scenario}: {o:?}"))
@@ -542,7 +582,17 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
                     .unwrap(),
                 65536,
             )
-            .unwrap()
+            .unwrap();
+            if format_failure {
+                let measured = result.get("result").and_then(|v| v.get("comparison"));
+                assert!(
+                    measured.is_some(),
+                    "Original format failure observation unavailable: {result:?}"
+                );
+                measured.unwrap().clone()
+            } else {
+                result
+            }
         });
         let mut expected = original_result.clone();
         if let Some(v) = &mut expected {
@@ -562,7 +612,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             normalize(v, &original_id);
         }
         trace(
-            &format!("native-answer-{scenario}"),
+            &format!("native-answer-{trace_scenario}"),
             IvyJson::object([
                 ("rust", result),
                 ("original", original_result.unwrap_or(IvyJson::Null)),

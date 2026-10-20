@@ -167,7 +167,7 @@ public static class PhoneNativeDialOracle {
         var rows=new List<object>();
         try {foreach(var step in input.RootElement.EnumerateArray()) {
             try {string method=step.GetProperty("method").GetString();var args=step.GetProperty("params");
-                object result=method=="fixture.info"?PhoneNativeInfoOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.upgrade"?PhoneNativeUpgradeOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.answer"?PhoneNativeAnswerOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.incoming"?PhoneNativeIncomingOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():method=="fixture.requests"?Requests(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
+                object result=method=="fixture.disposal"?PhoneNativeAnswerOracle.FormatFailure(args).GetAwaiter().GetResult():method=="fixture.info"?PhoneNativeInfoOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.upgrade"?PhoneNativeUpgradeOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.answer"?PhoneNativeAnswerOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.incoming"?PhoneNativeIncomingOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():method=="fixture.requests"?Requests(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
                 rows.Add(new{json=JsonSerializer.Serialize(result,NativeRpc.Json)});
             } catch(Exception e){rows.Add(new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"});}
         }} finally {owner.DisposeAsync().AsTask().GetAwaiter().GetResult();}
@@ -235,8 +235,18 @@ public static class PhoneNativeAnswerOracle {
     static async Task<string> Receive(UdpClient peer,int milliseconds=4000) {using var cancel=new CancellationTokenSource(milliseconds);for(;;){var p=await peer.ReceiveAsync(cancel.Token);string raw=Encoding.UTF8.GetString(p.Buffer);if(!raw.StartsWith("SIP/2.0 100"))return raw;}}
     static async Task Wait(Func<bool> ready){var until=DateTime.UtcNow.AddSeconds(4);while(!ready()){if(DateTime.UtcNow>=until)throw new Exception("Original answer observation unavailable");await Task.Delay(1);}}
     static async Task<object> Invoke(NativeSipOperations owner,string method,object args){try{return new{json=JsonSerializer.Serialize(await owner.InvokeAsync(method,Args(args)),NativeRpc.Json)};}catch(Exception e){return new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"};}}
+    static object Error(Exception error)=>error==null?null:new{type=error.GetType().FullName,message=error.Message,stack=error.StackTrace};
+    // Isolate a faulted original disposal from the outer fixture's owner. Preserve
+    // partial receipts and raw cleanup failures instead of losing the whole trace.
+    public static async Task<object> FormatFailure(JsonElement args){
+        var owner=new NativeSipOperations(PhoneNativeScreeningOracle.Audio);object result=null;Exception failure=null,finalFailure=null;
+        try{result=await Run(owner,args);}catch(Exception e){failure=e;}
+        finally{try{await owner.DisposeAsync();}catch(Exception e){finalFailure=e;}}
+        return new{result,failure=Error(failure),finalDisposalError=Error(finalFailure)};
+    }
     public static async Task<object> Run(NativeSipOperations owner,JsonElement args){
         string scenario=args.GetProperty("scenario").GetString();bool delayed=scenario.StartsWith("delayed"),waiting=scenario.EndsWith("waiting");
+        bool formatFailure=args.TryGetProperty("formatFailure",out var format)&&format.GetBoolean();
         await owner.InvokeAsync("configure",args.GetProperty("configuration"));
         using var peer=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));UdpClient rtp=null,rtcp=null;
         for(int n=0;n<32;n++){rtp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));int port=((IPEndPoint)rtp.Client.LocalEndPoint).Port;try{if(port==65535)throw new SocketException();rtcp=new UdpClient(new IPEndPoint(IPAddress.Loopback,port+1));break;}catch(SocketException){rtp.Dispose();rtp=null;}}
@@ -250,7 +260,7 @@ public static class PhoneNativeAnswerOracle {
             var ring=SIPResponse.ParseSIPResponse(await Receive(peer));if((int)ring.Status!=180)throw new Exception("Original answer ringing unavailable");
             await Wait(()=>Host(owner).Calls.Any(c=>c.Observation.SipCallId==wire));var call=Host(owner).Calls.Single(c=>c.Observation.SipCallId==wire);var media=call.Media;string id=call.Observation.Id;
             var failureCallbacks=new List<object>();media.MediaFailed+=()=>{failureCallbacks.Add(call.Observation);throw new InvalidOperationException("Synthetic external failure listener");};
-            void FailMedia(){typeof(SipMediaSession).GetMethod("Fail",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(media,Array.Empty<object>());if(!media.Failed)throw new Exception("Original media failure unavailable");}
+            void FailMedia(){if(formatFailure)media.SetRemoteDescription(SIPSorcery.SIP.App.SdpType.offer,SIPSorcery.Net.SDP.ParseSDPDescription(sdp.Replace("PCMA/8000","PCMA/8000/2")));else typeof(SipMediaSession).GetMethod("Fail",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(media,Array.Empty<object>());if(!media.Failed)throw new Exception("Original media failure unavailable");}
             await owner.InvokeAsync("call.claim",Args(new{callId=id}));await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
             var pending=Invoke(owner,"call.answer",new{callId=id,waiting});
             var final=SIPResponse.ParseSIPResponse(await Receive(peer));int status=(int)final.Status;tag=final.Header.To.ToTag;
@@ -280,8 +290,14 @@ public static class PhoneNativeAnswerOracle {
                 var response=SIPResponse.GetResponse(bye,(SIPResponseStatusCodesEnum)200,null);byte[] packet=Encoding.UTF8.GetBytes(response.ToString());await peer.SendAsync(packet,packet.Length,target);}catch(OperationCanceledException)when(scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")){}
             }
             await Wait(()=>(call.Observation.State=="local_ended"||call.Observation.State=="outcome_unknown"));object ended=call.Observation;bool sameMedia=ReferenceEquals(media,call.Media);
-            await owner.InvokeAsync("call.release",Args(new{callId=id}));bool released=Host(owner).FindCall(id)==null;await owner.DisposeAsync();
-            return new{status,answered,hungup,ended,controls,endRequest,noByeObservationMs=scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:0,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=true,failureCallbacks,answerCompletedBeforeAck,mediaStartedBeforeAck};
+            object releaseResult=null;Exception disposalError=null;
+            if(formatFailure)releaseResult=await Invoke(owner,"call.release",new{callId=id});else await owner.InvokeAsync("call.release",Args(new{callId=id}));
+            bool released=Host(owner).FindCall(id)==null;
+            if(formatFailure){try{await owner.DisposeAsync();}catch(Exception e){disposalError=e;}}else await owner.DisposeAsync();
+            var result=new{status,answered,hungup,ended,controls,endRequest,noByeObservationMs=scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:0,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=disposalError==null,failureCallbacks,answerCompletedBeforeAck,mediaStartedBeforeAck};
+            if(!formatFailure)return result;
+            var comparison=Args(result).EnumerateObject().ToDictionary(p=>p.Name,p=>(object)p.Value);comparison.Add("releaseResult",releaseResult);
+            return new{comparison,disposalError=Error(disposalError)};
         }
     }
 }

@@ -51,7 +51,9 @@ pub(super) fn normalize(value: &mut IvyJson, generated: &str) {
                     let mut decoded = parse(&value.as_str().unwrap(), 65536).unwrap();
                     normalize(&mut decoded, generated);
                     *value = stringify(&decoded, 65536).unwrap().into();
-                } else if key == &"id".into() && value.as_str().is_ok_and(|s| s == generated) {
+                } else if (key == &"id".into() || key == &"callId".into())
+                    && value.as_str().is_ok_and(|s| s == generated)
+                {
                     assert_eq!(generated.len(), 36);
                     assert!(generated.bytes().enumerate().all(|(i, b)| {
                         if [8, 13, 18, 23].contains(&i) {
