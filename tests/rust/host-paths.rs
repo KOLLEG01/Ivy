@@ -1,6 +1,9 @@
 use ivy_host_runtime::paths;
 use std::{fs, path::PathBuf};
 
+#[path = "host-native-recovery-cases.rs"]
+mod native_recovery_cases;
+
 #[path = "host-executor-service-cases.rs"]
 mod executor_service_cases;
 

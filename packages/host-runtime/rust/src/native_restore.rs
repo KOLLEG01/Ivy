@@ -13,6 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 type Replacements = BTreeMap<String, BTreeMap<JsString, BTreeMap<JsString, JsString>>>;
 const ROW_LIMIT: usize = 1_000_000;
 
+mod recovery;
+pub use recovery::{mapped_file, relocate_native_storage};
+
 fn require(condition: bool, code: &str, message: &str) -> IvyResult<()> {
     if condition {
         Ok(())
