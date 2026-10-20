@@ -22,6 +22,8 @@ mod control;
 mod delivery;
 #[path = "task-board-engine-factory-driver.rs"]
 mod driver;
+#[path = "task-board-engine-factory-lifecycle.rs"]
+mod lifecycle;
 #[path = "task-board-engine-factory-native.rs"]
 mod native;
 #[path = "task-board-engine-factory-observations.rs"]
@@ -62,6 +64,7 @@ struct Fixture {
     steering: Option<steering::Scenario>,
     scheduler: Option<scheduler::Scenario>,
     delivery: Option<delivery::Scenario>,
+    lifecycle: Option<lifecycle::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -89,6 +92,7 @@ impl Fixture {
             steering: None,
             scheduler: None,
             delivery: None,
+            lifecycle: None,
         }
     }
     fn database(&self) -> Connection {
@@ -176,6 +180,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         if let Some(delivery) = &self.delivery {
             delivery.bind(&policy.context)?;
         }
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.bind(&policy.context)?;
+        }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
         drop(policy.context.calls.recover_publication()?);
@@ -192,7 +199,9 @@ impl CheckPolicy for Policies<'_> {
     async fn creation(&self, _: &Json, _: &Json, _: &Json, _: &JsString) -> IvyResult<()> {
         let g = self.context.owner.generation as u64;
         self.fixture.creations.borrow_mut().push(g);
-        if g == 1 {
+        if let Some(lifecycle) = &self.fixture.lifecycle {
+            lifecycle.creations[g as usize - 1].wait().await;
+        } else if g == 1 {
             self.fixture.held.wait().await;
         }
         Ok(())
@@ -321,6 +330,9 @@ impl TaskNoticePolicy for Policies<'_> {
         if self.fixture.delivery.is_some() {
             return TaskCommentNotices.comment(task, operation);
         }
+        if self.fixture.lifecycle.is_some() {
+            return TaskCommentNotices.comment(task, operation);
+        }
         if self.fixture.driver.is_some()
             || self.fixture.control.is_some()
             || self.fixture.steering.is_some()
@@ -350,6 +362,11 @@ impl CategoryLocale for Policies<'_> {
 }
 impl LifecyclePages for Policies<'_> {
     async fn page(&self, key: &str, options: &Json) -> IvyResult<Json> {
+        if let Some(lifecycle) = &self.fixture.lifecycle {
+            lifecycle
+                .page(self.context.owner.generation as usize, key, options)
+                .await;
+        }
         if let Some(delivery) = &self.fixture.delivery {
             if key == "task-board/delivery" {
                 delivery.check_page(options)?;
@@ -396,7 +413,10 @@ impl LifecyclePages for Policies<'_> {
                 steering.ready.wait().await;
             }
         }
-        if self.context.owner.generation == 1.0 && options.get("select").is_some() {
+        if self.fixture.lifecycle.is_none()
+            && self.context.owner.generation == 1.0
+            && options.get("select").is_some()
+        {
             self.fixture.page_waiting.set(true);
             self.fixture.page_held.wait().await;
         }
@@ -433,6 +453,7 @@ impl LifecyclePages for Policies<'_> {
                     } else if self.fixture.retirement.is_some()
                         || self.fixture.observations.is_some()
                         || self.fixture.control.is_some()
+                        || self.fixture.lifecycle.is_some()
                     {
                         assert_eq!(value.get("workflowState"), Some(&"review".into()));
                     } else if self.fixture.native.is_some() || self.fixture.driver.is_some() {
