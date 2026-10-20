@@ -10,6 +10,10 @@ use crate::{
 use ivy_contracts::{core_schema::validate_host, json};
 use ivy_sdk::clock::Clock;
 use std::{path::PathBuf, sync::Arc, time::Duration};
+mod phases;
+#[cfg(test)]
+#[path = "../../../../../tests/rust/host-reset-release-cases.rs"]
+mod release_cases;
 
 fn internal<T, E>(value: Result<T, E>) -> IvyResult<T> {
     value.map_err(|_| IvyError::internal())
