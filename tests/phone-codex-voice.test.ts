@@ -557,7 +557,7 @@ test("Incoming continuation keeps its exact task and speech context, still greet
   await voice.stop(first.callId);
   const before = f.requests.length, incoming = f.incoming();
   assert.equal(await voice.prepare(incoming, 0, selection), threadId);
-  assert.deepEqual(f.requests.slice(before), []);
+  assert.deepEqual(f.requests.slice(before), [{ method: 'thread/realtime/stop', params: { threadId } }]);
   await voice.start(incoming, 0, threadId, 'Begruesse den User mit "Servus"', "offer", () => {});
   await voice.connected(incoming.callId, async () => {});
   await voice.connected(incoming.callId, async () => {});
@@ -591,7 +591,9 @@ for (const reset of [undefined, true, false]) test(`Outgoing context reset ${res
   await voice.prewarm("incoming-user", selection);
   await voice.archive();
   const before = f.requests.length, incoming = f.incoming(), nextThread = await voice.prepare(incoming, 0, selection);
-  assert.deepEqual(f.requests.slice(before), [], "the next call uses its background preparation without native setup");
+  assert.deepEqual(f.requests.slice(before), reset === false
+    ? [{ method: 'thread/realtime/stop', params: { threadId: nextThread } }] : [],
+    "a retained conversation confirms media stop without repeating task preparation");
   assert.notEqual(nextThread, previousThread);
   if (reset === false) assert.equal(nextThread, outgoingThread);
   else assert.notEqual(nextThread, outgoingThread);
@@ -824,7 +826,8 @@ test("An unknown unused creation still warms incoming continuation without repea
   assert.equal(f.journal.codexTaskCache("prepared-phone-voice", f.fingerprint)?.creationOperationId, creationOperationId);
   const warm = f.requests.length;
   assert.equal(await second.prepare(f.incoming(), 0, selection), threadId);
-  assert.deepEqual(f.requests.slice(warm), [], "the incoming call needs no native reconciliation");
+  assert.deepEqual(f.requests.slice(warm), [{ method: 'thread/realtime/stop', params: { threadId } }],
+    "the incoming continuation confirms media stop without repeating task preparation");
 });
 
 test("Slow unused model preparation does not delay an already warmed incoming continuation", async t => {
@@ -844,7 +847,8 @@ test("Slow unused model preparation does not delay an already warmed incoming co
     assert.equal(finished, false);
     const before = f.requests.length;
     assert.equal(await second.prepare(f.incoming(), 0, selection), threadId);
-    assert.deepEqual(f.requests.slice(before), [], "continuation does not await the other task's preparation");
+    assert.deepEqual(f.requests.slice(before), [{ method: 'thread/realtime/stop', params: { threadId } }],
+      "continuation confirms its own media stop without awaiting the other task's preparation");
   } finally { release(); await warm; }
 });
 
@@ -871,6 +875,21 @@ test("A completed conversation keeps its history and the next call uses a fresh 
   assert.equal(f.journal.voiceTask(first.callId, 0), oldThread);
   assert.equal(f.requests.filter(value => value.method === "thread/start").length, 2);
   assert.equal(await voice.start(second, 0, nextThread, "Independent second context", "offer", () => {}), "remote answer");
+});
+
+test('A cached incoming continuation confirms media stop and replaces a dead loop before new startup', async t => {
+  const f = fixture(t); f.settings.resumeIncomingConversation = true;
+  const voice = f.voice(), first = f.incoming(), threadId = await voice.prepare(first, 0, selection);
+  await voice.start(first, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(first.callId, async () => {});
+  await voice.stop(first.callId); f.release(first);
+  f.killLoops();
+  const next = f.incoming();
+  const replacement = await voice.prepare(next, 0, selection);
+  assert.notEqual(replacement, threadId);
+  assert.equal(f.journal.voiceTask(first.callId, 0), threadId);
+  assert.equal(f.requests.filter(request => request.method === 'thread/realtime/start').length, 1,
+    'a broken cached media session is rejected before another start');
 });
 
 test("A confirmed dead cached agent loop is replaced without erasing its retained call identity", async (t) => {

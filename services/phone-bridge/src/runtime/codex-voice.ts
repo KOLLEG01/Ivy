@@ -1102,7 +1102,6 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     if (this.observations.has(threadId) || this.works.protected(threadId)) return null;
     requireThat(!this.sessions.size && (!this.reservations.has(threadId) || this.reservations.get(threadId) === ownerId),
       "phone_voice_task_busy", "Previous Voice task still belongs to an original call.");
-    if (this.reconciled.has(threadId) && this.preparedSelections.get(threadId) === canonical(selection)) return threadId;
     const key = `resume:${threadId}`;
     if (this.preparing.has(key)) {
       await this.preparing.get(key);
@@ -1115,10 +1114,13 @@ export class PhoneCodexVoice implements PhoneVoicePort {
         if (!this.reconciled.has(threadId)) {
           this.thread(await this.call("thread/resume", { threadId, cwd: this.settings.cwd,
             model: selection.model, config: { ...this.settings.config, model_reasoning_effort: selection.reasoningEffort }, excludeTurns: true }));
-          await this.call("thread/realtime/stop", { threadId });
-          this.reconciled.add(threadId);
         }
-        await this.call("thread/settings/update", { threadId, model: selection.model, effort: selection.reasoningEffort });
+        // Task/settings readiness does not prove that its previous media session is gone.
+        // Confirm the exact old realtime session stopped before every idle continuation.
+        await this.call("thread/realtime/stop", { threadId });
+        this.reconciled.add(threadId);
+        if (this.preparedSelections.get(threadId) !== canonical(selection))
+          await this.call("thread/settings/update", { threadId, model: selection.model, effort: selection.reasoningEffort });
         this.preparedSelections.set(threadId, canonical(selection));
         return threadId;
       } catch (error) {
