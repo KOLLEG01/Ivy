@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+ivy-host-runtime.workspace = true
 ivy-contracts.workspace = true
 ivy-sdk.workspace = true
 ivy-store.workspace = true

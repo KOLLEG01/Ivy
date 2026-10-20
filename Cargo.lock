@@ -685,6 +685,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
+ "url",
  "uuid",
  "windows-sys 0.61.2",
 ]
@@ -713,6 +714,21 @@ version = "0.2.40"
 dependencies = [
  "ivy-contracts",
  "rusqlite",
+ "uuid",
+]
+
+[[package]]
+name = "ivy-task-board"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "futures-util",
+ "ivy-contracts",
+ "ivy-host-runtime",
+ "ivy-sdk",
+ "ivy-store",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 
