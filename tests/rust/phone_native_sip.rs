@@ -123,8 +123,8 @@ async fn admitted_factory_uses_sdk_identity_and_offer_answer_addresses() {
                 "\"address\":\"127.0.0.1\"",
                 &format!("\"address\":\"{binding}\""),
             )
-            .replace("57000", "58000")
-            .replace("57998", "58998");
+            .replace("57000", "43000")
+            .replace("57998", "43998");
         owner
             .configure(&configuration(&params), |_| async { Ok(()) })
             .unwrap()
@@ -132,7 +132,9 @@ async fn admitted_factory_uses_sdk_identity_and_offer_answer_addresses() {
             .await
             .unwrap();
         let call = owner.prepare(CALL.into()).unwrap();
-        call.prepared().await.unwrap();
+        call.prepared()
+            .await
+            .unwrap_or_else(|error| panic!("{input:?}: {error:?}"));
         let media = call.media().unwrap();
         let offer = media.create_offer().unwrap();
         check_identity(&offer, &media);
@@ -255,7 +257,7 @@ async fn production_factory_retains_one_identity_attempt_and_clean_entropy_failu
         Some(SipHostError::NotReady)
     );
     assert_eq!(entropy.fills.load(Ordering::SeqCst), 0);
-    let params = BASE.replace("57000", "59000").replace("57998", "59998");
+    let params = BASE.replace("57000", "44000").replace("57998", "44998");
     owner
         .configure(&configuration(&params), |_| async { Ok(()) })
         .unwrap()
