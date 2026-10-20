@@ -187,6 +187,7 @@ export const rustTests = {
   'tests/rust/host-defaults.rs': { package: 'ivy-host-runtime', test: 'host-defaults' },
   'tests/rust/host-logs.rs': { package: 'ivy-host-runtime', test: 'host-logs' },
   'tests/rust/agent-claude.rs': { package: 'ivy-agent-manager', test: 'agent-claude' },
+  'tests/rust/agent-claude-adapter.rs': { package: 'ivy-agent-manager', test: 'agent-claude-adapter' },
   'tests/rust/agent-native-backup-paths.rs': { package: 'ivy-agent-manager', test: 'agent-native-backup-paths' },
   'tests/rust/agent-skills-files.rs': { package: 'ivy-agent-manager', test: 'agent-skills-files', originalBackend: 'agent-manager' },
   'tests/rust/agent-offline-import.rs': { package: 'ivy-agent-manager', test: 'agent-offline-import', originalBackend: 'agent-manager' },
