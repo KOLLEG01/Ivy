@@ -28,6 +28,7 @@ use ivy_contracts::{
     IvyError, IvyJson as Json, IvyResult, JsString,
     json::{canonical, parse, stringify},
 };
+use ivy_host_runtime::portable_native_files::NativeHelperLayout;
 use ivy_sdk::{
     rpc::{RequestFuture, RequestOptions},
     service::{ConnectionOptions, ServiceConnection, ServiceFuture},
@@ -278,6 +279,141 @@ async fn quiet(runtime: &WhatsAppRuntime) {
         tokio::task::yield_now().await;
     }
 }
+async fn component_desktop_assembly(
+    root: &Path,
+    journal: &Journal,
+    config: Json,
+    media: Arc<dyn RuntimeMedia>,
+    generation: Arc<ChatGeneration>,
+) -> Json {
+    let artifact = root.join("admitted-component");
+    std::fs::create_dir(&artifact).unwrap();
+    let artifact = ivy_host_runtime::paths::realpath(&artifact).unwrap();
+    let translator = Translator::new(Some(&JsString::from("de")));
+    #[cfg(windows)]
+    {
+        // An unexpected cache miss must fail against an inert qualification
+        // image, never reach the installed PowerShell/desktop capability.
+        let command_bin = std::env::var_os("IVY_CHAT_DESKTOP_TEST_BIN")
+            .expect("Supply the isolated inert powershell.exe command directory");
+        assert_eq!(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap()).next(),
+            Some(std::path::PathBuf::from(command_bin))
+        );
+        let helper = std::env::var_os("IVY_CHAT_DESKTOP_JOB_HELPER")
+            .expect("Supply the matching source-pinned Host ivy-job qualification image");
+        let native = artifact.join("dist/native");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::copy(&helper, native.join("ivy-job.exe")).unwrap();
+        assert_eq!(
+            RuntimeAssembly::for_component(
+                journal.clone(),
+                config.clone(),
+                media.clone(),
+                artifact.clone(),
+                NativeHelperLayout::Target,
+                translator,
+            )
+            .err()
+            .unwrap()
+            .code,
+            "artifact_missing",
+            "Target composition must not select a legacy helper"
+        );
+        let target = native.join(if cfg!(target_arch = "x86_64") {
+            "win32-x64"
+        } else {
+            "win32-arm64"
+        });
+        std::fs::create_dir(&target).unwrap();
+        std::fs::copy(helper, target.join("ivy-job.exe")).unwrap();
+    }
+    let assembly = RuntimeAssembly::for_component(
+        journal.clone(),
+        config,
+        media,
+        artifact,
+        NativeHelperLayout::Target,
+        translator,
+    )
+    .unwrap();
+    let attached = assembly.create(generation).unwrap();
+    let mut row = Inbox {
+        id: "desktop-command".into(),
+        sender: "alice".into(),
+        jid: "15555550201@s.whatsapp.net".into(),
+        message: "{}".into(),
+        state: "pending".into(),
+        request: None,
+        received: 1001,
+    };
+    // Reuse the physical journal result from the existing probe. Neither this
+    // replay nor the attempted fence below may activate a real desktop command.
+    let replay = attached.command(&row, &"/desktop ensure".into()).await;
+    if cfg!(windows) {
+        assert_eq!(
+            replay.unwrap(),
+            Some(
+                Translator::default()
+                    .translate("desktop.ensure", None)
+                    .unwrap()
+            )
+        );
+    } else {
+        assert_eq!(replay.unwrap_err().code, "desktop_unavailable");
+    }
+    row.id = "component-invalid".into();
+    let invalid = attached
+        .command(&row, &"/desktop invalid".into())
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.code, "invalid_arguments");
+    assert_eq!(
+        invalid.message_js(),
+        translator.translate("desktop.usage", None).unwrap()
+    );
+    assert!(journal.get("desktop:component-invalid").unwrap().is_null());
+    row.id = "component-unknown".into();
+    let attempted = Json::object([("attempted", true.into())]);
+    journal
+        .set("desktop:component-unknown", &attempted)
+        .unwrap();
+    journal.flush().await.unwrap();
+    let unknown = attached
+        .command(&row, &"/desktop restart".into())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        unknown.code,
+        if cfg!(windows) {
+            "desktop_outcome_unknown"
+        } else {
+            "desktop_unavailable"
+        }
+    );
+    assert_eq!(
+        unknown.message_js(),
+        translator
+            .translate(
+                if cfg!(windows) {
+                    "desktop.unclear"
+                } else {
+                    "desktop.platform"
+                },
+                None
+            )
+            .unwrap()
+    );
+    assert_eq!(journal.get("desktop:component-unknown").unwrap(), attempted);
+    Json::object([
+        ("layout", "target".into()),
+        ("missingTargetRejected", Json::Bool(cfg!(windows))),
+        ("physicalResultReused", Json::Bool(cfg!(windows))),
+        ("attemptFence", unknown.code.into()),
+        ("localizedValidation", invalid.message_js().into()),
+        ("desktopActivation", false.into()),
+    ])
+}
 #[tokio::test]
 async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_lifetime() {
     let corpus = oracle();
@@ -477,6 +613,14 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         ])
     );
     assert_eq!(desktop_io.calls.lock().unwrap().len(), 1);
+    let component_assembly = component_desktop_assembly(
+        &root,
+        &journal,
+        factory.inner.config.clone(),
+        media.clone(),
+        generation.clone(),
+    )
+    .await;
     let mut payloads = Vec::new();
     {
         let lease = generation.accept().unwrap();
@@ -632,6 +776,7 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
         ("failedReplacement", Json::String(rejected.code_js())),
         ("helpOutputs", Json::Number(1.0)),
         ("desktopOutputs", Json::Number(1.0)),
+        ("componentDesktopAssembly", component_assembly),
         (
             "desktopCalls",
             Json::Array(desktop_io.calls.lock().unwrap().clone()),

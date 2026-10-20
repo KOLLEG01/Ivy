@@ -1,6 +1,7 @@
 //! The runtime borrows the existing domain owners through a generation lease.
 use super::{
     commands::{CommandFuture, DesktopCommands, WhatsAppCommands},
+    desktop::WhatsAppDesktop,
     journal::Inbox,
     journal_owner::Journal,
     listener::WhatsAppListener,
@@ -13,12 +14,13 @@ use crate::{
     generation::{ChatGeneration, ChatGenerationLease},
 };
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
+use ivy_host_runtime::portable_native_files::NativeHelperLayout;
 use ivy_sdk::{
     clock::automatic_notifications_allowed,
     operation_ids::scoped_operation_id,
     rpc::{RequestFuture, RequestOptions},
 };
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 pub type BoolFuture<'a> = Pin<Box<dyn Future<Output = IvyResult<bool>> + Send + 'a>>;
 pub trait RuntimeAttached: Send + Sync {
@@ -54,6 +56,32 @@ pub struct RuntimeAssembly {
     pub media: Arc<dyn RuntimeMedia>,
     pub desktop: Arc<dyn DesktopCommands>,
     pub translator: Translator,
+}
+impl RuntimeAssembly {
+    /// Component/build admission precedes this composition. Bind its explicit
+    /// helper layout before accepting any generation or desktop command.
+    pub fn for_component(
+        journal: Journal,
+        config: Json,
+        media: Arc<dyn RuntimeMedia>,
+        admitted_artifact: PathBuf,
+        layout: NativeHelperLayout,
+        translator: Translator,
+    ) -> IvyResult<Self> {
+        let desktop = Arc::new(WhatsAppDesktop::for_component(
+            journal.clone(),
+            admitted_artifact,
+            layout,
+            translator,
+        )?);
+        Ok(Self {
+            journal,
+            config,
+            media,
+            desktop,
+            translator,
+        })
+    }
 }
 struct Attached {
     lease: Arc<ChatGenerationLease>,
