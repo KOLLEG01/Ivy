@@ -15,6 +15,7 @@ ivy-store = { path = "packages/store" }
 ivy-sdk = { path = "packages/sdk/rust" }
 ivy-host-runtime = { path = "packages/host-runtime/rust" }
 ivy-cli = { path = "packages/cli/rust" }
+ivy-hive = { path = "services/hive/rust" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order", "raw_value"] }
 sha2 = "=0.11.1"
