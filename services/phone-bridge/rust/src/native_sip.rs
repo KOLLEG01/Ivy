@@ -108,9 +108,11 @@ impl NativeCallConfiguration {
         connection_address: IpAddr,
     ) -> SipMediaSettings {
         let (first_port, last_port) = self.binding.rtp_port_range();
+        let mut interface = self.binding.endpoint();
+        interface.set_port(0);
         SipMediaSettings {
             call_id: id,
-            interface: SocketAddr::new(self.binding.endpoint().ip(), 0),
+            interface,
             connection_address,
             first_port,
             last_port,
@@ -118,6 +120,40 @@ impl NativeCallConfiguration {
             preferences: self.codecs.preferences().to_vec(),
             identity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn media_binding_preserves_the_validated_ipv6_scope() {
+        let frame = br#"{"version":1,"epoch":"11111111-1111-4111-8111-111111111111","requestId":1,"operationId":"11111111-1111-4111-8111-111111111111","method":"configure","params":{"binding":{"address":"fe80::1%12","port":5060,"transport":"udp"},"codecs":{"preferences":["PCMA"]},"incomingPeers":[],"registration":null,"password":null}}"#;
+        let request = NativeRequest::parse(frame).unwrap();
+        let parts = NativeSipConfiguration::parse(&request)
+            .unwrap()
+            .into_parts()
+            .unwrap();
+        let configuration = NativeCallConfiguration {
+            binding: parts.binding,
+            codecs: parts.codecs,
+            incoming: parts.incoming,
+        };
+        let mut expected = configuration.binding().endpoint();
+        expected.set_port(0);
+        let settings = configuration.media_settings(
+            "11111111-1111-4111-8111-111111111111".into(),
+            SipMediaIdentity {
+                session_id: 1,
+                source: 17,
+                sequence: 100,
+                timestamp: 200,
+                cname: "fixture".into(),
+            },
+            "fe80::1".parse().unwrap(),
+        );
+        assert_eq!(settings.interface, expected);
+        assert_eq!(settings.interface, "[fe80::1%12]:0".parse().unwrap());
     }
 }
 pub type NativeSipMediaFuture =
