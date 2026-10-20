@@ -2,7 +2,7 @@ use crate::frozen_contracts::ContractsBinding;
 use ivy_contracts::{
     IvyJson as Json, JsString,
     hash::hash_json,
-    json::{canonical, parse},
+    json::{parse, stringify},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_host_runtime::{config::InstanceConfig, health::HealthFile, node_runtime::NodeRuntime};
@@ -85,7 +85,7 @@ impl Drop for Fixture {
     }
 }
 fn write(path: &Path, value: &Json) {
-    std::fs::write(path, canonical(value, MANAGEMENT_FRAME_BYTES).unwrap()).unwrap();
+    std::fs::write(path, stringify(value, MANAGEMENT_FRAME_BYTES).unwrap()).unwrap();
 }
 fn result(value: ivy_contracts::IvyResult<Json>) -> Json {
     match value {
