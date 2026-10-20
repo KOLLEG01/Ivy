@@ -1,9 +1,11 @@
 //! SDK address selection for the native SIP host's always-present binding.
 //! SIPSorcery 10.0.15 notice: native/phone-runtime/licenses/SIPSorcery-10.0.15.md.
 use super::MediaError;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    io,
+    net::{IpAddr, SocketAddr},
     sync::{Mutex, OnceLock},
 };
 
@@ -28,6 +30,26 @@ impl Cache {
     }
 }
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+fn probe_address<S>(
+    socket: io::Result<S>,
+    destination: SocketAddr,
+    connect: impl FnOnce(&S, SocketAddr) -> io::Result<()>,
+    local_address: impl FnOnce(&S) -> io::Result<Option<SocketAddr>>,
+) -> Result<Option<SocketAddr>, MediaError> {
+    // UdpClient construction is outside the SDK's SocketException catch.
+    // Connect includes the implicit local bind; only that and endpoint lookup
+    // are allowed to report a missing route and use the configured binding.
+    let socket = socket.map_err(|_| MediaError::AddressUnavailable)?;
+    if connect(&socket, destination).is_err() {
+        return Ok(None);
+    }
+    let Ok(Some(mut local)) = local_address(&socket) else {
+        return Ok(None);
+    };
+    local.set_port(0);
+    Ok(Some(local))
+}
 
 fn cache_time() -> Result<i64, MediaError> {
     #[cfg(windows)]
@@ -114,20 +136,20 @@ impl SipSdpRoute for SystemSipSdpRoute {
             }
         }
         destination.set_port(5060);
-        let any = if destination.is_ipv4() {
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        let domain = if destination.is_ipv4() {
+            Domain::IPV4
         } else {
-            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+            Domain::IPV6
         };
-        let socket =
-            UdpSocket::bind(SocketAddr::new(any, 0)).map_err(|_| MediaError::AddressUnavailable)?;
-        if socket.connect(destination).is_err() {
-            return Ok(None);
-        }
-        let Ok(mut local) = socket.local_addr() else {
+        let Some(local) = probe_address(
+            Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)),
+            destination,
+            |socket, remote| socket.connect(&remote.into()),
+            |socket| socket.local_addr().map(|address| address.as_socket()),
+        )?
+        else {
             return Ok(None);
         };
-        local.set_port(0);
         cache
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -155,6 +177,113 @@ pub(super) fn advertised_address(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn route_probe_separates_constructor_connect_bind_and_endpoint_failures() {
+        use ivy_contracts::json::{IvyJson, stringify};
+        use std::{cell::RefCell, rc::Rc};
+        struct Probe(Rc<RefCell<Vec<&'static str>>>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("dispose");
+            }
+        }
+        let mut rows = Vec::new();
+        for (family, remote, local) in [
+            ("v4", "127.0.0.2:5060", "127.0.0.1:49152"),
+            ("v6", "[fe80::2%17]:5060", "[fe80::1%17]:49152"),
+        ] {
+            let destination: SocketAddr = remote.parse().unwrap();
+            let local: SocketAddr = local.parse().unwrap();
+            for stage in [
+                "construct_socket",
+                "connect_socket",
+                "implicit_bind_socket",
+                "local_socket",
+                "local_missing",
+                "success",
+            ] {
+                let events = Rc::new(RefCell::new(vec!["construct"]));
+                let socket = if stage == "construct_socket" {
+                    Err(io::Error::from_raw_os_error(10055))
+                } else {
+                    Ok(Probe(events.clone()))
+                };
+                let result = probe_address(
+                    socket,
+                    destination,
+                    |socket, selected| {
+                        assert_eq!(selected, destination);
+                        socket.0.borrow_mut().push("connect");
+                        if stage == "connect_socket" {
+                            return Err(io::Error::from_raw_os_error(10051));
+                        }
+                        socket.0.borrow_mut().push("implicit-bind");
+                        if stage == "implicit_bind_socket" {
+                            return Err(io::Error::from_raw_os_error(10048));
+                        }
+                        Ok(())
+                    },
+                    |socket| {
+                        socket.0.borrow_mut().push("local");
+                        match stage {
+                            "local_socket" => Err(io::Error::from_raw_os_error(10022)),
+                            "local_missing" => Ok(None),
+                            _ => Ok(Some(local)),
+                        }
+                    },
+                );
+                let mut advertised = local;
+                advertised.set_port(0);
+                let expected = match stage {
+                    "construct_socket" => Err(MediaError::AddressUnavailable),
+                    "success" => Ok(Some(advertised)),
+                    _ => Ok(None),
+                };
+                assert_eq!(result, expected, "{family}/{stage}");
+                let expected_events: &[&str] = match stage {
+                    "construct_socket" => &["construct"],
+                    "connect_socket" => &["construct", "connect", "dispose"],
+                    "implicit_bind_socket" => &["construct", "connect", "implicit-bind", "dispose"],
+                    _ => &["construct", "connect", "implicit-bind", "local", "dispose"],
+                };
+                assert_eq!(events.borrow().as_slice(), expected_events);
+                rows.push(IvyJson::object([
+                    ("family", family.into()),
+                    ("stage", stage.into()),
+                    (
+                        "state",
+                        match result {
+                            Err(_) => "error",
+                            Ok(None) => "none",
+                            Ok(Some(_)) => "address",
+                        }
+                        .into(),
+                    ),
+                    (
+                        "local",
+                        result
+                            .ok()
+                            .flatten()
+                            .map(|address| address.to_string().into())
+                            .unwrap_or(IvyJson::Null),
+                    ),
+                    (
+                        "events",
+                        IvyJson::Array(
+                            events
+                                .borrow()
+                                .iter()
+                                .map(|event| (*event).into())
+                                .collect(),
+                        ),
+                    ),
+                ]));
+            }
+        }
+        if let Ok(path) = std::env::var("IVY_PHONE_ROUTE_FAILURE_TRACE") {
+            std::fs::write(path, stringify(&IvyJson::Array(rows), 65536).unwrap()).unwrap();
+        }
+    }
     #[test]
     fn route_cache_expires_at_five_minutes_and_retains_backwards_clock_policy() {
         let remote = "127.0.0.2:0".parse().unwrap();
