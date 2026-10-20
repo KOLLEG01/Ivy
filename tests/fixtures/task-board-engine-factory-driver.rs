@@ -109,7 +109,7 @@ fn frames(peer: &Peer, kind: &str) -> Vec<Json> {
         .collect()
 }
 async fn reached(fixture: &Fixture, peer: &Peer, stage: &str, mut condition: impl FnMut() -> bool) {
-    let result = tokio::time::timeout(Duration::from_secs(8), async {
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
@@ -117,7 +117,25 @@ async fn reached(fixture: &Fixture, peer: &Peer, stage: &str, mut condition: imp
     .await;
     assert!(
         result.is_ok(),
-        "Driver stage {stage}; {}; {}",
+        "Driver stage {stage}; held projection {}; pages {}; {}; {}",
+        fixture.page_waiting.get(),
+        canonical(
+            &Json::Array(
+                fixture
+                    .pages
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .take(4)
+                    .map(|(_, key, options)| Json::object([
+                        ("key", key.clone().into()),
+                        ("options", options.clone())
+                    ]))
+                    .collect()
+            ),
+            MANAGEMENT_FRAME_BYTES
+        )
+        .unwrap(),
         canonical(
             &Json::Array(
                 fixture

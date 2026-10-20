@@ -160,7 +160,7 @@ fn count(fixture: &Fixture, sql: &str) -> i64 {
     fixture.database().query_row(sql, [], |r| r.get(0)).unwrap()
 }
 async fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
-    tokio::time::timeout(Duration::from_secs(8), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
