@@ -106,44 +106,35 @@ for (const capacity of [false, true]) test(`${capacity ? 'capacity' : 'quota'} f
   await f.first.drain(f.runId);
   const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
   assert.equal(run.value.phase, 'failed'); assert.equal(task.value.claim, null);
-  assert.equal(task.value.workflowState, 'waiting'); assert.equal(task.value.waiting?.reason, 'time');
-  assert.equal(engine.condition(task.value).state, 'deferred');
-  assert.equal(task.value.fields.nextReviewAt, new Date(Date.parse(capacity ? run.value.finishedAt! : reset) + 60000).toISOString());
+  assert.equal(task.value.workflowState, 'waiting'); assert.equal(task.value.runtimeWait?.reason, 'host');
+  assert.equal(engine.condition(task.value).state, 'blocked_environment');
+  assert.equal(task.value.runtimeWait?.retryAt, new Date(Date.parse(capacity ? run.value.finishedAt! : reset) + 60000).toISOString());
   assert.equal(task.value.comments.at(-1)!.body, message);
   const scheduler = new TaskBoardScheduler(engine);
   for (let pass = 0; pass < 2; pass++) assert.equal(await scheduler.task(task.pin.objectId), null);
   assert.deepEqual((await engine.store.read('task-board/task', task.pin.objectId)).pin, task.pin);
-  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(task.value.fields.nextReviewAt!) + 1 });
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(task.value.runtimeWait?.retryAt!) + 1 });
   const continued = await new TaskBoardScheduler(engine).task(task.pin.objectId);
   assert.ok(continued?.run);
   assert.equal(await new TaskBoardScheduler(f.f.w.f.second).task(task.pin.objectId), null);
   await f.second.drain(continued.run.objectId);
   const current = await engine.store.read('task-board/task', task.pin.objectId);
   assert.deepEqual(current.value.primaryResourceRef, task.value.primaryResourceRef);
-  assert.equal(current.value.waiting, null); assert.equal(current.value.attemptCount, 2);
+  assert.equal(current.value.runtimeWait, null); assert.equal(current.value.attemptCount, 2);
   for (const [method, count] of [['thread/start', 1], ['thread/resume', 1], ['turn/start', 2]] as const)
     assert.equal(f.f.frames.filter(frame => frame['method'] === method).length, count);
 });
 
-for (const capacity of [false, true]) test(`previously blocked ${capacity ? 'capacity' : 'quota'} failures are reclassified from the original native turn and respect explicit user waits`, async t => {
-  const f = await fixture(t), engine = f.f.w.f.first, reset = new Date(Date.now() + 120000).toISOString();
-  await f.first.drain(f.runId); f.error({ message: capacity ? 'Selected model is at capacity. Please try a different model.' : `Claude five hour limit reached. Resets at ${reset}.` }); f.status('failed'); f.outputs([]);
+for (const capacity of [false, true]) test(`technical ${capacity ? 'capacity' : 'quota'} retry dates do not become business time conditions`, async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
   await f.first.drain(f.runId);
+  f.error({ message: capacity ? 'Selected model is at capacity.' : "You've hit your session limit" });
+  f.status('failed'); f.outputs([]); await f.first.drain(f.runId);
   const task = await engine.store.read('task-board/task', (await f.current()).value.taskId);
-  const waiting = { reason: 'user' as const, detail: 'Execution failed; see the ticket comment.', since: task.value.updatedAt };
-  // Reproduce the stored projection produced before quota-aware completion publication.
-  await engine.store.write('task-board/task', { ...task.value, waiting, fields: { ...task.value.fields, nextReviewAt: null } }, randomUUID(),
-    { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
-  const deferred = await new TaskBoardScheduler(engine).task(task.pin.objectId);
-  assert.ok(deferred?.task);
-  const recovered = await engine.store.read('task-board/task', task.pin.objectId);
-  assert.equal(recovered.value.waiting?.reason, 'time'); assert.equal(recovered.value.attemptCount, 1);
-  assert.equal(recovered.value.fields.nextReviewAt, new Date(Date.parse(capacity ? (await f.current()).value.finishedAt! : reset) + 60000).toISOString());
-  assert.deepEqual(recovered.value.primaryResourceRef, task.value.primaryResourceRef);
-  await engine.store.write('task-board/task', { ...recovered.value, waiting: { ...waiting, detail: 'Waiting for a deliberate user decision.' }, fields: { ...recovered.value.fields, nextReviewAt: null } }, randomUUID(),
-    { objectId: recovered.pin.objectId, expectedRevision: recovered.pin.revision });
+  assert.equal(task.value.runtimeWait?.reason, 'host');
+  assert.ok(task.value.runtimeWait?.retryAt);
+  assert.equal(task.value.nextSteps.some(step => step.requires.some(condition => condition.kind === 'time')), false);
   assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
-  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
 });
 
 test('quota recovery preserves an unanswered ticket question', async t => {
@@ -154,7 +145,7 @@ test('quota recovery preserves an unanswered ticket question', async t => {
     commentId: 'quota-question', authorKind: 'agent', purpose: 'question', body: 'Which input should be used?', requests: [], responses: [], attachments: [], replyTo: null });
   f.error({ message: "You've hit your session limit" }); f.status('failed'); f.outputs([]); await f.first.drain(f.runId);
   task = await engine.store.read('task-board/task', task.pin.objectId);
-  assert.equal(task.value.waiting?.reason, 'user'); assert.equal(task.value.fields.nextReviewAt, null);
+  assert.equal(task.value.openQuestionCount, 1); assert.ok(task.value.runtimeWait?.retryAt);
   assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
 });
 
@@ -326,7 +317,7 @@ test('an unfinished turn closes only when the original owned process loss is con
   const uncertainTask = await f.f.w.f.first.store.read('task-board/task', uncertain.value.taskId);
   assert.equal(uncertainTask.value.workflowState, 'in_progress');
   const engine = f.f.w.f.first;
-  await engine.store.write('task-board/task', { ...uncertainTask.value, workflowState: 'waiting', waiting: { reason: 'external_outcome', detail: 'Original execution is being reconciled.', since: new Date().toISOString() } }, randomUUID(),
+  await engine.store.write('task-board/task', { ...uncertainTask.value, workflowState: 'waiting', runtimeWait: { reason: 'external_outcome', detail: 'Original execution is being reconciled.', since: new Date().toISOString() } }, randomUUID(),
     { objectId: uncertainTask.pin.objectId, expectedRevision: uncertainTask.pin.revision });
   await f.first.step(f.runId);
   const corrected = await engine.store.read('task-board/task', uncertain.value.taskId);
@@ -425,19 +416,19 @@ test('closed provider retains in progress with visible automatic recovery and bo
   let run = await f.current();
   let task = await f.f.w.f.first.store.read('task-board/task', run.value.taskId);
   assert.equal(run.value.phase, 'outcome_unknown');
-  assert.equal(task.value.waiting, null);
+  assert.equal(task.value.runtimeWait, null);
   assert.equal(task.value.workflowState, 'in_progress');
   assert.equal(task.value.claim?.run?.objectId, f.runId);
   assert.equal(executionCondition({ workflowState: task.value.workflowState, control: task.value.fields.control,
     publication: !!task.value.publication, claim: { phase: task.value.claim!.phase, hostId: run.value.target.hostId },
-    waiting: task.value.waiting, executionRequirement: task.value.fields.executionRequirement }).state, 'recovering');
+    runtimeWait: task.value.runtimeWait, executionRequirement: task.value.fields.executionRequirement }).state, 'recovering');
   const engine = f.f.w.f.first;
-  await engine.store.write('task-board/task', { ...task.value, workflowState: 'waiting', waiting: { reason: 'host', detail: 'Native reconciliation is waiting.', since: new Date().toISOString() } }, randomUUID(),
+  await engine.store.write('task-board/task', { ...task.value, workflowState: 'waiting', runtimeWait: { reason: 'host', detail: 'Native reconciliation is waiting.', since: new Date().toISOString() } }, randomUUID(),
     { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
   await f.second.step(f.runId);
   task = await engine.store.read('task-board/task', run.value.taskId);
   assert.equal(task.value.workflowState, 'in_progress');
-  assert.equal(task.value.waiting, null);
+  assert.equal(task.value.runtimeWait, null);
   await f.second.step(f.runId);
   assert.deepEqual((await engine.store.read('task-board/task', run.value.taskId)).pin, task.pin);
   const firstCalls = f.f.ownerCalls;
@@ -453,7 +444,7 @@ test('closed provider retains in progress with visible automatic recovery and bo
   task = await f.f.w.f.first.store.read('task-board/task', run.value.taskId);
   assert.equal(run.value.phase, 'running');
   assert.equal(task.value.workflowState, 'in_progress');
-  assert.equal(task.value.waiting, null);
+  assert.equal(task.value.runtimeWait, null);
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/start').length, 1);
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
 });
@@ -477,7 +468,7 @@ test('periodic reconciliation recovers completed work after provider loss and a 
   for (let pass = 0; pass < 16 && (await f.current()).value.phase !== 'completed'; pass++) await tick();
   const run = await f.current(), task = await engine.store.read('task-board/task', run.value.taskId);
   assert.equal(run.value.phase, 'completed'); assert.equal(task.value.workflowState, 'review');
-  assert.equal(task.value.waiting, null); assert.deepEqual(task.value.primaryResourceRef, identity);
+  assert.equal(task.value.runtimeWait, null); assert.deepEqual(task.value.primaryResourceRef, identity);
   assert.equal(task.value.attemptCount, 1);
   for (const method of ['thread/start', 'turn/start']) assert.equal(f.f.frames.filter(frame => frame['method'] === method).length, 1);
   assert.deepEqual(runtime.diagnostics, []);
@@ -665,8 +656,8 @@ test('a queued fresh recovery cannot silently move its retained workspace', asyn
   f.f.w.planned.workspace = { ...f.f.w.planned.workspace, canonicalCwd: '/another-workspace', intendedPath: '/another-workspace' };
   const deferred = await new TaskBoardScheduler(f.f.w.f.second, f.clock).task(task.pin.objectId);
   const blocked = await engine.store.read('task-board/task', deferred!.task!);
-  assert.equal(blocked.value.waiting!.reason, 'workspace');
-  assert.match(blocked.value.waiting!.detail, /retain the original workspace/);
+  assert.equal(blocked.value.runtimeWait!.reason, 'workspace');
+  assert.match(blocked.value.runtimeWait!.detail, /retain the original workspace/);
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/start').length, 1);
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 0);
 });

@@ -1,18 +1,21 @@
-import { bundledSchema } from '../../../../packages/sdk/src/node.js';
+import { bundledSchema as bundleSchema } from '../../../../packages/sdk/src/node.js';
 import { validateTaskBoard } from '../../../../packages/sdk/src/node.js';
 import type { TaskBoard, Wire } from '../../../../packages/sdk/src/node.js';
 import catalog from '../../../../specs/schemas/task-board.operations.json' with { type: 'json' };
+import retainedCatalog from '../../../../specs/schemas/task-board-retained.operations.json' with { type: 'json' };
+import retainedSchema from '../../../../specs/schemas/task-board-retained.schema.json' with { type: 'json' };
+import findingsRetainedSchema from '../../../../specs/schemas/task-board-findings-retained.schema.json' with { type: 'json' };
 import evidenceChunk from '../../../../specs/schemas/task-board.evidence-chunk.json' with { type: 'json' };
 import readEvidenceChunk from '../../../../specs/schemas/task-board.read-evidence-chunk.json' with { type: 'json' };
 import attachment from '../../../../specs/schemas/task-board.attachment.json' with { type: 'json' };
-import { upgradeConfigurationRecord, upgradeTaskRecord } from '../../../../packages/sdk/src/client.js';
+import { upgradeConfigurationRecord, upgradeTaskRecord, upgradeResultRecord } from '../../../../packages/sdk/src/client.js';
 import { freezePublishedWorkflowSchema, freezeRecoverySchema } from './workflow-schema.js';
 import { referencePageKey } from './reference-pages.js';
 
 export const version = '1.0.0' as const;
-export const contractVersion = (key: ContractKey | 'task-board/comments'): '1.0.0' | '1.1.0' | '1.2.0' | '1.3.0' | '1.12.0' => key === 'task-board/task' ? '1.12.0' : key === 'task-board/run' ? '1.3.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comments' || key === 'task-board/comment-read-state' ? '1.1.0' : version;
-export const readableVersions = (key: ContractKey | 'task-board/comments'): string[] => key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0']
-  : key === 'task-board/run' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0'] : key === 'task-board/configuration' ? ['1.0.0', '1.1.0', '1.2.0'] : key === 'task-board/delivery' || key === 'task-board/comments' || key === 'task-board/comment-read-state' ? ['1.0.0', '1.1.0'] : [version];
+export const contractVersion = (key: ContractKey | 'task-board/comments'): '1.0.0' | '1.1.0' | '1.2.0' | '2.1.0' => ['task-board/task', 'task-board/run', 'task-board/result', 'task-board/comments'].includes(key) ? '2.1.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? '1.1.0' : version;
+export const readableVersions = (key: ContractKey | 'task-board/comments'): string[] => key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0']
+  : key === 'task-board/run' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '2.0.0', '2.1.0'] : key === 'task-board/result' ? ['1.0.0', '2.0.0', '2.1.0'] : key === 'task-board/comments' ? ['1.0.0', '1.1.0', '2.0.0', '2.1.0'] : key === 'task-board/configuration' ? ['1.0.0', '1.1.0', '1.2.0'] : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? ['1.0.0', '1.1.0'] : [version];
 // Before task 1.5.0 and configuration 1.1.0, an execution requirement could name one capability instead of a host.
 const capabilityRequirement = { type: 'object', properties: { kind: { const: 'capability' }, capabilityKey: { $ref: '#/$defs/WireIdentifier' } }, required: ['kind', 'capabilityKey'], additionalProperties: false };
 function withCapabilityRequirement(contract: Wire.DataContract, from: string, to: string, description?: string): Wire.DataContract {
@@ -51,10 +54,12 @@ export const localContractKeys = new Set<ContractKey>(['task-board/native-signal
 /** Reads records from before the capability requirement was replaced by required capabilities. */
 export function upgradeRecord<K extends ContractKey>(key: K, value: ContractValues[K]): ContractValues[K] {
   return (key === 'task-board/task' ? upgradeTaskRecord(value as TaskBoard.Task)
-    : key === 'task-board/configuration' ? upgradeConfigurationRecord(value as TaskBoard.Configuration) : value) as ContractValues[K];
+    : key === 'task-board/configuration' ? upgradeConfigurationRecord(value as TaskBoard.Configuration)
+    : key === 'task-board/result' ? upgradeResultRecord(value as TaskBoard.Result) : value) as ContractValues[K];
 }
 export function validateDomain<K extends ContractKey>(key: K, value: unknown): asserts value is ContractValues[K] { validateTaskBoard(contractNames[key], value); }
-export const taskBoardSchema = (name: string) => bundledSchema('#/$defs/' + name, catalog.schema);
+export const taskBoardSchema = (name: string) => bundleSchema('#/$defs/' + name, catalog.schema);
+const bundledSchema = (reference: string, document: string) => bundleSchema(reference, document, { TaskBoard: retainedSchema });
 function publishedTaskSchema(schema: Record<string, unknown>): Record<string, unknown> {
   // Tool-facing descriptions may evolve, but the published Task contracts are immutable.
   const definitions = schema.$defs as Record<string, { description?: string; properties?: Record<string, { description?: string }> }>;
@@ -65,11 +70,11 @@ function publishedTaskSchema(schema: Record<string, unknown>): Record<string, un
     delete fields?.[name]?.description;
   return schema;
 }
-export function taskBoardContracts(): Wire.DataContract[] {
+function retainedContracts(): Wire.DataContract[] {
   const retention = (key: string): Wire.RetentionPolicy => key === 'task-board/task' ? { objects: { mode: 'retain' }, revisions: { mode: 'bounded', maximumCount: 1000 } } :
     key === 'task-board/result' ? { objects: { mode: 'retain' }, revisions: { mode: 'current' } } : { objects: { mode: 'retain' }, revisions: { mode: 'current' } };
   const finalKeys = new Set(['task-board/configuration', 'task-board/task', 'task-board/result', 'task-board/run', 'task-board/review', 'task-board/history', 'task-board/delivery', 'task-board/task-key-sequence', 'task-board/task-key-allocation', 'task-board/comment-read-state']);
-  const contracts: Wire.DataContract[] = catalog.contracts.filter(value => finalKeys.has(value.key)).map(value => ({ key: value.key, version: value.version, owner: { kind: 'service', serviceName: 'task-board' }, mediaType: 'application/json', retention: retention(value.key), jsonSchema: value.key === 'task-board/task' ? publishedTaskSchema(bundledSchema(value.definition, catalog.schema)) : bundledSchema(value.definition, catalog.schema),
+  const contracts: Wire.DataContract[] = retainedCatalog.contracts.filter(value => finalKeys.has(value.key)).map(value => ({ key: value.key, version: value.version, owner: { kind: 'service', serviceName: 'task-board' }, mediaType: 'application/json', retention: retention(value.key), jsonSchema: value.key === 'task-board/task' ? publishedTaskSchema(bundledSchema(value.definition, retainedCatalog.schema)) : bundledSchema(value.definition, retainedCatalog.schema),
     specMarkdown: `# ${value.key} ${value.version}\n\nTaskBoard owns this exact workflow contract. Primary domain Objects have the configured workflow root as their direct parent. Immutable prepared payloads use the same exact contract below their owning Operation; they are evidence, not primary Tasks or Runs. Apply the state, actor, reference and recovery rules from the TaskBoard specification and decision 0011. Every write uses CAS or a retained create mutation ID. Native side effects require the saved claim, exact native plan and owner outcome evidence; this data schema alone does not authorize execution.` }));
   // Retained revisions in this installation still require their immutable published schemas.
   for (const [key, from, to] of [['task-board/task', '1.9.0', '1.8.0'], ['task-board/run', '1.2.0', '1.1.0']] as const) {
@@ -258,4 +263,37 @@ export function taskBoardContracts(): Wire.DataContract[] {
   delete (readState.jsonSchema as { properties: Record<string, unknown> }).properties.readDirectAgentCommentCount;
   contracts.unshift(selectiveReadState);
   return contracts;
+}
+
+function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.0' | '2.1.0'): Wire.DataContract[] {
+  const selectedSchema = (reference: string) => selectedVersion === '2.0.0'
+    ? bundleSchema(reference, catalog.schema, { TaskBoard: findingsRetainedSchema }) : bundleSchema(reference, catalog.schema);
+  const current = catalog.contracts.filter(value => ['task-board/task', 'task-board/run', 'task-board/result'].includes(value.key)).map(value => ({
+    key: value.key, version: selectedVersion, owner: { kind: 'service' as const, serviceName: 'task-board' }, mediaType: 'application/json',
+    retention: value.key === 'task-board/task' ? { objects: { mode: 'retain' as const }, revisions: { mode: 'bounded' as const, maximumCount: 50 }, awaitOwnerReadiness: true } :
+      { objects: { mode: 'retain' as const }, revisions: { mode: 'current' as const } },
+    jsonSchema: selectedSchema(value.definition),
+    specMarkdown: '# ' + value.key + ' ' + selectedVersion + '\n\nTaskBoard owns scoped next steps, local questions and independent observations. Native claims and exact original receipts remain authoritative.',
+  }));
+  const task = current.find(value => value.key === 'task-board/task')!;
+  const oldHeader = retained.find(value => value.key === 'task-board/task' && value.version === '1.12.0')!;
+  (task.jsonSchema as { properties: Record<string, unknown> }).properties.commentStore =
+    structuredClone((oldHeader.jsonSchema as { properties: Record<string, unknown> }).properties.commentStore);
+  const schema = task.jsonSchema as { properties: Record<string, any>; $defs: Record<string, unknown> };
+  schema.properties.commentStore.properties.nativeInputs.items.properties.handoff = { $ref: '#/$defs/TaskBoardHandoff' };
+  const commentSchema = selectedSchema('#/$defs/Comment');
+  const { $defs: commentDefinitions, ...commentItem } = commentSchema;
+  const comments = { key: 'task-board/comments', version: selectedVersion, owner: task.owner, mediaType: 'application/json',
+    retention: { objects: { mode: 'retain' as const }, revisions: { mode: 'current' as const } },
+    jsonSchema: { type: 'object', properties: { schemaVersion: { const: 1 }, taskId: { type: 'string', minLength: 1, maxLength: 256 },
+      comments: { type: 'array', items: commentItem } }, $defs: commentDefinitions,
+      required: ['schemaVersion', 'taskId', 'comments'], additionalProperties: false },
+    specMarkdown: '# task-board/comments ' + selectedVersion + '\n\nRetained ticket conversation. Questions belong to this ticket and comments do not alter next-step conditions.',
+  };
+  return [...current, comments];
+}
+
+export function taskBoardContracts(): Wire.DataContract[] {
+  const retained = retainedContracts();
+  return [...workflowContracts(retained, '2.1.0'), ...workflowContracts(retained, '2.0.0'), ...retained];
 }

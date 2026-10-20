@@ -28,10 +28,8 @@ export function useAction(workspace: () => TaskBoard.WorkspaceInfo, scope: strin
   };
   const readOperation = async () => {
     if (!saved.value) throw new Error('The original action is unavailable.');
-    const operation = await nativeRead(client, workspace().serviceNodeId, 'task-board.operation', { operationId: saved.value.call.operationId! }) as TaskBoard.Operation;
-    const matches = operation.request.action === 'savePlan'
-      ? operation.request.draftHash === await hashJson(saved.value.call.arguments)
-      : canonical(operation.request) === canonical(saved.value.call.arguments);
+    const operation = await nativeRead(client, workspace().serviceNodeId, 'task-board.operation', { operationId: saved.value.call.operationId! }) as TaskBoard.OperationReceipt;
+    const matches = (operation.submittedHash ?? operation.requestHash) === await hashJson(saved.value.call.arguments);
     if (operation.callerPrincipalId !== saved.value.callerPrincipalId || operation.operationId !== saved.value.call.operationId || !matches) throw new Error('The operation differs from the retained caller or original request.');
     return operation;
   };

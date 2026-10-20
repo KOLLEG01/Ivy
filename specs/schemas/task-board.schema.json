@@ -668,43 +668,6 @@
       ],
       "additionalProperties": false
     },
-    "Check": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512
-        },
-        "status": {
-          "enum": [
-            "passed",
-            "failed",
-            "not_run",
-            "blocked"
-          ]
-        },
-        "detail": {
-          "type": "string",
-          "minLength": 0,
-          "maxLength": 16384
-        },
-        "evidence": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Artifact"
-          },
-          "maxItems": 32
-        }
-      },
-      "required": [
-        "name",
-        "status",
-        "detail",
-        "evidence"
-      ],
-      "additionalProperties": false
-    },
     "RepositoryResult": {
       "type": "object",
       "properties": {
@@ -840,13 +803,6 @@
           },
           "maxItems": 256
         },
-        "checks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Check"
-          },
-          "maxItems": 256
-        },
         "codeReferences": {
           "type": "array",
           "items": {
@@ -877,46 +833,9 @@
       "required": [
         "summary",
         "artifacts",
-        "checks",
         "codeReferences",
         "repositoryResult",
         "limitations"
-      ],
-      "additionalProperties": false
-    },
-    "Waiting": {
-      "type": "object",
-      "properties": {
-        "reason": {
-          "type": "string",
-          "enum": [
-            "user",
-            "time",
-            "dependency",
-            "host",
-            "capability",
-            "workspace",
-            "external_outcome",
-            "publication",
-            "workflow"
-          ]
-        },
-        "detail": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "since": {
-          "type": "string",
-          "minLength": 24,
-          "maxLength": 24,
-          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-        }
-      },
-      "required": [
-        "reason",
-        "detail",
-        "since"
       ],
       "additionalProperties": false
     },
@@ -1022,14 +941,6 @@
           "$ref": "#/$defs/WorkspaceRequirement",
           "description": "Required workspace policy for this task. Choose one kind deliberately; TaskBoard resolves it on the selected host before starting agent work."
         },
-        "dependencies": {
-          "type": "array",
-          "items": {
-            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-          },
-          "maxItems": 256,
-          "uniqueItems": true
-        },
         "requiredCapabilities": {
           "type": "array",
           "items": {
@@ -1054,19 +965,6 @@
         "allowParallel": {
           "type": "boolean"
         },
-        "nextReviewAt": {
-          "anyOf": [
-            {
-              "type": "string",
-              "minLength": 24,
-              "maxLength": 24,
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "dueAt": {
           "anyOf": [
             {
@@ -1090,9 +988,7 @@
         "priority",
         "executionRequirement",
         "workspaceRequirement",
-        "dependencies",
         "userContact",
-        "nextReviewAt",
         "dueAt"
       ],
       "additionalProperties": false
@@ -1710,19 +1606,6 @@
           ],
           "description": "Required field. null inherits TaskBoard defaults; automatic selects any eligible PC; host restricts scheduling to that PC."
         },
-        "nextReviewAt": {
-          "anyOf": [
-            {
-              "type": "string",
-              "minLength": 24,
-              "maxLength": 24,
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "dueAt": {
           "anyOf": [
             {
@@ -1735,14 +1618,6 @@
               "type": "null"
             }
           ]
-        },
-        "dependencies": {
-          "type": "array",
-          "items": {
-            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-          },
-          "maxItems": 256,
-          "uniqueItems": true
         }
       },
       "required": [
@@ -1751,9 +1626,7 @@
         "control",
         "priority",
         "executionRequirement",
-        "nextReviewAt",
-        "dueAt",
-        "dependencies"
+        "dueAt"
       ],
       "additionalProperties": false
     },
@@ -1823,14 +1696,6 @@
           "$ref": "#/$defs/WorkspaceRequirement",
           "description": "Required workspace policy for this task. Choose one kind deliberately; TaskBoard resolves it on the selected host before starting agent work."
         },
-        "dependencies": {
-          "type": "array",
-          "items": {
-            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-          },
-          "maxItems": 256,
-          "uniqueItems": true
-        },
         "requiredCapabilities": {
           "type": "array",
           "items": {
@@ -1855,19 +1720,6 @@
         "allowParallel": {
           "type": "boolean"
         },
-        "nextReviewAt": {
-          "anyOf": [
-            {
-              "type": "string",
-              "minLength": 24,
-              "maxLength": 24,
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "dueAt": {
           "anyOf": [
             {
@@ -1891,8 +1743,6 @@
         "priority",
         "executionRequirement",
         "workspaceRequirement",
-        "dependencies",
-        "nextReviewAt",
         "dueAt"
       ],
       "additionalProperties": false
@@ -2040,13 +1890,16 @@
           ],
           "description": "Initial workflow state; omitted means todo. Agent in_progress requires a real scheduler claim and cannot be created directly. Review requires an initial manual final Result."
         },
-        "waiting": {
-          "$ref": "#/$defs/InitialWaiting",
-          "description": "Required only for waiting. nextReviewAt stays in fields; the service sets since. Internal recovery reasons cannot be supplied."
-        },
         "initialResult": {
           "$ref": "#/$defs/ResultContent",
           "description": "Manual final material for a user-controlled review or done task. Required for review; does not claim native execution."
+        },
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "maxItems": 32
         }
       },
       "required": [
@@ -2089,6 +1942,13 @@
             }
           ],
           "description": "Assign or remove the delegating parent. Omit to preserve the current parent."
+        },
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "maxItems": 32
         }
       },
       "required": [
@@ -2189,8 +2049,18 @@
           },
           "maxItems": 256
         },
-        "checkOnly": {
+        "coordinationOnly": {
           "type": "boolean"
+        },
+        "nextStepId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2225,46 +2095,17 @@
         "expectedWorkspace": {
           "$ref": "#/$defs/ExpectedWorkspace"
         },
-        "reason": {
-          "enum": [
-            "user",
-            "time",
-            "dependency",
-            "host",
-            "capability",
-            "workspace"
-          ]
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "maxItems": 32
         },
-        "detail": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "nextReviewAt": {
+        "runtimeWait": {
           "anyOf": [
             {
-              "type": "string",
-              "minLength": 24,
-              "maxLength": 24,
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "blocker": {
-          "$ref": "#/$defs/Blocker"
-        },
-        "checkScope": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "questionWait": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/QuestionWait"
+              "$ref": "#/$defs/RuntimeWait"
             },
             {
               "type": "null"
@@ -2290,9 +2131,7 @@
         "operationId",
         "taskId",
         "expectedRevision",
-        "reason",
-        "detail",
-        "nextReviewAt"
+        "nextSteps"
       ],
       "additionalProperties": false
     },
@@ -2550,8 +2389,15 @@
         "recoveryFor": {
           "$ref": "#/$defs/ObjectPin"
         },
-        "checkOnly": {
-          "type": "boolean"
+        "nextStepId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2709,7 +2555,7 @@
         },
         "moveToTodo": {
           "type": "boolean",
-          "description": "Explicitly reopen a Done task with this comment. Otherwise comments on Done tasks do not schedule work."
+          "description": "Explicitly reopen a Done task with this comment. Otherwise new comments are processed without reopening task work."
         },
         "nativeInput": {
           "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/PendingInput"
@@ -3178,16 +3024,6 @@
             "cancelled"
           ]
         },
-        "waiting": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Waiting"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "claim": {
           "anyOf": [
             {
@@ -3223,44 +3059,34 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "questionWait": {
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "maxItems": 32
+        },
+        "runtimeWait": {
           "anyOf": [
             {
-              "$ref": "#/$defs/QuestionWait"
+              "$ref": "#/$defs/RuntimeWait"
             },
             {
               "type": "null"
             }
           ]
-        },
-        "blocker": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Blocker"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "scheduledCheckFailure": {
-          "type": "string",
-          "minLength": 0,
-          "maxLength": 2048
         }
       },
       "required": [
         "taskKey",
         "fields",
         "workflowState",
-        "waiting",
         "claim",
         "publication",
         "latestResult",
         "openQuestionCount",
-        "questionWait",
-        "blocker",
-        "scheduledCheckFailure"
+        "nextSteps",
+        "runtimeWait"
       ],
       "additionalProperties": false
     },
@@ -3317,84 +3143,6 @@
           "$ref": "#/$defs/TaskCardView"
         }
       ]
-    },
-    "Blocker": {
-      "type": "object",
-      "properties": {
-        "taskId": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-        },
-        "until": {
-          "enum": [
-            "idle",
-            "done",
-            "delivery"
-          ]
-        },
-        "key": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-        }
-      },
-      "required": [
-        "taskId",
-        "until"
-      ],
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "until": {
-                "const": "delivery"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "key"
-            ]
-          },
-          "else": {
-            "not": {
-              "required": [
-                "key"
-              ]
-            }
-          }
-        }
-      ]
-    },
-    "BlockerObservation": {
-      "type": "object",
-      "properties": {
-        "blocker": {
-          "$ref": "#/$defs/Blocker"
-        },
-        "fingerprint": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
-        }
-      },
-      "required": [
-        "blocker",
-        "fingerprint"
-      ],
-      "additionalProperties": false
-    },
-    "QuestionWait": {
-      "type": "object",
-      "properties": {
-        "taskId": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-        },
-        "commentId": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-        }
-      },
-      "required": [
-        "taskId",
-        "commentId"
-      ],
-      "additionalProperties": false
     },
     "WorkDelivery": {
       "type": "object",
@@ -3505,151 +3253,6 @@
         "detail",
         "run",
         "operationId"
-      ],
-      "additionalProperties": false
-    },
-    "InitialWaiting": {
-      "type": "object",
-      "properties": {
-        "reason": {
-          "enum": [
-            "user",
-            "time",
-            "dependency",
-            "host",
-            "capability",
-            "workspace"
-          ]
-        },
-        "detail": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "blocker": {
-          "$ref": "#/$defs/Blocker"
-        }
-      },
-      "required": [
-        "reason",
-        "detail"
-      ],
-      "additionalProperties": false
-    },
-    "ScheduledCheck": {
-      "type": "object",
-      "properties": {
-        "scope": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "failure": {
-          "type": "object",
-          "properties": {
-            "code": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            "detail": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2048
-            },
-            "at": {
-              "type": "string",
-              "minLength": 24,
-              "maxLength": 24,
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-            }
-          },
-          "required": [
-            "code",
-            "detail",
-            "at"
-          ],
-          "additionalProperties": false
-        }
-      },
-      "required": [
-        "scope"
-      ],
-      "additionalProperties": false
-    },
-    "Handoff": {
-      "type": "object",
-      "properties": {
-        "workflowState": {
-          "enum": [
-            "review",
-            "waiting",
-            "todo"
-          ]
-        },
-        "waiting": {
-          "$ref": "#/$defs/InitialWaiting"
-        },
-        "nextStep": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 4096
-        },
-        "nextReviewAt": {
-          "anyOf": [
-            {
-              "type": "string",
-              "minLength": 24,
-              "maxLength": 24,
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "checkScope": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "checkFailure": {
-          "type": "object",
-          "properties": {
-            "code": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            "detail": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2048
-            }
-          },
-          "required": [
-            "code",
-            "detail"
-          ],
-          "additionalProperties": false
-        },
-        "deliveries": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkDelivery"
-          },
-          "maxItems": 32
-        },
-        "questionWait": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/QuestionWait"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "workflowState",
-        "nextReviewAt"
       ],
       "additionalProperties": false
     },
@@ -3846,9 +3449,6 @@
         "fields": {
           "$ref": "#/$defs/TaskFields"
         },
-        "blocker": {
-          "$ref": "#/$defs/Blocker"
-        },
         "workflowState": {
           "type": "string",
           "enum": [
@@ -3859,16 +3459,6 @@
             "review",
             "done",
             "cancelled"
-          ]
-        },
-        "waiting": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Waiting"
-            },
-            {
-              "type": "null"
-            }
           ]
         },
         "publication": {
@@ -3950,15 +3540,13 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/Comment"
-          },
-          "maxItems": 512
+          }
         },
         "commentDeliveries": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/CommentDelivery"
-          },
-          "maxItems": 512
+          }
         },
         "agentCommentCount": {
           "type": "integer",
@@ -3992,13 +3580,10 @@
         "parentTaskId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
         },
-        "scheduledCheck": {
-          "$ref": "#/$defs/ScheduledCheck"
-        },
         "openQuestionCount": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 512
+          "maximum": 9007199254740991
         },
         "completionIssue": {
           "$ref": "#/$defs/CompletionIssue"
@@ -4021,22 +3606,35 @@
           ],
           "additionalProperties": false
         },
-        "consumedBlockers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/BlockerObservation"
-          },
-          "maxItems": 32
-        },
         "deliveries": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/DeliveryReceipt"
+          }
+        },
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "maxItems": 32
+        },
+        "runtimeWait": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeWait"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consumedSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StepObservation"
           },
           "maxItems": 64
-        },
-        "questionWait": {
-          "$ref": "#/$defs/QuestionWait"
         }
       },
       "required": [
@@ -4044,7 +3642,6 @@
         "taskKey",
         "fields",
         "workflowState",
-        "waiting",
         "publication",
         "primaryResourceRef",
         "claim",
@@ -4059,48 +3656,12 @@
         "workRevision",
         "attachments",
         "createdAt",
-        "updatedAt"
+        "updatedAt",
+        "nextSteps",
+        "runtimeWait"
       ],
       "additionalProperties": false,
       "allOf": [
-        {
-          "if": {
-            "properties": {
-              "workflowState": {
-                "const": "waiting"
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "waiting": {
-                "$ref": "#/$defs/Waiting"
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "workflowState": {
-                "enum": [
-                  "backlog",
-                  "in_progress",
-                  "review",
-                  "done",
-                  "cancelled"
-                ]
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "waiting": {
-                "type": "null"
-              }
-            }
-          }
-        },
         {
           "if": {
             "properties": {
@@ -4120,28 +3681,6 @@
             "properties": {
               "claim": {
                 "$ref": "#/$defs/Claim"
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "workflowState": {
-                "enum": [
-                  "backlog",
-                  "todo",
-                  "review",
-                  "done",
-                  "cancelled"
-                ]
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "claim": {
-                "type": "null"
               }
             }
           }
@@ -4652,8 +4191,8 @@
             }
           ]
         },
-        "checkContext": {
-          "$ref": "#/$defs/CheckContext"
+        "executionContext": {
+          "$ref": "#/$defs/ExecutionContext"
         }
       },
       "required": [
@@ -4683,27 +4222,6 @@
       ],
       "additionalProperties": false,
       "allOf": [
-        {
-          "if": {
-            "properties": {
-              "originalRequest": {
-                "required": [
-                  "checkOnly"
-                ],
-                "properties": {
-                  "checkOnly": {
-                    "const": true
-                  }
-                }
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "checkContext"
-            ]
-          }
-        },
         {
           "if": {
             "properties": {
@@ -5194,66 +4712,6 @@
       ],
       "additionalProperties": false
     },
-    "CheckContext": {
-      "type": "object",
-      "properties": {
-        "at": {
-          "type": "string",
-          "minLength": 24,
-          "maxLength": 24,
-          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-        },
-        "workflowState": {
-          "enum": [
-            "todo",
-            "waiting",
-            "review"
-          ]
-        },
-        "waiting": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Waiting"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "scheduledCheck": {
-          "$ref": "#/$defs/ScheduledCheck"
-        },
-        "latestResult": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ObjectPin"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "acceptedReview": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ObjectPin"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "at",
-        "workflowState",
-        "waiting",
-        "scheduledCheck",
-        "latestResult",
-        "acceptedReview"
-      ],
-      "additionalProperties": false
-    },
     "NativeUpdateRequest": {
       "type": "object",
       "properties": {
@@ -5655,7 +5113,9 @@
             "1.9.0",
             "1.10.0",
             "1.11.0",
-            "1.12.0"
+            "1.12.0",
+            "2.0.0",
+            "2.1.0"
           ]
         },
         "payload": {
@@ -6077,6 +5537,9 @@
         },
         "handoffRun": {
           "$ref": "#/$defs/ObjectPin"
+        },
+        "submittedHash": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
         }
       },
       "required": [
@@ -6124,6 +5587,18 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 50
+            },
+            "maxConcurrentRuns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256,
+              "default": 10
+            },
+            "stallWarningMs": {
+              "type": "integer",
+              "minimum": 60000,
+              "maximum": 86400000,
+              "default": 300000
             }
           },
           "required": [
@@ -6216,6 +5691,18 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 50
+            },
+            "maxConcurrentRuns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256,
+              "default": 10
+            },
+            "stallWarningMs": {
+              "type": "integer",
+              "minimum": 60000,
+              "maximum": 86400000,
+              "default": 300000
             }
           },
           "required": [
@@ -7278,6 +6765,259 @@
         "verification",
         "verificationCursor",
         "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "Condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "time"
+            },
+            "at": {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            }
+          },
+          "required": [
+            "kind",
+            "at"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "task"
+            },
+            "taskId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "until": {
+              "enum": [
+                "idle",
+                "done"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "taskId",
+            "until"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "delivery"
+            },
+            "taskId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "key": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            "after": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+            }
+          },
+          "required": [
+            "kind",
+            "taskId",
+            "key"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "user"
+            },
+            "questionId": {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            }
+          },
+          "required": [
+            "kind",
+            "questionId"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "NextStep": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "id",
+        "scope",
+        "requires"
+      ],
+      "additionalProperties": false
+    },
+    "StepObservation": {
+      "type": "object",
+      "properties": {
+        "stepId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "fingerprint": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        }
+      },
+      "required": [
+        "stepId",
+        "fingerprint"
+      ],
+      "additionalProperties": false
+    },
+    "RuntimeWait": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "enum": [
+            "host",
+            "capability",
+            "workspace",
+            "external_outcome",
+            "publication",
+            "workflow"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "since": {
+          "type": "string",
+          "minLength": 24,
+          "maxLength": 24,
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+        },
+        "retryAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "reason",
+        "detail",
+        "since"
+      ],
+      "additionalProperties": false
+    },
+    "Handoff": {
+      "type": "object",
+      "properties": {
+        "workflowState": {
+          "enum": [
+            "review",
+            "waiting",
+            "todo"
+          ]
+        },
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "maxItems": 32
+        },
+        "deliveries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkDelivery"
+          },
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "workflowState",
+        "nextSteps"
+      ],
+      "additionalProperties": false
+    },
+    "ExecutionContext": {
+      "type": "object",
+      "properties": {
+        "workflowState": {
+          "enum": [
+            "backlog",
+            "todo",
+            "in_progress",
+            "waiting",
+            "review",
+            "done",
+            "cancelled"
+          ]
+        },
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NextStep"
+          },
+          "maxItems": 32
+        },
+        "latestResult": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "acceptedReview": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObjectPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "workflowState",
+        "nextSteps",
+        "latestResult",
+        "acceptedReview"
       ],
       "additionalProperties": false
     }

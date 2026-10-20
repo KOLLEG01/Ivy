@@ -27,7 +27,7 @@ test('every valid manual initial state is published directly without native work
   const f = taskBoardFixture(t), scheduler = new TaskBoardScheduler(f.first);
   for (const workflowState of ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'] as const) {
     const request: TaskBoard.CreateRequest = { action: 'create', operationId: randomUUID(), fields, workflowState,
-      ...(workflowState === 'waiting' ? { waiting: { reason: 'user', detail: 'Awaiting a decision.' } } : {}),
+      ...(workflowState === 'waiting' ? { nextSteps: [{ id: 'manual-appointment', scope: 'Continue the manual ticket later.', requires: [{ kind: 'time', at: new Date(Date.now() + 60000).toISOString() }] }] } : {}),
       ...(['review', 'done'].includes(workflowState) ? { initialResult: content } : {}) };
     const saved = await f.invoke(request);
     const task = (await f.first.store.read('task-board/task', saved.task!)).value;
@@ -69,13 +69,10 @@ test('invalid initial states and wait material leave no partial task or executio
     { change: { workflowState: 'review' }, code: 'task_board_result_required' },
     { change: { workflowState: 'todo', initialResult: content }, code: 'invalid_arguments' },
     { change: { workflowState: 'done', fields: { ...fields, control: 'agent' }, initialResult: content }, code: 'task_board_native_evidence_required' },
-    { change: { workflowState: 'todo', waiting: { reason: 'user', detail: 'Wait.' } }, code: 'invalid_arguments' },
     { change: { workflowState: 'waiting' }, code: 'invalid_arguments' },
-    { change: { workflowState: 'waiting', waiting: { reason: 'dependency', detail: 'No linked condition.' } }, code: 'invalid_arguments' },
-    { change: { workflowState: 'waiting', waiting: { reason: 'capability', detail: 'No required capability.' } }, code: 'invalid_arguments' },
-    { change: { workflowState: 'waiting', waiting: { reason: 'time', detail: 'No future date.' } }, code: 'task_board_invalid_date' },
-    { change: { workflowState: 'waiting', waiting: { reason: 'user', detail: 'Wrong blocker reason.', blocker: { taskId: 'missing', until: 'idle' } } }, code: 'invalid_arguments' },
-    { change: { workflowState: 'waiting', waiting: { reason: 'dependency', detail: 'Missing task.', blocker: { taskId: 'missing', until: 'done' } } }, code: 'not_found' },
+    { change: { workflowState: 'waiting', nextSteps: [{ id: 'missing-question', scope: 'Wait for an own question.', requires: [{ kind: 'user', questionId: 'missing' }] }] }, code: 'task_board_comment_mismatch' },
+    { change: { workflowState: 'waiting', nextSteps: [{ id: 'missing-task', scope: 'Wait for a task.', requires: [{ kind: 'task', taskId: 'missing', until: 'done' }] }] }, code: 'not_found' },
+    { change: { workflowState: 'waiting', nextSteps: [{ id: 'invalid-date', scope: 'Wait for a real date.', requires: [{ kind: 'time', at: '2026-02-30T00:00:00.000Z' }] }] }, code: 'task_board_invalid_date' },
   ];
   for (const { change, code } of cases)
     await assert.rejects(f.invoke({ action: 'create', operationId: randomUUID(), fields, ...change }), { code });
@@ -91,18 +88,18 @@ test('initial waiting distinguishes idle review from accepted Done and keeps its
   const peer = await f.invoke({ action: 'create', operationId: randomUUID(), fields, workflowState: 'review', initialResult: content });
   for (const until of ['done', 'idle'] as const) {
     const saved = await f.invoke({ action: 'create', operationId: randomUUID(), fields: { ...fields, control: 'agent' },
-      workflowState: 'waiting', waiting: { reason: 'dependency', detail: 'Wait for peer.', blocker: { taskId: peer.task!.objectId, until } } });
+      workflowState: 'waiting', nextSteps: [{ id: 'peer', scope: 'Wait for peer.', requires: [{ kind: 'task', taskId: peer.task!.objectId, until }] }] });
     await scheduler.task(saved.task!.objectId);
     const task = (await f.first.store.read('task-board/task', saved.task!.objectId)).value;
     assert.equal(task.workflowState, until === 'idle' ? 'in_progress' : 'waiting');
     assert.equal(!!task.lastRun, until === 'idle');
   }
   const request: TaskBoard.CreateRequest = { action: 'create', operationId: randomUUID(), workflowState: 'waiting',
-    fields: { ...fields, nextReviewAt: new Date(Date.now() + 60000).toISOString() }, waiting: { reason: 'time', detail: 'Review later.' } };
+    fields, nextSteps: [{ id: 'later', scope: 'Review later.', requires: [{ kind: 'time', at: new Date(Date.now() + 60000).toISOString() }] }] };
   const saved = await f.invoke(request);
   const original = (await f.first.store.read('task-board/task', saved.task!)).value;
   assert.deepEqual(await f.invoke(request), saved);
-  assert.equal((await f.first.store.read('task-board/task', saved.task!)).value.waiting!.since, original.waiting!.since);
+  assert.deepEqual((await f.first.store.read('task-board/task', saved.task!)).value.nextSteps, original.nextSteps);
 });
 
 test('a registered offline host can retain an explicit initial wait without bypassing later live validation', async t => {
@@ -110,7 +107,7 @@ test('a registered offline host can retain an explicit initial wait without bypa
   await f.clients.get('native-agent')!.client.request('service.heartbeat', { ready: false, diagnostics: [] });
   const request: TaskBoard.CreateRequest = { action: 'create', operationId: randomUUID(), workflowState: 'waiting',
     fields: { ...fields, control: 'agent', nativeOptions: { model: 'not-yet-verifiable', reasoningEffort: null, serviceTier: null } },
-    waiting: { reason: 'host', detail: 'Waiting for the registered host.' } };
+    nextSteps: [{ id: 'registered-host', scope: 'Continue on the selected host when it is available.', requires: [] }] };
   const saved = await f.invoke(request);
   await scheduler.task(saved.task!.objectId);
   assert.equal((await f.first.store.read('task-board/task', saved.task!.objectId)).value.lastRun, null);

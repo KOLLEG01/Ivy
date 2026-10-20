@@ -37,22 +37,12 @@ export const fields: TaskBoard.TaskFields = {
   priority: 2,
   executionRequirement: { kind: "host", hostId: "fixture-host" },
   workspaceRequirement: { kind: "task_workspace" },
-  dependencies: [],
   userContact: "ticket",
-  nextReviewAt: null,
   dueAt: null,
 };
 export const content: TaskBoard.ResultContent = {
   summary: "Saved material result.",
   artifacts: [],
-  checks: [
-    {
-      name: "Fixture check",
-      status: "passed",
-      detail: "Only an isolated fixture.",
-      evidence: [],
-    },
-  ],
   codeReferences: [],
   repositoryResult: null,
   limitations: [],
@@ -438,4 +428,14 @@ export function taskBoardFixture(
       return { plan: result.plan!, task: ready.task!, target, workspace };
     },
   };
+}
+
+export function retainedTaskFixture(task: TaskBoard.Task) {
+  const { nextSteps: _steps, runtimeWait: _runtime, consumedSteps: _consumed, ...previous } = task;
+  const claim = previous.claim;
+  if (claim) {
+    const { nextStepId: _step, ...request } = claim.request;
+    previous.claim = { ...claim, request, requestHash: hashJson(request) };
+  }
+  return { ...previous, fields: { ...previous.fields, dependencies: [], nextReviewAt: null }, waiting: null };
 }

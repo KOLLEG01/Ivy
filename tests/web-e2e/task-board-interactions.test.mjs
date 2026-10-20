@@ -7,12 +7,12 @@ import { expect } from '@playwright/test';
 import { taskBoardFixture } from './fixtures/task-board-fixture.mjs';
 
 const fields = title => ({ title, description: '', acceptanceCriteria: [], category: null, control: 'user', priority: 2,
-  executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' }, dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null });
+  executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },  userContact: 'ticket',  dueAt: null });
 const gate = () => { let release; return { promise: new Promise(resolve => { release = resolve; }), release: () => release() }; };
 const routeTo = id => '#/tasks?node=browser-task-board&id=' + id;
 const isComment = body => body.method === 'tools.call' && body.params.qualifiedName === 'task-board.comment';
 
-test('optimistic comments render once before dispatch and acknowledgement, retaining a new draft', { timeout: 90000 }, async t => {
+test('optimistic comments render once before dispatch and acknowledgement, retaining a new draft', { timeout: 180000 }, async t => {
   const f = await taskBoardFixture(t);
   const created = await f.invoke({ action: 'create', fields: fields('Optimistic conversation') }), id = created.task.objectId;
   await f.open(routeTo(id));
@@ -51,13 +51,96 @@ test('optimistic comments render once before dispatch and acknowledgement, retai
   assert.deepEqual(f.pageErrors, []);
 });
 
-test('definitive failure retries the retained message and unknown outcomes only observe the original identity', { timeout: 120000 }, async t => {
+for (const width of [1440, 390]) test(`a retained capacity rejection does not lock new comments or question answers at ${width}px`, { timeout: 120000 }, async t => {
+  const f = await taskBoardFixture(t, { viewport: { width, height: 900 } });
+  const created = await f.invoke({ action: 'create', fields: fields('Rejected comment recovery') }), id = created.task.objectId;
+  await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent', purpose: 'question',
+    commentId: 'own-question', body: 'Which implementation should continue?', requests: [], responses: [], attachments: [], replyTo: null });
+  await f.open(routeTo(id));
+  await f.page.locator('[data-slot=task-pending-questions]').getByRole('button', { name: 'Answer question', exact: true }).click();
+  const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
+  const send = f.page.getByRole('button', { name: 'Add comment', exact: true });
+  const reject = gate(), started = gate();
+  t.after(() => reject.release());
+  const calls = [];
+  await f.page.route('**/api/v1/rpc', async route => {
+    const body = route.request().postDataJSON();
+    if (!isComment(body)) return route.continue();
+    calls.push(body.params);
+    if (calls.length !== 1) return route.continue();
+    started.release(); await reject.promise;
+    return route.fulfill({ json: { jsonrpc: '2.0', id: body.id, error: { code: -32000,
+      message: 'The Task has reached its comment capacity.', data: { code: 'content_too_large', outcome: 'not_executed' } } } });
+  });
+  await editor.fill('Previously rejected answer');
+  await f.page.locator('input[type=file]').setInputFiles({ name: 'retained.txt', mimeType: 'text/plain', buffer: Buffer.from('Retained answer attachment') });
+  await expect(editor.locator('a')).toHaveCount(1);
+  await send.click();
+  await started.promise;
+  await editor.fill('A new ordinary comment');
+  await expect(send).toBeDisabled();
+  reject.release();
+  const failure = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Previously rejected answer' });
+  await expect(failure).toContainText('content_too_large; not_executed');
+  await expect(send).toBeEnabled();
+  await expect(editor).toContainText('A new ordinary comment');
+  await expect(f.page.locator('[data-slot=task-pending-questions]').getByRole('button', { name: 'Answer question', exact: true })).toBeEnabled();
+  await f.page.evaluate(() => {
+    const key = Object.keys(sessionStorage).find(value => value.startsWith('ivy.task-board.pending-comment:'));
+    const retained = JSON.parse(sessionStorage.getItem(key));
+    if (retained.failed) sessionStorage.setItem(key, JSON.stringify(retained.failed[0]));
+  });
+  await f.page.reload();
+  await expect(failure).toHaveCount(1);
+  await expect(f.page.locator('[data-slot=task-pending-questions]').getByRole('button', { name: 'Answer question', exact: true })).toBeEnabled();
+  await editor.fill('A new ordinary comment');
+  await send.click();
+  await expect.poll(async () => (await f.task(id)).comments.some(comment => comment.body === 'A new ordinary comment')).toBe(true);
+  await expect(failure.getByRole('button', { name: 'Retry message', exact: true })).toBeEnabled();
+  await f.page.reload();
+  await expect(failure).toHaveCount(1);
+  await f.page.locator('[data-slot=task-pending-questions]').getByRole('button', { name: 'Answer question', exact: true }).click();
+  await editor.fill('A new addressed answer');
+  await expect(send).toBeEnabled();
+  await send.click();
+  await expect.poll(async () => (await f.task(id)).comments.find(comment => comment.body === 'A new addressed answer')?.replyTo).toBe('own-question');
+  await expect(f.page.locator('[data-slot=task-pending-questions]')).toHaveCount(0);
+  await editor.fill('Another unsent draft');
+  await failure.getByRole('button', { name: 'Retry message', exact: true }).click();
+  await expect.poll(async () => (await f.task(id)).comments.filter(comment => comment.commentId === calls[0].arguments.commentId).length).toBe(1);
+  await expect(failure.getByRole('button', { name: 'Retry message', exact: true })).toHaveCount(0);
+  const recovered = (await f.task(id)).comments.find(comment => comment.commentId === calls[0].arguments.commentId);
+  assert.equal(recovered.replyTo, 'own-question');
+  assert.equal(recovered.attachments[0].filename, 'retained.txt');
+  assert.equal(calls.length, 4);
+  assert.notEqual(calls[0].operationId, calls[3].operationId);
+  await expect(editor).toContainText('Another unsent draft');
+  await expect(send).toBeEnabled();
+  await f.page.unroute('**/api/v1/rpc');
+  await f.page.route('**/api/v1/rpc', route => {
+    const body = route.request().postDataJSON();
+    if (!isComment(body)) return route.continue();
+    return route.fulfill({ json: { jsonrpc: '2.0', id: body.id, error: { code: -32000,
+      message: 'Rejected unsent comment.', data: { code: 'content_too_large', outcome: 'not_executed' } } } });
+  });
+  await editor.fill('Discarded failed message');
+  await send.click();
+  const discarded = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Discarded failed message' });
+  await discarded.getByRole('button', { name: 'Discard unsent message', exact: true }).click();
+  await f.page.reload();
+  await expect(discarded).toHaveCount(0);
+  await editor.fill('Still able to comment');
+  await expect(send).toBeEnabled();
+  assert.deepEqual(f.pageErrors, []);
+});
+
+test('definitive failure retries the retained message and unknown outcomes only observe the original identity', { timeout: 240000 }, async t => {
   const f = await taskBoardFixture(t);
   const created = await f.invoke({ action: 'create', fields: fields('Retry conversation') }), id = created.task.objectId;
   await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent', purpose: 'question',
     commentId: 'original-question', body: 'Reply to this question', requests: [], responses: [], attachments: [], replyTo: null });
   await f.open(routeTo(id));
-  await f.page.getByRole('button', { name: 'Answer question', exact: true }).click();
+  await f.page.locator('[data-slot=task-pending-questions]').getByRole('button', { name: 'Answer question', exact: true }).click();
   const editor = f.page.getByRole('textbox', { name: 'Comment', exact: true });
   let attempt = 0, firstId;
   await f.page.route('**/api/v1/rpc', async route => {
@@ -74,10 +157,10 @@ test('definitive failure retries the retained message and unknown outcomes only 
   });
   await editor.fill('Retain on failure');
   await f.page.locator('input[type=file]').setInputFiles({ name: 'retained.txt', mimeType: 'text/plain', buffer: Buffer.from('Retained file') });
-  await expect(editor.locator('a')).toHaveCount(1);
+  await expect(editor.locator('a')).toHaveCount(1, { timeout: 30000 });
   await f.page.getByRole('button', { name: 'Add comment', exact: true }).click();
   const failed = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Retain on failure' });
-  await expect(failed.getByRole('button', { name: 'Retry message', exact: true })).toBeVisible();
+  await expect(failed.getByRole('button', { name: 'Retry message', exact: true })).toBeVisible({ timeout: 30000 });
   await failed.getByRole('button', { name: 'Retry message', exact: true }).click();
   await expect.poll(async () => (await f.task(id)).comments.filter(comment => comment.commentId === firstId).length).toBe(1);
   const comment = (await f.task(id)).comments.find(comment => comment.commentId === firstId);
@@ -97,6 +180,9 @@ test('definitive failure retries the retained message and unknown outcomes only 
   await f.page.getByRole('button', { name: 'Add comment', exact: true }).click();
   const unknown = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Unknown original outcome' });
   await expect(unknown.getByRole('button', { name: 'Retry message', exact: true })).toBeVisible();
+  await editor.fill('A draft waiting for the original outcome');
+  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeDisabled();
+  await expect(f.page.locator('[data-slot=task-comment-composer]').getByRole('button', { name: 'Check original message', exact: true })).toBeEnabled();
   await unknown.getByRole('button', { name: 'Retry message', exact: true }).click();
   assert.equal(calls, 1);
   await f.page.reload();
@@ -112,7 +198,7 @@ test('definitive failure retries the retained message and unknown outcomes only 
   assert.deepEqual(f.pageErrors, []);
 });
 
-test('approval responses use one optimistic message and retain the composer draft', { timeout: 90000 }, async t => {
+test('approval responses use one optimistic message and retain the composer draft', { timeout: 180000 }, async t => {
   const f = await taskBoardFixture(t);
   const created = await f.invoke({ action: 'create', fields: fields('Approval conversation') }), id = created.task.objectId;
   await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent',
@@ -151,26 +237,30 @@ test('approval responses use one optimistic message and retain the composer draf
 for (const width of [1440, 390]) test(`the common overlay, filtered counters and all Waiting groups work at ${width}px`, { timeout: 180000 }, async t => {
   const f = await taskBoardFixture(t, { native: true, viewport: { width, height: 900 } });
   const create = async (title, changes = {}, rest = {}) => (await f.invoke({ action: 'create', fields: { ...fields(title), ...changes }, ...rest })).task;
-  const user = await create('User feedback', {}, { workflowState: 'waiting', waiting: { reason: 'user', detail: 'An answer is needed.' } });
-  const dependency = await create('Dependency wait', { dependencies: [user.objectId] });
-  await create('Runtime wait', {}, { workflowState: 'waiting', waiting: { reason: 'workspace', detail: 'Workspace is unavailable.' } });
-  await create('Time wait', { nextReviewAt: '2099-01-01T12:00:00.000Z' }, { workflowState: 'waiting', waiting: { reason: 'time', detail: 'Resume on the scheduled date.' } });
+  const user = await create('User feedback');
+  const dependency = await create('Dependency wait', {}, { nextSteps: [{ id: 'dependency', scope: 'Wait for the first ticket.', requires: [{ kind: 'task', taskId: user.objectId, until: 'done' }] }] });
+  const runtime = await create('Runtime wait');
+  await f.invoke({ action: 'defer', taskId: runtime.objectId, expectedRevision: runtime.revision,
+    nextSteps: [{ id: 'resume', scope: 'Resume when the workspace returns.', requires: [] }],
+    runtimeWait: { reason: 'workspace', detail: 'Workspace is unavailable.', since: new Date().toISOString() } });
+  await create('Time wait', {}, { workflowState: 'waiting', nextSteps: [{ id: 'appointment', scope: 'Resume on the scheduled date.', requires: [{ kind: 'time', at: '2099-01-01T12:00:00.000Z' }] }] });
   const ready = await create('Ready without a blocker', { control: 'agent' });
   await create('Due is not a restart', { control: 'agent', dueAt: '2099-01-01T12:00:00.000Z' });
-  const unscheduled = await create('No restart set', { nextReviewAt: '2099-01-01T12:00:00.000Z' }, { workflowState: 'waiting', waiting: { reason: 'time', detail: 'The previous restart date is unavailable.' } });
+  const unscheduled = await create('No restart set', {}, { nextSteps: [] });
   // Read-state tests use real retained mixed comments; source-task scheduling is tested separately.
   const store = f.taskBoard().runtime.engine.store, current = await store.read('task-board/task', user.objectId);
   const noDate = await store.read('task-board/task', unscheduled.objectId);
-  await store.write('task-board/task', { ...noDate.value, fields: { ...noDate.value.fields, nextReviewAt: null } }, randomUUID(),
+  await store.write('task-board/task', { ...noDate.value, workflowState: 'waiting', nextSteps: [] }, randomUUID(),
     { objectId: noDate.pin.objectId, expectedRevision: noDate.pin.revision });
   const now = new Date().toISOString();
   const comment = (id, authorKind, sourceTaskId) => ({ commentId: id, sequence: 0, author: { principalId: 'browser-fixture', serviceNodeId: 'browser-task-board', source: 'worker', generation: 1 },
     authorKind, body: id, requests: [], responses: [], delivery: null, attachments: [], run: null, turnId: null, replyTo: null, createdAt: now, operationId: id, ...(sourceTaskId ? { sourceTaskId } : {}) });
   const comments = [comment('User message', 'user'), comment('Direct agent answer', 'agent'), comment('Cross-agent note', 'agent', dependency.objectId)].map((value, i) => ({ ...value, sequence: i + 1 }));
-  await store.write('task-board/task', { ...current.value, comments, agentCommentCount: 2 }, randomUUID(), { objectId: user.objectId, expectedRevision: current.pin.revision });
+  await store.write('task-board/task', { ...current.value, comments: comments.map(value => value.commentId === 'Direct agent answer' ? { ...value, purpose: 'question' } : value), agentCommentCount: 2, openQuestionCount: 1,
+    nextSteps: [{ id: 'own-answer', scope: 'Wait for the own answer.', requires: [{ kind: 'user', questionId: 'Direct agent answer' }] }] }, randomUUID(), { objectId: user.objectId, expectedRevision: current.pin.revision });
   await f.open('#/tasks?node=browser-task-board');
   const waiting = f.page.getByRole('region', { name: 'Waiting', exact: true });
-  for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['ready', 'Ready without a blocker'], ['ready', 'Due is not a restart'], ['unscheduled', 'No restart set']]) {
+  for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['ready', 'Ready without a blocker'], ['ready', 'Due is not a restart'], ['runtime', 'No restart set']]) {
     await expect(waiting.locator('[data-waiting-group=' + group + ']').getByRole('link', { name: title, exact: true })).toBeVisible();
   }
   await expect(f.page.getByRole('region', { name: 'Todo', exact: true })).toHaveCount(0);

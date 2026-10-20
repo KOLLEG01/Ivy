@@ -19,7 +19,7 @@ export class TaskBoardCoordination {
       return ["TaskBoard publication gate"];
     }
     const task = "TaskBoard publication gate " + request.taskId;
-    if (!["edit", "start", "continue", "transition", "review", "cancel", "defer"].includes(request.action)) {
+    if (!["edit", "start", "continue", "transition", "review", "cancel", "defer", "nativeUpdate"].includes(request.action)) {
       this.store.retainOperationGates(operation.pin.objectId, [task]);
       return [task];
     }
@@ -27,13 +27,12 @@ export class TaskBoardCoordination {
       objectId: request.taskId,
       revision: request.expectedRevision,
     });
-    const shared = request.action === "edit"
-      ? previous.value.fields.category !== request.fields.category ||
-        request.parentTaskId !== undefined && request.parentTaskId !== (previous.value.parentTaskId ?? null) ||
-        canonical(previous.value.fields.dependencies) !== canonical(request.fields.dependencies)
-      : request.action === "start" || request.action === "continue"
-        ? previous.value.fields.dependencies.length > 0 || !!previous.value.blocker
-        : request.action === 'defer' ? !!request.blocker : request.action === "transition" || request.action === "review" || request.action === "cancel";
+    const shared = request.action === 'edit' && (request.parentTaskId !== undefined || request.fields.category !== previous.value.fields.category ||
+      request.nextSteps !== undefined && canonical(request.nextSteps) !== canonical(previous.value.nextSteps)) ||
+      request.action === 'defer' && canonical(request.nextSteps) !== canonical(previous.value.nextSteps) ||
+      request.action === 'transition' || request.action === 'review' || request.action === 'cancel' ||
+      request.action === 'start' || request.action === 'continue' ||
+      request.action === 'nativeUpdate' && ['completion', 'transcript', 'snapshot'].includes(request.change.kind);
     const names = shared ? ["TaskBoard publication gate", task] : [task];
     this.store.retainOperationGates(operation.pin.objectId, names);
     return names;
@@ -138,6 +137,11 @@ export class TaskBoardCoordination {
     const operation = await this.store.read("task-board/operation", operationId);
     const taskReserved = reserved && (await this.reserved(operation));
     for (const name of await this.gates(operation)) {
+      // Native completion still contains the old graph; admission has no Run yet.
+      // Ordinary graph edits already expose their new steps in the reservation.
+      if (taskReserved && name === 'TaskBoard publication gate' &&
+          ['start', 'continue', 'nativeUpdate'].includes(operation.value.request.action) &&
+          !['succeeded', 'failed'].includes(operation.value.phase)) continue;
       const current = await this.current(name);
       if (current.value.activeOperation?.objectId !== operationId) continue;
       requireThat(

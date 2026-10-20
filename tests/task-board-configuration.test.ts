@@ -403,12 +403,15 @@ test("offline hosts reject unverified concrete defaults and native options but p
     { code: "task_board_target_unavailable" },
   );
   await assert.rejects(
-    f.create({ control: "agent", nativeOptions: value.defaults.nativeOptions }),
+    f.invoke({ action: "create", operationId: "offline-runnable-options", workflowState: "todo",
+      fields: { ...fields, control: "agent", nativeOptions: value.defaults.nativeOptions } }),
     { code: "task_board_target_unavailable" },
   );
-  await assert.rejects(f.create({ control: "agent" }), {
-    code: "task_board_target_unavailable",
-  });
+  const retained = await f.create({ control: "agent", nativeOptions: value.defaults.nativeOptions });
+  const backlog = await f.first.store.read("task-board/task", retained.task!);
+  assert.equal(backlog.value.workflowState, "backlog");
+  assert.equal(backlog.value.claim, null);
+  assert.deepEqual(backlog.value.fields.nativeOptions, value.defaults.nativeOptions);
   const task = (await f.first.store.read("task-board/task", created.task!))
     .value;
   assert.ok(
@@ -526,7 +529,7 @@ test("a model removed after saving remains blocked with a specific explanation a
   );
   assert.equal(task.value.workflowState, "waiting");
   assert.match(
-    task.value.waiting!.detail,
+    task.value.runtimeWait!.detail,
     /selected model, reasoning and speed/,
   );
   assert.equal((await f.first.store.page("task-board/run")).items.length, 0);

@@ -196,8 +196,7 @@ export class TaskBoardNativeLifecycle {
     const request = operation.value.request;
     requireThat(request.action === 'recoverThread' && operation.value.actor.source === 'scheduler' &&
       operation.value.callerPrincipalId === this.engine.settings.principalId && task.value.fields.control === 'agent' &&
-      ['todo', 'waiting'].includes(task.value.workflowState) && (!task.value.waiting || task.value.waiting.reason === 'user') &&
-      !task.value.blocker && same(request.run, task.value.lastRun),
+      ['todo', 'waiting'].includes(task.value.workflowState) && (!task.value.runtimeWait || task.value.runtimeWait.reason !== 'external_outcome') && same(request.run, task.value.lastRun),
       'task_board_forbidden', 'Only the scheduler can recover this exact failed, agent-controlled attempt.');
     // Preparing the first lifecycle call durably admits this exact recovery after proof verification.
     // Replay must still complete that admitted action if the closed Run's local proof later expires.
@@ -240,10 +239,12 @@ export class TaskBoardNativeLifecycle {
     task: Document<'task-board/task'>, primary: Primary | null, startWork: boolean): Promise<void> {
     const at = operation.value.createdAt;
     const value: TaskBoard.Task = { ...task.value, primaryResourceRef: primary, publication: steps.pin, updatedAt: at,
-      ...(startWork ? { workflowState: 'todo' as const, waiting: null, acceptedReview: null,
-        fields: { ...task.value.fields, control: 'agent' as const, nextReviewAt: null } } : {}) };
+      ...(startWork ? { workflowState: 'todo' as const, runtimeWait: null, acceptedReview: null,
+        fields: { ...task.value.fields, control: 'agent' as const } } : {}) };
     if (startWork && operation.value.request.action === 'newThread') {
       delete value.completionIssue; delete value.continuation;
+      value.consumedSteps = [];
+      if (!value.nextSteps.length) value.nextSteps = [{ id: 'main', scope: value.fields.description || value.fields.title, requires: [] }];
     }
     const reserved = await steps.write('task-board/task', value, { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
     const request = operation.value.request;

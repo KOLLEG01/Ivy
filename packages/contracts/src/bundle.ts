@@ -8,8 +8,8 @@ import { secretarySchema } from './secretary-validation.js';
 import { requireThat } from './errors.js';
 
 /** Produce a self-contained MCP schema; ivy.invalid identifiers never become network retrievals. */
-export function bundledSchema(reference: string, document = String(hostSchema['$id'])): Record<string, unknown> {
-  const sources = { Wire: wireSchema, Operation: operationSchema, Host: hostSchema, Agent: agentSchema, TaskBoard: taskBoardSchema, Automation: automationSchema, Chat: chatSchema, Secretary: secretarySchema };
+export function bundledSchema(reference: string, document = String(hostSchema['$id']), overrides: Record<string, Record<string, unknown>> = {}): Record<string, unknown> {
+  const sources = { Wire: wireSchema, Operation: operationSchema, Host: hostSchema, Agent: agentSchema, TaskBoard: taskBoardSchema, Automation: automationSchema, Chat: chatSchema, Secretary: secretarySchema, ...overrides };
   const documents = new Map(Object.entries(sources).map(([prefix, schema]) => [String(schema['$id']), { prefix, schema }]));
   const definitions: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   const resolve = (reference: string, base: string): { value: Record<string, unknown>; document: string; name: string } => {

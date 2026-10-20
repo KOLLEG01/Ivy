@@ -10,17 +10,17 @@
     },
     {
       "key": "task-board/task",
-      "version": "1.9.0",
+      "version": "2.1.0",
       "definition": "#/$defs/Task"
     },
     {
       "key": "task-board/run",
-      "version": "1.2.0",
+      "version": "2.1.0",
       "definition": "#/$defs/Run"
     },
     {
       "key": "task-board/result",
-      "version": "1.0.0",
+      "version": "2.1.0",
       "definition": "#/$defs/Result"
     },
     {
@@ -209,7 +209,7 @@
     },
     "operation": {
       "input": "#/$defs/OperationQuery",
-      "output": "#/$defs/Operation",
+      "output": "#/$defs/OperationReceipt",
       "mutation": false
     },
     "operationReceipt": {

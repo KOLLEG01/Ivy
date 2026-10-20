@@ -9,7 +9,7 @@ import { taskBoardFixture } from './task-board.js';
 export async function nativeWorkflow(t: { after: (fn: () => void) => void }, nativeVersion: '0.154.0' = '0.154.0', projectWorkspace = false) {
   const f = taskBoardFixture(t, nativeVersion), planned = await f.planned('agent', projectWorkspace
     ? { kind: 'directory_path', path: String(f.plan.threadStart.cwd) } : { kind: 'task_workspace' });
-  const startRequest: TaskBoard.StartRequest = { action: 'start', operationId: randomUUID(), taskId: planned.task.objectId, expectedRevision: planned.task.revision, intent: planned.plan, target: planned.target, workspace: planned.workspace, commentIds: [] };
+  const startRequest: TaskBoard.StartRequest = { action: 'start', operationId: randomUUID(), taskId: planned.task.objectId, expectedRevision: planned.task.revision, intent: planned.plan, target: planned.target, workspace: planned.workspace, commentIds: [], nextStepId: "main" };
   const started = await f.invoke(startRequest);
   let task = started.task!, run = started.run!;
   const refresh = async () => { task = (await f.first.store.read('task-board/task', task.objectId)).pin; run = (await f.first.store.read('task-board/run', run.objectId)).pin; };
@@ -58,7 +58,7 @@ export async function nativeWorkflow(t: { after: (fn: () => void) => void }, nat
   const handoff = async (body = 'The overall requested work is ready for acceptance.') => {
     await refresh();
     await f.invoke({ action: 'comment', operationId: randomUUID(), taskId: task.objectId, expectedRevision: task.revision,
-      commentId: randomUUID(), authorKind: 'agent', purpose: 'handoff', body, handoff: { workflowState: 'review', nextReviewAt: null },
+      commentId: randomUUID(), authorKind: 'agent', purpose: 'handoff', body, handoff: { workflowState: 'review', nextSteps: [] },
       requests: [], responses: [], attachments: [], replyTo: null });
     await refresh();
   };

@@ -1,4 +1,4 @@
-import { checkBlocker, questionWaitOpen, validateBlocker } from './task-coordination.js';
+import { assessSteps, validateNextSteps } from './next-steps.js';
 import { canonical, digest, hashJson } from '../../../../packages/sdk/src/node.js';
 import { IvyError, requireThat } from '../../../../packages/sdk/src/node.js';
 import type { Agent, TaskBoard } from '../../../../packages/sdk/src/node.js';
@@ -34,7 +34,7 @@ export async function sharedProjectOwner(store: TaskBoardStore, task: TaskBoard.
       if (item.objectId === taskId) continue;
       const peer = (await store.read('task-board/task', item.objectId)).value;
       if (task.fields.allowParallel && peer.fields.allowParallel) continue;
-      if (peer.workflowState === 'waiting' && (peer.waiting?.reason === 'workspace' || !peer.lastRun)) continue;
+      if (peer.workflowState === 'waiting' && (peer.runtimeWait?.reason === 'workspace' || !peer.lastRun)) continue;
       const run = peer.claim ? null : peer.lastRun ? (await store.read('task-board/run', peer.lastRun)).value : null;
       if (!peer.claim && (!run || ['completed', 'failed', 'cancelled'].includes(run.phase))) continue;
       const peerTarget = peer.claim?.target ?? run?.target;
@@ -47,7 +47,6 @@ export async function sharedProjectOwner(store: TaskBoardStore, task: TaskBoard.
   return null;
 }
 export function resultCommentFits(task: TaskBoard.Task, comment: TaskBoard.Comment, publication: TaskBoard.ObjectPin, taskId: string): boolean {
-  if (task.comments.length >= 512) return false;
   try {
     validateTaskContent({ ...task, publication: null, lastHistory: publication,
       comments: [...task.comments, { ...comment, delivery: task.fields.userContact !== 'ticket' ? publication : null }],
@@ -88,7 +87,7 @@ export class TaskBoardChecks {
     }
     if (task.latestResult) {
       const result = (await this.store.read('task-board/result', task.latestResult)).value;
-      requireThat(result.taskId === taskId && (!['review', 'done'].includes(task.workflowState) || result.kind === 'final'), 'task_board_result_mismatch', 'Review and done tasks must retain their own final Result.');
+      requireThat(result.taskId === taskId && (task.workflowState !== 'review' || result.kind === 'final'), 'task_board_result_mismatch', 'Review tasks must retain their own final Result.');
     }
     if (task.acceptedReview) {
       const review = (await this.store.read('task-board/review', task.acceptedReview)).value;
@@ -110,36 +109,15 @@ export class TaskBoardChecks {
     requireThat(bytes.length === value.revision.byteLength && digest(bytes) === artifact.contentHash, 'task_board_evidence_mismatch', 'The returned artifact bytes must match the retained hash and length.');
   }
   async content(content: TaskBoard.ResultContent): Promise<void> {
-    for (const artifact of [...content.artifacts, ...content.checks.flatMap(check => check.evidence)]) await this.artifact(artifact);
+    for (const artifact of content.artifacts) await this.artifact(artifact);
     for (const ref of content.codeReferences) {
       let url: URL;
       try { url = new URL(ref.url); } catch { throw new IvyError('task_board_invalid_reference', 'A code reference URL must have valid HTTP(S) syntax.'); }
       requireThat(['http:', 'https:'].includes(url.protocol) && !!url.hostname && !url.username && !url.password, 'task_board_invalid_reference', 'Code references must be HTTP(S) URLs without embedded credentials.');
     }
   }
-  async dependencies(fields: TaskBoard.TaskFields, self: string | null, satisfied = false): Promise<void> {
-    // The publication gate covers this whole traversal and the eventual graph edit. Iterative DFS
-    // avoids stack exhaustion and rejects cycles already present in referenced retained records.
-    const done = new Set<string>(), visiting = new Set<string>(), tasks = new Map<string, Document<'task-board/task'>>(), pending = fields.dependencies.map(id => ({ id, exit: false, direct: true }));
-    if (satisfied) for (const id of fields.dependencies) {
-      const task = await this.store.read('task-board/task', id, true, true); tasks.set(id, task);
-      requireThat(task.value.workflowState === 'done' && !task.value.publication, 'task_board_dependency_waiting', 'Every direct dependency must have an accepted result before starting.');
-    }
-    while (pending.length) {
-      const entry = pending.pop()!;
-      if (entry.exit) { visiting.delete(entry.id); done.add(entry.id); continue; }
-      requireThat(entry.id !== self && !visiting.has(entry.id), 'task_board_dependency_cycle', 'The dependency graph would contain a cycle.');
-      if (done.has(entry.id)) continue;
-      requireThat(done.size + visiting.size < 10000, 'task_board_dependency_limit', 'Dependency verification exceeds the 10,000-task complete traversal limit.');
-      const task = tasks.get(entry.id) ?? await this.store.read('task-board/task', entry.id, true, true); tasks.set(entry.id, task);
-      requireThat(!task.value.publication, 'task_board_publication_pending', 'A dependency still has an unfinished publication.');
-      visiting.add(entry.id); pending.push({ ...entry, exit: true });
-      for (const id of task.value.fields.dependencies) pending.push({ id, exit: false, direct: false });
-      if (task.value.blocker) pending.push({ id: task.value.blocker.taskId, exit: false, direct: false });
-    }
-  }
   async fields(fields: TaskBoard.TaskFields, self: string | null): Promise<void> {
-    date(fields.nextReviewAt); date(fields.dueAt); await this.dependencies(fields, self);
+    date(fields.dueAt);
     requireThat(fields.category === null || fields.category.trim() === fields.category && fields.category.length > 0,
       'invalid_arguments', 'Task category must be normalized nonempty text.');
     if (fields.workspaceRequirement.kind === 'repository_path') {
@@ -154,10 +132,9 @@ export class TaskBoardChecks {
     }
   }
   async initialState(request: TaskBoard.CreateRequest, fields: TaskBoard.TaskFields, actor: TaskBoard.Actor, at: string): Promise<{
-    workflowState: TaskBoard.Task['workflowState']; waiting: TaskBoard.Waiting | null; blocker?: TaskBoard.Blocker;
+    workflowState: TaskBoard.Task['workflowState']; nextSteps: TaskBoard.NextStep[]; runtimeWait: null;
   }> {
     const workflowState = request.workflowState ?? 'todo';
-    requireThat(!request.waiting || workflowState === 'waiting', 'invalid_arguments', 'Waiting details are only valid for an initial waiting state.');
     requireThat(workflowState !== 'in_progress' || fields.control === 'user',
       'task_board_user_controlled', 'Agent work needs a real scheduler claim; create it in Todo to request execution.');
     requireThat(workflowState !== 'review' || fields.control === 'user',
@@ -170,24 +147,15 @@ export class TaskBoardChecks {
       await this.content(request.initialResult);
     }
     requireThat(workflowState !== 'review' || !!request.initialResult, 'task_board_result_required', 'Manual Review needs an initial final Result.');
-    if (workflowState !== 'waiting') return { workflowState, waiting: null };
-    requireThat(request.waiting, 'invalid_arguments', 'An initial waiting state needs a reason and details.');
-    const { reason, detail, blocker } = request.waiting;
-    requireThat(reason !== 'dependency' || !!blocker || fields.dependencies.length > 0,
-      'invalid_arguments', 'A dependency wait needs a linked blocker or task dependency.');
-    requireThat(reason !== 'capability' || !!fields.requiredCapabilities?.length,
-      'invalid_arguments', 'A capability wait needs required capabilities.');
-    await this.deferral({ reason, detail, ...(blocker ? { blocker } : {}), nextReviewAt: fields.nextReviewAt }, null, at);
-    return { workflowState, waiting: { reason, detail, since: at }, ...(blocker ? { blocker } : {}) };
+    const nextSteps = request.nextSteps ?? (['todo', 'in_progress'].includes(workflowState) ? [{ id: 'main', scope: fields.description || fields.title, requires: [] }] : []);
+    await validateNextSteps(this.store, null, nextSteps);
+    requireThat(workflowState !== 'waiting' || nextSteps.length > 0, 'invalid_arguments', 'Waiting needs concrete next-step conditions.');
+    return { workflowState, nextSteps, runtimeWait: null };
   }
-  async deferral(request: Pick<TaskBoard.DeferRequest, 'reason' | 'detail' | 'nextReviewAt' | 'blocker'>, self: string | null, at: string): Promise<void> {
-    if (request.blocker) {
-      requireThat(request.reason === 'dependency' || request.reason === 'workspace', 'invalid_arguments', 'Task blockers require a dependency or workspace reason.');
-      await validateBlocker(this.store, request.blocker, self);
-    }
-    date(request.nextReviewAt);
-    requireThat(request.reason !== 'time' || !!request.nextReviewAt && request.nextReviewAt > at,
-      'task_board_invalid_date', 'A time deferral needs a future next-review date.');
+  async deferral(request: TaskBoard.DeferRequest, self: string | null, at: string): Promise<void> {
+    const task = self ? (await this.store.read('task-board/task', self)).value : undefined;
+    await validateNextSteps(this.store, self, request.nextSteps, task);
+    if (request.runtimeWait?.retryAt) date(request.runtimeWait.retryAt);
   }
   async executionOptions(fields: TaskBoard.TaskFields, task?: TaskBoard.Task, allowUnavailable = false): Promise<void> {
     const options = fields.nativeOptions;
@@ -200,19 +168,15 @@ export class TaskBoardChecks {
       (task ? (await freshContextRecovery(this.store, task))?.target.serviceNodeId : undefined);
     await checkConfiguration(this.store, { schemaVersion: 1, defaults }, serviceNodeId, allowUnavailable);
   }
-  async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution, coordinationOnly = false, checkOnly = false, recoveryOnly = false): Promise<Agent.PlanDraft> {
+  async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution, coordinationOnly = false, recoveryOnly = false, nextStepId?: string | null): Promise<Agent.PlanDraft> {
     requireThat(target && workspace && target.hostId === workspace.hostId && target.serviceNodeId === workspace.serviceNodeId,
       'task_board_execution_plan_required', 'Start must retain one resolved native owner and workspace.');
     const recovery = await freshContextRecovery(this.store, task);
     if (recovery) requireThat(same(target, recovery.target) && workspace.canonicalCwd === recovery.workspace.canonicalCwd && workspace.intendedPath === recovery.workspace.intendedPath,
       'task_board_workspace_mismatch', 'Fresh recovery must retain the original owner and workspace.');
     if (!coordinationOnly && !recoveryOnly) {
-        const linkedQuestionOpen = await questionWaitOpen(this.store, task.questionWait);
-        const questionAnswered = !!task.questionWait && !linkedQuestionOpen;
-        requireThat(questionAnswered || task.workflowState === 'todo' && queuedUserInput(task) || !task.fields.nextReviewAt || task.fields.nextReviewAt <= now, 'task_board_time_waiting', 'The task is deferred until its next review time.');
-      await this.dependencies(task.fields, taskId, true);
-        await checkBlocker(this.store, task.blocker, task.consumedBlockers, checkOnly || questionAnswered || queuedUserInput(task));
-        requireThat(checkOnly || !linkedQuestionOpen, 'task_board_input_required', 'Waiting for the linked user question to be answered.');
+      const selected = (await assessSteps(this.store, task, now)).find(value => value.step.id === nextStepId && value.ready);
+      requireThat(selected, 'task_board_input_required', 'The selected next step is not ready under its actual conditions.');
     }
     const plan = await readPlan(this.store, intent); planSemantics(plan);
     if (plan.location) {

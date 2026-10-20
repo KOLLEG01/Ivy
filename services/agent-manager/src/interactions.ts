@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { hashJson } from '../../../packages/sdk/src/node.js';
 import { IvyError, requireThat } from '../../../packages/sdk/src/node.js';
 import type { Agent, Wire } from '../../../packages/sdk/src/node.js';
@@ -36,7 +35,7 @@ export class NativeInteractions {
     this.entries.set(key, entry);
     entry.work = (async () => {
       try {
-        const reply = await this.rpc.request(method, params, { requestId: 'interaction-' + randomUUID(), detachOnTimeout: true, priority:'interaction' });
+        const reply = await this.rpc.request(method, params, { detachOnTimeout: true, priority:'interaction' });
         const result: Agent.Interaction = { operationId: id, epoch: this.epoch, reply };
         entry.bytes = Buffer.byteLength(JSON.stringify(result));
         return result;

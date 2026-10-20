@@ -34,6 +34,9 @@ An isolated [Claude adapter option](CLAUDE-ADAPTER.md) uses the same AgentManage
   and immutable parameter revisions; changed defaults cannot redirect saved work.
 - Keep native resource ownership and connection epoch explicit. Inventory may expose stored
   tasks that the current connection cannot control. Failed enumeration preserves prior observations.
+- Expired observations release active request capacity without terminating accepted turns.
+  Late replies remain recognizable with bounded correlation state; explicit unresolved request
+  identities stay fenced and cannot be dispatched again as a timeout recovery.
 - Durable invocation saves intent before dispatch and outcome before acknowledgement. Direct
   interactions and read observations retain their distinct recovery contracts; losing a
   transient interaction cache does not authorize replay.

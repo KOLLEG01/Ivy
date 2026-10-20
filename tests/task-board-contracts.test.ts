@@ -9,8 +9,41 @@ import { fields, content } from './fixtures/task-board.js';
 const time = '2026-05-01T12:00:00.000Z';
 const actor = { principalId: 'user', serviceNodeId: 'task-board', generation: 1, source: 'user' as const };
 
+test('published finding-bearing contracts remain immutable after checks are removed', () => {
+  assert.deepEqual(Object.fromEntries(taskBoardContracts().filter(contract => contract.version === '2.0.0')
+    .map(contract => [contract.key, hashJson(contract)])), {
+    'task-board/task': 'sha256:1bfe05ce9a0f34418b00b0080d0c0131e2f168fa2041ec48f2c002a40c5c6a30',
+    'task-board/run': 'sha256:3ca0353a7d44c18a15f4ea4df16e51fabef40834fbced5f73f906d0a745be5d8',
+    'task-board/result': 'sha256:1862474ec6fc7161c8a5378abd1bd1374e03278dccdec59afe64c87a5e407a38',
+    'task-board/comments': 'sha256:0a8312bb4f8c372bbadb3fe7753e86d9c092c4314e4d68d9c5c1136a098a01a1',
+  });
+  assert.throws(() => validateTaskBoard('ResultContent', { ...content, checks: [] }));
+  assert.throws(() => validateTaskBoard('Handoff', { workflowState: 'review', nextSteps: [], checks: [] }));
+  assert.throws(() => validateTaskBoard('DeferRequest', { action: 'defer', taskId: 'task', operationId: 'defer',
+    expectedRevision: 1, nextSteps: [], checks: [] }));
+});
+
+test('findings in older handoffs survive conversion to next steps', () => {
+  const findings = [{ key: 'approval', status: 'pending', detail: 'Still awaiting approval.', evidence: [] }];
+  const originalComment = { commentId: 'prior-handoff', sequence: 1, author: actor, authorKind: 'agent', body: 'Original handoff.',
+    purpose: 'handoff', handoff: { workflowState: 'waiting', nextReviewAt: '2099-01-01T00:00:00.000Z', checks: findings },
+    requests: [], responses: [], attachments: [], run: null, turnId: null, replyTo: null, delivery: null,
+    operationId: 'prior-handoff', createdAt: time };
+  const task = { schemaVersion: 1, taskKey: 'TASK-0001', fields, workflowState: 'waiting', waiting: null, publication: null,
+    primaryResourceRef: null, claim: null, attemptCount: 0, lastRun: null, lastHistory: null, latestResult: null,
+    acceptedReview: null, comments: [originalComment], commentDeliveries: [], agentCommentCount: 1, workRevision: 0,
+    attachments: [], createdAt: time, updatedAt: time };
+  const upgraded = upgradeRecord('task-board/task', task as unknown as TaskBoard.Task);
+  assert.equal(upgraded.comments[0]!.body, originalComment.body);
+  assert.equal('checks' in upgraded.comments[0]!.handoff!, false);
+  assert.equal(upgraded.comments.length, 2);
+  const body = upgraded.comments[1]!.body;
+  assert.deepEqual(JSON.parse(body.slice(body.indexOf('json\n') + 5, body.lastIndexOf('\n'))), findings);
+  assert.doesNotThrow(() => validateTaskBoard('Task', upgraded));
+});
+
 test('published Task contract definitions stay stable when tool descriptions change', () => {
-  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0'].includes(value.version));
+  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0'].includes(value.version));
   assert.deepEqual(Object.fromEntries(contracts.map(value => [value.version, hashJson(value)])), {
     '1.9.0': 'sha256:d77cdc4472e267298847aed6fa7f207d546fbe96afadc1a379c5a886961164ff',
     '1.8.0': 'sha256:00a22238b737fc5e1f178c5dd239b88aaa2467220c103bf7ff3094772cc70db7',
@@ -50,7 +83,7 @@ test('older capability requirements read as automatic placement with a required 
     workflowState: 'todo' as const, waiting: null, publication: null, primaryResourceRef: null, claim: null, attemptCount: 0, lastRun: null, lastHistory: null, latestResult: null,
     acceptedReview: null, comments: [], commentDeliveries: [], agentCommentCount: 0, workRevision: 0, attachments: [], createdAt: time, updatedAt: time };
   assert.throws(() => validateTaskBoard('Task', task));
-  const upgraded = upgradeRecord('task-board/task', task);
+  const upgraded = upgradeRecord('task-board/task', task as unknown as TaskBoard.Task);
   assert.deepEqual(upgraded.fields.executionRequirement, { kind: 'automatic' });
   assert.deepEqual(upgraded.fields.requiredCapabilities, ['video-editing']);
   assert.doesNotThrow(() => validateTaskBoard('Task', upgraded));
@@ -59,7 +92,7 @@ test('older capability requirements read as automatic placement with a required 
 });
 
 test('new workflow contracts accept Task keys, states, comments and workspace requirements', () => {
-  const task = { schemaVersion: 1 as const, taskKey: 'TASK-0001', fields, workflowState: 'backlog' as const, waiting: null, publication: null, primaryResourceRef: null, claim: null,
+  const task = { schemaVersion: 1 as const, taskKey: 'TASK-0001', fields, workflowState: 'backlog' as const, nextSteps: [], runtimeWait: null, publication: null, primaryResourceRef: null, claim: null,
     attemptCount: 0, lastRun: null, lastHistory: null, latestResult: null, acceptedReview: null, comments: [], commentDeliveries: [], agentCommentCount: 0, workRevision: 0, attachments: [], createdAt: time, updatedAt: time };
   assert.doesNotThrow(() => validateTaskBoard('Task', task));
   assert.throws(() => validateTaskBoard('Task', { ...task, taskKey: 'task-1' }));

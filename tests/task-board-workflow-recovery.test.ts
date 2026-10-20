@@ -9,7 +9,7 @@ import { taskBoardTools } from '../services/task-board/src/runtime/registry.js';
 import type { TaskBoard, Wire } from '../packages/contracts/src/generated.js';
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
 import { TaskBoardReconciler } from '../services/task-board/src/runtime/reconciler.js';
-import { checkBlocker, consumeBlocker } from '../services/task-board/src/runtime/task-coordination.js';
+import { assessSteps, consumeStep, stepCondition } from '../services/task-board/src/runtime/next-steps.js';
 import { nativeWorkflow } from './fixtures/task-board-native.js';
 import { content, context } from './fixtures/task-board.js';
 import { TaskBoardEvidence } from '../services/task-board/src/runtime/evidence.js';
@@ -99,10 +99,9 @@ test('uploads and recovery handoffs at the reference limit remain admitted and p
   assert.deepEqual((await store.read('task-board/task', next)).value.attachments, reordered.attachments);
   const repair = await new TaskBoardScheduler(w.f.second).task(task.pin.objectId); assert.ok(repair?.run);
   w.adopt(repair); await w.running();
-  const recovered = await finish(w, { workflowState: 'todo', nextStep: 'Continue the existing authorized work.', nextReviewAt: null,
-    deliveries: [{ key: 'retained-capacity-proof', artifacts: [], codeReferences: [
+  const recovered = await finish(w, { workflowState: 'todo', deliveries: [{ key: 'retained-capacity-proof', artifacts: [], codeReferences: [
       { kind: 'commit', url: 'https://example.test/commit/abc', commit: 'abc', label: 'Existing implementation' },
-    ] }] });
+    ] }], nextSteps: [{ id: 'next', scope: 'Continue the existing authorized work.', requires: [] }] });
   assert.equal(recovered.value.completionIssue, undefined);
   assert.equal(recovered.value.publication, null);
   assert.equal(recovered.value.attachments.length, 256);
@@ -116,7 +115,7 @@ test('an own handoff rejects sourceTaskId precisely and keeps the active claim a
   const task = w.state().task;
   const request: TaskBoard.CommentActionRequest = { action: 'comment', operationId: randomUUID(), taskId: task.objectId,
     expectedRevision: task.revision, sourceTaskId: task.objectId, commentId: randomUUID(), authorKind: 'agent', purpose: 'handoff',
-    body: 'Ready for acceptance.', handoff: { workflowState: 'review', nextReviewAt: null }, requests: [], responses: [], attachments: [], replyTo: null };
+    body: 'Ready for acceptance.', handoff: { workflowState: 'review', nextSteps: [] }, requests: [], responses: [], attachments: [], replyTo: null };
   await assert.rejects(w.f.invoke(request), code('task_board_handoff_source'));
   assert.ok((await w.f.first.store.read('task-board/task', task.objectId)).value.claim);
   const done = await finish(w, request.handoff);
@@ -139,7 +138,7 @@ test('native completion reconciles an accepted handoff after another original pu
   const current = w.state().task;
   const intent: TaskBoard.CommentActionRequest = { action: 'comment', operationId: randomUUID(), taskId: current.objectId,
     expectedRevision: current.revision, commentId: 'retained-handoff', authorKind: 'agent', purpose: 'handoff', body: 'Ready after the original publication settles.',
-    handoff: { workflowState: 'review', nextReviewAt: null }, requests: [], responses: [], attachments: [], replyTo: null };
+    handoff: { workflowState: 'review', nextSteps: [] }, requests: [], responses: [], attachments: [], replyTo: null };
   await assert.rejects(w.f.invoke(intent), code('task_board_publication_busy'));
   const accepted = await w.f.first.operations.find('user', intent.operationId);
   assert.equal(accepted?.value.phase, 'accepted'); assert.equal(accepted?.value.requestHash, hashJson(intent));
@@ -163,13 +162,13 @@ test('native completion reconciles an accepted handoff after another original pu
 
 test('an unchanged idle dependency wakes ordinary work once across scheduler recreation', async t => {
   const w = await nativeWorkflow(t); await w.running();
-  const peer = await w.f.planned('agent'), blocker: TaskBoard.Blocker = { taskId: peer.task.objectId, until: 'idle' };
-  const waiting: TaskBoard.Handoff = { workflowState: 'waiting', waiting: { reason: 'dependency', detail: 'Integrate the next child result.', blocker }, nextReviewAt: null };
+  const peer = await w.f.planned('agent'), blocker: TaskBoard.Condition = { kind: 'task', taskId: peer.task.objectId, until: 'idle' };
+  const waiting: TaskBoard.Handoff = { workflowState: 'waiting', nextSteps: [{ id: 'next', scope: 'Integrate the next child result.', requires: [blocker] }] };
   await finish(w, waiting);
   const started = await new TaskBoardScheduler(w.f.second).task(w.state().task.objectId);
   assert.ok(started?.run); w.adopt(started); await w.running();
   const after = await finish(w, waiting);
-  assert.equal(after.value.consumedBlockers?.length, 1);
+  assert.ok(after.value.consumedSteps?.some(value => value.stepId === 'next'));
   assert.equal(await new TaskBoardScheduler(w.f.first).task(after.pin.objectId), null);
   const source = await w.f.first.store.read('task-board/task', peer.task.objectId);
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: source.pin.objectId, expectedRevision: source.pin.revision,
@@ -181,45 +180,39 @@ test('named deliveries require concrete output, publish at completion and cannot
   const w = await nativeWorkflow(t); await w.running();
   const delivery: TaskBoard.WorkDelivery = { key: 'service-health', artifacts: [],
     codeReferences: [{ kind: 'commit', url: 'https://example.test/commit/abc', label: 'Health API implementation', commit: 'abc' }] };
-  const taskId = w.state().task.objectId, blocker: TaskBoard.Blocker = { taskId, until: 'delivery', key: delivery.key };
+  const taskId = w.state().task.objectId, consumer = await w.f.planned('agent');
+  const base = (await w.f.first.store.read('task-board/task', consumer.task)).value;
+  const nextSteps: TaskBoard.NextStep[] = [{ id: 'health', scope: 'Integrate the exact health delivery.', requires: [{ kind: 'delivery', taskId, key: delivery.key }] }];
+  const assess = (consumedSteps: TaskBoard.StepObservation[] = []) => assessSteps(w.f.first.store, { ...base, nextSteps, consumedSteps }, new Date().toISOString());
   assert.throws(() => validateTaskBoard('WorkDelivery', { ...delivery, codeReferences: [] }));
-  assert.throws(() => validateTaskBoard('Blocker', { taskId, until: 'delivery' }));
-  await assert.rejects(checkBlocker(w.f.first.store, blocker), code('task_board_dependency_waiting'));
-  await w.refresh();
-  await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision,
-    commentId: 'acceptance-question', authorKind: 'agent', purpose: 'question', body: 'Which additional acceptance target should be used?', requests: [], responses: [], attachments: [], replyTo: null });
-  await w.refresh();
-  await handoff(w, { workflowState: 'waiting', waiting: { reason: 'user', detail: 'The acceptance target question remains open.' }, nextReviewAt: null, deliveries: [delivery] });
-  await assert.rejects(checkBlocker(w.f.first.store, blocker), code('task_board_dependency_waiting'));
-  const done = await finish(w);
-  assert.equal(done.value.workflowState, 'waiting'); assert.equal(done.value.deliveries?.[0]?.delivery.key, delivery.key);
-  const observed = await checkBlocker(w.f.first.store, blocker); assert.ok(observed);
-  const consumed = consumeBlocker([], observed);
-  await assert.rejects(checkBlocker(w.f.second.store, blocker, consumed), code('task_board_dependency_consumed'));
-  // Republishing exactly the same artifact/code pins is not a new delivery.
-  const receipt = done.value.deliveries![0]!;
-  assert.equal(receipt.identity, hashJson({ taskId, delivery }));
-  await assert.rejects(checkBlocker(w.f.first.store, { ...blocker, key: 'other-delivery' }), code('task_board_dependency_waiting'));
+  assert.equal((await assess())[0]!.ready, false);
+  await handoff(w, { workflowState: 'review', nextSteps: [], deliveries: [delivery] });
+  assert.equal((await assess())[0]!.ready, false);
+  const done = await finish(w), observed = (await assess())[0]!;
+  assert.equal(observed.ready, true);
+  const consumed = consumeStep(base, observed);
+  assert.equal((await assess(consumed))[0]!.ready, false);
+  assert.equal((await assess(consumed))[0]!.consumed, true);
+  assert.equal(done.value.deliveries![0]!.identity, hashJson({ taskId, delivery }));
 });
 
-test('a linked parent question remains binding with no local questions and resumes after its addressed answer', async t => {
+test('a foreign question is not inherited and only its concrete delivery gates the dependent scope', async t => {
   const w = await nativeWorkflow(t); await w.running();
-  const parent = await w.f.planned('agent'), questionId = 'approval-at-parent';
+  const parent = await w.f.planned('agent');
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: parent.task.objectId, expectedRevision: parent.task.revision,
-    commentId: questionId, authorKind: 'agent', purpose: 'question', body: 'May the prepared change be published?', requests: [], responses: [], attachments: [], replyTo: null });
-  const questionWait = { taskId: parent.task.objectId, commentId: questionId };
-  const done = await finish(w, { workflowState: 'waiting', waiting: { reason: 'user', detail: 'The parent approval is still open.' },
-    nextReviewAt: new Date(Date.now() + 6 * 3600_000).toISOString(), checkScope: 'Read delivery status without performing the action needing approval.', questionWait });
-  assert.equal(done.value.openQuestionCount, 0); assert.equal(w.f.first.condition(done.value).state, 'needs_user');
-  assert.equal(await new TaskBoardScheduler(w.f.second).task(done.pin.objectId), null);
-  await assert.rejects(w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: done.pin.objectId, expectedRevision: done.pin.revision,
-    reason: 'user', detail: 'Cannot remove an unanswered linked approval.', nextReviewAt: null, questionWait: null }), code('task_board_input_required'));
+    commentId: 'parent-approval', authorKind: 'agent', purpose: 'question', body: 'May the lab be provisioned?', requests: [], responses: [], attachments: [], replyTo: null });
+  const done = await finish(w, { workflowState: 'waiting', nextSteps: [
+    { id: 'lab', scope: 'Qualify the actual lab after it is supplied.', requires: [{ kind: 'delivery', taskId: parent.task.objectId, key: 'isolated-lab-ready' }] },
+    { id: 'independent', scope: 'Read independently at the next appointment.', requires: [{ kind: 'time', at: new Date(Date.now() + 60000).toISOString() }] },
+  ] });
+  assert.equal(done.value.openQuestionCount, 0);
+  assert.equal(stepCondition(await assessSteps(w.f.first.store, done.value, new Date().toISOString())).state, 'deferred');
   const source = await w.f.first.store.read('task-board/task', parent.task.objectId);
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: source.pin.objectId, expectedRevision: source.pin.revision,
-    commentId: randomUUID(), authorKind: 'user', body: 'Approved.', replyTo: questionId, agentDelivery: 'none', requests: [], responses: [], attachments: [] });
-  const resumed = await new TaskBoardScheduler(w.f.second).task(done.pin.objectId);
-  assert.ok(resumed?.run);
-  assert.equal((await w.f.first.store.read('task-board/run', resumed.run)).value.originalRequest.checkOnly, undefined);
+    commentId: randomUUID(), authorKind: 'user', body: 'Approved, but not provisioned yet.', replyTo: 'parent-approval', agentDelivery: 'none', requests: [], responses: [], attachments: [] });
+  const assessed = await assessSteps(w.f.first.store, done.value, new Date().toISOString());
+  assert.equal(assessed.find(value => value.step.id === 'lab')!.ready, false);
+  assert.equal(await new TaskBoardScheduler(w.f.second).task(done.pin.objectId), null);
 });
 
 test('missing handoff queues recovery and an old terminal claim is never unlocked by age', async t => {
@@ -235,7 +228,7 @@ test('missing handoff queues recovery and an old terminal claim is never unlocke
   assert.ok((await w.f.first.store.read('task-board/task', stale.objectId)).value.claim);
 });
 
-test('a missing handoff recovers in the same context and resumes authorized work without user input', async t => {
+test('a missing handoff recovers in the same context after processing new comments without user input', async t => {
   const w = await nativeWorkflow(t); await w.running();
   await w.refresh();
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision,
@@ -243,13 +236,21 @@ test('a missing handoff recovers in the same context and resumes authorized work
   await w.refresh();
   const closed = await finish(w), original = closed.value.completionIssue!.run;
   const scheduler = new TaskBoardScheduler(w.f.second);
+  const conversation = await scheduler.task(closed.pin.objectId); assert.ok(conversation?.run);
+  const conversationRun = await w.f.first.store.read('task-board/run', conversation.run);
+  assert.equal(conversationRun.value.originalRequest.coordinationOnly, true);
+  assert.deepEqual(conversationRun.value.originalRequest.commentIds, ['queued-feedback']);
+  w.adopt(conversation); await w.running();
+  const discussed = await finish(w);
+  assert.deepEqual(discussed.value.completionIssue?.run, original);
+  assert.deepEqual(discussed.value.latestResult, closed.value.latestResult);
   const repair = await scheduler.task(closed.pin.objectId); assert.ok(repair?.run);
   const run = await w.f.first.store.read('task-board/run', repair.run);
   assert.equal(run.value.originalRequest.action, 'continue');
   assert.deepEqual(run.value.originalRequest.action === 'continue' && run.value.originalRequest.recoveryFor, original);
   assert.deepEqual(run.value.originalRequest.commentIds, []);
-  assert.match(JSON.stringify(run.value.plan.turnStart), /only restores the missing structured handoff/);
-  assert.equal((await scheduler.task(closed.pin.objectId)), null, 'A second claim cannot overlap recovery.');
+  assert.match(JSON.stringify(run.value.plan.turnStart), /Recover the original missing completion intent/);
+  assert.equal(await scheduler.task(closed.pin.objectId), null);
   w.adopt(repair); await w.running();
   const before = await w.f.first.store.read('task-board/task', repair.task!.objectId);
   await assert.rejects(w.f.worker({ action: 'edit', operationId: randomUUID(), taskId: before.pin.objectId,
@@ -257,16 +258,21 @@ test('a missing handoff recovers in the same context and resumes authorized work
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: before.pin.objectId, expectedRevision: before.pin.revision,
     commentId: 'during-recovery', body: 'Preserve this instruction for the next normal turn.', requests: [], responses: [], attachments: [], replyTo: null });
   await w.refresh();
-  const after = await finish(w, { workflowState: 'todo', nextStep: 'Continue the already requested implementation.', nextReviewAt: null });
+  const after = await finish(w, { workflowState: 'todo', nextSteps: [{ id: 'next', scope: 'Continue the already requested implementation.', requires: [] }] });
   assert.equal(after.value.completionIssue, undefined); assert.equal(after.value.workflowState, 'todo');
   assert.deepEqual(after.value.latestResult, closed.value.latestResult);
-  assert.deepEqual(after.value.continuation, closed.value.continuation);
   assert.equal(after.value.openQuestionCount, 0);
+  const followup = await scheduler.task(after.pin.objectId); assert.ok(followup?.run);
+  const followupRun = await w.f.first.store.read('task-board/run', followup.run);
+  assert.equal(followupRun.value.originalRequest.coordinationOnly, true);
+  assert.deepEqual(followupRun.value.primaryResourceRef, closed.value.primaryResourceRef);
+  assert.deepEqual(followupRun.value.originalRequest.commentIds, ['during-recovery']);
+  w.adopt(followup); await w.running(); await finish(w);
   const work = await scheduler.task(after.pin.objectId); assert.ok(work?.run);
   const workRun = await w.f.first.store.read('task-board/run', work.run);
-  assert.equal(workRun.value.originalRequest.action === 'continue' && workRun.value.originalRequest.recoveryFor, undefined);
+  assert.equal(workRun.value.originalRequest.coordinationOnly, undefined);
+  assert.equal(workRun.value.originalRequest.nextStepId, 'next');
   assert.deepEqual(workRun.value.primaryResourceRef, closed.value.primaryResourceRef);
-  assert.deepEqual(workRun.value.originalRequest.commentIds, ['queued-feedback', 'during-recovery']);
 });
 
 test('recovery retains exact native evidence under collection pressure and respects a real user question', async t => {
@@ -280,10 +286,10 @@ test('recovery retains exact native evidence under collection pressure and respe
   assert.ok(await w.f.first.store.read('task-board/native-call', originalRun.value.calls.thread!));
   const repair = await new TaskBoardScheduler(w.f.second).task(closed.pin.objectId); assert.ok(repair?.run);
   w.adopt(repair); await w.running();
-  await assert.rejects(handoff(w, { workflowState: 'todo', nextStep: 'Start without the answer.', nextReviewAt: null }), code('task_board_input_required'));
-  const after = await finish(w, { workflowState: 'waiting', waiting: { reason: 'user', detail: 'The target question remains unanswered.' }, nextReviewAt: null });
+  await handoff(w, { workflowState: 'todo', nextSteps: [{ id: 'independent', scope: 'Continue only already authorized independent work.', requires: [] }] });
+  const after = await finish(w, { workflowState: 'waiting', nextSteps: [{ id: 'next', scope: 'The target question remains unanswered.', requires: [{ kind: 'user', questionId: 'real-question' }] }] });
   assert.equal(after.value.completionIssue, undefined); assert.equal(after.value.openQuestionCount, 1);
-  assert.equal(w.f.first.condition(after.value).state, 'needs_user');
+  assert.equal(stepCondition(await assessSteps(w.f.first.store, after.value, new Date().toISOString())).state, 'needs_user');
 });
 
 test('a legacy missing handoff after coordination takes recovery mode even when an independent check is due', async t => {
@@ -294,15 +300,13 @@ test('a legacy missing handoff after coordination takes recovery mode even when 
     originalRequest: request, requestHash: hashJson(request),
   }, randomUUID(), { create: { parentId: store.rootObjectId, name: 'Legacy later coordination' } });
   const task = await store.write('task-board/task', { ...closed.value, lastRun: coordination,
-    waiting: { ...closed.value.waiting!, reason: 'user', detail: 'Execution ended without an explicit completion intent; review the ticket before continuing.' },
-    fields: { ...closed.value.fields, nextReviewAt: new Date(Date.now() - 1000).toISOString() },
-    scheduledCheck: { scope: 'The existing independent check.' },
+    runtimeWait: null, nextSteps: [{ id: 'appointment', scope: 'Observe at the appointment.', requires: [{ kind: 'time', at: new Date(Date.now() - 1000).toISOString() }] }],
   }, randomUUID(), { objectId: closed.pin.objectId, expectedRevision: closed.pin.revision });
   const repair = await new TaskBoardScheduler(w.f.second).task(task.objectId); assert.ok(repair?.run);
   const run = await store.read('task-board/run', repair.run);
-  assert.equal(run.value.originalRequest.checkOnly, undefined);
+  assert.equal('checkOnly' in run.value.originalRequest, false);
   assert.deepEqual(run.value.originalRequest.action === 'continue' && run.value.originalRequest.recoveryFor, closed.value.completionIssue!.run);
-  assert.equal(run.value.checkContext, undefined);
+  assert.equal(run.value.executionContext?.workflowState, 'waiting');
 });
 
 test('a pruned legacy pre-closure revision uses the same terminal Run without losing its recovery identity', async t => {
@@ -324,29 +328,28 @@ test('a pruned legacy pre-closure revision uses the same terminal Run without lo
   const run = await store.read('task-board/run', repair.run);
   assert.deepEqual(run.value.originalRequest.action === 'continue' && run.value.originalRequest.recoveryFor, issue.run);
   w.adopt(repair); await w.running();
-  const recovered = await finish(w, { workflowState: 'todo', nextStep: 'Continue the authorized work.', nextReviewAt: null });
+  const recovered = await finish(w, { workflowState: 'todo', nextSteps: [{ id: 'next', scope: 'Continue the authorized work.', requires: [] }] });
   assert.equal(recovered.value.completionIssue, undefined);
 });
 
-test('repeated todo handoffs without new evidence stop instead of making an empty execution loop', async t => {
+test('repeating the same next-step fingerprint stops instead of making an empty execution loop', async t => {
   const w = await nativeWorkflow(t); await w.running();
-  for (let index = 0; index < 3; index++) {
-    const task = await finish(w, { workflowState: 'todo', nextStep: 'Continue the same next step.', nextReviewAt: null });
-    if (index < 2) {
-      const next = await new TaskBoardScheduler(w.f.second).task(task.pin.objectId); assert.ok(next?.run);
-      w.adopt(next); await w.running();
-    } else {
-      assert.equal(task.value.completionIssue?.code, 'task_board_no_progress');
-      await assert.rejects(new TaskBoardScheduler(w.f.second).task(task.pin.objectId), code('task_board_no_progress'));
-    }
-  }
+  const intent: TaskBoard.Handoff = { workflowState: 'todo', nextSteps: [{ id: 'same', scope: 'Continue the same already authorized scope.', requires: [] }] };
+  await finish(w, intent);
+  const next = await new TaskBoardScheduler(w.f.first).task(w.state().task.objectId);
+  assert.ok(next?.run); w.adopt(next); await w.running();
+  const after = await finish(w, intent);
+  assert.equal(await new TaskBoardScheduler(w.f.second).task(after.pin.objectId), null);
+  assert.equal(stepCondition(await assessSteps(w.f.first.store, after.value, new Date().toISOString())).state, 'workflow_attention');
 });
 
 test('recovery attempts survive scheduler replacement and stop after two unusable terminal handoffs', async t => {
   const w = await nativeWorkflow(t); await w.running(); await w.refresh();
   await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision,
     commentId: 'prior-feedback', body: 'Keep this correction for ordinary work.', requests: [], responses: [], attachments: [], replyTo: null });
-  await w.refresh(); await finish(w);
+  await w.refresh(); const closed = await finish(w);
+  const conversation = await new TaskBoardScheduler(w.f.second).task(closed.pin.objectId); assert.ok(conversation?.run);
+  w.adopt(conversation); await w.running(); await finish(w);
   let now = Date.now(); t.mock.timers.enable({ apis: ['Date'], now });
   for (let attempt = 1; attempt <= 2; attempt++) {
     const repair = await new TaskBoardScheduler(w.f.second).task(w.state().task.objectId); assert.ok(repair?.run);
@@ -354,20 +357,20 @@ test('recovery attempts survive scheduler replacement and stop after two unusabl
     const after = await finish(w);
     assert.equal(after.value.completionIssue?.attempts, attempt);
     if (attempt < 2) assert.equal(await new TaskBoardScheduler(w.f.second).task(after.pin.objectId), null);
-    else await assert.rejects(new TaskBoardScheduler(w.f.second).task(after.pin.objectId), code('task_board_handoff_recovery_exhausted'));
+    else assert.equal(await new TaskBoardScheduler(w.f.second).task(after.pin.objectId), null);
     now += 31_000; t.mock.timers.setTime(now);
   }
   const after = await w.f.first.store.read('task-board/task', w.state().task.objectId);
   assert.equal(w.f.first.condition(after.value).state, 'workflow_attention');
   assert.equal(after.value.openQuestionCount, 0);
-  assert.equal(after.value.commentDeliveries.find(value => value.commentId === 'prior-feedback')?.state, 'queued');
-  await assert.rejects(new TaskBoardScheduler(w.f.second).task(after.pin.objectId), code('task_board_handoff_recovery_exhausted'));
+  assert.equal(after.value.commentDeliveries.find(value => value.commentId === 'prior-feedback')?.state, 'delivered');
+  assert.equal(await new TaskBoardScheduler(w.f.second).task(after.pin.objectId), null);
   await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: after.pin.objectId,
     expectedRevision: after.pin.revision, workflowState: 'todo', detail: 'Retry the original handoff after repairing storage.' });
   const resumed = await w.f.first.store.read('task-board/task', after.pin.objectId);
   assert.equal(resumed.value.completionIssue?.attempts, 0);
   assert.equal(resumed.value.completionIssue?.retryAt, null);
-  assert.equal(resumed.value.fields.nextReviewAt, after.value.fields.nextReviewAt);
+  assert.deepEqual(resumed.value.nextSteps, after.value.nextSteps);
   const retry = await new TaskBoardScheduler(w.f.second).task(after.pin.objectId);
   assert.ok(retry?.run);
   const recovery = await w.f.first.store.read('task-board/run', retry.run);
@@ -391,8 +394,8 @@ test('native capacity backoff during recovery spends no attempt and cannot rearm
   const task = await w.f.first.store.read('task-board/task', outcome.task!);
   assert.equal(task.value.completionIssue?.attempts, 0);
   assert.ok(task.value.completionIssue?.retryAt);
-  assert.equal(task.value.fields.nextReviewAt, null);
-  assert.equal(task.value.scheduledCheck, undefined);
+  assert.equal(task.value.runtimeWait?.retryAt ?? null, null);
+  assert.equal('latestChecks' in task.value, false);
   assert.equal(await new TaskBoardScheduler(w.f.second).task(task.pin.objectId), null);
 });
 
@@ -405,11 +408,11 @@ test('a lost original context before recovery dispatch becomes attention without
   const after = await w.f.first.store.read('task-board/task', w.state().task.objectId);
   assert.equal(after.value.completionIssue?.code, 'task_board_recovery_context_unavailable');
   assert.equal(w.f.first.condition(after.value).state, 'workflow_attention');
-  await assert.rejects(new TaskBoardScheduler(w.f.second).task(after.pin.objectId), code('task_board_recovery_context_unavailable'));
+  assert.equal(await new TaskBoardScheduler(w.f.second).task(after.pin.objectId), null);
 });
 
 test('terminal receipts survive payload eviction, remain caller-bound and do not authorize replay', async t => {
-  const w = await nativeWorkflow(t); await w.running(); await finish(w, { workflowState: 'review', nextReviewAt: null });
+  const w = await nativeWorkflow(t); await w.running(); await finish(w, { workflowState: 'review', nextSteps: [] });
   const operationId = w.startRequest.operationId, caller = context(operationId, w.f.settings.principalId),
     before = await w.f.first.operation(operationId, caller, true);
   w.f.first.store.historyLimits.count = 0; await w.f.first.store.collectLocal();

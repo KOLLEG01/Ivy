@@ -81,7 +81,7 @@ import { useCommentPreferences } from "./comment-preferences";
 import { useCommentVisibility } from './comment-visibility';
 import { useOptimisticComment } from './optimistic-comment';
 import TaskHistory from "./TaskHistory.vue";
-import NativeInput from "../../../packages/ui-client/src/NativeInput.vue";
+import TaskQuestions from "./TaskQuestions.vue";
 import TaskAttachment from "./TaskAttachment.vue";
 import { attachmentBytes, attachmentSource, attachmentUpload, saveBytes, sourceAttachmentId, useAttachmentImages } from "./attachment-images";
 import { attachmentView } from "./attachment-view";
@@ -120,20 +120,19 @@ const detailRoute = (id: string, values: Record<string, string> = {}) => taskRou
   { ...Object.fromEntries(['q', 'status', 'control', 'host', 'category', 'project'].flatMap(key => props.query.has(key) ? [[key, props.query.get(key)!]] : [])), ...values });
 const task = useRemote((signal) =>
     readDocument("task", props.taskId, props.workspace.rootObjectId, signal), 15000, ["objects/task-board/task"]);
-const displayComments = computed(() => [...(task.value.value?.value.comments ?? []), ...(optimistic.message.value ? [optimistic.message.value] : [])]
+const displayComments = computed(() => [...(task.value.value?.value.comments ?? []), ...optimistic.messages.value]
   .filter(comment => showCrossAgent.value || !crossAgentComment(comment, props.taskId)).sort((a, b) =>
   commentPreferences.value.order === "newest-first" ? b.sequence - a.sequence : a.sequence - b.sequence,
 ));
 const pendingQuestions = computed(() => openQuestions({ comments: task.value.value?.value.comments ?? [] }));
 const replyTarget = ref<string | null>(null), commentComposer = ref<HTMLElement[]>([]);
 const replyingTo = computed(() => task.value.value?.value.comments.find(comment => comment.commentId === replyTarget.value));
-const answerQuestion = async (id: string) => { replyTarget.value = id; await nextTick(); commentComposer.value[0]?.scrollIntoView({ block: 'center' }); };
+const answerQuestion = async (id: string) => { tab.value = 'chat'; replyTarget.value = id; await nextTick(); commentComposer.value[0]?.scrollIntoView({ block: 'center' }); };
 const newestCommentId = computed(() => displayComments.value
   .reduce<TaskBoard.Comment | undefined>((latest, comment) =>
     comment.authorKind === "system" && comment.body === "Ticket edited" ? latest :
       !latest || comment.sequence > latest.sequence ? comment : latest, undefined)?.commentId);
-const commentSections = computed(() => commentPreferences.value.order === "newest-first"
-  ? ["composer", "comments"] : ["comments", "composer"]);
+const commentSections = ["comments", "composer"];
 const executionDefaults = useExecutionDefaults(
   () => props.workspace,
   () => task.value.value?.value,
@@ -328,10 +327,11 @@ const chatEntries = computed(() => displayComments.value.map((comment, index) =>
   const gap = previous ? Math.abs(Date.parse(comment.createdAt) - Date.parse(previous.createdAt)) : Infinity;
   return { comment, kind: chatKind(comment), stamp: gap > 10 * minute ? stampLabel(comment.createdAt) : null };
 }));
+const dependencyIds = computed(() => [...new Set(task.value.value?.value.nextSteps.flatMap(step => step.requires.flatMap(condition => condition.kind === 'task' || condition.kind === 'delivery' ? [condition.taskId] : [])) ?? [])]);
 const dependencyPage = ref(0),
   dependencies = useRemote(async (signal) =>
       await Promise.all(
-        (task.value.value?.value.fields.dependencies ?? [])
+        dependencyIds.value
           .slice(dependencyPage.value * 20, dependencyPage.value * 20 + 20)
           .map(async (id) => {
             try {
@@ -795,7 +795,7 @@ const showArrived = () => {
     <template v-if="task.value.value">
       <Alert
         v-if="
-          taskView.value.value && !(tab === 'chat' && task.value.value.value.publication) && !task.value.value.value.scheduledCheck?.failure && task.value.value.value.workflowState !== 'review' &&
+          taskView.value.value && !(tab === 'chat' && task.value.value.value.publication) && task.value.value.value.workflowState !== 'review' &&
           noteworthyCondition(taskView.value.value.executionCondition.state)
         "
         class="mt-4"
@@ -821,7 +821,7 @@ const showArrived = () => {
         class="mt-4"
         @changed="refresh"
       />
-      <Alert v-if="task.value.value.value.completionIssue && (task.value.value.value.scheduledCheck?.failure || taskView.value.value?.executionCondition.state === 'needs_user')" class="mt-4">
+      <Alert v-if="task.value.value.value.completionIssue && taskView.value.value?.executionCondition.state === 'needs_user'" class="mt-4">
         <CircleAlert aria-hidden="true" />
         <AlertTitle>{{ tr('Übergabe prüfen', 'Workflow needs attention') }}</AlertTitle>
         <AlertDescription>{{ task.value.value.value.completionIssue.detail }}</AlertDescription>
@@ -830,22 +830,6 @@ const showArrived = () => {
         {{ tr('Abgeschlossene Reparaturversuche:', 'Completed recovery attempts:') }} {{ task.value.value.value.completionIssue.attempts ?? 0 }}/2.
         <span v-if="task.value.value.value.completionIssue.retryAt">{{ tr('Nächster Versuch:', 'Next attempt:') }} {{ new Date(task.value.value.value.completionIssue.retryAt).toLocaleString() }}.</span>
       </p>
-      <Alert v-if="task.value.value.value.questionWait" class="mt-4">
-        <CircleAlert aria-hidden="true" />
-        <AlertTitle>{{ tr('Verknüpfte Nutzerfrage', 'Linked user question') }}</AlertTitle>
-        <AlertDescription>
-          <a :href="detailRoute(task.value.value.value.questionWait.taskId, { question: task.value.value.value.questionWait.commentId })" class="underline underline-offset-4">
-            {{ tr('Die offene Frage im verknüpften Ticket ansehen', 'View the open question in the linked ticket') }}
-          </a>
-        </AlertDescription>
-      </Alert>
-      <Alert v-if="task.value.value.value.scheduledCheck?.failure" variant="destructive" class="mt-4">
-        <CircleAlert aria-hidden="true" />
-        <AlertTitle>{{ tr('Automatische Prüfung fehlgeschlagen', 'Scheduled check failed') }}</AlertTitle>
-        <AlertDescription>{{ task.value.value.value.scheduledCheck.failure.detail }}
-          <span v-if="task.value.value.value.fields.nextReviewAt" class="block">{{ tr('Nächster Versuch:', 'Next attempt:') }} {{ new Date(task.value.value.value.fields.nextReviewAt).toLocaleString() }}</span>
-        </AlertDescription>
-      </Alert>
       <p
         v-if="tab !== 'chat' && (error || archive.error.value)"
         role="alert"
@@ -993,17 +977,11 @@ const showArrived = () => {
                     new Date(task.value.value.value.fields.dueAt).toLocaleString()
                   }}</PropertyItem
                 >
-                <PropertyItem
-                  v-if="task.value.value.value.fields.nextReviewAt"
-                  :label="task.value.value.value.scheduledCheck ? tr('Nächste automatische Prüfung', 'Next automatic check') : 'Next review'"
-                  >{{
-                    new Date(
-                      task.value.value.value.fields.nextReviewAt,
-                    ).toLocaleString()
-                  }}</PropertyItem
-                >
-                <PropertyItem v-if="task.value.value.value.scheduledCheck" :label="tr('Automatische Prüfung', 'Automatic check')">
-                  <span class="break-words">{{ task.value.value.value.scheduledCheck.scope }}</span>
+                <PropertyItem v-if="task.value.value.value.nextSteps.length" :label="tr('Nächste Schritte', 'Next steps')">
+                  <ul class="space-y-2"><li v-for="step in task.value.value.value.nextSteps" :key="step.id">
+                    <p class="break-words">{{ step.scope }}</p>
+                    <ul class="text-xs text-muted-foreground"><li v-for="(condition, index) in step.requires" :key="index">{{ condition.kind === 'time' ? new Date(condition.at).toLocaleString() : condition.kind === 'user' ? tr('Antwort auf eigene Frage', 'Answer to own question') : condition.kind === 'delivery' ? condition.key : condition.until }}</li></ul>
+                  </li></ul>
                 </PropertyItem>
                 <PropertyItem label="Updates">{{
                   {
@@ -1111,7 +1089,7 @@ const showArrived = () => {
               >
             </section>
             <section
-              v-if="task.value.value.value.fields.dependencies.length"
+              v-if="dependencyIds.length"
               class="space-y-2"
               aria-labelledby="task-dependencies"
             >
@@ -1132,12 +1110,12 @@ const showArrived = () => {
                   :tone="statusTone(item.state)"
               /></a>
               <PageControls
-                v-if="task.value.value.value.fields.dependencies.length > 20"
+                v-if="dependencyIds.length > 20"
                 :page="dependencyPage + 1"
                 :count="dependencies.value.value?.length ?? 0"
                 :has-next="
                   (dependencyPage + 1) * 20 <
-                  task.value.value.value.fields.dependencies.length
+                  dependencyIds.length
                 "
                 :loading="dependencies.loading.value"
                 @previous="
@@ -1186,15 +1164,16 @@ const showArrived = () => {
                   ><span class="h-px flex-1 bg-foreground/50" />{{ tr("Neu", "New") }}<span class="h-px flex-1 bg-foreground/50" /></p>
                   <p v-if="entry.stamp" class="ivy-chat-stamp">{{ entry.stamp }}</p>
                   <p
-                    v-if="entry.kind === 'event'"
+                    v-if="entry.kind === 'event' && !entry.comment.body.includes('\n') && !entry.comment.attachments.length"
                     class="py-1 text-center text-xs text-muted-foreground"
                   >
                     {{ entry.comment.body === 'Ticket edited' ? tr('Ticket bearbeitet', 'Ticket edited') : entry.comment.body }}
                   </p>
                   <ConversationMessage
                     v-else
-                    :variant="entry.kind"
-                    :label="entry.kind === 'reply' ? 'Agent' : ''"
+                    :variant="entry.kind === 'event' ? 'reply' : entry.kind"
+                    :label="entry.kind === 'event' ? tr('System', 'System') : entry.kind === 'reply' ? 'Agent' : ''"
+                    v-bind="entry.kind === 'event' ? { icon: SquareKanban } : {}"
                     :class="entry.kind === 'user' ? 'mt-1' : ''"
                   >
                     <template v-if="entry.kind === 'external'" #label>
@@ -1207,10 +1186,13 @@ const showArrived = () => {
                       ><ExternalLink class="size-3 shrink-0" aria-hidden="true" /></a>
                     </template>
                     <div class="min-w-0 space-y-3">
-                      <div v-if="entry.comment.commentId === optimistic.message.value?.commentId && optimistic.issue.value" role="alert" class="space-y-2 text-sm">
-                        <p>{{ optimistic.issue.value }}</p>
-                        <Button size="sm" variant="secondary" :disabled="!available || !editable || optimistic.preparing.value || action.busy.value" @click="optimistic.retry">
+                      <div v-if="optimistic.issue(entry.comment.commentId)" role="alert" class="space-y-2 text-sm">
+                        <p>{{ optimistic.issue(entry.comment.commentId) }}</p>
+                        <Button size="sm" variant="secondary" :disabled="!available || !editable || !optimistic.canRetry(entry.comment.commentId)" @click="optimistic.retry(entry.comment.commentId)">
                           {{ tr('Erneut versuchen', 'Retry message') }}
+                        </Button>
+                        <Button v-if="optimistic.canDiscard(entry.comment.commentId)" size="sm" variant="ghost" @click="optimistic.discard(entry.comment.commentId)">
+                          {{ tr('Ungesendete Nachricht verwerfen', 'Discard unsent message') }}
                         </Button>
                       </div>
                       <div v-if="!entry.comment.nativeInput && pendingQuestions.some(question => question.commentId === entry.comment.commentId)" class="flex flex-wrap items-center gap-2">
@@ -1219,7 +1201,7 @@ const showArrived = () => {
                       </div>
                       <ExpandableContent
                         v-if="!entry.comment.nativeInput || entry.comment.replyTo || nativeInput(entry.comment)?.state === 'answered' || nativeInput(entry.comment)?.state === 'expired'"
-                        :enabled="commentPreferences.collapseOlder && entry.kind !== 'user' && entry.comment.commentId !== newestCommentId"
+                        :enabled="entry.kind === 'event' || (commentPreferences.collapseOlder && entry.kind !== 'user' && entry.comment.commentId !== newestCommentId)"
                         :show-more-label="tr('Mehr anzeigen', 'Show more')"
                         :show-less-label="tr('Weniger anzeigen', 'Show less')"
                       >
@@ -1231,9 +1213,6 @@ const showArrived = () => {
                           :preview-image="previewImage"
                         />
                       </ExpandableContent>
-                      <NativeInput v-if="entry.comment.nativeInput && !entry.comment.replyTo && !['answered', 'expired'].includes(nativeInput(entry.comment)!.state)" compact
-                        :input="nativeInput(entry.comment)!" :epoch="entry.comment.nativeInput.identity.epoch"
-                        :available="writable" :base="base" :client="client" @answered="refresh" />
                       <div
                         v-for="request in entry.comment.requests"
                         :key="request.requestId"
@@ -1315,10 +1294,16 @@ const showArrived = () => {
                 v-else
                 ref="commentComposer"
                 data-slot="task-comment-composer"
-                class="space-y-1.5 py-3"
-                :class="commentPreferences.order === 'newest-first' ? '' : 'ivy-chat-surface sticky bottom-0 z-10'"
+                class="ivy-chat-surface sticky bottom-0 z-10 space-y-1.5 py-3"
               >
                 <ActionState v-if="!optimistic.isComment.value && (action.saved.value?.phase !== 'succeeded' || action.error.value)" :action="action" @changed="refresh" />
+                <Alert v-if="optimistic.pending.value && optimistic.issue(optimistic.pending.value.request.commentId)" role="status">
+                  <AlertTitle>{{ tr('Vorherige Nachricht noch nicht bestätigt', 'Previous message not confirmed') }}</AlertTitle>
+                  <AlertDescription class="space-y-2">
+                    <p>{{ optimistic.issue(optimistic.pending.value.request.commentId) }}</p>
+                    <Button size="sm" variant="outline" :disabled="!available || !editable || !optimistic.canRetry(optimistic.pending.value.request.commentId)" @click="optimistic.retry(optimistic.pending.value.request.commentId)">{{ tr('Originalnachricht prüfen', 'Check original message') }}</Button>
+                  </AlertDescription>
+                </Alert>
                 <Alert v-if="task.value.value.value.publication && !optimistic.pending.value && !optimistic.isComment.value" role="status">
                   <AlertTitle>{{ tr('Änderung wird gespeichert', 'Saving task update') }}</AlertTitle>
                   <AlertDescription>{{ tr('Ein vorheriger Vorgang wird noch abgeschlossen. Dein Text bleibt erhalten.', 'A previous action is still being completed. Your draft is retained.') }}</AlertDescription>
@@ -1335,6 +1320,7 @@ const showArrived = () => {
                   </Label>
                   <span v-if="uploading" role="status" class="text-muted-foreground">Uploading…</span>
                 </div>
+                <TaskQuestions :questions="pendingQuestions" :available="writable" @answer="answerQuestion" @answered="refresh" />
                 <MarkdownEditor
                   ref="commentInput"
                   v-model="commentBody"
@@ -1393,6 +1379,7 @@ const showArrived = () => {
       </TabsContent>
       </template>
     </template>
+    <TaskQuestions v-if="task.value.value && tab !== 'chat'" class="ivy-chat-surface sticky bottom-0 z-10" :questions="pendingQuestions" :available="writable" @answer="answerQuestion" @answered="refresh" />
     <ImagePreview
       v-model:open="imagePreviewOpen"
       :source="previewSource ? images.urls.value[previewSource] ?? null : null"

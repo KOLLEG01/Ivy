@@ -41,7 +41,7 @@ export class TaskComments {
     return { ...header, comments };
   }
 
-  async write(task: TaskBoard.Task, taskId: string, scope: string): Promise<StoredTask> {
+  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '2.1.0'): Promise<StoredTask> {
     const page = await this.client.request('objects.query', { contractKey: commentContractKey,
       where: { op: 'and', args: [{ field: 'object.parentId', op: 'eq', value: taskId },
         { field: 'object.name', op: 'eq', value: 'Comments' }] }, limit: 2, includeArchived: true });
@@ -62,7 +62,7 @@ export class TaskComments {
     let objectId = existing?.object.id;
     if (!existing || hashJson(existing.content.value) !== hashJson(value)) {
       const mutationId = await this.identity(hashJson({ scope, comments: value, previous: existing?.revision.revision ?? 0 }));
-      const saved = await this.client.request('objects.write', { mutationId, contractVersion: '1.1.0',
+      const saved = await this.client.request('objects.write', { mutationId, contractVersion,
         content: { encoding: 'json', value: value as unknown as Wire.Json }, references: {},
         ...(existing ? { objectId: existing.object.id, expectedRevision: existing.revision.revision } :
           { create: { name: 'Comments', parentId: taskId, ownerObjectId: null, contractKey: commentContractKey } }) });

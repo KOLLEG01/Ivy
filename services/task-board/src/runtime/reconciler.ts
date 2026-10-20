@@ -40,8 +40,8 @@ const queries = {
     where: {
       op: "and",
       args: [
-        { op: "eq", field: "data:/fields/control", value: "agent" },
-        { op: "in", field: "data:/workflowState", value: ["todo", "in_progress", "waiting", "review"] },
+
+        { op: "in", field: "data:/workflowState", value: ["backlog", "todo", "in_progress", "waiting", "review", "done", "cancelled"] },
       ],
     },
   },
@@ -104,7 +104,7 @@ export class TaskBoardReconciler {
   async settled(): Promise<void> { await Promise.all(this.activeTasks.values()); }
   async stop(): Promise<void> { this.stopped = true; await this.settled(); }
   get diagnostics(): Wire.Diagnostic[] {
-    return [...this.failures.values()];
+    return [...this.failures.values(), ...this.native.progress.diagnostics];
   }
   private record(key: string, error?: unknown) {
     if (!error) {

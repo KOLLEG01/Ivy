@@ -6,7 +6,7 @@ import { choose, options } from './fixtures/select.mjs';
 
 const fields = title => ({ title, description: '', acceptanceCriteria: [], category: null, control: 'user',
   priority: 2, executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },
-  dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null });
+   userContact: 'ticket',  dueAt: null });
 const savedId = page => new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('id');
 
 for (const width of [1440, 390]) test(`creation keeps explicit waiting and manual Review state through drafts at ${width}px`, { timeout: 120000 }, async t => {
@@ -15,23 +15,26 @@ for (const width of [1440, 390]) test(`creation keeps explicit waiting and manua
   await f.open('#/new?node=browser-task-board');
   const status = () => f.page.getByLabel('Initial status', { exact: true });
   await expect(status()).toHaveText('Todo');
-  assert.deepEqual(await options(status()), ['Backlog', 'Todo', 'In progress', 'Blocked', 'Review', 'Done', 'Cancelled']);
+  assert.deepEqual(await options(status()), ['Backlog', 'Todo', 'In progress', 'Waiting', 'Review', 'Done', 'Cancelled']);
   await f.page.getByRole('radio', { name: 'Me', exact: true }).check();
   await f.page.getByLabel('Title', { exact: true }).fill('Initially blocked manual work');
   await choose(status(), 'waiting');
-  await choose(f.page.getByLabel('Waiting for', { exact: true }), 'dependency');
-  await f.page.getByLabel('Waiting details', { exact: true }).fill('Wait until the other task is ready for review.');
-  await choose(f.page.getByLabel('Blocking task', { exact: true }), peer.task.objectId);
-  await expect(f.page.getByLabel('Wait until', { exact: true })).toHaveText(/Idle/);
+  const steps = f.page.getByRole('group', { name: 'Next steps', exact: true });
+  await steps.getByRole('button', { name: 'Add independent step', exact: true }).click();
+  await steps.getByLabel('Next step', { exact: true }).fill('Wait until the other task is ready for review.');
+  await steps.getByRole('button', { name: 'Add condition', exact: true }).click();
+  await choose(steps.getByRole('combobox').nth(0), 'task');
+  await choose(steps.getByRole('combobox').nth(1), peer.task.objectId);
+  await choose(steps.getByRole('combobox').nth(2), 'idle');
   await f.page.reload();
-  await expect(status()).toHaveText('Blocked');
-  await expect(f.page.getByLabel('Waiting details', { exact: true })).toHaveValue('Wait until the other task is ready for review.');
+  await expect(status()).toHaveText('Waiting');
+  await expect(f.page.getByLabel('Next step', { exact: true })).toHaveValue('Wait until the other task is ready for review.');
   await f.page.getByRole('button', { name: 'Create task', exact: true }).click();
   await expect(f.page.getByRole('heading', { name: /TASK-.*Initially blocked manual work/ })).toBeVisible();
   const waiting = await f.task(savedId(f.page));
   assert.equal(waiting.workflowState, 'waiting');
-  assert.equal(waiting.waiting.reason, 'dependency');
-  assert.deepEqual(waiting.blocker, { taskId: peer.task.objectId, until: 'idle' });
+  assert.equal(waiting.runtimeWait, null);
+  assert.deepEqual(waiting.nextSteps[0].requires, [{ kind: 'task', taskId: peer.task.objectId, until: 'idle' }]);
   assert.equal(waiting.claim, null);
   assert.equal(waiting.lastRun, null);
 
@@ -63,7 +66,8 @@ test('an agent cannot start with incomplete uploads, while explicit Backlog pres
   await expect(f.page.getByText('Create this task in Backlog to finish uploading its files before an agent can start. Move it to Todo when ready.')).toBeVisible();
   await expect(f.page.getByRole('button', { name: 'Create task', exact: true })).toBeDisabled();
   await choose(f.page.getByLabel('Initial status', { exact: true }), 'waiting');
-  await f.page.getByLabel('Waiting details', { exact: true }).fill('Waiting for the input to finish uploading.');
+  await f.page.getByRole('button', { name: 'Add independent step', exact: true }).click();
+  await f.page.getByLabel('Next step', { exact: true }).fill('Waiting for the input to finish uploading.');
   await expect(f.page.getByRole('button', { name: 'Create task', exact: true })).toBeDisabled();
   await choose(f.page.getByLabel('Initial status', { exact: true }), 'backlog');
   await f.page.getByRole('button', { name: 'Create task', exact: true }).click();

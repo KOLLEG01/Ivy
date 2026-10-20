@@ -12,17 +12,20 @@ import { finalOutputText, outputParams, pageCursor, TaskBoardTurnEvidence } from
 import { nativeArray, nativeRecord, nativeString } from "./native-intent.js";
 import type { NativeSlot } from "./native-intent.js";
 import { finishedRun, projectNativeState } from "./native-publication.js";
+import { executionMode } from './execution-mode.js';
 import { claimedWorkflowState } from "./condition.js";
 import { mutation } from "./store.js";
 import type { Document } from "./store.js";
 import { syncNativeComments } from './native-comments.js';
 import { peerState } from './task-coordination.js';
+import { NativeProgress } from './native-progress.js';
 
 /** One bounded reconciliation pass. Persisted calls and evidence authorize every next action. */
 export class TaskBoardNativeOrchestrator {
   readonly driver: TaskBoardNativeDriver;
   readonly inspector: TaskBoardNativeInspector;
   readonly evidence: TaskBoardTurnEvidence;
+  readonly progress: NativeProgress;
   private readonly threads = new Map<
     string,
     { serviceNodeId: string; threadId: string }
@@ -37,16 +40,21 @@ export class TaskBoardNativeOrchestrator {
         "thread/status/changed",
         "serverRequest/resolved",
       ].includes(nativeString(event["method"]));
-    if (!relevant) return false;
+    const activity = /^(item\/|turn\/(?:started|completed)$|serverRequest\/resolved$)/.test(nativeString(event["method"]));
+    if (!relevant && !activity) return false;
     let matched = false;
     for (const [runId, thread] of this.threads)
       if (
           thread.serviceNodeId === params.serviceNodeId &&
           thread.threadId === body["threadId"]
-      ) { this.retries.delete(runId); matched = true; }
+      ) {
+        if (activity) this.progress.activity(runId);
+        if (relevant) { this.retries.delete(runId); matched = true; }
+      }
     return matched;
   }
   constructor(readonly engine: TaskBoardEngine) {
+    this.progress = new NativeProgress(engine.owner.serviceNodeId, engine.settings.scheduler.stallWarningMs ?? 300_000);
     this.driver = new TaskBoardNativeDriver(engine);
     this.inspector = new TaskBoardNativeInspector(engine);
     this.evidence = new TaskBoardTurnEvidence(engine.store, engine.settings.principalId);
@@ -123,7 +131,7 @@ export class TaskBoardNativeOrchestrator {
           });
         }
         const waiting = after.value.phase === "starting"
-          ? (await this.engine.store.read("task-board/task", after.value.taskId)).value.waiting : null;
+          ? (await this.engine.store.read("task-board/task", after.value.taskId)).value.runtimeWait : null;
         if (after.value.phase === "outcome_unknown" || waiting?.reason === "host")
           this.postpone(runId);
         else this.retries.delete(runId);
@@ -142,7 +150,7 @@ export class TaskBoardNativeOrchestrator {
     await this.engine.verifyOwner();
     const store = this.engine.store,
       run = await store.read("task-board/run", runId);
-    if (finishedRun(run.value)) return;
+    if (finishedRun(run.value)) { this.progress.forget(runId); return; }
     const task = await store.read("task-board/task", run.value.taskId),
       active = task.value.claim?.run?.objectId === runId;
     requireThat(
@@ -226,6 +234,7 @@ export class TaskBoardNativeOrchestrator {
         thread = nativeRecord(
           nativeRecord(inspection.metadata.reply.result)["thread"],
         );
+      if (status !== 'inProgress') this.progress.forget(runId);
       if (status === "inProgress" && inspection.turns.epoch !== run.value.nativeEpoch &&
           await this.inspector.ownerStopped(run.value)) {
         await this.update(run, task, {
@@ -264,8 +273,7 @@ export class TaskBoardNativeOrchestrator {
         }
       }
       if (status === "inProgress") {
-        if (active && !run.value.cancellation && !run.value.originalRequest.checkOnly &&
-            !(run.value.originalRequest.action === 'continue' && run.value.originalRequest.recoveryFor) && inspection.turns.epoch === run.value.nativeEpoch) {
+        if (active && !run.value.cancellation &&   !(run.value.originalRequest.action === 'continue' && run.value.originalRequest.recoveryFor) && inspection.turns.epoch === run.value.nativeEpoch) {
           const previous = run.value.calls.steer ? (await store.read('task-board/native-call', run.value.calls.steer)).value.origin : null;
           const initial = (await store.read('task-board/task', { objectId: run.value.taskId, revision: run.value.originalRequest.expectedRevision })).value;
           const peersHash = await peerState(store, task.value, task.pin.objectId);
@@ -289,8 +297,13 @@ export class TaskBoardNativeOrchestrator {
             mediaType: "application/json",
           },
         );
-        const waiting = active ? task.value.waiting : null;
-        const projectedWaiting = claimedWorkflowState(projection.waiting) === 'waiting' ? projection.waiting : null;
+        const waiting = active ? task.value.runtimeWait : null;
+        this.progress.observe(runId, run.value.taskId, projection.phase === 'running' && !run.value.cancellation,
+          hashJson({ turn, status: thread['status'] }));
+        const projectedWaiting = projection.runtimeWait;
+        const workflowState = executionMode(run.value.originalRequest) === 'conversation'
+          ? (run.value.executionContext?.workflowState ?? task.value.workflowState)
+          : projection.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(projection.runtimeWait);
         if (
           projection.phase === run.value.phase &&
           projection.externalOutcome.state ===
@@ -299,7 +312,7 @@ export class TaskBoardNativeOrchestrator {
           (!active ||
             (projectedWaiting?.reason === waiting?.reason &&
               projectedWaiting?.detail === waiting?.detail &&
-              task.value.workflowState === claimedWorkflowState(projection.waiting)))
+              task.value.workflowState === workflowState))
         )
           return;
       }
@@ -356,10 +369,10 @@ export class TaskBoardNativeOrchestrator {
       if (
         run.value.externalOutcome.state === "unknown" &&
         run.value.externalOutcome.code === error.code &&
-        (!active || (task.value.workflowState === 'in_progress' && task.value.claim?.phase === 'outcome_unknown' && !task.value.waiting))
+        (!active || (task.value.workflowState === 'in_progress' && task.value.claim?.phase === 'outcome_unknown' && !task.value.runtimeWait))
       )
         return;
-      if (task.value.waiting?.detail === detail && (!active || task.value.workflowState === claimedWorkflowState(task.value.waiting))) return;
+      if (task.value.runtimeWait?.detail === detail && (!active || task.value.workflowState === claimedWorkflowState(task.value.runtimeWait))) return;
       await this.update(run, task, {
         kind: "unavailable",
         reason: ["service_not_ready", "service_unavailable", "native_unavailable", "task_board_native_unavailable"].includes(error.code)

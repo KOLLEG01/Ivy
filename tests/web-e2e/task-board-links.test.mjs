@@ -16,9 +16,9 @@ const fields = (title) => ({
   priority: 2,
   executionRequirement: null,
   workspaceRequirement: { kind: "task_workspace" },
-  dependencies: [],
+
   userContact: "ticket",
-  nextReviewAt: null,
+
   dueAt: null,
 });
 

@@ -80,6 +80,7 @@ export { validateAutomation } from "../../contracts/src/automation-validation.js
 export { validateChat } from "../../contracts/src/chat-validation.js";
 export { validateSecretary } from "../../contracts/src/secretary-validation.js";
 export { validateTaskBoard } from "../../contracts/src/task-board-validation.js";
+export { openTaskQuestions } from "../../contracts/src/task-board-questions.js";
 export { isReadOnlyNativeMethod } from "../../contracts/src/native-contract.js";
 export {
   checkedNativeContract,

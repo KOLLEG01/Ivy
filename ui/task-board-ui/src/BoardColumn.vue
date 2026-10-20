@@ -31,10 +31,11 @@ import { usePage } from "../../../packages/ui-client/src/runtime";
 import { nativeRead } from "../../../packages/ui-client/src/native";
 import { mapConcurrent } from '../../../packages/ui-client/src/concurrency';
 import { useCommentVisibility } from './comment-visibility';
-import { and, base, client, taskContractVersions } from "./runtime";
+import { and, base, client, taskContractVersions, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
 import {
+  nextStepTime,
   conditionLabel,
   conditionTone,
   noteworthyCondition,
@@ -116,28 +117,21 @@ const pages = usePage(async (signal, cursor) => {
     const page = await load(result.nextCursor);
     result.items.push(...page.items); result.nextCursor = page.nextCursor;
   }
-  const dependencies = new Map<string, Promise<boolean>>();
-  const dependencyDone = (id: string) => {
-    if (!dependencies.has(id)) dependencies.set(id, nativeRead(client, props.workspace.serviceNodeId, 'task-board.read', { task: id, view: 'card' }, signal)
-      .then(value => (value as TaskBoard.TaskCardView).task.workflowState === 'done').catch(() => { signal.throwIfAborted(); return false; }));
-    return dependencies.get(id)!;
-  };
   const items = await mapConcurrent(result.items, async item => {
     const view = await nativeRead(client, props.workspace.serviceNodeId, 'task-board.read', { task: item.objectId, view: 'card' }, signal) as TaskBoard.TaskCardView;
     const task = view.task, fields = task.fields;
-    const dependency = waiting && (await Promise.all(fields.dependencies.map(dependencyDone))).some(done => !done);
     return {
       id: item.objectId, taskKey: task.taskKey, title: fields.title, category: fields.category ?? '',
       priority: fields.priority, control: fields.control,
       requestedEnvironment: fields.executionRequirement?.kind === 'host' ? fields.executionRequirement.hostId : '',
       resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
       conditionDetail: view.executionCondition.detail, openQuestionCount: task.openQuestionCount ?? 0,
-      checkFailure: task.scheduledCheckFailure, nextReviewAt: fields.nextReviewAt ?? '', dueAt: fields.dueAt ?? '',
+      nextReviewAt: nextStepTime(task) ?? '', dueAt: fields.dueAt ?? '',
       commentCount: view.commentCount, directCommentCount: view.directCommentCount,
       unreadAgentComments: view.unreadAgentComments, unreadDirectAgentComments: view.unreadDirectAgentComments,
-      group: waiting ? waitingGroup(task, view.executionCondition, dependency) : '',
+      group: waiting ? waitingGroup(task, view.executionCondition) : '',
       context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,
-        waiting: task.waiting?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
+        waiting: task.runtimeWait?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication },
     };
   }, signal);
   if (waiting) items.sort((a, b) => waitingGroups.findIndex(group => group.id === a.group) - waitingGroups.findIndex(group => group.id === b.group));
@@ -279,7 +273,7 @@ defineExpose({ refresh: pages.refresh });
     >
       <section v-for="group in groups" :key="group.id" :aria-label="group.title || undefined"
         :data-waiting-group="group.id || undefined" class="flex flex-col gap-2"
-        :class="group.id === 'user' ? 'rounded-lg border-2 border-amber-500/70 p-2' : ''">
+        >
       <h3 v-if="group.title" class="px-1.5 pt-2 text-xs font-semibold text-muted-foreground">{{ group.title }} <span class="font-normal">{{ group.items.length }}</span></h3>
       <template
         v-for="task in group.items"
@@ -299,6 +293,7 @@ defineExpose({ refresh: pages.refresh });
         </h3>
         <article
           class="task-item group relative min-w-0"
+          :data-attention="task.openQuestionCount ? 'question' : undefined"
           :class="[
             layout === 'list'
               ? 'flex items-center gap-3 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'
@@ -382,7 +377,7 @@ defineExpose({ refresh: pages.refresh });
               class="inline-flex items-center gap-1"
               :title="'Next check ' + new Date(task.nextReviewAt).toLocaleString()"
               ><Clock class="size-3.5" aria-hidden="true" />{{
-                shortDate(task.nextReviewAt)
+                new Date(task.nextReviewAt).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
               }}</span
             >
             <span
@@ -421,7 +416,7 @@ defineExpose({ refresh: pages.refresh });
             :tone="conditionTone(task.condition)"
             :title="task.conditionDetail"
           />
-          <StatusBadge v-if="task.checkFailure" label="Check failed" tone="bad" class="mt-2" :title="task.checkFailure" />
+          <StatusBadge v-if="task.openQuestionCount" :label="task.openQuestionCount + ' ' + tr('offene Frage(n)', 'open question(s)')" tone="warning" />
           <DropdownMenu
             ><DropdownMenuTrigger as-child
               ><Button

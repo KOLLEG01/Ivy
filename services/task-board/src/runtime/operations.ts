@@ -199,6 +199,7 @@ export class TaskBoardOperations {
       "task_board_stage_conflict",
       "New writes must append to the unfinished operation in order.",
     );
+    proposed = await this.store.upgradeStored(key, proposed);
     const hash = hashJson(proposed),
       name = "Prepared " + index + " " + hash.slice(7),
       payloadId = mutation(id, "payload:" + index + ":" + hash);
@@ -271,6 +272,8 @@ export class TaskBoardOperations {
       entry.contractKey,
       entry.payload.object,
       false,
+      false,
+      true,
     );
     requireThat(
       payload.metadata.parentId === id &&
@@ -284,6 +287,7 @@ export class TaskBoardOperations {
       payload.value,
       entry.mutationId,
       entry.destination,
+      entry.contractVersion,
     );
     await this.amend(id, (operation) => {
       const latest = operation.writes[index];

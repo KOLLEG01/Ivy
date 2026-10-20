@@ -35,6 +35,8 @@ import { useAction } from "./action";
 import ActionState from "./ActionState.vue";
 import TaskLocationPicker from "./TaskLocationPicker.vue";
 import WikiLinkPicker from "./WikiLinkPicker.vue";
+import NextStepsEditor from "./NextStepsEditor.vue";
+import { openTaskQuestions } from "../../../packages/sdk/src/client.js";
 import { nativeRead } from "../../../packages/ui-client/src/native";
 import {
   executionEnvironments,
@@ -61,10 +63,8 @@ const defaults: TaskBoard.TaskFields = {
   executionRequirement: null,
   nativeOptions: { model: null, reasoningEffort: null, serviceTier: null },
   workspaceRequirement: { kind: "task_workspace" },
-  dependencies: [],
   userContact: "ticket",
   allowParallel: false,
-  nextReviewAt: null,
   dueAt: null,
 };
 const sameFields = (a: TaskBoard.TaskFields, b: TaskBoard.TaskFields) =>
@@ -73,10 +73,8 @@ const form = ref<TaskBoard.TaskFields>(
   structuredClone(props.task?.value.fields ?? defaults),
 );
 const initialState = ref<TaskBoard.Task['workflowState']>('todo');
-const waitingReason = ref<TaskBoard.InitialWaiting['reason']>('user');
-const waitingDetail = ref('');
-const waitingBlocker = ref('');
-const waitingUntil = ref<TaskBoard.Blocker['until']>('idle');
+const nextSteps = ref<TaskBoard.NextStep[]>(structuredClone(props.task?.value.nextSteps ?? []));
+const ownQuestions = computed(() => openTaskQuestions({ comments: props.task?.value.comments ?? [] }));
 const initialSummary = ref('');
 const revision = ref(props.task?.pin.revision ?? null),
   baseFields = ref<TaskBoard.TaskFields | null>(
@@ -103,15 +101,14 @@ try {
       retained.principalId === props.workspace.principalId
     ) {
       form.value = retained.fields;
+      delete (form.value as unknown as Record<string, unknown>).dependencies;
+      delete (form.value as unknown as Record<string, unknown>).nextReviewAt;
+      nextSteps.value = retained.nextSteps ?? retained.initial?.nextSteps ?? nextSteps.value;
       revision.value = retained.revision;
       baseFields.value = retained.baseFields ??
         (retained.revision === props.task?.pin.revision ? baseFields.value : null);
       if (!props.task && retained.initial) {
         initialState.value = retained.initial.workflowState ?? 'todo';
-        waitingReason.value = retained.initial.waiting?.reason ?? 'user';
-        waitingDetail.value = retained.initial.waiting?.detail ?? '';
-        waitingBlocker.value = retained.initial.waiting?.blocker?.taskId ?? '';
-        waitingUntil.value = retained.initial.waiting?.blocker?.until ?? 'idle';
         initialSummary.value = retained.initial.initialResult?.summary ?? '';
       }
       // A retained copy of already-saved fields starts from the current save base.
@@ -162,11 +159,7 @@ const blockers = useRemote(
 );
 const blockerOptions = computed(() =>
   (blockers.value.value ?? [])
-    .filter(
-      (task) =>
-        task.workflowState !== "cancelled" ||
-        form.value.dependencies.includes(task.id),
-    )
+    .filter(task => task.workflowState !== "cancelled")
     .map((task) => ({
       value: task.id,
       label: task.taskKey + " · " + task.title,
@@ -420,16 +413,11 @@ const normalizedFields = (): TaskBoard.TaskFields => {
   return fields;
 };
 let retainDraft = true;
-const initialFields = (): Pick<TaskBoard.CreateRequest, 'workflowState' | 'waiting' | 'initialResult'> => ({
+const initialFields = (): Pick<TaskBoard.CreateRequest, 'workflowState' | 'nextSteps' | 'initialResult'> => ({
   workflowState: initialState.value,
-  ...(initialState.value === 'waiting' ? { waiting: {
-    reason: waitingReason.value,
-    detail: waitingDetail.value.trim(),
-    ...(['dependency', 'workspace'].includes(waitingReason.value) && waitingBlocker.value
-      ? { blocker: { taskId: waitingBlocker.value, until: waitingUntil.value } } : {}),
-  } } : {}),
+  ...(nextSteps.value.length ? { nextSteps: nextSteps.value } : {}),
   ...(form.value.control === 'user' && ['review', 'done'].includes(initialState.value) && initialSummary.value.trim()
-    ? { initialResult: { summary: initialSummary.value.trim(), artifacts: [], checks: [], codeReferences: [], repositoryResult: null, limitations: [] } } : {}),
+    ? { initialResult: { summary: initialSummary.value.trim(), artifacts: [], codeReferences: [], repositoryResult: null, limitations: [] } } : {}),
 });
 const clearDraft = () => {
   retainDraft = false;
@@ -437,7 +425,7 @@ const clearDraft = () => {
 };
 watch(
   [form, revision, baseFields, capabilities, host, category, nativeModel, reasoningEffort, serviceTier,
-    initialState, waitingReason, waitingDetail, waitingBlocker, waitingUntil, initialSummary],
+    initialState, nextSteps, initialSummary],
   () => {
     if (!retainDraft) return;
     try {
@@ -445,6 +433,7 @@ watch(
         key,
         JSON.stringify({
           fields: normalizedFields(),
+          nextSteps: nextSteps.value,
           revision: revision.value,
           baseFields: baseFields.value,
           ...(!props.task ? { initial: initialFields() } : {}),
@@ -472,13 +461,7 @@ const initialProblem = computed(() => {
       ['todo', 'waiting'].includes(initialState.value))
     return 'Create this task in Backlog to finish uploading its files before an agent can start. Move it to Todo when ready.';
   if (initialState.value === 'review' && !initialSummary.value.trim()) return 'Review needs a final result.';
-  if (initialState.value !== 'waiting') return '';
-  if (!waitingDetail.value.trim()) return 'Describe what this task is waiting for.';
-  if (waitingReason.value === 'time' && (!form.value.nextReviewAt || form.value.nextReviewAt <= new Date().toISOString()))
-    return 'Choose a future next-review time.';
-  if (waitingReason.value === 'dependency' && !waitingBlocker.value && !form.value.dependencies.length)
-    return 'Choose a blocking task or a task dependency.';
-  if (waitingReason.value === 'capability' && !capabilities.value.length) return 'Choose the required host capabilities.';
+  if (initialState.value === 'waiting' && !nextSteps.value.length) return 'Add a next step and its conditions.';
   return '';
 });
 const images = useAttachmentImages(
@@ -541,7 +524,7 @@ const localDate = (value: string | null) => {
     .toISOString()
     .slice(0, 16);
 };
-const setDate = (key: "dueAt" | "nextReviewAt", event: Event) => {
+const setDate = (key: "dueAt", event: Event) => {
   const value = (event.target as HTMLInputElement).value;
   form.value[key] = value ? new Date(value).toISOString() : null;
 };
@@ -578,12 +561,13 @@ const save = async () => {
         }
       }
       let pin: TaskBoard.ObjectPin | null = current.pin;
-      if (!sameFields(fields, current.value.fields)) {
+      if (!sameFields(fields, current.value.fields) || JSON.stringify(nextSteps.value) !== JSON.stringify(current.value.nextSteps)) {
         const outcome = await action.start("Save task changes", {
           action: "edit",
           taskId: current.pin.objectId,
           expectedRevision: current.pin.revision,
           fields,
+          nextSteps: nextSteps.value,
         });
         pin = outcome?.task ?? null;
       }
@@ -619,11 +603,6 @@ const workerOptions = [
   { value: "user" as const, label: "Me" },
 ];
 const initialStateOptions = Object.keys(stateLabels).map(value => ({ value, label: stateLabel(value) }));
-const waitReasons: { value: TaskBoard.InitialWaiting['reason']; label: string }[] = [
-  { value: 'user', label: 'User input' }, { value: 'time', label: 'Time' },
-  { value: 'dependency', label: 'Task dependency' }, { value: 'host', label: 'Host' },
-  { value: 'capability', label: 'Host capabilities' }, { value: 'workspace', label: 'Workspace' },
-];
 const priorityOptions = [4, 3, 2, 1, 0].map((value) => ({
   value,
   label: priorityLabels[value]!,
@@ -734,40 +713,6 @@ const cancel = () => {
                 :disabled="locked"
             /></Field>
           </div>
-          <template v-if="!task && initialState === 'waiting'">
-            <Field>
-              <Label for="task-wait-reason">Waiting for</Label>
-              <OptionSelect id="task-wait-reason" v-model="waitingReason" :disabled="locked">
-                <option v-for="option in waitReasons" :key="option.value" :value="option.value">{{ option.label }}</option>
-              </OptionSelect>
-            </Field>
-            <Field>
-              <Label for="task-wait-detail">Waiting details</Label>
-              <Input id="task-wait-detail" v-model="waitingDetail" required :maxlength="16384" :disabled="locked" />
-            </Field>
-            <div v-if="['dependency', 'workspace'].includes(waitingReason)" class="grid gap-6 sm:grid-cols-2">
-              <Field>
-                <Label for="task-wait-blocker">Blocking task</Label>
-                <OptionSelect id="task-wait-blocker" v-model="waitingBlocker" :disabled="locked" placeholder="None">
-                  <option value="">None</option>
-                  <option v-for="option in blockerOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                </OptionSelect>
-              </Field>
-              <Field>
-                <Label for="task-wait-until">Wait until</Label>
-                <OptionSelect id="task-wait-until" v-model="waitingUntil" :disabled="locked || !waitingBlocker">
-                  <option value="idle">Idle — ready for review</option>
-                  <option value="done">Done — accepted</option>
-                </OptionSelect>
-              </Field>
-            </div>
-            <Field v-if="waitingReason === 'time' && form.control === 'agent'">
-              <Label for="task-wait-time">Next review</Label>
-              <Input id="task-wait-time" type="datetime-local" :model-value="localDate(form.nextReviewAt)" required
-                :disabled="locked" @change="setDate('nextReviewAt', $event)" />
-            </Field>
-            <FieldDescription v-if="form.control === 'agent'">User input waits for an explicit response. Other waits are checked again automatically.</FieldDescription>
-          </template>
           <Field v-if="!task && form.control === 'user' && ['review', 'done'].includes(initialState)">
             <Label>Final result{{ initialState === 'done' ? ' (optional)' : '' }}</Label>
             <MarkdownEditor v-model="initialSummary" variant="field" label="Final result" :disabled="locked"
@@ -798,15 +743,6 @@ const cancel = () => {
                 :model-value="localDate(form.dueAt)"
                 :disabled="locked"
                 @change="setDate('dueAt', $event)"
-            /></Field>
-            <Field
-              ><Label for="task-review-date">Next review</Label
-              ><Input
-                id="task-review-date"
-                type="datetime-local"
-                :model-value="localDate(form.nextReviewAt)"
-                :disabled="locked"
-                @change="setDate('nextReviewAt', $event)"
             /></Field>
           </div>
         </FieldGroup>
@@ -953,20 +889,10 @@ const cancel = () => {
         </FieldGroup>
       </FieldSet>
 
-      <Field
-        ><Label for="task-blockers">Blockers</Label
-        ><TagPicker
-          id="task-blockers"
-          v-model="form.dependencies"
-          label="Blockers"
-          :options="blockerOptions"
-          placeholder="Search tasks"
-          :empty-text="blockers.loading.value ? 'Loading tasks…' : 'No other task can block this one.'"
-          :disabled="locked || fixed"
-        /><FieldDescription
-          >This task starts after these tasks are done.</FieldDescription
-        ></Field
-      >
+      <FieldSet>
+        <FieldLegend>Next steps</FieldLegend>
+        <NextStepsEditor v-model="nextSteps" :questions="ownQuestions" :tasks="blockerOptions" :disabled="locked || fixed" />
+      </FieldSet>
 
       <Alert v-if="error" variant="destructive"
         ><AlertTitle>Task not saved</AlertTitle

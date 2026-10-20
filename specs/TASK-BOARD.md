@@ -10,8 +10,7 @@ UI requirements: [UI](UI.md).
   per-task output directories. Workflow state, execution condition and user/agent control are separate.
   Category is organizational metadata, not a capability or execution target.
 - Creation stores its selected workflow state directly; omission means Todo for every caller.
-  Explicit Backlog preserves unscheduled preparation. Waiting requires public deferral details
-  and uses `fields.nextReviewAt` for time waits; linked blockers retain their idle/done distinction.
+  Explicit Backlog preserves unscheduled preparation. Waiting requires concrete `nextSteps` with scoped prerequisites.
   Manual In Progress creates no native execution. Manual Review requires an initial final Result;
   initial final material may also accompany manual Done. Agent In Progress and Review require
   their real native claim/completion workflows and cannot be fabricated by creation. Done and
@@ -48,7 +47,7 @@ UI requirements: [UI](UI.md).
 - Explicit `newThread` work creates a new Codex task and queues the existing ticket in Todo.
   Previous contexts remain linked until ticket archival. It requires resolved execution; ordinary continuation reuses the
   current native task. Ticket content, comments, attachments and previous Runs remain available.
-- User-controlled tasks never start autonomously. Agent-controlled Todo work is eligible only
+- User-controlled task work never starts autonomously. Agent-controlled Todo work is eligible only
   when dependencies, timing, an available host and workspace conditions permit it. A missing
   execution requirement inherits the TaskBoard execution default; an explicit automatic
   requirement allocates to the least busy eligible AgentManager;
@@ -85,16 +84,29 @@ UI requirements: [UI](UI.md).
   automatic state notifications. Explicit directed messages and dependencies may cross workspaces.
   Agents coordinate overlapping changes,
   commits and deployments through directed ticket comments; unrelated changes must be preserved.
-  A task may defer with `blocker: {taskId, until: "idle" | "done"}`. Cycles are rejected.
-  Blocked is the board label for `waiting`, including tasks blocked before their first attempt.
+  Tasks defer through scoped next-step conditions. Closed dependency cycles are rejected while independent progress paths remain available.
+  Waiting describes prerequisites, not a pause. Backlog suspends automatic task work;
+  agent waits are edited through their concrete next steps. Fulfilled deliveries and consumed
+  steps do not create future dependency edges. Completion revalidates its next-step graph under
+  the shared publication gate and preserves newer assignments instead of overwriting them.
   Confirmed native usage-limit failures defer agent work until the reported reset, with a one-minute
   grace period. Without a usable reset time, retry after fifteen minutes. Confirmed model-capacity
   failures retry after one minute. Continue with the same model and context; repeated temporary
-  failures defer again. General failures, cancellation and unanswered questions require intervention.
+  failures defer again, including the original conversation comment batch. General failures and
+  cancellation require intervention; an own user condition gates only its applicable scope,
+  including questions posted as replies to another comment.
   When the condition clears, the scheduler rechecks time, dependencies, host and workspace before
   continuing. User-controlled work and Backlog remain unscheduled. A task waiting for a host
   names why each AgentManager was skipped. Manual rank in any board column is the ticket's Hive
   sibling order; it orders the board only, and scheduling still follows priority.
+- Admission enforces `scheduler.maxConcurrentRuns` (default 10) across all unfinished Runs,
+  including conversations, recovery, user input and unknown outcomes. Reconciliation remains
+  available when execution capacity is full. After `scheduler.stallWarningMs` (default five
+  minutes) without observed native progress, diagnostics warn while preserving the original
+  claim. Native activity clears the warning; explicit user-input waits do not count as stalls.
+- Metadata edits preserve Review and Done. Changing an agent assignment reopens those states
+  with an executable next step. Manual Done may retain intermediate material; only Review
+  requires a final Result. Subsequent comments and edits remain valid after manual closure.
 - The agent performs Git lifecycle work from the ticket's explicit workspace/worktree intent.
   TaskBoard and AgentManager do not silently clone, switch branches or alter repositories.
   Completed workspace directories are retained.
@@ -135,57 +147,29 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   approval workflow. Native requests retain their original identities in comments; UI buttons and
   MCP answer them through AgentManager. Responses are mirrored into the same timeline; secret
   answers stay at the native owner.
-- User comments wake current or future agent work, except on Done: those remain notes unless
-  `moveToTodo=true` explicitly reopens the ticket. Title, description and criteria cannot change
-  beneath an active claim; permitted scheduling metadata changes keep revision checks.
+- New user comments and directed agent messages are processed independently of work conditions, including on manual, Done and Cancelled tickets. This does not reopen work or replace its final result; `moveToTodo=true` explicitly reopens Done. Active assignment fields remain fixed and metadata changes use revision checks.
+  A new message re-arms an availability retry once; a failed attempt retains technical backoff.
+  Continuing an existing conversation verifies its native identity, working directory and project
+  against its retained Run instead of reallocating a workspace through complete project inventory.
 - Update prompts contain only the task key, service reference and a request to reread the ticket;
   never copy ticket fields or comment bodies. Running turns receive `turn/steer` with their exact
   expected turn ID. Retained operation receipts acknowledge the original comment batch only.
   Unknown receipts are reconciled before another delivery; a failed steer leaves comments queued
   for the same primary's next turn. Event wakeups and periodic reconciliation share this path.
-- Ordinary agent comments never wake their author. Directed messages use `authorKind=agent`,
-  `sourceTaskId` and explicit `agentDelivery=queue`. Review and blocked recipients with a primary
-  may answer in a coordination-only turn without implementation, reopening review or replacing
-  its result. Done and Cancelled never restart from agent messages. Related-task state changes
-  notify running peers through the same reference-only steering path.
-- Delegated tasks identify their original task with `parentTaskId`; their separate hosts and worktrees
-  do not change that responsibility. The parent reviews saved final results and integration, moves
-  accepted children to Done, and archives them. Waiting on a child uses `until=idle` so its Review can
-  be assessed. Named deliveries (`until=delivery`, `key`) wait for exact published artifact or code
-  references without requiring the whole child to reach Done. Each idle/done or named delivery
-  identity wakes the same work once; repeating an unchanged condition does not create a polling loop.
-  Host capacity, memory admission and execution retry belong to the executing agent system.
-  Coordination-only turns may accept and archive children while preserving the parent's
-  result and blocker. Delegation cycles are rejected. Omitted child contact defaults to ticket;
-  completion is delivered once to the parent through normal directed-comment handling.
-- Agents publish one final comment with `purpose=handoff`, useful output links, actual verification
-  and material limitations. Its structured `handoff` declares overall readiness (`workflowState=review`)
-  or remaining work (`waiting` with public waiting details), and `nextReviewAt` or null.
-  TaskBoard applies this intent with the result only after confirmed native completion; merely ending
-  a successful turn does not establish readiness. Missing intent displays workflow attention separately
-  from an unanswered user question. Completion first reconciles accepted handoff operations under
-  their original Run identity. Only unchanged work under the same claim permits rebasing an
-  unpublished handoff across unrelated ticket revisions.
-  Only actual review readiness sends the configured root completion notification or delivers the delegated result to its parent. Unanswered questions and failed attempts remain
-  Blocked; queued follow-up work returns to Todo unless an explicit blocker remains. Users move root Review to Done using the normal board
-  transition, with no result-acceptance action or extra review state.
-- Ordinary questions remain open until an addressed user reply (`replyTo`), their typed answers,
-  or explicit `resolvesQuestions` with an explanation. Unrelated replies and handoffs never close them.
-  Native questions retain their owner-bound answer workflow. Open questions remain visible during checks.
-  A `questionWait` names the exact ticket and question comment blocking another task; an empty local
-  question count does not answer it. Its addressed answer permits work to resume.
-- A handoff or idle deferral may add `checkScope`, an explicit independent check performed at
-  `nextReviewAt`. TaskBoard schedules it in Blocked or Review despite unanswered ordinary questions,
-  while still enforcing dependencies, host/workspace availability, active claims and unknown outcomes.
-  The retained check-only Run acknowledges field-edit markers already in its pinned snapshot,
-  but does not consume queued discussion, steer into general work, replace a
-  result awaiting Review or repeat its completion notification. New discussion waits for a normal Run.
-  Each check explicitly renews its future date/scope or clears it. Resolved native failures or missing
-  check intent retain the scope, publish a visible failure and retry after fifteen minutes (or the
-  native reset time), preserving a confirmed later date or an explicit timer stop.
-  Owner-reported `checkFailure` likewise stays visible until a successful check.
-  Scheduling belongs to TaskBoard; no second scheduling assignment is required. Durable claims and
-  original operation reconciliation prevent duplicate starts across restarts and missed notifications.
+- Ordinary agent updates never wake their author. Directed messages explicitly name sourceTaskId and queue delivery.
+- Independent next steps have id, scope and requires: AND within a step, OR across steps. Conditions
+  are time, task idle/done, named delivery and own user question. Automatic paths take precedence over User.
+  No cross-ticket question gate or work/check mode exists. Comment processing preserves existing prerequisites.
+- Questions remain local and open until an addressed answer or explained resolution. All cards with
+  own pending questions have a yellow border. Full pending questions stay at the bottom above the composer.
+- Verification findings, execution errors and unavailable evidence belong in ordinary result text,
+  comments and attachments, not structured check lists or board badges. Preserve earlier findings and
+  exact evidence references when reading retained records. Repeated observations explicitly publish
+  their next time condition; unrelated comments never shift it.
+- Delegated tasks retain parentTaskId. Parents review exact child results at idle, accept and archive
+  completed children. Named deliveries can unblock independent scopes before overall completion.
+- A confirmed native completion applies its structured handoff with workflowState and nextSteps.
+  Only overall Review readiness notifies the user. Missing handoffs recover in the same context.
 - Serialize publication per Task until the first Task write has durably retained the owning
   Operation marker. Root coordination additionally covers shared category and dependency graph
   changes. That marker and Task CAS then protect the unfinished publication while up to twenty
@@ -217,9 +201,8 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
 
 ## Recovery and contact
 
-- Execution mode is one of work, coordination, independent check or completion recovery.
-  Admission and scheduling share mode selection; the owner validates mode-specific writes.
-  Missing handoffs take priority over peer coordination, without consuming queued discussion.
+- Technical execution paths are scoped execution, conversation processing and completion recovery.
+  New external comments are processed first without removing recovery evidence or work prerequisites.
   Recover the original accepted publication first. After confirmed native termination, a
   recovery-only continuation reuses the same context to publish existing work, never to repeat
   implementation or uncertain effects. Its original Run and necessary evidence remain protected.
@@ -229,11 +212,9 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   the durable attempt count. Explicit stops, user control and genuine questions remain binding.
   An explicit move to Todo rearms the bounded handoff recovery in the existing context,
   or clears a terminal execution error so the original work can be retried.
-- A handoff may select Todo with a concrete `nextStep` and a null review date to continue
-  already authorized work. Waiting details and check scopes are forbidden on this disposition.
-  Unchanged committed/output evidence may continue twice before a visible no-progress fault.
-  Technical failed or recovery outcomes do not replace a previously saved work result.
-  Operational recovery failures remain visible independently of service readiness.
+- A handoff may select Todo with concrete nextSteps to continue authorized work. Each unchanged step
+  fingerprint is consumed once; agents publish changed scope, prerequisites or deliveries to resume.
+  Technical failures do not replace previously saved results. Recovery failures remain independently visible.
 
 - Reconcile unfinished claims/publications before fresh work. Fair bounded scans recover missed
   claims whose Run is terminal through their original completion operation; age alone never clears

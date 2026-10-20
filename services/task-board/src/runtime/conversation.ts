@@ -1,3 +1,4 @@
+import { openTaskQuestions } from '../../../../packages/sdk/src/client.js';
 import type { TaskBoard } from '../../../../packages/sdk/src/node.js';
 
 /** Directed comments from a different ticket; a ticket's own worker stays visible. */
@@ -20,20 +21,7 @@ export function runHandoff(task: TaskBoard.Task, runId: string): TaskBoard.Comme
 }
 
 /** Only an addressed answer or an explicit resolution closes a ticket question. */
-export function openQuestions(task: Pick<TaskBoard.Task, 'comments'>, runId?: string): TaskBoard.Comment[] {
-  return task.comments.filter((comment, index) => {
-    if (comment.purpose !== 'question' || comment.sourceTaskId || comment.replyTo) return false;
-    if (comment.nativeInput) {
-      if (runId && comment.run?.objectId !== runId) return false;
-      return !task.comments.slice(index + 1).some(reply => reply.replyTo === comment.commentId && !!reply.nativeInput && ['answered', 'expired'].includes(reply.nativeInput.state));
-    }
-    return !task.comments.slice(index + 1).some(reply =>
-      reply.resolvesQuestions?.includes(comment.commentId) ||
-      reply.authorKind === 'user' && reply.replyTo === comment.commentId ||
-      comment.requests.length > 0 && comment.requests.every(request =>
-        task.comments.slice(index + 1).some(answer => answer.responses.some(response => response.requestId === request.requestId))));
-  });
-}
+export const openQuestions = openTaskQuestions;
 
 export function unansweredQuestion(task: TaskBoard.Task, runId: string): boolean {
   return openQuestions(task, runId).length > 0;

@@ -213,9 +213,10 @@ for (const bound of ["count", "bytes"] as const) {
     const saved = await f.first.store.read("task-board/task", result.task!);
     assert.equal(saved.value.publication, null);
     assert.equal(saved.value.workflowState, "review");
-    assert.deepEqual(saved.value.comments, comments);
+    assert.deepEqual(saved.value.comments.slice(0, comments.length), comments);
+    assert.equal(saved.value.comments.length, comments.length + (bound === "count" ? 1 : 0));
     assert.equal((await f.first.store.read("task-board/result", result.result!)).value.content.summary, summary);
-    assert.equal((await f.first.store.page("task-board/delivery")).items.length, 0);
+    assert.equal((await f.first.store.page("task-board/delivery")).items.length, bound === "count" ? 1 : 0);
   });
 }
 
@@ -441,7 +442,8 @@ test("category projection bounds results and avoids full-family scans after a 10
       taskKey: "TASK-" + id,
       fields: { ...fields, category: "Updated " + (id % 300) },
       workflowState: "backlog",
-      waiting: null,
+      runtimeWait: null,
+      nextSteps: [],
       publication: null,
       primaryResourceRef: null,
       claim: null,
@@ -1030,7 +1032,7 @@ test("Backlog-to-Todo is explicit and agent execution is scheduler-owned", async
   );
   assert.deepEqual(f.first.condition(automaticTask.value), {
     state: "queued",
-    detail: "Waiting for the next available execution PC.",
+    detail: "Waiting for an authorized next step.",
   });
   await assert.rejects(
     f.first.schedule({
@@ -1052,9 +1054,9 @@ test("Backlog-to-Todo is explicit and agent execution is scheduler-owned", async
         useWorktree: false,
         repository: null,
       },
-      commentIds: [],
+      commentIds: [], nextStepId: 'main',
     }),
-    code("task_board_user_controlled"),
+    code("task_board_invalid_transition"),
   );
   const moved = await f.invoke({
     action: "transition",
@@ -1087,7 +1089,7 @@ test("Backlog-to-Todo is explicit and agent execution is scheduler-owned", async
   );
   assert.deepEqual(f.first.condition(manualTask.value), {
     state: "needs_user",
-    detail: "Ready for you to start.",
+    detail: "Ready for manual work.",
   });
   const backlog = await f.invoke({
     action: "transition",
@@ -1138,9 +1140,9 @@ test("comments are immutable task material without scheduling user-controlled wo
   });
   const task = await f.first.store.read("task-board/task", comment.task!);
   assert.equal(task.value.workflowState, "done");
-  assert.equal(task.value.workRevision, 0);
+  assert.equal(task.value.workRevision, 1);
   assert.equal(task.value.comments.at(-1)?.body, "Please improve this.");
-  assert.deepEqual(task.value.commentDeliveries, []);
+  assert.equal(task.value.commentDeliveries.at(-1)?.state, "queued");
 });
 
 test("editing an agent ticket queues a system event instead of a user comment", async (t) => {
@@ -1166,7 +1168,7 @@ test("scheduler start retains resolved target, workspace and inline plan", async
     intent: planned.plan,
     target: planned.target,
     workspace: planned.workspace,
-    commentIds: [],
+    commentIds: [], nextStepId: 'main',
   };
   const started = await f.first.schedule(request);
   const run = await f.first.store.read("task-board/run", started.run!);
@@ -1184,7 +1186,7 @@ test("failed actions only release their own workspace reservation", async (t) =>
   const f = taskBoardFixture(t), planned = await f.planned("agent", { kind: "directory_path", path: String(f.plan.threadStart.cwd) }), other = await f.create();
   const request: TaskBoard.StartRequest = { action: "start", operationId: "shared-workspace-operation",
     taskId: planned.task.objectId, expectedRevision: planned.task.revision, intent: planned.plan,
-    target: planned.target, workspace: planned.workspace, commentIds: [] };
+    target: planned.target, workspace: planned.workspace, commentIds: [], nextStepId: 'main' };
   const write = f.first.store.writePrepared.bind(f.first.store);
   f.first.store.writePrepared = async (...args: Parameters<TaskBoardStore["writePrepared"]>) => {
     if (args[0] === "task-board/task") throw new IvyError("revision_conflict", "Concurrent Task write.");
@@ -1225,7 +1227,7 @@ test("parallel opt-in admits another Task and explicit reservations still transf
     intent: value.plan,
     target: value.target,
     workspace: value.workspace,
-    commentIds: [],
+    commentIds: [], nextStepId: 'main',
   });
   const active = await f.first.schedule(start(first, "first-workspace"));
   const concurrent = await f.first.schedule(start(second, "second-workspace"));
@@ -1450,7 +1452,8 @@ test("dependency intents become visible in the first Task reservation and reject
     operationId: aId,
     taskId: a.task!.objectId,
     expectedRevision: a.task!.revision,
-    fields: { ...fields, dependencies: [b.task!.objectId] },
+    fields,
+    nextSteps: [{ id: 'peer', scope: 'Wait for B.', requires: [{ kind: 'task', taskId: b.task!.objectId, until: 'done' }] }],
   });
   await reservationEntered;
   const editB = f.invoke({
@@ -1458,7 +1461,8 @@ test("dependency intents become visible in the first Task reservation and reject
     operationId: bId,
     taskId: b.task!.objectId,
     expectedRevision: b.task!.revision,
-    fields: { ...fields, dependencies: [a.task!.objectId] },
+    fields,
+    nextSteps: [{ id: 'peer', scope: 'Wait for A.', requires: [{ kind: 'task', taskId: a.task!.objectId, until: 'done' }] }],
   });
   await assert.rejects(editB, code("task_board_publication_busy"));
   release();
@@ -1471,13 +1475,11 @@ test("dependency intents become visible in the first Task reservation and reject
     code("task_board_dependency_cycle"),
   );
   assert.deepEqual(
-    (await f.first.store.read("task-board/task", a.task!.objectId)).value.fields
-      .dependencies,
+    (await f.first.store.read("task-board/task", a.task!.objectId)).value.nextSteps[0]?.requires.map(condition => 'taskId' in condition ? condition.taskId : null) ?? [],
     [b.task!.objectId],
   );
   assert.deepEqual(
-    (await f.first.store.read("task-board/task", b.task!.objectId)).value.fields
-      .dependencies,
+    (await f.first.store.read("task-board/task", b.task!.objectId)).value.nextSteps[0]?.requires.map(condition => 'taskId' in condition ? condition.taskId : null) ?? [],
     [],
   );
 });
@@ -1573,8 +1575,10 @@ test("a plain worker question needs no typed request and any user comment resume
     replyTo: "plain-question-comment",
   });
   const repliedTask = await f.first.store.read("task-board/task", replied.task!);
-  assert.equal(repliedTask.value.workflowState, "todo");
-  assert.equal(repliedTask.value.waiting, null);
+  assert.equal(repliedTask.value.workflowState, "waiting");
+  assert.equal(repliedTask.value.openQuestionCount, 0);
+  assert.deepEqual(repliedTask.value.nextSteps, askedTask.value.nextSteps);
+  assert.equal(repliedTask.value.runtimeWait, null);
   assert.equal(
     repliedTask.value.commentDeliveries.at(-1)?.commentId,
     "plain-answer-comment",
@@ -1683,7 +1687,7 @@ test("material field edits during an active claim are rejected", async (t) => {
     intent: planned.plan,
     target: planned.target,
     workspace: planned.workspace,
-    commentIds: [],
+    commentIds: [], nextStepId: 'main',
   });
   const task = await f.first.store.read("task-board/task", started.task!);
   await assert.rejects(
@@ -1703,7 +1707,7 @@ test("contact edits during an active claim preserve the running assignment with 
   const started = await f.first.schedule({
     action: "start", operationId: "contact-claim", taskId: planned.task.objectId,
     expectedRevision: planned.task.revision, intent: planned.plan, target: planned.target,
-    workspace: planned.workspace, commentIds: [],
+    workspace: planned.workspace, commentIds: [], nextStepId: 'main',
   });
   const before = await f.first.store.read("task-board/task", started.task!);
   assert.equal(before.value.workflowState, "in_progress");
@@ -1719,7 +1723,7 @@ test("contact edits during an active claim preserve the running assignment with 
   const after = (await f.first.store.read("task-board/task", edited.task!)).value;
   assert.equal(after.fields.userContact, "chat");
   assert.equal(after.workflowState, "in_progress");
-  for (const key of ["claim", "lastRun", "primaryResourceRef", "attemptCount", "waiting", "workRevision", "commentDeliveries"] as const)
+  for (const key of ["claim", "lastRun", "primaryResourceRef", "attemptCount", "runtimeWait", "workRevision", "commentDeliveries"] as const)
     assert.deepEqual(after[key], before.value[key], key);
   for (const change of [{ requiredCapabilities: ["audio"] }, { nativeOptions: { model: null, reasoningEffort: "low", serviceTier: null } }]) {
     await assert.rejects(f.invoke({

@@ -21,8 +21,7 @@ test('an unavailable input owner does not prevent Run recovery', async t => {
 test('periodic scans give recovery a turn even when the same waiting Task is always schedulable', async t => {
   const w = await nativeWorkflow(t); await w.running();
   const waiting = await w.f.planned('agent');
-  await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: waiting.task.objectId,
-    expectedRevision: waiting.task.revision, reason: 'host', detail: 'Provider connection is closed.', nextReviewAt: null });
+  await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: waiting.task.objectId, expectedRevision: waiting.task.revision, nextSteps: [{ id: 'next', scope: 'Provider connection is closed.', requires: [] }] });
   const runtime = new TaskBoardReconciler(w.f.first);
   let recovered = 0, scheduled = 0;
   runtime.native.drain = async () => { recovered++; return true; };
@@ -169,7 +168,7 @@ test('a completed Run clears its previous recovery failure after leaving the act
   assert.deepEqual(runtime.diagnostics, []);
 });
 
-test("reconciliation excludes Backlog and discovers Todo after startup recovery", async (t) => {
+test("reconciliation includes discussion-only states and discovers Todo after startup recovery", async (t) => {
   const f = taskBoardFixture(t),
     backlog = await f.create({ control: "agent" }),
     moved = await f.create({ control: "agent" });
@@ -183,7 +182,7 @@ test("reconciliation excludes Backlog and discovers Todo after startup recovery"
   for (let index = 0; index < 6; index++) await step(runtime);
   assert.equal(runtime.recovered, true);
   assert.ok(seen.includes(moved.task!.objectId));
-  assert.ok(!seen.includes(backlog.task!.objectId));
+  assert.ok(seen.includes(backlog.task!.objectId));
 });
 
 test("idle reconciliation does not initialize or poll the category projection", async (t) => {

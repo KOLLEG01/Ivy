@@ -104,7 +104,7 @@ test('cancellation waits for both prepared turn and reattachment prevention befo
   await w.observe('turn', turn, null, 'failed', 'unused', fenced);
   const pending = await w.f.first.store.read('task-board/run', w.state().run), task = await w.f.first.store.read('task-board/task', w.state().task);
   assert.equal(pending.value.phase, 'cancel_requested'); assert.equal(pending.value.result, null); assert.equal(task.value.workflowState, 'waiting');
-  assert.equal(task.value.waiting!.reason, 'external_outcome');
+  assert.equal(task.value.runtimeWait!.reason, 'external_outcome');
   await w.observe('thread', resume, null, 'failed', 'unused', fenced);
   const cancelled = await w.f.first.store.read('task-board/run', w.state().run);
   assert.equal(cancelled.value.phase, 'cancelled'); assert.equal(cancelled.value.externalOutcome.code, 'cancelled_before_dispatch');

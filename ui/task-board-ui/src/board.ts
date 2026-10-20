@@ -15,27 +15,25 @@ export const waitingGroups = [
   { id: 'ready', title: tr('Bereit', 'Ready') },
   { id: 'unscheduled', title: tr('Ohne Wiederanlauf', 'Unscheduled') },
 ] as const;
-export function waitingGroup(task: TaskBoard.TaskCard, condition: TaskBoard.ExecutionCondition, dependency: boolean, now = Date.now()) {
-  if (task.openQuestionCount || task.questionWait || task.waiting?.reason === 'user' || task.claim?.phase === 'waiting_input') return 'user';
-  if (dependency || task.blocker || task.waiting?.reason === 'dependency') return 'dependency';
+export function waitingGroup(task: TaskBoard.TaskCard, condition: TaskBoard.ExecutionCondition, dependency = false, now = Date.now()) {
+  if (condition.state === 'deferred') return 'time';
+  if (condition.state === 'blocked_dependency') return 'dependency';
   if (['blocked_environment', 'outcome_unknown', 'recovering', 'workflow_attention'].includes(condition.state)) return 'runtime';
-  if (task.fields.nextReviewAt && Date.parse(task.fields.nextReviewAt) > now) return 'time';
-  if (task.workflowState === 'todo' && task.fields.control === 'user' && !task.waiting) return 'user';
-  // Ready Todo has no invented wait; a wait without a real restart date is explicitly unscheduled.
-  return task.workflowState === 'todo' && !task.waiting ? 'ready' : 'unscheduled';
+  if (condition.state === 'needs_user' || task.claim?.phase === 'waiting_input') return 'user';
+  return condition.state === 'queued' ? 'ready' : 'unscheduled';
 }
 /** Matches TaskBoard: after any attempt, claim, Run or native context the host and project are fixed. */
 export const taskStarted = (task: TaskBoard.Task) =>
   task.attemptCount > 0 || !!task.claim || !!task.lastRun || !!task.primaryResourceRef;
 export type BoardTransition = Exclude<TaskBoard.Task['workflowState'], 'review'>;
 export interface TransitionContext { workflowState: TaskBoard.Task['workflowState']; control: TaskBoard.TaskFields['control']; claimed: boolean; waiting: string; hasResult: boolean; publishing: boolean }
-export const taskContext = (task: TaskBoard.Task): TransitionContext => ({ workflowState: task.workflowState, control: task.fields.control, claimed: !!task.claim, waiting: task.waiting?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication });
+export const taskContext = (task: TaskBoard.Task): TransitionContext => ({ workflowState: task.workflowState, control: task.fields.control, claimed: !!task.claim, waiting: task.runtimeWait?.reason ?? '', hasResult: !!task.latestResult, publishing: !!task.publication });
 export function transitions(task: TransitionContext): Array<{ action: BoardTransition; label: string }> {
   if (task.publishing || task.claimed || task.waiting === 'external_outcome' || task.workflowState === 'cancelled') return [];
   const result: Array<{ action: BoardTransition; label: string }> = [];
   if (['backlog', 'waiting', 'review', 'done'].includes(task.workflowState)) result.push({ action: 'todo', label: 'Move to Todo' });
   if (task.control === 'user' && task.workflowState === 'todo') result.push({ action: 'in_progress', label: 'Start manual work' });
-  if (['todo', 'in_progress'].includes(task.workflowState)) result.push({ action: 'waiting', label: 'Mark blocked' });
+  if (task.control === 'user' && ['todo', 'in_progress'].includes(task.workflowState)) result.push({ action: 'waiting', label: tr('Auf wartend setzen', 'Mark waiting') });
   if (['in_progress', 'waiting', 'review'].includes(task.workflowState)) result.push({ action: 'done', label: 'Move to Done' });
   if (task.workflowState !== 'backlog') result.push({ action: 'backlog', label: 'Move to Backlog' });
   if (task.workflowState !== 'done') result.push({ action: 'cancelled', label: 'Cancel task' });
@@ -52,7 +50,7 @@ export const conditionTone = (condition: string): Tone =>
   condition.startsWith('blocked') || condition === 'outcome_unknown' ? 'bad' : ['needs_user', 'publishing', 'starting', 'recovering', 'workflow_attention'].includes(condition) ? 'warning' : condition === 'active' ? 'good' : 'neutral';
 /** Cards only surface conditions that ask for attention; the column already states ordinary progress. */
 export const noteworthyCondition = (condition: string) => !['idle', 'active', 'queued'].includes(condition);
-export const stateLabels: Record<string, string> = { backlog: 'Backlog', todo: 'Todo', in_progress: 'In progress', waiting: 'Blocked', review: 'Review', done: 'Done', cancelled: 'Cancelled' };
+export const stateLabels: Record<string, string> = { backlog: 'Backlog', todo: 'Todo', in_progress: 'In progress', waiting: tr('Wartend', 'Waiting'), review: 'Review', done: 'Done', cancelled: 'Cancelled' };
 export const stateLabel = (state: string) => stateLabels[state] ?? state.replaceAll('_', ' ');
 export const priorityLabels: Record<number, string> = { 4: 'Urgent', 3: 'High', 2: 'Medium', 1: 'Low', 0: 'Lowest' };
 export const priorityLabel = (priority: unknown) => typeof priority === 'number' ? priorityLabels[priority] ?? 'P' + priority : 'None';
@@ -61,3 +59,6 @@ export const stateIcons = { backlog: CircleDashed, todo: Circle, in_progress: Ci
 export const stateColors: Record<string, string> = { in_progress: 'text-amber-500', review: 'text-sky-500', done: 'text-emerald-500', cancelled: 'text-muted-foreground' };
 /** Where a Task is ranked: before another Task or at the end (null), after another Task, or first among the given column states. */
 export type Placement = { before: string | null } | { after: string } | { top: string[] };
+
+export const nextStepTime = (task: Pick<TaskBoard.Task, 'nextSteps'>): string | null =>
+  task.nextSteps.flatMap(step => step.requires.filter(condition => condition.kind === 'time').map(condition => condition.at)).sort()[0] ?? null;

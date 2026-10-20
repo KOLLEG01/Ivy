@@ -49,15 +49,11 @@ Object.assign(defs, {
   Artifact: obj({ object: ref('ObjectPin'), label: str(512, 1), mediaType: str(256, 1), contentHash: hash, byteLength: integer(0, 8388608) }, ['object', 'label', 'mediaType', 'contentHash']),
   CodeReference: obj({ kind: { enum: ['repository', 'commit', 'pull_request', 'issue', 'file'] },
     url: { ...str(4096, 1), pattern: '^https?://' }, label: str(512, 1), commit: nullable(str(128, 1)) }),
-  Check: obj({ name: str(512, 1), status: { enum: ['passed', 'failed', 'not_run', 'blocked'] },
-    detail: str(16384), evidence: array(ref('Artifact'), 32) }),
   RepositoryResult: obj({ hostId: id, serviceNodeId: id, project: resource, repositoryName: str(512, 1), branch: nullable(str(512, 1)), commit: nullable(str(128, 1)),
     originName: nullable(str(128, 1)), originUrl: nullable(str(4096, 1)), originState: { enum: ['confirmed', 'local_only', 'no_origin', 'unknown'] },
     remoteRef: nullable(str(512, 1)), observedAt: timestamp, limitation: nullable(str(16384, 1)) }),
-  ResultContent: obj({ summary: str(1048576, 1), artifacts: array(ref('Artifact')), checks: array(ref('Check')),
+  ResultContent: obj({ summary: str(1048576, 1), artifacts: array(ref('Artifact')),
     codeReferences: array(ref('CodeReference')), repositoryResult: nullable(ref('RepositoryResult')), limitations: array(str(16384, 1), 128) }),
-  Waiting: obj({ reason: { type: 'string', enum: ['user', 'time', 'dependency', 'host', 'capability', 'workspace', 'external_outcome', 'publication', 'workflow'] },
-    detail: str(16384, 1), since: timestamp }),
   ChatTarget: obj({ serviceNodeId: id, expectedBridge: chat('ExpectedBridge'), channel: chat('Channel') }),
   PhoneTarget: obj({ serviceNodeId: id, recipientId: id }),
   TaskFields: obj({ title: str(512, 1), description: str(1048576), acceptanceCriteria: array(str(16384, 1)), category: nullable(str(128, 1)),
@@ -66,11 +62,10 @@ Object.assign(defs, {
     executionRequirement: { ...nullable(ref('ExecutionRequirement')), description: 'Required field. null inherits TaskBoard defaults; automatic selects any eligible PC; host restricts scheduling to that PC.' },
     nativeOptions: ref('NativeOptions'),
     workspaceRequirement: { ...ref('WorkspaceRequirement'), description: 'Required workspace policy for this task. Choose one kind deliberately; TaskBoard resolves it on the selected host before starting agent work.' },
-    dependencies: { ...array(id), uniqueItems: true },
     requiredCapabilities: { ...array({ ...str(64, 1), pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }, 32), uniqueItems: true, description: 'Capability keys the selected host must advertise before agent work starts. Missing means none.' },
     userContact: { type: 'string', enum: ['ticket', 'chat', 'phone'], default: 'ticket' },
     allowParallel: bool,
-    nextReviewAt: nullable(timestamp), dueAt: nullable(timestamp) }),
+    dueAt: nullable(timestamp) }),
   TaskAttachment: obj({ attachmentId: id, object: ref('ObjectPin'), filename: str(512, 1), mediaType: str(256, 1), byteLength: integer(0, 8388608),
     contentHash: hash, uploader: ref('Actor'), createdAt: timestamp }),
   ApprovalRequest: obj({ requestId: id, type: { const: 'approval' }, title: str(512, 1), detail: str(16384) }),
@@ -97,7 +92,7 @@ Object.assign(defs.Comment.properties, {
   sourceTaskId: id,
 });
 defs.TaskFields.required = defs.TaskFields.required.filter(key => key !== 'nativeOptions' && key !== 'requiredCapabilities' && key !== 'allowParallel');
-defs.TaskCardFields = obj(Object.fromEntries(['title', 'category', 'control', 'priority', 'executionRequirement', 'nextReviewAt', 'dueAt', 'dependencies'].map(key => [key, defs.TaskFields.properties[key]])));
+defs.TaskCardFields = obj(Object.fromEntries(['title', 'category', 'control', 'priority', 'executionRequirement', 'dueAt'].map(key => [key, defs.TaskFields.properties[key]])));
 defs.TaskFieldsInput = { ...defs.TaskFields, properties: { ...defs.TaskFields.properties,
   userContact: { type: 'string', enum: ['ticket', 'chat', 'phone'],
     description: 'Contact route: ticket records only in the ticket; chat also contacts Main; phone also contacts by voice. Omit on root creation to inherit task_configuration defaults.userContact; delegated creation defaults to ticket and delivers completion to the parent. Omit on edit to preserve the setting.' },
@@ -116,7 +111,7 @@ Object.assign(defs, {
   EditRequest: action('edit', { fields: ref('TaskFieldsInput') }),
   TransitionRequest: action('transition', { workflowState: { enum: ['backlog', 'todo', 'in_progress', 'waiting', 'done', 'cancelled'] }, detail: nullable(str(16384, 1)) }),
   StartRequest: action('start', { target: ref('Target'), intent: ref('ObjectPin'), workspace: ref('WorkspaceResolution'), commentIds: array(id, 256) }),
-  DeferRequest: action('defer', { reason: { enum: ['user', 'time', 'dependency', 'host', 'capability', 'workspace'] }, detail: str(16384, 1), nextReviewAt: nullable(timestamp) }),
+  DeferRequest: action('defer', {}),
   ReassignRequest: action('reassign', { executionRequirement: nullable(ref('ExecutionRequirement')), workspaceRequirement: ref('WorkspaceRequirement'),
     reason: str(16384, 1), previousRun: nullable(ref('ObjectPin')), acknowledgeUnresolved: bool }),
   NewThreadRequest: action('newThread', { reason: str(16384, 1) }),
@@ -150,9 +145,9 @@ Object.assign(defs, {
   MarkCommentsReadResult: obj({ task: ref('ObjectPin'), readState: ref('ObjectPin'), unreadAgentComments: integer(), unreadDirectAgentComments: integer() }),
   ExecutionCondition: obj({ state: { enum: ['idle', 'queued', 'allocating', 'starting', 'active', 'needs_user', 'deferred', 'blocked_dependency', 'blocked_environment', 'recovering', 'outcome_unknown', 'publishing', 'workflow_attention'] }, detail: str(2048) }),
   TaskView: obj({ object: ref('ObjectPin'), task: ref('Task'), executionCondition: ref('ExecutionCondition'), unreadAgentComments: integer(), unreadDirectAgentComments: integer() }),
-  TaskCard: obj({ taskKey: id, fields: ref('TaskCardFields'), workflowState: { enum: workflowStates }, waiting: nullable(ref('Waiting')),
+  TaskCard: obj({ taskKey: id, fields: ref('TaskCardFields'), workflowState: { enum: workflowStates },
     claim: nullable(ref('Claim')), publication: nullable(ref('ObjectPin')), latestResult: nullable(ref('ObjectPin')),
-    openQuestionCount: integer(), questionWait: nullable(ref('QuestionWait')), blocker: nullable(ref('Blocker')), scheduledCheckFailure: str(2048) }),
+    openQuestionCount: integer() }),
   TaskCardView: obj({ object: ref('ObjectPin'), task: ref('TaskCard'), executionCondition: ref('ExecutionCondition'),
     unreadAgentComments: integer(), unreadDirectAgentComments: integer(), commentCount: integer(), directCommentCount: integer() }),
   ReadResult: { anyOf: [ref('TaskView'), ref('TaskCardView')] },
@@ -165,42 +160,26 @@ Object.assign(defs.CommentActionRequest.properties, {
   authorKind: { enum: ['user', 'agent'], description: 'Use agent for worker-authored comments; these never enqueue their own execution.' },
   purpose: { enum: ['update', 'question', 'handoff'], description: 'Use question when waiting for user input and handoff for the final delivery. TaskBoard owns the transition after the turn ends.' },
   contactUser: { type: 'boolean', description: 'Request contact through the configured Main or voice route for an important question. Routine updates stay in the ticket. Completion contact is automatic.' },
-  moveToTodo: { type: 'boolean', description: 'Explicitly reopen a Done task with this comment. Otherwise comments on Done tasks do not schedule work.' },
+  moveToTodo: { type: 'boolean', description: 'Explicitly reopen a Done task with this comment. Otherwise new comments are processed without reopening task work.' },
   nativeInput: agent('PendingInput'),
   handoff: { ...ref('Handoff'), description: 'Required for a worker handoff. Declare whether the overall task is ready for review or remains waiting. Applied only after confirmed native completion.' },
   resolvesQuestions: { ...array(id, 32), uniqueItems: true, description: 'Explicitly resolve these ordinary ticket questions with the explanation in body. Native inputs must be answered at their owner.' },
 });
-defs.Blocker = obj({ taskId: id, until: { enum: ['idle', 'done', 'delivery'] }, key: id }, ['taskId', 'until']);
-defs.Blocker.allOf = [{ if: { properties: { until: { const: 'delivery' } } }, then: { required: ['key'] }, else: { not: { required: ['key'] } } }];
-defs.BlockerObservation = obj({ blocker: ref('Blocker'), fingerprint: hash });
-defs.QuestionWait = obj({ taskId: id, commentId: id });
 defs.WorkDelivery = obj({ key: id, artifacts: array(ref('Artifact'), 32), codeReferences: array(ref('CodeReference'), 32) });
 defs.WorkDelivery.allOf = [{ anyOf: [{ properties: { artifacts: { minItems: 1 } } }, { properties: { codeReferences: { minItems: 1 } } }] }];
 defs.DeliveryReceipt = obj({ delivery: ref('WorkDelivery'), identity: hash, result: ref('ObjectPin') });
 defs.CompletionIssue = obj({ code: id, detail: str(2048, 1), run: ref('ObjectPin'), operationId: id,
   attempts: integer(0, 2), retryAt: nullable(timestamp) }, ['code', 'detail', 'run', 'operationId']);
-defs.DeferRequest.properties.blocker = ref('Blocker');
-defs.InitialWaiting = obj({ reason: defs.DeferRequest.properties.reason, detail: str(16384, 1), blocker: ref('Blocker') }, ['reason', 'detail']);
-defs.ScheduledCheck = obj({ scope: str(16384, 1), failure: obj({ code: id, detail: str(2048, 1), at: timestamp }) }, ['scope']);
-defs.Handoff = obj({ workflowState: { enum: ['review', 'waiting', 'todo'] }, waiting: ref('InitialWaiting'), nextStep: str(4096, 1),
-  nextReviewAt: nullable(timestamp), checkScope: str(16384, 1), checkFailure: obj({ code: id, detail: str(2048, 1) }),
-  deliveries: array(ref('WorkDelivery'), 32), questionWait: nullable(ref('QuestionWait')) }, ['workflowState', 'nextReviewAt']);
-// State-dependent handoff rules are enforced together with questions, modes and timing by the owner.
 defs.Comment.properties.handoff = ref('Handoff');
 defs.Comment.properties.resolvesQuestions = { ...array(id, 32), uniqueItems: true };
-defs.DeferRequest.properties.checkScope = str(16384, 1);
-defs.DeferRequest.properties.questionWait = nullable(ref('QuestionWait'));
 defs.DeferRequest.properties.recoveryRetryAt = nullable(timestamp);
 Object.assign(defs.CreateRequest.properties, {
   workflowState: { type: 'string', enum: workflowStates,
     description: 'Initial workflow state; omitted means todo. Agent in_progress requires a real scheduler claim and cannot be created directly. Review requires an initial manual final Result.' },
-  waiting: { ...ref('InitialWaiting'), description: 'Required only for waiting. nextReviewAt stays in fields; the service sets since. Internal recovery reasons cannot be supplied.' },
   initialResult: { ...ref('ResultContent'), description: 'Manual final material for a user-controlled review or done task. Required for review; does not claim native execution.' },
 });
 defs.ContinueRequest.properties.coordinationOnly = bool;
 defs.ContinueRequest.properties.recoveryFor = ref('ObjectPin');
-defs.StartRequest.properties.checkOnly = bool;
-defs.ContinueRequest.properties.checkOnly = bool;
 defs.ExecutionRequest = { oneOf: [ref('StartRequest'), ref('ContinueRequest')] };
 defs.ActionRequest = { oneOf: ['Configure', 'SavePlan', 'Create', 'Edit', 'Transition', 'Defer', 'Reassign', 'NewThread', 'Cancel', 'Review', 'SaveResult', 'CommentAction', 'UploadAttachment'].map(name => ref(name + 'Request')) };
 defs.ActionInput = { oneOf: defs.ActionRequest.oneOf.map(value => value.$ref.endsWith('/SavePlanRequest') ? ref('SavePlanInput') : value) };
@@ -210,12 +189,11 @@ Object.assign(defs, {
     claimedAt: timestamp, phase: { enum: ['claimed', 'run_created', 'starting', 'running', 'waiting_input', 'publishing_result', 'cancel_requested', 'outcome_unknown'] },
     run: nullable(ref('ObjectPin')) }),
   Task: obj({ schemaVersion: { const: 1 }, taskKey: { ...id, pattern: '^TASK-[0-9]{4,}$' }, fields: ref('TaskFields'),
-    blocker: ref('Blocker'),
     workflowState: { type: 'string', enum: ['backlog', 'todo', 'in_progress', 'waiting', 'review', 'done', 'cancelled'] },
-    waiting: nullable(ref('Waiting')), publication: nullable(ref('ObjectPin')), primaryResourceRef: nullable(resource), claim: nullable(ref('Claim')),
+    publication: nullable(ref('ObjectPin')), primaryResourceRef: nullable(resource), claim: nullable(ref('Claim')),
     attemptCount: integer(), lastRun: nullable(ref('ObjectPin')), lastHistory: nullable(ref('ObjectPin')),
     latestResult: nullable(ref('ObjectPin')), acceptedReview: nullable(ref('ObjectPin')),
-    comments: array(ref('Comment'), 512), commentDeliveries: array(ref('CommentDelivery'), 512), agentCommentCount: integer(), workRevision: integer(),
+    comments: { type: 'array', items: ref('Comment') }, commentDeliveries: { type: 'array', items: ref('CommentDelivery') }, agentCommentCount: integer(), workRevision: integer(),
     attachments: array(ref('TaskAttachment'), 256), createdAt: timestamp, updatedAt: timestamp }),
   NativeCallOrigin: { oneOf: [obj({ kind: { const: 'initial' } }), obj({ kind: { const: 'reattach' }, predecessor: ref('ObjectPin'), preparedEpoch: id }),
     obj({ kind: { const: 'steer' }, commentIds: array(id, 512), workRevision: integer(), peersHash: hash, predecessor: nullable(ref('ObjectPin')) })] },
@@ -246,18 +224,11 @@ Object.assign(defs, {
     history: nullable(ref('ObjectPin')), result: nullable(ref('ObjectPin')), review: nullable(ref('ObjectPin')), attachment: nullable(ref('TaskAttachment')), configuration: ref('ObjectPin'), archive: ref('ArchiveResult') },
     ['operationId', 'task', 'plan', 'run', 'history', 'result', 'review', 'attachment']),
 });
-defs.Task.required = defs.Task.required.filter(key => key !== 'blocker');
 defs.Task.properties.parentTaskId = id;
-defs.Task.properties.scheduledCheck = ref('ScheduledCheck');
-defs.Task.properties.openQuestionCount = integer(0, 512);
+defs.Task.properties.openQuestionCount = integer();
 defs.Task.properties.completionIssue = ref('CompletionIssue');
 defs.Task.properties.continuation = obj({ fingerprint: hash, stalls: integer(0, 2) });
-defs.Task.properties.consumedBlockers = array(ref('BlockerObservation'), 32);
-defs.Task.properties.deliveries = array(ref('DeliveryReceipt'), 64);
-defs.Task.properties.questionWait = ref('QuestionWait');
-defs.CheckContext = obj({ at: timestamp, workflowState: { enum: ['todo', 'waiting', 'review'] }, waiting: nullable(ref('Waiting')),
-  scheduledCheck: ref('ScheduledCheck'), latestResult: nullable(ref('ObjectPin')), acceptedReview: nullable(ref('ObjectPin')) });
-defs.Run.properties.checkContext = ref('CheckContext');
+defs.Task.properties.deliveries = { type: 'array', items: ref('DeliveryReceipt') };
 // Domain Objects are strict, distinct contracts. Large native schemas stay behind exact revision
 // pins. Publication bytes are a hash-checked JSON artifact, validated against contractKey both
 // before staging and before dispatch; the destination Hive write validates them again.
@@ -283,7 +254,7 @@ defs.NativeLifecycleCall = obj({ key: id,
   operationId: id, method: { enum: ['thread/archive', 'thread/unarchive', 'thread/start', 'thread/resume'] }, params: wire('Json'),
   definitionHash: hash, observation: nullable(agent('Operation')) });
 defs.PreparedWrite = obj({
-  mutationId: id, contractKey: { enum: Object.keys(contracts).map(key => 'task-board/' + key) }, contractVersion: { enum: ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0'] }, payload: ref('Artifact'),
+  mutationId: id, contractKey: { enum: Object.keys(contracts).map(key => 'task-board/' + key) }, contractVersion: { enum: ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0'] }, payload: ref('Artifact'),
   destination: { oneOf: [obj({ create: obj({ parentId: nullable(id), name: str(256, 1) }) }),
     obj({ objectId: id, expectedRevision: integer(1) })] }, outcome: nullable(ref('ObjectPin')) });
 defs.HandoffWork = obj({ claimOperationId: id, workRevision: integer(0), contentHash: hash, primaryResourceRef: nullable(resource) });
@@ -298,8 +269,12 @@ defs.OperationReceipt = obj({ receipt: { const: true }, operationId: id, callerP
   phase: defs.Operation.properties.phase, action: id, taskId: nullable(id), updatedAt: timestamp,
   outcome: nullable(ref('ActionOutcome')), error: defs.Operation.properties.error, handoffRun: ref('ObjectPin') },
   ['receipt', 'operationId', 'callerPrincipalId', 'requestHash', 'phase', 'action', 'taskId', 'updatedAt', 'outcome', 'error']);
+defs.OperationReceipt.properties.submittedHash = hash;
+
 defs.Settings = obj({ principalId: id, rootObjectId: nullable(id),
-  scheduler: obj({ enabled: bool, intervalMs: integer(1000, 3600000), pageSize: integer(1, 50) }),
+  scheduler: obj({ enabled: bool, intervalMs: integer(1000, 3600000), pageSize: integer(1, 50),
+    maxConcurrentRuns: { ...integer(1, 256), default: 10 },
+    stallWarningMs: { ...integer(60000, 86400000), default: 300000 } }, ['enabled', 'intervalMs', 'pageSize']),
   phoneTarget: nullable(ref('PhoneTarget')) });
 defs.WorkspaceQuery = obj({});
 defs.WorkspaceInfo = obj({ serviceNodeId: id, generation: integer(1), principalId: id, rootObjectId: nullable(id),
@@ -359,15 +334,43 @@ defs.NativeFullTurnTranscript = obj({ schemaVersion: { const: 1 }, collectionId:
   unsupportedItems: ref('ReadEvidenceRef'), fullTurn: ref('ReadEvidenceRef'), fullTurnCursor: nativeCursor,
   fullTurnBytes: integer(1, 16777216), verification: ref('ReadEvidenceRef'), verificationCursor: nativeCursor, createdAt: timestamp });
 
+defs.Condition = { oneOf: [
+  obj({ kind: { const: 'time' }, at: timestamp }),
+  obj({ kind: { const: 'task' }, taskId: id, until: { enum: ['idle', 'done'] } }),
+  obj({ kind: { const: 'delivery' }, taskId: id, key: id, after: hash }, ['kind', 'taskId', 'key']),
+  obj({ kind: { const: 'user' }, questionId: id }),
+] };
+defs.NextStep = obj({ id, scope: str(16384, 1), requires: array(ref('Condition'), 32) });
+defs.StepObservation = obj({ stepId: id, fingerprint: hash });
+defs.RuntimeWait = obj({ reason: { enum: ['host', 'capability', 'workspace', 'external_outcome', 'publication', 'workflow'] },
+  detail: str(16384, 1), since: timestamp, retryAt: nullable(timestamp) }, ['reason', 'detail', 'since']);
+Object.assign(defs.Task.properties, { nextSteps: array(ref('NextStep'), 32), runtimeWait: nullable(ref('RuntimeWait')),
+  consumedSteps: array(ref('StepObservation'), 64) });
+defs.Task.required.push('nextSteps', 'runtimeWait');
+Object.assign(defs.TaskCard.properties, { nextSteps: array(ref('NextStep'), 32), runtimeWait: nullable(ref('RuntimeWait')) });
+defs.TaskCard.required.push('nextSteps', 'runtimeWait');
+defs.Handoff = obj({ workflowState: { enum: ['review', 'waiting', 'todo'] }, nextSteps: array(ref('NextStep'), 32),
+  deliveries: array(ref('WorkDelivery'), 32) }, ['workflowState', 'nextSteps']);
+defs.Comment.properties.handoff = ref('Handoff');
+defs.CreateRequest.properties.nextSteps = array(ref('NextStep'), 32);
+defs.EditRequest.properties.nextSteps = array(ref('NextStep'), 32);
+defs.DeferRequest = action('defer', { nextSteps: array(ref('NextStep'), 32), runtimeWait: nullable(ref('RuntimeWait')), recoveryRetryAt: nullable(timestamp) });
+defs.DeferRequest.required = defs.DeferRequest.required.filter(key => !['runtimeWait', 'recoveryRetryAt'].includes(key));
+for (const name of ['StartRequest', 'ContinueRequest']) {
+  defs[name].properties.coordinationOnly = bool;
+  defs[name].properties.nextStepId = nullable(id);
+}
+defs.ExecutionContext = obj({ workflowState: { enum: workflowStates }, nextSteps: array(ref('NextStep'), 32),
+  latestResult: nullable(ref('ObjectPin')), acceptedReview: nullable(ref('ObjectPin')) });
+defs.Run.properties.executionContext = ref('ExecutionContext');
+contractVersions.task = '2.1.0';
+contractVersions.run = '2.1.0';
+contractVersions.result = '2.1.0';
 const when = (key, value, properties) => ({ if: { properties: { [key]: { const: value } } }, then: { properties } });
 defs.Task.allOf = [
-  when('workflowState', 'waiting', { waiting: ref('Waiting') }),
-  { if: { properties: { workflowState: { enum: ['backlog', 'in_progress', 'review', 'done', 'cancelled'] } } }, then: { properties: { waiting: nil } } },
   { if: { properties: { workflowState: { const: 'in_progress' }, fields: { properties: { control: { const: 'agent' } } } } }, then: { properties: { claim: ref('Claim') } } },
-  { if: { properties: { workflowState: { enum: ['backlog', 'todo', 'review', 'done', 'cancelled'] } } }, then: { properties: { claim: nil } } },
 ];
 defs.Run.allOf = [
-  { if: { properties: { originalRequest: { required: ['checkOnly'], properties: { checkOnly: { const: true } } } } }, then: { required: ['checkContext'] } },
   { if: { properties: { phase: { enum: ['running', 'waiting_input', 'publishing_result', 'completed'] } } },
     then: { properties: { primaryResourceRef: resource, turnId: id, nativeEpoch: id } } },
   when('phase', 'completed', { result: ref('ObjectPin'), finishedAt: timestamp }),
@@ -392,7 +395,7 @@ const operations = Object.fromEntries(defs.ActionInput.oneOf.map(item => {
   const name = item.$ref.slice('#/$defs/'.length), actionName = defs[name].properties.action.const;
   return [actionName, { input: '#/$defs/' + name, output: '#/$defs/ActionOutcome', mutation: true }];
 }));
-operations.operation = { input: '#/$defs/OperationQuery', output: '#/$defs/Operation', mutation: false };
+operations.operation = { input: '#/$defs/OperationQuery', output: '#/$defs/OperationReceipt', mutation: false };
 operations.operationReceipt = { input: '#/$defs/OperationReceiptQuery', output: '#/$defs/OperationReceipt', mutation: false };
 operations.workspace = { input: '#/$defs/WorkspaceQuery', output: '#/$defs/WorkspaceInfo', mutation: false };
 operations.configuration = { input: '#/$defs/ConfigurationQuery', output: '#/$defs/ConfigurationView', mutation: false };

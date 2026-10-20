@@ -1,6 +1,5 @@
 import type { Wire } from '../../../../packages/sdk/src/node.js';
 import { same } from './checks.js';
-import { unansweredQuestion } from './conversation.js';
 import type { TaskBoardEngine } from './engine.js';
 import { nativeArray, nativeRecord, nativeString } from './native-intent.js';
 import { TaskBoardNativeInspector } from './native-inspector.js';
@@ -64,9 +63,8 @@ export function nativeRateLimitRetryAt(turn: Record<string, Wire.Json>, observed
 /** Reinspect the original failed turn when a ticket is still waiting for user intervention. */
 export async function failedRateLimitRetryAt(engine: TaskBoardEngine, task: Document<'task-board/task'>): Promise<string | null> {
   const value = task.value, primary = value.primaryResourceRef;
-  if (value.blocker || value.waiting?.reason !== 'user' || value.waiting.detail !== 'Execution failed; see the ticket comment.' ||
-    !primary || primary.namespace !== 'codex' || primary.kind !== 'thread' || !value.lastRun ||
-    unansweredQuestion(value, value.lastRun.objectId)) return null;
+  if (value.runtimeWait?.reason !== 'host' ||
+    !primary || primary.namespace !== 'codex' || primary.kind !== 'thread' || !value.lastRun) return null;
   const run = await engine.store.read('task-board/run', value.lastRun);
   if (run.value.taskId !== task.pin.objectId || run.value.phase !== 'failed' || run.value.externalOutcome.code !== 'native_failed' ||
     run.value.externalOutcome.state !== 'failed' || run.value.cancellation || !run.value.turnId || !run.value.nativeEpoch ||

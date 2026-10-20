@@ -59,7 +59,7 @@ export async function startTaskBoard(path: string) {
         recovered: runtime.recovered, observedAt: new Date().toISOString(), scheduler: settings.scheduler, phoneTarget: settings.phoneTarget };
       return result;
     }
-    if (tool.name === 'operation' || tool.name === 'operationReceipt') return await engine.operation(String(args['operationId']), context, tool.name === 'operationReceipt') as unknown as Wire.Json;
+    if (tool.name === 'operation' || tool.name === 'operationReceipt') return await engine.operation(String(args['operationId']), context, true) as unknown as Wire.Json;
     if (tool.name === 'configuration') return await engine.configuration() as unknown as Wire.Json;
     if (tool.name === 'read') {
       await engine.verifyOwner();

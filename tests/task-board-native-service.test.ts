@@ -140,7 +140,7 @@ test('actual services recover a pending native question and read one bounded res
   const afterContactEdit = await task();
   assert.equal(afterContactEdit.fields.userContact, 'chat');
   assert.equal(afterContactEdit.workflowState, 'in_progress');
-  for (const key of ['primaryResourceRef', 'attemptCount', 'waiting'] as const)
+  for (const key of ['primaryResourceRef', 'attemptCount', 'runtimeWait'] as const)
     assert.deepEqual(afterContactEdit[key], beforeContactEdit[key], key);
   assert.equal(afterContactEdit.lastRun!.objectId, beforeContactEdit.lastRun.objectId);
   assert.equal(afterContactEdit.claim!.operationId, beforeContactEdit.claim!.operationId);
@@ -153,7 +153,7 @@ test('actual services recover a pending native question and read one bounded res
   assert.equal(frames.filter(frame => frame['method'] === 'turn/interrupt').length, 0);
   assert.ok(askNativeQuestion);
   (askNativeQuestion as () => void)();
-  await until(async () => (await task()).waiting?.reason === 'user' && (await signals())?.inputs.length === 1, 60000);
+  await until(async () => (await task()).claim?.phase === 'waiting_input' && (await signals())?.inputs.length === 1, 60000);
   const beforeRestart = (await signals())!, priorGeneration = taskBoard.service.connection.generation;
   assert.equal(beforeRestart.inputs[0]!.identity.requestId, 'fixture-native-question');
   await taskBoard.close(); taskBoard = await startTaskBoard(taskBoardPath); await taskBoard.service.waitReady(); await until(() => taskBoard.runtime?.recovered === true, 60000);

@@ -14,9 +14,9 @@ const fields = (title, category = null) => ({
   priority: 2,
   executionRequirement: null,
   workspaceRequirement: { kind: "task_workspace" },
-  dependencies: [],
+
   userContact: "ticket",
-  nextReviewAt: null,
+
   dueAt: null,
 });
 
@@ -307,7 +307,7 @@ test("automatic native recovery stays in progress while user input stays blocked
   await expect.poll(async () => (await f.task(created.task.objectId)).claim?.run?.objectId, { timeout: 30000 }).toBeTruthy();
   const admitted = await f.task(created.task.objectId);
   const runId = admitted.claim?.run?.objectId;
-  assert.ok(runId, JSON.stringify({ state: admitted.workflowState, waiting: admitted.waiting }));
+  assert.ok(runId, JSON.stringify({ state: admitted.workflowState, runtimeWait: admitted.runtimeWait }));
   // Drive the following status changes explicitly after automatic admission.
   await runtime.stop();
   await runtime.native.drain(runId);
@@ -691,23 +691,22 @@ test(
     ).toBeVisible();
     const blocked = await f.invoke({
       action: "create",
-      fields: { ...fields("Blocked by the first task"), dependencies: [first.task.objectId] },
+      fields: fields("Blocked by the first task"),
+      nextSteps: [{ id: "dependency", scope: "Wait for the first task.", requires: [{ kind: "task", taskId: first.task.objectId, until: "done" }] }],
     });
     await f.page.getByRole("link", { name: /First category task/ }).first().click();
     await expect(f.page.getByRole("dialog", { name: "Task details", exact: true })).toBeVisible();
     await expect(f.page.getByRole("button", { name: "Close", exact: true })).toBeVisible();
     await f.page.getByRole("button", { name: "Edit task", exact: true }).click();
-    const blockers = f.page.getByRole("combobox", { name: "Blockers", exact: true });
-    await blockers.fill("task");
-    await expect(f.page.getByRole("option", { name: /Second category task/ })).toBeVisible();
-    await expect(f.page.getByRole("option", { name: /Blocked by the first task/ })).toHaveCount(0);
-    await expect(f.page.getByRole("option", { name: /First category task/ })).toHaveCount(0);
-    await f.page.getByRole("option", { name: /Second category task/ }).click();
-    await f.page.keyboard.press("Escape");
+    const steps = f.page.getByRole("group", { name: "Next steps", exact: true });
+    await steps.getByLabel("Next step", { exact: true }).fill("Wait for the second task.");
+    await steps.getByRole("button", { name: "Add condition", exact: true }).click();
+    await choose(steps.getByRole("combobox").nth(0), "task");
+    await choose(steps.getByRole("combobox").nth(1), second.task.objectId);
     await f.page.getByRole("button", { name: "Save changes", exact: true }).click();
     await expect
-      .poll(async () => (await f.task(first.task.objectId)).fields.dependencies)
-      .toEqual([second.task.objectId]);
+      .poll(async () => (await f.task(first.task.objectId)).nextSteps[0].requires)
+      .toEqual([{ kind: "task", taskId: second.task.objectId, until: "done" }]);
     assert.ok(blocked.task);
     assert.deepEqual(f.pageErrors, []);
     assert.deepEqual(f.externalRequests, []);

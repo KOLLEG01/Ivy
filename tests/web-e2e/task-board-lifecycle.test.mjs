@@ -10,7 +10,7 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     const create = async (title, category = 'Batch', states = ['todo', 'in_progress', 'done']) => {
       let outcome = await f.invoke({ action: 'create', workflowState: 'backlog', fields: { title, description: '', acceptanceCriteria: [], category,
         control: 'user', priority: 2, executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },
-        dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null } });
+         userContact: 'ticket',  dueAt: null } });
       for (const workflowState of states) outcome = await f.invoke({ action: 'transition', taskId: outcome.task.objectId,
         expectedRevision: outcome.task.revision, workflowState, detail: null });
       return outcome.task;
@@ -65,7 +65,7 @@ for (const [layout, viewport] of [['desktop', { width: 1440, height: 1000 }], ['
     const f = await taskBoardFixture(t, { native: true, scheduler: true, viewport });
     let outcome = await f.invoke({ action: 'create', workflowState: 'backlog', fields: { title: 'Explicit fresh Codex work', description: 'Keep this ticket and its comments.',
       acceptanceCriteria: [], category: null, control: 'user', priority: 2, executionRequirement: { kind: 'host', hostId: 'isolated-agent-host' },
-      workspaceRequirement: { kind: 'task_workspace' }, dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null } });
+      workspaceRequirement: { kind: 'task_workspace' },  userContact: 'ticket',  dueAt: null } });
     for (const workflowState of ['todo', 'in_progress', 'done']) outcome = await f.invoke({ action: 'transition', taskId: outcome.task.objectId,
       expectedRevision: outcome.task.revision, workflowState, detail: null });
     const id = outcome.task.objectId, store = f.taskBoard().runtime.engine.store;

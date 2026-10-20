@@ -43,6 +43,47 @@ test('foreground native interactions still dispatch when background observation 
   await Promise.all(background);
 });
 
+test('expired observations release active capacity without retaining an unbounded identity history', async context => {
+  const native = fixture(context);
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const active = native.rpc.request('account/logout', null, { requestId: 'original-active-operation' });
+  for (let batch = 0; batch < 20; batch++) {
+    const observations = Array.from({ length: 16 }, () => assert.rejects(
+      native.rpc.request('thread/loaded/list', {}, { detachOnTimeout: true }, 10), { code: 'native_observation_deadline' }));
+    await assert.rejects(native.rpc.request('thread/loaded/list', {}, { detachOnTimeout: true }), { code: 'native_capacity' });
+    context.mock.timers.tick(10);
+    await Promise.all(observations);
+  }
+  await assert.rejects(native.rpc.request('account/logout', null, { requestId: String(native.sent[1]!['id']) }), { code: 'native_state_conflict' });
+  const latest = native.rpc.request('thread/read', { threadId: 'current' }, { detachOnTimeout: true });
+  for (const frame of native.sent.slice(1, -1).reverse()) native.emit({ id: frame['id'], result: { stale: true } });
+  assert.equal(native.rpc.connected, true);
+  native.emit({ id: native.sent.at(-1)!['id'], result: { current: true } });
+  assert.deepEqual(await latest, { result: { current: true } });
+  native.emit({ id: 'original-active-operation', result: { original: true } });
+  assert.deepEqual(await active, { result: { original: true } });
+  assert.equal(native.rpc.connected, true);
+});
+
+test('expired explicit identities remain fenced and bounded without starving generated observations', async context => {
+  const native = fixture(context);
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  for (let index = 0; index < 64; index++) {
+    const expired = assert.rejects(native.rpc.request('account/logout', null,
+      { requestId: 'retained-' + index, detachOnTimeout: true }, 10), { code: 'native_observation_deadline' });
+    context.mock.timers.tick(10); await expired;
+  }
+  const sent = native.sent.length;
+  await assert.rejects(native.rpc.request('account/logout', null, { requestId: 'another-explicit', detachOnTimeout: true }), { code: 'native_capacity' });
+  await assert.rejects(native.rpc.request('account/logout', null, { requestId: 'retained-0' }), { code: 'native_state_conflict' });
+  assert.equal(native.sent.length, sent);
+  const current = native.rpc.request('thread/loaded/list', {}, { detachOnTimeout: true });
+  native.emit({ id: native.sent.at(-1)!['id'], result: { data: [], nextCursor: null } });
+  await current;
+  for (let index = 0; index < 64; index++) native.emit({ id: 'retained-' + index, result: {} });
+  assert.equal(native.rpc.connected, true);
+});
+
 test('public native JSONL preserves null, fragmented UTF-8, exact server IDs and unmodified native replies', async t => {
   const f = fixture(t), order: string[] = [];
   const pending = f.rpc.request('account/logout', null, { beforeSend: () => { assert.equal(f.sent.length, 0); order.push('intent'); }, beforeResolve: () => { order.push('result'); } });

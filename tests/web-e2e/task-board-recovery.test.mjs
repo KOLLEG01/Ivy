@@ -8,7 +8,7 @@ for (const width of [1440, 390]) test(`lost upload and comment replies recover w
   const created = await f.invoke({ action: 'create', workflowState: 'backlog', fields: {
     title: 'Recover uncertain conversation writes', description: '', acceptanceCriteria: [], category: null,
     control: 'user', priority: 2, executionRequirement: null, workspaceRequirement: { kind: 'task_workspace' },
-    dependencies: [], userContact: 'ticket', nextReviewAt: null, dueAt: null,
+     userContact: 'ticket',  dueAt: null,
   } });
   const id = created.task.objectId;
   await f.open('#/tasks?id=' + id + '&node=browser-task-board' + (width === 390 ? '&panel=sheet' : ''));

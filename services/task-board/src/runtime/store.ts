@@ -68,14 +68,19 @@ export class TaskBoardStore {
   private compactingComments = false;
   private commentPassPending = false;
   private commentRetryAt = 0;
+  private resultCursor: string | null = null;
+  private resultsCompacted = false;
   async protectRunSources(): Promise<void> {
     await protectRunSources(this.client, this.rootObjectId, scope => this.preparedMutationId(scope));
   }
   /** Bounded storage-only backfill, including archived tickets; normal workflow CAS remains authoritative. */
   async compactComments(limit = 2): Promise<boolean> {
-    if (this.commentsCompacted || this.compactingComments || Date.now() < this.commentRetryAt) return this.commentsCompacted;
+    if (this.compactingComments) return false;
     this.compactingComments = true;
     try {
+      const resultsCompacted = await this.compactResults(10);
+      if (this.commentsCompacted) return resultsCompacted;
+      if (Date.now() < this.commentRetryAt) return false;
       const page: Operation.ObjectsQueryResult = await this.client.request('objects.query', { contractKey: 'task-board/task', includeArchived: true,
         where: this.rootObjectId === null ? { field: 'object.parentId', op: 'isNull' } :
           { field: 'object.parentId', op: 'eq', value: this.rootObjectId },
@@ -91,7 +96,9 @@ export class TaskBoardStore {
           await this.client.request('objects.write', { objectId: task.pin.objectId, expectedRevision: task.pin.revision,
             expectedArchived: task.metadata.effectivelyArchived, contractVersion: contractVersion('task-board/task'),
             mutationId: await this.preparedMutationId('compact:' + hashJson(task.pin)),
-            references: { ...task.revision.references, ...(recoveryRun ? { 'recovery-run': recoveryRun } : {}) },
+            references: await taskReferences(this.client, task.pin.objectId,
+              { ...task.revision.references, ...(recoveryRun ? { 'recovery-run': recoveryRun } : {}) },
+              taskAttachmentPins(task.value), scope => this.preparedMutationId(scope)),
             content: { encoding: 'json', value: value as unknown as Wire.Json } });
         } catch (error) {
           if (!(error instanceof IvyError && error.code === 'revision_conflict')) throw error;
@@ -104,8 +111,46 @@ export class TaskBoardStore {
         this.commentPassPending = false;
         this.commentRetryAt = Date.now() + 60_000;
       }
-      return this.commentsCompacted;
+      return this.commentsCompacted && resultsCompacted;
     } finally { this.compactingComments = false; }
+  }
+  private async compactResults(limit: number): Promise<boolean> {
+    if (this.resultsCompacted) return true;
+    const page = await this.client.request('objects.query', { contractKey: 'task-board/result', includeArchived: true,
+      where: this.rootObjectId === null ? { field: 'object.parentId', op: 'isNull' } :
+        { field: 'object.parentId', op: 'eq', value: this.rootObjectId }, limit,
+      ...(this.resultCursor ? { cursor: this.resultCursor } : {}) });
+    for (const item of page.items) {
+      if (item.contractVersion === contractVersion('task-board/result')) continue;
+      const result = await this.read('task-board/result', item.objectId, true, true);
+      const references = { ...result.revision.references };
+      for (const [index, artifact] of result.value.content.artifacts.entries())
+        if (!this.localKey(artifact.object.objectId)) references['artifact-' + index] = artifact.object;
+      await this.client.request('objects.write', { objectId: item.objectId, expectedRevision: result.pin.revision,
+        expectedArchived: result.metadata.effectivelyArchived, contractVersion: contractVersion('task-board/result'),
+        mutationId: await this.preparedMutationId('preserve-result-findings:' + hashJson(result.pin)),
+        references, content: { encoding: 'json', value: result.value as unknown as Wire.Json } });
+      await yieldToRequests();
+    }
+    this.resultCursor = page.nextCursor;
+    this.resultsCompacted = page.nextCursor === null;
+    return this.resultsCompacted;
+  }
+  async upgradeStored<K extends ContractKey>(key: K, value: ContractValues[K]): Promise<ContractValues[K]> {
+    if (key !== 'task-board/task') return upgradeRecord(key, value);
+    const stored = structuredClone(value) as unknown as { latestChecks?: { evidence?: TaskBoard.Artifact[] }[];
+      comments?: { handoff?: { checks?: { evidence?: TaskBoard.Artifact[] }[] } }[];
+      content?: { checks?: { evidence?: TaskBoard.Artifact[] }[] } };
+    const findings = [...stored.latestChecks ?? [], ...stored.content?.checks ?? [],
+      ...(stored.comments ?? []).flatMap(comment => comment.handoff?.checks ?? [])];
+    for (const artifact of findings.flatMap(finding => finding.evidence ?? [])) {
+      if (artifact.byteLength !== undefined) continue;
+      const read = await this.client.request('objects.read', artifact.object);
+      requireThat(read.revision.contentHash === artifact.contentHash && read.revision.mediaType === artifact.mediaType,
+        'task_board_evidence_mismatch', 'Retained verification evidence differs from its immutable pin.');
+      artifact.byteLength = read.revision.byteLength;
+    }
+    return upgradeRecord(key, stored as unknown as ContractValues[K]);
   }
   withReadCache<T>(work: () => Promise<T>): Promise<T> {
     return this.reads.getStore() ? work() : this.reads.run(new Map(), work);
@@ -233,6 +278,14 @@ export class TaskBoardStore {
     const operation = this.localDocument("task-board/operation", rootId, false).value;
     if (!["succeeded", "failed"].includes(operation.phase)) return true;
     if (operation.error?.execution === "unknown") return true;
+    if (operation.phase === 'succeeded' && operation.handoffRun && 'taskId' in operation.request) {
+      const task = await this.read('task-board/task', operation.request.taskId, true, true).catch(error => {
+        if (error instanceof IvyError && error.code === 'not_found') return null;
+        throw error;
+      });
+      if (task?.value.claim?.run?.objectId === operation.handoffRun.objectId ||
+          task?.value.completionIssue?.run.objectId === operation.handoffRun.objectId) return true;
+    }
     if (operation.actor.source === "scheduler" && "taskId" in operation.request &&
         "expectedRevision" in operation.request &&
         await taskActive(operation.request.taskId, operation.request.expectedRevision)) return true;
@@ -679,6 +732,7 @@ export class TaskBoardStore {
     ref: string | TaskBoard.ObjectPin,
     primary = true,
     includeArchived = false,
+    retained = false,
   ): Promise<Document<K>> {
     const objectId = typeof ref === "string" ? ref : ref.objectId;
     if (localContractKeys.has(key) || this.localKey(objectId) === key)
@@ -687,7 +741,7 @@ export class TaskBoardStore {
       cacheKey =
         typeof ref === "string"
           ? null
-          : key + ":" + ref.objectId + ":" + ref.revision + ":" + primary + ":" + includeArchived;
+          : key + ":" + ref.objectId + ":" + ref.revision + ":" + primary + ":" + includeArchived + ":" + retained;
     const cached = cacheKey ? cache?.get(cacheKey) : undefined;
     if (cached) return structuredClone(cached) as Document<K>;
     const result = await this.client.request(
@@ -722,7 +776,7 @@ export class TaskBoardStore {
     const document = {
       key,
       pin: pinOf(result),
-      value: upgradeRecord(key, (key === 'task-board/task'
+      value: retained ? result.content.value as unknown as ContractValues[K] : await this.upgradeStored(key, (key === 'task-board/task'
         ? await new TaskComments(this.client, scope => this.preparedMutationId(scope)).read(result.content.value, result.object.id)
         : result.content.value) as ContractValues[K]),
       metadata: result.object,
@@ -826,8 +880,9 @@ export class TaskBoardStore {
     value: ContractValues[K],
     mutationId: string,
     destination: TaskBoard.PreparedWrite["destination"],
+    retainedVersion: TaskBoard.PreparedWrite['contractVersion'] = contractVersion(key),
   ): Promise<TaskBoard.ObjectPin> {
-    return this.writeWithIdentity(key, value, mutationId, destination, true);
+    return this.writeWithIdentity(key, value, mutationId, destination, true, retainedVersion);
   }
   private async writeWithIdentity<K extends ContractKey>(
     key: K,
@@ -835,7 +890,9 @@ export class TaskBoardStore {
     mutationId: string,
     destination: TaskBoard.PreparedWrite["destination"],
     retainedIdentity: boolean,
+    selectedVersion: TaskBoard.PreparedWrite['contractVersion'] = contractVersion(key),
   ): Promise<TaskBoard.ObjectPin> {
+    if (!retainedIdentity) value = await this.upgradeStored(key, value);
     if (
       localContractKeys.has(key) ||
       ("create" in destination &&
@@ -941,7 +998,7 @@ export class TaskBoardStore {
     const content: Wire.Content = {
       encoding: "json",
       value: (key === 'task-board/task' && !('create' in destination)
-        ? await new TaskComments(this.client, scope => this.preparedMutationId(scope)).write(value as TaskBoard.Task, destination.objectId, mutationId)
+        ? await new TaskComments(this.client, scope => this.preparedMutationId(scope)).write(value as TaskBoard.Task, destination.objectId, mutationId, selectedVersion)
         : value) as Wire.Json,
     };
     let references: Wire.RevisionReferences = {};
@@ -971,9 +1028,8 @@ export class TaskBoardStore {
     } else if (key === "task-board/result") {
       const artifacts = [
         ...(value as TaskBoard.Result).content.artifacts,
-        ...(value as TaskBoard.Result).content.checks.flatMap(
-          (check) => check.evidence,
-        ),
+        ...((value as unknown as { content: { checks?: { evidence: TaskBoard.Artifact[] }[] } }).content.checks ?? [])
+          .flatMap(finding => finding.evidence),
       ]
         .filter((artifact) => !this.localKey(artifact.object.objectId))
         .slice(0, 256);
@@ -989,7 +1045,7 @@ export class TaskBoardStore {
         "create" in destination
           ? {
               mutationId,
-              contractVersion: contractVersion(key),
+              contractVersion: selectedVersion,
               content,
               references,
               create: {
@@ -1000,7 +1056,7 @@ export class TaskBoardStore {
             }
           : {
               mutationId,
-              contractVersion: contractVersion(key),
+              contractVersion: selectedVersion,
               content,
               references,
               objectId: destination.objectId,

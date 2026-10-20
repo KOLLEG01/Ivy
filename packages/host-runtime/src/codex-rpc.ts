@@ -32,6 +32,8 @@ export class NativeRpc {
   private bufferedBytes = 0;
   private readonly pending = new Map<string, Pending>();
   private readonly expired = new Set<string>();
+  private readonly observationPrefix = 'observation-' + randomUUID() + ':';
+  private observationSequence = 0;
   private readonly requests: Map<string, Agent.Catalog['clientRequests'][number]>;
   private readonly serverRequests: Map<string, Agent.Catalog['serverRequests'][number]>;
   private readonly notifications: Map<string, Agent.Catalog['serverNotifications'][number]>;
@@ -61,21 +63,28 @@ export class NativeRpc {
   private write(encoded: string): void {
     this.input.write(encoded + '\n', error => { if (error) this.close('native_write_failed'); });
   }
+  private observation(id: string): boolean {
+    if (!id.startsWith(this.observationPrefix)) return false;
+    const suffix = id.slice(this.observationPrefix.length), sequence = Number(suffix);
+    return Number.isSafeInteger(sequence) && sequence > 0 && sequence <= this.observationSequence && String(sequence) === suffix;
+  }
   request(method: string, params: Wire.Json, hooks: NativeRequestHooks = {}, timeoutMs = 120_000): Promise<Agent.Reply> {
     let encoded: string, id: string;
     try {
       this.writable(); requireThat(this.pending.size < (hooks.priority==='interaction'?64:56), 'native_capacity', 'Native request capacity is full; foreground slots remain reserved.');
-      requireThat(!hooks.detachOnTimeout || this.expired.size + [...this.pending.values()].filter(value=>value.detachOnTimeout).length < (hooks.priority==='interaction'?64:16), 'native_capacity', 'Native observation capacity is full.');
+      requireThat(!hooks.detachOnTimeout || [...this.pending.values()].filter(value=>value.detachOnTimeout).length < (hooks.priority==='interaction'?64:16), 'native_capacity', 'Native observation capacity is full.');
+      requireThat(!hooks.detachOnTimeout || !hooks.requestId || this.expired.size < 64, 'native_capacity', 'Native unresolved request identity capacity is full.');
       requireThat(this.requests.has(method), 'native_method_unavailable', 'Method is absent from this installed native catalog.');
       requireThat(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 600_000, 'invalid_arguments', 'Native observation deadline must be finite and at most ten minutes.');
-      id = hooks.requestId ?? randomUUID(); validateAgentFrame(id, 'request-id');
+      requireThat(!hooks.requestId?.startsWith(this.observationPrefix), 'native_state_conflict', 'Native observation request IDs cannot be reused.');
+      id = hooks.requestId ?? (hooks.detachOnTimeout ? this.observationPrefix + ++this.observationSequence : randomUUID()); validateAgentFrame(id, 'request-id');
       requireThat(!this.pending.has(id) && !this.expired.has(id), 'native_state_conflict', 'Native request ID is already in use.');
       encoded = encodeJson({ id, method, params }, nativeRequestFrameBytes);
     } catch (error) { return Promise.reject(error instanceof IvyError ? error : new IvyError('native_request_invalid', 'Native request validation failed.')); }
     return new Promise<Agent.Reply>((resolve, reject) => {
       const timer = setTimeout(() => {
         if(!hooks.detachOnTimeout){this.close('native_deadline_exceeded');return;}
-        this.pending.delete(id);this.expired.add(id);
+        this.pending.delete(id);if(!this.observation(id))this.expired.add(id);
         reject(new IvyError('native_observation_deadline','Background observation expired; active turns remain connected.','unknown', { method, timeoutMs }));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, method, timeoutMs, ...hooks });
@@ -142,7 +151,7 @@ export class NativeRpc {
     validateAgentFrame(frame['id'], 'request-id');
     requireThat(typeof frame['id'] === 'string', 'native_unknown_response', 'Native response does not identify an outstanding client request.');
     const id = frame['id'], pending = this.pending.get(id), expired = this.expired.has(id);
-    requireThat(pending || expired, 'native_unknown_response', 'Native response has no outstanding client request.');
+    requireThat(pending || expired || this.observation(id), 'native_unknown_response', 'Native response has no outstanding client request.');
     requireThat(Object.hasOwn(frame, 'result') !== Object.hasOwn(frame, 'error'), 'native_invalid_frame', 'Native response requires exactly one result or error.');
     const reply = Object.hasOwn(frame, 'result') ? { result: frame['result']! } : { error: frame['error']! };
     validateAgentFrame(reply); const typed = reply as Agent.Reply;
