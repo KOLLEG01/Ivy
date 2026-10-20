@@ -10,6 +10,8 @@ pub use local::{
     complete_reset_record, confirm_reset_record, prepare_reset_hold, prove_reset_locks_released,
     reset_record_path, restored_bootstrap_target, saved_reset_runtime,
 };
+mod host;
+pub use host::{ResetHost, reset_process_alive, wait_reset_processes_stopped};
 fn truthy(value: &J) -> bool {
     match value {
         J::Null => false,

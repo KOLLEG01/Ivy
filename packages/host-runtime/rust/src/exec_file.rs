@@ -92,6 +92,15 @@ pub async fn exec_file(command: FileCommand, bootstrap_root: PathBuf, options: F
     Ok(exec_file_detailed(command, bootstrap_root, options).await?.result)
 }
 
+/// Preserve an original execFile call that leaves timeout unset. This private
+/// path keeps output limits, cancellation and the same native process owner;
+/// public FileCommand callers still require a finite positive deadline.
+pub(crate) async fn exec_file_without_timeout(mut command: FileCommand, bootstrap_root: PathBuf, options: FileOptions) -> IvyResult<FileResult> {
+    if command.maximum_buffer_bytes > 64 * 1024 * 1024 { return Err(IvyError::new("invalid_arguments", "Exec-file requires bounded time and output limits.")); }
+    command.timeout_ms = 0;
+    Ok(tokio::spawn(run(command, bootstrap_root, options, Input::Open)).await.map_err(|_| IvyError::internal())?.result)
+}
+
 pub(crate) async fn exec_file_detailed(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions) -> IvyResult<FileExecution> {
     execute(command, bootstrap_root, options, Input::Open).await
 }
@@ -156,7 +165,7 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
     let resolved = match resolved { Ok(value) => value, Err(error) => return FileExecution { result: empty(FileFailure::Spawn), spawn_error: Some(error) } };
     if options.cancellation.is_cancelled() { return empty(FileFailure::Cancelled).into() }
     let launch = LaunchContext { raw_output: true, job_launcher: options.job_launcher, ..Default::default() };
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(command.timeout_ms as u64);
+    let deadline = (command.timeout_ms != 0).then(|| tokio::time::Instant::now() + Duration::from_millis(command.timeout_ms as u64));
     let mut child = match process::spawn_resolved_detailed(resolved, &bootstrap_root, launch, Some(environment), Some(command.executable.clone())).await {
         Ok(value) => value, Err(error) => return FileExecution { result: empty(if error.error.outcome == ivy_contracts::Outcome::Unknown { FileFailure::Unknown } else { FileFailure::Spawn }), spawn_error: error.source },
     };
@@ -180,7 +189,7 @@ async fn run(command: FileCommand, bootstrap_root: PathBuf, options: FileOptions
         biased;
         stream = exceeded.recv() => stream.map(FileFailure::MaxBuffer),
         _ = options.cancellation.cancelled() => Some(FileFailure::Cancelled),
-        _ = tokio::time::sleep_until(deadline) => Some(FileFailure::Timeout),
+        _ = async { match deadline { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending::<()>().await } } => Some(FileFailure::Timeout),
         _ = completion.wait() => None,
     };
     drop(overflow);
@@ -212,6 +221,10 @@ fn resolve_parts(file: &std::ffi::OsStr, args: &[OsString], cwd: Option<&Path>, 
     let executable = resolve_executable(file, &cwd, environment)?;
     Ok(ResolvedCommand { executable, cwd, args: args.to_vec() })
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/rust/host-exec-file-deadline.rs"]
+mod deadline_cases;
 
 #[cfg(unix)]
 fn resolve_executable(file: &std::ffi::OsStr, cwd: &Path, environment: &BTreeMap<OsString, OsString>) -> std::io::Result<PathBuf> {

@@ -13,6 +13,8 @@ mod journal_cases;
 mod reset_coordinator_cases;
 #[path = "host-reset-local-cases.rs"]
 mod reset_local_cases;
+#[path = "host-reset-stop-cases.rs"]
+mod reset_stop_cases;
 #[path = "host-artifact-cases.rs"]
 mod artifact_cases;
 #[path = "host-native-dispatch-cases.rs"]

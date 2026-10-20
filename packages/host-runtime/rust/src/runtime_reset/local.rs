@@ -28,11 +28,20 @@ fn field(value: &J, key: &str) -> IvyResult<JsString> {
         .cloned()
         .ok_or_else(IvyError::internal)
 }
-fn now(clock: &dyn Clock) -> IvyResult<J> {
+pub(super) fn now(clock: &dyn Clock) -> IvyResult<J> {
     Ok(
         internal(DateTime::<Utc>::from_timestamp_millis(clock.utc_millis()).ok_or(()))?
             .to_rfc3339_opts(SecondsFormat::Millis, true)
             .into(),
+    )
+}
+pub(super) fn require_publisher_digest(value: &JsString) -> IvyResult<()> {
+    require(
+        value.0.len() == 71
+            && value.0.starts_with(&JsString::from("sha256:").0)
+            && value.0[7..].iter().all(|v| matches!(*v, 48..=57 | 97..=102)),
+        "invalid_arguments",
+        "Runtime reset requires the checked ui publisher credential digest.",
     )
 }
 pub fn reset_record_path(config: &J) -> IvyResult<PathBuf> {
@@ -84,17 +93,7 @@ pub async fn prepare_reset_hold(
 ) -> IvyResult<J> {
     internal(
         tokio::spawn(async move {
-            require(
-                publisher_credential_digest.0.len() == 71
-                    && publisher_credential_digest
-                        .0
-                        .starts_with(&JsString::from("sha256:").0)
-                    && publisher_credential_digest.0[7..]
-                        .iter()
-                        .all(|v| matches!(*v, 48..=57 | 97..=102)),
-                "invalid_arguments",
-                "Runtime reset requires the checked ui publisher credential digest.",
-            )?;
+            require_publisher_digest(&publisher_credential_digest)?;
             let path = reset_record_path(&config)?;
             internal(
                 tokio::fs::create_dir_all(path.parent().ok_or_else(IvyError::internal)?).await,
