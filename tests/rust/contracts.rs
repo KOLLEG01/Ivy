@@ -270,8 +270,8 @@ fn native_frame_bounds_match_the_existing_contract() {
 #[test]
 fn url_projection_matches_node_constructor_fields_and_failures() {
     use ivy_contracts::whatwg_url::{
-        clear_url_credentials, parse_form, parse_url, parse_url_with_base, set_url_search_params,
-        url_components,
+        clear_url_credentials, parse_form, parse_url, parse_url_with_base, serialize_form,
+        set_url_search_params, url_components,
     };
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut mismatches = Vec::new();
@@ -281,6 +281,7 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
         "components",
         "relative",
         "form",
+        "form-serialize",
     ] {
         let output = std::process::Command::new("node")
             .args([
@@ -302,7 +303,7 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
         for row in rows {
             let input = parse(row["input"].as_str().unwrap(), 100_000).unwrap();
             let expected = parse(row["result"].as_str().unwrap(), 100_000).unwrap();
-            let actual = if mode == "form" {
+            let actual = if mode == "form" || mode == "form-serialize" {
                 let result = if let Some(form) = input.get("form") {
                     Ok(IvyJson::Array(
                         parse_form(form.as_js_string().unwrap())
@@ -324,8 +325,12 @@ fn url_projection_matches_node_constructor_fields_and_failures() {
                             )
                         })
                         .collect();
-                    set_url_search_params(input.get("url").unwrap().as_js_string().unwrap(), &pairs)
-                        .map(IvyJson::String)
+                    if let Some(url) = input.get("url") {
+                        set_url_search_params(url.as_js_string().unwrap(), &pairs)
+                            .map(IvyJson::String)
+                    } else {
+                        Ok(IvyJson::String(serialize_form(&pairs)))
+                    }
                 };
                 match result {
                     Ok(value) => IvyJson::object([("ok", true.into()), ("value", value)]),

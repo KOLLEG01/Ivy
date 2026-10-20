@@ -35,3 +35,44 @@ pub fn base64url_decode(text: &JsString) -> Vec<u8> {
 pub fn base64url_text(text: &JsString) -> JsString {
     JsString::from(String::from_utf8_lossy(&base64url_decode(text)).as_ref())
 }
+
+/// Accept exactly standard padded base64 whose decoded length fits the caller's
+/// bound, as in Buffer.from(text, "base64").toString("base64") == text.
+/// Rejected input is never decoded or allocated. The empty string is canonical.
+pub fn canonical_base64_decode(text: &JsString, maximum_bytes: usize) -> Option<Vec<u8>> {
+    let units = &text.0;
+    if units.len() % 4 != 0 {
+        return None;
+    }
+    let padding = if units.ends_with(&[61, 61]) {
+        2
+    } else {
+        usize::from(units.ends_with(&[61]))
+    };
+    let length = units.len() / 4 * 3 - padding;
+    if length > maximum_bytes {
+        return None;
+    }
+    let body = &units[..units.len() - padding];
+    if !body
+        .iter()
+        .all(|unit| matches!(unit, 65..=90 | 97..=122 | 48..=57 | 43 | 47))
+    {
+        return None;
+    }
+    if padding != 0 {
+        let last = match *body.last()? {
+            unit @ 65..=90 => unit - 65,
+            unit @ 97..=122 => unit - 97 + 26,
+            unit @ 48..=57 => unit - 48 + 52,
+            43 => 62,
+            47 => 63,
+            _ => return None,
+        };
+        // Unused low bits must be zero for decode/re-encode to be identical.
+        if last & if padding == 2 { 15 } else { 3 } != 0 {
+            return None;
+        }
+    }
+    Some(base64url_decode(text))
+}

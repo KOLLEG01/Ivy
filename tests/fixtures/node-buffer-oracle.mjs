@@ -1,5 +1,6 @@
 const hex=bytes=>bytes.toString('hex');
 const decode=input=>{const bytes=Buffer.from(input,'base64url');return {bytes:hex(bytes),text:bytes.toString('utf8')};};
+const canonical=input=>{const bytes=Buffer.from(input,'base64');return bytes.toString('base64')===input?hex(bytes):null;};
 const contexts=['XQ==','QX==','QQX','AAAXAA==','QUJDX-_+/AA='];
 const units=contexts.map(context=>{
  const expected=Array.from({length:256},(_,unit)=>decode(context.replace('X',String.fromCharCode(unit))));
@@ -24,4 +25,20 @@ let state=0x85ba64;
 const random=max=>{state=(Math.imul(state,1664525)+1013904223)>>>0;return state%max;};
 for(let i=0;i<8192;i++){let input='';const count=random(80);for(let j=0;j<count;j++)input+=alphabet[random(alphabet.length)];inputs.add(input);}
 const malformed=[...inputs].map(input=>({input:JSON.stringify(input),...decode(input)}));
-process.stdout.write(JSON.stringify({node:process.version,unitComparisons:contexts.length*65536,units,utf8,malformed}));
+const canonicalInputs=new Set(inputs);
+for(let first=0;first<=255;first++){
+ canonicalInputs.add(Buffer.from([first]).toString('base64'));
+ for(let second=0;second<=255;second++)canonicalInputs.add(Buffer.from([first,second]).toString('base64'));
+}
+const canonicalUnits=contexts.map(context=>({context,expected:Array.from({length:256},(_,unit)=>canonical(context.replace('X',String.fromCharCode(unit))))}));
+for(const {context,expected}of canonicalUnits)for(let unit=0;unit<=0xffff;unit++){
+ const actual=canonical(context.replace('X',String.fromCharCode(unit)));
+ if(actual!==(unit<=255?expected[unit]:null))throw Error('Canonical UTF16 class differs '+unit+' '+context);
+}
+const canonicalRows=[...canonicalInputs].map(input=>({input:JSON.stringify(input),expected:canonical(input)}));
+const maximumBytes=8*1024*1024;
+const limits=[...new Set([0,1,2,3,maximumBytes-1,maximumBytes,maximumBytes+1])].map(length=>{
+ const bytes=Buffer.alloc(length),encoded=bytes.toString('base64'),decoded=Buffer.from(encoded,'base64');
+ return {length,accepted:decoded.length<=maximumBytes&&decoded.toString('base64')===encoded};
+});
+process.stdout.write(JSON.stringify({node:process.version,unitComparisons:contexts.length*65536,units,utf8,malformed,canonicalRows,canonicalUnits,limits}));

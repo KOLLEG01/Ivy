@@ -154,6 +154,20 @@ pub fn parse_form(input: &JsString) -> Vec<(JsString, JsString)> {
         .collect()
 }
 
+/// URLSearchParams(entries).toString() for already-string name/value pairs.
+/// Retain their order and duplicates, converting each UTF-16 string to USVString.
+pub fn serialize_form(entries: &[(JsString, JsString)]) -> JsString {
+    url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(entries.iter().map(|(name, value)| {
+            (
+                String::from_utf16_lossy(&name.0),
+                String::from_utf16_lossy(&value.0),
+            )
+        }))
+        .finish()
+        .into()
+}
+
 /// Construct an absolute URL and apply searchParams.set for each pair in order.
 /// Empty updates leave the constructor's query spelling intact. Caller policy
 /// (including permitted redirect schemes and origins) is deliberately separate.

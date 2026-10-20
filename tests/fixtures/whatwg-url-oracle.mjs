@@ -87,9 +87,26 @@ function formRows() {
   return rows;
 }
 
+function formSerializeRows() {
+  const rows=[];
+  const add=pairs=>rows.push({input:JSON.stringify({pairs}),
+    result:JSON.stringify({ok:true,value:new URLSearchParams(pairs).toString()})});
+  add([]);
+  add([['node','host.service'],['id','thread'],['node','again']]);
+  add([['\ud800','first'],['\udfff','second'],['�','third']]);
+  for(let unit=0;unit<=0xffff;unit++){
+    const value=String.fromCharCode(unit);
+    add([[value,'a +%&=#~*\0\r\n'],['node',value],[value,value]]);
+  }
+  for(const value of ['😀','\ud800\udfff','x\ud800y\udfff','',"\t\0\ufeff\r\n",'a +%&=#~*'])
+    add([[value,value],['node',value],['id',value],[value,'last']]);
+  return rows;
+}
+
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){
 const mode=process.argv[2];
 if (mode === 'form') process.stdout.write(JSON.stringify(formRows()));
+else if (mode === 'form-serialize') process.stdout.write(JSON.stringify(formSerializeRows()));
 else {
 const credentials=mode==='credentials';
 if(credentials){

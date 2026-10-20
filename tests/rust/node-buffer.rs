@@ -1,7 +1,7 @@
 use ivy_contracts::{
     JsString,
     json::parse,
-    node_buffer::{base64url_decode, base64url_text},
+    node_buffer::{base64url_decode, base64url_text, canonical_base64_decode},
 };
 use std::sync::OnceLock;
 
@@ -95,4 +95,59 @@ fn malformed_padding_alphabets_and_seeded_cursor_text_match_node() {
         let input = parse(row["input"].as_str().unwrap(), usize::MAX).unwrap();
         check(input.as_js_string().unwrap(), row);
     }
+}
+
+#[test]
+fn canonical_standard_base64_and_original_eight_mib_bound_match_node() {
+    let fixture = oracle();
+    let check = |input: &JsString, expected: &serde_json::Value| {
+        let actual = canonical_base64_decode(input, 8 * 1024 * 1024).map(|bytes| hex(&bytes));
+        assert_eq!(actual.as_deref(), expected.as_str(), "canonical {input:?}");
+    };
+    let rows = fixture["canonicalRows"].as_array().unwrap();
+    assert!(rows.len() > 80_000);
+    for row in rows {
+        let input = parse(row["input"].as_str().unwrap(), usize::MAX).unwrap();
+        check(input.as_js_string().unwrap(), &row["expected"]);
+    }
+    for group in fixture["canonicalUnits"].as_array().unwrap() {
+        let context = group["context"].as_str().unwrap();
+        for unit in 0..=u16::MAX {
+            let mut input = JsString::from(context);
+            let index = input.0.iter().position(|unit| *unit == 88).unwrap();
+            input.0[index] = unit;
+            check(
+                &input,
+                if unit <= 255 {
+                    &group["expected"][usize::from(unit)]
+                } else {
+                    &serde_json::Value::Null
+                },
+            );
+        }
+    }
+    for row in fixture["limits"].as_array().unwrap() {
+        let length = row["length"].as_u64().unwrap() as usize;
+        let mut encoded = "AAAA".repeat(length / 3);
+        encoded.push_str(match length % 3 {
+            0 => "",
+            1 => "AA==",
+            _ => "AAA=",
+        });
+        let actual = canonical_base64_decode(&encoded.into(), 8 * 1024 * 1024);
+        assert_eq!(
+            actual.is_some(),
+            row["accepted"].as_bool().unwrap(),
+            "length={length}"
+        );
+        if let Some(bytes) = actual {
+            assert_eq!(bytes.len(), length);
+            assert!(bytes.iter().all(|byte| *byte == 0));
+        }
+    }
+    assert_eq!(
+        canonical_base64_decode(&JsString::from(""), 0),
+        Some(Vec::new())
+    );
+    assert!(canonical_base64_decode(&JsString::from("AA=="), 0).is_none());
 }
