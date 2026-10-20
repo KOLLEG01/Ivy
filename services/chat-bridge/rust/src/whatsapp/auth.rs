@@ -28,6 +28,29 @@ impl AuthStore {
             .optional()
     }
 
+    /// Read every category from one committed state for compatibility preflight.
+    /// Keep unknown rows and encoded values intact; inspection never advances keys.
+    pub fn snapshot(&mut self) -> rusqlite::Result<Vec<AuthEntry>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let entries = {
+            let mut query =
+                tx.prepare("SELECT category,id,value FROM auth ORDER BY category,id")?;
+            query
+                .query_map([], |row| {
+                    Ok(AuthEntry {
+                        category: row.get(0)?,
+                        id: row.get(1)?,
+                        value: row.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(entries)
+    }
+
     pub fn set(&self, category: &str, id: &str, value: Option<&str>) -> rusqlite::Result<()> {
         if self.get(category, id)?.as_deref() == value {
             return Ok(());
@@ -50,6 +73,13 @@ impl AuthStore {
     pub fn close(self) -> rusqlite::Result<()> {
         self.db.close().map_err(|(_, error)| error)
     }
+}
+
+/// Encoded authentication material. Deliberately has no Debug implementation.
+pub struct AuthEntry {
+    pub category: String,
+    pub id: String,
+    pub value: String,
 }
 
 pub struct AuthMutation<'a> {
