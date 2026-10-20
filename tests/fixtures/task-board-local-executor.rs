@@ -37,7 +37,7 @@ impl Gate {
     }
 }
 #[derive(Default)]
-struct WakeFlag(AtomicBool);
+pub(crate) struct WakeFlag(pub(crate) AtomicBool);
 impl Wake for WakeFlag {
     fn wake(self: Arc<Self>) {
         self.0.store(true, Ordering::Release);
@@ -48,6 +48,23 @@ impl Wake for WakeFlag {
 }
 fn poll<F: Future>(future: Pin<&mut F>, wake: &Arc<WakeFlag>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(&Waker::from(wake.clone())))
+}
+// Yield only after a registered wake permits a poll. The runtime yield renews
+// Tokio's cooperative budget; it never grants an extra owner poll by itself.
+pub(crate) async fn poll_registered<F: Future>(
+    mut future: Pin<&mut F>,
+    wake: &Arc<WakeFlag>,
+) -> Poll<F::Output> {
+    for _ in 0..128 {
+        if !wake.0.swap(false, Ordering::AcqRel) {
+            return Poll::Pending;
+        }
+        if let Poll::Ready(value) = poll(future.as_mut(), wake) {
+            return Poll::Ready(value);
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("The finite owner exceeded its registered-wake poll budget");
 }
 async fn bounded<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(3), future)
@@ -160,4 +177,79 @@ async fn interrupted_owner_executor_releases_the_admitted_invocation_with_unknow
     assert_eq!(error.code_js(), "internal_error".into());
     assert_eq!(error.message_js(), "Service invocation failed.".into());
     assert_eq!(error.outcome, Outcome::Unknown);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn late_reconciliation_admission_wakes_nested_execution_without_unsolicited_polls() {
+    use ivy_task_board::{
+        engine_execution::{ExecutionProgram, ExecutionQueue},
+        operations::Document,
+    };
+    struct Program<'a> {
+        gate: &'a Gate,
+        calls: Cell<u64>,
+    }
+    impl ExecutionProgram for Program<'_> {
+        async fn run(&self, operation: Document) -> ivy_contracts::IvyResult<Json> {
+            self.calls.set(self.calls.get() + 1);
+            self.gate.wait().await;
+            Ok(operation.value)
+        }
+    }
+    let operation = |value: &str| Document {
+        pin: Json::object([
+            ("objectId", "accepted".into()),
+            ("revision", Json::Number(1.0)),
+        ]),
+        value: value.into(),
+        content_hash: ivy_contracts::hash::hash_json(&Json::from(value)).unwrap(),
+        parent_id: None,
+    };
+    let execution_gate = Gate::default();
+    let root_gate = Gate::default();
+    let program = Program {
+        gate: &execution_gate,
+        calls: Cell::new(0),
+    };
+    let execution_jobs = LocalExecutor::default();
+    let queue = ExecutionQueue::new(&program, &execution_jobs);
+    let invocation_jobs = LocalExecutor::default();
+    let invocations = EngineInvocations::new(&invocation_jobs);
+    let reconciliation_jobs = LocalExecutor::default();
+    let category_jobs = LocalExecutor::default();
+    let mut driver = Box::pin(invocation_jobs.drive(reconciliation_jobs.drive(
+        execution_jobs.drive(category_jobs.drive(async {
+            root_gate.wait().await;
+            invocations.stop().await;
+        })),
+    )));
+    let wake = Arc::new(WakeFlag(AtomicBool::new(true)));
+    assert!(poll_registered(driver.as_mut(), &wake).await.is_pending());
+    assert!(!wake.0.load(Ordering::Acquire));
+    assert_eq!(program.calls.get(), 0);
+    // The factory's real queue order is already idle. Reconciliation then
+    // submits an invocation whose admission enqueues lower-layer execution.
+    reconciliation_jobs.spawn(Box::pin(async {
+        drop(
+            invocations
+                .run(async { queue.execute(operation("original"))?.await })
+                .unwrap(),
+        );
+    }));
+    assert!(wake.0.load(Ordering::Acquire));
+    assert!(poll_registered(driver.as_mut(), &wake).await.is_pending());
+    assert_eq!(program.calls.get(), 1);
+    assert!(!wake.0.load(Ordering::Acquire));
+    let duplicate = queue.execute(operation("ignored replacement")).unwrap();
+    invocations.stop_admissions();
+    assert!(invocations.run(async { Ok(Json::Null) }).is_err());
+    root_gate.release();
+    assert!(poll_registered(driver.as_mut(), &wake).await.is_pending());
+    assert_eq!(program.calls.get(), 1);
+    execution_gate.release();
+    assert!(poll_registered(driver.as_mut(), &wake).await.is_ready());
+    assert_eq!(duplicate.await.unwrap(), Json::from("original"));
+    assert_eq!(program.calls.get(), 1);
+    queue.settled().await;
+    invocations.settled().await;
 }

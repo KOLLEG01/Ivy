@@ -1,4 +1,5 @@
 use super::*;
+use crate::local_executor::{WakeFlag, poll_registered};
 use ivy_store::rusqlite::Connection;
 use ivy_task_board::{
     engine_execution::ReadScopeExecutor,
@@ -332,31 +333,18 @@ async fn cyclic_driver_graph_keeps_queued_originals_across_retirement_and_abando
             let mut driver = Box::pin(
                 executor.drive(execution_executor.drive(internal_owner.run(&engine, root))),
             );
-            poll_fn(|cx| {
-                assert!(driver.as_mut().poll(cx).is_pending());
-                if owner_gate.entered.load(Ordering::SeqCst) == 1 {
-                    Poll::Ready(())
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-            })
-            .await;
+            let wake = Arc::new(WakeFlag(AtomicBool::new(true)));
+            assert!(poll_registered(driver.as_mut(), &wake).await.is_pending());
+            assert_eq!(owner_gate.entered.load(Ordering::SeqCst), 1);
             drop(observer);
             owner_gate.release();
-            poll_fn(|cx| {
-                assert!(driver.as_mut().poll(cx).is_pending());
-                if execution_gate.entered.load(Ordering::SeqCst) == 1 {
-                    assert_eq!(program.program.calls.get(), 1);
-                    Poll::Ready(())
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-            })
-            .await;
+            assert!(poll_registered(driver.as_mut(), &wake).await.is_pending());
+            assert_eq!(execution_gate.entered.load(Ordering::SeqCst), 1);
+            assert_eq!(program.program.calls.get(), 1);
             execution_gate.release();
-            let result = driver.await;
+            let Poll::Ready(result) = poll_registered(driver.as_mut(), &wake).await else {
+                panic!("Retained cyclic admission lost its registered completion wake");
+            };
             if root_failed_early {
                 let error = result.unwrap_err();
                 assert_eq!(error.code_js(), original_error.code_js());
