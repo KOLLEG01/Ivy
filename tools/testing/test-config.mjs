@@ -184,6 +184,7 @@ export const rustTests = {
   'tests/rust/host-package-requirements.rs': { package: 'ivy-host-runtime', test: 'host-package-requirements' },
   'tests/rust/host-defaults.rs': { package: 'ivy-host-runtime', test: 'host-defaults' },
   'tests/rust/host-logs.rs': { package: 'ivy-host-runtime', test: 'host-logs' },
+  'tests/rust/agent-claude.rs': { package: 'ivy-agent-manager', test: 'agent-claude' },
   'tests/rust/agent-state.rs': { package: 'ivy-agent-manager', test: 'agent-state' },
   'tests/rust/agent-notifications.rs': { package: 'ivy-agent-manager', test: 'agent-notifications' },
   'tests/rust/agent-interactions.rs': {
