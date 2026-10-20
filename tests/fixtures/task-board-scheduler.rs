@@ -481,6 +481,6 @@ async fn original_scheduler_allocation_and_attempt_effects_are_preserved() {
             );
         }
     }
-    assert_eq!(cases, 150);
-    assert_eq!(boundaries, 2046);
+    assert_eq!(cases, 152);
+    assert_eq!(boundaries, 2074);
 }

@@ -46,6 +46,8 @@ add('failed context recovery keeps workspace',{recovery:true});add('failed recov
 for(const where of ['serviceNodes.list','agent.status','agent.capabilities','agent.resolveWorkspace:false','agent.catalog','agent.projects','agent.resolveWorkspace:true','prompt','write'])add('allocation error '+where,{fault:{where,code:'service_unavailable'}});
 add('saved native version must match catalog source',{catalog:{sourceHash:zero}});add('native binding definition must remain catalog exact',{definitionHash:zero});
 addS('prepare first automatic request');addS('continue retained conversation',{task:{primaryResourceRef:primary}});addS('queued comment selection',{task:{commentDeliveries:[{commentId:'q',state:'queued'},{commentId:'done',state:'delivered'}]}});
+addS('factory due task without a ready host retains defer',{fields:{priority:3,nextReviewAt:at,executionRequirement:{kind:'automatic'}},fault:{where:'allocate',code:'task_board_target_unavailable',message:'No ready AgentManager is currently available.'}});
+addS('factory future task defers before allocation',{fields:{priority:2,nextReviewAt:future,executionRequirement:{kind:'automatic'}}});
 addS('logical owner checked before disabled',{enabled:false});addS('manual task still forwards delegated review',{fields:{control:'manual'}});addS('claimed task cannot reschedule',{task:{claim:{run:pin(200)}}});addS('publication blocks reschedule',{task:{publication:pin(300)}});
 for(const state of ['review','done','backlog'])addS('inactive workflow '+state,{task:{workflowState:state}});
 for(const reason of ['publication','external_outcome','unknown'])addS('unsupported waiting '+reason,{task:{workflowState:'waiting',waiting:{reason}}});

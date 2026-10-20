@@ -26,6 +26,8 @@ mod native;
 mod observations;
 #[path = "task-board-engine-factory-retirement.rs"]
 mod retirement;
+#[path = "task-board-engine-factory-scheduler.rs"]
+mod scheduler;
 #[path = "task-board-engine-factory-steering.rs"]
 mod steering;
 
@@ -56,6 +58,7 @@ struct Fixture {
     driver: Option<driver::Scenario>,
     control: Option<control::Scenario>,
     steering: Option<steering::Scenario>,
+    scheduler: Option<scheduler::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -81,6 +84,7 @@ impl Fixture {
             driver: None,
             control: None,
             steering: None,
+            scheduler: None,
         }
     }
     fn database(&self) -> Connection {
@@ -162,6 +166,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         if let Some(steering) = &self.steering {
             steering.bind(&policy.context)?;
         }
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.bind(&policy.context)?;
+        }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
         drop(policy.context.calls.recover_publication()?);
@@ -183,7 +190,10 @@ impl CheckPolicy for Policies<'_> {
         }
         Ok(())
     }
-    fn coordination_pending(&self, _: &Json) -> IvyResult<bool> {
+    fn coordination_pending(&self, task: &Json) -> IvyResult<bool> {
+        if let Some(scheduler) = &self.fixture.scheduler {
+            return scheduler.coordination(task);
+        }
         panic!("Not a coordination decision")
     }
     async fn failed_rate_limit_retry_at(&self, _: &Document) -> IvyResult<Option<JsString>> {
@@ -205,6 +215,9 @@ impl TaskPrompts for Policies<'_> {
     ) -> IvyResult<JsString> {
         if let Some(driver) = &self.fixture.driver {
             return driver.prompt(task, owner, coordination);
+        }
+        if let Some(scheduler) = &self.fixture.scheduler {
+            return scheduler.prompt(task, owner, coordination);
         }
         panic!("No native prompt")
     }
@@ -286,6 +299,9 @@ impl TaskNoticePolicy for Policies<'_> {
         if let Some(observations) = &self.fixture.observations {
             return observations.notice(self.context.owner.generation, task, operation);
         }
+        if let Some(scheduler) = &self.fixture.scheduler {
+            return scheduler.notice(self.context.owner.generation, task, operation);
+        }
         if self.fixture.driver.is_some()
             || self.fixture.control.is_some()
             || self.fixture.steering.is_some()
@@ -315,6 +331,14 @@ impl CategoryLocale for Policies<'_> {
 }
 impl LifecyclePages for Policies<'_> {
     async fn page(&self, key: &str, options: &Json) -> IvyResult<Json> {
+        if let Some(scheduler) = &self.fixture.scheduler {
+            if key == "task-board/task"
+                && options.get("where").and_then(|v| v.get("op")) == Some(&"and".into())
+                && self.context.owner.generation == 1.0
+            {
+                scheduler.ready.wait().await;
+            }
+        }
         if let Some(native) = &self.fixture.native {
             if key == "task-board/run" && self.context.owner.generation == 1.0 {
                 native.inputs_ready.wait().await;
@@ -358,6 +382,13 @@ impl LifecyclePages for Policies<'_> {
             key.into(),
             options.clone(),
         ));
+        if let Some(scheduler) = &self.fixture.scheduler {
+            if key == "task-board/task"
+                && options.get("where").and_then(|v| v.get("op")) == Some(&"and".into())
+            {
+                return scheduler.page(self.fixture, options);
+            }
+        }
         let mut items = vec![];
         for (id, revision, value) in self.fixture.rows(key) {
             if let Some(filter) = options.get("where") {
@@ -433,7 +464,7 @@ impl SchedulerJournalBindings for Policies<'_> {
 }
 impl CurrentPolicies for Policies<'_> {
     fn scheduler_enabled(&self) -> bool {
-        false
+        self.fixture.scheduler.is_some()
     }
     fn scheduler_interval_ms(&self) -> f64 {
         1000.0
@@ -444,10 +475,16 @@ impl CurrentPolicies for Policies<'_> {
     fn peer_comment(&self, _: &Json) -> IvyResult<bool> {
         panic!("No peer comment")
     }
-    async fn forward_delegated_review(&self, _: &Document) -> IvyResult<()> {
+    async fn forward_delegated_review(&self, task: &Document) -> IvyResult<()> {
+        if let Some(scheduler) = &self.fixture.scheduler {
+            return scheduler.forward(task);
+        }
         panic!("No child")
     }
-    async fn unstarted_missing_context(&self, _: &Document) -> IvyResult<bool> {
+    async fn unstarted_missing_context(&self, task: &Document) -> IvyResult<bool> {
+        if let Some(scheduler) = &self.fixture.scheduler {
+            return scheduler.missing(task);
+        }
         panic!("No native context")
     }
     fn run_handoff(&self, task: &Json, run: &JsString) -> IvyResult<bool> {

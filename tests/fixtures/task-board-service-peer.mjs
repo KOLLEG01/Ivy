@@ -2,6 +2,7 @@ import {registerHooks} from 'node:module';
 import {existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {once} from 'node:events';
+import assert from 'node:assert/strict';
 import {WebSocketServer} from 'ws';
 
 registerHooks({resolve(specifier,context,next){
@@ -22,7 +23,8 @@ const driver=process.argv.includes('--factory-driver');
 const driverBoundary=driver?(await import('./task-board-driver-peer.mjs')).driverBoundary():null;
 const control=process.argv.includes('--factory-control');
 const controlBoundary=control?(await import('./task-board-control-peer.mjs')).controlBoundary():null;
-const factory=process.argv.includes('--factory')||retirement||observations||driver||control;
+const scheduler=process.argv.includes('--factory-scheduler');
+const factory=process.argv.includes('--factory')||retirement||observations||driver||control||scheduler;
 const registry={namespaces:[{namespace:'task-board',description:'Fixture',guideMarkdown:'',tools:[definition,...(process.argv.includes('--engine')||factory?[actionDefinition]:[])],topics:[],inventoryKinds:[]}],contracts:[],requiredContracts:[]};
 const wss=new WebSocketServer({host:'127.0.0.1',port:0,perMessageDeflate:false,maxPayload:32*1024*1024});
 await once(wss,'listening');
@@ -52,6 +54,10 @@ wss.on('connection',(socket,request)=>{
     else if(method==='objects.stat'&&selected===1&&params.objectId==='missing-root')send({jsonrpc:'2.0',id,error:{code:-32000,message:'Refused root.',data:{code:'fixture_refusal',outcome:'unknown',details:{phase:'root'}}}});
     else if(['registry.sync','notifications.subscribe','objects.stat'].includes(method))reply(id,{});
     else if(method==='serviceNodes.get')reply(id,{serviceNodeId:params.serviceNodeId,serviceName:'task-board',connected:true,synced:true,principalId:'fixture-principal'});
+    else if(scheduler&&method==='serviceNodes.list'){
+      assert.deepEqual(params,{serviceName:'agent-manager',limit:200});
+      emit({kind:'scheduler-hosts',params});reply(id,{items:[],nextCursor:null});
+    }
     else if(factory&&method==='system.status')reply(id,{runtimeEpoch:'11111111-1111-4111-8111-111111111111'});
     else if(factory&&method==='events.head')reply(id,{throughSequence:0});
     else if(factory&&method==='events.subscribe')reply(id,{items:[],throughSequence:0,gap:null});
