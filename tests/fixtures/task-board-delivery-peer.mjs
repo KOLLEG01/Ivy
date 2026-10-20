@@ -8,7 +8,8 @@ export function deliveryBoundary(){
  let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null;
  const definitions=new Map();
  const phone=()=>row.input.mode==='phonePrepared';
- const template=()=>row.initial.current.value.chatRequest;
+ const fallback=()=>phone()&&row.input.fault.outcome==='not_executed';
+ const template=()=>row.initial.current.value.chatRequest??row.boundaries.find(b=>b.kind==='write'&&b.args[1].chatRequest)?.args[1].chatRequest;
  const expected=()=>({...template().expectedBridge,callerPrincipalId:'fixture-principal'});
  const channel=()=>structuredClone(template().channel);
  const operation=()=>{
@@ -23,9 +24,9 @@ export function deliveryBoundary(){
   const fail=(code,message,outcome='not_executed')=>send({jsonrpc:'2.0',id,error:{code:-32000,message,data:{code,outcome}}});
   if(method==='test.deliveryFixture'){
    assert.equal(row,null);row=structuredClone(params.row);
-   assert.equal(row.name,phone()?'factory phone question lost admission recovers confirmed':'factory question lost notify recovers confirmed');
+   assert.equal(row.name,fallback()?'factory phone refused question falls back and recovers original chat':phone()?'factory phone question lost admission recovers confirmed':'factory question lost notify recovers confirmed');
    assert.equal(row.expected.final.value.state,'confirmed');
-   if(phone()){reply(id,{});return true;}
+   if(phone()&&!fallback()){reply(id,{});return true;}
    const raw=key=>row.boundaries.find(b=>b.kind==='rpc'&&b.args[0]==='objects.read'&&b.value.object.contractKey===key).value;
    replyRaw=structuredClone(raw('chat-bridge/reply'));inputRaw=structuredClone(raw('chat-bridge/input'));
    validateChat('Reply',replyRaw.content.value);validateChat('Input',inputRaw.content.value);
@@ -36,29 +37,31 @@ export function deliveryBoundary(){
    emit({kind:'delivery-browser-notice',params});reply(id,{});return true;
   }
   if(method==='serviceNodes.get'&&params.serviceNodeId==='chat-node'){
-   assert.ok(row);assert.equal(phone(),false);reply(id,{serviceNodeId:'chat-node',serviceName:'chat-bridge',principalId:expected().principalId,connected:true,synced:true,ready:true});return true;
+   assert.ok(row);assert.ok(!phone()||fallback());reply(id,{serviceNodeId:'chat-node',serviceName:'chat-bridge',principalId:expected().principalId,connected:true,synced:true,ready:true});return true;
   }
   if(method==='serviceNodes.get'&&params.serviceNodeId==='phone-node'){
    assert.ok(row);assert.equal(phone(),true);reply(id,{serviceNodeId:'phone-node',serviceName:'phone-bridge',connected:true,synced:true,ready:true});return true;
   }
   if(method==='tools.list'&&['chat','phone'].includes(params.namespace)){
-   assert.ok(row);const name=params.namePrefix,namespace=phone()?'phone':'chat';assert.equal(params.namespace,namespace);
-   assert.ok((phone()?['request','operation']:['workspace','operation','notify','notice']).includes(name));
-   const definition={namespace,name,interfaceVersion:phone()?'1.0.0':'1.2.0',annotations:{readOnlyHint:!['notify','request'].includes(name)},inputSchema:{},outputSchema:{}};
+   assert.ok(row);const name=params.namePrefix,namespace=params.namespace;
+   assert.ok(namespace==='phone'?phone():!phone()||fallback());
+   assert.ok((namespace==='phone'?['request','operation']:['workspace','operation','notify','notice']).includes(name));
+   const definition={namespace,name,interfaceVersion:namespace==='phone'?'1.0.0':'1.2.0',annotations:{readOnlyHint:!['notify','request'].includes(name)},inputSchema:{},outputSchema:{}};
    definitions.set(namespace+'.'+name,definition);
    reply(id,{provider:{node:{serviceNodeId:namespace+'-node'}},items:[{qualifiedName:namespace+'.'+name,definition,definitionHash:toolDefinitionHash(definition),catalogHash:'sha256:'+'b'.repeat(64)}],nextCursor:null});return true;
   }
-  if(method==='objects.read'&&row&&!phone()){
+  if(method==='objects.read'&&row&&(!phone()||fallback())){
    const proof=params.objectId===row.expected.final.value.deliveryEvidence.objectId?replyRaw:
     params.objectId===replyRaw.content.value.origin.inputId?inputRaw:null;
    if(!proof)return false;
    emit({kind:'delivery-proof',address:params,raw:proof});reply(id,proof);return true;
   }
   if(method!=='tools.call'||!['chat.','phone.'].some(prefix=>params.qualifiedName.startsWith(prefix)))return false;
-  assert.ok(row);assert.equal(params.serviceNodeId,phone()?'phone-node':'chat-node');
+  assert.ok(row);const isPhone=params.qualifiedName.startsWith('phone.');assert.equal(params.serviceNodeId,isPhone?'phone-node':'chat-node');
   assert.equal(params.expectedDefinitionHash,toolDefinitionHash(definitions.get(params.qualifiedName)));
   const args=params.arguments;
-  if(phone()){
+  if(isPhone){
+   assert.ok(phone());
    if(params.qualifiedName==='phone.request'){
     const source=row.initial.current.value.phoneRequest;
     assert.deepEqual(args,{...source,operationId:args.operationId});
@@ -67,6 +70,13 @@ export function deliveryBoundary(){
      phoneRequest=structuredClone(args);emit({kind:'delivery-phone-first-admission',request:phoneRequest});
     }else assert.deepEqual(args,phoneRequest);
     emit({kind:'delivery-phone-request',request:structuredClone(args)});
+    if(fallback()){
+     assert.equal(selected,1);assert.equal(phoneRequest.operationId,args.operationId);
+     const original=row.boundaries.find(b=>b.kind==='rpc'&&b.args[0]==='tools.call'&&b.args[1].qualifiedName==='phone.request'&&b.error);
+     assert.ok(original);assert.equal(original.error.outcome,'not_executed');
+     emit({kind:'delivery-phone-refusal',error:structuredClone(original.error)});
+     fail(original.error.code,original.error.message,original.error.outcome);return true;
+    }
     if(selected===1){fail('service_unavailable','Fixture failure.','unknown');return true;}
     const original=row.boundaries.find(b=>b.kind==='rpc'&&b.args[0]==='tools.call'&&b.args[1].qualifiedName==='phone.request'&&b.value);
     const value={...structuredClone(original.value),operationId:phoneRequest.operationId};
