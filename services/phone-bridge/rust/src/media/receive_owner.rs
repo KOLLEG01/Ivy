@@ -895,6 +895,15 @@ impl SipRtpReceiver {
             .format
             .clone()
     }
+    pub(super) fn dispose_sender_format(&self) {
+        self.handle
+            .0
+            .sender
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .format = None;
+    }
     #[cfg(test)]
     pub(super) fn sender_state(&self) -> &Sender {
         &self.handle.0.sender

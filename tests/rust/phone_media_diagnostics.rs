@@ -212,7 +212,8 @@ async fn run(case: &IvyJson) -> Vec<IvyJson> {
                     .send_to(&bytes, m.observation().receive.transport.local_rtp)
                     .await
                     .unwrap();
-                until(|| m.observation().receive.raw_rtp_packets > before).await;
+                crate::sip_receiver::wait(|| m.observation().receive.raw_rtp_packets > before)
+                    .await;
             }
             "counters" => {
                 let number = |key| {
@@ -322,7 +323,7 @@ async fn original_raw_channel_and_selected_alternate_event_counters_are_distinct
         ),
         op("answer"),
     ];
-    let packet = |payload, data: &[u8], sequence, foreign| {
+    let packet = |payload, data: &[u8], sequence, foreign: bool| {
         let mut raw = vec![0; 12 + data.len()];
         ivy_phone_bridge::media::RtpHeader {
             marker: false,

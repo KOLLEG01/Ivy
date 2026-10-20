@@ -322,6 +322,9 @@ impl Core {
             let work = core.clone();
             let result = tokio::spawn(async move {
                 work.receiver().close().await;
+                // The original public send-codec field survives Close, then
+                // clears during Dispose before awaiting owned audio cleanup.
+                work.receiver().dispose_sender_format();
                 if let Some(screen) = work
                     .state
                     .lock()
