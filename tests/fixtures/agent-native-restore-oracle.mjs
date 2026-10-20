@@ -34,7 +34,7 @@ const helpers=source.slice(source.indexOf('const sqlName'),source.indexOf('/** C
 const start=source.indexOf('    const database = join(newHome'),end=source.indexOf('    report.instances.push(',start);
 assert(start>0&&end>start);
 const original=new Function('DatabaseSync','createHash','lstat','open','realpath','isAbsolute','join','relative','sep','inside','relativeFile','fileHash','exists','canonical','hashJson','requireThat',
- stripTypeScriptTypes(helpers,{mode:'transform'})+'\nreturn {map:mappedFile,run:async function(input){const {newHome,oldHome,prefix,layout}=input;const files=new Map(input.manifest.files.map(file=>[file.path,file]));\n'+stripTypeScriptTypes(source.slice(start,end),{mode:'transform'})+'\nreturn {logicalDataHash,changes,workingHash:await fileHash(database)};}};')
+ stripTypeScriptTypes(helpers,{mode:'transform'})+'\nreturn {map:mappedFile,digest:logicalDigest,run:async function(input){const {newHome,oldHome,prefix,layout}=input;const files=new Map(input.manifest.files.map(file=>[file.path,file]));\n'+stripTypeScriptTypes(source.slice(start,end),{mode:'transform'})+'\nreturn {logicalDataHash,changes,workingHash:await fileHash(database)};}};')
  (DatabaseSync,createHash,fs.lstat,fs.open,fs.realpath,isAbsolute,join,relative,sep,inside,relativeFile,fileHash,exists,canonical,hashJson,requireThat);
 const fixtureSource=readFileSync('tests/native-restore.test.ts','utf8');
 const fixtureStart=fixtureSource.indexOf('async function fixture('),fixtureEnd=fixtureSource.indexOf('\nfor (const version',fixtureStart);
@@ -44,6 +44,10 @@ const fixture=new Function('mkdtemp','mkdir','writeFile','readFile','rm','realpa
  (async prefix=>{await guard(prefix);return fs.mkdtemp(prefix);},async(path,...args)=>{await guard(path);return fs.mkdir(path,...args);},async(path,...args)=>{await guard(path);return fs.writeFile(path,...args);},fs.readFile,
  async()=>{throw Error('Original fixture cleanup is owned by the Rust test');},fs.realpath,dirname,join,relative,resolve,sep,()=>parent,DatabaseSync,jsonFile,
  (await import('node:fs')).existsSync,inside,hashJson,async(from,to,...args)=>{await guard(from);await guard(to);return copyVerified(from,to,...args);},async root=>{await guard(root);return inventoryFiles(root);},resolve('.'));
+if(input.action.startsWith('outer-')){
+ const {runOuter}=await import('./agent-native-restore-outer-oracle.mjs');
+ await runOuter({input,parent,fixture,guard,copyVerified,exists,inventoryFiles,backupPath,original});
+}else{
 const saved=join(parent,'restore-cases.json');
 async function snap(root){return inventoryFiles(root);}
 async function safeCopy(from,to){await guard(from);await guard(to);for(const file of await inventoryFiles(from))await copyVerified(join(from,file.path),join(to,file.path),file,true);}
@@ -160,4 +164,5 @@ async function observation(row){
  const sourceNow=await snap(row.source),backupNow=await snap(row.backup);
  assert.deepEqual(sourceNow,row.protected.source,'Source fixture changed');assert.deepEqual(backupNow,row.protected.backup,'Backup fixture changed');
  return{data,sourcePreserved:true,backupPreserved:true,workingHash:await fileHash(join(row.newHome,'state_5.sqlite'))};
+}
 }

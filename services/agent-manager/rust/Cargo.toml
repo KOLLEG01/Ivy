@@ -63,3 +63,7 @@ path = "../../../tests/rust/agent-offline-import.rs"
 [[test]]
 name = "agent-claude-adapter"
 path = "../../../tests/rust/agent-claude-adapter.rs"
+
+[[test]]
+name = "agent-native-restore"
+path = "../../../tests/rust/agent-native-restore.rs"

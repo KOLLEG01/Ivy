@@ -1,22 +1,21 @@
-// Compile the same Host domain source to isolate its SQL transaction from the
-// generic file mapper. File observations here come from the original mapper.
-#[path = "../../packages/host-runtime/rust/src/native_restore.rs"]
-mod native_restore;
+// Exercise the actual public Host module and file mapper against the original.
 use ivy_contracts::{
-    IvyError, IvyJson, JsString, Outcome,
+    IvyError, IvyJson, JsString,
     hash::digest,
     json::{canonical, parse, stringify},
 };
-use ivy_host_runtime::{node_path, paths};
+use ivy_host_runtime::{native_restore, node_path, paths};
 use ivy_store::{
     rusqlite::Connection,
     sqlite::{self, OpenOptions},
 };
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
@@ -89,15 +88,6 @@ fn node(root: &Path, action: &str) -> IvyJson {
     );
     parse(&String::from_utf8(result.stdout).unwrap(), usize::MAX).unwrap()
 }
-fn replay_error(error: &IvyJson) -> IvyError {
-    let data = value(error, "data");
-    let outcome = match string(data, "outcome").as_str() {
-        "unknown" => Outcome::Unknown,
-        "completed" => Outcome::Completed,
-        _ => Outcome::NotExecuted,
-    };
-    IvyError::new(string(data, "code"), string(error, "message")).with_outcome(outcome)
-}
 fn wire(error: IvyError) -> IvyJson {
     IvyJson::object([("ok", false.into()), ("error", error.to_wire())])
 }
@@ -126,7 +116,6 @@ fn copied_sqlite_transactions_match_original_layout_digest_and_failure_boundarie
         ]
     );
     node(&root.0, "reset");
-    let mappings = node(&root.0, "mappings");
     let mut replies = Vec::new();
     for case in cases.as_array().unwrap() {
         let name = string(case, "name");
@@ -164,30 +153,31 @@ fn copied_sqlite_transactions_match_original_layout_digest_and_failure_boundarie
             },
         )
         .unwrap();
-        let replay = mappings
+        let files: BTreeMap<_, _> = value(value(case, "manifest"), "files")
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| string(row, "name") == name)
-            .unwrap();
+            .map(|file| {
+                (
+                    value(file, "path").as_js_string().unwrap().clone(),
+                    file.clone(),
+                )
+            })
+            .collect();
+        let context = node_path::Context::current().unwrap();
         let result = native_restore::relocate_database(
             db,
             value(case, "layout"),
             |raw: &JsString, scope| {
-                let row = value(replay, "mappings")
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|row| {
-                        value(row, "path").as_js_string() == Some(raw)
-                            && string(row, "scope") == scope
-                    })
-                    .expect("Original file observation missing");
-                let reply = value(row, "reply");
-                if value(reply, "ok").as_bool() == Some(false) {
-                    return Err(replay_error(value(reply, "error")));
-                }
-                Ok(value(reply, "value").as_js_string().cloned())
+                native_restore::mapped_file(
+                    raw,
+                    scope,
+                    value(case, "oldHome").as_js_string().unwrap(),
+                    value(case, "newHome").as_js_string().unwrap(),
+                    value(case, "prefix").as_js_string().unwrap(),
+                    &files,
+                    &context,
+                )
             },
         );
         let reply = match result {
@@ -263,4 +253,195 @@ fn copied_sqlite_transactions_match_original_layout_digest_and_failure_boundarie
             );
         }
     }
+    save_proof(
+        "sql-and-real-mapper",
+        &IvyJson::object([
+            ("original", expected),
+            ("observed", observed),
+            (
+                "replies",
+                IvyJson::Array(
+                    replies
+                        .into_iter()
+                        .map(|(name, reply)| {
+                            IvyJson::object([("name", name.into()), ("reply", reply)])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]),
+    );
+}
+
+fn save_proof(group: &str, value: &IvyJson) {
+    if let Some(path) = std::env::var_os("IVY_NATIVE_RESTORE_PROOF") {
+        let mut out = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        let record = IvyJson::object([("group", group.into()), ("value", value.clone())]);
+        writeln!(out, "{}", stringify(&record, usize::MAX).unwrap()).unwrap();
+    }
+}
+
+fn comparable_report(value: &IvyJson) -> IvyJson {
+    let mut report = value.clone();
+    let timestamp = string(&report, "completedAt");
+    chrono::DateTime::parse_from_rfc3339(&timestamp).unwrap();
+    assert_eq!(timestamp.len(), 24);
+    report.insert("completedAt", "<executing-clock>".into());
+    let instances = value
+        .get("instances")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let mut row = row.clone();
+            // Physical SQLite output is engine-specific. Its returned digest is
+            // checked against that execution's actual bytes below.
+            row.remove("workingHash");
+            row
+        })
+        .collect();
+    report.insert("instances", IvyJson::Array(instances));
+    report
+}
+
+#[tokio::test]
+async fn copied_restore_admission_before_images_and_publication_match_original() {
+    use ivy_host_runtime::{layout::StorageContext, native_backup_paths::NativeBackupPolicy};
+    let root = Root::new();
+    let cases = node(&root.0, "outer-prepare");
+    let expected = node(&root.0, "outer-original");
+    let positive = expected
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| value(value(row, "reply"), "ok").as_bool() == Some(true))
+        .map(|row| string(row, "name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        positive,
+        [
+            "0.154.0",
+            "0.158.0",
+            "0.159.2",
+            "external-shared",
+            "implicit-shared",
+            "zero-alternate",
+            "absent-metadata",
+            "platform-preferred"
+        ]
+    );
+    node(&root.0, "outer-reset");
+    let mut replies = Vec::new();
+    for case in cases.as_array().unwrap() {
+        let policy = NativeBackupPolicy::new(
+            StorageContext {
+                paths: node_path::Context::current().unwrap(),
+                account_home: node_path::from_native(&root.0),
+                compare: Arc::new(|_, _| {
+                    panic!("Single-instance fixture must not use a locale fallback")
+                }),
+            },
+            BTreeMap::new(),
+            node_path::Context::current().unwrap().cwd,
+        );
+        let result = native_restore::relocate_native_storage(
+            value(case, "original"),
+            value(case, "target"),
+            value(case, "manifest"),
+            Path::new(&string(case, "distributionRoot")),
+            &policy,
+        )
+        .await;
+        let reply = match result {
+            Ok(report) => IvyJson::object([("ok", true.into()), ("value", report)]),
+            Err(error) => wire(error),
+        };
+        let name = string(case, "name");
+        let original = expected
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| string(row, "name") == name)
+            .unwrap();
+        if value(&reply, "ok").as_bool() == Some(true) {
+            assert_eq!(
+                value(value(original, "reply"), "ok").as_bool(),
+                Some(true),
+                "{name}"
+            );
+            same(
+                &comparable_report(value(&reply, "value")),
+                &comparable_report(value(value(original, "reply"), "value")),
+                &name,
+            );
+        } else {
+            same(&reply, value(original, "reply"), &name);
+        }
+        replies.push((name, reply));
+    }
+    let observed = node(&root.0, "outer-inspect");
+    for original in expected.as_array().unwrap() {
+        let name = string(original, "name");
+        let actual = observed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| string(row, "name") == name)
+            .unwrap();
+        for key in ["data", "files", "sourcePreserved", "backupPreserved"] {
+            same(
+                value(actual, key),
+                value(original, key),
+                &format!("{name} {key}"),
+            );
+        }
+        let reply = &replies.iter().find(|(n, _)| n == &name).unwrap().1;
+        if value(&reply, "ok").as_bool() == Some(true) {
+            // The saved report is exactly the returned value, and its final
+            // database hash names this execution's bytes rather than the oracle's.
+            same(
+                value(actual, "report"),
+                value(reply, "value"),
+                &format!("{name} saved report"),
+            );
+            let instances = value(value(reply, "value"), "instances")
+                .as_array()
+                .unwrap();
+            for instance in instances {
+                same(
+                    value(instance, "workingHash"),
+                    value(actual, "workingHash"),
+                    &format!("{name} working bytes"),
+                );
+            }
+        } else {
+            assert!(
+                value(actual, "report").is_null(),
+                "Failure published a success report: {name}"
+            );
+        }
+    }
+    save_proof(
+        "outer-restore",
+        &IvyJson::object([
+            ("original", expected),
+            ("observed", observed),
+            (
+                "replies",
+                IvyJson::Array(
+                    replies
+                        .into_iter()
+                        .map(|(name, reply)| {
+                            IvyJson::object([("name", name.into()), ("reply", reply)])
+                        })
+                        .collect(),
+                ),
+            ),
+        ]),
+    );
 }

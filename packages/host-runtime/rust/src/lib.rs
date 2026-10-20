@@ -36,3 +36,8 @@ pub mod scheduler;
 pub mod layout;
 pub mod native_backup_policy;
 pub mod native_backup_paths;
+
+#[path="artifact/file_record.rs"]
+pub mod artifact_file;
+pub mod backup_files;
+pub mod native_restore;

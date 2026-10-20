@@ -40,6 +40,21 @@ impl NativeBackupPolicy {
             account_home: &self.storage.account_home,
         }
     }
+    pub(crate) fn storage(&self) -> &StorageContext {
+        &self.storage
+    }
+    pub(crate) fn owned_home(
+        &self,
+        config: &IvyJson,
+        instance: &IvyJson,
+    ) -> IvyResult<Option<JsString>> {
+        let paths = service_paths_for_style(config, instance, self.storage.paths.style)?;
+        instance_owned_codex_home_data_json(
+            instance.required("settings")?,
+            paths.get("data"),
+            &self.homes(),
+        )
+    }
     /// Exclude only the per-session helper cache of an explicitly owned home.
     pub fn exclusions(&self, config: &IvyJson) -> IvyResult<Vec<IvyJson>> {
         let mut rows = Vec::new();
