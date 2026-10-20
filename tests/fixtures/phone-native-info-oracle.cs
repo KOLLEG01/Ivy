@@ -34,10 +34,10 @@ public static class PhoneNativeInfoOracle {
                 string ct=step.GetProperty("contentType").ValueKind==JsonValueKind.Null?null:step.GetProperty("contentType").GetString(),body=step.GetProperty("body").GetString();
                 string selectedVia=step.TryGetProperty("branch",out var b)?b.GetString():"z9hG4bK-owned-info-"+(++branch);
                 await SendRaw(Raw("INFO",seq,body,ct,mutation=="wire"?"foreign-wire":selectedWire,mutation=="local"?"foreign-local":mutation=="missingLocal"?null:selectedLocal,mutation=="remote"?"foreign-remote":mutation=="missingRemote"?null:selectedRemote,selectedVia));
-                int? status=null;using var cancel=new CancellationTokenSource(step.GetProperty("reply").GetBoolean()?4000:150);
-                try{for(;;){var packet=await peer.ReceiveAsync(cancel.Token);string raw=Encoding.UTF8.GetString(packet.Buffer);if(!raw.StartsWith("SIP/2.0"))throw new Exception("Unexpected original INFO dialog request");var response=SIPResponse.ParseSIPResponse(raw);if(response.Header.CSeqMethod!=SIPMethodsEnum.INFO||response.Header.CSeq!=seq)continue;status=(int)response.Status;break;}}
+                int? status=null,responseSequence=null;using var cancel=new CancellationTokenSource(step.GetProperty("reply").GetBoolean()?4000:150);
+                try{for(;;){var packet=await peer.ReceiveAsync(cancel.Token);string raw=Encoding.UTF8.GetString(packet.Buffer);if(!raw.StartsWith("SIP/2.0"))throw new Exception("Unexpected original INFO dialog request");var response=SIPResponse.ParseSIPResponse(raw);if(response.Header.CSeqMethod!=SIPMethodsEnum.INFO||response.Header.Vias.TopViaHeader.Branch!=selectedVia)continue;status=(int)response.Status;responseSequence=response.Header.CSeq;break;}}
                 catch(OperationCanceledException){}
-                rows.Add(new{label,status,features=observed.Features.Observation});
+                rows.Add(new{label,status,responseSequence,features=observed.Features.Observation});
             }}
             async Task<(SipCall,string,string)> Outgoing(string id,bool first){
                 await owner.InvokeAsync("call.prepare",Args(new{callId=id}));var current=Host(owner).FindCall(id);await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));

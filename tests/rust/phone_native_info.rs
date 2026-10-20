@@ -29,7 +29,7 @@ fn cases(challenge: bool) -> Vec<IvyJson> {
     let mut cases = vec![];
     for (phase, base, body) in [
         ("beforeAnswer", 1, "*0#"),
-        ("beforeAck", 10, if challenge { "*1" } else { "*0#" }),
+        ("beforeAck", 10, if challenge { "12" } else { "*0#" }),
     ] {
         for (i, key) in body.chars().enumerate() {
             cases.push(case(
@@ -191,7 +191,7 @@ fn cases(challenge: bool) -> Vec<IvyJson> {
             reply,
         ));
     }
-    for sequence in [0, i32::MAX] {
+    for sequence in [0, i32::MAX - 1, i32::MAX] {
         cases.push(case(
             "connected",
             &format!("sequence-{sequence}"),
@@ -394,17 +394,19 @@ impl Peer {
                             Response::try_from(std::str::from_utf8(&bytes[..n]).unwrap()).unwrap();
                         if response.cseq_header().unwrap().method().unwrap() == Method::Info
                             && response
-                                .cseq_header()
+                                .top_via_header()
+                                .unwrap()
+                                .typed()
+                                .unwrap()
+                                .branch()
                                 .unwrap()
                                 .value()
-                                .split_whitespace()
-                                .next()
-                                .unwrap()
-                                .parse::<i32>()
-                                .unwrap()
-                                == seq
+                                == branch
                         {
-                            break response.status_code.code();
+                            break (
+                                response.status_code.code(),
+                                response.cseq_header().unwrap().seq().unwrap(),
+                            );
                         }
                     }
                 },
@@ -415,7 +417,11 @@ impl Peer {
                 ("label", label.into()),
                 (
                     "status",
-                    response.map_or(IvyJson::Null, |s| IvyJson::Number(s.into())),
+                    response.map_or(IvyJson::Null, |(s, _)| IvyJson::Number(s.into())),
+                ),
+                (
+                    "responseSequence",
+                    response.map_or(IvyJson::Null, |(_, s)| IvyJson::Number(s.into())),
                 ),
                 (
                     "features",
@@ -697,6 +703,19 @@ async fn native_sip_info_original_dialog_lifetime_grammar_fifo_and_feature_autho
         let media = call.media().unwrap();
         let local_rtp = media.observation().receive.transport.local_rtp;
         rows.extend(peer.cases("connected", &identity, &call).await);
+        for (sequence, response) in [(0, 0), (i32::MAX - 1, i32::MAX - 1), (i32::MAX, 100)] {
+            assert_eq!(
+                rows.iter()
+                    .find(|r| r.get("label").unwrap().as_str().unwrap()
+                        == format!("sequence-{sequence}"))
+                    .unwrap()
+                    .get("responseSequence")
+                    .unwrap()
+                    .as_f64(),
+                Some(f64::from(response)),
+                "{name}/sequence-{sequence}"
+            );
+        }
         for label in [
             "body-1024",
             "utf16-1024",

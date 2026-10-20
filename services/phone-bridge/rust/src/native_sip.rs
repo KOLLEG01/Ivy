@@ -569,7 +569,22 @@ impl NativeSipOperations {
             return Ok(());
         }
         transaction.destination = source;
-        match transaction.reply(StatusCode::OK).await {
+        let response = if sequence == i32::MAX {
+            // The original response header constructor retains its default at
+            // Int32.MaxValue. Admission and duplicate tracking use the request.
+            let mut response = transaction.endpoint_inner.make_response(
+                &transaction.original,
+                StatusCode::OK,
+                None,
+            );
+            response
+                .headers
+                .unique_push(rsipstack::sip::headers::CSeq::new("100 INFO").into());
+            transaction.respond(response).await
+        } else {
+            transaction.reply(StatusCode::OK).await
+        };
+        match response {
             Ok(_) => Ok(()),
             Err(_) => Err(transaction),
         }
