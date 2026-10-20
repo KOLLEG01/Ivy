@@ -205,12 +205,14 @@ fn pump(inner: &Arc<Inner>, audio: Arc<dyn PcmSendPort>) -> Result<(), ReceiveEr
                 hook(SendPoint::Due(clock.next()), audio.state(), &mut Vec::new());
             }
         }
-        match audio.send_health() {
+        let health = audio.send_health();
+        let observed = origin.elapsed();
+        match health {
             AudioSendHealth::Ready => audio_failed_at = None,
             AudioSendHealth::Failed => return Err(ReceiveError::Codec(CodecError::Failed)),
             AudioSendHealth::RepairPending => {
-                let failed_at = *audio_failed_at.get_or_insert(now);
-                if now.saturating_sub(failed_at) >= Duration::from_secs(15) {
+                let failed_at = *audio_failed_at.get_or_insert(observed);
+                if observed.saturating_sub(failed_at) >= Duration::from_secs(15) {
                     return Err(ReceiveError::Codec(CodecError::Failed));
                 }
             }

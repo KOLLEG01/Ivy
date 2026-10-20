@@ -50,6 +50,7 @@ struct Audio {
     reads: AtomicUsize,
     health: AtomicU8,
     health_reads: AtomicUsize,
+    health_gate: Mutex<Option<Arc<Gate>>>,
     read_gate: Mutex<Option<Arc<Gate>>>,
 }
 impl Audio {
@@ -62,6 +63,7 @@ impl Audio {
             reads: AtomicUsize::new(0),
             health: AtomicU8::new(0),
             health_reads: AtomicUsize::new(0),
+            health_gate: Mutex::new(None),
             read_gate: Mutex::new(None),
         }
     }
@@ -102,6 +104,10 @@ impl PcmSendPort for Audio {
     }
     fn send_health(&self) -> AudioSendHealth {
         self.health_reads.fetch_add(1, Ordering::SeqCst);
+        let gate = self.health_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.hit();
+        }
         match self.health.load(Ordering::SeqCst) {
             0 => AudioSendHealth::Ready,
             1 => AudioSendHealth::RepairPending,
@@ -762,8 +768,13 @@ async fn accepted_format_replacement_invalidates_inflight_frame_without_replacin
 async fn repair_pending_keeps_the_original_fifteen_second_limit_even_without_negotiation() {
     let (receiver, audio, events, _, _) = setup(false).await;
     audio.health.store(1, Ordering::SeqCst);
-    let began = Instant::now();
+    let health = Arc::new(Gate::default());
+    *audio.health_gate.lock().unwrap() = Some(health.clone());
     receiver.start_sending(audio.clone(), 17, 7, 77).unwrap();
+    health.wait().await;
+    sleep(Duration::from_millis(150)).await;
+    let began = Instant::now();
+    health.release();
     timeout(Duration::from_secs(18), async {
         while events.0.load(Ordering::SeqCst) == 0 {
             sleep(Duration::from_millis(5)).await;
