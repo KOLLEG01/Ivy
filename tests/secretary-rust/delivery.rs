@@ -1,4 +1,6 @@
 use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
+#[cfg(windows)]
+mod document_resource_cases;
 mod packaging_cases;
 mod triage_workflow_cases;
 mod video_cases;
