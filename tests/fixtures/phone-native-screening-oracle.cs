@@ -41,24 +41,26 @@ public static class PhoneNativeScreeningOracle {
         digit.Invoke(features,new object[]{key,Enum.Parse(digit.GetParameters()[1].ParameterType,"SipInfo")});
     }
     static async Task Wait(Func<bool> ready){var until=DateTime.UtcNow.AddSeconds(4);while(!ready()){if(DateTime.UtcNow>=until)throw new Exception("Original screening evidence unavailable");await Task.Delay(1);}}
+    static bool Silent(byte[] packet) {
+        if(packet.Length!=172||packet[0]!=128||(packet[1]&127)!=8)throw new Exception("Original screening PCMA packet unavailable");
+        for(int i=12;i<packet.Length;i++)if(packet[i]!=213)return false;
+        return true;
+    }
     public static async Task Connected(NativeSipOperations owner,string id,string scenario,UdpClient rtp,List<object> rows,JsonElement args) {
         var call=Host(owner).FindCall(id);
         if(call.Features.Observation.Screening!="waiting")throw new Exception("Original connected screening state unavailable");
-        var packet=await rtp.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(1));
-        if(packet.Buffer.Length<13||(packet.Buffer[1]&127)!=8)throw new Exception("Original screening RTP unavailable");
+        using(var cancel=new CancellationTokenSource(1000))while(Silent((await rtp.ReceiveAsync(cancel.Token)).Buffer)){}
         rows.Add(await PhoneNativeDialOracle.FeedbackRow(owner,"call.screening.bridge",new{callId=id,settings=(object)null}));
         if(scenario=="screening_retired")return;
         if(scenario=="screening_decline"){Digit(call.Features,'2');await Wait(()=>call.Observation.State=="local_ended");return;}
         if(scenario=="screening_timeout"){await Wait(()=>call.Features.Observation.Screening=="timeout");return;}
         Digit(call.Features,'1');
         if(call.Features.Observation.Screening!="accepted")throw new Exception("Original screening acceptance unavailable");
-        // Accepted screening closes the announcement while caller PCM is closed.
+        // Accepted screening closes announcement PCM; the original sender keeps silence RTP.
         using(var cancel=new CancellationTokenSource(150)){
             for(;;){try{await rtp.ReceiveAsync(cancel.Token);}catch(OperationCanceledException){break;}}
         }
-        using(var cancel=new CancellationTokenSource(150)){
-            try{await rtp.ReceiveAsync(cancel.Token);throw new Exception("Original accepted announcement still sending");}catch(OperationCanceledException){}
-        }
+        using(var cancel=new CancellationTokenSource(1000))if(!Silent((await rtp.ReceiveAsync(cancel.Token)).Buffer))throw new Exception("Original accepted announcement PCM still playing");
         if(scenario=="screening_accept_late_bridge")await Task.Delay(1200);
         if(args.TryGetProperty("audioSettingsCases",out var cases))foreach(var settings in cases.EnumerateArray())rows.Add(await PhoneNativeDialOracle.FeedbackRow(owner,"call.screening.bridge",new{callId=id,settings}));
         rows.Add(await PhoneNativeDialOracle.FeedbackRow(owner,"call.screening.bridge",new{callId=id,settings=new{}}));

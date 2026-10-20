@@ -63,12 +63,19 @@ pub(super) async fn connected(
 ) {
     assert_eq!(call.features().observation().screening, "waiting");
     let mut packet = [0u8; 2048];
-    let (length, _) = timeout(Duration::from_secs(1), rtp.recv_from(&mut packet))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(length > 12);
-    assert_eq!(packet[1] & 127, 8);
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let (length, _) = rtp.recv_from(&mut packet).await.unwrap();
+            assert_eq!(length, 172);
+            assert_eq!(packet[0], 128);
+            assert_eq!(packet[1] & 127, 8);
+            if packet[12..length].iter().any(|byte| *byte != 213) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
     rows.push(
         row(
             dispatcher,
@@ -100,11 +107,12 @@ pub(super) async fn connected(
     .await
     .is_ok()
     {}
-    assert!(
-        timeout(Duration::from_millis(150), rtp.recv_from(&mut packet))
-            .await
-            .is_err()
-    );
+    let (length, _) = timeout(Duration::from_secs(1), rtp.recv_from(&mut packet))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(length, 172);
+    assert!(packet[12..length].iter().all(|byte| *byte == 213));
     if scenario == "screening_accept_late_bridge" {
         sleep(Duration::from_millis(1200)).await;
     }
@@ -361,6 +369,10 @@ async fn native_screening_composes_original_announcement_deadline_bridge_and_rep
             steps.push(("fixture.outgoing".into(),format!(r#"{{"callId":"{CALL}","scenario":"{scenario}","screeningSettings":{screening},"audioSettingsCases":[{cases}]}}"#)));
         }
         let original = super::dial::original_raw(&steps);
+        trace(
+            &format!("native-screening-original-{mode}"),
+            IvyJson::object([("original", original.clone().unwrap_or(IvyJson::Null))]),
+        );
         let mut rows = Vec::new();
         for (index, (method, params)) in steps.iter().enumerate() {
             let result = if method == "fixture.outgoing" {
