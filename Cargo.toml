@@ -10,6 +10,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+ivy-hive = { path = "services/hive/rust" }
 ivy-contracts = { path = "packages/contracts/rust" }
 ivy-store = { path = "packages/store" }
 ivy-sdk = { path = "packages/sdk/rust" }
