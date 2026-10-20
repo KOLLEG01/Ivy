@@ -1,7 +1,10 @@
 //! An original dialog's outbound offer. IPC timeouts never cancel its driver.
 use super::{InviteExchange, SipEndpoint, SipIoError, endpoint::DialogFlow};
 use rsipstack::sip::{Header, Request};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio_util::sync::CancellationToken;
 
 pub(super) async fn run(
@@ -10,6 +13,7 @@ pub(super) async fn run(
     flow: &DialogFlow,
     media: Arc<dyn super::HostedSipMedia>,
     stopped: CancellationToken,
+    renegotiating: Arc<AtomicBool>,
 ) -> Result<(), SipIoError> {
     let mut invite =
         InviteExchange::new(request.clone()).map_err(|_| SipIoError::InvalidRequest)?;
@@ -25,6 +29,7 @@ pub(super) async fn run(
             continue;
         }
         if status >= 300 {
+            renegotiating.store(false, Ordering::Release);
             // The stack owns the non-success ACK and original transaction.
             return client.retire().await;
         }
@@ -39,7 +44,10 @@ pub(super) async fn run(
             .select_final(&response)
             .map_err(|_| SipIoError::InvalidRequest)?;
         let body = String::from_utf8_lossy(&response.body);
-        if !media.is_closed()
+        // Concurrent transactions share the original agent's negotiation flag.
+        // Every success gets an ACK; only the first final applies its answer.
+        if renegotiating.swap(false, Ordering::AcqRel)
+            && !media.is_closed()
             && response.headers.iter().any(|header| matches!(header, Header::ContentType(value) if crate::media::valid_sdp(Some(value.value()), &body)))
         {
             media.accept_answer(&body);

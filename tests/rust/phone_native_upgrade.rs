@@ -181,9 +181,28 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 "repeated",
                 "retransmitted",
                 "pending_hangup",
+                "concurrent",
+                "concurrent_reverse",
+                "repeat_downgrade",
+                "hangup_success",
+                "pending_release",
             ] {
-                let lifecycle =
-                    ["late", "repeated", "retransmitted", "pending_hangup"].contains(&kind);
+                let concurrent = ["concurrent", "concurrent_reverse"].contains(&kind);
+                let repeated = ["repeated", "repeat_downgrade"].contains(&kind);
+                let early_end =
+                    ["pending_hangup", "hangup_success", "pending_release"].contains(&kind);
+                let lifecycle = [
+                    "late",
+                    "repeated",
+                    "retransmitted",
+                    "pending_hangup",
+                    "concurrent",
+                    "concurrent_reverse",
+                    "repeat_downgrade",
+                    "hangup_success",
+                    "pending_release",
+                ]
+                .contains(&kind);
                 if lifecycle && preferred != "PCMU" {
                     continue;
                 }
@@ -346,10 +365,33 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 let mut early = None;
                 let mut again = None;
                 let mut bye_sequence = None;
+                let mut release = None;
+                let mut release_before_final = false;
                 if !["disabled", "unauthenticated", "trusted"].contains(&kind) {
-                    let (invite, remote) = next(&peer, Method::Invite).await;
+                    let (mut invite, remote) = next(&peer, Method::Invite).await;
                     assert_eq!(invite.method, Method::Invite);
                     requests.push(invite_row(&invite, &tag));
+                    let mut other_invite = None;
+                    let mut second = None;
+                    if concurrent {
+                        let dispatch = dispatcher.clone();
+                        let params = selected.clone();
+                        second = Some(tokio::spawn(async move {
+                            dispatch
+                                .execute(command("call.codec.upgrade", &params, 8, 8))
+                                .await
+                        }));
+                        let (other, _) = next(&peer, Method::Invite).await;
+                        assert_ne!(
+                            invite.cseq_header().unwrap().seq().unwrap(),
+                            other.cseq_header().unwrap().seq().unwrap()
+                        );
+                        requests.push(invite_row(&other, &tag));
+                        other_invite = Some(other);
+                        if kind == "concurrent_reverse" {
+                            std::mem::swap(&mut invite, other_invite.as_mut().unwrap());
+                        }
+                    }
                     // The retained receipt/driver survives abandonment of its first IPC waiter.
                     pending.take().unwrap().abort();
                     if kind == "late" {
@@ -358,8 +400,16 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                                 .await,
                         );
                     }
-                    if kind == "pending_hangup" {
+                    if early_end {
                         bye_sequence = Some(end(&dispatcher, &selected, &peer).await);
+                    }
+                    if kind == "pending_release" {
+                        let work = owner.release(&call).unwrap();
+                        release_before_final = matches!(
+                            tokio::time::timeout(Duration::from_secs(1), work.clone().wait()).await,
+                            Ok(Ok(()))
+                        );
+                        release = Some(work);
                     }
                     let answer_sdp = sdp(
                         if kind == "fallback" { "PCMA" } else { "PCMU" },
@@ -390,13 +440,41 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     let (ack, _) = next(&peer, Method::Ack).await;
                     assert_eq!(ack.method, Method::Ack);
                     requests.push(ack_row(&ack));
+                    if concurrent {
+                        early = Some(
+                            super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5)
+                                .await,
+                        );
+                        second.take().unwrap().await.unwrap();
+                        again = Some(
+                            super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 8)
+                                .await,
+                        );
+                        let other = other_invite.unwrap();
+                        let body = sdp("PCMA", 8);
+                        let mut response = crate::sip_host::response(
+                            &other,
+                            200,
+                            &format!(
+                                "Content-Type: application/sdp\r\nContact: <sip:caller@{}>\r\n",
+                                peer.local_addr().unwrap()
+                            ),
+                            &body,
+                        );
+                        response
+                            .headers
+                            .unique_push(other.to_header().unwrap().clone().into());
+                        crate::sip_host::send(&peer, remote, &response).await;
+                        let (ack, _) = next(&peer, Method::Ack).await;
+                        requests.push(ack_row(&ack));
+                    }
                     if kind == "retransmitted" {
                         crate::sip_host::send(&peer, remote, &response).await;
                         let (repeated_ack, _) = next(&peer, Method::Ack).await;
                         assert_eq!(ack.to_string(), repeated_ack.to_string());
                         requests.push(ack_row(&repeated_ack));
                     }
-                    if kind == "repeated" {
+                    if repeated {
                         // A fresh operation gets new protocol work on this same call.
                         early = Some(
                             super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5)
@@ -411,7 +489,11 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         });
                         let (invite, remote) = next(&peer, Method::Invite).await;
                         requests.push(invite_row(&invite, &tag));
-                        let accepted_sdp = sdp("PCMU", 0);
+                        let accepted_sdp = if kind == "repeat_downgrade" {
+                            sdp("PCMA", 8)
+                        } else {
+                            sdp("PCMU", 0)
+                        };
                         let mut response = crate::sip_host::response(
                             &invite,
                             200,
@@ -455,7 +537,16 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         65536,
                     )
                     .unwrap();
-                    let sent = if ["upgraded", "repeated", "retransmitted"].contains(&kind) {
+                    let sent = if [
+                        "upgraded",
+                        "repeated",
+                        "retransmitted",
+                        "concurrent",
+                        "concurrent_reverse",
+                        "repeat_downgrade",
+                    ]
+                    .contains(&kind)
+                    {
                         "PCMU"
                     } else {
                         "PCMA"
@@ -474,11 +565,15 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         state,
                         "{scenario}"
                     );
-                    assert_eq!(
-                        result.get("codec").unwrap().as_str().unwrap(),
-                        sent,
-                        "{scenario}"
-                    );
+                    if kind == "pending_release" {
+                        assert!(result.get("codec").unwrap().is_null());
+                    } else {
+                        assert_eq!(
+                            result.get("codec").unwrap().as_str().unwrap(),
+                            sent,
+                            "{scenario}"
+                        );
+                    }
                 }
                 let mut rows = vec![first.clone()];
                 if let Some(again) = again {
@@ -501,7 +596,11 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 rows.push(
                     super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 7).await,
                 );
-                owner.release(&call).unwrap().wait().await.unwrap();
+                if let Some(release) = release {
+                    release.wait().await.unwrap();
+                } else {
+                    owner.release(&call).unwrap().wait().await.unwrap();
+                }
                 let replacement = owner.prepare(id.clone()).unwrap();
                 replacement.prepared().await.unwrap();
                 assert_eq!(
@@ -534,7 +633,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                             "dialog".into(),
                             IvyJson::object([
                                 ("firstBeforeFinal", (kind == "late").into()),
-                                ("hangupBeforeFinal", (kind == "pending_hangup").into()),
+                                ("hangupBeforeFinal", early_end.into()),
                                 (
                                     "sendCodecBeforeEnd",
                                     send_codec.map_or(IvyJson::Null, Into::into),
@@ -542,6 +641,14 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                                 ("byeSequence", n(bye_sequence as usize)),
                             ]),
                         ));
+                    }
+                }
+                if ["pending_release", "hangup_success"].contains(&kind) {
+                    if let IvyJson::Object(fields) = &mut result {
+                        if kind == "pending_release" {
+                            fields.push(("releaseBeforeFinal".into(), release_before_final.into()));
+                        }
+                        fields.push(("ackAfterFinal".into(), true.into()));
                     }
                 }
                 trace(

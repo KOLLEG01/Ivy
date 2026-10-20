@@ -9,7 +9,10 @@ use rsipstack::{
 };
 use std::{
     future::pending,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -97,6 +100,7 @@ pub(super) struct IncomingInvite {
     identity: Option<Identity>,
     observation: watch::Receiver<CallObservation>,
     done: watch::Receiver<Option<Result<(), CallError>>>,
+    released: watch::Receiver<Option<Result<(), CallError>>>,
     info_before_ack: bool,
 }
 impl IncomingInvite {
@@ -135,6 +139,7 @@ impl IncomingInvite {
         };
         let (observations, observation) = watch::channel(initial);
         let (finished, done) = watch::channel(None);
+        let (release_ready, released) = watch::channel(None);
         let (commands, receiver) = mpsc::channel(8);
         let (upgrades, upgrade_rx) = mpsc::unbounded_channel();
         let mut actor = IncomingActor {
@@ -146,6 +151,8 @@ impl IncomingInvite {
             commands: receiver,
             upgrades: upgrade_rx,
             outbound: JoinSet::new(),
+            renegotiating: Arc::new(AtomicBool::new(false)),
+            release_ready,
             local_sequence: 0,
             identity: identity.clone(),
             observations,
@@ -161,6 +168,14 @@ impl IncomingInvite {
         };
         tokio::spawn(async move {
             let result = actor.run(ring_seconds).await;
+            actor.release_ready.send_if_modified(|saved| {
+                if saved.is_some() {
+                    false
+                } else {
+                    *saved = Some(result);
+                    true
+                }
+            });
             actor.control.ring_stop.cancel();
             if result.is_err() {
                 actor.current.uncertain = true;
@@ -192,6 +207,7 @@ impl IncomingInvite {
             identity,
             observation,
             done,
+            released,
             info_before_ack,
         }
     }
@@ -279,6 +295,26 @@ impl IncomingInvite {
         .await
         .map_err(|_| CallError::CleanupUnconfirmed)?
     }
+    pub fn cleanup_confirmed(&self) -> bool {
+        matches!(*self.done.borrow(), Some(Ok(())))
+    }
+    pub async fn release(&self) -> Result<(), CallError> {
+        self.request_hangup();
+        let mut released = self.released.clone();
+        tokio::time::timeout(Duration::from_secs(35), async {
+            loop {
+                if let Some(result) = *released.borrow_and_update() {
+                    return result;
+                }
+                released
+                    .changed()
+                    .await
+                    .map_err(|_| CallError::CleanupUnconfirmed)?;
+            }
+        })
+        .await
+        .map_err(|_| CallError::CleanupUnconfirmed)?
+    }
 }
 struct Negotiation {
     sequence: i32,
@@ -294,6 +330,8 @@ struct IncomingActor {
     commands: mpsc::Receiver<Transaction>,
     upgrades: mpsc::UnboundedReceiver<()>,
     outbound: JoinSet<Result<(), super::SipIoError>>,
+    renegotiating: Arc<AtomicBool>,
+    release_ready: watch::Sender<Option<Result<(), CallError>>>,
     local_sequence: u32,
     identity: Option<Identity>,
     observations: watch::Sender<CallObservation>,
@@ -631,6 +669,16 @@ impl IncomingActor {
             if stopping
                 && self.bye.is_none()
                 && self.media_start.is_none()
+                && self.reinvite.is_empty()
+                && self.failed_controls.is_empty()
+            {
+                // The original public call can dispose PCM and leave the host
+                // while its original transport still owns outbound ACK work.
+                self.release_ready.send_replace(Some(Ok(())));
+            }
+            if stopping
+                && self.bye.is_none()
+                && self.media_start.is_none()
                 && self.outbound.is_empty()
             {
                 self.commands.close();
@@ -656,9 +704,10 @@ impl IncomingActor {
                     invite.headers.unique_push(CSeq::new(format!("{} INVITE",self.local_sequence)).into());
                     invite.headers.unique_push(ContentType::new("application/sdp").into());
                     invite.headers.unique_push(ContentLength::from(invite.body.len() as u32).into());
-                    let endpoint=self.endpoint.clone();let stopped=self.control.stopped.clone();
+                    self.renegotiating.store(true,Ordering::Release);
+                    let endpoint=self.endpoint.clone();let stopped=self.control.stopped.clone();let renegotiating=self.renegotiating.clone();
                     let flow=flow.clone();
-                    self.outbound.spawn(async move {super::reinvite_client::run(endpoint,invite,&flow,media,stopped).await});
+                    self.outbound.spawn(async move {super::reinvite_client::run(endpoint,invite,&flow,media,stopped,renegotiating).await});
                 },
                 completed=self.outbound.join_next(),if !self.outbound.is_empty()=>{
                     if !matches!(completed,Some(Ok(Ok(())))){return Err(CallError::CleanupUnconfirmed);}

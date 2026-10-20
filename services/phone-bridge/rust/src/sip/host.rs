@@ -341,6 +341,7 @@ struct State {
     registration_view: Option<SipRegistrationObserver>,
     reconnecting: Option<Arc<Completion<RegistrationObservation>>>,
     calls: crate::call_slots::CallSlots<Arc<Call>>,
+    retired_incoming: Vec<super::incoming::IncomingInvite>,
     requests: Option<ManagedRequests>,
     unhandled_requests: Vec<Transaction>,
     closing: Option<Arc<Completion<()>>>,
@@ -395,6 +396,7 @@ impl SipHost {
             registration_view: None,
             reconnecting: None,
             calls: Default::default(),
+            retired_incoming: Vec::new(),
             requests: None,
             unhandled_requests: Vec::new(),
             closing: None,
@@ -1163,7 +1165,7 @@ fn begin_release(owner: &Shared, call: &Arc<Call>) -> Arc<Completion<()>> {
             };
             let incoming = match incoming {
                 Some(incoming) => incoming
-                    .close()
+                    .release()
                     .await
                     .map_err(|_| SipHostError::CleanupUnconfirmed),
                 None => Ok(()),
@@ -1182,11 +1184,16 @@ fn begin_release(owner: &Shared, call: &Arc<Call>) -> Arc<Completion<()>> {
         .await
         .unwrap_or(Err(SipHostError::CleanupUnconfirmed));
         if result.is_ok() {
+            let mut owner = owner.lock().unwrap();
             owner
-                .lock()
-                .unwrap()
-                .calls
-                .retain(|original| !Arc::ptr_eq(original, &call));
+                .retired_incoming
+                .retain(|call| !call.cleanup_confirmed());
+            if let Some(incoming) = call.state.lock().unwrap().incoming.clone() {
+                if !incoming.cleanup_confirmed() {
+                    owner.retired_incoming.push(incoming);
+                }
+            }
+            owner.calls.retain(|original| !Arc::ptr_eq(original, &call));
         }
         done.finish(result);
     });
@@ -1229,6 +1236,16 @@ fn begin_close(owner: &Shared) -> Arc<Completion<()>> {
             done.finish(result);
             return;
         }
+        // Released public slots can still have original transport work. Keep
+        // those owners fenced and confirm them before releasing the binding.
+        let retired = owner.lock().unwrap().retired_incoming.clone();
+        for incoming in retired {
+            if incoming.close().await.is_err() {
+                done.finish(Err(SipHostError::CleanupUnconfirmed));
+                return;
+            }
+        }
+        owner.lock().unwrap().retired_incoming.clear();
         let registration = owner.lock().unwrap().registration.take();
         if let Some(mut registration) = registration {
             if let Err(error) = registration.close().await {
