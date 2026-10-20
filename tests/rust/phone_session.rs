@@ -314,16 +314,15 @@ fn tracks(s: &SdpDocument, port: u16) -> IvyJson {
     )
 }
 fn original_session(inputs: &[IvyJson]) -> Option<IvyJson> {
+    original_session_fixture("tests/fixtures/phone-session-oracle.ps1", inputs)
+}
+fn original_session_fixture(fixture: &str, inputs: &[IvyJson]) -> Option<IvyJson> {
     if std::env::var_os("IVY_PHONE_CONFIG_ORACLE_DIR").is_none() {
         eprintln!("Original session oracle unavailable; differential not executed");
         return None;
     }
     let mut child = Command::new("pwsh")
-        .args([
-            "-NoProfile",
-            "-File",
-            "tests/fixtures/phone-session-oracle.ps1",
-        ])
+        .args(["-NoProfile", "-File", fixture])
         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.."))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

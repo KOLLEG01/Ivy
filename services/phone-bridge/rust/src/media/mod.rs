@@ -6,6 +6,7 @@ mod evs;
 mod evs_native;
 mod format;
 mod g711;
+mod identity;
 mod negotiation;
 mod packet;
 mod permit;
@@ -22,6 +23,7 @@ mod rtcp_statistics;
 mod rtcp_time;
 mod rtp;
 mod sdp;
+mod sdp_address;
 mod send_clock;
 mod sender;
 mod session;
@@ -34,6 +36,7 @@ pub use call_audio::{
     AudioAttachmentStatus, AudioDesktopIdentity, AudioMutePolicy, AudioOperation, AudioRoutePermit,
     AudioSettings, CallAudioError, CallAudioFactory, CallAudioPort, CallAudioRoute,
 };
+pub use identity::{SipMediaEntropy, SystemSipMediaEntropy};
 pub use permit::AudioPermit;
 pub use progress_audio::{
     CallWaitingAudio, ScreeningAudio, WavError, load_announcement, parse_announcement,
@@ -54,6 +57,7 @@ pub use sdp::{
     SDP_UNITS, SdpConnection, SdpDirection, SdpDocument, SdpError, SdpFormat, SdpMedia,
     SdpMediaKind, SdpOrigin, bounded_sdp, valid_sdp,
 };
+pub use sdp_address::{SipSdpRoute, SystemSipSdpRoute};
 pub use send_clock::RtpSendClock;
 pub use sender::{AudioSendHealth, PcmSendPort};
 pub use session::{
@@ -73,6 +77,8 @@ pub enum MediaError {
     ClockWentBackwards,
     ClockOverflow,
     ClockUnavailable,
+    EntropyUnavailable,
+    AddressUnavailable,
     ReportCallbackFailed,
     InvalidPermitAge,
     StaleObservation,

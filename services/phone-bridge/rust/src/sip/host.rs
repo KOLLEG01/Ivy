@@ -28,6 +28,7 @@ pub enum SipHostError {
     Binding(BindError),
     Registration(RegistrationError),
     Signalling(SipIoError),
+    InitializationFailed,
     CleanupUnconfirmed,
 }
 impl std::fmt::Display for SipHostError {

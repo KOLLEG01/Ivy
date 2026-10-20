@@ -101,8 +101,10 @@ impl SdpIdentity {
         let mut document = SdpDocument::default();
         document.origin.session_id = self.session_id.to_string();
         document.origin.version = self.version;
-        document.origin.address_type = address_type.into();
-        document.origin.address = Some(address.clone());
+        // RTPSession constructs SDP(IPAddress.Loopback), independently of its
+        // selected connection address, including scoped IPv6 connections.
+        document.origin.address_type = "IP4".into();
+        document.origin.address = Some("127.0.0.1".into());
         document.connection = Some(SdpConnection {
             network: "IN".into(),
             address_type: address_type.into(),

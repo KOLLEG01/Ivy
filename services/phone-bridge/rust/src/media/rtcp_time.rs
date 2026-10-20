@@ -72,15 +72,8 @@ pub trait RtcpRuntime: Send + Sync + 'static {
 pub fn rtcp_interval(
     mut random: impl FnMut() -> Result<u32, MediaError>,
 ) -> Result<u16, MediaError> {
-    const RANGE: u64 = 5001;
-    const MAX: u64 = 1_u64 << 32;
-    for _ in 0..10 {
-        let value = u64::from(random()?);
-        if value <= MAX - MAX % RANGE {
-            return Ok(2500 + (value % RANGE) as u16);
-        }
-    }
-    Err(MediaError::ClockUnavailable)
+    super::identity::random_range(2500, 7500, &mut random, MediaError::ClockUnavailable)
+        .map(|interval| interval as u16)
 }
 
 #[cfg(windows)]
@@ -117,24 +110,12 @@ impl RtcpRuntime for WindowsRtcpRuntime {
         RtcpWallTime::new(ticks(local)?, ticks(utc)?)
     }
     fn interval_ms(&self) -> Result<u16, MediaError> {
-        use windows_sys::Win32::Security::Cryptography::{
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
-        };
+        use super::{SipMediaEntropy, SystemSipMediaEntropy};
         rtcp_interval(|| {
             let mut bytes = [0_u8; 4];
-            // SAFETY: the system provider writes exactly the borrowed array;
-            // a null algorithm handle is required by this provider flag.
-            let status = unsafe {
-                BCryptGenRandom(
-                    std::ptr::null_mut(),
-                    bytes.as_mut_ptr(),
-                    4,
-                    BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-                )
-            };
-            if status < 0 {
-                return Err(MediaError::ClockUnavailable);
-            }
+            SystemSipMediaEntropy
+                .fill(&mut bytes)
+                .map_err(|_| MediaError::ClockUnavailable)?;
             Ok(u32::from_ne_bytes(bytes))
         })
     }

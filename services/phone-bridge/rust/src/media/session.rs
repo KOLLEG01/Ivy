@@ -5,7 +5,7 @@ use super::{
     CallAudioError, CallAudioPort, CallWaitingAudio, Codec, EvsLibrary, MediaCodec,
     NegotiationError, PcmAudioPort, PcmAudioState, PcmSendPort, ReceiveError, RtcpRuntime,
     ScreeningAudio, SdpDirection, SdpDocument, SdpIdentity, SdpType, SipReceiveEvents,
-    SipReceiveObservation, SipRtpReceiver,
+    SipReceiveObservation, SipRtpReceiver, SipSdpRoute,
 };
 use crate::{
     dtmf::InputSource,
@@ -31,6 +31,7 @@ pub enum SipMediaError {
     Audio(CallAudioError),
     Receive(ReceiveError),
     Negotiation(NegotiationError),
+    AddressUnavailable,
     CleanupUnconfirmed,
 }
 impl From<ReceiveError> for SipMediaError {
@@ -57,7 +58,7 @@ impl std::error::Error for SipMediaError {}
 type Result<T> = std::result::Result<T, SipMediaError>;
 
 /// Identity comes from the original call admission, not renegotiation. The
-/// native owner supplies its random source/sequence/timestamp/session ID once.
+/// native owner supplies its original source/sequence/timestamp/session ID once.
 pub struct SipMediaIdentity {
     pub session_id: u32,
     pub source: u32,
@@ -211,6 +212,7 @@ struct State {
 }
 struct Core {
     settings: SipMediaSettings,
+    routes: Option<Arc<dyn SipSdpRoute>>,
     audio: CallAudioPort,
     waiting: Arc<CallWaitingAudio>,
     send: Arc<SendAudio>,
@@ -257,9 +259,17 @@ impl Core {
         d.remote_changed = false;
         Ok(report)
     }
-    fn identity(&self, version: u64) -> Result<SdpIdentity> {
-        let mut local = self.receiver().observation().transport.local_rtp;
-        local.set_ip(self.settings.connection_address);
+    fn identity(&self, version: u64, offer: Option<SocketAddr>) -> Result<SdpIdentity> {
+        let bound = self.receiver().observation().transport.local_rtp;
+        let mut local = if let Some(routes) = &self.routes {
+            super::sdp_address::advertised_address(self.settings.interface, offer, routes.as_ref())
+                .map_err(|_| SipMediaError::AddressUnavailable)?
+        } else {
+            let mut local = bound;
+            local.set_ip(self.settings.connection_address);
+            local
+        };
+        local.set_port(bound.port());
         SdpIdentity::new(
             local,
             self.settings.identity.session_id,
@@ -360,12 +370,37 @@ pub struct SipMediaSession {
     handle: Arc<Handle>,
 }
 impl SipMediaSession {
+    /// Errors acknowledge disposal of construction resources, unless they are
+    /// CleanupUnconfirmed. Dropping this constructor future is not that proof;
+    /// admitted factories must retain it until completion.
     pub async fn bind(
         settings: SipMediaSettings,
         audio: CallAudioPort,
         evs: Option<Arc<EvsLibrary>>,
         runtime: Arc<dyn RtcpRuntime>,
         events: Arc<dyn SipReceiveEvents>,
+    ) -> Result<Self> {
+        Self::bind_inner(settings, audio, evs, runtime, events, None).await
+    }
+    /// Native SDK policy: the configured binding supplies offers; an answer
+    /// first asks for the route to the remote offer's session-level address.
+    pub async fn bind_with_route(
+        settings: SipMediaSettings,
+        audio: CallAudioPort,
+        evs: Option<Arc<EvsLibrary>>,
+        runtime: Arc<dyn RtcpRuntime>,
+        events: Arc<dyn SipReceiveEvents>,
+        routes: Arc<dyn SipSdpRoute>,
+    ) -> Result<Self> {
+        Self::bind_inner(settings, audio, evs, runtime, events, Some(routes)).await
+    }
+    async fn bind_inner(
+        settings: SipMediaSettings,
+        audio: CallAudioPort,
+        evs: Option<Arc<EvsLibrary>>,
+        runtime: Arc<dyn RtcpRuntime>,
+        events: Arc<dyn SipReceiveEvents>,
+        routes: Option<Arc<dyn SipSdpRoute>>,
     ) -> Result<Self> {
         let prepared = (|| {
             if audio.call_id() != settings.call_id {
@@ -388,12 +423,17 @@ impl SipMediaSession {
         let (descriptions, waiting) = match prepared {
             Ok(value) => value,
             Err(error) => {
-                audio.close().wait().await?;
+                audio
+                    .close()
+                    .wait()
+                    .await
+                    .map_err(|_| SipMediaError::CleanupUnconfirmed)?;
                 return Err(error);
             }
         };
         let core = Arc::new(Core {
             settings,
+            routes,
             audio,
             send: Arc::new(SendAudio::new(waiting.clone())),
             waiting,
@@ -420,23 +460,33 @@ impl SipMediaSession {
         let receiver = match receiver {
             Ok(receiver) => receiver,
             Err(error) => {
-                core.audio.close().wait().await?;
+                core.audio
+                    .close()
+                    .wait()
+                    .await
+                    .map_err(|_| SipMediaError::CleanupUnconfirmed)?;
                 return Err(error.into());
             }
         };
         let _ = core.receiver.set(receiver);
         let identity = &core.settings.identity;
-        if core.identity(0).is_err()
+        if core.identity(0, None).is_err()
             || core
                 .receiver()
                 .enable_reporting(identity.source, &identity.cname, runtime)
                 .is_err()
         {
-            core.close().wait().await?;
+            core.close()
+                .wait()
+                .await
+                .map_err(|_| SipMediaError::CleanupUnconfirmed)?;
             return Err(SipMediaError::InvalidRequest);
         }
         if core.closed.load(Ordering::Acquire) {
-            core.close().wait().await?;
+            core.close()
+                .wait()
+                .await
+                .map_err(|_| SipMediaError::CleanupUnconfirmed)?;
             return Err(SipMediaError::Closed);
         }
         Ok(Self {
@@ -452,7 +502,7 @@ impl SipMediaSession {
         if c.closed.load(Ordering::Acquire) {
             return None;
         }
-        let identity = c.identity(s.descriptions.version).ok()?;
+        let identity = c.identity(s.descriptions.version, None).ok()?;
         let offer = s.descriptions.offer(&identity);
         c.receiver()
             .description_effects(
@@ -467,7 +517,15 @@ impl SipMediaSession {
     pub fn create_answer(&self) -> Option<SdpDocument> {
         let c = &self.handle.0;
         let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
-        let identity = c.identity(s.descriptions.version).ok()?;
+        let offer = s
+            .descriptions
+            .negotiation
+            .remote_description()
+            .and_then(|remote| remote.connection())
+            .and_then(|connection| {
+                super::session_description::address(connection.address(), 0).ok()
+            });
+        let identity = c.identity(s.descriptions.version, offer).ok()?;
         s.descriptions.answer(
             &identity,
             c.receiver().observation().transport.local_rtp.port(),

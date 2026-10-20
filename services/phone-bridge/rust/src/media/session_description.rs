@@ -203,7 +203,7 @@ fn destination(
 }
 /// IPAddress.Parse's legacy IPv4 forms; never resolve a host name or contact a
 /// resolver. IPv6 numeric scopes remain part of the original endpoint identity.
-fn address(text: &str, port: u16) -> Result<SocketAddr, NegotiationError> {
+pub(super) fn address(text: &str, port: u16) -> Result<SocketAddr, NegotiationError> {
     let text = text
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
