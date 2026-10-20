@@ -76,8 +76,8 @@ public static class PhoneNativeDialOracle {
                 Reply(peer,bye,byeRemote,200,"");
             }
             await owner.InvokeAsync("call.release",Args(new{callId=id}));
-            if(scenario=="remote_bye")return new{call,hungup,ended,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
-                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null};
+            if(scenario=="remote_bye")return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
+                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,ended};
             return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
                 requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null};
         }
