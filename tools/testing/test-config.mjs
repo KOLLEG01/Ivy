@@ -227,6 +227,8 @@ export const rustTests = {
   'tests/rust/hive_push_native.rs': { package: 'ivy-hive', test: 'hive-push-native' },
   'tests/rust/hive_push_profile.rs': { package: 'ivy-hive', test: 'hive-push-profile' },
   'tests/rust/hive_package_ui.rs': { package: 'ivy-hive', test: 'hive-package-ui' },
+  'tests/rust/hive_http.rs': { package: 'ivy-hive', test: 'hive-http' },
+  'tests/rust/hive_offline_backup.rs': { package: 'ivy-hive', test: 'hive-offline-backup' },
   'tests/rust/hive_storage_worker.rs': { package: 'ivy-hive', test: 'hive-storage-worker' },
   'tests/rust/hive_worker_client.rs': {
     package: 'ivy-hive', test: 'hive-worker-client',
