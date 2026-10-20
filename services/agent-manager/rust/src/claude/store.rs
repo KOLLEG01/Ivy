@@ -94,7 +94,7 @@ fn is(value: &IvyJson, expected: &str) -> bool {
         .as_js_string()
         .is_some_and(|v| v == &JsString::from(expected))
 }
-fn truthy(value: &IvyJson) -> bool {
+pub(super) fn truthy(value: &IvyJson) -> bool {
     match value {
         IvyJson::Null => false,
         IvyJson::Bool(v) => *v,
@@ -103,7 +103,7 @@ fn truthy(value: &IvyJson) -> bool {
         _ => true,
     }
 }
-fn number(value: &IvyJson) -> f64 {
+pub(super) fn number(value: &IvyJson) -> f64 {
     // SQLite affinity normally supplies numbers. Preserve legacy primitive
     // coercion for hand-created rows; this is not a protocol input parser.
     match value {
