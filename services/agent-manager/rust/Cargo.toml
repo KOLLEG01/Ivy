@@ -46,3 +46,7 @@ path = "../../../tests/rust/agent-projects.rs"
 [[test]]
 name = "agent-claude"
 path = "../../../tests/rust/agent-claude.rs"
+
+[[test]]
+name = "agent-native-backup-paths"
+path = "../../../tests/rust/agent-native-backup-paths.rs"

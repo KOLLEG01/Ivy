@@ -271,15 +271,38 @@ pub fn instance_owned_codex_home_json(
         return Ok(None);
     }
     let home = resolve_codex_home_json(settings, context)?.path;
+    Ok(owned_home_at(home, data_root, context))
+}
+
+/// Raw service-path data may be absent or malformed. As in the original helper,
+/// it is inspected only after explicit-home selection and resolution.
+pub fn instance_owned_codex_home_data_json(
+    settings: &IvyJson,
+    data_root: Option<&IvyJson>,
+    context: &HomeContext<'_>,
+) -> IvyResult<Option<JsString>> {
+    if json_setting(settings, "codexHome")?.is_none()
+        && json_setting(settings, "nativeHome")?.is_none()
+    {
+        return Ok(None);
+    }
+    let home = resolve_codex_home_json(settings, context)?.path;
+    let data_root = data_root
+        .and_then(IvyJson::as_js_string)
+        .ok_or_else(IvyError::internal)?;
+    Ok(owned_home_at(home, data_root, context))
+}
+
+fn owned_home_at(home: JsString, data_root: &JsString, context: &HomeContext<'_>) -> Option<JsString> {
     let local = context.paths.relative(data_root, &home);
     let outside = if context.paths.style == Style::Windows {
         [46, 46, 92]
     } else {
         [46, 46, 47]
     };
-    Ok((!local.0.is_empty()
+    (!local.0.is_empty()
         && local.0 != [46, 46]
         && !local.0.starts_with(&outside)
         && !node_path::is_absolute(context.paths.style, &local))
-    .then_some(home))
+    .then_some(home)
 }

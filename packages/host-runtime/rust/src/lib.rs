@@ -32,3 +32,5 @@ pub mod streaming_hash;
 pub mod process_fence;
 pub mod process_output;
 pub mod scheduler;
+#[path="layout/storage_api.rs"]
+pub mod layout;
