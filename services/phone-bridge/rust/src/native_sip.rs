@@ -7,8 +7,8 @@ use crate::{
     },
     native_rpc::NativeRequest,
     sip::{
-        HostedSipMedia, SipHost, SipHostCall, SipHostCallObservation, SipHostError,
-        SipHostObservation,
+        HostedSipMedia, RegistrationObservation, SipHost, SipHostCall, SipHostCallObservation,
+        SipHostError, SipHostObservation,
     },
 };
 use std::{
@@ -88,6 +88,7 @@ pub struct NativeCallConfiguration {
     binding: NativeSipBinding,
     codecs: NativeCodecSettings,
     incoming: NativeIncomingPeers,
+    registration: bool,
 }
 impl NativeCallConfiguration {
     pub fn binding(&self) -> &NativeSipBinding {
@@ -98,6 +99,9 @@ impl NativeCallConfiguration {
     }
     pub fn incoming_peers(&self) -> &NativeIncomingPeers {
         &self.incoming
+    }
+    pub fn has_registration(&self) -> bool {
+        self.registration
     }
     /// The call owner supplies its original entropy and resolved SDP address.
     /// Construct these only inside the admitted factory, before RTP startup.
@@ -138,6 +142,7 @@ mod tests {
             binding: parts.binding,
             codecs: parts.codecs,
             incoming: parts.incoming,
+            registration: false,
         };
         let mut expected = configuration.binding().endpoint();
         expected.set_port(0);
@@ -238,11 +243,13 @@ impl NativeSipOperations {
         let parsed = NativeSipConfiguration::parse(request)?;
         tokio::runtime::Handle::try_current().map_err(|_| SipHostError::NotReady)?;
         state.configured = true;
+        let registration = parsed.has_registration();
         let parts = parsed.into_parts()?;
         state.configuration = Some(Arc::new(NativeCallConfiguration {
             binding: parts.binding,
             codecs: parts.codecs,
             incoming: parts.incoming,
+            registration,
         }));
         let host = self.0.host.clone();
         let operation = retained(async move {
@@ -323,6 +330,37 @@ impl NativeSipOperations {
             .iter()
             .find(|c| c.observation().id == id)
             .cloned()
+    }
+    pub fn reconnect_registration(
+        &self,
+    ) -> Result<NativeSipOperation<RegistrationObservation>, SipHostError> {
+        let state = self.0.state.lock().unwrap();
+        if state.stopping {
+            return Err(SipHostError::Stopping);
+        }
+        if state
+            .configuring
+            .as_ref()
+            .and_then(NativeSipOperation::result)
+            .is_none_or(|r| r.is_err())
+        {
+            return Err(SipHostError::NotReady);
+        }
+        if !state
+            .configuration
+            .as_ref()
+            .is_some_and(|c| c.has_registration())
+        {
+            return Err(SipHostError::NotReady);
+        }
+        // Native metadata retires only after its original release completes.
+        // A host slot drained before that publication is still not idle here.
+        if !state.calls.is_empty() {
+            return Err(SipHostError::OperationConflict);
+        }
+        tokio::runtime::Handle::try_current().map_err(|_| SipHostError::NotReady)?;
+        let work = self.0.host.begin_registration_reconnect()?;
+        Ok(retained(work))
     }
     fn original(state: &State, expected: &NativeSipCall) -> Result<(), SipHostError> {
         if state.calls.iter().any(|c| Arc::ptr_eq(&c.0, &expected.0)) {

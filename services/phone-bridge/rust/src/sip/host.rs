@@ -629,6 +629,16 @@ impl SipHost {
         completion.wait().await
     }
     pub async fn reconnect_registration(&self) -> Result<RegistrationObservation, SipHostError> {
+        self.begin_registration_reconnect()?.await
+    }
+    /// Native receipt admission reserves the original transition before its
+    /// observer future is returned. Protocol work remains independently owned.
+    pub(crate) fn begin_registration_reconnect(
+        &self,
+    ) -> Result<
+        impl Future<Output = Result<RegistrationObservation, SipHostError>> + Send + use<>,
+        SipHostError,
+    > {
         let completion = {
             let mut state = self.shared().lock().unwrap();
             ready(&state)?;
@@ -658,24 +668,34 @@ impl SipHost {
                 if let Some(mut previous) = previous {
                     if let Err(error) = previous.close().await {
                         owner.lock().unwrap().registration = Some(previous);
+                        drop(bound);
                         done.finish(Err(SipHostError::Registration(error)));
                         return;
                     }
                 }
-                let next = SipRegistration::start(bound, settings, password, proxy)
-                    .map_err(SipHostError::Registration);
-                let result = next.map(|registration| {
-                    let observation = registration.observation();
+                let result = {
                     let mut state = owner.lock().unwrap();
-                    state.registration_view = Some(registration.observer());
-                    state.registration = Some(registration);
-                    observation
-                });
+                    if state.stopping {
+                        Err(SipHostError::Stopping)
+                    } else {
+                        SipRegistration::start(bound.clone(), settings, password, proxy)
+                            .map_err(SipHostError::Registration)
+                            .map(|registration| {
+                                let observation = registration.observation();
+                                state.registration_view = Some(registration.observer());
+                                state.registration = Some(registration);
+                                observation
+                            })
+                    }
+                };
+                // Publish completion after releasing this worker's binding
+                // reference, so the waiting close can confirm the same fence.
+                drop(bound);
                 done.finish(result);
             });
             completion
         };
-        completion.wait().await
+        Ok(async move { completion.wait().await })
     }
     /// The native incoming-request owner takes the original stream once and
     /// offers matching controls back here; it owns all other SIP requests.

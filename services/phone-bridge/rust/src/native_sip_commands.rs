@@ -3,6 +3,7 @@
 use crate::{
     native_config::NativeMicroSettings,
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
+    native_registration::registration_json,
     native_rpc::{NativeHandler, NativeInvocation, NativeOutcome, NativeRequest},
     native_sip::{
         NativeSipCall, NativeSipError, NativeSipOperation, NativeSipOperations, retained,
@@ -21,7 +22,7 @@ pub type NativeMicroSetup =
 type Setup = dyn Fn(Option<NativeMicroSettings>) -> NativeMicroSetup + Send + Sync;
 type CallView = dyn Fn(&NativeSipCall) -> Result<IvyJson, NativeSipError> + Send + Sync;
 
-/// This owns configure/prepare/hangup/release. Status, diagnostics, features,
+/// This owns configure/prepare/hangup/release/reconnect. Status, diagnostics, features,
 /// dial/answer and platform commands remain with the required original runtime.
 /// The view must project the supplied original handle; it must not find a call
 /// again by ID or expose credentials. There is no placeholder platform runtime
@@ -91,6 +92,21 @@ impl NativeSipCommands {
             .params()
             .as_object()
             .expect("validated native params");
+        if request.method() == "registration.reconnect" {
+            if !fields.is_empty() {
+                return Err(SipHostError::InvalidRequest.into());
+            }
+            let work = self.owner.reconnect_registration()?;
+            return Ok(Box::pin(async move {
+                match work.wait().await {
+                    Ok(observation) => match registration_json(&observation) {
+                        Ok(json) => NativeOutcome::result(json),
+                        Err(_) => NativeOutcome::error("operation_outcome_unknown"),
+                    },
+                    Err(error) => failed(error.into()),
+                }
+            }));
+        }
         if fields.len() != 1 || request.params().get("callId").is_none() {
             return Err(SipHostError::InvalidRequest.into());
         }
@@ -159,7 +175,11 @@ impl NativeHandler for NativeSipCommands {
     fn invoke(&self, request: NativeRequest) -> NativeInvocation {
         if !matches!(
             request.method(),
-            "configure" | "call.prepare" | "call.hangup" | "call.release"
+            "configure"
+                | "call.prepare"
+                | "call.hangup"
+                | "call.release"
+                | "registration.reconnect"
         ) {
             return self.remaining.invoke(request);
         }

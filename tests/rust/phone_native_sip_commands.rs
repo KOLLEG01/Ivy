@@ -1,4 +1,6 @@
 use super::*;
+#[path = "phone_native_registration.rs"]
+mod registration;
 use ivy_phone_bridge::{
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
     native_rpc::{NativeDispatcher, NativeHandler, NativeInvocation, NativeOutcome},
@@ -419,8 +421,13 @@ async fn native_lifecycle_dto_and_error_order_match_original_handler_subset() {
         ("call.prepare", "{}".into()),
         ("call.hangup", "{\"callId\":42}".into()),
         ("call.release", "{\"callId\":null}".into()),
+        ("registration.reconnect", "{}".into()),
         ("configure", "{}".into()),
         ("configure", params.clone()),
+        ("registration.reconnect", "{}".into()),
+        ("registration.reconnect", "{\"extra\":null}".into()),
+        ("registration.reconnect", "{\"callId\":42}".into()),
+        ("registration.reconnect", "{\"callId\":null}".into()),
         ("configure", "{\"callId\":null}".into()),
         ("configure", "{}".into()),
         ("configure", "{\"callId\":42}".into()),
@@ -435,6 +442,7 @@ async fn native_lifecycle_dto_and_error_order_match_original_handler_subset() {
         ("call.release", "{\"callId\":\"bad\"}".into()),
         ("call.prepare", selected.clone()),
         ("call.prepare", selected.clone()),
+        ("registration.reconnect", "{}".into()),
         ("call.hangup", selected.replace('}', ",\"extra\":null}")),
         ("call.hangup", selected.clone()),
         ("call.release", selected.clone()),
