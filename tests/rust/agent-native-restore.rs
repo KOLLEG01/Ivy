@@ -1,5 +1,5 @@
-// Same Agent-authored Host domain source; the Host-owned module declaration is
-// requested separately. These checks isolate SQL from the generic file mapper.
+// Compile the same Host domain source to isolate its SQL transaction from the
+// generic file mapper. File observations here come from the original mapper.
 #[path = "../../packages/host-runtime/rust/src/native_restore.rs"]
 mod native_restore;
 use ivy_contracts::{

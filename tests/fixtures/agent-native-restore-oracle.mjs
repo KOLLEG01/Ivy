@@ -42,7 +42,7 @@ async function applyPost(row){
  if(row.name==='missing-target')await fs.unlink(join(row.newHome,'sessions/paginated-selected.jsonl'));
  if(row.name==='changed-target')await fs.writeFile(join(row.newHome,'sessions/paginated-selected.jsonl'),'changed');
  if(row.name==='physical-escape'){
-  const sessions=join(row.newHome,'sessions'),external=join(row.root,'held-sessions');
+  const sessions=join(row.newHome,'sessions'),external=join(row.root,'held-sessions-'+input.action);
   await guard(sessions);await guard(external);await fs.rename(sessions,external);
   await fs.symlink(external,sessions,process.platform==='win32'?'junction':'dir');
  }
