@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.Text.Json;
 using Ivy.PhoneBridge;
 
-// Compare the existing handler's lifecycle DTO ordering and only id/state
-// fields of its call projection. No status/feature/platform parity is implied.
+// Compare original lifecycle DTO ordering and complete outgoing call projections.
+// Status/platform behavior is qualified separately with original call audio.
 // Ports stay closed, no registration/account or non-loopback traffic is used.
 public static class PhoneNativeLifecycleOracle {
     sealed class Port : IPcmAudioPort {
@@ -27,7 +27,7 @@ public static class PhoneNativeLifecycleOracle {
                     rows.Add(method=="configure" ? new { configured=value.GetProperty("configured").GetBoolean() } :
                         method=="call.features" ? value.Clone() :
                         method=="call.release" ? (object)new { callId=value.GetProperty("callId").GetString(),released=value.GetProperty("released").GetBoolean() } :
-                        new { id=value.GetProperty("id").GetString(),state=value.GetProperty("state").GetString() });
+                        value.Clone());
                 } catch(Exception failure) {
                     rows.Add(new { error=failure is NativeRpcException rpc ? rpc.Code :
                         failure is ArgumentException || failure is JsonException ? "invalid_request" : "operation_outcome_unknown" });

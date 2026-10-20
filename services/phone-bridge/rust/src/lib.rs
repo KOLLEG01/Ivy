@@ -13,6 +13,7 @@ pub mod native_rpc;
 pub mod native_sip;
 pub mod native_sip_commands;
 pub mod native_sip_media;
+pub mod native_sip_status;
 pub mod sip;
 pub mod voice_rpc;
 pub mod voice_selection;

@@ -6,7 +6,6 @@ use super::{
     SipMediaObservation, TelephoneEventFormat,
 };
 use ivy_contracts::{IvyJson, json::stringify};
-use std::time::UNIX_EPOCH;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaViewError {
@@ -89,15 +88,8 @@ fn events_json(v: &[TelephoneEventFormat]) -> Result<String> {
 }
 fn rtcp_json(v: &RtcpReceiveObservation) -> Result<String> {
     let last = if let Some(at) = v.last_report_at {
-        let nanos = match at.duration_since(UNIX_EPOCH) {
-            Ok(d) => i128::try_from(d.as_nanos()).map_err(|_| MediaViewError::InvalidTimestamp)?,
-            Err(e) => -i128::try_from(e.duration().as_nanos())
-                .map_err(|_| MediaViewError::InvalidTimestamp)?,
-        };
-        let ticks = i64::try_from(621_355_968_000_000_000_i128 + nanos / 100)
-            .map_err(|_| MediaViewError::InvalidTimestamp)?;
         text(
-            &crate::native_registration::utc_ticks(ticks)
+            &crate::native_registration::utc_time(at)
                 .map_err(|_| MediaViewError::InvalidTimestamp)?,
         )?
     } else {
@@ -124,6 +116,10 @@ fn rtcp_json(v: &RtcpReceiveObservation) -> Result<String> {
 /// Raw signed counters and native timestamps never pass through f64/IvyJson.
 /// Route/realtime values remain owned, already-safe observations from callers.
 pub fn diagnostics_json(v: &SipMediaObservation, realtime: Option<&IvyJson>) -> Result<String> {
+    diagnostics_raw_json(v, &value(realtime)?)
+}
+/// The native caller validates this raw object/null before composition.
+pub(crate) fn diagnostics_raw_json(v: &SipMediaObservation, realtime: &str) -> Result<String> {
     let r = &v.receive;
     let send = v
         .send_format
@@ -202,7 +198,7 @@ pub fn diagnostics_json(v: &SipMediaObservation, realtime: Option<&IvyJson>) -> 
         count(r.received_packets),
         receive_json(&r.receive)?,
         audio_json(&v.audio)?,
-        value(realtime)?,
+        realtime,
         dtmf
     );
     if result.len() > crate::ipc::FRAME_BYTES {

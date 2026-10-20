@@ -1,14 +1,13 @@
 //! Native SIP lifecycle commands composed with process-local replay receipts.
-//! The caller retains the complete call view and the remaining native runtime.
+//! Status uses the original admitted calls; the caller retains platform owners.
 use crate::{
     call_features::CallAccessSettings,
     native_config::NativeMicroSettings,
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
     native_registration::registration_json,
     native_rpc::{NativeHandler, NativeInvocation, NativeOutcome, NativeRequest},
-    native_sip::{
-        NativeSipCall, NativeSipError, NativeSipOperation, NativeSipOperations, retained,
-    },
+    native_sip::{NativeSipError, NativeSipOperation, NativeSipOperations, retained},
+    native_sip_status::{NativeSipViews, call_json, status_json},
     sip::SipHostError,
 };
 use ivy_contracts::{IvyJson, json::stringify};
@@ -21,18 +20,15 @@ use std::{
 pub type NativeMicroSetup =
     Pin<Box<dyn Future<Output = Result<(), SipHostError>> + Send + 'static>>;
 type Setup = dyn Fn(Option<NativeMicroSettings>) -> NativeMicroSetup + Send + Sync;
-type CallView = dyn Fn(&NativeSipCall) -> Result<IvyJson, NativeSipError> + Send + Sync;
 
-/// This owns configure/prepare/features/hangup/release/reconnect. Status, diagnostics,
-/// dial/answer and platform commands remain with the required original runtime.
-/// The view must project the supplied original handle; it must not find a call
-/// again by ID or expose credentials. There is no placeholder platform runtime
-/// or default call/feature/status projection.
+/// Lifecycle and status compose the original SIP/media/feature handles. The
+/// remaining runtime supplies platform commands and its required Micro/realtime
+/// observations; it cannot replace the SIP call projection.
 pub struct NativeSipCommands {
     owner: NativeSipOperations,
     remaining: Arc<dyn NativeRuntime>,
     setup: Arc<Setup>,
-    view: Arc<CallView>,
+    views: NativeSipViews,
     shutdown: Mutex<Option<NativeSipOperation<()>>>,
 }
 impl NativeSipCommands {
@@ -40,13 +36,13 @@ impl NativeSipCommands {
         owner: NativeSipOperations,
         remaining: Arc<dyn NativeRuntime>,
         setup: impl Fn(Option<NativeMicroSettings>) -> NativeMicroSetup + Send + Sync + 'static,
-        view: impl Fn(&NativeSipCall) -> Result<IvyJson, NativeSipError> + Send + Sync + 'static,
+        views: NativeSipViews,
     ) -> Self {
         Self {
             owner,
             remaining,
             setup: Arc::new(setup),
-            view: Arc::new(view),
+            views,
             shutdown: Mutex::new(None),
         }
     }
@@ -68,6 +64,30 @@ impl NativeSipCommands {
         } else {
             None
         };
+        if matches!(request.method(), "status" | "heartbeat") {
+            let fields = request
+                .params()
+                .as_object()
+                .expect("validated native params");
+            if fields.iter().any(|(key, _)| key != &"callId".into())
+                || request.method() == "heartbeat" && !fields.is_empty()
+            {
+                return Err(SipHostError::InvalidRequest.into());
+            }
+            let snapshot = self.owner.status_snapshot(selected.as_deref())?;
+            let views = self.views.clone();
+            return Ok(Box::pin(async move {
+                if let Some(call) = &snapshot.call {
+                    if let Err(e) = call.constructed().await {
+                        return failed(e.into());
+                    }
+                }
+                match status_json(snapshot, &views) {
+                    Ok(json) => NativeOutcome::result(json),
+                    Err(e) => failed(e),
+                }
+            }));
+        }
         if request.method() == "configure" {
             let setup = self.setup.clone();
             let work = self.owner.configure(&request, move |micro| setup(micro))?;
@@ -131,7 +151,6 @@ impl NativeSipCommands {
         if fields.len() != 1 || request.params().get("callId").is_none() {
             return Err(SipHostError::InvalidRequest.into());
         }
-        let view = self.view.clone();
         if request.method() == "call.prepare" {
             let id = selected.ok_or(SipHostError::InvalidRequest)?;
             // Reserve synchronously under NativeDispatcher admission, before
@@ -139,8 +158,8 @@ impl NativeSipCommands {
             let call = self.owner.prepare(id)?;
             return Ok(Box::pin(async move {
                 match call.prepared().await {
-                    Ok(()) => match view(&call) {
-                        Ok(value) => result(value),
+                    Ok(()) => match call_json(&call) {
+                        Ok(value) => NativeOutcome::result(value),
                         Err(error) => failed(error),
                     },
                     Err(error) => failed(error.into()),
@@ -152,8 +171,8 @@ impl NativeSipCommands {
             .ok_or(SipHostError::NotReady)?;
         if request.method() == "call.hangup" {
             self.owner.hangup(&call)?;
-            let outcome = match view(&call) {
-                Ok(value) => result(value),
+            let outcome = match call_json(&call) {
+                Ok(value) => NativeOutcome::result(value),
                 Err(error) => failed(error),
             };
             return Ok(Box::pin(async move { outcome }));
@@ -197,6 +216,8 @@ impl NativeHandler for NativeSipCommands {
         if !matches!(
             request.method(),
             "configure"
+                | "status"
+                | "heartbeat"
                 | "call.prepare"
                 | "call.hangup"
                 | "call.release"

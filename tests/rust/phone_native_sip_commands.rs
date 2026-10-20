@@ -1,12 +1,14 @@
 use super::*;
 #[path = "phone_native_registration.rs"]
 mod registration;
+#[path = "phone_native_status.rs"]
+mod status;
 use ivy_phone_bridge::{
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
     native_rpc::{NativeDispatcher, NativeHandler, NativeInvocation, NativeOutcome},
     native_sip::{NativeSipCall, NativeSipError},
     native_sip_commands::NativeSipCommands,
-    sip::SipHostCallPhase,
+    native_sip_status::NativeSipViews,
 };
 use std::{future::Future, task::Poll};
 
@@ -92,21 +94,16 @@ fn actual_owner(
 fn command(method: &str, params: &str, operation: u64, request: u64) -> NativeRequest {
     let id = format!("00000000-0000-4000-8000-{operation:012x}");
     NativeRequest::parse(format!(r#"{{"version":1,"epoch":"{CALL}","requestId":{request},"operationId":{},"method":"{method}","params":{params}}}"#,
-        if method == "status" { "null".into() } else { format!("\"{id}\"") }).as_bytes()).unwrap()
+        if ivy_phone_bridge::ipc::is_read_only(method) { "null".into() } else { format!("\"{id}\"") }).as_bytes()).unwrap()
 }
-fn subset(call: &NativeSipCall) -> Result<IvyJson, NativeSipError> {
-    let state = call.observation();
-    let phase = match state.phase {
-        SipHostCallPhase::Prepared => "prepared",
-        SipHostCallPhase::Dialing => "dialing",
-        SipHostCallPhase::Connected => "connected",
-        SipHostCallPhase::LocalEnded => "local_ended",
-        SipHostCallPhase::OutcomeUnknown => "outcome_unknown",
-    };
-    Ok(IvyJson::object([
-        ("id", state.id.into()),
-        ("state", phase.into()),
-    ]))
+fn closed_platform_views() -> NativeSipViews {
+    NativeSipViews::new(
+        || Ok("null".into()),
+        |call| {
+            assert!(!call.media().unwrap().call_audio().status().route.is_some());
+            Ok("null".into())
+        },
+    )
 }
 async fn cancel<F: Future>(work: F) {
     let mut work = Box::pin(work);
@@ -136,7 +133,7 @@ async fn native_features_dto_error_order_and_saved_receipts_match_original_outgo
         owner.clone(),
         remaining.clone(),
         |_| Box::pin(async { Ok(()) }),
-        subset,
+        closed_platform_views(),
     ));
     let selected = format!(r#"{{"callId":"{CALL}"}}"#);
     let challenge = |raw: &str| format!(r#"{{"callId":"{CALL}","challenge":{raw}}}"#);
@@ -484,7 +481,7 @@ async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse()
                 Ok(())
             })
         },
-        subset,
+        closed_platform_views(),
     ));
     let dispatcher = NativeDispatcher::new(CALL.into(), 32, handler.clone()).unwrap();
     cancel(dispatcher.execute(command("configure", &params, 1, 1))).await;
@@ -548,7 +545,7 @@ async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse()
     assert_eq!(conflict.outcome().error_code(), Some("operation_conflict"));
     assert_eq!(media.create_offer().unwrap().to_sdp(), offer);
     let forwarded = dispatcher
-        .execute(command("status", "{\"caller\":42}", 0, 9))
+        .execute(command("inventory", "{\"caller\":42}", 0, 9))
         .await;
     assert_eq!(
         value(forwarded.outcome())
@@ -559,7 +556,7 @@ async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse()
     );
     assert_eq!(
         *remaining.methods.lock().unwrap(),
-        vec![("status".into(), parse("{\"caller\":42}", 65536).unwrap())]
+        vec![("inventory".into(), parse("{\"caller\":42}", 65536).unwrap())]
     );
     let hung_up = dispatcher
         .execute(command("call.hangup", &selected, 4, 10))
@@ -634,7 +631,7 @@ async fn native_command_shutdown_finally_drains_caller_after_sip_failure_and_ret
             owner.clone(),
             remaining.clone(),
             |_| Box::pin(async { Err(SipHostError::CleanupUnconfirmed) }),
-            subset,
+            closed_platform_views(),
         );
         let result = handler.invoke(command("configure", &params, 1, 1)).await;
         assert_eq!(result.error_code(), Some("operation_outcome_unknown"));
@@ -683,21 +680,18 @@ async fn native_projection_failures_keep_original_effects_and_safe_receipts() {
             owner.clone(),
             remaining,
             |_| Box::pin(async { Ok(()) }),
-            move |_| {
-                count.fetch_add(1, Ordering::SeqCst);
-                match mode {
-                    0 => Err(SipHostError::NotReady.into()),
-                    1 => Ok("x".repeat(65536).into()),
-                    2 => panic!("synthetic projection panic"),
-                    _ => {
-                        let mut value = IvyJson::Null;
-                        for _ in 0..25 {
-                            value = IvyJson::Array(vec![value]);
-                        }
-                        Ok(value)
+            NativeSipViews::new(
+                move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    match mode {
+                        0 => Err(SipHostError::NotReady.into()),
+                        1 => Ok(format!("{{\"value\":\"{}\"}}", "x".repeat(65536))),
+                        2 => panic!("synthetic projection panic"),
+                        _ => Ok("{\"invalid\":NaN}".into()),
                     }
-                }
-            },
+                },
+                |_| Ok("null".into()),
+            ),
         ));
         let dispatcher = NativeDispatcher::new(CALL.into(), 16, handler.clone()).unwrap();
         assert!(
@@ -709,15 +703,22 @@ async fn native_projection_failures_keep_original_effects_and_safe_receipts() {
                 .is_none()
         );
         let selected = format!(r#"{{"callId":"{CALL}"}}"#);
+        assert!(
+            dispatcher
+                .execute(command("call.prepare", &selected, 2, 2))
+                .await
+                .outcome()
+                .error_code()
+                .is_none()
+        );
         let code = match mode {
             0 => "runtime_not_ready",
-            3 => "invalid_request",
             _ => "operation_outcome_unknown",
         };
         for request in [2, 3] {
             assert_eq!(
                 dispatcher
-                    .execute(command("call.prepare", &selected, 2, request))
+                    .execute(command("status", &selected, 0, request))
                     .await
                     .outcome()
                     .error_code(),
@@ -725,7 +726,7 @@ async fn native_projection_failures_keep_original_effects_and_safe_receipts() {
             );
         }
         assert!(owner.find(CALL).is_some());
-        assert_eq!(views.load(Ordering::SeqCst), 1);
+        assert_eq!(views.load(Ordering::SeqCst), 2);
         assert_eq!(factory.starts.load(Ordering::SeqCst), 1);
         dispatcher
             .execute(command("call.release", &selected, 3, 4))
@@ -736,7 +737,7 @@ async fn native_projection_failures_keep_original_effects_and_safe_receipts() {
             ("mode", n(mode)),
             ("error", code.into()),
             ("effectRetained", true.into()),
-            ("projectionInvocations", n(1)),
+            ("projectionInvocations", n(2)),
         ]));
     }
     trace("native-lifecycle-projection", IvyJson::Array(rows));
@@ -751,7 +752,7 @@ async fn native_lifecycle_dto_and_error_order_match_original_handler_subset() {
         owner.clone(),
         remaining,
         |_| Box::pin(async { Ok(()) }),
-        subset,
+        closed_platform_views(),
     ));
     let selected = format!(r#"{{"callId":"{CALL}"}}"#);
     let steps: Vec<(&str, String)> = vec![

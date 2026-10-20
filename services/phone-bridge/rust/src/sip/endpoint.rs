@@ -74,7 +74,7 @@ struct Routes {
     clients: HashMap<TransactionKey, Arc<Route>>,
 }
 #[derive(Clone, Default)]
-struct FinalResponses(Arc<Mutex<Routes>>);
+struct FinalResponses(Arc<Mutex<Routes>>, super::signalling::SignallingObservers);
 impl FinalResponses {
     fn close(&self) {
         let mut routes = self.0.lock().unwrap();
@@ -102,9 +102,14 @@ impl FinalResponses {
 }
 impl MessageInspector for FinalResponses {
     fn before_send(&self, message: SipMessage, _: Option<&SipAddr>) -> SipMessage {
+        self.1.record(&message, true);
         message
     }
     fn after_received(&self, message: SipMessage, from: Option<&SipAddr>) -> SipMessage {
+        // Stack-generated timeout/send-error responses have no remote source.
+        if from.is_some() {
+            self.1.record(&message, false);
+        }
         // auto_ack_2xx=false retires the library transaction on its first 2xx.
         // The public inspector still observes later 2xx before stack routing.
         if let SipMessage::Response(response) = &message {
@@ -206,6 +211,12 @@ impl SipEndpoint {
     }
     pub fn inner(&self) -> &EndpointInnerRef {
         &self.endpoint.inner
+    }
+    pub(crate) fn observe_signalling(&self, call_id: &str) -> super::SipSignalling {
+        self.routes.1.observe(call_id)
+    }
+    pub(super) fn signalling_observers(&self) -> super::signalling::SignallingObservers {
+        self.routes.1.clone()
     }
     pub(crate) fn is_running(&self) -> bool {
         !self.routes.0.lock().unwrap().closed

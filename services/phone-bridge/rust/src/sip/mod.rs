@@ -9,9 +9,11 @@ mod host;
 mod invite;
 mod registration;
 mod registration_client;
+mod signalling;
 mod tls;
 mod udp;
 pub(crate) use registration::same_ip;
+pub use signalling::{SipSignalling, SipSignallingEvent, SipSignallingObservation};
 
 pub use binding::{BindError, BoundSipTransport, SipBoundFlow};
 pub use call::{

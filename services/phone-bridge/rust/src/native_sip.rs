@@ -194,6 +194,12 @@ struct Call {
 #[derive(Clone)]
 pub struct NativeSipCall(Arc<Call>);
 impl NativeSipCall {
+    pub fn signalling(&self) -> Option<crate::sip::SipSignallingObservation> {
+        self.0.original.signalling()
+    }
+    pub(crate) async fn constructed(&self) -> Result<(), SipHostError> {
+        self.0.original.constructed().await
+    }
     pub fn features(&self) -> PhoneCallFeatures {
         self.0.features.clone()
     }
@@ -224,7 +230,34 @@ struct Owner {
 }
 #[derive(Clone)]
 pub struct NativeSipOperations(Arc<Owner>);
+pub(crate) struct NativeSipStatusSnapshot {
+    pub configured: bool,
+    pub call: Option<NativeSipCall>,
+    pub registration: Option<RegistrationObservation>,
+    pub call_ids: Vec<String>,
+    pub endpoint: Option<SocketAddr>,
+}
 impl NativeSipOperations {
+    pub(crate) fn status_snapshot(
+        &self,
+        id: Option<&str>,
+    ) -> Result<NativeSipStatusSnapshot, SipHostError> {
+        let s = self.0.state.lock().unwrap();
+        if s.stopping {
+            return Err(SipHostError::Stopping);
+        }
+        let host = self.0.host.observation();
+        Ok(NativeSipStatusSnapshot {
+            configured: s.configured,
+            call: match id {
+                Some(id) => s.calls.iter().find(|c| c.observation().id == id).cloned(),
+                None => s.calls.first().cloned(),
+            },
+            registration: host.registration,
+            call_ids: s.calls.iter().map(|c| c.observation().id).collect(),
+            endpoint: host.endpoint,
+        })
+    }
     pub fn new(media: Arc<dyn NativeSipMediaFactory>) -> Self {
         Self::with_feature_time(media, Arc::new(SystemCallFeatureTime::default()))
     }

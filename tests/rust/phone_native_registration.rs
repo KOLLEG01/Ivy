@@ -413,7 +413,7 @@ impl Session {
             owner.clone(),
             remaining.clone(),
             |_| Box::pin(async { Ok(()) }),
-            subset,
+            closed_platform_views(),
         ));
         let dispatcher = NativeDispatcher::new(CALL.into(), 64, handler.clone()).unwrap();
         let reply = dispatcher

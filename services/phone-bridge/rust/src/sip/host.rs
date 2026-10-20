@@ -173,6 +173,7 @@ struct CallState {
 }
 struct Call {
     id: String,
+    signalling_view: OnceLock<super::SipSignalling>,
     host: Weak<Mutex<State>>,
     state: Mutex<CallState>,
     media: OnceLock<Arc<dyn HostedSipMedia>>,
@@ -225,6 +226,18 @@ pub struct SipHostCall(Arc<Call>);
 impl SipHostCall {
     pub fn observation(&self) -> SipHostCallObservation {
         self.0.observation()
+    }
+    pub fn signalling(&self) -> Option<super::SipSignallingObservation> {
+        self.0
+            .signalling_view
+            .get()
+            .map(super::SipSignalling::observation)
+    }
+    pub(crate) async fn constructed(&self) -> Result<(), SipHostError> {
+        if let Some(initializing) = &self.0.initializing {
+            initializing.wait().await?;
+        }
+        Ok(())
     }
     /// Observe the original startup. Dropping this waiter does not cancel it,
     /// return its slot or grant a later object authority over the same ID.
@@ -422,9 +435,17 @@ impl SipHost {
         }
         let mut state = self.shared().lock().unwrap();
         admission(&state, &id)?;
+        let endpoint = state
+            .binding
+            .as_ref()
+            .unwrap()
+            .endpoint()
+            .map_err(SipHostError::Binding)?;
         let media = create()?;
+        let signalling_view = OnceLock::from(endpoint.observe_signalling(&id));
         let call = Arc::new(Call {
             id,
+            signalling_view,
             host: Arc::downgrade(self.shared()),
             state: Mutex::new(CallState {
                 attempted: false,
@@ -454,11 +475,19 @@ impl SipHost {
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| SipHostError::NotReady)?;
         let initializing = Completion::new();
-        let call = {
+        let (call, observers) = {
             let mut state = self.shared().lock().unwrap();
             admission(&state, &id)?;
+            let observers = state
+                .binding
+                .as_ref()
+                .unwrap()
+                .endpoint()
+                .map_err(SipHostError::Binding)?
+                .signalling_observers();
             let call = Arc::new(Call {
                 id,
+                signalling_view: OnceLock::new(),
                 host: Arc::downgrade(self.shared()),
                 state: Mutex::new(CallState {
                     attempted: false,
@@ -472,7 +501,7 @@ impl SipHost {
                 initializing: Some(initializing.clone()),
             });
             state.calls.push(call.clone());
-            call
+            (call, observers)
         };
         let original = call.clone();
         runtime.spawn(async move {
@@ -482,6 +511,9 @@ impl SipHost {
             let mut state = original.state.lock().unwrap();
             let result = match result {
                 Ok(media) => {
+                    let _ = original
+                        .signalling_view
+                        .set(observers.observe(&original.id));
                     // Hangup/release may have arrived while the original
                     // constructor was suspended. Revoke before publication.
                     if state.ending {
@@ -791,6 +823,9 @@ fn begin_release(owner: &Shared, call: &Arc<Call>) -> Arc<Completion<()>> {
                 if initializing.wait().await == Err(SipHostError::CleanupUnconfirmed) {
                     return Err(SipHostError::CleanupUnconfirmed);
                 }
+            }
+            if let Some(view) = original.signalling_view.get() {
+                view.close();
             }
             if let Some(preparing) = preparing {
                 let _ = preparing.wait().await;

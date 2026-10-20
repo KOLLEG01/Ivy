@@ -131,6 +131,18 @@ fn endpoint(peer: Option<RegistrationPeer>) -> Result<String, RegistrationViewEr
     };
     quote(&format!("{protocol}:{address}"))
 }
+pub(crate) fn utc_time(at: std::time::SystemTime) -> Result<String, RegistrationViewError> {
+    let nanos = match at.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => {
+            i128::try_from(d.as_nanos()).map_err(|_| RegistrationViewError::InvalidTimestamp)?
+        }
+        Err(e) => -i128::try_from(e.duration().as_nanos())
+            .map_err(|_| RegistrationViewError::InvalidTimestamp)?,
+    };
+    let ticks = i64::try_from(621_355_968_000_000_000_i128 + nanos / 100)
+        .map_err(|_| RegistrationViewError::InvalidTimestamp)?;
+    utc_ticks(ticks)
+}
 pub(crate) fn utc_ticks(ticks: i64) -> Result<String, RegistrationViewError> {
     if !(0..=3_155_378_975_999_999_999).contains(&ticks) {
         return Err(RegistrationViewError::InvalidTimestamp);
