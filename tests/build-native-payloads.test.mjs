@@ -11,7 +11,7 @@ const targets = [
   ['x86_64-unknown-linux-gnu', 'linux-x64'], ['aarch64-unknown-linux-gnu', 'linux-arm64'],
 ];
 
-function fixture(t, matrix = targets) {
+function fixture(t, matrix = targets, component = 'example') {
   const base = realpathSync(tmpdir()), root = mkdtempSync(join(base, 'ivy-native-payload-'));
   t.after(() => {
     const child = relative(base, root);
@@ -19,38 +19,38 @@ function fixture(t, matrix = targets) {
     rmSync(root, { recursive: true, force: true });
   });
   const plan = {
-    schemaVersion: 1, componentId: 'example', version: '1.2.3',
+    schemaVersion: 1, componentId: component, version: '1.2.3',
     requirements: { node: '>=24.18.0 <25.0.0' },
-    entrypoint: { executable: 'node', args: ['dist/services/example/src/main.js'] },
+    entrypoint: { executable: 'node', args: [`dist/services/${component}/src/main.js`] },
     readiness: { command: { executable: 'node', args: ['dist/packages/host-runtime/src/health.js'] } },
     shutdown: { timeoutMs: 100 },
   };
-  const planPath = join(root, 'services/example/deploy.json');
+  const planPath = join(root, `services/${component}/deploy.json`);
   mkdirSync(dirname(planPath), { recursive: true });
   const save = () => writeFileSync(planPath, JSON.stringify(plan)); save();
   const identity = { schemaVersion: 1, version: '9.8.7', buildId: 'sha256:' + 'a'.repeat(64) };
   // These bytes qualify assembly only. They are never executed or presented as
   // binaries built for the selected target.
   const bytes = name => Buffer.concat([Buffer.from([0, 255, 10]), Buffer.from(name)]);
-  const payloads = matrix.flatMap(([target, platform]) => ['example', 'host-executor'].map(component => {
-    const outputDirectory = join(root, 'inputs', component, platform);
+  const payloads = matrix.flatMap(([target, platform]) => [component, 'host-executor'].map(owner => {
+    const outputDirectory = join(root, 'inputs', owner, platform);
     mkdirSync(outputDirectory, { recursive: true });
-    const names = component === 'example' ? ['ivy-example'] : ['ivy-health', ...(platform.startsWith('win32-') ? ['ivy-job'] : [])];
+    const names = owner === component ? ['ivy-' + component] : ['ivy-health', ...(platform.startsWith('win32-') ? ['ivy-job'] : [])];
     const files = names.map(name => {
       const file = join(outputDirectory, name + (platform.startsWith('win32-') ? '.exe' : ''));
       writeFileSync(file, bytes(basename(file))); return file;
     });
     writeFileSync(join(outputDirectory, 'build-info.json'), JSON.stringify(identity));
     const instructionFiles = [];
-    if (component === 'example') {
+    if (owner === component) {
       const file = join(root, 'inputs', 'instructions', platform, 'example-policy.json');
       mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, JSON.stringify('policy \ud800'));
       instructionFiles.push(file);
     }
-    return { component, target, platform, identity: { ...identity }, outputDirectory, files, instructionFiles };
+    return { component: owner, target, platform, identity: { ...identity }, outputDirectory, files, instructionFiles };
   }));
   const outputRoot = join(root, 'dist'), requiredBinaries = { win32: ['ivy-job'] };
-  const stage = extra => stageNativePayloads({ component: 'example', root, outputRoot, identity, payloads, requiredBinaries, ...extra });
+  const stage = extra => stageNativePayloads({ component, root, outputRoot, identity, payloads, requiredBinaries, ...extra });
   return { root, plan, planPath, save, identity, payloads, outputRoot, stage, bytes };
 }
 
@@ -85,6 +85,48 @@ test('restricted unchanged plans stage exactly their advertised OS and architect
   const result = f.stage();
   assert.deepEqual(result.platforms, ['linux-x64']);
   assert.equal(existsSync(join(f.outputRoot, 'native/win32-x64')), false);
+});
+
+function secretaryFixture(t) {
+  const f = fixture(t, targets, 'secretary');
+  const inputs = new Map([
+    ['specs/native/codex-1.2.3/catalog.json', '{"source":"base"}\n'],
+    ['specs/native/codex-1.2.3/catalog.linux-x64.json', '{"source":"linux"}\n'],
+    ['specs/native/LICENSE.codex', 'catalog license\n'],
+    ['services/secretary/rust/pdf-worker.mjs', 'export const pdf = () => import("pdfjs-dist/legacy/build/pdf.mjs");\n'],
+  ]);
+  for (const [path, bytes] of inputs) {
+    const file = join(f.root, path); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, bytes);
+  }
+  writeFileSync(join(f.root, 'specs/native/codex-1.2.3/source.json.gz'), 'build-only source');
+  return { ...f, inputs };
+}
+
+test('Secretary universal staging retains runtime catalogs and its exact private PDF adapter', t => {
+  const f = secretaryFixture(t), result = f.stage();
+  assert.deepEqual(result.platforms, targets.map(([, platform]) => platform));
+  for (const [path, bytes] of f.inputs) {
+    const output = join(f.outputRoot, path.replace('secretary/rust/', 'secretary/'));
+    assert.equal(readFileSync(output, 'utf8'), bytes); assert.ok(result.files.includes(output));
+  }
+  assert.equal(existsSync(join(f.outputRoot, 'specs/native/codex-1.2.3/source.json.gz')), false);
+  assert.equal(existsSync(join(f.outputRoot, 'services/secretary/rust')), false);
+  assert.equal(new Set(result.files).size, result.files.length);
+});
+
+test('missing or linked Secretary runtime assets fail before staging any target', t => {
+  for (const change of [
+    f => rmSync(join(f.root, 'services/secretary/rust/pdf-worker.mjs')),
+    f => { for (const path of f.inputs.keys()) if (path.endsWith('.json')) rmSync(join(f.root, path)); },
+    f => {
+      const original = join(f.root, 'specs/native'), moved = join(f.root, 'catalog-input');
+      renameSync(original, moved); symlinkSync(moved, original, process.platform === 'win32' ? 'junction' : 'dir');
+    },
+  ]) {
+    const f = secretaryFixture(t); change(f);
+    assert.throws(() => f.stage(), /ENOENT|catalogs are missing|must not use links/);
+    assert.equal(existsSync(f.outputRoot), false);
+  }
 });
 
 test('missing, duplicate, extra and mismatched target records fail before writing output', t => {

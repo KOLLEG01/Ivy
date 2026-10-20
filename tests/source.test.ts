@@ -11,7 +11,7 @@ import {
   chmod,
   stat,
 } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import {
@@ -368,8 +368,21 @@ test(
       join(f.source, "services/companion/native/phone-runtime/entry.cs"),
       "public static class Entry {}\n",
     );
+    const runtimeAssets: Array<[string, string]> = [
+      ["services/secretary/rust/pdf-worker.mjs", 'import("pdfjs-dist/legacy/build/pdf.mjs");\n'],
+      ["specs/native/codex-1.2.3/catalog.json", '{"runtime":"catalog"}\n'],
+    ];
+    for (const [path, bytes] of runtimeAssets) {
+      await mkdir(dirname(join(f.source, path)), { recursive: true });
+      await writeFile(join(f.source, path), bytes);
+    }
     const first = await captureSource(f.source, f.config);
     await verifySnapshot(first, f.config);
+    for (const [path, bytes] of runtimeAssets) {
+      assert.equal(await readFile(join(first.sourceRoot, path), "utf8"), bytes);
+      await writeFile(join(f.source, path), "changed after capture\n");
+      assert.equal(await readFile(join(first.sourceRoot, path), "utf8"), bytes);
+    }
     assert.equal(
       await readFile(
         join(
