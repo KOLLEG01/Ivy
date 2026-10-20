@@ -297,6 +297,15 @@ fn tracks(s: &SdpDocument, port: u16) -> IvyJson {
                                 .collect(),
                         ),
                     ),
+                    (
+                        "parameters",
+                        IvyJson::Array(
+                            m.formats()
+                                .iter()
+                                .map(|f| f.parameters().map(Into::into).unwrap_or(IvyJson::Null))
+                                .collect(),
+                        ),
+                    ),
                 ])
             })
             .collect(),

@@ -348,6 +348,27 @@ impl SdpMedia {
     pub fn formats(&self) -> &[SdpFormat] {
         &self.formats
     }
+    /// The parser retains video FMTP lines in their canonical wire order.
+    /// Codec matching also needs their effective per-payload parameters.
+    pub(super) fn codec_formats(&self) -> Vec<SdpFormat> {
+        let mut formats = self.formats.clone();
+        if self.kind == SdpMediaKind::Video {
+            for value in self
+                .attributes
+                .extra
+                .iter()
+                .filter_map(|line| line.strip_prefix("a=fmtp:"))
+            {
+                let (id, parameters) = split_field(value);
+                if let Ok(id) = id.parse::<u8>() {
+                    if let Some(format) = formats.iter_mut().find(|f| f.payload == id) {
+                        format.parameters = Some(parameters.into());
+                    }
+                }
+            }
+        }
+        formats
+    }
     pub fn mid(&self) -> Option<&str> {
         self.mid.as_deref()
     }

@@ -470,8 +470,9 @@ impl AudioNegotiator {
         Ok(())
     }
     pub(super) fn next_track(&mut self, update: &mut DescriptionUpdate) -> Option<TrackUpdate> {
-        while let Some(track) = update.remote.media.get(update.next).cloned() {
+        while let Some(mut track) = update.remote.media.get(update.next).cloned() {
             update.next += 1;
+            track.formats = track.codec_formats();
             let kind = match track.kind {
                 SdpMediaKind::Audio => 0,
                 SdpMediaKind::Video => 1,

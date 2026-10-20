@@ -42,7 +42,7 @@ public static class PhoneSessionOracle {
             session.OnSendReport+=(kind,report)=>{if(kind!=SDPMediaTypesEnum.audio)return;var before=State();object result=null;object after=null;
                 try{if(!fired&&input.TryGetProperty("callback",out var callback)){fired=true;switch(callback.GetProperty("op").GetString()){
                     case "throw":throw new InvalidOperationException("Synthetic callback failure");
-                    case "offer":result=session.CreateOffer(IPAddress.Loopback).Media.Select(m=>new{kind=m.Media.ToString(),mid=m.MediaID,port=m.Port==local?"local":m.Port.ToString(),direction=m.MediaStreamStatus.ToString(),formats=m.MediaFormats.Keys.ToArray()}).ToArray();break;
+                    case "offer":result=session.CreateOffer(IPAddress.Loopback).Media.Select(m=>new{kind=m.Media.ToString(),mid=m.MediaID,port=m.Port==local?"local":m.Port.ToString(),direction=m.MediaStreamStatus.ToString(),formats=m.MediaFormats.Keys.ToArray(),parameters=m.MediaFormats.Values.Select(f=>f.Fmtp).ToArray()}).ToArray();break;
                     case "status":session.SetMediaStreamStatus(SDPMediaTypesEnum.audio,MediaStreamStatusEnum.RecvOnly);break;
                     case "set":result=session.SetRemoteDescription(SdpType.offer,SDP.ParseSDPDescription(callback.GetProperty("sdp").GetString().Replace("$PORT",port.ToString()))).ToString();break;
                     case "close":session.Close("synthetic");break;
@@ -57,7 +57,7 @@ public static class PhoneSessionOracle {
                     case "status":session.SetMediaStreamStatus(SDPMediaTypesEnum.audio,Enum.Parse<MediaStreamStatusEnum>(step.GetProperty("value").GetString()));break;
                     case "offer":case "answer":{
                         var sdp=op=="offer"?session.CreateOffer(IPAddress.Loopback):session.CreateAnswer(IPAddress.Loopback);
-                        description=sdp==null?null:new{version=sdp.AnnouncementVersion,port=sdp.Media.Count==0?null:sdp.Media[0].Port==local?"local":sdp.Media[0].Port.ToString(),direction=sdp.Media.Count==0?null:sdp.Media[0].MediaStreamStatus.ToString(),tracks=sdp.Media.Select(m=>new{kind=m.Media.ToString(),mid=m.MediaID,port=m.Port==local?"local":m.Port.ToString(),direction=m.MediaStreamStatus.ToString(),formats=m.MediaFormats.Keys.ToArray()}).ToArray()};break;}
+                        description=sdp==null?null:new{version=sdp.AnnouncementVersion,port=sdp.Media.Count==0?null:sdp.Media[0].Port==local?"local":sdp.Media[0].Port.ToString(),direction=sdp.Media.Count==0?null:sdp.Media[0].MediaStreamStatus.ToString(),tracks=sdp.Media.Select(m=>new{kind=m.Media.ToString(),mid=m.MediaID,port=m.Port==local?"local":m.Port.ToString(),direction=m.MediaStreamStatus.ToString(),formats=m.MediaFormats.Keys.ToArray(),parameters=m.MediaFormats.Values.Select(f=>f.Fmtp).ToArray()}).ToArray()};break;}
                     case "send":session.AudioStream.SendAudioFrame(160,0,new byte[]{1,2,3,4});break;
                     default:throw new ArgumentException();
                 }}catch(Exception failure){error=failure.GetType().Name;}
