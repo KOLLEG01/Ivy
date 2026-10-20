@@ -665,6 +665,8 @@ fn transport_frame_admission_matches_typescript() {
             "service-notification" => validate_service_notification_frame(&value),
             "provider-notification" => validate_provider_notification_frame(&value),
             "event-availability" => validate_event_availability_frame(&value),
+            "tool-routing" => validate_tool_routing(&value, false),
+            "discovery-routing" => validate_tool_routing(&value, true),
             _ => validate_provider_call_frame(&value),
         };
         if case["ok"] == true {
@@ -673,6 +675,9 @@ fn transport_frame_admission_matches_typescript() {
             let error = result.unwrap_err();
             assert_eq!(error.code, case["code"].as_str().unwrap(), "{case}");
             assert_eq!(error.message, case["message"].as_str().unwrap(), "{case}");
+            if let Some(wire) = case["wire"].as_str() {
+                assert_eq!(error.to_wire(), parse(wire, 100_000).unwrap(), "{case}");
+            }
         }
     }
 }
