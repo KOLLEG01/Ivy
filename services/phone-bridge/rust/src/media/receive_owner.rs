@@ -276,6 +276,7 @@ impl Inner {
         let selected_event =
             state.selected_event != 0 && packet.header.payload_type == state.selected_event;
         if selected_event || state.event_payloads.contains(&packet.header.payload_type) {
+            state.event_packets = state.event_packets.wrapping_add(1);
             if !selected_event && !state.local_payloads.contains(&packet.header.payload_type) {
                 return Ok(Vec::new()); // Alternate channel observer runs after SDK dispatch.
             }
@@ -284,7 +285,6 @@ impl Inner {
             if !selected_event && state.local_payloads.contains(&packet.header.payload_type) {
                 state.parsed_event_packets = state.parsed_event_packets.wrapping_add(1);
             }
-            state.event_packets += 1;
             if let Some(digit) = packet
                 .payload
                 .first()
@@ -495,9 +495,6 @@ impl RtpDatagramSink for Sink {
             let Some(packet) = packet else {
                 return;
             };
-            if !state.local_payloads.contains(&(payload as u8)) {
-                state.event_packets = state.event_packets.wrapping_add(1);
-            }
             let digit = packet
                 .payload
                 .first()

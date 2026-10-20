@@ -47,7 +47,11 @@ public static class PhoneMediaDiagnosticsOracle {
                 case "send":{
                     long before=Raw(session);var bytes=Convert.FromHexString(step.GetProperty("hex").GetString());
                     (step.TryGetProperty("foreign",out var f)&&f.GetBoolean()?foreign:peer).Send(bytes,bytes.Length,local);
-                    if(!SpinWait.SpinUntil(()=>Raw(session)>before,TimeSpan.FromSeconds(3)))throw new Exception("Original datagram observation unavailable");break;
+                    // A following bare header has no application payload effect.
+                    // Its raw count proves the preceding callback completed.
+                    var barrier=new byte[12];barrier[0]=0x80;barrier[1]=127;
+                    (step.TryGetProperty("foreign",out var barrierForeign)&&barrierForeign.GetBoolean()?foreign:peer).Send(barrier,barrier.Length,local);
+                    if(!SpinWait.SpinUntil(()=>Raw(session)>=before+2,TimeSpan.FromSeconds(3)))throw new Exception("Original datagram observation unavailable");break;
                 }
                 case "counters":{
                     long Number(string key)=>long.Parse(step.GetProperty(key).GetString(),CultureInfo.InvariantCulture);

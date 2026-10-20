@@ -156,13 +156,21 @@ pub fn diagnostics_json(v: &SipMediaObservation, realtime: Option<&IvyJson>) -> 
     } else {
         "null".into()
     };
-    let raw = array(&r.raw_payloads, |(payload, packets)| {
-        Ok(format!(
-            "{{\"payload\":{},\"packets\":{}}}",
-            payload,
-            count(*packets)
-        ))
-    })?;
+    let raw = format!(
+        "[{}]",
+        r.raw_payloads
+            .iter()
+            .filter(|(_, packets)| count(*packets) > 0)
+            .map(|(payload, packets)| {
+                format!(
+                    "{{\"payload\":{},\"packets\":{}}}",
+                    payload,
+                    count(*packets)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let dtmf = format!(
         "{{\"offeredEventPayloads\":{},\"offeredEventPayloadIds\":[{}],\"remoteEventFormats\":{},\"localEventFormats\":{},\"negotiatedEventPayloadId\":{},\"rawPayloads\":{},\"inBand\":{},\"rawRtpPackets\":{},\"rawOfferedEventPackets\":{},\"parsedEventPackets\":{},\"libraryEventPackets\":{},\"unsupportedPayloadPackets\":{},\"inBandAnalyzedPackets\":{},\"inBandDetectedDigits\":{},\"rfc4733DetectedDigits\":{}}}",
         offered_count,

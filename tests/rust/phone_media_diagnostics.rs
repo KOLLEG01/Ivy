@@ -212,7 +212,14 @@ async fn run(case: &IvyJson) -> Vec<IvyJson> {
                     .send_to(&bytes, m.observation().receive.transport.local_rtp)
                     .await
                     .unwrap();
-                crate::sip_receiver::wait(|| m.observation().receive.raw_rtp_packets > before)
+                let mut barrier = [0; 12];
+                barrier[0] = 0x80;
+                barrier[1] = 127;
+                source
+                    .send_to(&barrier, m.observation().receive.transport.local_rtp)
+                    .await
+                    .unwrap();
+                crate::sip_receiver::wait(|| m.observation().receive.raw_rtp_packets >= before + 2)
                     .await;
             }
             "counters" => {
@@ -280,10 +287,9 @@ fn compare(actual: &[IvyJson], original: &IvyJson, label: &str) {
         );
         let a = a.get("diagnostics").unwrap().as_str().unwrap();
         let b = b.get("diagnostics").unwrap().as_str().unwrap();
-        assert_eq!(
-            parse(&a, 65536).unwrap(),
-            parse(&b, 65536).unwrap(),
-            "{label} step {index} diagnostics"
+        assert!(
+            parse(&a, 65536).unwrap() == parse(&b, 65536).unwrap(),
+            "{label} step {index} diagnostics\nactual: {a}\noriginal: {b}"
         );
     }
 }
@@ -293,25 +299,27 @@ async fn original_media_diagnostics_follow_sdp_codecs_endpoints_close_and_dispos
     let expected =
         original_session_fixture("tests/fixtures/phone-media-diagnostics-oracle.ps1", &inputs);
     let mut actual = Vec::new();
-    for (index, input) in inputs.iter().enumerate() {
+    for input in &inputs {
         let rows = run(input).await;
-        if let Some(e) = &expected {
-            compare(
-                &rows,
-                &e.as_array().unwrap()[index],
-                &format!("scenario {index}"),
-            );
-        }
         actual.push(IvyJson::Array(rows));
     }
     trace(
         "media-diagnostics-sdp",
         IvyJson::object([
             ("inputs", IvyJson::Array(inputs)),
-            ("rust", IvyJson::Array(actual)),
-            ("original", expected.unwrap_or(IvyJson::Null)),
+            ("rust", IvyJson::Array(actual.clone())),
+            ("original", expected.clone().unwrap_or(IvyJson::Null)),
         ]),
     );
+    if let Some(e) = expected {
+        for (index, rows) in actual.iter().enumerate() {
+            compare(
+                rows.as_array().unwrap(),
+                &e.as_array().unwrap()[index],
+                &format!("scenario {index}"),
+            );
+        }
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn original_raw_channel_and_selected_alternate_event_counters_are_distinct() {

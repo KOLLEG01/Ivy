@@ -259,6 +259,15 @@ impl AudioNegotiator {
             Self::new(&[Codec::Pcma, Codec::Pcmu])
                 .expect("fixed challenge codecs")
                 .configured
+                .into_iter()
+                // ChallengeCodecs replaces track capabilities directly; the
+                // SDK's initial addTrack event insertion does not run again.
+                .filter(|format| {
+                    !format
+                        .name()
+                        .is_some_and(|name| name.eq_ignore_ascii_case("telephone-event"))
+                })
+                .collect()
         } else {
             self.configured.clone()
         };
