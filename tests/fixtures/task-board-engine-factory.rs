@@ -128,14 +128,9 @@ impl Fixture {
         self.opens.set(count);
         Ok(OpenedJournal {
             connection: self.database(),
-            limits: if self.retention.is_some() {
-                HistoryLimits {
-                    count: 0,
-                    ..HistoryLimits::default()
-                }
-            } else {
-                HistoryLimits::default()
-            },
+            limits: self
+                .retention
+                .map_or_else(HistoryLimits::default, retention::limits),
         })
     }
 }

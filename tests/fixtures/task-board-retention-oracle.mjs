@@ -13,6 +13,34 @@ const methods=source.slice(source.indexOf('  private async retainedLocalRoot('),
  source.slice(source.indexOf('  private localDocument<'),source.indexOf('  async read<'));
 const Store=new Function('hasUnresolvedOutcome','IvyError','requireThat','hashJson','contractVersion',stripTypeScriptTypes('class Store { local; client; rootObjectId=null; historyLimits; constructor(db,client,limits){this.local=db;this.client=client;this.historyLimits=limits;}\n'+methods+'\n}')+'\nreturn Store;')(hasUnresolvedOutcome,IvyError,requireThat,hashJson,()=> '1.0.0');
 const time='2026-01-02T03:04:05.006Z';
+if(process.argv.includes('--configuration-control')){
+ const input=JSON.parse(readFileSync(0,'utf8'));
+ const configurationSource=readFileSync('services/task-board/src/runtime/configuration.ts','utf8');
+ const {validateTaskBoard}=await import('../../packages/contracts/src/task-board-validation.ts');
+ const helpers=configurationSource.slice(configurationSource.indexOf('export const configurationName'),configurationSource.indexOf('export function executionWithDefaults'));
+ const Configuration=new Function('validateTaskBoard','requireThat',stripTypeScriptTypes(helpers.replaceAll('export ',''))+'\nreturn {initialConfiguration,checkConfiguration};')(validateTaskBoard,requireThat);
+ if(input.configurationControl==='request'){
+  const value=Configuration.initialConfiguration();
+  value.defaults.nativeOptions={model:null,reasoningEffort:null,serviceTier:'standard'};
+  const request={action:'configure',operationId:'retention-control',configuration:null,value};
+  validateTaskBoard('ActionRequest',request);validateTaskBoard('DurableRequest',request);
+  const engine=readFileSync('services/task-board/src/runtime/engine.ts','utf8');
+  const actorSource=engine.slice(engine.indexOf('    const actor: TaskBoard.Actor ='),engine.indexOf('    if (request.action === "savePlan")'));
+  const makeActor=new Function('request','context',stripTypeScriptTypes(actorSource)+'\nreturn actor;');
+  const actor=makeActor.call({owner:input.owner},request,{callerPrincipalId:input.callerPrincipalId});
+  const trace=[];await Configuration.checkConfiguration({client:{async request(method,args){trace.push([method,args]);return{items:[],nextCursor:null};}}},value);
+  process.stdout.write(JSON.stringify({request,actor,trace}));
+ }else{
+  if(input.configurationControl!=='cached')throw Error('Unbound control mode');
+  const engine=readFileSync('services/task-board/src/runtime/engine.ts','utf8'),start=engine.indexOf('  private async executeCached('),end=engine.indexOf('    // Complete transcripts',start);
+  const prefix=engine.slice(start,end),trace=[];
+  const Cached=new Function('IvyError',stripTypeScriptTypes('class Cached {coordination;constructor(coordination){this.coordination=coordination;}'+prefix+'throw Error("Only original cached terminal branch is bound");}}',{mode:'transform'})+'\nreturn Cached;')(IvyError);
+  const cached=new Cached({async release(id){trace.push(id);}});
+  const outcome=await cached.executeCached(input.operation);
+  process.stdout.write(JSON.stringify({outcome,trace}));
+ }
+ process.exit(0);
+}
 const operation=(extra={})=>({callerPrincipalId:'caller',operationId:'request',requestHash:'sha256:original',phase:'succeeded',actor:{source:'user'},request:{},writes:[],error:null,...extra});
 const document=(id='root',key='task-board/operation',value=operation(),parent=null)=>({id,key,value,parent,name:id});
 const task=(state='todo',revision=2,archived=false)=>({object:{contractKey:'task-board/task',currentRevision:revision,effectivelyArchived:archived},content:{encoding:'json',value:{workflowState:state}}});

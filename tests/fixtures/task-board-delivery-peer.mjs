@@ -5,7 +5,7 @@ import {toolDefinitionHash} from '../../packages/contracts/src/tool-definition.t
 
 // Only the isolated factory mode enters this finite, original-source-backed peer.
 export function deliveryBoundary(){
- let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null,forwardReads=0,retainedDelivery=null,retentionError=null;
+ let row=null,request=null,replyRaw=null,inputRaw=null,phoneRequest=null,forwardReads=0,retainedDelivery=null,retentionError=null,retentionConfiguration=false;
  const definitions=new Map();
  const phone=()=>row.input.mode==='phonePrepared';
  const fallback=()=>phone()&&row.input.fault?.outcome==='not_executed';
@@ -44,6 +44,14 @@ export function deliveryBoundary(){
    retainedDelivery=structuredClone(raw);retentionError=params.error??null;
    if(retentionError){assert.deepEqual(Object.keys(retentionError).sort(),['code','message','outcome']);assert.ok(['service_unavailable','not_found'].includes(retentionError.code));assert.equal(retentionError.outcome,'not_executed');}
    reply(id,{});return true;
+  }
+  if(method==='test.retentionConfiguration'){
+   assert.ok(row);assert.deepEqual(params,{});assert.equal(retentionConfiguration,false);
+   retentionConfiguration=true;reply(id,{});return true;
+  }
+  if(method==='serviceNodes.list'&&retentionConfiguration){
+   assert.deepEqual(params,{serviceName:'agent-manager',limit:200});
+   emit({kind:'retention-configuration-hosts',params});reply(id,{items:[],nextCursor:null});return true;
   }
   if(method==='objects.read'&&retainedDelivery&&params.objectId===retainedDelivery.object.objectId){
    assert.deepEqual(params,{objectId:retainedDelivery.object.objectId});

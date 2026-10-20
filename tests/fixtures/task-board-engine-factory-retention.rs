@@ -3,10 +3,26 @@ use driver::{count, frames};
 use ivy_task_board::{generation::GenerationClock, service::ServiceControl};
 use std::{io::Write, rc::Rc};
 
+#[path = "task-board-engine-factory-retention-success.rs"]
+mod success;
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Case {
     RowPressure,
     RemoteReadFailure,
+    SuccessfulBytePressure,
+}
+pub(super) fn limits(case: Case) -> HistoryLimits {
+    match case {
+        Case::SuccessfulBytePressure => HistoryLimits {
+            count: 10000,
+            bytes: 0,
+        },
+        _ => HistoryLimits {
+            count: 0,
+            ..HistoryLimits::default()
+        },
+    }
 }
 #[derive(Clone, Default)]
 pub(super) struct FactoryClock(Option<Rc<ManualClock>>);
@@ -121,7 +137,11 @@ fn original(input: &Json) -> Json {
             "--experimental-transform-types",
             "--disable-warning=ExperimentalWarning",
             "tests/fixtures/task-board-retention-oracle.mjs",
-            "--factory-snapshot",
+            if input.get("configurationControl").is_some() {
+                "--configuration-control"
+            } else {
+                "--factory-snapshot"
+            },
         ])
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .stdin(Stdio::piped())
@@ -211,13 +231,14 @@ async fn collect(
         .await
         .unwrap();
     let before = tables(fixture);
+    let limit = limits(fixture.retention.unwrap());
     let mut input = Json::object([
         ("tables", before.clone()),
         (
             "limits",
             Json::object([
-                ("count", Json::Number(0.0)),
-                ("bytes", Json::Number(268435456.0)),
+                ("count", Json::Number(limit.count as f64)),
+                ("bytes", Json::Number(limit.bytes as f64)),
             ]),
         ),
         ("nowMs", Json::Number(fixture.clock.now_millis() + 60000.0)),
@@ -267,6 +288,8 @@ async fn collect(
     until(|| {
         fixture.pages.borrow().len() > pages
             && frames(peer, "delivery-retention-read").len() > reads
+            && (stage != "successful-byte-control-evicted"
+                || count(fixture, "SELECT count(*) FROM retired_operations") == 1)
     })
     .await;
     let after = tables(fixture);
@@ -343,6 +366,10 @@ pub(super) async fn pending(
     question: &Json,
 ) {
     checkpoint(fixture, peer, connection, "pending").await;
+    if fixture.retention == Some(Case::SuccessfulBytePressure) {
+        success::pending(fixture, peer, control, connection).await;
+        return;
+    }
     let mut request = question.clone();
     request.insert("operationId", "retention-control".into());
     // The original revision is stale. Admission succeeds, retained execution
@@ -550,6 +577,16 @@ async fn unavailable_delivery_read_preserves_cleanup_error_and_graph_until_absen
     delivery::run_delivery_mode(
         "factory question lost notify recovers confirmed",
         Some(Case::RemoteReadFailure),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_unreferenced_configuration_expires_under_byte_pressure_preserving_question_graph()
+ {
+    delivery::run_delivery_mode(
+        "factory question lost notify recovers confirmed",
+        Some(Case::SuccessfulBytePressure),
     )
     .await;
 }
