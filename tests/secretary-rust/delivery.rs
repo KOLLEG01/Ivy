@@ -2,6 +2,7 @@ use ivy_contracts::{IvyError, IvyJson, Outcome, json::parse};
 mod packaging_cases;
 mod triage_workflow_cases;
 mod video_cases;
+mod video_codec_cases;
 mod video_command_cases;
 use ivy_sdk::{rpc::*, tools::ToolClients};
 use std::{
