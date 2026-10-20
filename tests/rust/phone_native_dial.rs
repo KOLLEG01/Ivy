@@ -355,8 +355,16 @@ async fn outgoing(
     if scenario == "remote_bye" {
         let from = invite.from_header().unwrap();
         let tag = from.tag().unwrap().unwrap().value().to_string();
+        let remote_tag = ack
+            .to_header()
+            .unwrap()
+            .tag()
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_string();
         let raw = format!(
-            "BYE sip:fixture@{remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-owned-bye\r\nFrom: <sip:peer@{}>;tag=owned-peer\r\nTo: <{}>;tag={tag}\r\nCall-ID: {CALL}\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n",
+            "BYE sip:fixture@{remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-owned-bye\r\nFrom: <sip:peer@{}>;tag={remote_tag}\r\nTo: <{}>;tag={tag}\r\nCall-ID: {CALL}\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n",
             peer.local_addr().unwrap(),
             peer.local_addr().unwrap(),
             from.uri().unwrap()

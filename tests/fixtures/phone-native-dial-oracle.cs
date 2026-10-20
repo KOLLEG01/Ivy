@@ -59,7 +59,7 @@ public static class PhoneNativeDialOracle {
             var policy=Host(owner).FindCall(id).Features.Observation;
             object ended=null;
             if(scenario=="remote_bye") {
-                string raw=$"BYE sip:fixture@{remote} SIP/2.0\r\nVia: SIP/2.0/UDP {peer.Client.LocalEndPoint};branch=z9hG4bK-owned-bye\r\nFrom: <sip:peer@{peer.Client.LocalEndPoint}>;tag=owned-peer\r\nTo: <{invite.Header.From.FromURI}>;tag={invite.Header.From.FromTag}\r\nCall-ID: {id}\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n";
+                string raw=$"BYE sip:fixture@{remote} SIP/2.0\r\nVia: SIP/2.0/UDP {peer.Client.LocalEndPoint};branch=z9hG4bK-owned-bye\r\nFrom: <sip:peer@{peer.Client.LocalEndPoint}>;tag={ack.Header.To.ToTag}\r\nTo: <{invite.Header.From.FromURI}>;tag={invite.Header.From.FromTag}\r\nCall-ID: {id}\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n";
                 byte[] packet=Encoding.UTF8.GetBytes(raw);
                 for(int n=0;n<2;n++) {
                     await peer.SendAsync(packet,packet.Length,remote);
