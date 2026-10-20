@@ -89,6 +89,7 @@ pub mod bootstrap_maintenance;
 pub mod bootstrap_os;
 pub mod backup_files;
 pub mod private_backup;
+pub mod restore;
 pub mod project_storage;
 pub mod systemd;
 pub mod docker;

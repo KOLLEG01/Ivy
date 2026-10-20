@@ -21,6 +21,7 @@ fn lower(value: &[u16]) -> Vec<u16> {
     }
     output.extend(segment.to_lowercase().encode_utf16()); output
 }
+pub(crate) fn lowercase(value: &JsString) -> JsString { JsString(lower(&value.0)) }
 fn reserved(value: &[u16]) -> bool {
     let upper: Vec<_> = value.iter().map(|c| if (97..=122).contains(c) { c - 32 } else { *c }).collect();
     ["CON", "PRN", "AUX", "NUL"].iter().any(|s| upper == s.encode_utf16().collect::<Vec<_>>())
