@@ -60,7 +60,22 @@ function report(peer){
  return{synthetic:true,mode,categoryCounts,rows:rows.length,current,archived,skipped,logicalHash:hash(Buffer.from(JSON.stringify(rows))),diagnostics};
 }
 async function run(){
- if(!['seed','group-control','archived-control','advance','verify'].includes(mode))throw Error('Unknown fixture phase');
+ if(!['seed','group-control','archived-control','advance','verify','crypto-wire','crypto-reply'].includes(mode))throw Error('Unknown fixture phase');
+ if(mode==='crypto-wire'||mode==='crypto-reply'){
+  // Keep original peers untouched; the native test exchanges only synthetic
+  // wire bytes with this independently persisted original implementation.
+  if(mode==='crypto-wire')copyFileSync(join(root,'alice.sqlite'),join(root,'crypto-alice.sqlite'));
+  const alice=peer('crypto-alice.sqlite');
+  if(mode==='crypto-reply'){
+   const reply=JSON.parse(readFileSync(join(root,'native-reply.json'),'utf8'));
+   assert.equal(reply.type,'msg');
+   assert((await alice.repo.decryptMessage({jid:bobJid,...unpack(reply)})).equals(Buffer.from('native-current-reply')),'Original peer decrypts native reply');
+  }
+  const plaintext=mode==='crypto-wire'?'native-current-send':'original-follow-up';
+  const wire=await alice.repo.encryptMessage({jid:bobJid,data:Buffer.from(plaintext)});
+  assert.equal(wire.type,'msg','Established session uses Signal wire envelope');
+  alice.save();return{synthetic:true,mode,plaintext,wire:pack(wire)};
+ }
  const archivedProbe=mode==='archived-control',sourceHashes=archivedProbe?['alice.sqlite','original.sqlite'].map(f=>hash(readFileSync(join(root,f)))):[];
  if(archivedProbe){copyFileSync(join(root,'alice.sqlite'),join(root,'archive-alice.sqlite'));copyFileSync(join(root,'original.sqlite'),join(root,'archive-bob.sqlite'));}
  const alice=peer(archivedProbe?'archive-alice.sqlite':'alice.sqlite'),bob=peer(archivedProbe?'archive-bob.sqlite':mode==='seed'||mode==='group-control'?'original.sqlite':mode==='advance'?'copied.sqlite':'rollback.sqlite');

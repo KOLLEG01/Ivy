@@ -1,5 +1,8 @@
 //! Offline representability probe. This is a container codec into upstream types,
 //! not a protocol implementation or an enabled authentication migration.
+#[path = "chat-auth-native-crypto-cases.rs"]
+mod crypto;
+
 use super::auth_compat::{phase, rows, transfer};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ivy_chat_bridge::whatsapp::auth::{AuthEntry, AuthStore};
