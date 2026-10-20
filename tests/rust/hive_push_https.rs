@@ -71,6 +71,12 @@ impl Oracle {
         );
     }
     fn sender(&self, trusted: bool) -> NativeSender {
+        NativeSender::new(
+            Arc::new(self.transport(trusted)),
+            Arc::new(|| Ok(1700043200)),
+        )
+    }
+    fn transport(&self, trusted: bool) -> NativeHttps {
         let mut roots = RootCertStore::empty();
         if trusted {
             roots
@@ -86,9 +92,34 @@ impl Oracle {
             .unwrap()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let https = NativeHttps::new(tokio::runtime::Handle::current(), Arc::new(config)).unwrap();
-        NativeSender::new(Arc::new(https), Arc::new(|| Ok(1700043200)))
+        NativeHttps::new(tokio::runtime::Handle::current(), Arc::new(config)).unwrap()
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actual_https_sender_uses_native_system_clock_expiration() {
+    let mut peer = Oracle::start().await;
+    let sender = NativeSender::with_numeric_expiration(
+        Arc::new(peer.transport(true)),
+        ivy_hive::browser_push_native::system_expiration(),
+    );
+    let before = peer.call(json!({"op":"expiration"})).await;
+    let (status, millis) = send(&sender, &peer.profile, "/status/201", None).await;
+    let after = peer.call(json!({"op":"expiration"})).await;
+    let observed = peer.call(json!({"op":"stats"})).await;
+    save(
+        &json!({"systemClock":true,"before":before,"after":after,"native":observed,"status":status,"millis":millis}),
+    );
+    assert_eq!(status, 201);
+    let requests = observed["requests"].as_array().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["signatureValid"], true);
+    assert_eq!(requests[0]["plaintext"], "notification");
+    let expiration = requests[0]["claims"]["exp"].as_i64().unwrap();
+    assert!(expiration >= before["expiration"].as_i64().unwrap());
+    assert!(expiration <= after["expiration"].as_i64().unwrap());
+    drop(sender);
+    peer.close().await;
 }
 fn options(profile: &Value) -> IvyJson {
     IvyJson::from_serde(&json!({"TTL":3600,"timeout":10000,"vapidDetails":profile["details"]}))

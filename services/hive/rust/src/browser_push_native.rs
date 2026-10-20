@@ -22,6 +22,7 @@ use ivy_contracts::{
     json::stringify,
     whatwg_url::{parse_url, url_components},
 };
+use ivy_sdk::clock::{Clock, SystemClock, date_add_local_seconds};
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 pub const SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
@@ -176,6 +177,24 @@ pub fn request(
     expiration: &dyn Fn() -> IvyResult<u64>,
     entropy: &dyn Entropy,
 ) -> IvyResult<Request> {
+    request_with_numeric_expiration(
+        subscription,
+        payload,
+        details,
+        &|| expiration().map(|n| n as f64),
+        entropy,
+    )
+}
+
+/// The original default Date helper may produce a negative timestamp or NaN;
+/// JSON serialization preserves these as a number or null, respectively.
+pub fn request_with_numeric_expiration(
+    subscription: &IvyJson,
+    payload: &str,
+    details: &IvyJson,
+    expiration: &dyn Fn() -> IvyResult<f64>,
+    entropy: &dyn Entropy,
+) -> IvyResult<Request> {
     let endpoint = String::from_utf16_lossy(&text(subscription, "endpoint")?.0);
     if endpoint.is_empty() {
         return Err(IvyError::internal());
@@ -198,31 +217,25 @@ pub fn request(
         headers.push(("Content-Encoding".into(), "aes128gcm".into()));
     }
     let subject = text(details, "subject")?;
-    if !matches!(parse_url(subject)?.protocol.as_str(), "https:" | "mailto:") {
+    let subject_url = parse_url(subject)?;
+    if !matches!(subject_url.protocol.as_str(), "https:" | "mailto:") {
         return Err(IvyError::internal());
+    }
+    if subject_url.hostname == "localhost" {
+        eprintln!(
+            "Vapid subject points to a localhost web URI, which is unsupported by Apple's push notification server and will result in a BadJwtToken error when sending notifications."
+        );
     }
     let public = String::from_utf16_lossy(&text(details, "publicKey")?.0);
     let private = String::from_utf16_lossy(&text(details, "privateKey")?.0);
     vapid_key(&public, 65)?;
     let private = vapid_key(&private, 32)?;
     let expiration = expiration()?;
-    // web-push signs the private scalar independently of the advertised public key.
-    let private = checked(agreement::PrivateKey::from_private_key(
-        &agreement::ECDH_P256,
-        &private,
-    ))?;
-    let own_public = checked(private.compute_public_key())?;
-    let own_private: EcPrivateKeyBin<'_> = checked(private.as_be_bytes())?;
-    let signer = checked(EcdsaKeyPair::from_private_key_and_public_key(
-        &ECDSA_P256_SHA256_FIXED_SIGNING,
-        own_private.as_ref(),
-        own_public.as_ref(),
-    ))?;
     let url = url_components(&endpoint.clone().into())?;
     let claims = stringify(
         &IvyJson::object([
             ("aud", url.origin.into()),
-            ("exp", IvyJson::Number(expiration as f64)),
+            ("exp", IvyJson::Number(expiration)),
             ("sub", IvyJson::String(subject.clone())),
         ]),
         usize::MAX,
@@ -232,12 +245,12 @@ pub fn request(
         URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"ES256"}"#),
         URL_SAFE_NO_PAD.encode(claims)
     );
-    let signature = checked(signer.sign(&SystemRandom::new(), token.as_bytes()))?;
+    let signature = vapid_signature(&private, token.as_bytes())?;
     headers.push((
         "Authorization".into(),
         format!(
             "vapid t={token}.{}, k={public}",
-            URL_SAFE_NO_PAD.encode(signature.as_ref())
+            URL_SAFE_NO_PAD.encode(signature)
         ),
     ));
     headers.push(("Urgency".into(), "normal".into()));
@@ -246,6 +259,57 @@ pub fn request(
         headers,
         body,
     })
+}
+
+fn vapid_signature(private: &[u8], token: &[u8]) -> IvyResult<Vec<u8>> {
+    // OpenSSL's original SEC1 import/sign path accepts every 32-byte scalar.
+    // Keep the existing AWS-LC path for valid keys, and use the vetted raw ECDSA
+    // primitive only for the persisted values its key importer rejects.
+    const ORDER: [u8; 32] = [
+        0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xbc,
+        0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
+    ];
+    if private.iter().all(|b| *b == 0) || private >= ORDER.as_slice() {
+        use p256::{
+            FieldBytes, NistP256, Scalar,
+            elliptic_curve::{bigint::U256, ff::PrimeField, ops::Reduce},
+        };
+        let raw: [u8; 32] = checked(private.try_into())?;
+        let secret = <Scalar as Reduce<U256>>::reduce_bytes(&raw.into());
+        let hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token);
+        let mut prehash = FieldBytes::default();
+        prehash.copy_from_slice(hash.as_ref());
+        loop {
+            // The native P-256 generator supplies a fresh uniform nonzero scalar.
+            // Never derive k from the persisted malformed key or reuse ECE entropy.
+            let nonce = checked(agreement::PrivateKey::generate(&agreement::ECDH_P256))?;
+            let encoded: EcPrivateKeyBin<'_> = checked(nonce.as_be_bytes())?;
+            let raw: [u8; 32] = checked(encoded.as_ref().try_into())?;
+            let scalar = Option::<Scalar>::from(Scalar::from_repr(raw.into()))
+                .ok_or_else(IvyError::internal)?;
+            if let Ok((signature, _)) =
+                ecdsa::hazmat::sign_prehashed::<NistP256, Scalar>(&secret, scalar, &prehash)
+            {
+                return Ok(signature.to_bytes().to_vec());
+            }
+            // ECDSA requires another fresh nonce when r or s is zero.
+        }
+    }
+    // The signing scalar is independent of the advertised VAPID public key.
+    let private = checked(agreement::PrivateKey::from_private_key(
+        &agreement::ECDH_P256,
+        private,
+    ))?;
+    let public = checked(private.compute_public_key())?;
+    let encoded: EcPrivateKeyBin<'_> = checked(private.as_be_bytes())?;
+    let signer = checked(EcdsaKeyPair::from_private_key_and_public_key(
+        &ECDSA_P256_SHA256_FIXED_SIGNING,
+        encoded.as_ref(),
+        public.as_ref(),
+    ))?;
+    Ok(checked(signer.sign(&SystemRandom::new(), token))?
+        .as_ref()
+        .to_vec())
 }
 
 pub type PostFuture = Pin<Box<dyn Future<Output = IvyResult<u16>> + Send>>;
@@ -259,13 +323,25 @@ pub trait Https: Send + Sync {
 /// Expiration deliberately has no UTC-arithmetic fallback: web-push adds twelve
 /// hours with Date.setSeconds in the host's local timezone, including DST folds.
 pub type Expiration = Arc<dyn Fn() -> IvyResult<u64> + Send + Sync>;
+pub type NumericExpiration = Arc<dyn Fn() -> IvyResult<f64> + Send + Sync>;
+pub fn local_expiration(clock: Arc<dyn Clock>) -> NumericExpiration {
+    Arc::new(move || {
+        Ok((date_add_local_seconds(clock.utc_millis() as f64, 43_200.0) / 1000.0).floor())
+    })
+}
+pub fn system_expiration() -> NumericExpiration {
+    local_expiration(Arc::new(SystemClock))
+}
 pub struct NativeSender {
     https: Arc<dyn Https>,
-    expiration: Expiration,
+    expiration: NumericExpiration,
     entropy: Arc<dyn Entropy>,
 }
 impl NativeSender {
     pub fn new(https: Arc<dyn Https>, expiration: Expiration) -> Self {
+        Self::with_numeric_expiration(https, Arc::new(move || expiration().map(|n| n as f64)))
+    }
+    pub fn with_numeric_expiration(https: Arc<dyn Https>, expiration: NumericExpiration) -> Self {
         Self {
             https,
             expiration,
@@ -281,7 +357,7 @@ impl Sender for NativeSender {
             {
                 return Err(IvyError::internal());
             }
-            request(
+            request_with_numeric_expiration(
                 &subscription,
                 &payload,
                 options.get("vapidDetails").ok_or_else(IvyError::internal)?,

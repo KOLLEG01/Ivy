@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 const fixture=JSON.parse(readFileSync(new URL('./hive-push-tls.json',import.meta.url)));
 const require=createRequire(process.env.IVY_HIVE_TEST_WEB_PUSH);
 const webPush=require(process.env.IVY_HIVE_TEST_WEB_PUSH);
+const vapid=require('./vapid-helper.js');
 const ece=require('http_ece');
 const scalar=n=>{const bytes=Buffer.alloc(32);bytes[31]=n;return bytes;};
 const receiver=crypto.createECDH('prime256v1');receiver.setPrivateKey(scalar(1));
@@ -25,7 +26,7 @@ const server=https.createServer({key:fixture.key,cert:fixture.cert,minVersion:'T
   const publicKey=crypto.createPublicKey({format:'jwk',key:{kty:'EC',crv:'P-256',x:advertised.subarray(1,33).toString('base64url'),y:advertised.subarray(33).toString('base64url')}});
   const signatureValid=!!token&&crypto.verify('sha256',Buffer.from(token.slice(0,2).join('.')),{key:publicKey,dsaEncoding:'ieee-p1363'},Buffer.from(token[2],'base64url'));
   const plaintext=bytes.length?ece.decrypt(bytes,{version:'aes128gcm',privateKey:receiver,authSecret:Buffer.alloc(16,7).toString('base64url')}).toString('utf8'):'';
-  requests.push({connection:sockets.get(req.socket),method:req.method,path:req.url,rawHeaders:req.rawHeaders,body:bytes.toString('base64'),tls:req.socket.getProtocol(),signatureValid,plaintext});
+  requests.push({connection:sockets.get(req.socket),method:req.method,path:req.url,rawHeaders:req.rawHeaders,body:bytes.toString('base64'),tls:req.socket.getProtocol(),signatureValid,plaintext,claims:token?JSON.parse(Buffer.from(token[1],'base64url')):null});
   res.on('finish',()=>completions.push({path:req.url}));
   const path=req.url.split('?')[0];
   if(path==='/drop'){req.socket.destroy();return;}
@@ -66,7 +67,8 @@ for await(const line of createInterface({input:process.stdin,crlfDelay:Infinity}
   try{const result=await webPush.sendNotification({endpoint:(input.host==='ip'?`https://127.0.0.1:${port}`:base)+input.path,keys:{p256dh:receiver.getPublicKey().toString('base64url'),auth:Buffer.alloc(16,7).toString('base64url')}},input.payload??'notification',{TTL:3600,timeout:10000,vapidDetails:details,agent:input.trusted===false?untrusted:agent});status=result.statusCode;}
   catch(error){status=error.statusCode??0;}
   console.log(JSON.stringify({status,millis:performance.now()-start,requests:requests.slice(before)}));
- }else if(input.op==='stats')console.log(JSON.stringify({requests,completions,sockets:sockets.size}));
+ }else if(input.op==='expiration')console.log(JSON.stringify({expiration:vapid.getFutureExpirationTimestamp(12*60*60)}));
+ else if(input.op==='stats')console.log(JSON.stringify({requests,completions,sockets:sockets.size}));
  else if(input.op==='close'){
   for(const timer of timers)clearTimeout(timer);timers.clear();
   agent.destroy();untrusted.destroy();for(const socket of sockets.keys())socket.destroy();

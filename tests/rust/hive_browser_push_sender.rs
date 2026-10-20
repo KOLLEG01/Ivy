@@ -14,11 +14,9 @@ mod authentication;
 mod http;
 #[path = "hive_oauth.rs"]
 mod oauth;
-#[path = "hive_push_crypto.rs"]
-mod native_crypto;
-
-#[path = "hive_push_https.rs"]
-mod native_https;
+#[path = "hive_push_original.rs"]
+mod original;
+use original::original_output;
 
 type Posted = (IvyJson, oneshot::Sender<IvyResult<IvyJson>>);
 static CORPUS: Mutex<()> = Mutex::new(());
@@ -328,33 +326,6 @@ async fn native_sender(input: &Value) -> Value {
 }
 fn original_sender(input: &Value) -> Value {
     original_output("tests/fixtures/hive-browser-push-sender-oracle.mjs", input)
-}
-fn original_output(fixture: &str, input: &Value) -> Value {
-    let mut child =
-        Command::new(std::env::var_os("IVY_TEST_NODE").unwrap_or_else(|| "node".into()))
-            .arg(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../..")
-                    .join(fixture),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.to_string().as_bytes())
-        .unwrap();
-    let result = child.wait_with_output().unwrap();
-    assert!(
-        result.status.success(),
-        "Original sender: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    serde_json::from_slice(&result.stdout).unwrap()
 }
 async fn compare_sender(name: &str, input: Value) -> Value {
     let native = tokio::task::LocalSet::new()

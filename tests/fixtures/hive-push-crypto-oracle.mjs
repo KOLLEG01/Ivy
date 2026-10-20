@@ -19,12 +19,34 @@ const curve=privateKey=>{const key=crypto.createECDH('prime256v1');key.setPrivat
 const scalar=n=>{const key=Buffer.alloc(32);key[31]=n;return key.toString('base64url');};
 const pair=n=>{const key=curve(scalar(n));return{publicKey:key.getPublicKey().toString('base64url'),privateKey:scalar(n)};};
 const receiver=pair(1),sender=pair(2),signer=pair(3);
+const order=BigInt('0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551');
+const integer=bytes=>BigInt('0x'+bytes.toString('hex'));
+const encoded=n=>n.toString(16).padStart(64,'0');
+function verifySignature(token,privateKey){
+ const parts=token.split('.'),message=Buffer.from(parts.slice(0,2).join('.')),signature=Buffer.from(parts[2],'base64url');
+ if(signature.length!==64)return false;
+ const secret=integer(Buffer.from(privateKey,'base64url'))%order;
+ if(secret!==0n){
+  const point=curve(Buffer.from(encoded(secret),'hex').toString('base64url')).getPublicKey();
+  const key=crypto.createPublicKey({key:{kty:'EC',crv:'P-256',x:point.subarray(1,33).toString('base64url'),y:point.subarray(33).toString('base64url')},format:'jwk'});
+  return crypto.verify('sha256',message,{key,dsaEncoding:'ieee-p1363'},signature);
+ }
+ // The original accepts d=0, for which a finite public key cannot be encoded.
+ // Independently check r=x((hash/s)G) mod n using Node's point multiplication.
+ const r=integer(signature.subarray(0,32)),s=integer(signature.subarray(32));
+ if(r<=0n||r>=order||s<=0n||s>=order)return false;
+ let base=s,power=order-2n,inverse=1n;
+ while(power){if(power&1n)inverse=inverse*base%order;base=base*base%order;power>>=1n;}
+ const nonce=integer(crypto.createHash('sha256').update(message).digest())*inverse%order;
+ if(nonce===0n)return false;
+ const point=curve(Buffer.from(encoded(nonce),'hex').toString('base64url')).getPublicKey();
+ return integer(point.subarray(1,33))%order===r;
+}
 function normalize(request, signingKey=signer){
  // HTTP serializes numeric header values; compare the emitted field values.
  const headers=Object.fromEntries(Object.entries(request.headers).map(([key,value])=>[key,String(value)])),auth=headers.Authorization;
  const token=auth.slice('vapid t='.length).split(', k=')[0],parts=token.split('.');
- const key=crypto.createPublicKey({key:{kty:'EC',crv:'P-256',x:curve(signingKey.privateKey).getPublicKey().subarray(1,33).toString('base64url'),y:curve(signingKey.privateKey).getPublicKey().subarray(33).toString('base64url')},format:'jwk'});
- const signatureValid=crypto.verify('sha256',Buffer.from(parts.slice(0,2).join('.')),{key,dsaEncoding:'ieee-p1363'},Buffer.from(parts[2],'base64url'));
+ const signatureValid=verifySignature(token,signingKey.privateKey);
  headers.Authorization=`vapid t=${parts.slice(0,2).join('.')}.<verified-signature>, k=${auth.split(', k=')[1]}`;
  return{endpoint:request.endpoint,headers,body:request.body?.toString('base64')??'',signatureValid};
 }
@@ -35,7 +57,7 @@ if(input.op==='validate'){
  console.log(JSON.stringify({generated,points}));
 }else{
  const create=crypto.createECDH,random=crypto.randomBytes,DateClass=globalThis.Date;
- const now=input.now??1700000000000;
+ let now=input.now??1700000000000;
  process.env.TZ=input.timezone??'UTC';
  let clockReads=0;
  globalThis.Date=class extends DateClass{constructor(...args){super(...(args.length?args:[now]));if(!args.length)++clockReads;}static now(){return now;}};
@@ -46,15 +68,22 @@ if(input.op==='validate'){
  crypto.randomBytes=function(size,...rest){if(size===16)return Buffer.from(salt);return random(size,...rest);};
  const subscription={endpoint:'https://updates.push.services.mozilla.com/wpush/v2/test?q=%2F',keys:{p256dh:receiver.publicKey,auth:Buffer.alloc(16,7).toString('base64url')}};
  const requests=input.cases.map(spec=>{
+  now=spec.now??input.now??1700000000000;
   const sub={...subscription,...spec.subscription,keys:{...subscription.keys,...spec.subscription?.keys}};
   const details={...signer,subject:'mailto:push@example.test',...spec.details};
   clockReads=0;
-  try{const request=webPush.generateRequestDetails(sub,spec.payload,{vapidDetails:details,TTL:3600,timeout:10000});return{ok:true,...normalize(request),clockReads};}catch{return{ok:false,clockReads};}
+  const warnings=[],warn=console.warn;
+  if(input.op==='warnings')console.warn=message=>warnings.push(message);
+  let result;
+  try{const request=webPush.generateRequestDetails(sub,spec.payload,{vapidDetails:details,TTL:3600,timeout:10000});result={ok:true,...normalize(request,details),clockReads};}catch{result={ok:false,clockReads};}
+  finally{console.warn=warn;}
+  if(input.op==='warnings')result.warnings=warnings;
+  return result;
  });
  crypto.createECDH=create;crypto.randomBytes=random;globalThis.Date=DateClass;
  const native=(input.native??[]).map(item=>{
   const request={...item,body:Buffer.from(item.body,'base64')};
-  try{const plain=request.body.length?ece.decrypt(request.body,{version:'aes128gcm',privateKey:curve(receiver.privateKey),authSecret:subscription.keys.auth}).toString('base64'):'';return{ok:true,...normalize(request),plaintext:plain};}catch{return{ok:false};}
+  try{const plain=request.body.length?ece.decrypt(request.body,{version:'aes128gcm',privateKey:curve(receiver.privateKey),authSecret:subscription.keys.auth}).toString('base64'):'';return{ok:true,...normalize(request,item.signingKey??signer),plaintext:plain};}catch{return{ok:false};}
  });
  console.log(JSON.stringify({receiver,sender,signer,subscription,expiration:expectedExpiration,requests,native}));
 }
