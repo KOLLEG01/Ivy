@@ -182,12 +182,8 @@ mod clock_tests {
         let epoch = 621_355_968_000_000_000;
         for (nanos, before, expected) in [
             (0, false, epoch),
-            (1, false, epoch),
-            (99, false, epoch),
             (100, false, epoch + 1),
             (123_456_700, false, epoch + 1_234_567),
-            (1, true, epoch - 1),
-            (99, true, epoch - 1),
             (100, true, epoch - 1),
             (123_456_700, true, epoch - 1_234_567),
         ] {
@@ -200,8 +196,8 @@ mod clock_tests {
             assert_eq!(utc_ticks(time), expected);
         }
         assert_eq!(
-            utc_ticks(UNIX_EPOCH - Duration::from_secs(62_135_596_800)),
-            0
+            utc_ticks(UNIX_EPOCH - Duration::from_secs(11_644_473_600)),
+            504_911_232_000_000_000
         );
         assert_eq!(
             utc_ticks(

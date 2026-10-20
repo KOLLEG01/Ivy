@@ -361,7 +361,7 @@ fn retained_keepalive_errors_ticks_and_late_completions_match_original_owner() {
             assert_eq!(
                 parse(&view, 65536).unwrap(),
                 parse(
-                    expected.get("observation").unwrap().as_str().unwrap(),
+                    &expected.get("observation").unwrap().as_str().unwrap(),
                     65536
                 )
                 .unwrap(),
