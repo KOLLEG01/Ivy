@@ -170,8 +170,8 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
             let answer = pending.await.unwrap();
             let answered = value(answer.outcome());
             assert_eq!(
-                answered.get("state").unwrap().as_str().as_deref(),
-                Some("local_ended")
+                answered.get("state").unwrap().as_str().unwrap(),
+                "local_ended"
             );
             assert_eq!(
                 answered.get("error").unwrap(),

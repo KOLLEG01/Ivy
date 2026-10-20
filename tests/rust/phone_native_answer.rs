@@ -1,6 +1,6 @@
 use super::incoming::{normalize, outcome, receive};
 use super::*;
-use rsipstack::sip::{Method, Request, prelude::*};
+use rsipstack::sip::{Method, prelude::*};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_answer_dto_global_lookup_and_outgoing_attempt_precedence_match_original() {
