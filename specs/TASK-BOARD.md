@@ -42,6 +42,8 @@ UI requirements: [UI](UI.md).
   user questions available outside the loaded page. It neither displays nor writes unread state.
   Sending reads the current ticket revision without loading its history. A successful operation
   receipt confirms its comment even outside the loaded page and releases the composer.
+  Confirmed writes also release publication gates from older UI snapshots, so a multi-file
+  selection continues without waiting for the view to refresh.
   Active retained headers reuse bounded in-memory summaries until normal storage backfill.
   Storage backfill also covers archived tickets without changing workflow state and retries
   active or conflicting tickets on later passes. Before readiness enables the new policy,

@@ -244,11 +244,19 @@ const editable = computed(
     !task.value.value?.archived &&
     !archive.busy.value && !archive.pending.value,
 );
-const writable = computed(() => editable.value && props.available && !task.error.value && !action.locked.value && !task.value.value?.value.publication);
+const publicationPending = computed(() => {
+  const current = task.value.value;
+  const confirmed = action.saved.value?.phase === 'succeeded' ? action.saved.value.outcome?.task : null;
+  // A successful write supersedes an older read that still shows its publication gate.
+  // In particular, the next file in a selection must not wait for a background refresh.
+  return !!current?.value.publication && !(confirmed?.objectId === props.taskId &&
+    confirmed.revision >= current.pin.revision);
+});
+const writable = computed(() => editable.value && props.available && !task.error.value && !action.locked.value && !publicationPending.value);
 const canDelete = computed(() =>
   props.available && props.workspace.role === "user" &&
   !!task.value.value && !task.value.value.value.claim &&
-  !task.value.value.value.publication && !action.locked.value &&
+  !publicationPending.value && !action.locked.value &&
   !archive.busy.value && !archive.pending.value,
 );
 // The agent task that carries this ticket's native conversation, when one exists.
@@ -1299,7 +1307,7 @@ const showArrived = () => {
                     <Button size="sm" variant="outline" :disabled="!available || !editable || !optimistic.canRetry(optimistic.pending.value.request.commentId)" @click="optimistic.retry(optimistic.pending.value.request.commentId)">{{ tr('Originalnachricht prüfen', 'Check original message') }}</Button>
                   </AlertDescription>
                 </Alert>
-                <Alert v-if="task.value.value.value.publication && !optimistic.pending.value && !optimistic.isComment.value" role="status">
+                <Alert v-if="publicationPending && !optimistic.pending.value && !optimistic.isComment.value" role="status">
                   <AlertTitle>{{ tr('Änderung wird gespeichert', 'Saving task update') }}</AlertTitle>
                   <AlertDescription>{{ tr('Ein vorheriger Vorgang wird noch abgeschlossen. Dein Text bleibt erhalten.', 'A previous action is still being completed. Your draft is retained.') }}</AlertDescription>
                 </Alert>

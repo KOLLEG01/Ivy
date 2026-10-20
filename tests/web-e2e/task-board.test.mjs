@@ -67,7 +67,7 @@ for (const width of [1440, 390]) test(`task drafts and comments keep keyboard fo
   assert.deepEqual(f.pageErrors, []);
 });
 
-for (const width of [1440, 390]) test(`comments accept multiple files and further selections without interrupting typing at ${width}px`, { timeout: 90000 }, async t => {
+for (const width of [1440, 390]) test(`comments accept multiple images and further files through a stale upload snapshot at ${width}px`, { timeout: 90000 }, async t => {
   const f = await taskBoardFixture(t, { viewport: { width, height: 1000 } });
   const created = await f.invoke({ action: 'create', fields: fields('Multiple comment attachments') });
   const id = created.task.objectId;
@@ -76,17 +76,36 @@ for (const width of [1440, 390]) test(`comments accept multiple files and furthe
   await editor.fill('Comment evidence');
   const picker = f.page.locator('input[type=file]');
   await expect(picker).toHaveAttribute('multiple', '');
-  const files = ['first.txt', 'second.txt', 'third.txt'].map(name => ({
-    name, mimeType: 'text/plain', buffer: Buffer.from('Exact evidence in ' + name),
-  }));
-  let releaseUpload, uploadStarted;
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4R8AAAAASUVORK5CYII=', 'base64');
+  const files = [
+    ...['first.png', 'second.png'].map(name => ({ name, mimeType: 'image/png', buffer: png })),
+    { name: 'third.txt', mimeType: 'text/plain', buffer: Buffer.from('Exact evidence in third.txt') },
+  ];
+  let releaseUpload, uploadStarted, stalePublication;
+  t.after(() => releaseUpload?.());
   const started = new Promise(resolve => { uploadStarted = resolve; });
   await f.page.route('**/api/v1/rpc', async route => {
     const body = route.request().postDataJSON();
+    const requests = [].concat(body);
+    const readsTask = request => request?.method === 'tools.call' && request.params.qualifiedName === 'task-board.read' &&
+      request.params.arguments.task === id;
+    const publication = stalePublication;
+    if (requests.some(readsTask) && publication) {
+      const response = await route.fetch(), value = await response.json();
+      // A read started during publication may arrive after the upload's success receipt.
+      for (const reply of [].concat(value)) if (readsTask(requests.find(request => request.id === reply.id))) {
+        reply.result.object.revision = publication.revision;
+        reply.result.task.publication = publication.pin;
+      }
+      return route.fulfill({ response, json: value });
+    }
     if (body.method === 'tools.call' && body.params.qualifiedName === 'task-board.uploadAttachment' && !releaseUpload) {
+      const response = await route.fetch(), value = await response.json();
+      stalePublication = { revision: value.result.task.revision - 1, pin: { objectId: randomUUID(), revision: 1 } };
       const held = new Promise(resolve => { releaseUpload = resolve; });
       uploadStarted();
       await held;
+      return route.fulfill({ response });
     }
     await route.continue();
   });
@@ -95,12 +114,24 @@ for (const width of [1440, 390]) test(`comments accept multiple files and furthe
   await expect(editor).toBeEditable();
   await expect(f.page.getByRole('button', { name: 'Add to message', exact: true })).toBeDisabled();
   await editor.pressSequentially(' while files upload');
+  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(f.page.getByText('A previous action is still being completed. Your draft is retained.', { exact: true })).toBeVisible();
   releaseUpload();
-  await expect(editor.locator('a')).toHaveCount(2);
+  await expect(editor.locator('img.ivy-embedded-image')).toHaveCount(2);
   await expect(f.page.getByRole('button', { name: 'Add to message', exact: true })).toBeEnabled();
+  await expect(f.page.getByText('This task cannot be changed right now.', { exact: true })).toHaveCount(0);
+  // A genuinely newer publication must still block mutations.
+  stalePublication = { ...stalePublication,
+    revision: (await f.client.request('objects.stat', { objectId: id })).currentRevision + 1 };
+  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(f.page.getByText('A previous action is still being completed. Your draft is retained.', { exact: true })).toBeVisible();
+  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeDisabled();
+  stalePublication = null;
   await f.page.unroute('**/api/v1/rpc');
+  await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
+  await expect(f.page.getByRole('button', { name: 'Add comment', exact: true })).toBeEnabled();
   await picker.setInputFiles(files.slice(2));
-  await expect(editor.locator('a')).toHaveCount(3);
+  await expect(editor.locator('a')).toHaveCount(1);
   await expect(f.page.getByRole('button', { name: 'Add to message', exact: true })).toBeEnabled();
   await editor.press('End');
   await editor.pressSequentially(' after all files');
