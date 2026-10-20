@@ -52,6 +52,8 @@ mod bootstrap_restart_cases;
 mod package_updater_cases;
 #[path = "host-bootstrap-maintenance-cases.rs"]
 mod bootstrap_maintenance_cases;
+#[path = "host-backup-files-cases.rs"]
+mod backup_files_cases;
 
 #[test]
 fn containment_normalizes_parents_and_rejects_sibling_prefixes() {

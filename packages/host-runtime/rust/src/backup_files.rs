@@ -1,6 +1,12 @@
-//! Private durable-maintenance directories, shared by bootstrap and backups.
+//! Private durable-maintenance files and directories, shared by bootstrap and backups.
 use crate::{IvyError, IvyResult, paths};
 use std::path::{Path, PathBuf};
+
+mod files;
+pub use files::{
+    BackupExclusion, BackupFile, copy_verified, inventory_files, relative_file,
+    relative_file_with_context, sync_directories,
+};
 
 pub async fn exists(path: &Path) -> IvyResult<bool> {
     match tokio::fs::symlink_metadata(path).await {
