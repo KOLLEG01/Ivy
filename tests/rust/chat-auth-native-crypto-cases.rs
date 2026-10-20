@@ -190,7 +190,7 @@ fn wire(value: &Json) -> Vec<u8> {
     bytes
 }
 
-fn pending(value: &Json, category: &str, index: usize) -> Vec<u8> {
+fn pending(value: &Json, category: &'static str, index: usize) -> Vec<u8> {
     wire(&field(value, category).unwrap().as_array().unwrap()[index])
 }
 
