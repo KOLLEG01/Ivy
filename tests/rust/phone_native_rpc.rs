@@ -5,6 +5,8 @@ use ivy_phone_bridge::{
 use std::sync::Arc;
 #[path = "phone_audio_sender.rs"]
 mod audio_sender;
+#[path = "phone_call_audio.rs"]
+mod call_audio;
 #[path = "phone_media_codec.rs"]
 mod media_codec;
 #[path = "phone_media_format.rs"]

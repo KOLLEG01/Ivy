@@ -1,4 +1,5 @@
 mod audio_frame;
+mod call_audio;
 mod codec_owner;
 mod codecs;
 mod evs;
@@ -8,6 +9,7 @@ mod g711;
 mod negotiation;
 mod packet;
 mod permit;
+mod progress_audio;
 mod queue;
 mod receive_analysis;
 mod receive_owner;
@@ -26,7 +28,14 @@ mod startup;
 mod transport;
 
 pub use audio_frame::RtpAudioFrames;
+pub use call_audio::{
+    AudioAttachmentStatus, AudioDesktopIdentity, AudioMutePolicy, AudioOperation, AudioRoutePermit,
+    AudioSettings, CallAudioError, CallAudioFactory, CallAudioPort, CallAudioRoute,
+};
 pub use permit::AudioPermit;
+pub use progress_audio::{
+    CallWaitingAudio, ScreeningAudio, WavError, load_announcement, parse_announcement,
+};
 pub use queue::AudioQueue;
 pub use receive_owner::{ReceiveError, SipReceiveEvents, SipReceiveObservation, SipRtpReceiver};
 pub use resample::PcmResampler;
