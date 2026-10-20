@@ -1,6 +1,7 @@
 //! Native adapter state. All persistence and event ordering happen on one
 //! owner; asynchronous provider calls leave as effects and return by call ID.
 use super::{
+    config,
     error::{AdapterError, Result},
     models::runtime_model_list,
     policy,
@@ -37,7 +38,8 @@ pub struct Environment {
     pub mcp_servers: J,
     pub startup_statuses: Vec<J>,
     pub config_overrides: J,
-    pub provider_loop_config: J,
+    /// Explicit admitted adapter config file; never discover another home.
+    pub config_path: std::path::PathBuf,
     pub prepare_worktree: Worktree,
     pub read_base64: FileReader,
     pub subagent_completed: Option<bool>,
@@ -143,10 +145,11 @@ impl Adapter {
         store: SessionStore,
         projects: ProjectStore,
         limits: RateLimitStore,
-        env: Environment,
+        mut env: Environment,
         clock: AdapterClock,
         ids: IdSource,
     ) -> Self {
+        config::load(&mut env);
         Self {
             store,
             projects,
@@ -568,7 +571,7 @@ impl Adapter {
                         .collect(),
                 ),
             )]),
-            "config/read" => self.config_read(),
+            "config/read" => self.config_read()?,
             "fs/readFile" => J::object([(
                 "dataBase64",
                 (self.env.read_base64)(&string(&str_or(
@@ -791,6 +794,8 @@ impl Adapter {
                 "Codex proxy models are disabled for this Claude adapter",
             ));
         }
+        let selection =
+            config::provider_loop_config(&self.env.environment, &self.env.config_overrides)?;
         let profile = policy::profile_from_params(p);
         let (approval, sandbox) = policy::profile_policy(&profile);
         let mut t = J::object([
@@ -849,7 +854,18 @@ impl Adapter {
                 policy::thread_source(field(p, "threadSource")),
             ),
             ("personality", policy::personality(field(p, "personality"))),
-            ("runtimeBackend", "claude".into()),
+            (
+                "runtimeBackend",
+                if is(
+                    field(field(&selection, "selection"), "runtimeType"),
+                    "codex-proxy",
+                ) {
+                    "codex"
+                } else {
+                    "claude"
+                }
+                .into(),
+            ),
             ("codexSessionId", J::Null),
         ]);
         for key in [
@@ -1110,7 +1126,7 @@ impl Adapter {
             ("data", J::Array(data)),
         ]))
     }
-    fn config_read(&self) -> J {
+    fn config_read(&self) -> Result<J> {
         let mut config = self.env.config_overrides.clone();
         if config.as_object().is_none() {
             config = object()
@@ -1167,7 +1183,7 @@ impl Adapter {
         config.insert("profiles", object());
         config.insert(
             "provider_loop_config",
-            self.env.provider_loop_config.clone(),
+            config::provider_loop_config(&self.env.environment, &self.env.config_overrides)?,
         );
         let mut provider = object();
         for key in [
@@ -1211,7 +1227,7 @@ impl Adapter {
                 ),
             ])
         };
-        J::object([
+        Ok(J::object([
             ("config", config),
             (
                 "origins",
@@ -1221,7 +1237,7 @@ impl Adapter {
                 ]),
             ),
             ("layers", J::Null),
-        ])
+        ]))
     }
     pub fn permission_request(
         &mut self,

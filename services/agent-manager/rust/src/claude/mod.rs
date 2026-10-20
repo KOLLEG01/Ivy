@@ -4,6 +4,7 @@
 pub mod ask;
 pub mod bridge;
 mod commands;
+mod config;
 pub mod driver;
 pub mod error;
 pub mod images;

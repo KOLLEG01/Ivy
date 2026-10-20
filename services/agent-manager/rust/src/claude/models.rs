@@ -5,7 +5,7 @@ use super::{
 };
 use ivy_contracts::{IvyJson, JsString};
 
-fn json_value(value: &IvyJson) -> Option<IvyJson> {
+pub(super) fn json_value(value: &IvyJson) -> Option<IvyJson> {
     let Some(text) = value.as_js_string() else {
         return None;
     };

@@ -92,6 +92,26 @@ struct Driver {
     deferred: Vec<(u64, Result<J>)>,
     watchdogs: std::collections::BTreeSet<JsString>,
 }
+
+// The Node oracle assigns these explicit fixture values through process.env.
+// Its UTF-8 environment boundary replaces lone UTF-16 surrogates before the
+// server reads them. Saved JSON strings take no such environment round trip.
+fn environment_input(spec: &J) -> J {
+    J::object(
+        f(spec, "environment")
+            .as_object()
+            .unwrap_or(&[])
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    J::from(String::from_utf16_lossy(
+                        &ivy_contracts::json::js_string(value).0,
+                    )),
+                )
+            }),
+    )
+}
 impl Driver {
     fn effects(&mut self, effects: Vec<Effect>) {
         let mut queue = VecDeque::from(effects);
@@ -159,7 +179,7 @@ impl Driver {
         }
     }
 }
-fn native(home: &Path, spec: &J, projection: J) -> J {
+fn native(home: &Path, spec: &J) -> J {
     for file in f(spec, "files").as_array().unwrap_or(&[]) {
         let path = home.join(f(file, "path").as_str().unwrap());
         assert!(path.starts_with(home));
@@ -171,6 +191,13 @@ fn native(home: &Path, spec: &J, projection: J) -> J {
                 .unwrap(),
         )
         .unwrap()
+    }
+    if let Some(config) = spec.get("config") {
+        fs::write(
+            home.join("config.json"),
+            stringify(config, usize::MAX).unwrap(),
+        )
+        .unwrap();
     }
     let clock_state = Arc::new(Mutex::new(
         f(spec, "now").as_f64().unwrap_or(1700000000123.0),
@@ -208,7 +235,7 @@ fn native(home: &Path, spec: &J, projection: J) -> J {
     let mut process_environment = v(
         r#"{"CLAUDE_CODEX_DEFAULT_MODEL":"sonnet","CLAUDE_CODEX_DEFAULT_EFFORT":"medium","CLAUDE_CODEX_DISABLE_CODEX_PROXY":"1"}"#,
     );
-    for (key, value) in f(spec, "environment").as_object().unwrap_or(&[]) {
+    for (key, value) in environment_input(spec).as_object().unwrap_or(&[]) {
         process_environment.insert(key.clone(), value.clone());
     }
     let env = Environment {
@@ -225,7 +252,7 @@ fn native(home: &Path, spec: &J, projection: J) -> J {
         mcp_servers: J::Null,
         startup_statuses: vec![],
         config_overrides: J::object([] as [(&str, J); 0]),
-        provider_loop_config: projection,
+        config_path: home.join("config.json"),
         prepare_worktree: Arc::new(|_, cwd| Ok(cwd.clone())),
         read_base64: Arc::new(|path| {
             Ok(STANDARD
@@ -376,9 +403,127 @@ fn paired(label: &str, spec: J) {
     fs::create_dir(&old).unwrap();
     fs::create_dir(&new).unwrap();
     let expected = original(&old, &spec);
-    let actual = native(&new, &spec, f(&expected, "providerLoopConfig").clone());
+    assert_eq!(
+        environment_input(&spec),
+        f(&expected, "environment").clone(),
+        "actual Node environment admission: {label}"
+    );
+    let actual = native(&new, &spec);
     let expected = f(&expected, "records").clone();
     compare(label, normalize(&actual, &new), normalize(&expected, &old));
+    if spec.get("config").is_some()
+        || f(&spec, "files").as_array().is_some_and(|files| {
+            files
+                .iter()
+                .any(|file| f(file, "path") == &J::from("config.json"))
+        })
+    {
+        assert_eq!(
+            fs::read(new.join("config.json")).ok(),
+            fs::read(old.join("config.json")).ok(),
+            "persisted config bytes: {label}"
+        );
+    }
+}
+
+#[test]
+fn provider_loop_config_read_matches_original_without_injected_projection() {
+    let rows = parse(
+        include_str!("../../fixtures/agent-claude-config-cases.json"),
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 35);
+    let mut rows = rows.as_array().unwrap().to_vec();
+    rows.push(v(r#"{"config":{"overrides":{"provider_loop_provider":"unknown\ud800","provider_loop_agent_loop":"TOKEN=syntheticFixture123 \udfff"}}}"#));
+    rows.push(v(r#"{"config":{"overrides":{"providerLoopProvider":"API_KEY=syntheticFixture123 ghp_syntheticFixture123","providerLoopAgentLoop":"sk-ant-syntheticFixture123 -----BEGIN RSA PRIVATE KEY-----\ud800\nfixture-----END RSA PRIVATE KEY-----"}}}"#));
+    for (index, mut spec) in rows.into_iter().enumerate() {
+        spec.insert("ids", J::Array(vec![]));
+        spec.insert(
+            "steps",
+            v(r#"[{"action":"request","message":{"id":"config","method":"config/read"}}]"#),
+        );
+        paired(&format!("provider/loop config {index}"), spec);
+    }
+}
+
+#[test]
+fn persisted_config_defaults_repair_and_ignored_invalid_bytes_match_original() {
+    let mut rows = vec![
+        v(
+            r#"{"config":{"model":"custom-model\ud800","model_reasoning_effort":"minimal","overrides":{"providerLoopProvider":"codex","approval_policy":"never","tools":{"fixture":true},"unmanaged":{"0":"zero","2":"two","quote":"\"\\"}}}}"#,
+        ),
+        v(
+            r#"{"config":{"model":"gpt-fixture","model_reasoning_effort":"high","overrides":{"provider_loop_provider":"codex","provider_loop_agent_loop":"native-claude-code-sdk","unmanaged":[{},[],"\udfff"]}}}"#,
+        ),
+        v(
+            r#"{"config":{"model":"   ","model_reasoning_effort":"invalid","overrides":{"sandbox_mode":null,"service_tier":false}}}"#,
+        ),
+        v(
+            r#"{"environment":{"CLAUDE_CODEX_DEFAULT_MODEL":"custom-default","CLAUDE_CODEX_DEFAULT_EFFORT":"xhigh"},"config":{"model":"codex-disabled","overrides":[]}}"#,
+        ),
+        v(
+            r#"{"environment":{"CLAUDE_CODEX_DEFAULT_EFFORT":"invalid"},"config":{"model":7,"model_reasoning_effort":null,"overrides":false}}"#,
+        ),
+        v(
+            r#"{"environment":{"CLAUDE_CODEX_DEFAULT_MODEL":"","CLAUDE_CODEX_MODELS":"[{\"id\":\"fixture-default\",\"isDefault\":true},{\"model\":\"other\"}]"},"config":{"model":"gpt-disabled","model_reasoning_effort":"max","overrides":{"providerLoopAgentLoop":"native-claude-code-sdk"}}}"#,
+        ),
+        v(
+            r#"{"environment":{"CLAUDE_CODEX_DEFAULT_MODEL":"","CLAUDE_CODEX_MODELS":" alpha ,beta "},"config":{"model":"gpt-disabled"}}"#,
+        ),
+        v(
+            r#"{"environment":{"CLAUDE_CODEX_DEFAULT_MODEL":"","CLAUDE_CODEX_MODELS":"[]"},"config":{"model":"gpt-disabled"}}"#,
+        ),
+        v(
+            r#"{"config":{"model":"","model_reasoning_effort":"low","overrides":{"providerLoopProvider":7,"provider_loop_config.providerId":"codex"}}}"#,
+        ),
+    ];
+    rows.push(J::object([(
+        "files",
+        J::Array(vec![J::object([
+            ("path", "config.json".into()),
+            ("base64", STANDARD.encode(b"{invalid saved config").into()),
+        ])]),
+    )]));
+    for (index, mut spec) in rows.into_iter().enumerate() {
+        spec.insert("ids", J::Array(vec![]));
+        spec.insert("steps",v(r#"[{"action":"request","message":{"id":1,"method":"config/read"}},{"action":"request","message":{"id":2,"method":"collaborationMode/list"}}]"#));
+        paired(&format!("saved config {index}"), spec);
+    }
+}
+
+#[test]
+fn managed_provider_selection_routes_sdk_and_blocks_codex_before_dispatch() {
+    for (index, environment) in [
+        v(r#"{"CLAUDE_CODEX_PROVIDER":"codex"}"#),
+        v(r#"{"CLAUDE_CODEX_RUNTIME_TYPE":"codex-exec"}"#),
+        v(r#"{"CLAUDE_CODEX_PROVIDER":"claude-code","CLAUDE_CODEX_RUNTIME_TYPE":"sdk"}"#),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut steps = v(r#"[
+          {"action":"request","message":{"id":1,"method":"config/read"}},
+          {"action":"request","message":{"id":2,"method":"thread/start","params":{"cwd":"C:/fixture"}}},
+          {"action":"request","message":{"id":3,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"fixture"}]}}}
+        ]"#).as_array().unwrap().to_vec();
+        if index == 2 {
+            steps.push(v(r#"{"action":"event","turnId":"id1","event":{"type":"text_delta","delta":"answer"}}"#));
+            steps.push(v(r#"{"action":"finish","turnId":"id1"}"#));
+        }
+        steps.push(v(r#"{"action":"request","message":{"id":4,"method":"thread/start","params":{"model":"gpt-disabled"}}}"#));
+        paired(
+            &format!("managed route {index}"),
+            J::object([
+                (
+                    "ids",
+                    J::Array((0..20).map(|i| format!("id{i}").into()).collect()),
+                ),
+                ("environment", environment),
+                ("steps", J::Array(steps)),
+            ]),
+        );
+    }
 }
 #[test]
 fn native_protocol_history_and_turn_order_match_frozen_server() {

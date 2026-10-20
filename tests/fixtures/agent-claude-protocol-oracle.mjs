@@ -52,7 +52,6 @@ const runtime = {
   async stop() { calls.push({ method: 'stop' }); },
 };
 const server = new CodexClaudeAppServer(store, runtime);
-const config = server.configRead().config.provider_loop_config;
 const records = [];
 let stopped = false;
 const drain = () => new Promise(setImmediate);
@@ -91,4 +90,6 @@ for (const rawStep of spec.steps) {
   records.push({ action: step.action, failure, state: snapshot() });
 }
 if (!stopped) await server.stop();
-process.stdout.write(JSON.stringify({ providerLoopConfig: config, records }));
+process.stdout.write(JSON.stringify({ records, environment: Object.fromEntries(
+  Object.keys(spec.environment ?? {}).map(key => [key, process.env[key]])
+) }));

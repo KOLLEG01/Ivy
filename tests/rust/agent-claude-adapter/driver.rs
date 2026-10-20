@@ -51,7 +51,7 @@ fn adapter(home: &Path) -> Adapter {
             mcp_servers: J::Null,
             startup_statuses: vec![],
             config_overrides: v("{}"),
-            provider_loop_config: v("{}"),
+            config_path: home.join("config.json"),
             prepare_worktree: Arc::new(|_, cwd| Ok(cwd.clone())),
             read_base64: Arc::new(|_| Err(AdapterError::new("Unexpected file read"))),
             subagent_completed: Some(true),
