@@ -2,6 +2,8 @@ use super::{ServiceFixture,assert_json_eq};
 use ivy_host_runtime::{IvyJson,filesystem};
 use std::{fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},sync::Mutex};
 static CORPUS:Mutex<()>=Mutex::new(());
+#[path="host-regular-text-public-cases.rs"]
+mod regular_text_cases;
 fn path(path:&Path)->IvyJson{IvyJson::String(ivy_host_runtime::node_path::from_native(path))}
 fn oracle(input:IvyJson)->IvyJson{
     let mut child=Command::new("node").arg("tests/fixtures/host-filesystem-oracle.mjs")

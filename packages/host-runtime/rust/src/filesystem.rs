@@ -4,6 +4,8 @@ use std::{fs,path::{Path,PathBuf}};
 #[cfg(windows)]
 #[path = "filesystem/windows_junction.rs"]
 mod windows_junction;
+mod regular_text;
+pub use regular_text::{TextFileError, read_regular, realpath};
 fn internal<T,E>(value:Result<T,E>)->IvyResult<T>{value.map_err(|_|IvyError::internal())}
 async fn blocking<T:Send+'static>(work:impl FnOnce()->IvyResult<T>+Send+'static)->IvyResult<T>{internal(tokio::task::spawn_blocking(work).await)?}
 fn fs_path(path:&Path)->PathBuf{node_path::filesystem_path(&node_path::from_native(path))}
@@ -71,12 +73,18 @@ fn identity(path: &Path, no_follow: bool) -> std::io::Result<FileIdentity> {
 }
 #[cfg(windows)]
 fn information(path: &Path, no_follow: bool) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
-    use std::os::windows::{fs::OpenOptionsExt,io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION,GetFileInformationByHandle,
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
         FILE_READ_ATTRIBUTES,FILE_FLAG_BACKUP_SEMANTICS,FILE_FLAG_OPEN_REPARSE_POINT,FILE_SHARE_READ,FILE_SHARE_WRITE,FILE_SHARE_DELETE};
     let flags = FILE_FLAG_BACKUP_SEMANTICS | if no_follow { FILE_FLAG_OPEN_REPARSE_POINT } else { 0 };
     let file = fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES).custom_flags(flags)
         .share_mode(FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE).open(path)?;
+    handle_information(&file)
+}
+#[cfg(windows)]
+fn handle_information(file: &fs::File) -> std::io::Result<windows_sys::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION,GetFileInformationByHandle};
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 { return Err(std::io::Error::last_os_error()); }
     Ok(info)

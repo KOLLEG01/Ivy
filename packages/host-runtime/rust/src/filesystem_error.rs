@@ -150,6 +150,26 @@ fn mapping(error: &io::Error, syscall: Syscall) -> Option<(&'static str, i32, &'
     Some((code, errno, description(code)?))
 }
 
+/// Reuse the same native/libuv classification for a reader's path or descriptor
+/// operation. Descriptor errors have no path suffix in Node's diagnostic.
+pub(crate) fn operation_message(
+    error: &io::Error,
+    syscall: &'static str,
+    path: Option<&JsString>,
+    context: &Context,
+) -> Option<(&'static str, JsString)> {
+    let mapping = mapping(error, Syscall::Stat)?;
+    let (code, _, description) = mapping;
+    let suffix = match path {
+        Some(path) => {
+            let path = render(mapping, Syscall::Stat, context.filesystem_path(path)).path;
+            format!(" '{path}'", path=String::from_utf16_lossy(&path.0))
+        },
+        None => String::new(),
+    };
+    Some((code, format!("{code}: {description}, {syscall}{suffix}").into()))
+}
+
 fn description(code: &str) -> Option<&'static str> {
     Some(match code {
         "ENOENT" => "no such file or directory",
