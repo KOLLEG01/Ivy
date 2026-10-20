@@ -124,6 +124,9 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
                 );
             }
             let params = format!(r#"{{"callId":"{id}","waiting":false}}"#);
+            if !remote_end {
+                clock.0.store(true, Ordering::SeqCst);
+            }
             let d = dispatcher.clone();
             let pending =
                 tokio::spawn(async move { d.execute(command("call.answer", &params, 4, 4)).await });
@@ -148,8 +151,6 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
                     200
                 );
                 assert!(call.observation().ending);
-            } else {
-                clock.0.store(true, Ordering::SeqCst);
             }
             super::answer::send(
                 &peer,
@@ -171,7 +172,11 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
             let answered = value(answer.outcome());
             assert_eq!(
                 answered.get("state").unwrap().as_str().unwrap(),
-                "local_ended"
+                if remote_end && !delayed {
+                    "connected"
+                } else {
+                    "local_ended"
+                }
             );
             assert_eq!(
                 answered.get("error").unwrap(),
@@ -181,7 +186,8 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
                     "media_failed".into()
                 }
             );
-            assert!(!call.media().unwrap().observation().started);
+            let media_started = call.media().unwrap().observation().started;
+            assert_eq!(media_started, remote_end && !delayed);
             assert_eq!(
                 events.receipts.lock().unwrap().len(),
                 usize::from(!remote_end)
@@ -192,9 +198,14 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
                     .digit(digit, ivy_phone_bridge::dtmf::InputSource::SipInfo)
                     .unwrap();
             }
-            assert!(
-                call.features().observation().command.is_none(),
-                "Early ending cannot grant connected command authority"
+            assert_eq!(
+                call.features().observation().command,
+                if remote_end && !delayed {
+                    Some("new_voice")
+                } else {
+                    None
+                },
+                "Only an actual prior connection grants command authority"
             );
             trace(
                 &format!("native-terminal-start-{delayed}-{remote_end}"),
@@ -204,7 +215,7 @@ async fn native_media_start_failure_and_early_remote_end_preserve_terminal_notif
                         "failureCallbacks",
                         IvyJson::Array(events.receipts.lock().unwrap().clone()),
                     ),
-                    ("originalMediaStarted", false.into()),
+                    ("originalMediaStarted", media_started.into()),
                     ("injectedRtcpClockFailure", (!remote_end).into()),
                 ]),
             );

@@ -244,8 +244,16 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             };
         let mut controls = vec![];
         *events.call.lock().unwrap() = Some(call.clone());
+        let mut early_answer = None;
+        let mut media_started_before_ack = false;
         if status == 200 {
-            assert!(!pending.is_finished(), "Answer must await the original ACK");
+            match tokio::time::timeout(Duration::from_millis(150), &mut pending).await {
+                Ok(answer) => early_answer = Some(answer.unwrap()),
+                Err(_) => assert!(delayed, "Initial-offer answer must complete before ACK"),
+            }
+            assert_eq!(early_answer.is_some(), !delayed);
+            media_started_before_ack = media.observation().started;
+            assert_eq!(media_started_before_ack, !delayed);
             if scenario.ends_with("hangup_before_ack") {
                 hungup = outcome(
                     dispatcher
@@ -256,7 +264,7 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             }
             if scenario.ends_with("slow_ack") {
                 tokio::time::sleep(Duration::from_millis(1250)).await;
-                assert!(!pending.is_finished());
+                assert!(early_answer.is_some());
                 while let Some(response) = receive(&peer, 50).await {
                     assert_eq!(
                         response.status_code.code(),
@@ -290,16 +298,22 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             assert_eq!(status, 406, "{scenario}");
             send(&peer, target, "ACK", 1, "z9hG4bK-owned-answer", &tag, "").await;
         }
-        let answer = tokio::time::timeout(Duration::from_secs(7), &mut pending)
-            .await
-            .unwrap()
-            .unwrap();
+        let answer_completed_before_ack = early_answer.is_some();
+        let answer = match early_answer {
+            Some(answer) => answer,
+            None => tokio::time::timeout(Duration::from_secs(7), &mut pending)
+                .await
+                .unwrap()
+                .unwrap(),
+        };
         let answered = outcome(answer.outcome());
         if scenario.ends_with("hangup_before_ack") || scenario.ends_with("media_failure_before_ack")
         {
-            assert!(
-                !media.observation().started,
-                "Late SIP connection cannot revive original media"
+            assert!(media.observation().closed);
+            assert_eq!(
+                media.observation().started,
+                !delayed,
+                "Ending cannot restart original media"
             );
         }
         let saved = answer
@@ -490,6 +504,11 @@ async fn original_native_answers_keep_original_media_ack_controls_and_saved_rece
             ("released", released.into()),
             ("closed", true.into()),
             ("failureCallbacks", IvyJson::Array(failure_callbacks)),
+            (
+                "answerCompletedBeforeAck",
+                answer_completed_before_ack.into(),
+            ),
+            ("mediaStartedBeforeAck", media_started_before_ack.into()),
         ]);
         let mut actual = result.clone();
         normalize(&mut actual, &id);

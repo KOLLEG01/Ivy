@@ -23,7 +23,6 @@ use tokio_util::sync::CancellationToken;
 struct Intent {
     answer: bool,
     ending: bool,
-    late_connection: bool,
 }
 struct Control {
     intent: Mutex<Intent>,
@@ -212,7 +211,7 @@ impl IncomingInvite {
         let mut current = *self.observation.borrow();
         let intent = self.control.intent.lock().unwrap();
         current.ending |= intent.ending;
-        if intent.ending && !intent.late_connection {
+        if intent.ending {
             current.active = false;
         }
         if self.done.has_changed().is_err() && self.done.borrow().is_none() {
@@ -296,9 +295,7 @@ impl IncomingActor {
     }
     fn end(&mut self) {
         self.current.remote_ended |= self.remote_ended;
-        if !self.control.intent.lock().unwrap().late_connection || self.remote_ended {
-            self.current.active = false;
-        }
+        self.current.active = false;
         self.current.ending = true;
         self.current.outcome.get_or_insert(CallOutcome::Ended);
         self.publish();
@@ -392,6 +389,9 @@ impl IncomingActor {
                 Some(body.into_bytes()),
             )
             .await?;
+        if !delayed {
+            self.start_media();
+        }
         let deadline = Instant::now() + Duration::from_secs(32);
         loop {
             tokio::select! {
@@ -401,31 +401,39 @@ impl IncomingActor {
                         let local_ending=self.control.intent.lock().unwrap().ending;
                         self.established=local_ending||!delayed||sdp(&ack).is_some_and(|body|media.accept_answer(body));
                         if !self.established{self.end();}
-                        else if local_ending&&!delayed {
-                            // With an initial offer, the original late ACK
-                            // restores SIP-active observation after hangup.
-                            // The delayed answer stays ended. Audio authority
-                            // stays revoked, and BYE still owns the fence.
-                            self.control.intent.lock().unwrap().late_connection=true;
-                            self.current.active=true;self.current.outcome=Some(CallOutcome::Connected);self.publish();
-                        }
                         break;
                     },
                     None=>return Err(CallError::CleanupUnconfirmed),_=>(),
                 },
                 transaction=self.commands.recv()=>{let Some(transaction)=transaction else{return Err(CallError::CleanupUnconfirmed);};self.control_request(transaction).await?;},
+                result=async{self.media_start.as_mut().unwrap().await},if self.media_start.is_some()=>self.media_started(result),
                 _ = sleep_until(deadline)=>return Err(CallError::CleanupUnconfirmed),
             }
         }
         self.exchange.as_ref().unwrap().close().await?;
         self.exchange.take();
-        if !self.ending() {
-            self.current.phase = FinalPhase::StartingMedia;
-            self.publish();
-            let original = media.clone();
-            self.media_start = Some(tokio::spawn(async move { original.start().await }));
+        if delayed && !self.ending() {
+            self.start_media();
         }
         self.connected(request, flow).await
+    }
+    fn start_media(&mut self) {
+        self.current.phase = FinalPhase::StartingMedia;
+        self.publish();
+        let original = self.media.as_ref().unwrap().clone();
+        self.media_start = Some(tokio::spawn(async move { original.start().await }));
+    }
+    fn media_started(&mut self, result: Result<bool, tokio::task::JoinError>) {
+        self.media_start.take();
+        let media = self.media.as_ref().unwrap();
+        if !matches!(result, Ok(true)) || media.failed() || media.is_closed() {
+            self.end();
+        } else if !self.ending() {
+            self.current.phase = FinalPhase::Confirmed;
+            self.current.active = true;
+            self.current.outcome = Some(CallOutcome::Connected);
+            self.publish();
+        }
     }
     fn answer_headers(&self, request: &Request) -> Result<Vec<Header>, CallError> {
         let contact = request
@@ -602,11 +610,7 @@ impl IncomingActor {
             tokio::select! {
                 _ = self.control.changed.notified()=>(),
                 transaction=self.commands.recv()=>{let Some(transaction)=transaction else{return Err(CallError::CleanupUnconfirmed);};self.control_request(transaction).await?;},
-                result=async{self.media_start.as_mut().unwrap().await},if self.media_start.is_some()=>{
-                    self.media_start.take();let media=self.media.as_ref().unwrap();
-                    if !result.unwrap_or(false)||media.failed()||media.is_closed(){self.end();}
-                    else if !self.ending(){self.current.phase=FinalPhase::Confirmed;self.current.active=true;self.current.outcome=Some(CallOutcome::Connected);self.publish();}
-                },
+                result=async{self.media_start.as_mut().unwrap().await},if self.media_start.is_some()=>self.media_started(result),
                 response=async{self.bye.as_mut().unwrap().next_response().await},if self.bye.is_some()=>{
                     let response=response.map_err(unknown)?;if response.status_code.code()>=200{
                         if response.status_code.code()>=300{return Err(CallError::CleanupUnconfirmed);}

@@ -201,8 +201,6 @@ impl Call {
             .or_else(|| state.invite.as_ref().map(DelayedInvite::observation));
         let phase = if signalling.is_some_and(|s| s.uncertain) {
             SipHostCallPhase::OutcomeUnknown
-        } else if self.incoming && signalling.is_some_and(|s| s.active) {
-            SipHostCallPhase::Connected
         } else if state.ending
             || state.failed_before_send
             || signalling.is_some_and(|s| s.outcome.is_some() && !s.active)

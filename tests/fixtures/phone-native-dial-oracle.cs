@@ -80,7 +80,7 @@ public static class PhoneNativeDialOracle {
             }
             await owner.InvokeAsync("call.release",Args(new{callId=id}));
             if(scenario=="remote_bye"||scenario.StartsWith("media_failure"))return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
-                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,ended,failureCallbacks};
+                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,failureCallbacks,ended};
             return new{call,hungup,policy,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
                 requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null,failureCallbacks};
         }
@@ -206,6 +206,7 @@ public static class PhoneNativeAnswerOracle {
             var pending=Invoke(owner,"call.answer",new{callId=id,waiting});
             var final=SIPResponse.ParseSIPResponse(await Receive(peer));int status=(int)final.Status;tag=final.Header.To.ToTag;
             object hungup=null;string endRequest=null;var controls=new List<int>();
+            bool answerCompletedBeforeAck=false,mediaStartedBeforeAck=false;if(status==200){answerCompletedBeforeAck=await Task.WhenAny(pending,Task.Delay(150))==pending;mediaStartedBeforeAck=(bool)typeof(SipMediaSession).GetField("started",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(media);}
             if(status==200){
                 if(scenario.EndsWith("hangup_before_ack"))hungup=await Invoke(owner,"call.hangup",new{callId=id});
                 if(scenario.EndsWith("media_failure_before_ack"))FailMedia();
@@ -231,7 +232,7 @@ public static class PhoneNativeAnswerOracle {
             }
             await Wait(()=>(call.Observation.State=="local_ended"||call.Observation.State=="outcome_unknown"));object ended=call.Observation;bool sameMedia=ReferenceEquals(media,call.Media);
             await owner.InvokeAsync("call.release",Args(new{callId=id}));bool released=Host(owner).FindCall(id)==null;await owner.DisposeAsync();
-            return new{status,answered,hungup,ended,controls,endRequest,noByeObservationMs=scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:0,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=true,failureCallbacks};
+            return new{status,answered,hungup,ended,controls,endRequest,noByeObservationMs=scenario.EndsWith("invalid_ack")||scenario.EndsWith("hangup_before_ack")?150:0,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=true,failureCallbacks,answerCompletedBeforeAck,mediaStartedBeforeAck};
         }
     }
 }
