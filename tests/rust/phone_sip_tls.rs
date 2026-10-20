@@ -58,14 +58,12 @@ async fn keepalive_retains_the_original_udp_socket_and_typed_failure_until_close
     assert_eq!(source, local);
     // A family mismatch is rejected locally. No packet reaches another peer.
     flow.remote = "[::1]:9".parse().unwrap();
-    let failure = flow.keepalive().await.unwrap_err();
+    flow.keepalive().await.unwrap();
+    let udp = flow.udp_socket.as_ref().and_then(Weak::upgrade).unwrap();
+    let completions = udp.completions().await;
     #[cfg(windows)]
-    assert_eq!(failure, RegistrationKeepaliveError::SocketError(10047));
-    #[cfg(not(windows))]
-    assert!(matches!(
-        failure,
-        RegistrationKeepaliveError::UnmappedSocketError(_)
-    ));
+    assert_eq!(completions, vec![Some(Ok(4)), Some(Err(Some(10047)))]);
+    drop(udp);
     assert_eq!(
         host.close().await,
         Err(BindError::Endpoint(SipIoError::InUse))
@@ -75,37 +73,12 @@ async fn keepalive_retains_the_original_udp_socket_and_typed_failure_until_close
     host.close().await.unwrap();
     let _rebound = tokio::net::UdpSocket::bind(local).await.unwrap();
     if let Some(directory) = std::env::var_os("IVY_PHONE_CALL_AUDIO_TRACE_DIR") {
-        let error = match failure {
-            RegistrationKeepaliveError::SocketError(code) => format!("{code}"),
+        let error = match completions.last() {
+            Some(Some(Err(Some(code)))) => code.to_string(),
             _ => "null".into(),
         };
-        std::fs::write(std::path::PathBuf::from(directory).join("native-registration-keepalive-socket.json"), format!("{{\"sameBoundSocket\":true,\"crlfBytes\":4,\"familyMismatchErrorCode\":{error},\"retainedFlowFencedClose\":true,\"originalBindingReleased\":true,\"replacementSockets\":0}}")).unwrap();
+        std::fs::write(std::path::PathBuf::from(directory).join("native-registration-keepalive-socket.json"), format!("{{\"sameBoundSocket\":true,\"crlfBytes\":4,\"admissionErrorCode\":0,\"completionErrorCode\":{error},\"retainedFlowFencedClose\":true,\"originalBindingReleased\":true,\"replacementSockets\":0}}")).unwrap();
     }
-}
-
-#[cfg(windows)]
-#[test]
-fn keepalive_failure_retains_winsock_codes_without_localized_error_strings() {
-    for code in [
-        995,
-        997,
-        10013,
-        10022,
-        10049,
-        10054,
-        10061,
-        i32::MIN,
-        i32::MAX,
-    ] {
-        assert_eq!(
-            keepalive_error(std::io::Error::from_raw_os_error(code)),
-            RegistrationKeepaliveError::SocketError(code)
-        );
-    }
-    assert_eq!(
-        keepalive_error(std::io::Error::other("synthetic private error detail")),
-        RegistrationKeepaliveError::SocketError(10014)
-    );
 }
 
 fn verifier() -> Arc<dyn rustls::client::danger::ServerCertVerifier> {

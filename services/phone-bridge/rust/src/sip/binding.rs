@@ -2,7 +2,7 @@
 //! The host supplies already parsed literal endpoints and owns call admission.
 use super::{
     ClientExchange, PreparedInvite, RegistrationKeepaliveError, SipEndpoint, SipIoError,
-    tls::TlsClient,
+    tls::TlsClient, udp::SipUdpSocket,
 };
 use rsipstack::{
     sip::{Request, Transport},
@@ -92,7 +92,7 @@ pub struct SipBoundFlow {
     proxy: Option<SipAddr>,
     local: SocketAddr,
     remote: SocketAddr,
-    udp_socket: Option<Weak<tokio::net::UdpSocket>>,
+    udp_socket: Option<Weak<SipUdpSocket>>,
 }
 impl SipBoundFlow {
     pub fn local_addr(&self) -> SocketAddr {
@@ -152,24 +152,7 @@ impl SipBoundFlow {
         let Some(socket) = self.udp_socket.as_ref().and_then(Weak::upgrade) else {
             return Err(RegistrationKeepaliveError::SocketError(10101));
         };
-        // rsipstack's send_raw erases io::Error into a localized string. Use
-        // the very same bound socket, with no new socket or transport owner.
-        socket
-            .send_to(b"\r\n\r\n", self.remote)
-            .await
-            .map(|_| ())
-            .map_err(keepalive_error)
-    }
-}
-
-fn keepalive_error(error: std::io::Error) -> RegistrationKeepaliveError {
-    #[cfg(windows)]
-    {
-        RegistrationKeepaliveError::SocketError(error.raw_os_error().unwrap_or(10014))
-    }
-    #[cfg(not(windows))]
-    {
-        RegistrationKeepaliveError::UnmappedSocketError(error.raw_os_error())
+        socket.begin_send(b"\r\n\r\n", self.remote)
     }
 }
 
@@ -199,7 +182,7 @@ pub struct BoundSipTransport {
     reserved: Option<TcpSocket>,
     tls: Option<TlsClient>,
     datagram: Option<SipConnection>,
-    udp_socket: Option<Weak<tokio::net::UdpSocket>>,
+    udp_socket: Option<Weak<SipUdpSocket>>,
     connections: Connections,
     sockets: SocketOwners,
     accepting: Option<JoinHandle<()>>,
@@ -217,8 +200,9 @@ impl BoundSipTransport {
                 .map_err(|_| BindError::BindFailed)?,
         );
         let local = socket.local_addr().map_err(|_| BindError::BindFailed)?;
-        let udp_socket = Arc::downgrade(&socket);
         let released = observed_owner(socket.clone());
+        let socket = SipUdpSocket::new(socket).map_err(|_| BindError::BindFailed)?;
+        let udp_socket = Arc::downgrade(&socket);
         let connection = UdpConnection::from_socket(socket, None, Some(stop.child_token()))
             .await
             .map_err(|_| BindError::BindFailed)?;
@@ -615,6 +599,9 @@ impl BoundSipTransport {
         }
         if let Some(endpoint) = self.endpoint.as_mut() {
             let endpoint = Arc::get_mut(endpoint).ok_or(BindError::Endpoint(SipIoError::InUse))?;
+            if let Some(udp) = self.udp_socket.as_ref().and_then(Weak::upgrade) {
+                udp.request_stop();
+            }
             endpoint.shutdown().await.map_err(BindError::Endpoint)?;
         }
         if let Some(accepting) = self.accepting.as_mut() {
@@ -646,13 +633,19 @@ impl BoundSipTransport {
                 .map_err(|_| BindError::ConnectFailed)?;
         }
         self.connections.lock().await.clear();
-        self.datagram.take();
-        self.reserved.take();
-        self.endpoint.take();
         // The library retires transport loops asynchronously. Observe their
         // final references before acknowledging socket release. A timeout
         // retains this host's stop fence; it never authorizes a replacement.
         tokio::time::timeout(CONNECT_TIMEOUT, async {
+            if let Some(udp) = self.udp_socket.as_ref().and_then(Weak::upgrade) {
+                udp.request_stop();
+                udp.drain()
+                    .await
+                    .map_err(|_| BindError::Endpoint(SipIoError::DriverFailed))?;
+            }
+            self.datagram.take();
+            self.reserved.take();
+            self.endpoint.take();
             loop {
                 if self
                     .sockets
@@ -665,9 +658,10 @@ impl BoundSipTransport {
                 }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
+            Ok::<(), BindError>(())
         })
         .await
-        .map_err(|_| BindError::Endpoint(SipIoError::InUse))?;
+        .map_err(|_| BindError::Endpoint(SipIoError::InUse))??;
         self.sockets.lock().await.clear();
         self.closed = true;
         Ok(())
