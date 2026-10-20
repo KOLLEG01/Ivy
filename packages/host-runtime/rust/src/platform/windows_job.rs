@@ -19,7 +19,7 @@ use windows_sys::Win32::{
         Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
         JobObjects::{
             CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            JOB_OBJECT_LIMIT_JOB_MEMORY, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
             OpenJobObjectW, SetInformationJobObject, TerminateJobObject,
         },
         Threading::{
@@ -152,7 +152,8 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
         println!("{{\"stopped\":{}}}", job_stopped(name)?);
         return Ok(0);
     }
-    if arguments.len() < 3 || arguments[0] != "--parent" {
+    let memory_mode = arguments.first().is_some_and(|v| v == "--memory-parent");
+    if arguments.len() < 3 || (!memory_mode && arguments[0] != "--parent") {
         return Err(argument_error(
             "Expected --parent PID executable [args...].",
         ));
@@ -168,11 +169,23 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
             OpenProcess(PROCESS_SYNCHRONIZE, 0, parent_id)
         })?)
     };
-    let mut executable_index = 2;
+    // A distinct leading mode makes an older helper reject the request before
+    // interpreting any executable. Never append an optional cap after legacy args.
+    let memory_limit = if memory_mode {
+        Some(arguments.get(2)
+            .and_then(|v| v.to_str())
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&bytes| bytes > 0 && parent.is_some())
+            .ok_or_else(|| argument_error("Invalid owned Job memory limit."))?)
+    } else { None };
+    let mut executable_index = if memory_mode { 3 } else { 2 };
     let allow_breakaway = arguments
         .get(executable_index)
         .is_some_and(|v| v == "--allow-breakaway");
     if allow_breakaway {
+        if memory_mode {
+            return Err(argument_error("A memory-limited Job cannot allow breakaway."));
+        }
         executable_index += 1;
     }
     let job_name = if arguments
@@ -206,6 +219,9 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
     } else {
         None
     };
+    if memory_mode && launch_pipe.is_none() {
+        return Err(argument_error("A memory-limited Job requires private ownership acknowledgement."));
+    }
     let argv0 = if arguments.get(executable_index).is_some_and(|v| v == "--argv0") {
         let value=arguments.get(executable_index+1).ok_or_else(||argument_error("Missing original argv0 value."))?;
         let value=wide(value)?;
@@ -234,6 +250,10 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
         } else {
             0
         };
+    if let Some(bytes) = memory_limit {
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+        limits.JobMemoryLimit = bytes;
+    }
     checked(unsafe {
         SetInformationJobObject(
             job.0,
@@ -322,7 +342,7 @@ pub fn run(arguments: &[OsString]) -> io::Result<u32> {
     let outcome = (|| {
         if let Some(pipe) = launch_pipe {
             super::windows_launch::watch_parent(parent.as_ref().unwrap().0, job.0)?;
-            super::windows_launch::acknowledge(pipe, process.0, job.0)?;
+            super::windows_launch::acknowledge(pipe, process.0, job.0, memory_limit)?;
         }
         if let Some(parent) = &parent {
             if unsafe { WaitForMultipleObjects(1, &parent.0, 0, 0) } != 258 {

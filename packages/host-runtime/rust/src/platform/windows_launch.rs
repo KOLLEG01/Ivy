@@ -23,7 +23,10 @@ use windows_sys::Win32::{
         IO::{CreateIoCompletionPort, GetQueuedCompletionStatus},
         JobObjects::{
             IsProcessInJob, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
-            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectAssociateCompletionPortInformation,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+            JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JobObjectExtendedLimitInformation, JobObjectAssociateCompletionPortInformation,
             JobObjectBasicAccountingInformation, QueryInformationJobObject,
             SetInformationJobObject, TerminateJobObject,
         },
@@ -36,6 +39,7 @@ use windows_sys::Win32::{
 
 const PREFIX: &str = r"\\.\pipe\Ivy.Process.";
 const MAGIC: &[u8; 8] = b"IVYJOB01";
+const MEMORY_MAGIC: &[u8; 8] = b"IVYJOB02";
 const JOB_QUERY_TERMINATE: u32 = 0x0002 | 0x0004 | 0x0008;
 
 fn checked(value: i32) -> io::Result<()> {
@@ -92,7 +96,7 @@ pub(super) fn watch_parent(parent: HANDLE, job: HANDLE) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn acknowledge(name: &str, child: HANDLE, job: HANDLE) -> io::Result<()> {
+pub(super) fn acknowledge(name: &str, child: HANDLE, job: HANDLE, memory_limit: Option<usize>) -> io::Result<()> {
     if !valid_pipe_name(name) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -104,10 +108,13 @@ pub(super) fn acknowledge(name: &str, child: HANDLE, job: HANDLE) -> io::Result<
         .write(true)
         .open(name)?;
     let mut frame = [0; 24];
-    frame[..8].copy_from_slice(MAGIC);
+    frame[..8].copy_from_slice(if memory_limit.is_some() { MEMORY_MAGIC } else { MAGIC });
     frame[8..16].copy_from_slice(&(child as usize as u64).to_le_bytes());
     frame[16..].copy_from_slice(&(job as usize as u64).to_le_bytes());
     pipe.write_all(&frame)?;
+    if let Some(bytes) = memory_limit {
+        pipe.write_all(&(bytes as u64).to_le_bytes())?;
+    }
     let mut go = [0];
     pipe.read_exact(&mut go)?;
     if go != [1] {
@@ -119,15 +126,20 @@ pub(super) fn acknowledge(name: &str, child: HANDLE, job: HANDLE) -> io::Result<
 pub(crate) struct Listener {
     pub name: String,
     pipe: NamedPipeServer,
+    memory_limit: Option<usize>,
 }
 impl Listener {
     pub fn new() -> io::Result<Self> {
+        Self::with_memory_limit(None)
+    }
+
+    pub fn with_memory_limit(memory_limit: Option<usize>) -> io::Result<Self> {
         let name = format!("{PREFIX}{}", uuid::Uuid::new_v4());
         let pipe = ServerOptions::new()
             .first_pipe_instance(true)
             .reject_remote_clients(true)
             .create(&name)?;
-        Ok(Self { name, pipe })
+        Ok(Self { name, pipe, memory_limit })
     }
 
     pub async fn accept(mut self, helper: &mut Child) -> io::Result<Proof> {
@@ -140,8 +152,16 @@ impl Listener {
         }
         let mut frame = [0; 24];
         self.pipe.read_exact(&mut frame).await?;
-        if &frame[..8] != MAGIC {
+        let magic = if self.memory_limit.is_some() { MEMORY_MAGIC } else { MAGIC };
+        if &frame[..8] != magic {
             return Err(io::Error::other("Invalid launch acknowledgement."));
+        }
+        if let Some(bytes) = self.memory_limit {
+            let mut echoed = [0; 8];
+            self.pipe.read_exact(&mut echoed).await?;
+            if u64::from_le_bytes(echoed) != bytes as u64 {
+                return Err(io::Error::other("Launch memory limit acknowledgement differs."));
+            }
         }
         let proof = {
             let source = helper
@@ -162,21 +182,21 @@ impl Listener {
                 decode(&frame[8..16])?,
                 PROCESS_SYNCHRONIZE | PROCESS_QUERY_INFORMATION,
             )?;
-            let job = duplicate(source, decode(&frame[16..])?, JOB_QUERY_TERMINATE)?;
             let events = ProcessEvents::new()?;
+            let job = duplicate(source, decode(&frame[16..])?, JOB_QUERY_TERMINATE)?;
+            let mut proof = Proof { child, job, events };
             let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
                 CompletionKey: 1usize as _,
-                CompletionPort: events.port.as_raw_handle(),
+                CompletionPort: proof.events.port.as_raw_handle(),
             };
             checked(unsafe {
                 SetInformationJobObject(
-                    job.as_raw_handle(),
+                    proof.job.as_raw_handle(),
                     JobObjectAssociateCompletionPortInformation,
                     (&association as *const JOBOBJECT_ASSOCIATE_COMPLETION_PORT).cast(),
                     size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
                 )
             })?;
-            let proof = Proof { child, job, events };
             let mut member = 0;
             checked(unsafe {
                 IsProcessInJob(
@@ -187,6 +207,30 @@ impl Listener {
             })?;
             if member == 0 {
                 return Err(io::Error::other("Launch child is outside its Job."));
+            }
+            if let Some(bytes) = self.memory_limit {
+                let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+                checked(unsafe { QueryInformationJobObject(
+                    proof.job.as_raw_handle(), JobObjectExtendedLimitInformation,
+                    (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32, null_mut(),
+                ) })?;
+                let flags = limits.BasicLimitInformation.LimitFlags;
+                let required = JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                if flags & required != required || limits.JobMemoryLimit != bytes
+                    || flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) != 0 {
+                    return Err(io::Error::other("Launch Job memory enforcement differs."));
+                }
+                for process in [source, unsafe { GetCurrentProcess() }] {
+                    checked(unsafe { IsProcessInJob(process, proof.job.as_raw_handle(), &mut member) })?;
+                    if member != 0 {
+                        return Err(io::Error::other("Launch supervisor belongs to the limited Job."));
+                    }
+                }
+                // Reconcile already queued births while the child is suspended.
+                if !proof.events.drain()? {
+                    return Err(io::Error::other("Launch Job notification queue is unconfirmed."));
+                }
             }
             proof
         };
@@ -210,6 +254,7 @@ struct ProcessEvents {
     port: OwnedHandle,
     observed: u64,
     pending: Vec<OwnedHandle>,
+    memory_limit_seen: bool,
 }
 impl ProcessEvents {
     fn new() -> io::Result<Self> {
@@ -221,6 +266,7 @@ impl ProcessEvents {
             port: unsafe { OwnedHandle::from_raw_handle(raw) },
             observed: 0,
             pending: Vec::new(),
+            memory_limit_seen: false,
         })
     }
 
@@ -249,6 +295,9 @@ impl ProcessEvents {
             }
             if key != 1 {
                 return Err(io::Error::other("Unexpected Job notification identity."));
+            }
+            if message == 10 /* JOB_OBJECT_MSG_JOB_MEMORY_LIMIT */ {
+                self.memory_limit_seen = true;
             }
             if message != 6
             /* JOB_OBJECT_MSG_NEW_PROCESS */
@@ -300,6 +349,15 @@ impl ProcessEvents {
     }
 }
 impl Proof {
+    pub fn poll_memory_limit(&mut self) -> io::Result<bool> {
+        self.events.drain()?;
+        Ok(self.events.memory_limit_seen)
+    }
+
+    pub fn memory_limit_seen(&self) -> bool {
+        self.events.memory_limit_seen
+    }
+
     pub fn terminate(&self) -> io::Result<()> {
         checked(unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) })
     }

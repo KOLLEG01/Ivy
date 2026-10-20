@@ -13,6 +13,8 @@ mod ignored_stdio_cases;
 #[cfg(windows)]
 #[path = "host-windows-process-cases.rs"]
 mod windows_process_cases;
+#[path = "host-memory-limit-cases.rs"]
+mod memory_limit_cases;
 
 // Exercise the private retained-handle failure paths through this selected target.
 #[cfg(windows)]

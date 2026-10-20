@@ -4,8 +4,9 @@ use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, Outcome};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
+    num::NonZeroU64,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
     time::Duration,
 };
 use tokio::{
@@ -92,6 +93,55 @@ pub struct OwnedProcess {
     group_pid: u32,
     #[cfg(windows)]
     job_retired: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Optional aggregate committed-memory enforcement for one owned Windows Job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessMemoryLimit {
+    pub maximum_job_commit_bytes: NonZeroU64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryAccounting {
+    WindowsJobCommitted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryLimitNotice {
+    WindowsJobMemoryLimit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryLimitEvidence {
+    /// Installed root policy, never an amount consumed or exhausted.
+    pub configured_bytes: u64,
+    pub accounting: MemoryAccounting,
+    /// Actual native notice on the owned private port/tree. A nested Job can
+    /// originate it; this does not identify the exhausted Job or its threshold.
+    pub native_notice: MemoryLimitNotice,
+}
+
+/// The existing process owner and completion, with a private native observation.
+pub struct MemoryLimitedProcess {
+    pub process: OwnedProcess,
+    configured_bytes: u64,
+    observed: Arc<AtomicBool>,
+}
+impl MemoryLimitedProcess {
+    /// A positive native notice alone proves neither tree retirement nor pipe EOF.
+    /// Absence is not evidence that no commitment was refused.
+    pub fn memory_limit_evidence(&self) -> Option<MemoryLimitEvidence> {
+        self.observed.load(Ordering::Acquire).then_some(MemoryLimitEvidence {
+            configured_bytes: self.configured_bytes,
+            accounting: MemoryAccounting::WindowsJobCommitted,
+            native_notice: MemoryLimitNotice::WindowsJobMemoryLimit,
+        })
+    }
+}
+
+struct MemoryRequest {
+    maximum: usize,
+    observed: Arc<AtomicBool>,
 }
 impl OwnedProcess {
     /// Send termination immediately, escalate after grace, retain unknown after
@@ -341,6 +391,33 @@ pub async fn spawn_exact_environment(
     spawn_resolved(resolved, root, context, Some(environment), None).await
 }
 
+/// Exact environment and existing owned retirement/IO, with an explicit Job cap.
+/// Requested accounting is refused before launch on unsupported targets or escape
+/// modes. Raw callers retain their own finite IO/deadline and EOF obligations.
+pub async fn spawn_exact_environment_with_memory_limit(
+    command: &Command,
+    root: &Path,
+    executables: &BTreeMap<String, PathBuf>,
+    mut context: LaunchContext,
+    memory_limit: ProcessMemoryLimit,
+) -> Result<MemoryLimitedProcess, SpawnFailure> {
+    if !cfg!(windows) || context.without_job || context.allow_windows_breakaway {
+        return Err(invalid("Requested Job memory enforcement is unavailable for this launch.").into());
+    }
+    let configured_bytes = memory_limit.maximum_job_commit_bytes.get();
+    let maximum = usize::try_from(configured_bytes)
+        .map_err(|_| invalid("Requested Job memory limit is not representable."))?;
+    validate_capture(&context)?;
+    let resolved = resolve_command(command, root, executables)?;
+    let environment = std::mem::take(&mut context.environment);
+    let observed = Arc::new(AtomicBool::new(false));
+    let process = spawn_resolved_with_stdio(
+        resolved, root, context, Some(environment), None, false,
+        Some(MemoryRequest { maximum, observed: observed.clone() }),
+    ).await?;
+    Ok(MemoryLimitedProcess { process, configured_bytes, observed })
+}
+
 fn validate_capture(context: &LaunchContext) -> IvyResult<()> {
     if context.redact.iter().any(|value| value.0.len() > 65536) {
         return Err(invalid("Redaction values exceed their bounded length."));
@@ -384,7 +461,7 @@ pub(crate) async fn spawn_resolved_detailed(
     exact_environment: Option<BTreeMap<OsString, OsString>>,
     argv0: Option<OsString>,
 ) -> Result<OwnedProcess, SpawnFailure> {
-    spawn_resolved_with_stdio(resolved, root, context, exact_environment, argv0, false).await
+    spawn_resolved_with_stdio(resolved, root, context, exact_environment, argv0, false, None).await
 }
 
 /// The same process-tree owner with null devices instead of caller/capture pipes.
@@ -395,7 +472,7 @@ pub(crate) async fn spawn_resolved_ignored(
     environment: BTreeMap<OsString, OsString>,
     argv0: OsString,
 ) -> Result<OwnedProcess, SpawnFailure> {
-    spawn_resolved_with_stdio(resolved, root, context, Some(environment), Some(argv0), true).await
+    spawn_resolved_with_stdio(resolved, root, context, Some(environment), Some(argv0), true, None).await
 }
 
 async fn spawn_resolved_with_stdio(
@@ -405,6 +482,7 @@ async fn spawn_resolved_with_stdio(
     exact_environment: Option<BTreeMap<OsString, OsString>>,
     argv0: Option<OsString>,
     ignored_stdio: bool,
+    memory_request: Option<MemoryRequest>,
 ) -> Result<OwnedProcess, SpawnFailure> {
     let maximum = context.maximum_output_bytes.unwrap_or(65536);
     let use_job = cfg!(windows) && !context.without_job;
@@ -419,7 +497,10 @@ async fn spawn_resolved_with_stdio(
     }
     #[cfg(windows)]
     let launch_listener = if use_job {
-        Some(crate::platform::windows_launch::Listener::new().map_err(io_error)?)
+        Some(match &memory_request {
+            Some(memory) => crate::platform::windows_launch::Listener::with_memory_limit(Some(memory.maximum)),
+            None => crate::platform::windows_launch::Listener::new(),
+        }.map_err(io_error)?)
     } else {
         None
     };
@@ -433,9 +514,12 @@ async fn spawn_resolved_with_stdio(
         .map_err(io_error)?;
         let mut process = TokioCommand::new(launcher);
         process.args([
-            OsString::from("--parent"),
+            OsString::from(if memory_request.is_some() { "--memory-parent" } else { "--parent" }),
             std::process::id().to_string().into(),
         ]);
+        if let Some(memory) = &memory_request {
+            process.arg(memory.maximum.to_string());
+        }
         if context.allow_windows_breakaway {
             process.arg("--allow-breakaway");
         }
@@ -554,6 +638,38 @@ async fn spawn_resolved_with_stdio(
         let mut unknown = false;
         let retirement_deadline;
         tokio::select! {
+            observation = async {
+                #[cfg(windows)]
+                if memory_request.is_some() {
+                    let proof = launch_proof.as_mut()
+                        .ok_or_else(|| std::io::Error::other("Limited Job ownership is unavailable."))?;
+                    loop {
+                        if proof.poll_memory_limit()? {
+                            return Ok(());
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+                std::future::pending::<std::io::Result<()>>().await
+            } => {
+                unknown = observation.is_err();
+                retirement_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                #[cfg(windows)] {
+                    if let Some(proof) = &launch_proof {
+                        if proof.memory_limit_seen() {
+                            if let Some(memory) = &memory_request {
+                                memory.observed.store(true, Ordering::Release);
+                            }
+                        }
+                        let _ = proof.terminate();
+                    }
+                }
+                let _ = child.start_kill();
+                match tokio::time::timeout_at(retirement_deadline, child.wait()).await {
+                    Ok(result) => { status = result.ok(); }
+                    Err(_) => { status = None; unknown = true; }
+                }
+            }
             result = child.wait() => {
                 status = result.ok();
                 retirement_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -590,6 +706,13 @@ async fn spawn_resolved_with_stdio(
             match proof.retire(retirement_deadline).await {
                 Ok(()) => retirement_observation.store(true, std::sync::atomic::Ordering::Release),
                 Err(_) => unknown = true,
+            }
+            // A notice can race child exit/stop. Drain it through the same retained
+            // owner before publishing Completion, even if retirement is unknown.
+            if proof.memory_limit_seen() {
+                if let Some(memory) = &memory_request {
+                    memory.observed.store(true, Ordering::Release);
+                }
             }
         }
         // Pipe draining shares the retirement deadline. Raw protocol owners drain
