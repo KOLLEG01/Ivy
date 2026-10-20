@@ -1,0 +1,285 @@
+use ivy_contracts::{IvyJson, hash::digest, json::stringify, limits::MANAGEMENT_FRAME_BYTES};
+use ivy_task_board::schema::task_board_contracts;
+use std::collections::HashSet;
+
+// Independent byte hashes from the original taskBoardContracts() returned array.
+// Each hash includes the entire schema, spec, retention and owner declaration.
+const ORIGINAL: &[(&str, &str, &str)] = &[
+    (
+        "task-board/task",
+        "2.3.0",
+        "sha256:56c1abb27419a500f5b9d499600e0fef4f0448b4494302011619b8a58c304607",
+    ),
+    (
+        "task-board/task",
+        "2.2.0",
+        "sha256:f159d7440274e4f1cded3d3ae08cf0b6b447fd4ebb0321c309498bb10e703676",
+    ),
+    (
+        "task-board/run",
+        "2.2.0",
+        "sha256:81d5f2792c8ed1bdad278b547453a338203f3d6232cce2ed738ed9ddfb1afccf",
+    ),
+    (
+        "task-board/result",
+        "2.2.0",
+        "sha256:431ef9ab86d71bae9183256a95e11cf8f540435c0f552297a2f9d0303af27104",
+    ),
+    (
+        "task-board/comment-node",
+        "1.0.0",
+        "sha256:0ddead2bcc9907aadc4d81a6e34bdc4e68fa5c0b7da3b175dbe18f8bd383cc18",
+    ),
+    (
+        "task-board/task",
+        "2.1.0",
+        "sha256:785b7c443c61ca9fe124047aaf883404a8224e329ab7ed4f4b464a7f370e0c20",
+    ),
+    (
+        "task-board/run",
+        "2.1.0",
+        "sha256:ea54e54be40fc7c6857ae710c32037625c57c0e5040cc80e80e92dc83faf1b4d",
+    ),
+    (
+        "task-board/result",
+        "2.1.0",
+        "sha256:5675318427cd0a951a384e146ccf57f4bd5c9499a76f24b3c04910fa5244cfbe",
+    ),
+    (
+        "task-board/comments",
+        "2.1.0",
+        "sha256:1eedc1647c1ad7dac031a9adf4d8c3ab64d9fbfbbade193f71dc59c337c613b5",
+    ),
+    (
+        "task-board/task",
+        "2.0.0",
+        "sha256:d7644941da6069feaed1db59891b17b63b5e039b368706e625b9992cc7bbc74f",
+    ),
+    (
+        "task-board/run",
+        "2.0.0",
+        "sha256:db85762a798e4d51286c9d1e8535f00f8f5951c70524729fe75a8d9271a7335b",
+    ),
+    (
+        "task-board/result",
+        "2.0.0",
+        "sha256:0452fed6d261b352bef9b3229d173dae9fdfef29f004c0cd47180d83d8ab8e54",
+    ),
+    (
+        "task-board/comments",
+        "2.0.0",
+        "sha256:2d031c0f2dc39f93863a138589a6ea1758b79602dd54d1f332141a0a2a023e04",
+    ),
+    (
+        "task-board/comment-read-state",
+        "1.1.0",
+        "sha256:5acb830c219626e9a4efad5a3511e0148130e49da17acba25a90b9f1f18ed960",
+    ),
+    (
+        "task-board/task",
+        "1.12.0",
+        "sha256:c7c3c5a30980b24649ec49689bf38ab9412545e91f91c48109f654ce31bcb9fe",
+    ),
+    (
+        "task-board/run",
+        "1.3.0",
+        "sha256:7edf745388246b2aa18ea2d708904de4839088b66798e2f1bb6c17329ca7dc80",
+    ),
+    (
+        "task-board/comments",
+        "1.1.0",
+        "sha256:f39adbd3e5ea0b7114f37fa813f23c987d9ffa0115482ba221167341d5ce2da8",
+    ),
+    (
+        "task-board/task",
+        "1.11.0",
+        "sha256:6d6b515b55cbb2915ef0864995252b77f9d71e32bfbc9a3336db9f8f775cdd55",
+    ),
+    (
+        "task-board/task",
+        "1.10.0",
+        "sha256:41437dcc85a60c1c1ba5560d96f1a3893f805c87208f863bc80cb858969a8909",
+    ),
+    (
+        "task-board/comments",
+        "1.0.0",
+        "sha256:c12addc9a4b1cfebaa2155ce60081d00b8e867a5b7aa10c04945264633970902",
+    ),
+    (
+        "task-board/configuration",
+        "1.2.0",
+        "sha256:6256a92707e79b31e8e292701945731213e22635c2bdc31d3415e8d8e83c076d",
+    ),
+    (
+        "task-board/task",
+        "1.9.0",
+        "sha256:143d75a0b9f1360137923d65860f0954aad7debf70f3683efa4886c4dcf8de21",
+    ),
+    (
+        "task-board/run",
+        "1.2.0",
+        "sha256:b37126f970f56b1b82f6d77e86982c7811e726be60354edb91c2161fa4400f49",
+    ),
+    (
+        "task-board/result",
+        "1.0.0",
+        "sha256:51d0f819800bc45526048b89095774ddf7a872bfa256337f7277d94c995b9f9a",
+    ),
+    (
+        "task-board/review",
+        "1.0.0",
+        "sha256:2123c33b0044f72b9b705b5a6338bbf6a5609fe8035cb4083994d262a4793808",
+    ),
+    (
+        "task-board/history",
+        "1.0.0",
+        "sha256:8301f88a76e6b9525924ca4200b950ef680a2a315b684746d2a277e6d9696039",
+    ),
+    (
+        "task-board/delivery",
+        "1.1.0",
+        "sha256:7b66cb7cccfdec60c7ddebf07063f2032b2db6e7647d4bea992df76ec7344d13",
+    ),
+    (
+        "task-board/task-key-sequence",
+        "1.0.0",
+        "sha256:bc1e62f26046ca6a5c6f32eec3c0b6067870b468210ffb0de21b80227d17b985",
+    ),
+    (
+        "task-board/task-key-allocation",
+        "1.0.0",
+        "sha256:b805a39a7087b364ff56192cd0bd2e9493dc6c64f41de1bd8b111f5a0b52682c",
+    ),
+    (
+        "task-board/comment-read-state",
+        "1.0.0",
+        "sha256:89536512d6a90e7258be921cdd9d164f295311c54ec9dc4a399b8d73c5b9686f",
+    ),
+    (
+        "task-board/task",
+        "1.8.0",
+        "sha256:3d2366800b8996ee03c021cfb37a83230b90ac53162c5bf7d3ae5c9941c5a62b",
+    ),
+    (
+        "task-board/run",
+        "1.1.0",
+        "sha256:ca5b954e86ca83ce69683231ea6d1559443928608e388637c847975143ec3a59",
+    ),
+    (
+        "task-board/task",
+        "1.7.0",
+        "sha256:006f184c50cb85b08e47ed65b8020353058fe3c3453a7321ab30b710c3451637",
+    ),
+    (
+        "task-board/delivery",
+        "1.0.0",
+        "sha256:06c1e909c23c94a5abde24ba3f8ef3b51248378a8a9d3c5cb3379b1f7c74136d",
+    ),
+    (
+        "task-board/task",
+        "1.6.0",
+        "sha256:d561a1fb6da96bbb870e4c7910c75f0c0163f0c4588fee19ef030fda6be46c50",
+    ),
+    (
+        "task-board/run",
+        "1.0.0",
+        "sha256:332432b6530100ed65fbecaa8ece18b3044d43ed85777b90c90c5535e75f65a8",
+    ),
+    (
+        "task-board/configuration",
+        "1.1.0",
+        "sha256:e230389ffb171501d0dd9370ee7fd2e7f902627e8264dc675d3038bab1c2bf36",
+    ),
+    (
+        "task-board/task",
+        "1.5.0",
+        "sha256:d207f99ff057caa52eadec0c477cbadf2a74d46bdb92a819b29218d894d43eb6",
+    ),
+    (
+        "task-board/configuration",
+        "1.0.0",
+        "sha256:7b6360e48ea42a05ec1e892b3cf5d35f5848ddff7399a7039a38b4694ca9181f",
+    ),
+    (
+        "task-board/task",
+        "1.4.0",
+        "sha256:5941af29e7790fa75543d95682458e3361f46360435f4a6d5c4ce570bc811f83",
+    ),
+    (
+        "task-board/task",
+        "1.3.0",
+        "sha256:4b7b09a63854080747570bda94546434a348028a85ef41065deab61ea83e9ff3",
+    ),
+    (
+        "task-board/task",
+        "1.2.0",
+        "sha256:a2dfe5fd8b33ca766ca8133539699ab4730a58661ea8b26c0563d438045b39cc",
+    ),
+    (
+        "task-board/task",
+        "1.1.0",
+        "sha256:3f742ad6493636dac5a97678e0e0f693a2b3c63217fbff525fe2c9ba8e181fd8",
+    ),
+    (
+        "task-board/task",
+        "1.0.0",
+        "sha256:af1dda89fd0b702c53d36b53cce286a905f89a334e2bd60ad6ba54b4845ec6fc",
+    ),
+    (
+        "task-board/attachment",
+        "1.0.0",
+        "sha256:b5490aa4704c1829850513f85594baabc031b18fc3d1ca53fe556f7388e02e27",
+    ),
+    (
+        "task-board/revision-protection",
+        "1.0.0",
+        "sha256:df92c322e714a09dad0302cbdea18d1da0b373158110e070f58f1e8b05acf95c",
+    ),
+    (
+        "task-board/reference-page",
+        "1.0.0",
+        "sha256:29b21be2df9f243b919eceb0ed127ae3626c63862df62faae50cccca41f2e87a",
+    ),
+];
+
+#[test]
+fn complete_catalog_preserves_original_definitions_and_return_order() {
+    let mut catalog = task_board_contracts().unwrap();
+    assert_eq!(catalog.len(), ORIGINAL.len());
+    let mut identities = HashSet::new();
+    let mut keys = HashSet::new();
+    for (definition, (key, version, expected)) in catalog.iter().zip(ORIGINAL) {
+        assert_eq!(definition.get("key").unwrap().as_str().unwrap(), *key);
+        assert_eq!(
+            definition.get("version").unwrap().as_str().unwrap(),
+            *version
+        );
+        assert!(identities.insert((*key, *version)));
+        keys.insert(*key);
+        let serialized = stringify(definition, MANAGEMENT_FRAME_BYTES).unwrap();
+        assert_eq!(digest(serialized.as_bytes()), *expected, "{key}@{version}");
+    }
+    assert_eq!(keys.len(), 15);
+    let serialized = stringify(&IvyJson::Array(catalog.clone()), MANAGEMENT_FRAME_BYTES).unwrap();
+    assert_eq!(serialized.len(), 598918);
+    assert_eq!(
+        digest(serialized.as_bytes()),
+        "sha256:39d5c5e41f06496f031c4f7be00f0171c3400a99a90186d9e4aec49132e6b48e"
+    );
+    // The builder returns a new object graph on every call.
+    catalog[0] = IvyJson::Null;
+    catalog.reverse();
+    let fresh = stringify(
+        &IvyJson::Array(task_board_contracts().unwrap()),
+        MANAGEMENT_FRAME_BYTES,
+    )
+    .unwrap();
+    assert_eq!(fresh, serialized);
+    println!(
+        "catalog definitions={} keys={} bytes={} sha256={}",
+        ORIGINAL.len(),
+        keys.len(),
+        fresh.len(),
+        digest(fresh.as_bytes())
+    );
+}

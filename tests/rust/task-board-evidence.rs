@@ -3,6 +3,8 @@ use ivy_task_board::evidence_bytes::*;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 
+#[path = "../fixtures/task-board-contracts.rs"]
+mod contracts;
 #[path = "../fixtures/task-board-evidence-support.rs"]
 mod support;
 use support::oracle;
