@@ -74,7 +74,18 @@ fn normalize(v: &mut IvyJson) {
         for (k, v) in fields {
             if k == &"endpoint".into() {
                 *v = "owned-endpoint".into();
-            } else if k == &"fromUri".into() {
+            } else if k == &"requestUri".into()
+                && v.as_str().unwrap().starts_with("sip:peer@127.0.0.1:")
+            {
+                let raw = v.as_str().unwrap();
+                let port = raw.strip_prefix("sip:peer@127.0.0.1:").unwrap();
+                assert_ne!(port.parse::<u16>().unwrap(), 0);
+                *v = "sip:peer@127.0.0.1:owned-peer".into();
+            } else if k == &"fromUri".into()
+                && v.as_str()
+                    .unwrap()
+                    .starts_with("sip:fixture-user@127.0.0.1:")
+            {
                 let raw = v.as_str().unwrap();
                 let port = raw
                     .strip_prefix("sip:fixture-user@127.0.0.1:")
@@ -237,11 +248,18 @@ async fn outgoing(
     dispatcher: Arc<NativeDispatcher>,
     scenario: &str,
     operation: u64,
+    supplied_peer: Option<UdpSocket>,
+    target: Option<&str>,
 ) -> IvyJson {
-    let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let peer = match supplied_peer {
+        Some(peer) => peer,
+        None => UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+    };
     let (rtp, _rtcp) = pair().await;
     let id = format!("\"{CALL}\"");
-    let destination = format!("\"sip:peer@{}\"", peer.local_addr().unwrap());
+    let destination = target
+        .map(|s| format!("\"{s}\""))
+        .unwrap_or_else(|| format!("\"sip:peer@{}\"", peer.local_addr().unwrap()));
     let params = args(
         &id,
         &destination,
@@ -345,10 +363,7 @@ async fn outgoing(
         ("hungup", hungup),
         ("inviteHasSdp", (!invite.body.is_empty()).into()),
         ("ackHasSdp", (!ack.body.is_empty()).into()),
-        (
-            "requestUriUser",
-            invite.uri.auth.as_ref().unwrap().user.clone().into(),
-        ),
+        ("requestUri", invite.uri.to_string().into()),
         (
             "fromUri",
             invite
@@ -409,6 +424,8 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
                         .as_str()
                         .unwrap(),
                     100 + 10 * i as u64,
+                    None,
+                    None,
                 )
                 .await
             } else {
@@ -457,7 +474,7 @@ async fn native_descriptor_dispatch_failures_keep_attempted_original_receipts() 
         let id = format!("\"{CALL}\"");
         let selected = format!(r#"{{"callId":"{CALL}"}}"#);
         let mut steps = vec![("configure".into(), params)];
-        for destination in ["sip:", "sips:", "sip:alice@", "sip:@", "tel:123"] {
+        for destination in ["sip:", "sips:", "sip:alice@", "sip:@"] {
             steps.push(("call.prepare".into(), selected.clone()));
             steps.push((
                 "call.dial".into(),
@@ -511,6 +528,67 @@ async fn native_descriptor_dispatch_failures_keep_attempted_original_receipts() 
                 .await;
             assert_eq!(r.outcome().result_json(), Some(snapshot.as_str()));
         }
+        assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
+        handler.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_telephone_uri_uses_only_the_configured_owned_proxy() {
+    for mode in ["initial", "delayed"] {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (owner, factory, routes, params) = actual_owner(48000, 48998);
+        let config=params.replace("\"transport\":\"udp\"",&format!("\"transport\":\"udp\",\"outgoingOfferMode\":\"{mode}\",\"outboundProxy\":\"$PROXY\""));
+        let inputs = vec![(
+            "fixture.proxyDial".into(),
+            format!(
+                r#"{{"callId":"{CALL}","scenario":"connected","destination":"tel:123","configuration":{config}}}"#
+            ),
+        )];
+        let original = original_raw(&inputs);
+        let remaining = Arc::new(Remaining::default());
+        remaining.close_gate.release();
+        let handler = Arc::new(NativeSipCommands::new(
+            owner.clone(),
+            remaining.clone(),
+            |_| Box::pin(async { Ok(()) }),
+            closed_platform_views(),
+        ));
+        let dispatcher =
+            Arc::new(NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap());
+        let actual = config.replace("$PROXY", &format!("udp:{}", peer.local_addr().unwrap()));
+        let r = dispatcher
+            .execute(command("configure", &actual, 1, 1))
+            .await;
+        assert!(r.outcome().error_code().is_none());
+        let selected = format!(r#"{{"callId":"{CALL}"}}"#);
+        let r = dispatcher
+            .execute(command("call.prepare", &selected, 2, 2))
+            .await;
+        assert!(r.outcome().error_code().is_none());
+        let result = outgoing(
+            &owner,
+            dispatcher.clone(),
+            "connected",
+            100,
+            Some(peer),
+            Some("tel:123"),
+        )
+        .await;
+        let rows = vec![IvyJson::object([(
+            "json",
+            stringify(&result, 65536).unwrap().into(),
+        )])];
+        trace(
+            &format!("native-dial-tel-proxy-{mode}"),
+            IvyJson::object([
+                ("rust", IvyJson::Array(rows.clone())),
+                ("original", original.clone().unwrap_or(IvyJson::Null)),
+                ("explicitOwnedProxy", true.into()),
+            ]),
+        );
+        compare(&rows, &original, &inputs);
+        assert_eq!(factory.starts.load(Ordering::SeqCst), 1);
         assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
         handler.shutdown().await.unwrap();
     }

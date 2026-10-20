@@ -30,16 +30,17 @@ public static class PhoneNativeDialOracle {
         for(int n=0;n<4;n++){var received=await Receive(peer);if(received.Item1.Method!=SIPMethodsEnum.CANCEL)return received;Reply(peer,received.Item1,received.Item2,200,"");}
         throw new Exception("Original dialog evidence unavailable after CANCEL");
     }
-    static async Task<object> Outgoing(NativeSipOperations owner,JsonElement args) {
+    static async Task<object> Outgoing(NativeSipOperations owner,JsonElement args,UdpClient suppliedPeer=null) {
         string id=args.GetProperty("callId").GetString(),scenario=args.GetProperty("scenario").GetString();
-        using var peer=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        using var peer=suppliedPeer??new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
         UdpClient rtp=null,rtcp=null;
         for(int n=0;n<32;n++) {rtp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));int p=((IPEndPoint)rtp.Client.LocalEndPoint).Port;
             try{if(p==65535)throw new SocketException();rtcp=new UdpClient(new IPEndPoint(IPAddress.Loopback,p+1));break;}catch(SocketException){rtp.Dispose();rtp=null;}}
         if(rtp==null)throw new Exception("Owned RTP pair unavailable");
         using(rtp)using(rtcp) {
-            string destination=$"sip:peer@{peer.Client.LocalEndPoint}";
-            var pending=owner.InvokeAsync("call.dial",Args(new{callId=id,destination,username="fixture-user",password="fixture-only",ringSeconds=5,waiting=false}));
+            bool telephone=args.TryGetProperty("destination",out var target);
+            string destination=telephone?target.GetString():$"sip:peer@{peer.Client.LocalEndPoint}";
+            var pending=owner.InvokeAsync("call.dial",Args(new{callId=id,destination,username=telephone?null:"fixture-user",password=telephone?null:"fixture-only",ringSeconds=5,waiting=false}));
             var (invite,remote)=await Receive(peer);
             object hungup=null;
             if(scenario=="hangup_before_answer")hungup=await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
@@ -56,15 +57,22 @@ public static class PhoneNativeDialOracle {
             }
             await owner.InvokeAsync("call.release",Args(new{callId=id}));
             return new{call,hungup,inviteHasSdp=!string.IsNullOrEmpty(invite.Body),ackHasSdp=!string.IsNullOrEmpty(ack.Body),
-                requestUriUser=invite.URI.User,fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null};
+                requestUri=invite.URI.ToString(),fromUri=invite.Header.From.FromURI.ToString(),sameCallId=invite.Header.CallId==id&&ack.Header.CallId==id,released=Host(owner).FindCall(id)==null};
         }
+    }
+    static async Task<object> ProxyDial(NativeSipOperations owner,JsonElement args) {
+        using var peer=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
+        using var config=JsonDocument.Parse(args.GetProperty("configuration").GetRawText().Replace("$PROXY",$"udp:{peer.Client.LocalEndPoint}"));
+        await owner.InvokeAsync("configure",config.RootElement);
+        await owner.InvokeAsync("call.prepare",Args(new{callId=args.GetProperty("callId").GetString()}));
+        return await Outgoing(owner,args,peer);
     }
     public static void Run() {
         using var input=JsonDocument.Parse(Console.In.ReadToEnd());var owner=new NativeSipOperations(id=>new CallAudioPort(id,new AudioPermit()));
         var rows=new List<object>();
         try {foreach(var step in input.RootElement.EnumerateArray()) {
             try {string method=step.GetProperty("method").GetString();var args=step.GetProperty("params");
-                object result=method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
+                object result=method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
                 rows.Add(new{json=JsonSerializer.Serialize(result,NativeRpc.Json)});
             } catch(Exception e){rows.Add(new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"});}
         }} finally {owner.DisposeAsync().AsTask().GetAwaiter().GetResult();}

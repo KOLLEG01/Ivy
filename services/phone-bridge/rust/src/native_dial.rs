@@ -87,20 +87,20 @@ impl NativeDial {
         }
         // ParseSIPURI requires an explicit scheme; a malformed URI is a native
         // operation error, distinct from the bounded argument validation above.
-        // The original descriptor accepts an empty host and tel URI, but its
-        // SIP dispatch cannot send them. Keep that failure after the original
+        // The original descriptor accepts an empty host. Keep that failure after the original
         // attempt latch instead of converting it to a pre-attempt DTO error.
         if let Some((scheme, authority)) = destination.split_once(':') {
             let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
             if (scheme.eq_ignore_ascii_case("sip") || scheme.eq_ignore_ascii_case("sips"))
                 && host.trim().is_empty()
-                || scheme.eq_ignore_ascii_case("tel") && !authority.is_empty()
             {
                 return Ok(None);
             }
         }
         let uri: Uri = destination.try_into().map_err(|_| unknown())?;
-        if !matches!(uri.scheme, Some(Scheme::Sip | Scheme::Sips)) {
+        let telephone =
+            matches!(&uri.scheme,Some(Scheme::Other(s)) if s.eq_ignore_ascii_case("tel"));
+        if !telephone && !matches!(uri.scheme, Some(Scheme::Sip | Scheme::Sips)) {
             return Err(unknown());
         }
         let registered = registration.map(SipRegistrationSettings::dial_identity);
@@ -135,7 +135,7 @@ impl NativeDial {
         let mut canonical = uri.clone();
         canonical.params.clear();
         canonical.headers.clear();
-        if canonical.host_with_port.port.is_none() {
+        if !telephone && canonical.host_with_port.port.is_none() {
             canonical.host_with_port.port = Some(
                 (if uri.scheme == Some(Scheme::Sips) {
                     5061
