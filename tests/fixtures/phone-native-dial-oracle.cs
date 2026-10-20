@@ -26,6 +26,10 @@ public static class PhoneNativeDialOracle {
         response.Header.ContentLength=Encoding.UTF8.GetByteCount(body??"");
         byte[] bytes=Encoding.UTF8.GetBytes(response.ToString());peer.Send(bytes,bytes.Length,remote);
     }
+    static async Task<(SIPRequest,IPEndPoint)> ReceiveDialog(UdpClient peer) {
+        for(int n=0;n<4;n++){var received=await Receive(peer);if(received.Item1.Method!=SIPMethodsEnum.CANCEL)return received;Reply(peer,received.Item1,received.Item2,200,"");}
+        throw new Exception("Original dialog evidence unavailable after CANCEL");
+    }
     static async Task<object> Outgoing(NativeSipOperations owner,JsonElement args) {
         string id=args.GetProperty("callId").GetString(),scenario=args.GetProperty("scenario").GetString();
         using var peer=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));
@@ -41,12 +45,12 @@ public static class PhoneNativeDialOracle {
             if(scenario=="hangup_before_answer")hungup=await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
             string sdp=$"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {((IPEndPoint)rtp.Client.LocalEndPoint).Port} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n";
             Reply(peer,invite,remote,scenario=="refused"?486:200,scenario=="refused"?"":sdp);
-            var (ack,ackRemote)=await Receive(peer);
+            var (ack,ackRemote)=await ReceiveDialog(peer);
             if(ack.Method!=SIPMethodsEnum.ACK)throw new Exception("Original ACK unavailable");
             object call=await pending.WaitAsync(TimeSpan.FromSeconds(5));
             if(scenario!="refused") {
                 await owner.InvokeAsync("call.hangup",Args(new{callId=id}));
-                var (bye,byeRemote)=await Receive(peer);
+                var (bye,byeRemote)=await ReceiveDialog(peer);
                 if(bye.Method!=SIPMethodsEnum.BYE)throw new Exception("Original BYE unavailable");
                 Reply(peer,bye,byeRemote,200,"");
             }

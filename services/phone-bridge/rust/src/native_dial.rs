@@ -71,7 +71,7 @@ impl NativeDial {
     pub fn descriptor(
         &self,
         registration: Option<&SipRegistrationSettings>,
-    ) -> Result<DialDescriptor, NativeSipError> {
+    ) -> Result<Option<DialDescriptor>, NativeSipError> {
         let bounded =
             |s: &str, n| s.encode_utf16().count() <= n && !s.chars().any(char::is_control);
         let destination = self
@@ -87,6 +87,18 @@ impl NativeDial {
         }
         // ParseSIPURI requires an explicit scheme; a malformed URI is a native
         // operation error, distinct from the bounded argument validation above.
+        // The original descriptor accepts an empty host and tel URI, but its
+        // SIP dispatch cannot send them. Keep that failure after the original
+        // attempt latch instead of converting it to a pre-attempt DTO error.
+        if let Some((scheme, authority)) = destination.split_once(':') {
+            let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+            if (scheme.eq_ignore_ascii_case("sip") || scheme.eq_ignore_ascii_case("sips"))
+                && host.trim().is_empty()
+                || scheme.eq_ignore_ascii_case("tel") && !authority.is_empty()
+            {
+                return Ok(None);
+            }
+        }
         let uri: Uri = destination.try_into().map_err(|_| unknown())?;
         if !matches!(uri.scheme, Some(Scheme::Sip | Scheme::Sips)) {
             return Err(unknown());
@@ -137,14 +149,14 @@ impl NativeDial {
         if uri.scheme == Some(Scheme::Sips) {
             next_hop.r#type = Some(Transport::Tls);
         }
-        Ok(DialDescriptor {
+        Ok(Some(DialDescriptor {
             uri,
             from,
             to: canonical.to_string(),
             username: username.into(),
             credentials,
             next_hop,
-        })
+        }))
     }
 }
 pub(crate) struct DialDescriptor {

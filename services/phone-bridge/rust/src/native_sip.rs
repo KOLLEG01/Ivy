@@ -196,6 +196,7 @@ struct Call {
 }
 #[derive(Default)]
 struct CallResult {
+    attempted: bool,
     ending: bool,
     unknown: bool,
     error: Option<&'static str>,
@@ -226,6 +227,7 @@ impl NativeSipCall {
             observed.phase = SipHostCallPhase::OutcomeUnknown;
         }
         observed.ending |= result.ending;
+        observed.attempted |= result.attempted;
         observed
     }
     pub(crate) fn error(&self) -> Option<&'static str> {
@@ -513,17 +515,24 @@ impl NativeSipOperations {
         if observation.attempted || observation.ending {
             return Err(NativeConfigError::OutcomeUnknown.into());
         }
+        expected.0.result.lock().unwrap().attempted = true;
+        let Some(descriptor) = descriptor else {
+            return self.failed_dial_dispatch(expected);
+        };
         let media = expected.media().ok_or(SipHostError::NotReady)?;
+        if input.waiting && media.begin_waiting().is_err() {
+            return self.failed_dial_dispatch(expected);
+        }
         let delayed = config.binding.offer_mode() == crate::native_config::OfferMode::Delayed
             || config.binding.offer_mode() == crate::native_config::OfferMode::Auto
                 && config.codecs.preferences()[0] == crate::media::Codec::Evs;
         let body = if delayed {
             String::new()
         } else {
-            media
-                .create_offer()
-                .ok_or(NativeConfigError::OutcomeUnknown)?
-                .to_sdp()
+            match media.create_offer() {
+                Some(offer) => offer.to_sdp(),
+                None => return self.failed_dial_dispatch(expected),
+            }
         };
         let request = descriptor.request(
             &observation.id,
@@ -537,18 +546,17 @@ impl NativeSipOperations {
         );
         // The original BeginWaiting precedes dispatch; it does not grant live
         // caller audio or start a replacement sender.
-        if input.waiting {
-            media
-                .begin_waiting()
-                .map_err(|_| NativeConfigError::OutcomeUnknown)?;
-        }
         let pending = self.0.host.begin_dial(
             &expected.0.original,
             request,
             descriptor.next_hop,
             descriptor.credentials,
             input.ring_seconds as u32,
-        )?;
+        );
+        let pending = match pending {
+            Ok(pending) => pending,
+            Err(_) => return self.failed_dial_dispatch(expected),
+        };
         let owner = self.clone();
         let call = expected.clone();
         Ok(retained(async move {
@@ -562,8 +570,10 @@ impl NativeSipOperations {
                 let mut result = call.0.result.lock().unwrap();
                 match completed {
                     Ok(Ok(CallOutcome::Unknown)) => {
-                        result.unknown=true;result.ending=true;result.error=Some("sip_operation_outcome_unknown");
-                    },
+                        result.unknown = true;
+                        result.ending = true;
+                        result.error = Some("sip_operation_outcome_unknown");
+                    }
                     Ok(Ok(CallOutcome::Connected))
                         if !result.ending
                             && !result.unknown
@@ -590,6 +600,19 @@ impl NativeSipOperations {
             }
             crate::native_sip_status::call_json(&call).map_err(|_| SipHostError::CleanupUnconfirmed)
         }))
+    }
+    fn failed_dial_dispatch(
+        &self,
+        expected: &NativeSipCall,
+    ) -> Result<NativeSipOperation<String>, NativeSipError> {
+        let mut result = expected.0.result.lock().unwrap();
+        result.unknown = true;
+        result.ending = true;
+        result.error = Some("sip_operation_outcome_unknown");
+        drop(result);
+        self.0.host.hangup(&expected.0.original)?;
+        let snapshot = crate::native_sip_status::call_json(expected)?;
+        Ok(retained(async move { Ok(snapshot) }))
     }
     pub fn configure_features(
         &self,

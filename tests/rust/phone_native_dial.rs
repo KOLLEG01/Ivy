@@ -74,6 +74,13 @@ fn normalize(v: &mut IvyJson) {
         for (k, v) in fields {
             if k == &"endpoint".into() {
                 *v = "owned-endpoint".into();
+            } else if k == &"fromUri".into() {
+                let raw = v.as_str().unwrap();
+                let port = raw
+                    .strip_prefix("sip:fixture-user@127.0.0.1:")
+                    .expect("original From identity");
+                assert_ne!(port.parse::<u16>().unwrap(), 0);
+                *v = "sip:fixture-user@127.0.0.1:owned-peer".into();
             } else {
                 normalize(v);
             }
@@ -427,6 +434,84 @@ async fn native_initial_and_delayed_dial_use_original_media_policy_and_saved_rec
         assert_eq!(factory.starts.load(Ordering::SeqCst), 3);
         assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
         assert!(remaining.methods.lock().unwrap().is_empty());
+        handler.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_descriptor_dispatch_failures_keep_attempted_original_receipts() {
+    for mode in ["initial", "delayed"] {
+        let (owner, _, routes, params) = actual_owner(49000, 49998);
+        let params = params.replace(
+            "\"transport\":\"udp\"",
+            &format!("\"transport\":\"udp\",\"outgoingOfferMode\":\"{mode}\""),
+        );
+        let remaining = Arc::new(Remaining::default());
+        remaining.close_gate.release();
+        let handler = Arc::new(NativeSipCommands::new(
+            owner.clone(),
+            remaining.clone(),
+            |_| Box::pin(async { Ok(()) }),
+            closed_platform_views(),
+        ));
+        let id = format!("\"{CALL}\"");
+        let selected = format!(r#"{{"callId":"{CALL}"}}"#);
+        let mut steps = vec![("configure".into(), params)];
+        for destination in ["sip:", "sips:", "sip:alice@", "sip:@", "tel:123"] {
+            steps.push(("call.prepare".into(), selected.clone()));
+            steps.push((
+                "call.dial".into(),
+                args(
+                    &id,
+                    &format!("\"{destination}\""),
+                    "null",
+                    "null",
+                    "1",
+                    "false",
+                ),
+            ));
+            steps.push(("call.release".into(), selected.clone()));
+        }
+        let original = original_raw(&steps);
+        let dispatcher = NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap();
+        let mut rows = Vec::new();
+        let mut saved = Vec::new();
+        for (i, (m, p)) in steps.iter().enumerate() {
+            let r = dispatcher
+                .execute(command(m, p, i as u64 + 1, i as u64 + 1))
+                .await;
+            if m == "call.dial" {
+                let call = owner.find(CALL).unwrap();
+                assert!(call.observation().attempted && call.observation().ending);
+                assert_eq!(call.signalling().unwrap().sent, 0);
+                saved.push((i, r.outcome().result_json().unwrap().to_owned()));
+            }
+            rows.push(if let Some(e) = r.outcome().error_code() {
+                IvyJson::object([("error", e.into())])
+            } else {
+                IvyJson::object([("json", r.outcome().result_json().unwrap().into())])
+            });
+        }
+        trace(
+            &format!("native-dial-dispatch-failure-{mode}"),
+            IvyJson::object([
+                ("rust", IvyJson::Array(rows.clone())),
+                ("original", original.clone().unwrap_or(IvyJson::Null)),
+            ]),
+        );
+        compare(&rows, &original, &steps);
+        for (i, snapshot) in saved {
+            let r = dispatcher
+                .execute(command(
+                    &steps[i].0,
+                    &steps[i].1,
+                    i as u64 + 1,
+                    1000 + i as u64,
+                ))
+                .await;
+            assert_eq!(r.outcome().result_json(), Some(snapshot.as_str()));
+        }
+        assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
         handler.shutdown().await.unwrap();
     }
 }
