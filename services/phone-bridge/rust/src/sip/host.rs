@@ -240,6 +240,9 @@ impl Call {
 #[derive(Clone)]
 pub struct SipHostCall(Arc<Call>);
 impl SipHostCall {
+    pub(super) fn hosted_media(&self) -> Option<Arc<dyn HostedSipMedia>> {
+        self.0.media.get().cloned()
+    }
     pub(crate) fn id(&self) -> &str {
         &self.0.id
     }
@@ -618,8 +621,17 @@ impl SipHost {
         if current.incoming.is_some() {
             return Err(transaction);
         }
-        let incoming =
-            super::incoming::IncomingInvite::start(call.clone(), transaction, ring_seconds);
+        let incoming = super::incoming::IncomingInvite::start(
+            call.clone(),
+            transaction,
+            state
+                .binding
+                .as_ref()
+                .unwrap()
+                .endpoint()
+                .expect("admitted endpoint"),
+            ring_seconds,
+        );
         if current.ending {
             incoming.request_hangup();
         }
@@ -635,6 +647,26 @@ impl SipHost {
             .find(|call| call.id == id)
             .cloned()
             .map(SipHostCall)
+    }
+    pub(crate) fn begin_answer(
+        &self,
+        expected: &SipHostCall,
+        before: impl FnOnce() -> Result<(), SipHostError>,
+    ) -> Result<impl Future<Output = Result<CallOutcome, SipHostError>> + Send + use<>, SipHostError>
+    {
+        let state = self.shared().lock().unwrap();
+        ready(&state)?;
+        original(&state, self.shared(), expected)?;
+        let mut current = expected.0.state.lock().unwrap();
+        if current.attempted || current.ending || !expected.0.incoming {
+            return Err(SipHostError::OperationConflict);
+        }
+        let incoming = current.incoming.clone().ok_or(SipHostError::NotReady)?;
+        incoming
+            .request_answer(before)
+            .map_err(|_| SipHostError::OperationConflict)?;
+        current.attempted = true;
+        Ok(async move { Ok(incoming.wait_answer().await) })
     }
     /// Route selection is a separate pre-DNS authority; a proxy overrides it.
     /// The native DTO/descriptor owner constructs the original INVITE identity.
@@ -908,7 +940,14 @@ fn ready(state: &State) -> Result<(), SipHostError> {
 }
 fn deliver_control(state: &State, mut transaction: Transaction) -> Result<(), Transaction> {
     for call in state.calls.iter() {
-        if let Some(invite) = &call.state.lock().unwrap().invite {
+        let current = call.state.lock().unwrap();
+        if let Some(incoming) = &current.incoming {
+            transaction = match incoming.deliver_control(transaction) {
+                Ok(()) => return Ok(()),
+                Err(transaction) => transaction,
+            };
+        }
+        if let Some(invite) = &current.invite {
             transaction = match invite.deliver_control(transaction) {
                 Ok(()) => return Ok(()),
                 Err(transaction) => transaction,

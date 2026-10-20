@@ -115,7 +115,7 @@ public static class PhoneNativeDialOracle {
         var rows=new List<object>();
         try {foreach(var step in input.RootElement.EnumerateArray()) {
             try {string method=step.GetProperty("method").GetString();var args=step.GetProperty("params");
-                object result=method=="fixture.incoming"?PhoneNativeIncomingOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():method=="fixture.requests"?Requests(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
+                object result=method=="fixture.answer"?PhoneNativeAnswerOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.incoming"?PhoneNativeIncomingOracle.Run(owner,args).GetAwaiter().GetResult():method=="fixture.outgoing"?Outgoing(owner,args).GetAwaiter().GetResult():method=="fixture.proxyDial"?ProxyDial(owner,args).GetAwaiter().GetResult():method=="fixture.requests"?Requests(owner,args).GetAwaiter().GetResult():owner.InvokeAsync(method,args).GetAwaiter().GetResult();
                 rows.Add(new{json=JsonSerializer.Serialize(result,NativeRpc.Json)});
             } catch(Exception e){rows.Add(new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"});}
         }} finally {owner.DisposeAsync().AsTask().GetAwaiter().GetResult();}
@@ -174,5 +174,57 @@ public static class PhoneNativeIncomingOracle {
         if(claimed)await owner.InvokeAsync("call.release",Args(new{callId=id}));
         bool released=Host(owner).FindCall(id)==null;await owner.DisposeAsync();
         return new{code,call=admitted,claim,features,hungup,ended,statuses,retained,expired,released,duplicateIgnored,closed=true};
+    }
+}
+
+public static class PhoneNativeAnswerOracle {
+    static SipTransportHost Host(NativeSipOperations owner)=>(SipTransportHost)typeof(NativeSipOperations).GetField("host",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(owner);
+    static JsonElement Args(object value)=>JsonSerializer.SerializeToElement(value,NativeRpc.Json);
+    static async Task<string> Receive(UdpClient peer,int milliseconds=4000) {using var cancel=new CancellationTokenSource(milliseconds);for(;;){var p=await peer.ReceiveAsync(cancel.Token);string raw=Encoding.UTF8.GetString(p.Buffer);if(!raw.StartsWith("SIP/2.0 100"))return raw;}}
+    static async Task Wait(Func<bool> ready){var until=DateTime.UtcNow.AddSeconds(4);while(!ready()){if(DateTime.UtcNow>=until)throw new Exception("Original answer observation unavailable");await Task.Delay(1);}}
+    static async Task<object> Invoke(NativeSipOperations owner,string method,object args){try{return new{json=JsonSerializer.Serialize(await owner.InvokeAsync(method,Args(args)),NativeRpc.Json)};}catch(Exception e){return new{error=e is NativeRpcException rpc?rpc.Code:e is ArgumentException||e is JsonException?"invalid_request":"operation_outcome_unknown"};}}
+    public static async Task<object> Run(NativeSipOperations owner,JsonElement args){
+        string scenario=args.GetProperty("scenario").GetString();bool delayed=scenario.StartsWith("delayed"),waiting=scenario.EndsWith("waiting");
+        await owner.InvokeAsync("configure",args.GetProperty("configuration"));
+        using var peer=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));UdpClient rtp=null,rtcp=null;
+        for(int n=0;n<32;n++){rtp=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));int port=((IPEndPoint)rtp.Client.LocalEndPoint).Port;try{if(port==65535)throw new SocketException();rtcp=new UdpClient(new IPEndPoint(IPAddress.Loopback,port+1));break;}catch(SocketException){rtp.Dispose();rtp=null;}}
+        if(rtp==null)throw new Exception("Owned answer RTP pair unavailable");
+        using(rtp)using(rtcp){
+            string wire="owned-native-answer",tag="",source=peer.Client.LocalEndPoint.ToString();var target=Host(owner).LocalEndpoint;
+            string sdp=$"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {((IPEndPoint)rtp.Client.LocalEndPoint).Port} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n";
+            string Raw(string method,int sequence,string branch,string body)=>$"{method} sip:fixture@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {source};rport;branch={branch}\r\nFrom: <sip:caller@{source}>;tag=caller-tag\r\nTo: <sip:fixture@{target}>{(tag.Length==0?"":";tag="+tag)}\r\nCall-ID: {wire}\r\nCSeq: {sequence} {method}\r\nContact: <sip:caller@{source}>\r\nMax-Forwards: 70\r\nContent-Type: application/sdp\r\nContent-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n{body}";
+            async Task Send(string method,int seq,string branch,string body){byte[] packet=Encoding.UTF8.GetBytes(Raw(method,seq,branch,body));await peer.SendAsync(packet,packet.Length,target);}
+            await Send("INVITE",1,"z9hG4bK-owned-answer",scenario.EndsWith("invalid_offer")?"invalid-sdp":delayed?"":sdp);
+            var ring=SIPResponse.ParseSIPResponse(await Receive(peer));if((int)ring.Status!=180)throw new Exception("Original answer ringing unavailable");
+            await Wait(()=>Host(owner).Calls.Any(c=>c.Observation.SipCallId==wire));var call=Host(owner).Calls.Single(c=>c.Observation.SipCallId==wire);var media=call.Media;string id=call.Observation.Id;
+            await owner.InvokeAsync("call.claim",Args(new{callId=id}));await owner.InvokeAsync("call.features",Args(new{callId=id,challenge=(object)null}));
+            var pending=Invoke(owner,"call.answer",new{callId=id,waiting});
+            var final=SIPResponse.ParseSIPResponse(await Receive(peer));int status=(int)final.Status;tag=final.Header.To.ToTag;
+            object hungup=null;var controls=new List<int>();
+            if(status==200){
+                if(scenario.EndsWith("hangup_before_ack"))hungup=await Invoke(owner,"call.hangup",new{callId=id});
+                if(scenario.EndsWith("slow_ack")){await Task.Delay(1250);try{for(;;)if((int)SIPResponse.ParseSIPResponse(await Receive(peer,50)).Status!=200)throw new Exception("Original ring timer was not retired by answer");}catch(OperationCanceledException){}}
+                await Send("ACK",1,"z9hG4bK-owned-ack",delayed?(scenario.EndsWith("invalid_ack")?"invalid-sdp":sdp):"");
+            }else{await Send("ACK",1,"z9hG4bK-owned-answer","");}
+            object answered=await pending.WaitAsync(TimeSpan.FromSeconds(6));
+            if(status==200&&scenario.EndsWith("reinvite")){
+                await Send("INVITE",2,"z9hG4bK-owned-reinvite",delayed?"":sdp);var re=SIPResponse.ParseSIPResponse(await Receive(peer));controls.Add((int)re.Status);
+                await Send("INVITE",3,"z9hG4bK-owned-overlap",sdp);controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);
+                await Send("INVITE",1,"z9hG4bK-owned-stale",sdp);controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);
+                await Send("ACK",2,"z9hG4bK-owned-reack",delayed?sdp:"");
+                await Send("OPTIONS",4,"z9hG4bK-owned-options","");controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);
+            }
+            if(status==200&&scenario.EndsWith("remote_bye")){
+                for(int n=0;n<2;n++){await Send("BYE",5,"z9hG4bK-owned-bye","");controls.Add((int)SIPResponse.ParseSIPResponse(await Receive(peer)).Status);}
+                await Wait(()=>call.Observation.State=="local_ended");
+            }else if(status==200){
+                if(hungup==null&&!scenario.EndsWith("invalid_ack"))hungup=await Invoke(owner,"call.hangup",new{callId=id});
+                var bye=SIPRequest.ParseSIPRequest(await Receive(peer));if(bye.Method!=SIPMethodsEnum.BYE)throw new Exception("Original incoming BYE unavailable");
+                var response=SIPResponse.GetResponse(bye,(SIPResponseStatusCodesEnum)200,null);byte[] packet=Encoding.UTF8.GetBytes(response.ToString());await peer.SendAsync(packet,packet.Length,target);
+            }
+            await Wait(()=>call.Observation.State=="local_ended");object ended=call.Observation;bool sameMedia=ReferenceEquals(media,call.Media);
+            await owner.InvokeAsync("call.release",Args(new{callId=id}));bool released=Host(owner).FindCall(id)==null;await owner.DisposeAsync();
+            return new{status,answered,hungup,ended,controls,finalHasSdp=!string.IsNullOrEmpty(final.Body),ackHasSdp=status==200&&delayed,sameMedia,released,closed=true};
+        }
     }
 }

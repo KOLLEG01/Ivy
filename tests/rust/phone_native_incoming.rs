@@ -2,7 +2,7 @@ use super::*;
 use rsipstack::sip::Response;
 use std::net::SocketAddr;
 
-async fn receive(peer: &UdpSocket, milliseconds: u64) -> Option<Response> {
+pub(super) async fn receive(peer: &UdpSocket, milliseconds: u64) -> Option<Response> {
     tokio::time::timeout(Duration::from_millis(milliseconds), async {
         let mut bytes = [0u8; 8192];
         loop {
@@ -37,13 +37,13 @@ fn raw(
 fn wrap(json: String) -> IvyJson {
     IvyJson::object([("json", json.into())])
 }
-fn outcome(value: &NativeOutcome) -> IvyJson {
+pub(super) fn outcome(value: &NativeOutcome) -> IvyJson {
     value
         .error_code()
         .map(|e| IvyJson::object([("error", e.into())]))
         .unwrap_or_else(|| wrap(value.result_json().unwrap().into()))
 }
-fn normalize(value: &mut IvyJson, generated: &str) {
+pub(super) fn normalize(value: &mut IvyJson, generated: &str) {
     match value {
         IvyJson::Object(fields) => {
             for (key, value) in fields {

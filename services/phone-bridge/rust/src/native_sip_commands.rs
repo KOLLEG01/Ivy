@@ -161,6 +161,32 @@ impl NativeSipCommands {
                 }
             }));
         }
+        if request.method() == "call.answer" {
+            if fields.len() != 2 || request.params().get("callId").is_none() {
+                return Err(SipHostError::InvalidRequest.into());
+            }
+            let waiting = request
+                .params()
+                .get("waiting")
+                .and_then(IvyJson::as_bool)
+                .ok_or(SipHostError::InvalidRequest)?;
+            let call = selected
+                .and_then(|id| self.owner.find(&id))
+                .ok_or(SipHostError::NotReady)?;
+            let owner = self.owner.clone();
+            return Ok(Box::pin(async move {
+                if let Err(error) = call.constructed().await {
+                    return failed(error.into());
+                }
+                match owner.answer(&call, waiting) {
+                    Ok(work) => match work.wait().await {
+                        Ok(json) => NativeOutcome::result(json),
+                        Err(error) => failed(error.into()),
+                    },
+                    Err(error) => failed(error),
+                }
+            }));
+        }
         if fields.len() != 1 || request.params().get("callId").is_none() {
             return Err(SipHostError::InvalidRequest.into());
         }
@@ -250,6 +276,7 @@ impl NativeHandler for NativeSipCommands {
                 | "call.prepare"
                 | "call.dial"
                 | "call.claim"
+                | "call.answer"
                 | "call.hangup"
                 | "call.release"
                 | "registration.reconnect"

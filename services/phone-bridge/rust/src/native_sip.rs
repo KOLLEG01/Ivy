@@ -599,7 +599,10 @@ impl NativeSipOperations {
         tokio::spawn(async move {
             loop {
                 let observed = *changes.borrow_and_update();
-                if observed.ending || observed.uncertain || observed.outcome.is_some() {
+                if observed.ending
+                    || observed.uncertain
+                    || observed.outcome.is_some() && !observed.active
+                {
                     if let Some(media) = call.media() {
                         media.request_close();
                     }
@@ -786,6 +789,65 @@ impl NativeSipOperations {
                     {
                         result.ending = true;
                         result.error = Some("sip_dial_not_connected");
+                    }
+                    Ok(Ok(_)) if result.ending || result.unknown => (),
+                    _ => {
+                        result.unknown = true;
+                        result.ending = true;
+                        result.error = Some("sip_operation_outcome_unknown");
+                    }
+                }
+            }
+            if call.0.result.lock().unwrap().ending {
+                let _ = owner.0.host.hangup(&call.0.original);
+            }
+            crate::native_sip_status::call_json(&call).map_err(|_| SipHostError::CleanupUnconfirmed)
+        }))
+    }
+    pub(crate) fn answer(
+        &self,
+        expected: &NativeSipCall,
+        waiting: bool,
+    ) -> Result<NativeSipOperation<String>, NativeSipError> {
+        let state = self.0.state.lock().unwrap();
+        Self::original(&state, expected)?;
+        let observation = expected.observation();
+        if observation.attempted || observation.ending || expected.incoming().is_none() {
+            return Err(NativeConfigError::OutcomeUnknown.into());
+        }
+        expected.0.result.lock().unwrap().attempted = true;
+        let media = expected.media().ok_or(SipHostError::NotReady)?;
+        let pending = match self.0.host.begin_answer(&expected.0.original, || {
+            if waiting {
+                media
+                    .begin_waiting()
+                    .map_err(|_| SipHostError::InitializationFailed)?;
+            }
+            Ok(())
+        }) {
+            Ok(pending) => pending,
+            Err(_) => return self.failed_dial_dispatch(expected),
+        };
+        let owner = self.clone();
+        let call = expected.clone();
+        Ok(retained(async move {
+            let completed = tokio::time::timeout(std::time::Duration::from_secs(15), pending).await;
+            let original = call.0.original.observation();
+            {
+                let mut result = call.0.result.lock().unwrap();
+                match completed {
+                    Ok(Ok(CallOutcome::Connected))
+                        if !result.ending
+                            && !result.unknown
+                            && original.phase == SipHostCallPhase::Connected =>
+                    {
+                        call.0.features.connected()
+                    }
+                    Ok(Ok(CallOutcome::Ended | CallOutcome::Connected))
+                        if !result.ending && !result.unknown =>
+                    {
+                        result.ending = true;
+                        result.error = Some("sip_answer_not_connected");
                     }
                     Ok(Ok(_)) if result.ending || result.unknown => (),
                     _ => {

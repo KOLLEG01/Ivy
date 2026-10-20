@@ -37,6 +37,10 @@ pub trait DelayedInviteMedia: Send + Sync + 'static {
     fn negotiate_offer(&self, offer: &str) -> Option<String>;
     /// Apply a response to the initial offer on this same media session.
     fn accept_answer(&self, answer: &str) -> bool;
+    /// A bodyless incoming INVITE needs an offer from this original session.
+    fn initial_offer(&self) -> Option<String> {
+        None
+    }
     fn rejected_answer(&self, offer: &str) -> Option<String> {
         crate::media::SdpDocument::rejected_answer(offer)
     }

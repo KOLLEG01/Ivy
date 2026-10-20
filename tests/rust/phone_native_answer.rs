@@ -1,0 +1,470 @@
+use super::incoming::{normalize, outcome, receive};
+use super::*;
+use rsipstack::sip::{Method, Request, prelude::*};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_answer_dto_global_lookup_and_outgoing_attempt_precedence_match_original() {
+    let (owner, _, routes, params) = actual_owner(42000, 42998);
+    let remaining = Arc::new(Remaining::default());
+    remaining.close_gate.release();
+    let handler = Arc::new(NativeSipCommands::new(
+        owner.clone(),
+        remaining.clone(),
+        |_| Box::pin(async { Ok(()) }),
+        closed_platform_views(),
+    ));
+    let dispatcher = NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap();
+    let selected = format!(r#"{{"callId":"{CALL}"}}"#);
+    let valid = format!(r#"{{"callId":"{CALL}","waiting":false}}"#);
+    let mut steps = vec![
+        (
+            "call.answer".into(),
+            r#"{"callId":42,"waiting":false}"#.into(),
+        ),
+        ("configure".into(), params),
+    ];
+    for params in [
+        "{}",
+        r#"{"callId":null,"waiting":false}"#,
+        r#"{"callId":42,"waiting":false}"#,
+        r#"{"callId":false,"waiting":false}"#,
+        r#"{"callId":"missing","waiting":false}"#,
+        r#"{"callId":"missing","waiting":null}"#,
+        r#"{"callId":"missing"}"#,
+        r#"{"callId":"missing","waiting":false,"extra":0}"#,
+    ] {
+        steps.push(("call.answer".into(), params.into()));
+    }
+    steps.push(("call.prepare".into(), selected.clone()));
+    for waiting in ["null", "42", r#""false""#, "[]", "{}"] {
+        steps.push((
+            "call.answer".into(),
+            format!(r#"{{"callId":"{CALL}","waiting":{waiting}}}"#),
+        ));
+    }
+    steps.extend([
+        ("call.answer".into(), selected.clone()),
+        ("call.answer".into(), valid.clone()),
+        ("call.hangup".into(), selected.clone()),
+        ("call.answer".into(), valid.clone()),
+        ("call.answer".into(), valid.replace("false", "null")),
+        ("call.release".into(), selected),
+        ("call.answer".into(), valid),
+    ]);
+    let original = super::dial::original_raw(&steps);
+    let mut rows = vec![];
+    for (i, (method, params)) in steps.iter().enumerate() {
+        rows.push(outcome(
+            dispatcher
+                .execute(command(method, params, i as u64 + 1, i as u64 + 1))
+                .await
+                .outcome(),
+        ));
+    }
+    trace(
+        "native-answer-validation",
+        IvyJson::object([
+            ("rust", IvyJson::Array(rows.clone())),
+            ("original", original.clone().unwrap_or(IvyJson::Null)),
+            ("steps", n(steps.len())),
+        ]),
+    );
+    super::dial::compare(&rows, &original, &steps);
+    assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
+    assert!(remaining.methods.lock().unwrap().is_empty());
+    handler.shutdown().await.unwrap();
+}
+fn raw(
+    method: &str,
+    seq: u32,
+    branch: &str,
+    tag: &str,
+    source: std::net::SocketAddr,
+    target: std::net::SocketAddr,
+    body: &str,
+) -> String {
+    format!(
+        "{method} sip:fixture@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {source};rport;branch={branch}\r\nFrom: <sip:caller@{source}>;tag=caller-tag\r\nTo: <sip:fixture@{target}>{}\r\nCall-ID: owned-native-answer\r\nCSeq: {seq} {method}\r\nContact: <sip:caller@{source}>\r\nMax-Forwards: 70\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}",
+        if tag.is_empty() {
+            String::new()
+        } else {
+            format!(";tag={tag}")
+        },
+        body.len()
+    )
+}
+async fn send(
+    peer: &UdpSocket,
+    target: std::net::SocketAddr,
+    method: &str,
+    seq: u32,
+    branch: &str,
+    tag: &str,
+    body: &str,
+) {
+    peer.send_to(
+        raw(
+            method,
+            seq,
+            branch,
+            tag,
+            peer.local_addr().unwrap(),
+            target,
+            body,
+        )
+        .as_bytes(),
+        target,
+    )
+    .await
+    .unwrap();
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn original_native_answers_keep_original_media_ack_controls_and_saved_receipts() {
+    for scenario in [
+        "initial_connected",
+        "delayed_connected",
+        "initial_remote_bye",
+        "delayed_remote_bye",
+        "initial_waiting",
+        "initial_slow_ack",
+        "initial_invalid_offer",
+        "delayed_invalid_ack",
+        "initial_hangup_before_ack",
+        "delayed_hangup_before_ack",
+        "initial_reinvite",
+        "delayed_reinvite",
+    ] {
+        let delayed = scenario.starts_with("delayed");
+        let waiting = scenario.ends_with("waiting");
+        let (owner, factory, routes, params) = actual_owner(40000, 41998);
+        let config = params.replace(
+            "\"transport\":\"udp\"",
+            "\"transport\":\"udp\",\"incomingRingSeconds\":1",
+        );
+        let fixture = IvyJson::object([
+            ("scenario", scenario.into()),
+            ("configuration", parse(&config, 65536).unwrap()),
+        ]);
+        let steps = vec![("fixture.answer".into(), stringify(&fixture, 65536).unwrap())];
+        let original = super::dial::original_raw(&steps);
+        let remaining = Arc::new(Remaining::default());
+        remaining.close_gate.release();
+        let handler = Arc::new(NativeSipCommands::new(
+            owner.clone(),
+            remaining.clone(),
+            |_| Box::pin(async { Ok(()) }),
+            closed_platform_views(),
+        ));
+        let dispatcher =
+            Arc::new(NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap());
+        assert!(
+            dispatcher
+                .execute(command("configure", &config, 1, 1))
+                .await
+                .outcome()
+                .error_code()
+                .is_none()
+        );
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (rtp, _rtcp) = pair().await;
+        let target = owner.observation().endpoint.unwrap();
+        let sdp = format!(
+            "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fixture\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n",
+            rtp.local_addr().unwrap().port()
+        );
+        send(
+            &peer,
+            target,
+            "INVITE",
+            1,
+            "z9hG4bK-owned-answer",
+            "",
+            if scenario.ends_with("invalid_offer") {
+                "invalid-sdp"
+            } else if delayed {
+                ""
+            } else {
+                &sdp
+            },
+        )
+        .await;
+        assert_eq!(
+            receive(&peer, 4000).await.unwrap().status_code.code(),
+            180,
+            "{scenario}"
+        );
+        until(|| !owner.observation().calls.is_empty()).await;
+        let id = owner.observation().calls[0].id.clone();
+        let call = owner.find(&id).unwrap();
+        call.prepared().await.unwrap();
+        let media = call.media().unwrap();
+        let original_rtp = media.observation().receive.transport.local_rtp;
+        let selected = format!(r#"{{"callId":"{id}"}}"#);
+        let features = format!(r#"{{"callId":"{id}","challenge":null}}"#);
+        for (m, p, op) in [
+            ("call.claim", &selected, 2),
+            ("call.features", &features, 3),
+        ] {
+            assert!(
+                dispatcher
+                    .execute(command(m, p, op, op))
+                    .await
+                    .outcome()
+                    .error_code()
+                    .is_none()
+            );
+        }
+        let params = format!(r#"{{"callId":"{id}","waiting":{waiting}}}"#);
+        let saved_request = command("call.answer", &params, 4, 4);
+        let dispatch = dispatcher.clone();
+        let mut pending = tokio::spawn(async move { dispatch.execute(saved_request).await });
+        let final_response = receive(&peer, 4000).await.expect("Original final answer");
+        let status = final_response.status_code.code();
+        let tag = final_response
+            .to_header()
+            .unwrap()
+            .tag()
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_owned();
+        let mut hungup = IvyJson::Null;
+        let mut controls = vec![];
+        if status == 200 {
+            assert!(!pending.is_finished(), "Answer must await the original ACK");
+            if scenario.ends_with("hangup_before_ack") {
+                hungup = outcome(
+                    dispatcher
+                        .execute(command("call.hangup", &selected, 5, 5))
+                        .await
+                        .outcome(),
+                );
+            }
+            if scenario.ends_with("slow_ack") {
+                tokio::time::sleep(Duration::from_millis(1250)).await;
+                assert!(!pending.is_finished());
+                while let Some(response) = receive(&peer, 50).await {
+                    assert_eq!(
+                        response.status_code.code(),
+                        200,
+                        "Answer retired the original ring timer"
+                    );
+                }
+            }
+            send(
+                &peer,
+                target,
+                "ACK",
+                1,
+                "z9hG4bK-owned-ack",
+                &tag,
+                if delayed {
+                    if scenario.ends_with("invalid_ack") {
+                        "invalid-sdp"
+                    } else {
+                        &sdp
+                    }
+                } else {
+                    ""
+                },
+            )
+            .await;
+        } else {
+            assert_eq!(status, 488, "{scenario}");
+            send(&peer, target, "ACK", 1, "z9hG4bK-owned-answer", &tag, "").await;
+        }
+        let answer = tokio::time::timeout(Duration::from_secs(7), &mut pending)
+            .await
+            .unwrap()
+            .unwrap();
+        let answered = outcome(answer.outcome());
+        let saved = answer
+            .outcome()
+            .result_json()
+            .expect("Native answer outcome snapshot")
+            .to_owned();
+        if status == 200 && scenario.ends_with("reinvite") {
+            send(
+                &peer,
+                target,
+                "INVITE",
+                2,
+                "z9hG4bK-owned-reinvite",
+                &tag,
+                if delayed { "" } else { &sdp },
+            )
+            .await;
+            controls.push(receive(&peer, 4000).await.unwrap().status_code.code());
+            send(
+                &peer,
+                target,
+                "INVITE",
+                3,
+                "z9hG4bK-owned-overlap",
+                &tag,
+                &sdp,
+            )
+            .await;
+            controls.push(receive(&peer, 4000).await.unwrap().status_code.code());
+            send(
+                &peer,
+                target,
+                "INVITE",
+                1,
+                "z9hG4bK-owned-stale",
+                &tag,
+                &sdp,
+            )
+            .await;
+            controls.push(receive(&peer, 4000).await.unwrap().status_code.code());
+            send(
+                &peer,
+                target,
+                "ACK",
+                2,
+                "z9hG4bK-owned-reack",
+                &tag,
+                if delayed { &sdp } else { "" },
+            )
+            .await;
+            send(
+                &peer,
+                target,
+                "OPTIONS",
+                4,
+                "z9hG4bK-owned-options",
+                &tag,
+                "",
+            )
+            .await;
+            controls.push(receive(&peer, 4000).await.unwrap().status_code.code());
+        }
+        if status == 200 && scenario.ends_with("remote_bye") {
+            for _ in 0..2 {
+                send(&peer, target, "BYE", 5, "z9hG4bK-owned-bye", &tag, "").await;
+                controls.push(receive(&peer, 4000).await.unwrap().status_code.code());
+            }
+        } else if status == 200 {
+            if hungup.is_null() && !scenario.ends_with("invalid_ack") {
+                hungup = outcome(
+                    dispatcher
+                        .execute(command("call.hangup", &selected, 5, 5))
+                        .await
+                        .outcome(),
+                );
+            }
+            let (bye, remote) = crate::sip_host::received(&peer).await;
+            assert_eq!(bye.method, Method::Bye, "{scenario}");
+            assert_eq!(bye.call_id_header().unwrap().value(), "owned-native-answer");
+            crate::sip_host::send(&peer, remote, &crate::sip_host::response(&bye, 200, "", ""))
+                .await;
+        }
+        until(|| {
+            call.observation().phase == ivy_phone_bridge::sip::SipHostCallPhase::LocalEnded
+                && media.observation().closed
+        })
+        .await;
+        let ended = parse(
+            &ivy_phone_bridge::native_sip_status::call_json(&call).unwrap(),
+            65536,
+        )
+        .unwrap();
+        owner.release(&call).unwrap().wait().await.unwrap();
+        // Reusing the ID cannot lend the original saved answer another handle.
+        let replacement = owner.prepare(id.clone()).unwrap();
+        replacement.prepared().await.unwrap();
+        assert_eq!(
+            dispatcher
+                .execute(command("call.answer", &params, 4, 1004))
+                .await
+                .outcome()
+                .result_json(),
+            Some(saved.as_str())
+        );
+        assert!(!replacement.observation().attempted);
+        owner.release(&replacement).unwrap().wait().await.unwrap();
+        let released = owner.find(&id).is_none();
+        handler.shutdown().await.unwrap();
+        assert!(media.observation().closed);
+        assert_eq!(
+            media.observation().receive.transport.local_rtp,
+            original_rtp
+        );
+        assert_eq!(factory.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(routes.opens.load(Ordering::SeqCst), 0);
+        assert!(remaining.methods.lock().unwrap().is_empty());
+        drop(
+            UdpSocket::bind(target)
+                .await
+                .expect("Original answered binding released"),
+        );
+        let result = IvyJson::object([
+            ("status", IvyJson::Number(status.into())),
+            ("answered", answered),
+            ("hungup", hungup),
+            ("ended", ended),
+            (
+                "controls",
+                IvyJson::Array(
+                    controls
+                        .iter()
+                        .map(|n| IvyJson::Number((*n).into()))
+                        .collect(),
+                ),
+            ),
+            ("finalHasSdp", (!final_response.body.is_empty()).into()),
+            ("ackHasSdp", (status == 200 && delayed).into()),
+            ("sameMedia", true.into()),
+            ("released", released.into()),
+            ("closed", true.into()),
+        ]);
+        let mut actual = result.clone();
+        normalize(&mut actual, &id);
+        let original_result = original.as_ref().map(|o| {
+            parse(
+                &o.as_array().unwrap()[0]
+                    .get("json")
+                    .unwrap_or_else(|| panic!("{scenario}: {o:?}"))
+                    .as_str()
+                    .unwrap(),
+                65536,
+            )
+            .unwrap()
+        });
+        let mut expected = original_result.clone();
+        if let Some(v) = &mut expected {
+            let wrapped = v
+                .get("answered")
+                .unwrap()
+                .get("json")
+                .unwrap()
+                .as_str()
+                .unwrap();
+            let original_id = parse(&wrapped, 65536)
+                .unwrap()
+                .get("id")
+                .unwrap()
+                .as_str()
+                .unwrap();
+            normalize(v, &original_id);
+        }
+        trace(
+            &format!("native-answer-{scenario}"),
+            IvyJson::object([
+                ("rust", result),
+                ("original", original_result.unwrap_or(IvyJson::Null)),
+                ("normalizedRust", actual.clone()),
+                (
+                    "normalizedOriginal",
+                    expected.clone().unwrap_or(IvyJson::Null),
+                ),
+                ("originalBindingReleased", true.into()),
+                ("savedAnswerReplayedAfterReplacement", true.into()),
+                ("physicalAudioOpens", n(0)),
+            ]),
+        );
+        if let Some(expected) = expected {
+            assert_eq!(actual, expected, "{scenario}");
+        }
+    }
+}

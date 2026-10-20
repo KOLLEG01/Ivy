@@ -205,6 +205,18 @@ pub(crate) struct DialogFlow {
     connection: Option<SipConnection>,
     destination: Option<SipAddr>,
 }
+impl DialogFlow {
+    pub(super) fn from_server(original: &Transaction) -> Self {
+        Self {
+            endpoint: original.endpoint_inner.clone(),
+            connection: original
+                .connection
+                .clone()
+                .filter(|connection| connection.is_reliable()),
+            destination: original.destination.clone(),
+        }
+    }
+}
 impl SipEndpoint {
     /// Transport binding/TLS policy and call admission belong to the host.
     /// The supplied token must be scoped to this endpoint and its transports.

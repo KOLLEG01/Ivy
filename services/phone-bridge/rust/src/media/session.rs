@@ -845,6 +845,9 @@ impl SipMediaSession {
     }
 }
 impl DelayedInviteMedia for SipMediaSession {
+    fn initial_offer(&self) -> Option<String> {
+        self.create_offer().map(|description| description.to_sdp())
+    }
     fn is_closed(&self) -> bool {
         self.handle.0.closed.load(Ordering::Acquire)
     }

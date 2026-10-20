@@ -1,4 +1,6 @@
 use super::*;
+#[path = "phone_native_answer.rs"]
+mod answer;
 #[path = "phone_native_dial.rs"]
 mod dial;
 #[path = "phone_native_incoming.rs"]
