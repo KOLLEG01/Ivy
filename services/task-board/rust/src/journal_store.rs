@@ -33,6 +33,8 @@ use std::{
 
 #[path = "durable_admission.rs"]
 pub mod durable_admission;
+#[path = "persistent_reads.rs"]
+pub mod persistent_reads;
 
 /// Bind this to the accepted TaskBoard contract bundle. Retained public versions
 /// can be admitted as exact records, but are never rewritten during a read.
