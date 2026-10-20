@@ -86,6 +86,14 @@ impl Response for ProbedReply<'_> {
     fn headers_sent(&self) -> bool {
         self.inner.headers_sent()
     }
+    fn set_header(&mut self, name: &str, value: &JsString) -> IvyResult<()> {
+        self.inner.set_header(name, value)
+    }
+    fn end_empty(&mut self) -> IvyResult<()> {
+        let result = self.inner.end_empty();
+        self.probe("end");
+        result
+    }
     fn write_head(&mut self, status: u16, headers: IvyJson) -> IvyResult<()> {
         let result = self.inner.write_head(status, headers);
         self.probe("head");

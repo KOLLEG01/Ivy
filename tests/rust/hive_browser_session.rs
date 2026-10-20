@@ -1,4 +1,6 @@
 use super::*;
+#[path = "hive_auth_pages.rs"]
+mod auth_pages;
 use ivy_hive::http_auth::Connection;
 use ivy_hive::{
     browser_session::{self, Peer, Peers, Response as SessionResponse, Session},

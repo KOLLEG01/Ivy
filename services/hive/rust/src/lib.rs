@@ -1,5 +1,6 @@
 //! Hive service implementation. Storage policy is independent of the network executor.
 pub mod admission;
+pub mod auth_pages;
 pub mod browser_push;
 pub mod browser_push_http;
 pub mod browser_push_store;

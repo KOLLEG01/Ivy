@@ -86,6 +86,14 @@ impl Response for Reply {
     fn headers_sent(&self) -> bool {
         self.headers_sent
     }
+    fn set_header(&mut self, name: &str, value: &JsString) -> IvyResult<()> {
+        self.trace.lock().unwrap().push(json!({"kind":"header","id":self.spec["id"],"name":name,"valueEncoded":stringify(&IvyJson::String(value.clone()),usize::MAX).unwrap()}));
+        if self.spec["throwAt"] == name {
+            Err(IvyError::internal())
+        } else {
+            Ok(())
+        }
+    }
     fn write_head(&mut self, status: u16, headers: IvyJson) -> IvyResult<()> {
         self.trace.lock().unwrap().push(
             json!({"kind":"head","id":self.spec["id"],"status":status,"headers":carrier(&headers)}),
@@ -119,6 +127,17 @@ impl Response for Reply {
         } else {
             Ok(())
         }
+    }
+    fn end_empty(&mut self) -> IvyResult<()> {
+        self.trace
+            .lock()
+            .unwrap()
+            .push(json!({"kind":"end","id":self.spec["id"]}));
+        if self.spec["throwAt"] == "end" {
+            return Err(IvyError::internal());
+        }
+        self.ended = true;
+        Ok(())
     }
 }
 struct Bridge {

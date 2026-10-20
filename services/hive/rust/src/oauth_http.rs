@@ -4,7 +4,7 @@ use crate::{
     http_auth::{Connection, Headers as AuthenticationHeaders},
     http_body::{BodyBuffers, BodyStream},
     http_response::{self, Response},
-    oauth::HiveOAuth,
+    oauth::{HiveOAuth, Parameters},
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString, json::parse};
 
@@ -19,6 +19,32 @@ pub struct Handler<'a> {
     pub buffers: &'a BodyBuffers,
 }
 impl Handler<'_> {
+    /// Caller selected GET /oauth/authorize and decoded its canonical search
+    /// parameters. Rendering stays inside the same authentication admission.
+    pub fn authorize_page(
+        &self,
+        headers: &AuthenticationHeaders,
+        query: &Parameters,
+        response: &mut impl Response,
+    ) -> IvyResult<()> {
+        let mut admission = self.connection.admit_authentication(headers)?;
+        let result = (|| {
+            let pending = self.oauth.begin(query)?;
+            crate::auth_pages::html(
+                response,
+                200,
+                &crate::auth_pages::oauth(
+                    self.connection.authentication().base_path(),
+                    pending.get("transaction").unwrap().as_js_string().unwrap(),
+                    pending.get("clientName").unwrap().as_js_string().unwrap(),
+                    pending.get("scope").unwrap().as_js_string().unwrap(),
+                    false,
+                ),
+            )
+        })();
+        admission.release();
+        result
+    }
     /// Pathname is the canonical URL owner's pathname getter. The HTTP owner
     /// keeps its outer request lease and drives this future through completion,
     /// including after socket disconnect. False leaves other routes to that
