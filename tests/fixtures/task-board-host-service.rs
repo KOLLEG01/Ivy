@@ -1,17 +1,46 @@
 use crate::frozen_contracts::ContractsBinding;
 use ivy_contracts::{
-    IvyJson as Json, JsString,
+    IvyJson as Json, IvyResult, JsString,
     hash::hash_json,
     json::{parse, stringify},
     limits::MANAGEMENT_FRAME_BYTES,
 };
 use ivy_host_runtime::{config::InstanceConfig, health::HealthFile, node_runtime::NodeRuntime};
 use ivy_task_board::host_service;
+use ivy_task_board::journal_store::Contracts;
 use std::{
+    cell::Cell,
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, OnceLock},
 };
+
+#[derive(Default)]
+struct StartupContracts {
+    calls: Cell<u64>,
+    refused: Cell<bool>,
+}
+impl Contracts for StartupContracts {
+    fn version(&self, key: &str) -> IvyResult<String> {
+        ContractsBinding.version(key)
+    }
+    fn local(&self, key: &str) -> IvyResult<bool> {
+        ContractsBinding.local(key)
+    }
+    fn readable_version(&self, key: &str, version: &JsString) -> IvyResult<bool> {
+        ContractsBinding.readable_version(key, version)
+    }
+    fn validate_record(&self, key: &str, version: &JsString, value: &Json) -> IvyResult<()> {
+        ContractsBinding.validate_record(key, version, value)
+    }
+    fn validate_definition(&self, name: &str, value: &Json) -> IvyResult<()> {
+        assert_eq!(name, "Settings");
+        self.calls.set(self.calls.get() + 1);
+        let result = ContractsBinding.validate_definition(name, value);
+        self.refused.set(result.is_err());
+        result
+    }
+}
 
 struct Fixture {
     root: PathBuf,
@@ -113,16 +142,18 @@ fn effects(config: &Json) -> Json {
 async fn instance_configuration_and_taskboard_service_admission_match_original_before_connecting() {
     let fixture = Fixture::new().await;
     let rows = fixture.oracle.required("rows").unwrap().as_array().unwrap();
-    assert_eq!(rows.len(), 9);
+    assert_eq!(rows.len(), 28);
+    let mut mismatches = vec![];
     for row in rows {
         let path = fixture.prepare(row);
         let registry = Arc::new(|| {
             Box::pin(async { Ok(Json::object([] as [(&str, Json); 0])) })
                 as ivy_sdk::service::ServiceFuture<Json>
         });
+        let contracts = StartupContracts::default();
         let prepared =
-            host_service::prepare(path, &fixture.node, &ContractsBinding, registry, vec![]).await;
-        let actual = result(prepared.map(|p| {
+            host_service::prepare(path, &fixture.node, &contracts, registry, vec![]).await;
+        let actual = match prepared.map(|p| {
             assert!(!p.service.client.ready());
             assert!(!p.health.boot_id().is_empty());
             assert_eq!(
@@ -130,18 +161,57 @@ async fn instance_configuration_and_taskboard_service_admission_match_original_b
                 hash_json(row.required("config").unwrap()).unwrap()
             );
             Json::from(hash_json(p.config.json()).unwrap())
-        }));
-        assert_eq!(
-            actual,
-            row.required("result").unwrap().clone(),
-            "{}",
-            row.required("name").unwrap().as_str().unwrap()
-        );
-        assert_eq!(
-            effects(row.required("config").unwrap()),
-            row.required("effects").unwrap().clone()
-        );
+        }) {
+            Ok(value) => Json::object([("ok", value)]),
+            Err(e) => {
+                let config = row.required("config").unwrap();
+                let identity = config.get("componentId") != Some(&Json::from("task-board"))
+                    || config.get("credential").is_none();
+                let phase = if contracts.calls.get() == 0 {
+                    "host"
+                } else if contracts.refused.get() {
+                    "settings"
+                } else if identity {
+                    "identity"
+                } else {
+                    "transport"
+                };
+                Json::object([
+                    ("error", Json::String(e.code_js())),
+                    ("phase", phase.into()),
+                    (
+                        "message",
+                        if phase == "settings" {
+                            "$SETTINGS".into()
+                        } else {
+                            Json::String(e.message_js())
+                        },
+                    ),
+                    ("outcome", e.outcome.as_str().into()),
+                ])
+            }
+        };
+        if hash_json(&actual).unwrap() != hash_json(row.required("result").unwrap()).unwrap()
+            || row.required("settingsCalls").unwrap() != &Json::Number(contracts.calls.get() as f64)
+            || effects(row.required("config").unwrap()) != row.required("effects").unwrap().clone()
+        {
+            mismatches.push(Json::object([
+                ("name", row.required("name").unwrap().clone()),
+                ("actual", actual),
+                ("expected", row.required("result").unwrap().clone()),
+                ("settingsCalls", Json::Number(contracts.calls.get() as f64)),
+                (
+                    "expectedSettingsCalls",
+                    row.required("settingsCalls").unwrap().clone(),
+                ),
+            ]));
+        }
     }
+    assert!(
+        mismatches.is_empty(),
+        "Startup mismatches: {}",
+        stringify(&Json::Array(mismatches), MANAGEMENT_FRAME_BYTES).unwrap()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
