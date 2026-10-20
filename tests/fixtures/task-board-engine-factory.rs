@@ -16,6 +16,8 @@ use ivy_task_board::{
     task_written::{TaskCommentNotices, TaskNoticePolicy},
 };
 use std::{cmp::Ordering, path::PathBuf};
+#[path = "task-board-engine-factory-driver.rs"]
+mod driver;
 #[path = "task-board-engine-factory-native.rs"]
 mod native;
 #[path = "task-board-engine-factory-observations.rs"]
@@ -47,6 +49,7 @@ struct Fixture {
     native: Option<native::Scenario>,
     retirement: Option<retirement::Scenario>,
     observations: Option<observations::Scenario>,
+    driver: Option<driver::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -69,6 +72,7 @@ impl Fixture {
             native: None,
             retirement: None,
             observations: None,
+            driver: None,
         }
     }
     fn database(&self) -> Connection {
@@ -141,6 +145,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         if let Some(observations) = &self.observations {
             observations.bind(&policy.context)?;
         }
+        if let Some(driver) = &self.driver {
+            driver.bind(&policy.context)?;
+        }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
         drop(policy.context.calls.recover_publication()?);
@@ -176,7 +183,15 @@ impl CheckPolicy for Policies<'_> {
 // actual factory still constructs their concrete consumers; this fixture does
 // not qualify the accepted current native/question/handoff policy or accounts.
 impl TaskPrompts for Policies<'_> {
-    fn task_prompt(&self, _: &Json, _: &JsString, _: Option<&Json>) -> IvyResult<JsString> {
+    fn task_prompt(
+        &self,
+        task: &Json,
+        owner: &JsString,
+        coordination: Option<&Json>,
+    ) -> IvyResult<JsString> {
+        if let Some(driver) = &self.fixture.driver {
+            return driver.prompt(task, owner, coordination);
+        }
         panic!("No native prompt")
     }
     fn task_update_prompt(&self, _: &Json, _: &JsString, _: bool) -> IvyResult<JsString> {
@@ -249,6 +264,9 @@ impl TaskNoticePolicy for Policies<'_> {
         if let Some(observations) = &self.fixture.observations {
             return observations.notice(self.context.owner.generation, task, operation);
         }
+        if self.fixture.driver.is_some() {
+            return TaskCommentNotices.comment(task, operation);
+        }
         // An applied first Task step with an uncertain observation must retain
         // its original prepared write and reserved gate for the next owner.
         if self.context.owner.generation == 1.0 {
@@ -287,6 +305,11 @@ impl LifecyclePages for Policies<'_> {
                 observations.ready.wait().await;
             }
         }
+        if let Some(driver) = &self.fixture.driver {
+            if key == "task-board/run" && self.context.owner.generation == 1.0 {
+                driver.ready.wait().await;
+            }
+        }
         if self.context.owner.generation == 1.0 && options.get("select").is_some() {
             self.fixture.page_waiting.set(true);
             self.fixture.page_held.wait().await;
@@ -307,7 +330,7 @@ impl LifecyclePages for Policies<'_> {
                     assert_eq!(key, "task-board/task");
                     if self.fixture.retirement.is_some() || self.fixture.observations.is_some() {
                         assert_eq!(value.get("workflowState"), Some(&"review".into()));
-                    } else if self.fixture.native.is_some() {
+                    } else if self.fixture.native.is_some() || self.fixture.driver.is_some() {
                         assert_eq!(value.get("workflowState"), Some(&"in_progress".into()));
                     } else {
                         assert_eq!(

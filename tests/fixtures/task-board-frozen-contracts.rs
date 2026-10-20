@@ -62,6 +62,8 @@ impl Contracts for ContractsBinding {
                 "task-board/task-key-sequence" => "TaskKeySequence",
                 "task-board/native-read-evidence" => "NativeReadEvidence",
                 "task-board/native-turn-snapshot" => "NativeTurnSnapshot",
+                "task-board/native-call" => "NativeCall",
+                "task-board/native-evidence" => "NativeEvidence",
                 key => panic!("Unexpected record {key}"),
             },
             value,
