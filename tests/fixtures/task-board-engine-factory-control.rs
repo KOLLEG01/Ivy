@@ -90,6 +90,9 @@ fn run(fixture: &Fixture) -> (String, u64, Json) {
 }
 fn assert_review(fixture: &Fixture, scenario: &Scenario) {
     let records = scenario.records();
+    assert_review_records(fixture, &records);
+}
+pub(super) fn assert_review_records(fixture: &Fixture, records: &[(&str, Json, &str)]) {
     let expected = &records[3].1;
     let task = &fixture.rows("task-board/task")[0].2;
     for key in [
@@ -159,7 +162,7 @@ fn assert_review(fixture: &Fixture, scenario: &Scenario) {
         0
     );
 }
-fn data() -> Json {
+pub(super) fn data() -> Json {
     let output = std::process::Command::new("node")
         .args([
             "--experimental-transform-types",
@@ -321,7 +324,7 @@ async fn retained_interrupt_recovers_only_the_original_epoch_and_preserves_curre
                     hash_json(f(&recovered[0], "operation")).unwrap(),
                     hash_json(f(&committed[0], "operation")).unwrap()
                 );
-                exact_evidence(&fixture, &peer, 1);
+                exact_evidence(&fixture, &peer, 1, "succeeded");
             }
             assert_review(&fixture, scenario);
             let operations = fixture.rows("task-board/operation");

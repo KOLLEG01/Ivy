@@ -26,6 +26,8 @@ mod native;
 mod observations;
 #[path = "task-board-engine-factory-retirement.rs"]
 mod retirement;
+#[path = "task-board-engine-factory-steering.rs"]
+mod steering;
 
 fn clock() -> String {
     "2026-01-02T03:04:05.006Z".to_owned()
@@ -53,6 +55,7 @@ struct Fixture {
     observations: Option<observations::Scenario>,
     driver: Option<driver::Scenario>,
     control: Option<control::Scenario>,
+    steering: Option<steering::Scenario>,
 }
 impl Fixture {
     fn new(refusal: bool) -> Self {
@@ -77,6 +80,7 @@ impl Fixture {
             observations: None,
             driver: None,
             control: None,
+            steering: None,
         }
     }
     fn database(&self) -> Connection {
@@ -155,6 +159,9 @@ impl PolicyFactory<ContractsBinding, fn() -> String, fn() -> JsString, SystemClo
         if let Some(control) = &self.control {
             control.bind(&policy.context)?;
         }
+        if let Some(steering) = &self.steering {
+            steering.bind(&policy.context)?;
+        }
         // Exercise pre-graph retained internal admission on the real receiver.
         // Its abandoned observer must not discard accepted recovery work.
         drop(policy.context.calls.recover_publication()?);
@@ -201,7 +208,15 @@ impl TaskPrompts for Policies<'_> {
         }
         panic!("No native prompt")
     }
-    fn task_update_prompt(&self, _: &Json, _: &JsString, _: bool) -> IvyResult<JsString> {
+    fn task_update_prompt(
+        &self,
+        task: &Json,
+        owner: &JsString,
+        coordination: bool,
+    ) -> IvyResult<JsString> {
+        if let Some(steering) = &self.fixture.steering {
+            return steering.prompt(task, owner, coordination);
+        }
         panic!("No native prompt")
     }
 }
@@ -271,7 +286,10 @@ impl TaskNoticePolicy for Policies<'_> {
         if let Some(observations) = &self.fixture.observations {
             return observations.notice(self.context.owner.generation, task, operation);
         }
-        if self.fixture.driver.is_some() || self.fixture.control.is_some() {
+        if self.fixture.driver.is_some()
+            || self.fixture.control.is_some()
+            || self.fixture.steering.is_some()
+        {
             return TaskCommentNotices.comment(task, operation);
         }
         // An applied first Task step with an uncertain observation must retain
@@ -322,6 +340,11 @@ impl LifecyclePages for Policies<'_> {
                 control.ready.wait().await;
             }
         }
+        if let Some(steering) = &self.fixture.steering {
+            if key == "task-board/run" && self.context.owner.generation == 1.0 {
+                steering.ready.wait().await;
+            }
+        }
         if self.context.owner.generation == 1.0 && options.get("select").is_some() {
             self.fixture.page_waiting.set(true);
             self.fixture.page_held.wait().await;
@@ -340,7 +363,9 @@ impl LifecyclePages for Policies<'_> {
             if let Some(filter) = options.get("where") {
                 if filter.get("op") == Some(&"and".into()) {
                     assert_eq!(key, "task-board/task");
-                    if self.fixture.retirement.is_some()
+                    if let Some(steering) = &self.fixture.steering {
+                        assert_eq!(value.get("workflowState"), Some(&steering.workflow_state()));
+                    } else if self.fixture.retirement.is_some()
                         || self.fixture.observations.is_some()
                         || self.fixture.control.is_some()
                     {
@@ -361,6 +386,9 @@ impl LifecyclePages for Policies<'_> {
                     "object.id" => Json::from(id.clone()),
                     "data:/phase" => value.required("phase")?.clone(),
                     "data:/state" => value.required("state")?.clone(),
+                    "data:/workflowState" if self.fixture.steering.is_some() => {
+                        value.required("workflowState")?.clone()
+                    }
                     _ => panic!("Unbound finite page field {field}"),
                 };
                 if !filter
@@ -431,7 +459,7 @@ impl CurrentPolicies for Policies<'_> {
         panic!("No Run")
     }
     fn claimed_workflow_state(&self, waiting: &Json) -> IvyResult<JsString> {
-        if self.fixture.control.is_some() {
+        if self.fixture.control.is_some() || self.fixture.steering.is_some() {
             assert!(waiting.is_null() || waiting.get("reason") == Some(&"external_outcome".into()));
             return Ok("in_progress".into());
         }

@@ -182,7 +182,7 @@ pub(super) fn evidence(fixture: &Fixture) -> Vec<(String, String, Json)> {
     .map(Result::unwrap)
     .collect()
 }
-pub(super) fn exact_evidence(fixture: &Fixture, peer: &Peer, expected: usize) {
+pub(super) fn exact_evidence(fixture: &Fixture, peer: &Peer, expected: usize, phase: &str) {
     let manifests = evidence(fixture);
     assert_eq!(manifests.len(), expected);
     let calls = fixture.rows("task-board/native-call");
@@ -248,7 +248,7 @@ pub(super) fn exact_evidence(fixture: &Fixture, peer: &Peer, expected: usize) {
             hash_json(f(&observed, "params")).unwrap(),
             hash_json(f(f(f(call, "request"), "params"), "params")).unwrap()
         );
-        assert_eq!(f(&observed, "phase"), &"succeeded".into());
+        assert_eq!(f(&observed, "phase"), &Json::from(phase));
         assert_eq!(
             f(&observed, "requestHash"),
             &Json::from(
@@ -411,7 +411,7 @@ async fn production_factory_recovers_committed_native_calls_without_redispatch_a
                     hash_json(f(&first_calls[0].2, key)).unwrap()
                 );
             }
-            exact_evidence(&fixture, &peer, 2);
+            exact_evidence(&fixture, &peer, 2, "succeeded");
             let task = fixture.rows("task-board/task")[0].clone();
             assert_eq!(task.1, 9);
             assert_eq!(f(f(&task.2, "claim"), "run"), &pin("run", 5.0));
@@ -506,7 +506,7 @@ async fn production_factory_recovers_committed_native_calls_without_redispatch_a
             assert_eq!(frames(&peer, "committed-operation").len(), 2);
             assert_eq!(frames(&peer, "original-operation").len(), 1);
             assert_eq!(scenario.prompts.get(), 1);
-            exact_evidence(&fixture, &peer, 2);
+            exact_evidence(&fixture, &peer, 2, "succeeded");
             bounded(service.close()).await.unwrap();
         };
         let (result, ()) = tokio::join!(owner.run(&factory), script);
