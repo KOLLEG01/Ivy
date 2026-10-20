@@ -734,19 +734,31 @@ async fn connected_dialog_controls_return_to_original_call_and_slot_waits_for_re
         let media=Media::new(1,false);let call=host.prepare(ID.into(),||Ok(media.clone())).unwrap();
         let peer=UdpSocket::bind("127.0.0.1:0").await.unwrap();let remote=peer.local_addr().unwrap();
         let selected=host.clone();let selected_call=call.clone();
-        let dial=tokio::spawn(async move {selected.dial_delayed(&selected_call,invite(local),remote.into(),None,10).await});
+        let wire:Request=invite(local).to_string().replace("host-call-fixture",ID).try_into().unwrap();
+        let dial=tokio::spawn(async move {selected.dial_delayed(&selected_call,wire,remote.into(),None,10).await});
         let (original,source)=received(&peer).await;
         send(&peer,source,&response(&original,200,&format!("Contact: <sip:callee@{remote}>\r\nContent-Type: application/sdp\r\n"),OFFER)).await;
         let (ack,_)=received(&peer).await;assert_eq!(ack.method,Method::Ack);assert_eq!(ack.body,ANSWER.as_bytes());
         assert_eq!(dial.await.unwrap().unwrap(),CallOutcome::Connected);
         assert_eq!(host.observation().calls[0].phase,SipHostCallPhase::Connected);
-        let bye:Request=format!("BYE sip:caller@{local} SIP/2.0\r\nVia: SIP/2.0/UDP {remote};branch=z9hG4bK-host-bye\r\nFrom: <sip:callee@call.example.test>;tag=remote\r\nTo: <sip:caller@account.example.test>;tag=host-fixture\r\nCall-ID: host-call-fixture\r\nCSeq: 9 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n").try_into().unwrap();
+        let before_bye=call.signalling().unwrap();
+        assert!(before_bye.sent>=2&&before_bye.received>=1);
+        assert!(before_bye.events.iter().any(|e|e.direction=="sent"&&e.method=="ACK"&&e.status.is_none()));
+        assert!(before_bye.events.iter().any(|e|e.direction=="received"&&e.method=="INVITE"&&e.status==Some(200)));
+        let bye:Request=format!("BYE sip:caller@{local} SIP/2.0\r\nVia: SIP/2.0/UDP {remote};branch=z9hG4bK-host-bye\r\nFrom: <sip:callee@call.example.test>;tag=remote\r\nTo: <sip:caller@account.example.test>;tag=host-fixture\r\nCall-ID: {ID}\r\nCSeq: 9 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n").try_into().unwrap();
         peer.send_to(bye.to_string().as_bytes(),local).await.unwrap();
         let transaction=incoming.recv().await.unwrap();assert!(host.deliver_control(transaction).is_ok());
         let mut bytes=[0;8192];let (count,_)=peer.recv_from(&mut bytes).await.unwrap();
         let ended:Response=std::str::from_utf8(&bytes[..count]).unwrap().try_into().unwrap();assert_eq!(ended.status_code.code(),200);
         until(||host.observation().calls[0].phase==SipHostCallPhase::LocalEnded).await;
         assert_eq!(host.observation().calls.len(),1);assert_eq!(media.starts.load(Ordering::Acquire),1);
+        let final_view=call.signalling().unwrap();
+        assert!(final_view.events.iter().any(|e|e.direction=="received"&&e.method=="BYE"&&e.status.is_none()));
+        assert!(final_view.events.iter().any(|e|e.direction=="sent"&&e.method=="BYE"&&e.status==Some(200)));
+        if let Some(dir)=std::env::var_os("IVY_PHONE_CALL_AUDIO_TRACE_DIR"){
+            let value=ivy_contracts::IvyJson::object([("beforeBye",ivy_phone_bridge::native_sip_status::signalling_json(&before_bye).unwrap().into()),("afterBye",ivy_phone_bridge::native_sip_status::signalling_json(&final_view).unwrap().into())]);
+            std::fs::write(std::path::Path::new(&dir).join("native-status-signalling-wire.json"),ivy_contracts::json::stringify(&value,65536).unwrap()).unwrap();
+        }
         host.release(&call).await.unwrap();drop(incoming);host.close().await.unwrap();
     }).await.unwrap();
 }

@@ -95,7 +95,7 @@ async fn signal(owner: &NativeSipOperations, peer: &UdpSocket, params: &IvyJson)
     for i in 0..params.get("count").unwrap().as_f64().unwrap() as i64 {
         let body = "protected-fixture-body-never-status";
         let raw = format!(
-            "MESSAGE sip:fixture@{local} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-status-{i}\r\nFrom: <sip:fixture@localhost>;tag=foreign\r\nTo: <sip:target@localhost>;tag=unselected\r\nCall-ID: {id}\r\nCSeq: {} MESSAGE\r\nMax-Forwards: 70\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{body}",
+            "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-status-{i}\r\nFrom: <sip:fixture@localhost>;tag=foreign\r\nTo: <sip:target@localhost>;tag=unselected\r\nCall-ID: {id}\r\nCSeq: {} MESSAGE\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{body}",
             peer.local_addr().unwrap(),
             100 + i,
             body.len()
@@ -116,7 +116,10 @@ async fn original_full_native_status_heartbeat_and_call_views_follow_owned_lifet
         closed_platform_views(),
     ));
     let dispatcher = NativeDispatcher::new(CALL.into(), 128, handler.clone()).unwrap();
-    let steps = status_corpus(params);
+    let steps = status_corpus(params.replace(
+        "\"transport\":\"udp\"",
+        "\"transport\":\"udp\",\"maxConcurrentCalls\":3",
+    ));
     let inputs: Vec<_> = steps
         .iter()
         .map(|(m, p)| {
@@ -141,10 +144,10 @@ async fn original_full_native_status_heartbeat_and_call_views_follow_owned_lifet
                 signal(&owner, &peer, &parse(params, 65536).unwrap()).await;
                 IvyJson::object([("json", "{\"observed\":true}".into())])
             }
-            "fixture.dispose" => {
-                handler.shutdown().await.unwrap();
-                IvyJson::object([("json", "{\"disposed\":true}".into())])
-            }
+            "fixture.dispose" => match handler.shutdown().await {
+                Ok(()) => IvyJson::object([("json", "{\"disposed\":true}".into())]),
+                Err(_) => IvyJson::object([("error", "operation_outcome_unknown".into())]),
+            },
             _ => {
                 let reply = dispatcher
                     .execute(command(method, params, i as u64 + 1, i as u64 + 1))
@@ -307,6 +310,10 @@ async fn native_status_keeps_selected_original_after_release_and_same_id_reuse()
         remaining,
         |_| Box::pin(async { Ok(()) }),
         closed_platform_views(),
+    );
+    let params = params.replace(
+        "\"transport\":\"udp\"",
+        "\"transport\":\"udp\",\"maxConcurrentCalls\":3",
     );
     handler.invoke(command("configure", &params, 1, 1)).await;
     handler

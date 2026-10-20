@@ -33,7 +33,7 @@ public static class PhoneNativeStatusOracle {
         int count=args.GetProperty("count").GetInt32();
         for(int i=0;i<count;i++) {
             string body="protected-fixture-body-never-status";
-            string raw=$"MESSAGE sip:fixture@{host.LocalEndpoint} SIP/2.0\r\nVia: SIP/2.0/UDP {peer.Client.LocalEndPoint};branch=z9hG4bK-status-{i}\r\nFrom: <sip:fixture@localhost>;tag=foreign\r\nTo: <sip:target@localhost>;tag=unselected\r\nCall-ID: {call.Observation.SipCallId}\r\nCSeq: {100+i} MESSAGE\r\nMax-Forwards: 70\r\nContent-Type: application/octet-stream\r\nContent-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n{body}";
+            string raw=$"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP {peer.Client.LocalEndPoint};branch=z9hG4bK-status-{i}\r\nFrom: <sip:fixture@localhost>;tag=foreign\r\nTo: <sip:target@localhost>;tag=unselected\r\nCall-ID: {call.Observation.SipCallId}\r\nCSeq: {100+i} MESSAGE\r\nContent-Type: application/octet-stream\r\nContent-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n{body}";
             byte[] bytes=Encoding.UTF8.GetBytes(raw);peer.Send(bytes,bytes.Length,host.LocalEndpoint);
             if(!SpinWait.SpinUntil(()=>JsonSerializer.SerializeToElement(call.Signalling.Observation,NativeRpc.Json).GetProperty("received").GetInt64()>=before+i+1,TimeSpan.FromSeconds(3)))throw new Exception("Original signalling observation unavailable");
         }

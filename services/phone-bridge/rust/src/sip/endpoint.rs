@@ -540,8 +540,12 @@ impl ClientExchange {
                     .map_err(|_| SipIoError::SendFailed)?;
                 (connection, Some(destination))
             };
+        // This ACK deliberately bypasses the transaction sender and its
+        // inspector; record it once at the same original send boundary.
+        let message = SipMessage::Request(ack.clone());
+        self.registration.owner.1.record(&message, true);
         connection
-            .send(SipMessage::Request(ack.clone()), destination.as_ref())
+            .send(message, destination.as_ref())
             .await
             .map_err(|_| SipIoError::SendFailed)
     }

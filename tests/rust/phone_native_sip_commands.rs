@@ -6,7 +6,6 @@ mod status;
 use ivy_phone_bridge::{
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
     native_rpc::{NativeDispatcher, NativeHandler, NativeInvocation, NativeOutcome},
-    native_sip::{NativeSipCall, NativeSipError},
     native_sip_commands::NativeSipCommands,
     native_sip_status::NativeSipViews,
 };
