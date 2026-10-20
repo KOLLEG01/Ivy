@@ -218,9 +218,14 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 "concurrent_missing_type",
                 "concurrent_other_type",
                 "concurrent_malformed",
+                "concurrent_late",
             ] {
-                let mixed = kind.starts_with("concurrent_") && kind != "concurrent_reverse";
-                let concurrent = ["concurrent", "concurrent_reverse"].contains(&kind) || mixed;
+                let late = ["late", "concurrent_late"].contains(&kind);
+                let mixed = kind.starts_with("concurrent_")
+                    && !["concurrent_reverse", "concurrent_late"].contains(&kind);
+                let concurrent = ["concurrent", "concurrent_reverse", "concurrent_late"]
+                    .contains(&kind)
+                    || mixed;
                 let repeated = ["repeated", "repeat_downgrade"].contains(&kind);
                 let early_end =
                     ["pending_hangup", "hangup_success", "pending_release"].contains(&kind);
@@ -234,12 +239,10 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     "repeat_downgrade",
                     "hangup_success",
                     "pending_release",
+                    "concurrent_late",
                 ]
                 .contains(&kind)
                     || mixed;
-                if lifecycle && preferred != "PCMU" && !mixed {
-                    continue;
-                }
                 let scenario = format!("{mode}_{preferred}_{kind}");
                 let delayed = mode == "delayed";
                 let (owner, factory, routes, config) = actual_owner(40000, 41998);
@@ -429,11 +432,23 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     }
                     // The retained receipt/driver survives abandonment of its first IPC waiter.
                     pending.take().unwrap().abort();
-                    if kind == "late" {
+                    if late {
                         early = Some(
                             super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5)
                                 .await,
                         );
+                        if kind == "concurrent_late" {
+                            second.take().unwrap().await.unwrap();
+                            again = Some(
+                                super::feedback::row(
+                                    &dispatcher,
+                                    "call.codec.upgrade",
+                                    &selected,
+                                    8,
+                                )
+                                .await,
+                            );
+                        }
                     }
                     if early_end {
                         bye_sequence = Some(end(&dispatcher, &selected, &peer).await);
@@ -519,15 +534,27 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                             let (ack, _) = next(&peer, Method::Ack).await;
                             requests.push(ack_row(&ack));
                         }
-                        early = Some(
-                            super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 5)
+                        if kind != "concurrent_late" {
+                            early = Some(
+                                super::feedback::row(
+                                    &dispatcher,
+                                    "call.codec.upgrade",
+                                    &selected,
+                                    5,
+                                )
                                 .await,
-                        );
-                        second.take().unwrap().await.unwrap();
-                        again = Some(
-                            super::feedback::row(&dispatcher, "call.codec.upgrade", &selected, 8)
+                            );
+                            second.take().unwrap().await.unwrap();
+                            again = Some(
+                                super::feedback::row(
+                                    &dispatcher,
+                                    "call.codec.upgrade",
+                                    &selected,
+                                    8,
+                                )
                                 .await,
-                        );
+                            );
+                        }
                         if !mixed {
                             crate::sip_host::send(&peer, remote, &accepted).await;
                             let (ack, _) = next(&peer, Method::Ack).await;
@@ -603,16 +630,17 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         65536,
                     )
                     .unwrap();
-                    let sent = if mixed
-                        || [
-                            "upgraded",
-                            "repeated",
-                            "retransmitted",
-                            "concurrent",
-                            "concurrent_reverse",
-                            "repeat_downgrade",
-                        ]
-                        .contains(&kind)
+                    let sent = if !late
+                        && (mixed
+                            || [
+                                "upgraded",
+                                "repeated",
+                                "retransmitted",
+                                "concurrent",
+                                "concurrent_reverse",
+                                "repeat_downgrade",
+                            ]
+                            .contains(&kind))
                     {
                         "PCMU"
                     } else {
@@ -620,7 +648,8 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                     };
                     let state = if ["disabled", "trusted"].contains(&kind) {
                         "skipped"
-                    } else if !["refused", "pending_hangup", "late"].contains(&kind)
+                    } else if !["refused", "pending_hangup"].contains(&kind)
+                        && !late
                         && sent == preferred
                     {
                         "upgraded"
@@ -646,7 +675,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                 if let Some(again) = again {
                     rows.push(again);
                 }
-                if kind == "late" {
+                if late {
                     until(|| {
                         media
                             .observation()
@@ -699,7 +728,7 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                         fields.push((
                             "dialog".into(),
                             IvyJson::object([
-                                ("firstBeforeFinal", (kind == "late").into()),
+                                ("firstBeforeFinal", late.into()),
                                 ("hangupBeforeFinal", early_end.into()),
                                 (
                                     "sendCodecBeforeEnd",
@@ -716,6 +745,18 @@ async fn native_codec_upgrade_retains_original_dialog_media_transmission_and_rec
                             fields.push(("releaseBeforeFinal".into(), release_before_final.into()));
                         }
                         fields.push(("ackAfterFinal".into(), true.into()));
+                    }
+                }
+                if kind == "concurrent_late" {
+                    if let IvyJson::Object(fields) = &mut result {
+                        let (_, IvyJson::Object(dialog)) = fields
+                            .iter_mut()
+                            .find(|(key, _)| key == &"dialog".into())
+                            .unwrap()
+                        else {
+                            panic!("Lifecycle observation absent");
+                        };
+                        dialog.push(("secondBeforeFinal".into(), true.into()));
                     }
                 }
                 if mixed {

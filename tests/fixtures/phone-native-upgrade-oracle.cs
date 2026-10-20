@@ -21,9 +21,9 @@ public static class PhoneNativeUpgradeOracle {
     public static async Task<object> Run(NativeSipOperations owner,JsonElement args){
         string scenario=args.GetProperty("scenario").GetString();bool delayed=scenario.StartsWith("delayed");
         bool downgrade=scenario.EndsWith("_repeat_downgrade"),reverse=scenario.EndsWith("_concurrent_reverse");
-        bool mixed=scenario.Contains("_concurrent_")&&!reverse,refusedFirst=scenario.EndsWith("_refused_first"),refusedSecond=scenario.EndsWith("_refused_second");
+        bool concurrentLate=scenario.EndsWith("_concurrent_late"),mixed=scenario.Contains("_concurrent_")&&!reverse&&!concurrentLate,refusedFirst=scenario.EndsWith("_refused_first"),refusedSecond=scenario.EndsWith("_refused_second");
         bool late=scenario.EndsWith("_late"),repeated=scenario.EndsWith("_repeated")||downgrade,retransmitted=scenario.EndsWith("_retransmitted"),pendingHangup=scenario.EndsWith("_pending_hangup");
-        bool concurrent=scenario.EndsWith("_concurrent")||reverse||mixed,pendingRelease=scenario.EndsWith("_pending_release"),hangupSuccess=scenario.EndsWith("_hangup_success");
+        bool concurrent=scenario.EndsWith("_concurrent")||reverse||mixed||concurrentLate,pendingRelease=scenario.EndsWith("_pending_release"),hangupSuccess=scenario.EndsWith("_hangup_success");
         bool lifecycle=late||repeated||retransmitted||pendingHangup||concurrent||pendingRelease||hangupSuccess;
         await owner.InvokeAsync("configure",args.GetProperty("configuration"));
         using var peer=new UdpClient(new IPEndPoint(IPAddress.Loopback,0));UdpClient rtp=null,rtcp=null;
@@ -48,7 +48,7 @@ public static class PhoneNativeUpgradeOracle {
             async Task<SIPRequest> Additional(int sequence){for(;;){var next=await Next(SIPMethodsEnum.INVITE);if(next.Header.CSeq!=sequence)return next;}}
             void InviteRow(SIPRequest invite){requests.Add(new{method="INVITE",sequence=invite.Header.CSeq,sameCallId=invite.Header.CallId==wire,sameTags=invite.Header.From.FromTag==tag&&invite.Header.To.ToTag=="caller-tag",hasPcma=invite.Body.Contains("PCMA/8000"),hasPcmu=invite.Body.Contains("PCMU/8000"),hasSendrecv=invite.Body.Contains("sendrecv")});}
             void AckRow(SIPRequest ack){requests.Add(new{method=ack.Method.ToString(),sequence=ack.Header.CSeq,sameCallId=ack.Header.CallId==wire});}
-            int byeSequence=0;bool endedBeforeFinal=false,firstSaved=false,releaseBeforeFinal=false,acked=true;Task releasePending=null;Task<object> concurrentUpgrade=null;SIPRequest concurrentInvite=null;
+            int byeSequence=0;bool endedBeforeFinal=false,firstSaved=false,secondSaved=false,releaseBeforeFinal=false,acked=true;Task releasePending=null;Task<object> concurrentUpgrade=null;SIPRequest concurrentInvite=null;
             async Task CompleteConcurrent(){
                 var accepted=SIPResponse.GetResponse(concurrentInvite,(SIPResponseStatusCodesEnum)(refusedSecond?488:200),null);accepted.Header.Contact=[SIPContactHeader.ParseContactHeader($"<sip:caller@{source}>").Single()];
                 bool pcma=!mixed||scenario.EndsWith("missing_type")||scenario.EndsWith("other_type");
@@ -63,6 +63,7 @@ public static class PhoneNativeUpgradeOracle {
                 if(concurrent){concurrentUpgrade=Invoke(owner,id);concurrentInvite=await Additional(invite.Header.CSeq);if(concurrentInvite!=null)InviteRow(concurrentInvite);}
                 if(reverse&&concurrentInvite!=null){var first=invite;invite=concurrentInvite;concurrentInvite=first;}
                 if(late){rows.Add(await upgrade.WaitAsync(TimeSpan.FromSeconds(7)));firstSaved=true;}
+                if(concurrentLate){rows.Add(await concurrentUpgrade.WaitAsync(TimeSpan.FromSeconds(7)));secondSaved=true;}
                 if(pendingHangup||pendingRelease||hangupSuccess){await End();endedBeforeFinal=true;}
                 if(pendingRelease){releasePending=owner.InvokeAsync("call.release",Args(new{callId=id}));await Task.WhenAny(releasePending,Task.Delay(1000));releaseBeforeFinal=releasePending.IsCompletedSuccessfully;}
                 var response=SIPResponse.GetResponse(invite,(SIPResponseStatusCodesEnum)(scenario.EndsWith("refused")||pendingHangup||refusedFirst?488:200),null);
@@ -76,7 +77,7 @@ public static class PhoneNativeUpgradeOracle {
                 if(retransmitted){await peer.SendAsync(packet,packet.Length,target);AckRow(await Next(SIPMethodsEnum.ACK));}
                 if(!firstSaved){rows.Add(await upgrade.WaitAsync(TimeSpan.FromSeconds(7)));firstSaved=true;}
                 if(concurrent){
-                    rows.Add(await concurrentUpgrade.WaitAsync(TimeSpan.FromSeconds(7)));
+                    if(!secondSaved)rows.Add(await concurrentUpgrade.WaitAsync(TimeSpan.FromSeconds(7)));
                     if(concurrentInvite!=null&&!mixed)await CompleteConcurrent();
                 }
                 if(repeated){
@@ -92,6 +93,7 @@ public static class PhoneNativeUpgradeOracle {
             rows.Add(await Invoke(owner,id));
             object release;try{if(releasePending!=null)await releasePending.WaitAsync(TimeSpan.FromSeconds(7));else await owner.InvokeAsync("call.release",Args(new{callId=id}));release=new{released=Host(owner).FindCall(id)==null};}catch(Exception e){release=new{error=e.GetType().FullName,message=e.Message};}
             if(mixed)return new{rows,requests,before,sameMedia=ReferenceEquals(media,call.Media),release,dialog=new{firstBeforeFinal=false,hangupBeforeFinal=false,sendCodecBeforeEnd,byeSequence},finals};
+            if(concurrentLate)return new{rows,requests,before,sameMedia=ReferenceEquals(media,call.Media),release,dialog=new{firstBeforeFinal=true,secondBeforeFinal=true,hangupBeforeFinal=false,sendCodecBeforeEnd,byeSequence}};
             if(pendingRelease)return new{rows,requests,before,sameMedia=ReferenceEquals(media,call.Media),release,dialog=new{firstBeforeFinal=false,hangupBeforeFinal=endedBeforeFinal,sendCodecBeforeEnd,byeSequence},releaseBeforeFinal,ackAfterFinal=acked};
             if(hangupSuccess)return new{rows,requests,before,sameMedia=ReferenceEquals(media,call.Media),release,dialog=new{firstBeforeFinal=false,hangupBeforeFinal=endedBeforeFinal,sendCodecBeforeEnd,byeSequence},ackAfterFinal=acked};
             if(lifecycle)return new{rows,requests,before,sameMedia=ReferenceEquals(media,call.Media),release,dialog=new{firstBeforeFinal=late,hangupBeforeFinal=endedBeforeFinal,sendCodecBeforeEnd,byeSequence}};
