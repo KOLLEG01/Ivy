@@ -435,6 +435,19 @@ async fn session_waiting_screening_and_bridge_keep_original_identity_and_pair() 
     assert!(!port.state().open);
     assert_eq!(route.state.lock().unwrap().reads, 0);
     let original = m.observation().receive.transport.local_rtp;
+    let mut inbound = vec![0; 172];
+    ivy_phone_bridge::media::RtpHeader {
+        marker: false,
+        payload_type: 0,
+        sequence: 10,
+        timestamp: 1600,
+        source: 222,
+    }
+    .write(&[255; 160], &mut inbound)
+    .unwrap();
+    rtp.send_to(&inbound, original).await.unwrap();
+    wait(|| m.observation().receive.received_packets == 1).await;
+    assert_eq!(route.state.lock().unwrap().writes, 0);
     let bytes = wav(48000, 1, 4800);
     let file = TempWav::new(&bytes);
     m.prepare_screening(&file.0, &ivy_contracts::hash::digest(&bytes), 1, 1, true)
@@ -449,6 +462,17 @@ async fn session_waiting_screening_and_bridge_keep_original_identity_and_pair() 
     port.grant_authority().unwrap();
     m.bridge_screening();
     wait(|| route.state.lock().unwrap().reads > 0).await;
+    ivy_phone_bridge::media::RtpHeader {
+        marker: false,
+        payload_type: 0,
+        sequence: 11,
+        timestamp: 1760,
+        source: 222,
+    }
+    .write(&[255; 160], &mut inbound)
+    .unwrap();
+    rtp.send_to(&inbound, original).await.unwrap();
+    wait(|| route.state.lock().unwrap().writes == 1).await;
     let changed = offer(rtp.local_addr().unwrap().port(), "").replace("RTP/AVP 0", "RTP/AVP 8");
     m.set_remote_description(SdpType::Offer, &SdpDocument::parse(&changed).unwrap())
         .unwrap();
@@ -480,6 +504,8 @@ async fn session_waiting_screening_and_bridge_keep_original_identity_and_pair() 
             ("bridgedCapture", true.into()),
             ("sameSourceAndPair", true.into()),
             ("oneCleanup", true.into()),
+            ("actualReceiveBlockedWhileWaiting", true.into()),
+            ("actualReceiveAfterBridge", true.into()),
         ]),
     );
 }
