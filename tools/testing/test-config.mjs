@@ -189,6 +189,7 @@ export const rustTests = {
   'tests/rust/dashboards-document.rs': { package: 'ivy-dashboards', test: 'dashboards-document' },
   'tests/rust/dashboards-renderer.rs': { package: 'ivy-dashboards', test: 'dashboards-renderer' },
   'tests/rust/hive_push_native.rs': { package: 'ivy-hive', test: 'hive-push-native' },
+  'tests/rust/hive_push_profile.rs': { package: 'ivy-hive', test: 'hive-push-profile' },
   'tests/rust/hive_storage_worker.rs': { package: 'ivy-hive', test: 'hive-storage-worker' },
   'tests/rust/hive_worker_client.rs': {
     package: 'ivy-hive', test: 'hive-worker-client',
