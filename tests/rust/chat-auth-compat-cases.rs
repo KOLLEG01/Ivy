@@ -5,7 +5,7 @@ use ivy_contracts::{
 };
 use std::{fs, path::Path, process::Command};
 
-fn phase(mode: &str, root: &Path) -> Json {
+pub(super) fn phase(mode: &str, root: &Path) -> Json {
     let output = Command::new("node")
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .args(["tests/rust/fixtures/chat-auth-compat.mjs", mode])
@@ -20,7 +20,7 @@ fn phase(mode: &str, root: &Path) -> Json {
     parse(std::str::from_utf8(&output.stdout).unwrap(), usize::MAX).unwrap()
 }
 
-fn rows(entries: &[AuthEntry]) -> Json {
+pub(super) fn rows(entries: &[AuthEntry]) -> Json {
     Json::Array(
         entries
             .iter()
@@ -35,7 +35,7 @@ fn rows(entries: &[AuthEntry]) -> Json {
     )
 }
 
-fn transfer(from: &Path, to: &Path) -> Vec<AuthEntry> {
+pub(super) fn transfer(from: &Path, to: &Path) -> Vec<AuthEntry> {
     let mut original = AuthStore::open(from).unwrap();
     let first = original.snapshot().unwrap();
     assert!(

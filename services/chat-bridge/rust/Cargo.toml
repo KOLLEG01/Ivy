@@ -15,6 +15,9 @@ base64.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+wacore-libsignal = { version = "=0.7.0", default-features = false, features = ["legacy-session-interop"] }
+
 [[test]]
 name = "chat-native-driver"
 path = "../../../tests/rust/chat-native-driver.rs"

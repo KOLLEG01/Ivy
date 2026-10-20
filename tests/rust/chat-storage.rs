@@ -3,6 +3,8 @@ use ivy_chat_bridge::whatsapp::journal_io::{JournalIo, StorageUnavailable};
 use rusqlite::{Connection, types::Value};
 #[path = "chat-auth-compat-cases.rs"]
 mod auth_compat;
+#[path = "chat-auth-native-cases.rs"]
+mod auth_native;
 #[path = "chat-store-cases.rs"]
 mod chat_store;
 #[path = "chat-store-hive-cases.rs"]
