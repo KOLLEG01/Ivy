@@ -64,3 +64,11 @@ path = "../../../tests/rust/hive_push_profile.rs"
 [[test]]
 name = "hive-package-ui"
 path = "../../../tests/rust/hive_package_ui.rs"
+
+[[test]]
+name = "hive-http"
+path = "../../../tests/rust/hive_http.rs"
+
+[[test]]
+name = "hive-offline-backup"
+path = "../../../tests/rust/hive_offline_backup.rs"
