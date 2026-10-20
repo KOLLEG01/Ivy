@@ -1,6 +1,7 @@
 //! Turn/item state translated from the pinned server. Provider work is never
 //! awaited while this SQLite owner handles another native message.
 use super::{
+    commands::{self, WorkflowCommand},
     error::{AdapterError, Result},
     images, policy,
     protocol::{Adapter, CallKind, Effect, TurnState},
@@ -126,6 +127,7 @@ impl Adapter {
             notices: BTreeSet::new(),
             has_text: false,
             subagents: vec![],
+            workflow_tools: BTreeSet::new(),
         };
         self.turns.insert(id.clone(), state);
         self.status(
@@ -168,6 +170,15 @@ impl Adapter {
             self.item_event(state, id, item, true, &mut out);
             self.item_event(state, id, item, false, &mut out);
         }
+        if field(&state.params, "outputSchema").is_null()
+            && matches!(
+                commands::workflow_command(&state.prompt),
+                Some(WorkflowCommand::List)
+            )
+        {
+            out.extend(self.complete_workflow_list(id)?);
+            return Ok(out);
+        }
         let mut context = J::object([
             ("threadId", thread_id),
             ("turnId", id.clone().into_json()),
@@ -185,8 +196,29 @@ impl Adapter {
                 str_or(field(&state.params, "cwd"), field(&state.thread, "cwd")),
             ),
             ("runtimeType", J::Null),
-            ("model", field(&state.thread, "model").clone()),
-            ("effort", field(&state.thread, "reasoningEffort").clone()),
+            (
+                "model",
+                super::models::resolve_model(
+                    &str_or(field(&state.params, "model"), field(&state.thread, "model")),
+                    !field(&state.params, "outputSchema").is_null(),
+                    &self.env.environment,
+                    &self.env.discovered_router_models,
+                ),
+            ),
+            (
+                "effort",
+                super::models::resolve_effort(
+                    &if field(&state.params, "effort").as_js_string().is_some() {
+                        field(&state.params, "effort").clone()
+                    } else {
+                        coalesce(
+                            field(&state.thread, "reasoningEffort"),
+                            field(&self.env.environment, "CLAUDE_CODEX_EFFORT"),
+                        )
+                    },
+                    &self.env.environment,
+                ),
+            ),
             (
                 "claudeSessionId",
                 field(&state.thread, "claudeSessionId").clone(),
@@ -203,9 +235,22 @@ impl Adapter {
                     .into(),
             ),
             ("mcpServers", self.env.mcp_servers.clone()),
-            ("allowedTools", J::Null),
-            ("addDirs", J::Array(vec![])),
-            ("enableFileCheckpointing", false.into()),
+            (
+                "allowedTools",
+                super::models::allowed_tools(&self.env.environment),
+            ),
+            ("addDirs", super::models::add_dirs(&self.env.environment)),
+            (
+                "enableFileCheckpointing",
+                is(
+                    field(
+                        &self.env.environment,
+                        "CLAUDE_CODEX_ENABLE_FILE_CHECKPOINTING",
+                    ),
+                    "1",
+                )
+                .into(),
+            ),
             (
                 "outputFormat",
                 if field(&state.params, "outputSchema").is_null() {
@@ -751,6 +796,16 @@ impl Adapter {
         let tool = string(field(e, "toolUseId"));
         let input = field(e, "input");
         if is(field(e, "type"), "tool_use") {
+            let name = string(field(e, "toolName")).trim().to_english_lowercase();
+            if name == JsString::from("workflow") || name == JsString::from("workflows") {
+                state.workflow_tools.insert(tool.clone());
+                if let Some(timeout_ms) = self.env.subagent_watchdog_ms.filter(|ms| *ms > 0) {
+                    out.push(Effect::Watchdog {
+                        turn_id: turn.clone(),
+                        timeout_ms,
+                    });
+                }
+            }
             if state.item_ids.contains_key(&tool) {
                 return Ok(());
             }
@@ -823,6 +878,15 @@ impl Adapter {
                 )
             }
             return Ok(());
+        }
+        if is(field(e, "type"), "tool_result")
+            && state.workflow_tools.remove(&tool)
+            && state.workflow_tools.is_empty()
+            && state.subagents.is_empty()
+        {
+            out.push(Effect::CancelWatchdog {
+                turn_id: turn.clone(),
+            });
         }
         let Some(id) = state
             .item_ids
@@ -1021,6 +1085,20 @@ impl Adapter {
                 "Subagent ended without a terminal task result.",
                 &mut out,
             )?;
+        }
+        if result.is_ok() && !field(&state.params, "outputSchema").is_null() && !state.has_text {
+            let text =
+                commands::structured_fallback(field(&state.params, "outputSchema"), &state.prompt)?;
+            // The pinned fallback is an agent message even in plan mode.
+            let plan_mode = state.plan_mode;
+            state.plan_mode = false;
+            self.on_event(
+                &mut state,
+                turn,
+                &J::object([("type", "text_delta".into()), ("delta", text.into_json())]),
+                &mut out,
+            )?;
+            state.plan_mode = plan_mode;
         }
         self.complete_message(
             &mut state,

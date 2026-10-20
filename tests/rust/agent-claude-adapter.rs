@@ -148,6 +148,8 @@ mod sdk_cases;
 mod event_cases;
 #[path = "agent-claude-adapter/driver.rs"]
 mod driver_cases;
+#[path = "agent-claude-adapter/workflows.rs"]
+mod workflow_cases;
 fn local(home: &Path, spec: &J) -> J {
     let mutable = Arc::new(Mutex::new((
         f(spec, "now").as_f64().unwrap_or(1700000000123.0),

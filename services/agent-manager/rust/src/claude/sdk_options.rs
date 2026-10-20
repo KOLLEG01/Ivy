@@ -412,19 +412,7 @@ impl SdkEnvironment {
     }
 }
 pub fn workflow_prompt(prompt: &JsString) -> JsString {
-    let trimmed = prompt.trim();
-    let prefix = JsString::from("/workflows");
-    if !trimmed.0.starts_with(&prefix.0) {
-        return prompt.clone();
-    }
-    let tail = JsString(trimmed.0[prefix.0.len()..].to_vec());
-    if tail.0.is_empty() || !JsString(vec![tail.0[0]]).trim().0.is_empty() {
-        return prompt.clone();
-    }
-    let task = tail.trim();
-    if task.0.is_empty() {
-        prompt.clone()
-    } else {
+    if let Some(super::commands::WorkflowCommand::Run(task)) = super::commands::workflow_command(prompt) {
         concat(&[&"ultracode: ".into(),&task,&"\n\nKeep the launched workflow attached to this turn: wait for every workflow task to finish before returning the final response.".into()])
-    }
+    } else { prompt.clone() }
 }

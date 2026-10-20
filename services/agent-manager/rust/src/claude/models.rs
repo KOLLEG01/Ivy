@@ -1,9 +1,174 @@
 //! Current SDK model projection; no static provider-model fallback.
 use super::{
     error::{AdapterError, Result},
-    value::{field, string, truthy},
+    value::{coalesce, field, is, object, string, truthy},
 };
 use ivy_contracts::{IvyJson, JsString};
+
+fn json_value(value: &IvyJson) -> Option<IvyJson> {
+    let Some(text) = value.as_js_string() else {
+        return None;
+    };
+    // JSON.parse accepts literal UTF-16 surrogates inside strings. Escape code
+    // units before the shared UTF-8 parser, retaining paired and lone values.
+    let mut source = String::new();
+    for unit in &text.0 {
+        if (0xd800..=0xdfff).contains(unit) {
+            source.push_str(&format!("\\u{unit:04x}"))
+        } else {
+            source.push(char::from_u32(u32::from(*unit)).unwrap())
+        }
+    }
+    ivy_contracts::json::parse(&source, usize::MAX).ok()
+}
+fn json_object(value: &IvyJson) -> IvyJson {
+    json_value(value)
+        .filter(|v| v.as_object().is_some())
+        .unwrap_or_else(object)
+}
+pub fn resolve_model(
+    raw: &IvyJson,
+    summary: bool,
+    environment: &IvyJson,
+    discovered: &[JsString],
+) -> IvyJson {
+    let raw = string(&coalesce(raw, &"".into())).trim();
+    let default = || {
+        let value = field(environment, "CLAUDE_CODEX_DEFAULT_MODEL");
+        if truthy(value) {
+            value.clone()
+        } else {
+            IvyJson::Null
+        }
+    };
+    if summary
+        && (raw.0.is_empty()
+            || super::protocol::Adapter::codex_model(&IvyJson::String(raw.clone())))
+    {
+        for name in ["CLAUDE_CODEX_SUMMARY_MODEL", "CLAUDE_CODEX_TITLE_MODEL"] {
+            let value = field(environment, name);
+            if truthy(value) {
+                return value.clone();
+            }
+        }
+        return "haiku".into();
+    }
+    if raw.0.is_empty()
+        || ["default", "claude-default", "claude-code", "custom"]
+            .iter()
+            .any(|v| raw == JsString::from(*v))
+    {
+        return default();
+    }
+    let aliases = json_object(field(environment, "CLAUDE_CODEX_MODEL_ALIASES"));
+    let custom = aliases.get_key(&raw);
+    let alias = if let Some(value) = custom.filter(|v| v.as_js_string().is_some()) {
+        value.clone()
+    } else {
+        let built_in = match raw.to_utf8().ok().as_deref() {
+            Some("claude-sonnet") => Some("sonnet"),
+            Some("claude-opus") => Some("opus"),
+            Some("claude-fable") => Some("fable"),
+            Some("claude-haiku") => Some("haiku"),
+            Some("sonnet-1m" | "claude-sonnet-1m") => Some("sonnet[1m]"),
+            Some("opus-plan" | "claude-opus-plan") => Some("opusplan"),
+            _ => None,
+        };
+        built_in.map(IvyJson::from).unwrap_or(IvyJson::Null)
+    };
+    if truthy(&alias) {
+        return alias;
+    }
+    if let Some(configured) = field(environment, "CLAUDE_CODEX_MODELS").as_js_string() {
+        for value in configured
+            .0
+            .split(|c| *c == 44)
+            .map(|part| JsString(part.to_vec()).trim())
+            .filter(|s| !s.0.is_empty())
+        {
+            if value.to_english_lowercase() == raw.to_english_lowercase() {
+                return IvyJson::String(value);
+            }
+        }
+    }
+    for value in discovered {
+        if value.to_english_lowercase() == raw.to_english_lowercase() {
+            return IvyJson::String(value.clone());
+        }
+    }
+    if super::protocol::Adapter::codex_model(&IvyJson::String(raw.clone())) {
+        default()
+    } else {
+        IvyJson::String(raw)
+    }
+}
+pub fn resolve_effort(raw: &IvyJson, environment: &IvyJson) -> IvyJson {
+    let raw = string(&coalesce(raw, &"".into())).trim();
+    let aliases = json_object(field(environment, "CLAUDE_CODEX_EFFORT_ALIASES"));
+    let mapped = aliases
+        .get_key(&raw)
+        .filter(|v| v.as_js_string().is_some())
+        .cloned()
+        .unwrap_or_else(|| IvyJson::String(raw));
+    if ["low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .any(|v| is(&mapped, v))
+    {
+        mapped
+    } else if is(&mapped, "minimal") {
+        "low".into()
+    } else {
+        IvyJson::Null
+    }
+}
+pub fn allowed_tools(environment: &IvyJson) -> IvyJson {
+    let Some(raw) = field(environment, "CLAUDE_CODEX_ALLOWED_TOOLS").as_js_string() else {
+        return IvyJson::Null;
+    };
+    let raw = raw.trim();
+    if raw.0.is_empty()
+        || raw == JsString::from("*")
+        || raw.to_english_lowercase() == JsString::from("default")
+    {
+        return IvyJson::Null;
+    }
+    IvyJson::Array(
+        raw.0
+            .split(|c| *c == 44)
+            .map(|part| JsString(part.to_vec()).trim())
+            .filter(|s| !s.0.is_empty())
+            .map(IvyJson::String)
+            .collect(),
+    )
+}
+pub fn add_dirs(environment: &IvyJson) -> IvyJson {
+    let Some(raw) = field(environment, "CLAUDE_CODEX_ADD_DIRS").as_js_string() else {
+        return IvyJson::Array(vec![]);
+    };
+    if let Some(IvyJson::Array(ref values)) = json_value(&IvyJson::String(raw.clone())) {
+        let values: std::result::Result<Vec<_>, _> = values
+            .iter()
+            .map(ivy_contracts::json::try_js_string)
+            .collect();
+        if let Ok(values) = values {
+            return IvyJson::Array(
+                values
+                    .into_iter()
+                    .filter(|s| !s.0.is_empty())
+                    .map(IvyJson::String)
+                    .collect(),
+            );
+        }
+    }
+    IvyJson::Array(
+        raw.0
+            .split(|c| *c == 44)
+            .map(|part| JsString(part.to_vec()).trim())
+            .filter(|s| !s.0.is_empty())
+            .map(IvyJson::String)
+            .collect(),
+    )
+}
 
 fn context_alias(value: &JsString) -> bool {
     let mut units = value.0.as_slice();

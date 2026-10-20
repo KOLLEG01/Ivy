@@ -24,6 +24,7 @@ Object.assign(process.env, { CLAUDE_CODEX_HOME: root, CODEX_HOME: root,
   CLAUDE_CODEX_DISABLE_CODEX_PROXY: '1', CLAUDE_CODEX_DEFAULT_MODEL: 'sonnet',
   CLAUDE_CODEX_DEFAULT_EFFORT: 'medium', CLAUDE_CODEX_COMPAT_VERSION: '0.142.3',
   CLAUDE_CODEX_VERSION_SUFFIX: 'claude-codex', CLAUDE_CODEX_LOG_LEVEL: 'off' });
+Object.assign(process.env,spec.environment??{});
 let now = spec.now ?? 1700000000123, next = 0;
 Date.now = () => now;
 globalThis.__ivyClaudeFixture = { home: root, nextId: () => {
@@ -82,6 +83,7 @@ for (const rawStep of spec.steps) {
       const turn = active.get(step.turnId); active.delete(step.turnId);
       if (step.error) turn.reject(new Error(step.error)); else turn.resolve();
     } else if (step.action === 'disconnect') server.closePeer(peer(step.peer));
+    else if (step.action === 'wait') await new Promise(resolve=>setTimeout(resolve,step.millis));
     else if (step.action === 'stop') { await server.stop(); stopped = true; }
     else throw new Error('Unknown fixture action: ' + step.action);
   } catch (error) { failure = { name: error.name, message: error.message }; }

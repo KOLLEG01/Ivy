@@ -38,6 +38,8 @@ fn adapter(home: &Path) -> Adapter {
         projects,
         RateLimitStore::open(home),
         Environment {
+            environment: J::Null,
+            discovered_router_models: vec![],
             cwd: node_path::from_native(home),
             codex_home: node_path::from_native(home),
             platform_os: "windows".into(),
@@ -53,7 +55,7 @@ fn adapter(home: &Path) -> Adapter {
             prepare_worktree: Arc::new(|_, cwd| Ok(cwd.clone())),
             read_base64: Arc::new(|_| Err(AdapterError::new("Unexpected file read"))),
             subagent_completed: Some(true),
-            subagent_watchdog_ms: Some(30_000),
+            subagent_watchdog_ms: Some(1_000),
         },
         AdapterClock {
             seconds: clock,
@@ -390,6 +392,22 @@ async fn async_owner_keeps_native_controls_live_through_approvals_diff_and_backp
     .await;
     trace.response("after-interrupt").await;
 
+    let inspection=call(&bridge,"fixture/inspect",v("{}")).await;
+    let interrupted_before:f64=inspection.as_array().unwrap().iter().map(|entry|f(entry,"interrupts").as_f64().unwrap()).sum();
+    let workflow = start(&handle, &bridge, &mut trace, &thread, "workflow-watchdog").await;
+    emit(&bridge,&workflow,v(r#"{"type":"assistant","message":{"id":"pending-workflow","content":[{"type":"tool_use","id":"pending-workflow","name":"Workflow","input":{}}]}}"#)).await;
+    let done=completed(&mut trace,&workflow).await;
+    let failed=f(f(f(&done,"message"),"params"),"turn");
+    assert_eq!(f(failed,"status"),&J::from("failed"));
+    assert_eq!(f(f(failed,"error"),"message"),&J::from("Subagent did not publish a terminal result within 1 second."));
+    timeout(Duration::from_secs(3),async {
+        loop {
+            let inspection=call(&bridge,"fixture/inspect",v("{}")).await;
+            let interrupted:f64=inspection.as_array().unwrap().iter().map(|entry|f(entry,"interrupts").as_f64().unwrap()).sum();
+            if interrupted>interrupted_before {break}
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("watchdog did not independently interrupt the SDK pipe");
     let turn4 = start(&handle, &bridge, &mut trace, &thread, "backpressure").await;
     emit(&bridge,&turn4,v(r#"{"type":"assistant","message":{"id":"tool","content":[{"type":"tool_use","id":"backpressure-tool","name":"Bash","input":{"command":"fixture"}}]}}"#)).await;
     emit(&bridge,&turn4,v(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"backpressure-tool","content":"fixture result"}]}}"#)).await;
@@ -440,6 +458,7 @@ async fn async_owner_keeps_native_controls_live_through_approvals_diff_and_backp
         ("finalDiffBeforeCompletion", true.into()),
         ("interruptWinsFinalDiff", true.into()),
         ("stoppedWithBoundedQueues", true.into()),
+        ("workflowLaunchWatchdogInterrupt", true.into()),
         ("messages", J::Array(trace.messages)),
     ]);
     // The assertions above qualify integration invariants; this row records

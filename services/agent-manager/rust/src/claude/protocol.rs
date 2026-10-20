@@ -24,6 +24,8 @@ pub struct AdapterClock {
 /// Explicit executing-host facts and admitted configuration. Constructors do
 /// not discover another account, executable or provider as a fallback.
 pub struct Environment {
+    pub environment: J,
+    pub discovered_router_models: Vec<JsString>,
     pub cwd: JsString,
     pub codex_home: JsString,
     pub platform_os: JsString,
@@ -114,6 +116,7 @@ pub(super) struct TurnState {
     pub(super) notices: BTreeSet<JsString>,
     pub(super) has_text: bool,
     pub(super) subagents: Vec<(JsString, super::subagents::Child)>,
+    pub(super) workflow_tools: BTreeSet<JsString>,
 }
 pub struct Adapter {
     pub(super) store: SessionStore,

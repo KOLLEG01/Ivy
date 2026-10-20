@@ -3,10 +3,24 @@
 use super::{error::Result, value::*};
 use ivy_contracts::{IvyJson as J, JsString};
 use ivy_host_runtime::node_path::{self, Context, Style};
-use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use tokio::{
+    sync::Notify,
+    task::JoinHandle,
+    time::{Duration, Instant},
+};
 
 pub type IoFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 pub type EventSink = Arc<dyn Fn(J) -> IoFuture<()> + Send + Sync>;
+pub type ErrorSink = Arc<dyn Fn(super::error::AdapterError) -> IoFuture<()> + Send + Sync>;
 #[derive(Clone)]
 pub struct WorkflowFiles {
     /// Node realpath spelling; missing file/ancestor returns None. Other errors
@@ -166,31 +180,31 @@ pub struct Journal {
     pub launch: Launch,
     files: WorkflowFiles,
     verified: Option<JsString>,
+    progress: Arc<Mutex<Progress>>,
+    stopped: Arc<AtomicBool>,
+}
+#[derive(Default)]
+struct Progress {
     started: Vec<JsString>,
     completed: BTreeSet<JsString>,
 }
 impl Journal {
-    pub fn new(launch: Launch, files: WorkflowFiles) -> Self {
+    fn new(
+        launch: Launch,
+        files: WorkflowFiles,
+        progress: Arc<Mutex<Progress>>,
+        stopped: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             launch,
             files,
             verified: None,
-            started: vec![],
-            completed: BTreeSet::new(),
+            progress,
+            stopped,
         }
     }
-    pub fn started_count(&self) -> usize {
-        self.started.len()
-    }
-    pub fn completed_count(&self) -> usize {
-        self.completed.len()
-    }
-    pub fn active_ids(&self) -> Vec<JsString> {
-        self.started
-            .iter()
-            .filter(|id| !self.completed.contains(*id))
-            .cloned()
-            .collect()
+    fn current(&self) -> bool {
+        !self.stopped.load(Ordering::SeqCst)
     }
     async fn directory(&mut self, paths: &WorkflowPaths) -> Result<Option<JsString>> {
         if let Some(value) = &self.verified {
@@ -217,22 +231,34 @@ impl Journal {
     }
     /// Commit each observed lifecycle only after its consumer accepted it.
     pub async fn poll(&mut self, paths: &WorkflowPaths, sink: &EventSink) -> Result<()> {
+        if !self.current() {
+            return Ok(());
+        }
         let Some(dir) = self.directory(paths).await? else {
             return Ok(());
         };
+        if !self.current() {
+            return Ok(());
+        }
         let Some(text) = self
             .read(&dir, "journal.jsonl".into(), 8 * 1024 * 1024)
             .await?
         else {
             return Ok(());
         };
+        if !self.current() {
+            return Ok(());
+        }
         for entry in lines(&text) {
+            if !self.current() {
+                return Ok(());
+            }
             let kind = field(&entry, "type");
             let id = string_value(field(&entry, "agentId"));
             if (!is(kind, "started") && !is(kind, "result")) || !valid_agent_id(&id) {
                 continue;
             }
-            if !self.started.contains(&id) {
+            if !self.progress.lock().unwrap().started.contains(&id) {
                 let Some(transcript) = self.read(&dir, agent_file(&id), 4 * 1024 * 1024).await?
                 else {
                     continue;
@@ -244,6 +270,9 @@ impl Journal {
                         .filter(|s| !s.0.is_empty())
                 });
                 let Some(prompt) = prompt else { continue };
+                if !self.current() {
+                    return Ok(());
+                }
                 let first = prompt
                     .0
                     .split(|c| *c == 10)
@@ -256,9 +285,15 @@ impl Journal {
                     description: slice(&first, 0, 120),
                 };
                 self.emit(&event, sink).await?;
+                if !self.current() {
+                    return Ok(());
+                }
                 self.accept(&event);
             }
-            if !is(kind, "result") || self.completed.contains(&id) {
+            if !self.current() {
+                return Ok(());
+            }
+            if !is(kind, "result") || self.progress.lock().unwrap().completed.contains(&id) {
                 continue;
             }
             let result = field(&entry, "result");
@@ -287,12 +322,18 @@ impl Journal {
             if body.0.is_empty() {
                 continue;
             }
+            if !self.current() {
+                return Ok(());
+            }
             let event = JournalEvent::Result {
                 agent_id: id.clone(),
                 content: concat(&[&body, &"\nagentId: ".into(), &id]),
                 is_error: failed,
             };
             self.emit(&event, sink).await?;
+            if !self.current() {
+                return Ok(());
+            }
             self.accept(&event);
         }
         Ok(())
@@ -345,16 +386,208 @@ impl Journal {
         (sink)(body).await
     }
     pub fn accept(&mut self, event: &JournalEvent) {
+        let mut progress = self.progress.lock().unwrap();
         match event {
             JournalEvent::Started { agent_id, .. } => {
-                if !self.started.contains(agent_id) {
-                    self.started.push(agent_id.clone())
+                if !progress.started.contains(agent_id) {
+                    progress.started.push(agent_id.clone())
                 }
             }
             JournalEvent::Result { agent_id, .. } => {
-                self.completed.insert(agent_id.clone());
+                progress.completed.insert(agent_id.clone());
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct Cycle {
+    running: bool,
+    completed: u64,
+}
+struct MonitorState {
+    stopped: Arc<AtomicBool>,
+    progress: Arc<Mutex<Progress>>,
+    cycle: Mutex<Cycle>,
+    work: Notify,
+    settled: Notify,
+}
+impl MonitorState {
+    fn schedule(&self) -> Option<u64> {
+        let mut cycle = self.cycle.lock().unwrap();
+        if self.stopped.load(Ordering::SeqCst) {
+            return None;
+        }
+        if !cycle.running {
+            cycle.running = true;
+            self.work.notify_one();
+        }
+        Some(cycle.completed + 1)
+    }
+    async fn wait(&self, target: u64) {
+        loop {
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if self.cycle.lock().unwrap().completed >= target {
+                return;
+            }
+            settled.await;
+        }
+    }
+}
+/// One background poll owner per visible workflow. Flush joins an in-flight
+/// read instead of cancelling it; stop fences callbacks before its bounded wait.
+pub struct JournalMonitor {
+    state: Arc<MonitorState>,
+    task: JoinHandle<()>,
+}
+impl JournalMonitor {
+    pub fn start(
+        launch: Launch,
+        files: WorkflowFiles,
+        paths: Arc<WorkflowPaths>,
+        sink: EventSink,
+        on_error: ErrorSink,
+    ) -> Self {
+        let state = Arc::new(MonitorState {
+            stopped: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(Mutex::new(Progress::default())),
+            cycle: Mutex::new(Cycle::default()),
+            work: Notify::new(),
+            settled: Notify::new(),
+        });
+        state.schedule();
+        let worker = state.clone();
+        let task = tokio::spawn(async move {
+            let mut journal = Journal::new(
+                launch,
+                files,
+                worker.progress.clone(),
+                worker.stopped.clone(),
+            );
+            let mut timer = tokio::time::interval_at(
+                Instant::now() + Duration::from_millis(100),
+                Duration::from_millis(100),
+            );
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                if worker.stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                if !worker.cycle.lock().unwrap().running {
+                    tokio::select! {
+                        _ = worker.work.notified() => {},
+                        _ = timer.tick() => { worker.schedule(); },
+                    }
+                    continue;
+                }
+                let poll = journal.poll(&paths, &sink);
+                tokio::pin!(poll);
+                let result = loop {
+                    tokio::select! {
+                        result = &mut poll => break result,
+                        // Interval ticks that arrive during I/O share this poll.
+                        _ = timer.tick() => {},
+                    }
+                };
+                if let Err(error) = result {
+                    worker.stopped.store(true, Ordering::SeqCst);
+                    // The pinned monitor swallows a cleanup callback failure.
+                    let _ = on_error(error).await;
+                }
+                {
+                    let mut cycle = worker.cycle.lock().unwrap();
+                    cycle.running = false;
+                    cycle.completed += 1;
+                }
+                worker.settled.notify_waiters();
+            }
+            // A stop before the first poll still settles its scheduled flush.
+            let mut cycle = worker.cycle.lock().unwrap();
+            if cycle.running {
+                cycle.running = false;
+                cycle.completed += 1;
+                worker.settled.notify_waiters();
+            }
+        });
+        Self { state, task }
+    }
+    pub async fn flush(&self) {
+        if let Some(target) = self.state.schedule() {
+            self.state.wait(target).await
+        }
+    }
+    pub fn started_count(&self) -> usize {
+        self.state.progress.lock().unwrap().started.len()
+    }
+    pub fn completed_count(&self) -> usize {
+        self.state.progress.lock().unwrap().completed.len()
+    }
+    pub fn active_ids(&self) -> Vec<JsString> {
+        let progress = self.state.progress.lock().unwrap();
+        progress
+            .started
+            .iter()
+            .filter(|id| !progress.completed.contains(*id))
+            .cloned()
+            .collect()
+    }
+    pub async fn drain(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let mut stable = Instant::now();
+        let mut counts = (self.started_count(), self.completed_count());
+        while Instant::now() <= deadline {
+            if tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                self.flush(),
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
+            if self.state.stopped.load(Ordering::SeqCst) {
+                return;
+            }
+            let now = Instant::now();
+            let current = (self.started_count(), self.completed_count());
+            if current != counts {
+                counts = current;
+                stable = now
+            }
+            if current.0 > 0
+                && current.1 >= current.0
+                && now.duration_since(stable) >= Duration::from_millis(500)
+            {
+                return;
+            }
+            if now >= deadline {
+                return;
+            }
+            tokio::time::sleep(
+                Duration::from_millis(100)
+                    .min(deadline.duration_since(now).max(Duration::from_millis(1))),
+            )
+            .await;
+        }
+    }
+    pub async fn stop(&self) {
+        self.state.stopped.store(true, Ordering::SeqCst);
+        self.state.work.notify_one();
+        let target = {
+            let cycle = self.state.cycle.lock().unwrap();
+            cycle.running.then_some(cycle.completed + 1)
+        };
+        if let Some(target) = target {
+            let _ = tokio::time::timeout(Duration::from_millis(500), self.state.wait(target)).await;
+        }
+    }
+}
+impl Drop for JournalMonitor {
+    fn drop(&mut self) {
+        self.state.stopped.store(true, Ordering::SeqCst);
+        self.task.abort();
     }
 }
 fn agent_file(id: &JsString) -> JsString {

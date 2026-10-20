@@ -442,11 +442,11 @@ impl Owner {
         self.jobs.spawn(async move {
             let initial=bridge.call("query/start",options.params).await;
             if let Err(error)=initial {let _=owner.send(Input::Finished{turn,result:Err(error)}).await;return}
-            let mut poll=tokio::time::interval(Duration::from_millis(100));poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let changed = state.changed();
             while !state.is_finished() {
                 let result=tokio::select! {
                     input=receiver.recv()=>match input {Some(TurnInput::Message(message))=>state.message(&message).await,Some(TurnInput::End(error))=>state.end(error).await,None=>state.end(None).await},
-                    _=poll.tick()=>state.poll().await,
+                    _=changed.notified()=>Ok(()),
                 };
                 if let Err(error)=result {let _=state.end(Some(error)).await;break}
             }

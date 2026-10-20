@@ -3,11 +3,17 @@
 use super::{
     error::{AdapterError, Result},
     value::*,
-    workflow::{EventSink, Journal, Launch, WorkflowFiles, WorkflowPaths},
+    workflow::{ErrorSink, EventSink, JournalMonitor, Launch, WorkflowFiles, WorkflowPaths},
 };
 use ivy_contracts::{IvyJson as J, JsString};
-use std::collections::BTreeSet;
-use tokio::time::{Duration, Instant};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use tokio::{sync::Notify, time::Duration};
 
 struct Streamed {
     index: f64,
@@ -19,34 +25,82 @@ struct Deferred {
     text: J,
     session: J,
 }
+#[derive(Default)]
+struct Pending {
+    active: Vec<JsString>,
+    completed: BTreeSet<JsString>,
+    workflow_tools: BTreeSet<JsString>,
+    deferred: Option<Deferred>,
+    failure: Option<JsString>,
+    resolved: bool,
+    outcome: Option<Result<()>>,
+}
+#[derive(Default)]
+struct Shared {
+    pending: Mutex<Pending>,
+    changed: Arc<Notify>,
+}
+impl Shared {
+    fn add_active(&self, id: JsString) {
+        let mut state = self.pending.lock().unwrap();
+        if !state.active.contains(&id) {
+            state.active.push(id)
+        }
+    }
+    fn remove_active(&self, id: &JsString) -> bool {
+        let mut state = self.pending.lock().unwrap();
+        if let Some(index) = state.active.iter().position(|v| v == id) {
+            state.active.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+    fn complete(&self, id: JsString) {
+        self.pending.lock().unwrap().completed.insert(id);
+    }
+    fn completed(&self, id: &JsString) -> bool {
+        self.pending.lock().unwrap().completed.contains(id)
+    }
+}
+#[derive(Default)]
+struct TaskLife {
+    terminal: AtomicBool,
+    failed: AtomicBool,
+}
+impl TaskLife {
+    fn terminal(&self) -> bool {
+        self.terminal.load(Ordering::SeqCst)
+    }
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
+    fn terminate(&self) {
+        self.terminal.store(true, Ordering::SeqCst);
+    }
+}
 struct Task {
     id: JsString,
     tool: JsString,
     name: JsString,
     description: JsString,
     prompt: JsString,
-    monitor: Option<Journal>,
+    monitor: Option<Arc<JournalMonitor>>,
     aggregate: bool,
-    terminal: bool,
-    monitor_failed: bool,
+    life: Arc<TaskLife>,
 }
 pub struct SdkTurn {
     context: J,
     sink: EventSink,
     files: WorkflowFiles,
-    paths: WorkflowPaths,
+    paths: Arc<WorkflowPaths>,
     assistant: Option<JsString>,
     streamed: Vec<Streamed>,
-    active: Vec<JsString>,
-    completed: BTreeSet<JsString>,
-    workflow_tools: BTreeSet<JsString>,
+    shared: Arc<Shared>,
     launches: Vec<(JsString, Launch)>,
     skipped: BTreeSet<JsString>,
     tasks: Vec<Task>,
     structured: JsString,
-    deferred: Option<Deferred>,
-    failure: Option<JsString>,
-    outcome: Option<Result<()>>,
 }
 fn text(value: &J) -> JsString {
     string(&coalesce(value, &"".into()))
@@ -80,26 +134,24 @@ impl SdkTurn {
             context,
             sink,
             files,
-            paths,
+            paths: Arc::new(paths),
             assistant: None,
             streamed: vec![],
-            active: vec![],
-            completed: BTreeSet::new(),
-            workflow_tools: BTreeSet::new(),
+            shared: Arc::new(Shared::default()),
             launches: vec![],
             skipped: BTreeSet::new(),
             tasks: vec![],
             structured: JsString::default(),
-            deferred: None,
-            failure: None,
-            outcome: None,
         }
     }
     pub fn is_finished(&self) -> bool {
-        self.outcome.is_some()
+        self.shared.pending.lock().unwrap().outcome.is_some()
     }
     pub fn outcome(&self) -> Option<Result<()>> {
-        self.outcome.clone()
+        self.shared.pending.lock().unwrap().outcome.clone()
+    }
+    pub fn changed(&self) -> Arc<Notify> {
+        self.shared.changed.clone()
     }
     async fn emit(&self, event: J) -> Result<()> {
         (self.sink)(event).await
@@ -108,28 +160,16 @@ impl SdkTurn {
         truthy(field(&self.context, "outputFormat"))
     }
     fn suppressed(&self) -> bool {
-        !self.active.is_empty()
-            || self.tasks.iter().any(|task| {
-                task.monitor
-                    .as_ref()
-                    .is_some_and(|j| !j.active_ids().is_empty())
-            })
+        !self.shared.pending.lock().unwrap().active.is_empty()
     }
     fn add_active(&mut self, id: JsString) {
-        if !self.active.contains(&id) {
-            self.active.push(id)
-        }
+        self.shared.add_active(id)
     }
     fn remove_active(&mut self, id: &JsString) -> bool {
-        if let Some(index) = self.active.iter().position(|v| v == id) {
-            self.active.remove(index);
-            true
-        } else {
-            false
-        }
+        self.shared.remove_active(id)
     }
     pub async fn message(&mut self, message: &J) -> Result<()> {
-        if self.is_finished() {
+        if self.shared.pending.lock().unwrap().resolved {
             return Ok(());
         }
         match field(message, "type").as_str().ok().as_deref() {
@@ -289,7 +329,12 @@ impl SdkTurn {
                 ]))
                 .await?;
                 if name == JsString::from("Workflow") {
-                    self.workflow_tools.insert(id);
+                    self.shared
+                        .pending
+                        .lock()
+                        .unwrap()
+                        .workflow_tools
+                        .insert(id);
                 }
             }
         }
@@ -314,7 +359,13 @@ impl SdkTurn {
             if id.0.is_empty() {
                 continue;
             }
-            let workflow = self.workflow_tools.remove(&id);
+            let workflow = self
+                .shared
+                .pending
+                .lock()
+                .unwrap()
+                .workflow_tools
+                .remove(&id);
             self.remove_active(&id);
             let mut event = J::object([
                 ("type", "tool_result".into()),
@@ -339,23 +390,27 @@ impl SdkTurn {
         Ok(())
     }
     async fn result(&mut self, message: &J) -> Result<()> {
-        if self.deferred.is_some() || self.is_finished() {
+        let (resolved, deferred, failure) = {
+            let state = self.shared.pending.lock().unwrap();
+            (
+                state.resolved,
+                state.deferred.is_some(),
+                state.failure.clone(),
+            )
+        };
+        if deferred || resolved {
             return Ok(());
         }
         let success = is(field(message, "subtype"), "success")
             && !truthy(field(message, "is_error"))
-            && self.failure.is_none();
-        let result = self
-            .failure
-            .clone()
-            .map(JsonScalar::into_json)
-            .unwrap_or_else(|| {
-                if field(message, "result").is_null() {
-                    J::Null
-                } else {
-                    string(field(message, "result")).into_json()
-                }
-            });
+            && failure.is_none();
+        let result = failure.map(JsonScalar::into_json).unwrap_or_else(|| {
+            if field(message, "result").is_null() {
+                J::Null
+            } else {
+                string(field(message, "result")).into_json()
+            }
+        });
         let session = if field(message, "session_id").is_null() {
             J::Null
         } else {
@@ -386,7 +441,7 @@ impl SdkTurn {
             ]))
             .await?
         }
-        self.deferred = Some(Deferred {
+        self.shared.pending.lock().unwrap().deferred = Some(Deferred {
             success,
             text: result,
             session,
@@ -479,8 +534,7 @@ impl SdkTurn {
             prompt: JsString::default(),
             monitor: None,
             aggregate: false,
-            terminal: false,
-            monitor_failed: false,
+            life: Arc::new(TaskLife::default()),
         });
         self.tasks.len() - 1
     }
@@ -547,11 +601,113 @@ impl SdkTurn {
                 state.name.clone()
             }
         }
-        if state.terminal || state.aggregate || state.monitor.is_some() {
+        if state.life.terminal() || state.aggregate || state.monitor.is_some() {
             return Ok(());
         }
-        state.monitor = Some(Journal::new(launch, self.files.clone()));
-        self.flush(index).await
+        let life = state.life.clone();
+        let pending = self.shared.clone();
+        let events = self.sink.clone();
+        let sink: EventSink = Arc::new(move |event| {
+            let life = life.clone();
+            let pending = pending.clone();
+            let events = events.clone();
+            Box::pin(async move {
+                if life.terminal() {
+                    return Ok(());
+                }
+                let id = text(field(&event, "toolUseId"));
+                if is(field(&event, "type"), "tool_use") {
+                    {
+                        let mut state = pending.pending.lock().unwrap();
+                        if state.active.contains(&id) || state.completed.contains(&id) {
+                            return Ok(());
+                        }
+                        state.active.push(id.clone());
+                    }
+                    if let Err(error) = events(event).await {
+                        pending.remove_active(&id);
+                        return Err(error);
+                    }
+                } else {
+                    if !pending.pending.lock().unwrap().active.contains(&id) {
+                        return Ok(());
+                    }
+                    events(event).await?;
+                    pending.remove_active(&id);
+                    pending.complete(id);
+                }
+                Ok(())
+            })
+        });
+        let life = state.life.clone();
+        let pending = self.shared.clone();
+        let events = self.sink.clone();
+        let task = state.id.clone();
+        let tool = state.tool.clone();
+        let on_error: ErrorSink = Arc::new(move |error| {
+            let life = life.clone();
+            let pending = pending.clone();
+            let events = events.clone();
+            let task = task.clone();
+            let tool = tool.clone();
+            Box::pin(async move {
+                if life.terminal.swap(true, Ordering::SeqCst) {
+                    return Ok(());
+                }
+                life.failed.store(true, Ordering::SeqCst);
+                let message = concat(&[&"Workflow monitoring failed: ".into(), &error.message]);
+                {
+                    let mut state = pending.pending.lock().unwrap();
+                    if state.failure.is_none() {
+                        state.failure = Some(message.clone())
+                    }
+                }
+                let prefix = agent_tool(&task, &JsString::default());
+                let ids = pending
+                    .pending
+                    .lock()
+                    .unwrap()
+                    .active
+                    .iter()
+                    .filter(|id| id.0.starts_with(&prefix.0))
+                    .map(|id| slice(id, prefix.0.len(), id.0.len()))
+                    .collect();
+                close_agents(&pending, &events, &task, ids, &message, true).await?;
+                close_aggregate(&pending, &events, &task, &message, true).await?;
+                pending.pending.lock().unwrap().workflow_tools.remove(&tool);
+                events(J::object([
+                    ("type", "notice".into()),
+                    ("level", "warning".into()),
+                    ("message", message.clone().into_json()),
+                ]))
+                .await?;
+                let deferred = {
+                    let mut state = pending.pending.lock().unwrap();
+                    if let Some(value) = &mut state.deferred {
+                        value.success = false;
+                        if value.text.is_null() {
+                            value.text = message.into_json()
+                        }
+                        state.completed.insert(task_tool(&task));
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if deferred {
+                    finish(&pending, &events, true, false).await?
+                }
+                Ok(())
+            })
+        });
+        state.monitor = Some(Arc::new(JournalMonitor::start(
+            launch,
+            self.files.clone(),
+            self.paths.clone(),
+            sink,
+            on_error,
+        )));
+        Ok(())
     }
     async fn attach_deferred(&mut self, index: usize, source: &JsString) -> Result<()> {
         let found = if !source.0.is_empty() {
@@ -584,10 +740,10 @@ impl SdkTurn {
         let mut ids = state
             .monitor
             .as_ref()
-            .map(Journal::active_ids)
+            .map(|monitor| monitor.active_ids())
             .unwrap_or_default();
         let prefix = agent_tool(&state.id, &JsString::default());
-        for id in &self.active {
+        for id in &self.shared.pending.lock().unwrap().active {
             if id.0.starts_with(&prefix.0) {
                 let id = slice(id, prefix.0.len(), id.0.len());
                 if !id.0.is_empty() && !ids.contains(&id) {
@@ -604,22 +760,15 @@ impl SdkTurn {
         message: &JsString,
         error: bool,
     ) -> Result<()> {
-        for id in ids {
-            let tool = agent_tool(&self.tasks[index].id, &id);
-            self.remove_active(&tool);
-            self.completed.insert(tool.clone());
-            self.emit(J::object([
-                ("type", "tool_result".into()),
-                ("toolUseId", tool.into_json()),
-                (
-                    "content",
-                    concat(&[message, &"\nagentId: ".into(), &id]).into_json(),
-                ),
-                ("isError", error.into()),
-            ]))
-            .await?;
-        }
-        Ok(())
+        close_agents(
+            &self.shared,
+            &self.sink,
+            &self.tasks[index].id,
+            ids,
+            message,
+            error,
+        )
+        .await
     }
     async fn close_aggregate(
         &mut self,
@@ -627,23 +776,19 @@ impl SdkTurn {
         message: &JsString,
         error: bool,
     ) -> Result<()> {
-        let tool = task_tool(&self.tasks[index].id);
-        if !self.remove_active(&tool) {
-            return Ok(());
-        }
-        self.completed.insert(tool.clone());
-        self.emit(J::object([
-            ("type", "tool_result".into()),
-            ("toolUseId", tool.into_json()),
-            ("content", message.clone().into_json()),
-            ("isError", error.into()),
-        ]))
+        close_aggregate(
+            &self.shared,
+            &self.sink,
+            &self.tasks[index].id,
+            message,
+            error,
+        )
         .await
     }
     async fn aggregate(&mut self, index: usize) -> Result<()> {
         let state = &mut self.tasks[index];
         let tool = task_tool(&state.id);
-        if state.terminal || state.aggregate || self.completed.contains(&tool) {
+        if state.life.terminal() || state.aggregate || self.shared.completed(&tool) {
             return Ok(());
         }
         state.aggregate = true;
@@ -683,59 +828,25 @@ impl SdkTurn {
         }
         Ok(())
     }
-    async fn flush(&mut self, index: usize) -> Result<()> {
-        if self.tasks[index].terminal {
-            return Ok(());
-        }
-        let Some(monitor) = self.tasks[index].monitor.as_mut() else {
-            return Ok(());
-        };
-        let result = monitor.poll(&self.paths, &self.sink).await;
-        if let Err(error) = result {
-            let ids = monitor.active_ids();
-            self.tasks[index].monitor = None;
-            self.tasks[index].monitor_failed = true;
-            self.tasks[index].terminal = true;
-            let message = concat(&[&"Workflow monitoring failed: ".into(), &error.message]);
-            if self.failure.is_none() {
-                self.failure = Some(message.clone())
+    pub fn poll(&self) -> super::workflow::IoFuture<()> {
+        let monitors: Vec<_> = self
+            .tasks
+            .iter()
+            .filter_map(|task| task.monitor.clone())
+            .collect();
+        Box::pin(async move {
+            for monitor in monitors {
+                monitor.flush().await
             }
-            self.close_agents(index, ids, &message, true).await?;
-            self.close_aggregate(index, &message, true).await?;
-            self.workflow_tools.remove(&self.tasks[index].tool);
-            self.emit(J::object([
-                ("type", "notice".into()),
-                ("level", "warning".into()),
-                ("message", message.clone().into_json()),
-            ]))
-            .await?;
-            if let Some(deferred) = &mut self.deferred {
-                self.completed.insert(task_tool(&self.tasks[index].id));
-                deferred.success = false;
-                if deferred.text.is_null() {
-                    deferred.text = message.into_json()
-                }
-            }
-            self.finish(true).await?;
-        }
-        Ok(())
-    }
-    pub async fn poll(&mut self) -> Result<()> {
-        if self.is_finished() {
-            return Ok(());
-        }
-        for index in 0..self.tasks.len() {
-            self.flush(index).await?
-        }
-        if self.failure.is_some() {
-            self.finish(true).await?
-        }
-        Ok(())
+            Ok(())
+        })
     }
     async fn hidden(&mut self, index: usize) -> Result<()> {
+        self.tasks[index].life.terminate();
+        if let Some(monitor) = &self.tasks[index].monitor {
+            monitor.stop().await
+        }
         let ids = self.projected(index);
-        self.tasks[index].terminal = true;
-        self.tasks[index].monitor = None;
         self.close_agents(
             index,
             ids,
@@ -792,7 +903,7 @@ impl SdkTurn {
                 }
                 return Ok(());
             }
-            if self.completed.contains(&task_tool(&id)) {
+            if self.shared.completed(&task_tool(&id)) {
                 return Ok(());
             }
             let index = self.task(&id);
@@ -809,7 +920,13 @@ impl SdkTurn {
         if known.is_none()
             && !hint
             && !self.launches.iter().any(|(_, l)| l.task_id == id)
-            && !self.workflow_tools.contains(&source)
+            && !self
+                .shared
+                .pending
+                .lock()
+                .unwrap()
+                .workflow_tools
+                .contains(&source)
         {
             return Ok(());
         }
@@ -837,8 +954,8 @@ impl SdkTurn {
             return self.hidden(index).await;
         }
         let tool = task_tool(&id);
-        if self.completed.contains(&tool) {
-            self.tasks[index].terminal = true;
+        if self.shared.completed(&tool) {
+            self.tasks[index].life.terminate();
             return self.finish(false).await;
         }
         let status = text(field(message, "status"));
@@ -858,53 +975,23 @@ impl SdkTurn {
         let trailer = usage_trailer(field(message, "usage"));
         if self.tasks[index].monitor.is_some()
             && !self.tasks[index].aggregate
-            && !self.tasks[index].monitor_failed
+            && !self.tasks[index].life.failed()
         {
-            // Polling is owned by this turn. No separate timer or stale monitor
-            // callback survives a terminal signal or iterator cancellation.
-            let _ = tokio::time::timeout(Duration::from_millis(500), self.flush(index)).await;
-            let deadline = Instant::now() + Duration::from_millis(3000);
-            let mut stable = Instant::now();
-            let mut counts = (0, 0);
-            while self.tasks[index].monitor.is_some()
-                && !self.tasks[index].monitor_failed
-                && Instant::now() <= deadline
-            {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if tokio::time::timeout(remaining, self.flush(index))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                let Some(monitor) = &self.tasks[index].monitor else {
-                    break;
-                };
-                let current = (monitor.started_count(), monitor.completed_count());
-                if current != counts {
-                    counts = current;
-                    stable = Instant::now()
-                }
-                if current.0 > 0
-                    && current.1 >= current.0
-                    && stable.elapsed() >= Duration::from_millis(500)
-                {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    break;
-                }
-                tokio::time::sleep(
-                    Duration::from_millis(100)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                )
-                .await;
+            let monitor = self.tasks[index].monitor.as_ref().unwrap();
+            let _ = tokio::time::timeout(Duration::from_millis(500), monitor.flush()).await;
+            if !self.tasks[index].life.failed() {
+                monitor.drain(Duration::from_millis(3000)).await
             }
-            if let Some(monitor) = self.tasks[index].monitor.take() {
-                let ids = monitor.active_ids();
+            if !self.tasks[index].life.failed() {
+                if monitor.started_count() > 0 || !self.projected(index).is_empty() {
+                    self.tasks[index].life.terminate()
+                }
+                monitor.stop().await;
+                let ids = self.projected(index);
                 let count = monitor.started_count();
+                self.tasks[index].monitor = None;
                 if count > 0 || !ids.is_empty() {
-                    self.tasks[index].terminal = true;
+                    self.tasks[index].life.terminate();
                     let prefix = if status == JsString::from("completed") {
                         "Workflow completed before the individual transcript result became visible.\n"
                     } else {
@@ -913,7 +1000,7 @@ impl SdkTurn {
                     let reason = concat(&[&prefix.into(), &summary]);
                     self.close_agents(index, ids, &reason, status != JsString::from("completed"))
                         .await?;
-                    self.completed.insert(tool);
+                    self.shared.complete(tool);
                     let name = if self.tasks[index].name.0.is_empty() {
                         concat(&[&"Workflow ".into(), &id])
                     } else {
@@ -937,14 +1024,16 @@ impl SdkTurn {
                     .await?;
                     return self.finish(false).await;
                 }
+            } else {
+                monitor.stop().await
             }
         }
         self.aggregate(index).await?;
         if !self.remove_active(&tool) {
             return Ok(());
         }
-        self.completed.insert(tool.clone());
-        self.tasks[index].terminal = true;
+        self.shared.complete(tool.clone());
+        self.tasks[index].life.terminate();
         self.emit(J::object([
             ("type", "tool_result".into()),
             ("toolUseId", tool.into_json()),
@@ -955,15 +1044,23 @@ impl SdkTurn {
         self.finish(false).await
     }
     fn pending_workflows(&self) -> bool {
-        !self.workflow_tools.is_empty()
+        !self
+            .shared
+            .pending
+            .lock()
+            .unwrap()
+            .workflow_tools
+            .is_empty()
             || !self.launches.is_empty()
-            || self.tasks.iter().any(|t| !t.terminal)
+            || self.tasks.iter().any(|t| !t.life.terminal())
     }
     async fn stop_workflows(&mut self) -> Result<()> {
         for index in 0..self.tasks.len() {
+            self.tasks[index].life.terminate();
+            if let Some(monitor) = &self.tasks[index].monitor {
+                monitor.stop().await
+            }
             let ids = self.projected(index);
-            self.tasks[index].terminal = true;
-            self.tasks[index].monitor = None;
             self.close_agents(
                 index,
                 ids,
@@ -984,54 +1081,28 @@ impl SdkTurn {
         Ok(())
     }
     async fn finish(&mut self, force: bool) -> Result<()> {
-        if self.is_finished() || self.deferred.is_none() {
-            return Ok(());
-        }
-        if !force && self.deferred.as_ref().unwrap().success && self.pending_workflows() {
-            return Ok(());
-        }
-        let value = self.deferred.take().unwrap();
-        let outcome = if value.success {
-            Ok(())
-        } else {
-            Err(AdapterError::new(if value.text.is_null() {
-                "Claude turn failed".into()
-            } else {
-                string(&value.text)
-            }))
-        };
-        // Set the lifetime fence before awaiting the final consumer callback.
-        self.outcome = Some(outcome.clone());
-        if let Err(error) = self
-            .emit(J::object([
-                ("type", "completed".into()),
-                ("success", value.success.into()),
-                ("result", value.text),
-                ("claudeSessionId", value.session),
-            ]))
-            .await
-        {
-            self.outcome = Some(Err(error))
-        }
-        Ok(())
+        finish(&self.shared, &self.sink, force, self.pending_workflows()).await
     }
     pub async fn end(&mut self, error: Option<AdapterError>) -> Result<()> {
-        if self.is_finished() {
+        if self.shared.pending.lock().unwrap().resolved {
             return Ok(());
         }
         if let Some(error) = error {
             let cleanup = self.stop_workflows().await;
-            self.outcome = Some(Err(error.clone()));
+            self.shared.pending.lock().unwrap().resolved = true;
             let _ = self
                 .emit(J::object([
                     ("type", "error".into()),
-                    ("message", error.message.into_json()),
+                    ("message", error.message.clone().into_json()),
                 ]))
                 .await;
+            self.shared.pending.lock().unwrap().outcome = Some(Err(error));
+            self.shared.changed.notify_one();
             cleanup?;
             return Ok(());
         }
-        if self.deferred.is_some() {
+        let deferred = self.shared.pending.lock().unwrap().deferred.is_some();
+        if deferred {
             if self.pending_workflows() {
                 self.stop_workflows().await?
             }
@@ -1041,19 +1112,101 @@ impl SdkTurn {
             }
         }
         self.stop_workflows().await?;
-        self.outcome = Some(Ok(()));
-        if let Err(error) = self
+        self.shared.pending.lock().unwrap().resolved = true;
+        let result = self
             .emit(J::object([
                 ("type", "completed".into()),
                 ("success", true.into()),
                 ("result", J::Null),
             ]))
-            .await
-        {
-            self.outcome = Some(Err(error))
-        }
+            .await;
+        self.shared.pending.lock().unwrap().outcome = Some(result);
+        self.shared.changed.notify_one();
         Ok(())
     }
+}
+async fn close_agents(
+    pending: &Shared,
+    sink: &EventSink,
+    task: &JsString,
+    ids: Vec<JsString>,
+    message: &JsString,
+    error: bool,
+) -> Result<()> {
+    for id in ids {
+        let tool = agent_tool(task, &id);
+        if !pending.remove_active(&tool) {
+            continue;
+        }
+        pending.complete(tool.clone());
+        sink(J::object([
+            ("type", "tool_result".into()),
+            ("toolUseId", tool.into_json()),
+            (
+                "content",
+                concat(&[message, &"\nagentId: ".into(), &id]).into_json(),
+            ),
+            ("isError", error.into()),
+        ]))
+        .await?;
+    }
+    Ok(())
+}
+async fn close_aggregate(
+    pending: &Shared,
+    sink: &EventSink,
+    task: &JsString,
+    message: &JsString,
+    error: bool,
+) -> Result<()> {
+    let tool = task_tool(task);
+    if !pending.remove_active(&tool) {
+        return Ok(());
+    }
+    pending.complete(tool.clone());
+    sink(J::object([
+        ("type", "tool_result".into()),
+        ("toolUseId", tool.into_json()),
+        ("content", message.clone().into_json()),
+        ("isError", error.into()),
+    ]))
+    .await
+}
+async fn finish(pending: &Shared, sink: &EventSink, force: bool, workflows: bool) -> Result<()> {
+    let value = {
+        let mut state = pending.pending.lock().unwrap();
+        if state.resolved {
+            return Ok(());
+        }
+        let Some(value) = &state.deferred else {
+            return Ok(());
+        };
+        if !force && value.success && workflows {
+            return Ok(());
+        }
+        state.resolved = true;
+        state.deferred.take().unwrap()
+    };
+    let outcome = if value.success {
+        Ok(())
+    } else {
+        Err(AdapterError::new(if value.text.is_null() {
+            "Claude turn failed".into()
+        } else {
+            string(&value.text)
+        }))
+    };
+    let result = sink(J::object([
+        ("type", "completed".into()),
+        ("success", value.success.into()),
+        ("result", value.text),
+        ("claudeSessionId", value.session),
+    ]))
+    .await
+    .and(outcome);
+    pending.pending.lock().unwrap().outcome = Some(result);
+    pending.changed.notify_one();
+    Ok(())
 }
 fn usage_trailer(value: &J) -> JsString {
     if value.as_object().is_none() {

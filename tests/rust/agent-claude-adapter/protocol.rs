@@ -90,6 +90,7 @@ struct Driver {
     replies: Vec<J>,
     defer_calls: bool,
     deferred: Vec<(u64, Result<J>)>,
+    watchdogs: std::collections::BTreeSet<JsString>,
 }
 impl Driver {
     fn effects(&mut self, effects: Vec<Effect>) {
@@ -148,7 +149,12 @@ impl Driver {
                 Effect::Diff { turn_id, .. } => {
                     queue.extend(self.adapter.diff_result(&turn_id, "".into()).unwrap())
                 }
-                Effect::Watchdog { .. } | Effect::CancelWatchdog { .. } => {}
+                Effect::Watchdog { turn_id, .. } => {
+                    self.watchdogs.insert(turn_id);
+                }
+                Effect::CancelWatchdog { turn_id } => {
+                    self.watchdogs.remove(&turn_id);
+                }
             }
         }
     }
@@ -199,7 +205,15 @@ fn native(home: &Path, spec: &J, projection: J) -> J {
         ProjectStore::open(home, Style::Windows, compare, clock.clone(), ids.clone()).unwrap();
     let db = home.join("state.sqlite");
     let store = SessionStore::with_clock(home, &db, clock.clone()).unwrap();
+    let mut process_environment = v(
+        r#"{"CLAUDE_CODEX_DEFAULT_MODEL":"sonnet","CLAUDE_CODEX_DEFAULT_EFFORT":"medium","CLAUDE_CODEX_DISABLE_CODEX_PROXY":"1"}"#,
+    );
+    for (key, value) in f(spec, "environment").as_object().unwrap_or(&[]) {
+        process_environment.insert(key.clone(), value.clone());
+    }
     let env = Environment {
+        environment: process_environment,
+        discovered_router_models: vec![],
         cwd: "C:/fixture".into(),
         codex_home: node_path::from_native(home),
         platform_os: "windows".into(),
@@ -219,7 +233,13 @@ fn native(home: &Path, spec: &J, projection: J) -> J {
                 .into())
         }),
         subagent_completed: None,
-        subagent_watchdog_ms: Some(1_800_000),
+        subagent_watchdog_ms: Some(
+            f(f(spec, "environment"), "CLAUDE_CODEX_SUBAGENT_TIMEOUT_MS")
+                .as_str()
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1_800_000),
+        ),
     };
     let mut driver = Driver {
         adapter: Adapter::new(
@@ -240,6 +260,7 @@ fn native(home: &Path, spec: &J, projection: J) -> J {
         replies: vec![],
         defer_calls: false,
         deferred: vec![],
+        watchdogs: std::collections::BTreeSet::new(),
     };
     let mut records = vec![];
     for raw_step in f(spec, "steps").as_array().unwrap() {
@@ -294,6 +315,24 @@ fn native(home: &Path, spec: &J, projection: J) -> J {
             ),
             "disconnect" => {
                 driver.adapter.close_peer(&peer);
+                Ok(vec![])
+            }
+            "wait" => {
+                let waiting = driver.watchdogs.iter().cloned().collect::<Vec<_>>();
+                for turn in waiting {
+                    let thread = driver
+                        .contexts
+                        .iter()
+                        .find(|c| f(c, "turnId").as_js_string() == Some(&turn))
+                        .map(|c| f(c, "threadId").clone())
+                        .unwrap();
+                    let effects = driver.adapter.watchdog_elapsed(&turn).unwrap();
+                    driver.effects(effects);
+                    driver.calls.push(J::object([
+                        ("method", "interrupt".into()),
+                        ("threadId", thread),
+                    ]));
+                }
                 Ok(vec![])
             }
             "stop" => {
@@ -531,5 +570,171 @@ fn concurrent_usage_refresh_replies_in_request_order_and_reuses_the_clock() {
             spec.insert("usageError", "fixture unavailable".into())
         }
         paired(&format!("usage refresh coalescing error={error}"), spec)
+    }
+}
+
+#[test]
+fn workflow_local_listing_empty_summary_and_metrics_match_frozen_server() {
+    paired(
+        "bare workflows local listing",
+        v(r#"{"ids":["id0","id1","id2","id3"],"steps":[
+        {"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}},
+        {"action":"request","message":{"id":2,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"\u2003/workflows\r\n"}]}}},
+        {"action":"request","message":{"id":3,"method":"thread/read","params":{"threadId":"id0","includeTurns":true}}}
+    ]}"#),
+    );
+    paired(
+        "workflow history child status and local listing",
+        v(
+            r#"{"ids":["id0","id1","id2","id3","id4","id5","id6","id7","id8","id9","id10","id11"],"steps":[
+        {"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}},
+        {"action":"request","message":{"id":2,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"/workflows First\r\n  task \ud800"}]}}},
+        {"action":"event","turnId":"id1","event":{"type":"tool_use","toolUseId":"child","toolName":"Agent","input":{"prompt":"work","subagent_type":"workflow"}}},
+        {"action":"event","turnId":"id1","event":{"type":"tool_result","toolUseId":"child","content":"individual\nagentId: abcd1234"}},
+        {"action":"finish","turnId":"id1"},
+        {"action":"request","message":{"id":3,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"/workflows"}]}}},
+        {"action":"request","message":{"id":4,"method":"thread/read","params":{"threadId":"id0","includeTurns":true}}}
+    ]}"#,
+        ),
+    );
+    for (index,schema) in [
+        r#"{"type":"string"}"#,
+        r#"{"type":"array","items":{"type":"string"}}"#,
+        r#"{"type":"object","properties":{"title":{"type":"string"},"details":{"type":"array","items":{"type":"string"}},"count":{"type":"number"}},"required":["title","missing","count","details"]}"#,
+        r#"{"type":"object","properties":{"__proto__":{"type":"object"},"1":{"type":"string"},"nested":{"type":"object","properties":{"value":{"type":"string"}}}},"required":["__proto__",1,"nested"]}"#,
+        r#"{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"}}}}"#,
+        r#"{"type":"json_schema","schema":{"type":"string"}}"#,
+        "[]",
+        "false",
+        r#"{"type":"object","properties":{"only":{"type":"string"}},"required":[]}"#,
+    ].iter().enumerate() {
+        let schema=v(schema);
+        let mut params=v(r#"{"threadId":"id0","input":[{"type":"text","text":"Context\n- 1. First\n2) Title：  Final\ud800"}]}"#);
+        params.insert("outputSchema",schema);
+        if index==0 {params.insert("planMode",true.into());}
+        let spec=J::object([
+            ("ids",J::Array((0..15).map(|i|format!("id{i}").into()).collect())),
+            ("steps",J::Array(vec![
+                v(r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}}"#),
+                J::object([("action","request".into()),("message",J::object([("id",J::Number(2.0)),("method","turn/start".into()),("params",params)]))]),
+                v(r#"{"action":"event","turnId":"id1","event":{"type":"metrics","apiDurationMs":7,"numTurns":3,"costUsd":0.25}}"#),
+                v(r#"{"action":"event","turnId":"id1","event":{"type":"metrics","apiDurationMs":null,"numTurns":1,"costUsd":0.125}}"#),
+                v(r#"{"action":"finish","turnId":"id1"}"#),
+                v(r#"{"action":"request","message":{"id":3,"method":"thread/read","params":{"threadId":"id0","includeTurns":true}}}"#),
+            ])),
+        ]);
+        paired(&format!("empty structured fallback and transient metrics {index}"),spec);
+    }
+}
+
+#[test]
+fn effective_turn_model_effort_and_sdk_configuration_match_frozen_server() {
+    for (index, params, environment) in [
+        (
+            0,
+            r#"{"model":"claude-opus","effort":"burst"}"#,
+            r#"{"CLAUDE_CODEX_EFFORT_ALIASES":"{\"burst\":\"xhigh\"}","CLAUDE_CODEX_ALLOWED_TOOLS":" Bash, Read ,, ","CLAUDE_CODEX_ADD_DIRS":"[\"one\",null,7,false,\"\",[],[\"two\"]]","CLAUDE_CODEX_ENABLE_FILE_CHECKPOINTING":"1"}"#,
+        ),
+        (
+            1,
+            r#"{"model":"DEFAULT","effort":" low "}"#,
+            r#"{"CLAUDE_CODEX_MODEL_ALIASES":"{\"DEFAULT\":\"router-\\ud800\"}","CLAUDE_CODEX_ADD_DIRS":" first,second , ","CLAUDE_CODEX_ALLOWED_TOOLS":"default"}"#,
+        ),
+        (
+            2,
+            r#"{"model":"GLM-5.3","config":{"model_reasoning_effort":"max"}}"#,
+            r#"{"CLAUDE_CODEX_MODELS":"sonnet,glm-5.3","CLAUDE_CODEX_MODEL_ALIASES":"{invalid","CLAUDE_CODEX_ALLOWED_TOOLS":"*","CLAUDE_CODEX_ADD_DIRS":"[1,{\"toString\":7}]"}"#,
+        ),
+        (
+            3,
+            r#"{"model":"claude-haiku","collaborationMode":{"mode":"default","settings":{"model":"claude-opus","reasoning_effort":"minimal"}}}"#,
+            "{}",
+        ),
+        (
+            4,
+            r#"{"model":"default","outputSchema":{"type":"string"}}"#,
+            r#"{"CLAUDE_CODEX_SUMMARY_MODEL":"title-model"}"#,
+        ),
+        (5, r#"{"model":"custom","effort":"unknown"}"#, "{}"),
+    ] {
+        let mut params = v(params);
+        params.insert("threadId", "id0".into());
+        params.insert("input", v(r#"[{"type":"text","text":"Prompt"}]"#));
+        paired(
+            &format!("effective runtime configuration {index}"),
+            J::object([
+                (
+                    "ids",
+                    J::Array((0..10).map(|i| format!("id{i}").into()).collect()),
+                ),
+                ("environment", v(environment)),
+                (
+                    "steps",
+                    J::Array(vec![
+                        v(
+                            r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}}"#,
+                        ),
+                        J::object([
+                            ("action", "request".into()),
+                            (
+                                "message",
+                                J::object([
+                                    ("id", J::Number(2.0)),
+                                    ("method", "turn/start".into()),
+                                    ("params", params),
+                                ]),
+                            ),
+                        ]),
+                        v(
+                            r#"{"action":"event","turnId":"id1","event":{"type":"text_delta","delta":"answer"}}"#,
+                        ),
+                        v(r#"{"action":"finish","turnId":"id1"}"#),
+                    ]),
+                ),
+            ]),
+        );
+    }
+}
+
+#[test]
+fn workflow_watchdog_pending_launch_and_child_gaps_match_frozen_server() {
+    for stage in ["launch", "between-children", "launch-returned"] {
+        let mut steps = vec![
+            v(
+                r#"{"action":"request","message":{"id":1,"method":"thread/start","params":{"cwd":"C:/fixture"}}}"#,
+            ),
+            v(
+                r#"{"action":"request","message":{"id":2,"method":"turn/start","params":{"threadId":"id0","input":[{"type":"text","text":"workflow"}]}}}"#,
+            ),
+            v(
+                r#"{"action":"event","turnId":"id1","event":{"type":"tool_use","toolUseId":"workflow","toolName":"Workflow","input":{}}}"#,
+            ),
+        ];
+        if stage == "between-children" {
+            steps.push(v(r#"{"action":"event","turnId":"id1","event":{"type":"tool_use","toolUseId":"child","toolName":"Agent","input":{"prompt":"child"}}}"#));
+            steps.push(v(r#"{"action":"event","turnId":"id1","event":{"type":"tool_result","toolUseId":"child","content":"done"}}"#));
+        }
+        if stage == "launch-returned" {
+            steps.push(v(r#"{"action":"event","turnId":"id1","event":{"type":"tool_result","toolUseId":"workflow","content":"async launched"}}"#));
+        }
+        steps.push(v(r#"{"action":"wait","millis":1200}"#));
+        if stage != "launch-returned" {
+            steps.push(v(r#"{"action":"event","turnId":"id1","event":{"type":"tool_use","toolUseId":"late-child","toolName":"Agent","input":{"prompt":"stale"}}}"#));
+        }
+        steps.push(v(r#"{"action":"request","message":{"id":3,"method":"thread/read","params":{"threadId":"id0","includeTurns":true}}}"#));
+        paired(
+            &format!("workflow watchdog phase {stage}"),
+            J::object([
+                (
+                    "ids",
+                    J::Array((0..40).map(|i| format!("id{i}").into()).collect()),
+                ),
+                (
+                    "environment",
+                    v(r#"{"CLAUDE_CODEX_SUBAGENT_TIMEOUT_MS":"1000"}"#),
+                ),
+                ("steps", J::Array(steps)),
+            ]),
+        );
     }
 }

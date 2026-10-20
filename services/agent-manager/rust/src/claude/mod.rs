@@ -3,6 +3,7 @@
 //! packaging are separate from protocol state and the private SDK owner.
 pub mod ask;
 pub mod bridge;
+mod commands;
 pub mod driver;
 pub mod error;
 pub mod images;

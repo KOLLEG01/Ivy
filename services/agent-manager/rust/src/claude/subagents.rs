@@ -291,7 +291,7 @@ impl Adapter {
         let first = state.subagents.is_empty();
         state.subagents.push((string(field(e, "toolUseId")), child));
         if first {
-            if let Some(timeout_ms) = self.env.subagent_watchdog_ms {
+            if let Some(timeout_ms) = self.env.subagent_watchdog_ms.filter(|ms| *ms > 0) {
                 out.push(Effect::Watchdog {
                     turn_id: turn.clone(),
                     timeout_ms,
@@ -526,7 +526,7 @@ impl Adapter {
             self.close_child(state, turn, &child, status, agents, out)?
         }
         state.subagents.remove(index);
-        if state.subagents.is_empty() {
+        if state.subagents.is_empty() && state.workflow_tools.is_empty() {
             out.push(Effect::CancelWatchdog {
                 turn_id: turn.clone(),
             })
@@ -613,7 +613,7 @@ impl Adapter {
         let Some(mut state) = self.turns.remove(turn) else {
             return Ok(out);
         };
-        if state.subagents.is_empty() {
+        if state.subagents.is_empty() && state.workflow_tools.is_empty() {
             self.turns.insert(turn.clone(), state);
             return Ok(out);
         }
