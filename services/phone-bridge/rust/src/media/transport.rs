@@ -58,6 +58,11 @@ impl RtpPeer {
 /// not retain a strong transport handle; the session retains it separately.
 /// Close waits for an already running sink, including when its observer leaves.
 pub trait RtpDatagramSink: Send + Sync + 'static {
+    /// Parsed protocol observation before peer admission; no media delivery.
+    fn parsed_rtp(&self, _source: SocketAddr, _packet: RtpPacket<'_>) {}
+    /// Original channel observation after protocol dispatch, including rejected
+    /// datagrams. Never retain bytes; alternate event policy belongs here.
+    fn raw_rtp(&self, _source: SocketAddr, _datagram: &[u8]) {}
     fn rtp(&self, source: SocketAddr, packet: RtpPacket<'_>);
     fn rtcp(&self, source: SocketAddr, datagram: &[u8]);
 }
@@ -372,7 +377,10 @@ async fn receive(
         } else {
             RtpPacket::parse(&rtp[..size]).ok()
         };
-        {
+        if let Some(packet) = packet {
+            sink.parsed_rtp(source, packet);
+        }
+        let admitted = {
             let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.closed {
                 break Ok(());
@@ -394,21 +402,27 @@ async fn receive(
                 } else {
                     state.counters.foreign_rtp += 1;
                 }
-                continue;
-            }
-            if !control && packet.is_none() {
+                false
+            } else if !control && packet.is_none() {
                 state.counters.malformed_rtp += 1;
-                continue;
+                false
+            } else {
+                true
             }
-        }
+        };
         if inner.stop.is_cancelled() {
             break Ok(());
         }
         if control {
-            sink.rtcp(source, &rtcp[..size]);
+            if admitted {
+                sink.rtcp(source, &rtcp[..size]);
+            }
             rtcp[..size].fill(0);
         } else {
-            sink.rtp(source, packet.unwrap());
+            if admitted {
+                sink.rtp(source, packet.unwrap());
+            }
+            sink.raw_rtp(source, &rtp[..size]);
             rtp[..size].fill(0);
         }
     };

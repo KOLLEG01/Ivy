@@ -790,7 +790,7 @@ fn is_name(format: &SdpFormat, name: &str) -> bool {
         .name()
         .is_some_and(|value| value.eq_ignore_ascii_case(name))
 }
-fn event_formats(document: &SdpDocument) -> Vec<TelephoneEventFormat> {
+pub(super) fn event_formats(document: &SdpDocument) -> Vec<TelephoneEventFormat> {
     document
         .media
         .iter()

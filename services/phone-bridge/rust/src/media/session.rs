@@ -1,5 +1,5 @@
 //! One original SIP media session, its SDP, PCM ports and retained disposal.
-use super::session_description::{Advance, Descriptions};
+use super::session_description::{Advance, Applying, Descriptions};
 use super::{
     AudioAttachmentStatus, AudioDesktopIdentity, AudioOperation, AudioSendHealth, AudioSettings,
     CallAudioError, CallAudioPort, CallWaitingAudio, Codec, EvsLibrary, MediaCodec,
@@ -7,6 +7,7 @@ use super::{
     ScreeningAudio, SdpDirection, SdpDocument, SdpIdentity, SdpType, SipReceiveEvents,
     SipReceiveObservation, SipRtpReceiver, SipSdpRoute,
 };
+use super::{TelephoneEventFormat, negotiation::event_formats};
 use crate::{
     dtmf::InputSource,
     sip::{DelayedInviteMedia, HostedSipMedia, SipHostError},
@@ -94,6 +95,8 @@ pub struct SipMediaObservation {
     pub send_format: Option<super::AudioFormat>,
     pub transmitted_format: Option<super::AudioFormat>,
     pub sent_frames: u64,
+    pub remote_event_formats: Vec<TelephoneEventFormat>,
+    pub local_event_formats: Vec<TelephoneEventFormat>,
 }
 struct Completion {
     result: OnceLock<Result<()>>,
@@ -209,6 +212,19 @@ struct State {
     started: bool,
     screening: Option<Arc<ScreeningAudio>>,
     disposal: Option<Arc<Completion>>,
+    remote_event_formats: Vec<TelephoneEventFormat>,
+    local_event_formats: Vec<TelephoneEventFormat>,
+}
+impl State {
+    fn publish(&mut self, applying: Applying) {
+        self.descriptions.publish(applying);
+        self.remote_event_formats = self
+            .descriptions
+            .negotiation
+            .remote_description()
+            .map(event_formats)
+            .unwrap_or_default();
+    }
 }
 struct DtmfCallbacks {
     digit: Box<dyn Fn(char, InputSource) -> Result<()> + Send + Sync>,
@@ -250,6 +266,8 @@ impl Core {
         inactive: bool,
     ) -> std::result::Result<Option<Vec<u8>>, ReceiveError> {
         let d = &mut s.descriptions;
+        self.receiver()
+            .set_local_payloads(d.negotiation.local_formats().iter().map(|f| f.payload()));
         let report = self.receiver().description_effects(
             d.destinations,
             d.can_send(),
@@ -461,6 +479,8 @@ impl SipMediaSession {
                 started: false,
                 screening: None,
                 disposal: None,
+                remote_event_formats: Vec::new(),
+                local_event_formats: Vec::new(),
             }),
             closed: AtomicBool::new(false),
             failed: AtomicBool::new(false),
@@ -529,6 +549,14 @@ impl SipMediaSession {
                 None,
             )
             .ok()?;
+        s.local_event_formats = event_formats(&offer);
+        c.receiver().set_local_payloads(
+            s.descriptions
+                .negotiation
+                .local_formats()
+                .iter()
+                .map(|f| f.payload()),
+        );
         Some(offer)
     }
     pub fn create_answer(&self) -> Option<SdpDocument> {
@@ -543,10 +571,19 @@ impl SipMediaSession {
                 super::session_description::address(connection.address(), 0).ok()
             });
         let identity = c.identity(s.descriptions.version, offer).ok()?;
-        s.descriptions.answer(
+        let answer = s.descriptions.answer(
             &identity,
             c.receiver().observation().transport.local_rtp.port(),
-        )
+        );
+        s.local_event_formats = answer.as_ref().map(event_formats).unwrap_or_default();
+        c.receiver().set_local_payloads(
+            s.descriptions
+                .negotiation
+                .local_formats()
+                .iter()
+                .map(|f| f.payload()),
+        );
+        answer
     }
     pub fn local_sdp_formats(&self) -> Vec<super::SdpFormat> {
         self.handle
@@ -604,7 +641,7 @@ impl SipMediaSession {
                         // SDP continuation still publishes metadata, without
                         // configuring a codec, worker or socket again.
                         if !media_open {
-                            s.descriptions.publish(applying);
+                            s.publish(applying);
                             return Ok(());
                         }
                         if let Err(error) = c.description_effects(&mut s, false) {
@@ -617,7 +654,6 @@ impl SipMediaSession {
                             c.state
                                 .lock()
                                 .unwrap_or_else(|p| p.into_inner())
-                                .descriptions
                                 .publish(applying);
                             return Ok(());
                         }
@@ -628,7 +664,7 @@ impl SipMediaSession {
                         );
                         match result {
                             Ok(()) => {
-                                s.descriptions.publish(applying);
+                                s.publish(applying);
                                 return Ok(());
                             }
                             Err(error) => {
@@ -679,14 +715,16 @@ impl SipMediaSession {
         Ok(())
     }
     pub fn challenge_codecs(&self, enabled: bool) {
-        self.handle
-            .0
-            .state
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .descriptions
-            .negotiation
-            .challenge_codecs(enabled);
+        let c = &self.handle.0;
+        let mut s = c.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.descriptions.negotiation.challenge_codecs(enabled);
+        c.receiver().set_local_payloads(
+            s.descriptions
+                .negotiation
+                .local_formats()
+                .iter()
+                .map(|f| f.payload()),
+        );
     }
     pub fn prepare_audio(
         &self,
@@ -792,6 +830,8 @@ impl SipMediaSession {
             send_format: c.receiver().selected_send_format(),
             transmitted_format,
             sent_frames,
+            remote_event_formats: s.remote_event_formats.clone(),
+            local_event_formats: s.local_event_formats.clone(),
         }
     }
     pub fn request_close(&self) {

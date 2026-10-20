@@ -1,4 +1,6 @@
 use super::*;
+#[path = "phone_media_diagnostics.rs"]
+mod media_diagnostics;
 #[path = "phone_native_sip.rs"]
 mod native_operations;
 use ivy_phone_bridge::{

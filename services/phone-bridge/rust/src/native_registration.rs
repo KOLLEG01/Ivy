@@ -131,7 +131,7 @@ fn endpoint(peer: Option<RegistrationPeer>) -> Result<String, RegistrationViewEr
     };
     quote(&format!("{protocol}:{address}"))
 }
-fn utc_ticks(ticks: i64) -> Result<String, RegistrationViewError> {
+pub(crate) fn utc_ticks(ticks: i64) -> Result<String, RegistrationViewError> {
     if !(0..=3_155_378_975_999_999_999).contains(&ticks) {
         return Err(RegistrationViewError::InvalidTimestamp);
     }

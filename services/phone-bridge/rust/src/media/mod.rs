@@ -7,6 +7,7 @@ mod evs_native;
 mod format;
 mod g711;
 mod identity;
+pub mod native_view;
 mod negotiation;
 mod packet;
 mod permit;

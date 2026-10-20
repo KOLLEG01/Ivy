@@ -15,7 +15,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Mutex, OnceLock, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -79,6 +79,12 @@ pub struct SipReceiveObservation {
     pub inband_analyzed_packets: u64,
     pub inband_detected_digits: u64,
     pub inband: Option<crate::dtmf_detector::Diagnostics>,
+    pub raw_rtp_packets: u64,
+    pub raw_offered_event_packets: u64,
+    pub raw_payloads: Vec<(u8, u64)>,
+    pub library_event_packets: u64,
+    pub parsed_event_packets: u64,
+    pub native_unsupported_payload_packets: u64,
     pub failed: bool,
     pub failure: Option<ReceiveError>,
     pub cleanup_confirmed: bool,
@@ -102,6 +108,12 @@ struct State {
     unsupported_payload_packets: u64,
     event_packets: u64,
     detected_events: u64,
+    raw_payloads: [u64; 128],
+    raw_offered_event_packets: u64,
+    library_event_packets: u64,
+    parsed_event_packets: u64,
+    native_unsupported_payload_packets: u64,
+    local_payloads: Vec<u8>,
     failure: Option<ReceiveError>,
 }
 #[derive(Default)]
@@ -125,6 +137,7 @@ pub(super) struct Inner {
     changed: Notify,
     report_pending: Notify,
     pub(super) sender: Sender,
+    raw_rtp_packets: AtomicU64,
 }
 impl Inner {
     fn now(&self) -> Duration {
@@ -260,7 +273,17 @@ impl Inner {
             }
             reports.admission.learn(packet.header.source);
         }
-        if state.event_payloads.contains(&packet.header.payload_type) {
+        let selected_event =
+            state.selected_event != 0 && packet.header.payload_type == state.selected_event;
+        if selected_event || state.event_payloads.contains(&packet.header.payload_type) {
+            if !selected_event && !state.local_payloads.contains(&packet.header.payload_type) {
+                return Ok(Vec::new()); // Alternate channel observer runs after SDK dispatch.
+            }
+            // The SDK routes its one negotiated nonzero event ID through
+            // OnRtpEvent. Alternate offered IDs use the raw-channel observer.
+            if !selected_event && state.local_payloads.contains(&packet.header.payload_type) {
+                state.parsed_event_packets = state.parsed_event_packets.wrapping_add(1);
+            }
             state.event_packets += 1;
             if let Some(digit) = packet
                 .payload
@@ -285,6 +308,10 @@ impl Inner {
             .any(|format| format.payload() == packet.header.payload_type)
         {
             state.unsupported_payload_packets += 1;
+            if state.local_payloads.contains(&packet.header.payload_type) {
+                state.native_unsupported_payload_packets =
+                    state.native_unsupported_payload_packets.wrapping_add(1);
+            }
             return Ok(Vec::new());
         }
         let mut digits = Vec::new();
@@ -346,11 +373,13 @@ impl Inner {
                 .destinations
                 .rtp
                 .is_some_and(|p| p.port() == source.port() && crate::sip::same_ip(p, source))
-            || state.event_payloads.contains(&packet.header.payload_type)
-            || !state
+            || (state.selected_event != 0 && packet.header.payload_type == state.selected_event)
+            || !(state
                 .formats
                 .iter()
                 .any(|f| f.payload() == packet.header.payload_type)
+                || state.event_payloads.contains(&packet.header.payload_type)
+                    && state.local_payloads.contains(&packet.header.payload_type))
             || (packet.payload.is_empty()
                 && packet.contributing_sources.is_empty()
                 && packet.extension.is_none()
@@ -413,6 +442,86 @@ impl Inner {
 }
 struct Sink(Weak<Inner>);
 impl RtpDatagramSink for Sink {
+    fn parsed_rtp(&self, _source: SocketAddr, packet: RtpPacket<'_>) {
+        if let Some(inner) = self.0.upgrade() {
+            let mut s = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            if !inner.closed.load(Ordering::Acquire)
+                && s.failure.is_none()
+                && s.selected_event != 0
+                && packet.header.payload_type == s.selected_event
+                && packet.payload.len() >= 4
+            {
+                s.library_event_packets = s.library_event_packets.wrapping_add(1);
+            }
+        }
+    }
+    fn raw_rtp(&self, source: SocketAddr, bytes: &[u8]) {
+        if let Some(inner) = self.0.upgrade() {
+            inner.raw_rtp_packets.fetch_add(1, Ordering::Relaxed);
+            if inner.closed.load(Ordering::Acquire) {
+                return;
+            }
+            let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            if state.failure.is_some() {
+                return;
+            }
+            if !(16..=8192).contains(&bytes.len()) || bytes[0] >> 6 != 2 {
+                return;
+            }
+            let payload = usize::from(bytes[1] & 127);
+            state.raw_payloads[payload] = state.raw_payloads[payload].wrapping_add(1);
+            if state.event_payloads.contains(&(payload as u8)) {
+                state.raw_offered_event_packets = state.raw_offered_event_packets.wrapping_add(1);
+            }
+            let peer = state
+                .destinations
+                .rtp
+                .is_some_and(|p| p.port() == source.port() && crate::sip::same_ip(p, source));
+            let packet = RtpPacket::parse(bytes).ok();
+            if !peer {
+                if packet.is_some()
+                    && state.local_payloads.contains(&(payload as u8))
+                    && !(state.selected_event != 0 && payload as u8 == state.selected_event)
+                {
+                    state.queue.reject_peer();
+                }
+                return;
+            }
+            if !state.event_payloads.contains(&(payload as u8))
+                || payload as u8 == state.selected_event
+            {
+                return;
+            }
+            let Some(packet) = packet else {
+                return;
+            };
+            if !state.local_payloads.contains(&(payload as u8)) {
+                state.event_packets = state.event_packets.wrapping_add(1);
+            }
+            let digit = packet
+                .payload
+                .first()
+                .filter(|_| packet.payload.len() >= 4)
+                .and_then(|id| rtp_event_digit(*id));
+            if let Some(digit) = digit {
+                if state.tones.is_new(
+                    packet.header.source,
+                    packet.header.timestamp,
+                    packet.payload[0],
+                ) {
+                    state.detected_events = state.detected_events.wrapping_add(1);
+                    drop(state);
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        inner.events.digit(digit, InputSource::Rfc4733)
+                    }))
+                    .is_err()
+                    {
+                        inner.fail(ReceiveError::Codec(CodecError::Failed));
+                    }
+                }
+            }
+        }
+    }
     fn rtp(&self, source: SocketAddr, packet: RtpPacket<'_>) {
         if let Some(inner) = self.0.upgrade() {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -539,6 +648,12 @@ impl SipRtpReceiver {
                 unsupported_payload_packets: 0,
                 event_packets: 0,
                 detected_events: 0,
+                raw_payloads: [0; 128],
+                raw_offered_event_packets: 0,
+                library_event_packets: 0,
+                parsed_event_packets: 0,
+                native_unsupported_payload_packets: 0,
+                local_payloads: Vec::new(),
                 failure: None,
             }),
             audio,
@@ -554,6 +669,7 @@ impl SipRtpReceiver {
             changed: Notify::new(),
             report_pending: Notify::new(),
             sender: Sender::default(),
+            raw_rtp_packets: AtomicU64::new(0),
         });
         let transport = RtpTransport::bind(
             interface,
@@ -600,6 +716,12 @@ impl SipRtpReceiver {
     /// Apply only an accepted SDP negotiation, under the same receive lock as
     /// queue admission. Probe real codecs before committing the new peer/plan.
     pub fn configure(&self, plan: &AudioNegotiation, peer: RtpPeer) -> Result<(), ReceiveError> {
+        self.set_local_payloads(
+            plan.receive_formats()
+                .iter()
+                .map(AudioFormat::payload)
+                .chain(std::iter::once(plan.selected_event_payload())),
+        );
         self.configure_description(
             plan,
             MediaDestinations {
@@ -856,6 +978,18 @@ impl SipRtpReceiver {
             inband_analyzed_packets: state.inband_analyzed_packets,
             inband_detected_digits: state.inband_detected_digits,
             inband: state.analysis.as_ref().map(ReceiveAnalysis::diagnostics),
+            raw_rtp_packets: inner.raw_rtp_packets.load(Ordering::Relaxed),
+            raw_offered_event_packets: state.raw_offered_event_packets,
+            raw_payloads: state
+                .raw_payloads
+                .iter()
+                .enumerate()
+                .filter(|(_, count)| **count != 0)
+                .map(|(payload, count)| (payload as u8, *count))
+                .collect(),
+            library_event_packets: state.library_event_packets,
+            parsed_event_packets: state.parsed_event_packets,
+            native_unsupported_payload_packets: state.native_unsupported_payload_packets,
             failed: state.failure.is_some(),
             failure: state.failure,
             cleanup_confirmed: inner.completed.get().is_some(),
@@ -878,6 +1012,14 @@ impl SipRtpReceiver {
                 state.analysis = None;
             }
         }
+    }
+    pub(super) fn set_local_payloads(&self, payloads: impl Iterator<Item = u8>) {
+        self.handle
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .local_payloads = payloads.collect();
     }
     pub fn request_close(&self) {
         self.handle.0.request_close();
