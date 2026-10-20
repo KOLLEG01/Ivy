@@ -53,3 +53,4 @@ pub mod worker_protocol;
 pub mod worker_runtime;
 pub mod worker_server;
 pub mod ws_send;
+pub mod ws_socket_io;

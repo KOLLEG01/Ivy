@@ -25,6 +25,8 @@ mod dispatch_gate;
 mod server_peers;
 #[path = "hive_server_lifecycle.rs"]
 mod server_lifecycle;
+#[path = "hive_ws_socket_io.rs"]
+mod ws_socket_io;
 
 trait FixtureMut {
     fn get_mut(&mut self, name: &str) -> Option<&mut IvyJson>;
