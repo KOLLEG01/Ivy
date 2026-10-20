@@ -85,11 +85,12 @@ export class PhoneFlow {
       username: string | null;
       password: string | null;
     }>,
-    private readonly onError: (callId: string, code: string) => void = () =>
+    private readonly onError: (callId: string, code: string, scope?: 'call' | 'cleanup' | 'codex_voice') => void = () =>
       undefined,
     private readonly onConnected: (callId: string) => void = () => undefined,
     private readonly voice: PhoneVoicePort | null = null,
     readonly logs?: PhoneCallLogs,
+    private readonly onCleanupSucceeded: (callId: string) => void = () => undefined,
   ) {
     if (settings.audio) validatePhone("AudioSettings", settings.audio);
     requireThat(
@@ -517,11 +518,7 @@ export class PhoneFlow {
         }
         try {
           await this.cleanupWhenObserved(call);
-        } catch (cleanupError) {
-          try {
-            this.onError(call.callId, IvyError.from(cleanupError).code);
-          } catch {}
-        }
+        } catch { /* Cleanup reports its own exact outcome. */ }
       })
       .finally(() => this.work.delete(call.callId));
     this.work.set(call.callId, pending);
@@ -971,7 +968,8 @@ export class PhoneFlow {
         }
       } catch (error) {
         try {
-          this.onError(call.callId, IvyError.from(error).code);
+          if (!this.endedCalls.has(call.callId) && !this.abandonedCalls.has(call.callId))
+            this.onError(call.callId, IvyError.from(error).code);
         } catch {}
       }
     }
@@ -1073,7 +1071,10 @@ export class PhoneFlow {
     const prior = this.cleanups.get(callId);
     if (prior) return prior;
     this.endedCalls.add(callId);
-    const pending = this.cleanupCore(principalId, callId).finally(() =>
+    const pending = this.cleanupCore(principalId, callId).catch(error => {
+      try { this.onError(callId, IvyError.from(error).code, 'cleanup'); } catch {}
+      throw error;
+    }).finally(() =>
       this.cleanups.delete(callId),
     );
     this.cleanups.set(callId, pending);
@@ -1125,13 +1126,14 @@ export class PhoneFlow {
       break;
     }
     result(await this.calls.release(principalId, callId));
+    try { this.onCleanupSucceeded(callId); } catch {}
     this.commandSequences.delete(callId);
     this.endedCalls.delete(callId);
     this.abandonedCalls.delete(callId);
     this.voiceSelections.delete(callId);
     if (!this.closed && this.callRoute(call) === "voice")
       void this.prewarmVoice(principalId).catch((error) =>
-        this.onError(callId, IvyError.from(error).code),
+        this.onError(callId, IvyError.from(error).code, 'codex_voice'),
       );
   }
   close(): Promise<void> {

@@ -57,6 +57,9 @@ export interface PhoneConversation {
   fingerprint: string; partyKey: string; threadId: string; callId: string; generation: number;
   items: PhoneVoiceText[];
 }
+export interface PhoneVoiceObservation {
+  callId: string; threadId: string; generation: number; fingerprint: string; endedAt: number | null;
+}
 const validateContract = phoneValidator({ ...appToolsContract.$defs, ...archiveContract.$defs, ...contract.$defs });
 function validate(name: string, value: unknown): void {
   validateContract(name, value, phoneOutcomeReservation);
@@ -158,6 +161,8 @@ export class PhoneJournal {
   private setMeta(key: string, value: string): void { this.statement('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, value); }
   voiceWorks(): PhoneVoiceWork[] { return JSON.parse(this.meta('voiceWorks') ?? '[]') as PhoneVoiceWork[]; }
   saveVoiceWorks(works: PhoneVoiceWork[]): void { this.setMeta('voiceWorks', canonical(works, 256 * 1024)); }
+  voiceObservations(): PhoneVoiceObservation[] { return JSON.parse(this.meta('voiceObservations') ?? '[]') as PhoneVoiceObservation[]; }
+  saveVoiceObservations(values: PhoneVoiceObservation[]): void { this.setMeta('voiceObservations', canonical(values, 64 * 1024)); }
   voiceNotice(token: string): unknown { return JSON.parse(this.meta('voiceNotice:' + token) ?? 'null'); }
   saveVoiceNotice(token: string, notice: unknown): void { this.setMeta('voiceNotice:' + token, canonical(notice, 512 * 1024)); }
   rememberedVoiceReasoning(): PhoneVoiceSelection['reasoningEffort'] | null {

@@ -17,7 +17,7 @@ import {
 import type { Agent, Wire } from "../../../../packages/sdk/src/node.js";
 import type { PhoneCall } from "./admission.js";
 import { phoneCallerIdentity } from "./admission.js";
-import type { PhoneJournal, PhoneJournalIntent, PhoneConversation, PhoneVoiceText } from "./journal.js";
+import type { PhoneJournal, PhoneJournalIntent, PhoneConversation, PhoneVoiceText, PhoneVoiceObservation } from "./journal.js";
 import type { PhoneVoiceModel, PhoneVoiceSelection } from "./voice-selection.js";
 import type { PhoneSpeakerVoiceCatalog } from "./voice-selection.js";
 import { selectSpeakerCatalog } from './speaker-catalog.js';
@@ -149,6 +149,9 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   >();
   private readonly pendingInputs = new Map<string, NativeRequest>();
   private readonly works: PhoneVoiceWorks;
+  private readonly observations = new Map<string, PhoneVoiceObservation>();
+  private readonly observationRetryAt = new Map<string, number>();
+  private observing: Promise<void> | null = null;
   private workTimer: NodeJS.Timeout | null = null;
   private readonly interrupting = new Map<string, Promise<void>>();
   private readonly interrupted = new Set<string>();
@@ -173,6 +176,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       credential?: string;
       notifyInput?: (work: PhoneVoiceWork, input: Record<string, unknown>, current: () => boolean) => Promise<boolean>;
       now?: () => number;
+      workObserved?: (callId: string, code: string | null) => void;
     },
     private readonly onError: (code: string) => void = () => undefined,
     private readonly connect: typeof startCodexProcess = startCodexProcess,
@@ -184,12 +188,19 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     );
     const epoch = Date.now(), monotonic = performance.now();
     this.works = new PhoneVoiceWorks(journal, runtime.now ?? (() => epoch + performance.now() - monotonic));
+    const observations = journal.voiceObservations();
+    requireThat(Array.isArray(observations) && observations.length <= 64 && observations.every(value =>
+      typeof value.callId === 'string' && typeof value.threadId === 'string' && typeof value.fingerprint === 'string' &&
+      Number.isSafeInteger(value.generation) && (value.endedAt === null || Number.isFinite(value.endedAt)) &&
+      journal.getCall(value.callId) && journal.voiceTask(value.callId, value.generation) === value.threadId),
+    'phone_work_storage_invalid', 'Saved Voice observations must retain their original call and task.');
+    for (const value of observations) this.observations.set(value.threadId, value);
     this.scheduleWork();
   }
   work(callId: string): PhoneVoiceWork | null {
     return structuredClone(this.works.forCall(callId) ?? null);
   }
-  hasWork(): boolean { return this.works.all().some(work => activePhoneWork(work) || ['halting', 'outcome_unknown'].includes(work.state)); }
+  hasWork(): boolean { return !!this.observations.size || this.works.all().some(work => activePhoneWork(work) || ['halting', 'outcome_unknown'].includes(work.state)); }
   private scheduleWork(): void {
     if (this.workTimer) clearTimeout(this.workTimer);
     if (this.closed) return;
@@ -199,12 +210,67 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       // Claim synchronously, before any await: a reconnect cannot overtake an expired claim.
       const claims = this.works.claimExpired();
       for (const claim of claims) void this.interruptWork(claim);
+      void this.observeDetached();
       if (this.hasWork() && !this.connection?.rpc.connected)
         void this.recoverWorks().catch(error => this.onError(IvyError.from(error).code));
       this.notifyInputs();
       this.scheduleWork();
     }, Math.min(1000, ...deadlines));
     this.workTimer.unref();
+  }
+  private saveObservations(): void { this.journal.saveVoiceObservations([...this.observations.values()]); }
+  private workObserved(callId: string, code: string | null): void {
+    try { this.runtime.workObserved?.(callId, code); } catch { /* Telemetry cannot interrupt cleanup. */ }
+  }
+  private observationSucceeded(threadId: string): void {
+    const observation = this.observations.get(threadId);
+    if (!observation) return;
+    this.observations.delete(threadId);
+    try { this.saveObservations(); }
+    catch (error) { this.observations.set(threadId, observation); throw error; }
+    this.observationRetryAt.delete(threadId);
+    this.workObserved(observation.callId, null);
+  }
+  /** Read-only reconciliation is independent of media cleanup and survives release/restart. */
+  private observeDetached(): Promise<void> {
+    if (this.closed || this.observing) return this.observing ?? Promise.resolve();
+    const observation = [...this.observations.values()].find(value =>
+      (this.observationRetryAt.get(value.threadId) ?? 0) <= this.works.now());
+    if (!observation) return Promise.resolve();
+    const { threadId, callId, endedAt } = observation;
+    const revision = this.works.get(threadId)?.revision;
+    this.observing = (async () => {
+      try {
+        await this.open(true);
+        requireThat(observation.fingerprint === this.fingerprint, 'phone_work_owner_changed', 'Saved observation belongs to another native owner.');
+        await this.subscribeWork(threadId);
+        const value = await this.call('thread/read', { threadId, includeTurns: true }, { detachOnTimeout: true }, 5000);
+        this.thread(value);
+        if (this.observations.get(threadId) !== observation) return;
+        const current = this.works.get(threadId);
+        // Native notifications and a new live call outrank an earlier read snapshot.
+        if (current?.revision === revision && (!current?.attachedCallId || current.attachedCallId === callId)) {
+          const turns = (value['thread'] as Record<string, Wire.Json>)['turns'] as unknown as PreparationTurn[];
+          const turn = turns?.find(turn => turn.status === 'inProgress');
+          if (turn) this.works.started(this.journal.getCall(callId)!, threadId, turn.id, observation.fingerprint,
+            this.partyKey(this.journal.getCall(callId)!));
+          else {
+            const completed = current && turns?.find(turn => turn.id === current.turnId);
+            if (completed) this.works.completed(threadId, completed.id, completed.status);
+          }
+          this.works.detach(callId, endedAt);
+        }
+        this.observationSucceeded(threadId);
+        for (const claim of this.works.claimExpired()) void this.interruptWork(claim);
+        this.scheduleWork();
+        this.notifyInputs();
+      } catch (error) {
+        if (this.observations.get(threadId) !== observation) return;
+        this.observationRetryAt.set(threadId, this.works.now() + 15_000);
+        this.workObserved(callId, IvyError.from(error).code);
+      }
+    })().finally(() => { this.observing = null; });
+    return this.observing;
   }
   private interruptWork(claim: PhoneVoiceWork): Promise<void> {
     if (this.interrupted.has(claim.interruptId!)) return Promise.resolve();
@@ -244,6 +310,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     const turn = turns?.find(turn => turn.id === work.turnId);
     if (!turn) this.works.unknown(threadId, 'phone_work_turn_missing');
     else if (turn.status !== 'inProgress') this.works.completed(threadId, turn.id, turn.status);
+    this.observationSucceeded(threadId);
   }
   private recoverWorks(): Promise<void> {
     return this.recovering ??= (async () => {
@@ -428,12 +495,18 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       "Configured Codex does not support the requested Voice operation.",
     );
     this.schemas.validate(definition.inputSchema, params, 6 * 1024 * 1024);
-    const reply = await rpc.request(
-      method,
-      params,
-      hooks,
-      timeoutMs ?? (method === 'model/list' ? 15000 : method.startsWith("thread/realtime/") ? 30000 : 120000),
-    );
+    const deadline = timeoutMs ?? (method === 'model/list' ? 15000 : method.startsWith("thread/realtime/") ? 30000 : 120000);
+    const started = performance.now();
+    const reply = await rpc.request(method, params, hooks, deadline).catch(error => {
+      if (IvyError.from(error).code === 'native_observation_deadline') {
+        const threadId = typeof params['threadId'] === 'string' ? params['threadId'] : null;
+        const callId = threadId ? this.observations.get(threadId)?.callId ??
+          [...this.sessions.values()].find(session => session.threadId === threadId)?.call.callId ?? null : null;
+        process.stderr.write(JSON.stringify({ event: 'phone_codex_observation_timeout', method, callId, threadId,
+          timeoutMs: deadline, elapsedMs: Math.round(performance.now() - started) }) + '\n');
+      }
+      throw error;
+    });
     if ("error" in reply)
       throw new IvyError(
         "phone_codex_request_failed",
@@ -518,8 +591,12 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       const turn = params['turn'] as Record<string, Wire.Json> | undefined;
       const session = [...this.sessions.values()].find(value => value.threadId === threadId && !value.cancelled);
       if (typeof turn?.['id'] === 'string' && this.fingerprint) {
+        const observation = this.observations.get(threadId);
+        const detachedCall = !session && !this.works.get(threadId) && observation ? this.journal.getCall(observation.callId) : null;
         this.works.started(session && (!this.works.get(threadId) || session.started && !this.rejoining.has(session.call.callId))
-          ? session.call : undefined, threadId, turn['id'], this.fingerprint, session ? this.partyKey(session.call) : '');
+          ? session.call : detachedCall ?? undefined, threadId, turn['id'], this.fingerprint,
+          session ? this.partyKey(session.call) : detachedCall ? this.partyKey(detachedCall) : '');
+        if (detachedCall) this.works.detach(detachedCall.callId, observation!.endedAt);
         for (const claim of this.works.claimExpired()) void this.interruptWork(claim);
         this.scheduleWork();
       }
@@ -925,7 +1002,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       !this.reservations.size && !this.preparing.size && !this.journal.currentCalls().length;
   }
   private archiveProtected(threadId: string): boolean {
-    return this.works.protected(threadId) || this.journal.codexTaskCache(preparedTaskKey, this.fingerprint!)?.threadId === threadId ||
+    return this.observations.has(threadId) || this.works.protected(threadId) || this.journal.codexTaskCache(preparedTaskKey, this.fingerprint!)?.threadId === threadId ||
       this.journal.voiceConversation(this.fingerprint!)?.threadId === threadId;
   }
   private archiveIssue(threadId: string | null, error: unknown): void {
@@ -1022,7 +1099,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
   }
   private async resumeTask(context: PhoneConversation, selection: PhoneVoiceSelection, ownerId?: string): Promise<string | null> {
     const threadId = context.threadId;
-    if (this.works.protected(threadId)) return null;
+    if (this.observations.has(threadId) || this.works.protected(threadId)) return null;
     requireThat(!this.sessions.size && (!this.reservations.has(threadId) || this.reservations.get(threadId) === ownerId),
       "phone_voice_task_busy", "Previous Voice task still belongs to an original call.");
     if (this.reconciled.has(threadId) && this.preparedSelections.get(threadId) === canonical(selection)) return threadId;
@@ -1385,24 +1462,20 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     const session = this.sessions.get(callId);
     this.disconnected(callId, endedAt);
     if (session && session.started) {
-      // Reconcile a turn whose started notification raced the disconnect.
-      await this.open(true);
-      const value = await this.call('thread/read', { threadId: session.threadId, includeTurns: true },
-        { detachOnTimeout: true }, 5000);
-      this.thread(value);
-      const turns = (value['thread'] as Record<string, Wire.Json>)['turns'] as unknown as PreparationTurn[];
-      const turn = turns?.find(turn => turn.status === 'inProgress');
-      if (turn) this.works.started(session.call, session.threadId, turn.id, this.fingerprint!, this.partyKey(session.call));
-      else {
-        const work = this.works.get(session.threadId);
-        const completed = work && turns?.find(turn => turn.id === work.turnId);
-        if (completed) this.works.completed(session.threadId, completed.id, completed.status);
+      requireThat(this.observations.has(session.threadId) || this.observations.size < 64,
+        'phone_work_capacity', 'Too many original Voice observations await reconciliation.');
+      if (this.observations.get(session.threadId)?.callId !== callId) {
+        this.observations.set(session.threadId, { callId, threadId: session.threadId, generation: session.generation,
+          fingerprint: this.fingerprint!, endedAt });
+        this.observationRetryAt.delete(session.threadId);
+        this.saveObservations();
       }
     }
     this.works.detach(callId, endedAt);
     for (const claim of this.works.claimExpired()) void this.interruptWork(claim);
     this.scheduleWork();
     await this.stopSession(callId, undefined, true);
+    void this.observeDetached();
     this.notifyInputs();
   }
   async stop(callId: string, keepPreparedThreadId?: string): Promise<void> {
@@ -1499,6 +1572,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
           this.pendingInputs.delete(key);
       if (
         this.settings.keepTaskLoaded === false &&
+        !this.observations.has(session.threadId) &&
         !this.works.protected(session.threadId) &&
         this.connection?.rpc.connected
       )
@@ -1516,6 +1590,8 @@ export class PhoneCodexVoice implements PhoneVoicePort {
     if (this.workTimer) clearTimeout(this.workTimer);
     const halts = this.works.claimExpired(true).map(claim => this.interruptWork(claim));
     return (this.closing = (async () => {
+      await this.observing;
+      halts.push(...this.works.claimExpired(true).map(claim => this.interruptWork(claim)));
       await this.opening?.catch(() => undefined);
       await this.recovering?.catch(() => undefined);
       await Promise.allSettled(this.notifying.values());

@@ -209,6 +209,7 @@ export async function startPhoneBridge(path: string) {
               dataRoot: config.dataRoot,
               credential: config.credential!,
               notifyInput: (work, input, current) => voiceNotices.notify(work, input, current),
+              workObserved: (callId, code) => diagnostics.workObserved(callId, code),
             },
             (code) => diagnostics.voiceFailed(code),
           )
@@ -218,15 +219,18 @@ export async function startPhoneBridge(path: string) {
         native,
         settings,
         () => phoneCredentials(settings.credentialsPath),
-        (callId, code) => {
-          diagnostics.callFailed(callId, code);
+        (callId, code, scope = 'call') => {
+          if (scope === 'cleanup') diagnostics.cleanupFailed(callId, code);
+          else if (scope === 'codex_voice') diagnostics.voiceFailed(code);
+          else diagnostics.callFailed(callId, code);
           process.stderr.write(
-            JSON.stringify({ event: "phone_call_failed", callId, code }) + "\n",
+            JSON.stringify({ event: "phone_call_failed", callId, code, scope }) + "\n",
           );
         },
         (callId) => diagnostics.callSucceeded(callId),
         voice,
         logs,
+        callId => diagnostics.cleanupSucceeded(callId),
       );
       // SIP starts independently; prepare the configured caller's durable task off the call path.
       checkVoice();

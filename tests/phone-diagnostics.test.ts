@@ -3,6 +3,24 @@ import assert from "node:assert/strict";
 import { PhoneDiagnostics } from "../services/phone-bridge/src/runtime/diagnostics.js";
 import { validateShared } from "../packages/contracts/src/validation.js";
 
+test('cleanup and work observations recover independently of connection failures and other calls', () => {
+  const diagnostics = new PhoneDiagnostics('phone');
+  diagnostics.callFailed('call', 'connection_failed');
+  diagnostics.cleanupFailed('call', 'cleanup_failed');
+  diagnostics.cleanupFailed('other', 'other_cleanup_failed');
+  diagnostics.workObserved('call', 'native_observation_deadline');
+  diagnostics.pollSucceeded();
+  diagnostics.cleanupSucceeded('call');
+  assert.deepEqual(diagnostics.snapshot([]).map(item => item.code),
+    ['connection_failed', 'other_cleanup_failed', 'native_observation_deadline']);
+  diagnostics.callSucceeded('replacement');
+  assert.deepEqual(diagnostics.snapshot([]).map(item => item.code), ['other_cleanup_failed', 'native_observation_deadline']);
+  diagnostics.workObserved('call', null);
+  assert.deepEqual(diagnostics.snapshot([]).map(item => item.code), ['other_cleanup_failed']);
+  diagnostics.cleanupSucceeded('other');
+  assert.deepEqual(diagnostics.snapshot([]), []);
+});
+
 test("registration warnings survive healthy polling and clear only on observed recovery or disabled registration", () => {
   const diagnostics = new PhoneDiagnostics("phone");
   diagnostics.registrationObserved(true, {

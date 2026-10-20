@@ -441,6 +441,8 @@ function fixture(
     void respond(r).catch((error) => errors.push(String(error)));
   });
   const flows: PhoneFlow[] = [];
+  const failures: { callId: string; code: string; scope: string | undefined }[] = [];
+  const cleaned: string[] = [];
   const bound = new Map<string, string>(),
     prompts: { generation: number; threadId: string; prompt: string }[] = [];
   const promptSelections: unknown[] = [];
@@ -581,9 +583,11 @@ function fixture(
         credentialReads++;
         return { username: "fixture", password: "never-retained" };
       },
-      (_id, code) => errors.push(code),
+      (callId, code, scope) => { errors.push(code); failures.push({ callId, code, scope }); },
       undefined,
       voice,
+      undefined,
+      callId => cleaned.push(callId),
     );
     flows.push(f);
     return f;
@@ -604,6 +608,8 @@ function fixture(
     flow,
     requests,
     errors,
+    failures,
+    cleaned,
     epoch,
     root,
     events,
@@ -1519,5 +1525,27 @@ test('hangup revokes audio before detaching work and forwards the first native e
   await flow.observe();
   assert.deepEqual(detached, [{ callId: call.callId, endedAt: Date.parse(end) }]);
   assert.deepEqual(order, ['call.hangup', 'detach', 'call.realtime.stop', 'call.release']);
+  assert.equal(f.journal.currentCall(call.callId), null);
+  assert.deepEqual(f.cleaned, [call.callId]);
+});
+
+test('An unconfirmed Voice stop retains admission and its cleanup warning until the same cleanup succeeds', async t => {
+  const f = fixture(t);
+  let fail = true;
+  const flow = f.flow(settings, { ...f.port, async detach() {
+    if (fail) throw new IvyError('phone_voice_cleanup_unknown', 'Synthetic failed Voice stop.', 'unknown');
+  } });
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice');
+  await until(() => f.methods().includes('call.realtime.answer'));
+  await tick();
+  f.ended(new Date().toISOString());
+  await flow.observe();
+  assert.deepEqual(f.failures, [{ callId: call.callId, code: 'phone_voice_cleanup_unknown', scope: 'cleanup' }]);
+  assert.deepEqual(f.cleaned, []);
+  assert.ok(f.journal.currentCall(call.callId));
+  assert.equal(f.methods().includes('call.release'), false);
+  fail = false;
+  await flow.observe();
+  assert.deepEqual(f.cleaned, [call.callId]);
   assert.equal(f.journal.currentCall(call.callId), null);
 });

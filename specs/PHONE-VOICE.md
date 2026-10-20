@@ -152,6 +152,10 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   stop and native peer disposal before releasing the admission. Lost transport
   requires reconnecting to the same runtime for cleanup. Service clients never
   terminate a shared daemon. Uncertain outcomes remain visible in the journal.
+  Read-only work reconciliation must not delay media cleanup. Retain its original
+  call/task/end-time identity across release and restart; late observations cannot
+  override newer native events or another live call. Resolve observation and cleanup
+  warnings only after their own confirmed recovery, independently of connection failures.
 - The native SIP owner records the first transport end time. A running backing
   turn survives media cleanup for at most five minutes from that time; a missing
   or uncertain end time grants no background allowance. Completion ends this

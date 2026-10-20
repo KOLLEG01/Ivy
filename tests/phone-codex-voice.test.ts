@@ -64,6 +64,8 @@ function fixture(t: test.TestContext) {
   let losePromptReply = false;
   let archivePause: Promise<void> | undefined;
   let readPause: Promise<void> | undefined;
+  let workReadPause: Promise<void> | undefined;
+  let workReadTimeout = false;
   let loseArchiveReply = false;
   let modelTimeout = false;
   let preparationItems: Record<string, Wire.Json>[] = [
@@ -141,6 +143,12 @@ function fixture(t: test.TestContext) {
             };
           if (method === "thread/resume") unloaded.delete(id);
           result = { thread: { ...threads.get(id), ...(unloaded.has(id) ? { status: { type: 'notLoaded' } } : {}) } };
+          if (method === 'thread/read' && params['includeTurns'] === true) {
+            result = structuredClone(result);
+            await workReadPause;
+            if (workReadTimeout) throw new IvyError('native_observation_deadline', 'Synthetic work observation timeout.', 'unknown',
+              { method, timeoutMs: 5000 });
+          }
         }
         if (method === 'thread/list') {
           result = { data: [...threads.values()].filter(thread =>
@@ -296,6 +304,8 @@ function fixture(t: test.TestContext) {
     loseArchiveReply: () => { loseArchiveReply = true; },
     pauseArchive: (pause?: Promise<void>) => { archivePause = pause; },
     pauseRead: (pause?: Promise<void>) => { readPause = pause; },
+    pauseWorkRead: (pause?: Promise<void>) => { workReadPause = pause; },
+    workReadTimeout: (value: boolean) => { workReadTimeout = value; },
     disconnect: () => {
       online = false;
     },
@@ -1101,6 +1111,109 @@ test("A call arriving during idle unsubscribe waits and resumes before starting 
     1,
   );
   assert.equal(f.journal.voiceTask(call.callId, 0), threadId);
+});
+
+test('A slow work snapshot cannot delay Voice stop or overwrite a newer completed turn', async t => {
+  const f = fixture(t), voice = f.voice(), call = f.incoming();
+  const threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(call.callId, async () => {});
+  const turnId = f.started(threadId);
+  let release!: () => void;
+  f.pauseWorkRead(new Promise<void>(resolve => { release = resolve; }));
+  t.after(release);
+  await voice.detach(call.callId, Date.now());
+  f.release(call);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.journal.callCommand(call.callId, 'call.stopVoice')!.receipt!.ok, true);
+  assert.equal(f.journal.voiceObservations().length, 1);
+  f.completed(threadId, turnId);
+  release();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(voice.work(call.callId)!.state, 'completed');
+  assert.deepEqual(f.journal.voiceObservations(), []);
+});
+
+test('A timed-out observation recovers without a new call and retains the original work deadline', async t => {
+  const f = fixture(t);
+  let now = Date.now();
+  const observed: (string | null)[] = [];
+  const voice = f.voice({ now: () => now, workObserved: (_id, code) => observed.push(code) });
+  const call = f.incoming(), threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(call.callId, async () => {});
+  f.started(threadId);
+  f.workReadTimeout(true);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const end = now - 20_000;
+  await voice.detach(call.callId, end);
+  f.release(call);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(observed, ['native_observation_deadline']);
+  assert.equal(voice.work(call.callId)!.deadline, end + 300_000);
+  assert.equal(f.journal.voiceObservations().length, 1);
+  f.workReadTimeout(false);
+  now += 15_000;
+  t.mock.timers.tick(1000);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(observed, ['native_observation_deadline', null]);
+  assert.equal(voice.work(call.callId)!.deadline, end + 300_000);
+  assert.deepEqual(f.journal.voiceObservations(), []);
+  t.mock.timers.reset();
+});
+
+test('An old delayed snapshot cannot detach or change the turn of a rejoined live call', async t => {
+  const f = fixture(t), observations: (string | null)[] = [];
+  const voice = f.voice({ workObserved: (_id, code) => observations.push(code) });
+  const call = f.incoming(), threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(call.callId, async () => {});
+  const turnId = f.started(threadId);
+  let release!: () => void;
+  f.pauseWorkRead(new Promise<void>(resolve => { release = resolve; }));
+  t.after(release);
+  await voice.detach(call.callId, Date.now());
+  f.release(call);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  f.pauseWorkRead(); // The old read remains paused; new exact-task reads may complete.
+  const redial = f.incoming();
+  assert.equal(await voice.prepare(redial, 0, selection), threadId);
+  await voice.start(redial, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(redial.callId, async () => {});
+  release();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(voice.work(redial.callId)!.turnId, turnId);
+  assert.equal(voice.work(redial.callId)!.attachedCallId, redial.callId);
+  assert.equal(voice.work(redial.callId)!.deadline, null);
+  assert.deepEqual(observations, [null]);
+});
+
+test('An unobserved turn survives release/restart and is interrupted against the first end time', async t => {
+  const f = fixture(t);
+  let now = Date.now();
+  const voice = f.voice({ now: () => now });
+  const call = f.incoming(), threadId = await voice.prepare(call, 0, selection);
+  await voice.start(call, 0, threadId, 'Hi', 'offer', () => {});
+  await voice.connected(call.callId, async () => {});
+  const turnId = randomUUID();
+  (f.threads.get(threadId)!['turns'] as unknown[]).push({ id: turnId, status: 'inProgress', items: [] });
+  f.workReadTimeout(true);
+  const end = now;
+  await voice.detach(call.callId, end);
+  f.release(call);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(voice.work(call.callId), null, 'the started notification was missed');
+  await voice.close();
+  f.workReadTimeout(false);
+  now += 300_001;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const recovered = f.voice({ now: () => now });
+  t.mock.timers.tick(1000);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(recovered.work(call.callId)!.deadline, end + 300_000);
+  assert.equal(recovered.work(call.callId)!.state, 'paused_deadline');
+  assert.deepEqual(f.requests.filter(request => request.method === 'turn/interrupt').map(request => request.params), [{ threadId, turnId }]);
+  t.mock.timers.reset();
 });
 
 test('Hangup retains the backing turn and input; authorized redial attaches without another task or turn', async t => {

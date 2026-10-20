@@ -3,6 +3,8 @@ import type { Wire } from "../../../../packages/sdk/src/node.js";
 /** Bounded telemetry only. Call ownership and outcomes remain exclusively in PhoneJournal. */
 export class PhoneDiagnostics {
   private readonly calls = new Map<string, Wire.Diagnostic>();
+  private readonly cleanups = new Map<string, Wire.Diagnostic>();
+  private readonly observations = new Map<string, Wire.Diagnostic>();
   private poll: Wire.Diagnostic | null = null;
   private voice: Wire.Diagnostic | null = null;
   private registration: Wire.Diagnostic | null = null;
@@ -13,7 +15,7 @@ export class PhoneDiagnostics {
   private observation(
     code: string,
     prior: Wire.Diagnostic | null,
-    scope: "call" | "poll" | "registration" | "codex_voice",
+    scope: "call" | "call_cleanup" | "work_observation" | "poll" | "registration" | "codex_voice",
   ): Wire.Diagnostic {
     const at = this.now();
     return {
@@ -25,7 +27,11 @@ export class PhoneDiagnostics {
       lastObservedAt: at,
       status: "current",
       message:
-        scope === "call"
+        scope === "call_cleanup"
+          ? "Phone media cleanup is unconfirmed. Inspect the original stop and release outcomes."
+          : scope === "work_observation"
+            ? "The original Voice work status is awaiting reconciliation; call media cleanup is independent."
+          : scope === "call"
           ? "The original Phone call needs attention. Inspect its retained command outcomes; do not repeat the call."
           : scope === "registration"
             ? "Phone SIP registration or its keepalive needs attention. Inspect phone.status; existing call outcomes remain available."
@@ -46,6 +52,16 @@ export class PhoneDiagnostics {
    * releasing a failed call is cleanup, not evidence that the next caller can connect. */
   callSucceeded(_callId: string): void {
     this.calls.clear();
+  }
+  cleanupFailed(callId: string, code: string): void {
+    this.cleanups.set(callId, this.observation(code, this.cleanups.get(callId) ?? null, 'call_cleanup'));
+    if (this.cleanups.size > 32) this.cleanups.delete(this.cleanups.keys().next().value!);
+  }
+  cleanupSucceeded(callId: string): void { this.cleanups.delete(callId); }
+  workObserved(callId: string, code: string | null): void {
+    if (code === null) this.observations.delete(callId);
+    else this.observations.set(callId, this.observation(code, this.observations.get(callId) ?? null, 'work_observation'));
+    if (this.observations.size > 64) this.observations.delete(this.observations.keys().next().value!);
   }
   pollFailed(code: string): void {
     this.poll = this.observation(code, this.poll, "poll");
@@ -83,6 +99,8 @@ export class PhoneDiagnostics {
     // the bounded warning until a later call reaches the connected state.
     return structuredClone([
       ...this.calls.values(),
+      ...this.cleanups.values(),
+      ...this.observations.values(),
       ...(this.poll ? [this.poll] : []),
       ...(this.voice ? [this.voice] : []),
       ...(this.registration ? [this.registration] : []),
