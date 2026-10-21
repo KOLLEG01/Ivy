@@ -331,7 +331,15 @@ fn configured(micro: &str, fallback: &str, adopt: &str) -> String {
 #[test]
 fn original_voice_settings_gesture_authority_and_fallback_agree() {
     let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    std::panic::set_hook(Box::new(|info| {
+        if !info
+            .payload()
+            .downcast_ref::<&str>()
+            .is_some_and(|s| s.starts_with("fixture "))
+        {
+            eprintln!("{info}");
+        }
+    }));
     struct Restore(Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -661,7 +669,7 @@ fn original_voice_settings_gesture_authority_and_fallback_agree() {
     let copy = encoded.clone();
     let writer = std::thread::spawn(move || stdin.write_all(copy.as_bytes()).unwrap());
     let output = child.wait_with_output().unwrap();
-    writer.join().unwrap();
+    let written = writer.join();
     std::fs::write(format!("{prefix}.original.json"), &output.stdout).unwrap();
     std::fs::write(format!("{prefix}.original.err.log"), &output.stderr).unwrap();
     assert!(
@@ -669,6 +677,7 @@ fn original_voice_settings_gesture_authority_and_fallback_agree() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    written.unwrap();
     let original = parse(
         std::str::from_utf8(&output.stdout).unwrap(),
         32 * 1024 * 1024,

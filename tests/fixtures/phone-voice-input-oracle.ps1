@@ -2,7 +2,7 @@ $ErrorActionPreference='Stop'
 [Console]::InputEncoding=[Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $definition=@'
-using System;using System.IO;using System.Linq;using System.Text;using System.Text.Json;using System.Text.Json.Serialization;using System.Collections.Generic;using System.Threading;using System.Threading.Tasks;using System.Diagnostics;using System.Globalization;using System.Runtime.InteropServices;using System.Text.RegularExpressions;
+using System;using System.IO;using System.Linq;using System.Text;using System.Text.Json;using System.Text.Json.Serialization;using System.Collections.Generic;using System.Threading;using System.Threading.Tasks;using System.Diagnostics;using System.Globalization;using System.Runtime.InteropServices;using System.Text.RegularExpressions;using System.Security.Principal;
 '@ + "`n"
 function Slice([string]$text,[string]$start,[string]$end) {
  $a=$text.IndexOf($start,[StringComparison]::Ordinal)
