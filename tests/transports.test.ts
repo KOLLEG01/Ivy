@@ -2069,6 +2069,8 @@ test("MCP paginates the complete typed catalog and routes exact providers withou
     return { descriptors, pages };
   };
   const initialUserTools = (await allTools(mcp)).descriptors;
+  assert.deepEqual(initialUserTools.slice(0, 2).map(tool => tool.name), ['ivy_instructions', 'ivy_tool_schema']);
+  assert.ok(initialUserTools.findIndex(tool => tool.name === 'wiki_read') < initialUserTools.findIndex(tool => tool.name === 'hive_schema_register'));
   const initialDevTools = (await allTools(devMcp)).descriptors;
   const initialTools = [...initialUserTools, ...initialDevTools];
   const wireInstructions = (await discover('/mcp')).instructions;

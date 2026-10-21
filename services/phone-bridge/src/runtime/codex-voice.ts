@@ -38,7 +38,7 @@ export interface PhoneCodexVoiceSettings extends CodexProcessSettings {
   config?: Record<string, Wire.Json>;
 }
 export type PhoneVoiceSelectionCommand =
-  { commandSequence: number } | { operationId: string };
+  ({ commandSequence: number } | { operationId: string }) & { voiceId?: string };
 type Thread = {
   id: string;
   cwd: string;
@@ -1411,6 +1411,7 @@ export class PhoneCodexVoice implements PhoneVoicePort {
       threadId,
       prompt,
       ...selection,
+      ...(command.voiceId === undefined ? {} : { voiceId: command.voiceId }),
       ...("commandSequence" in command
         ? { commandSequence: command.commandSequence }
         : {}),

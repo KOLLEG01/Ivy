@@ -44,7 +44,9 @@ export class PhoneBridge {
           this.flow.calls.journal.currentCall(callId)?.callId === callId;
       }
     }
-    return { call, current, observation };
+    return { call, current, observation,
+      work: this.flow.voiceWork(caller, callId),
+      inputs: this.flow.voiceInputs(caller, callId) };
   }
   async invoke(
     name: PhoneTool,
@@ -66,6 +68,13 @@ export class PhoneBridge {
       }
       case "selectSpeakerVoice":
         result = await this.flow.selectSpeakerVoice(caller, String(args["callId"]), String(args["operationId"]), String(args["voiceId"]));
+        break;
+      case "update":
+        result = await this.flow.updateVoice(caller, String(args["callId"]), String(args["operationId"]), {
+          ...(args["model"] === undefined ? {} : { model: String(args["model"]) }),
+          ...(args["reasoningEffort"] === undefined ? {} : { reasoningEffort: String(args["reasoningEffort"]) }),
+          ...(args["voiceId"] === undefined ? {} : { voiceId: String(args["voiceId"]) }),
+        });
         break;
       case "probeLoopback": {
         requireThat(

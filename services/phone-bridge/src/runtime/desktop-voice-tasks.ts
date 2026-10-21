@@ -26,7 +26,8 @@ export type DesktopVoiceTaskPort = Pick<
   | "close"
 >;
 
-export type PhoneVoiceSelectionCommand = { commandSequence: number } | { operationId: string };
+export type { PhoneVoiceSelectionCommand } from './codex-voice.js';
+import type { PhoneVoiceSelectionCommand } from './codex-voice.js';
 
 /** Reuses this caller's last bound chat. A first call adopts Desktop's chat;
  * only an explicit Voice restart creates a new projectless task. */
@@ -552,7 +553,7 @@ export class PhoneVoiceTasks {
     if (prior) {
       requireThat(prior.intent.callId === call.callId && prior.intent.method === 'call.selectVoice' && prior.intent.threadId === threadId &&
         prior.intent.prompt === prompt && prior.intent.model === selection.model &&
-        prior.intent.reasoningEffort === selection.reasoningEffort,
+        prior.intent.reasoningEffort === selection.reasoningEffort && prior.intent.voiceId === command.voiceId,
         'mutation_conflict', 'Original Voice selection changed.');
       const state = (prior.receipt?.result as { state?: unknown } | null)?.state;
       if (prior.phase === 'result' && state === 'sent') return;
@@ -562,8 +563,10 @@ export class PhoneVoiceTasks {
     const intent: PhoneJournalIntent & { method: 'call.selectVoice' } = {
       epoch: call.epoch, callId: call.callId, operationId: 'operationId' in command ? command.operationId : randomUUID(), method: 'call.selectVoice',
       threadId, prompt, model: selection.model, reasoningEffort: selection.reasoningEffort,
+      ...(command.voiceId === undefined ? {} : { voiceId: command.voiceId }),
       ...(commandSequence === undefined ? {} : { commandSequence }),
       requestHash: digest(canonical({ threadId, prompt, model: selection.model,
+        ...(command.voiceId === undefined ? {} : { voiceId: command.voiceId }),
         reasoningEffort: selection.reasoningEffort, ...(commandSequence === undefined ? {} : { commandSequence }) })),
     };
     const resolved = await this.controller.resolve(databasePath, settings);

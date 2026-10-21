@@ -288,10 +288,21 @@
             ]
           },
           "else": {
-            "not": {
-              "required": [
-                "voiceId"
-              ]
+            "if": {
+              "properties": {
+                "method": {
+                  "not": {
+                    "const": "call.selectVoice"
+                  }
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "required": [
+                  "voiceId"
+                ]
+              }
             }
           }
         }

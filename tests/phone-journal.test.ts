@@ -80,6 +80,24 @@ test('Phone deployment declares the actual journal format and refuses older deve
   }
 });
 
+test('Combined model and speaker selection survives released-call compaction and reopen', t => {
+  const f = fixture(t), journal = f.open(), epoch = randomUUID(), callId = randomUUID();
+  const { archive } = journal as unknown as { archive: ReceiptArchive };
+  archive.limits.count = 1;
+  const args = { threadId: randomUUID(), prompt: 'Voice task model selection', model: 'gpt-6.1-sol', reasoningEffort: 'high', voiceId: 'ember' };
+  const selection = { ...intent(epoch, 'call.prepare', callId), ...args, method: 'call.selectVoice' as const, requestHash: digest(canonical(args)) };
+  archive.retain('command', selection.operationId, JSON.stringify({ schemaVersion: 1, intent: selection, phase: 'result',
+    receipt: { ok: true, result: { threadId: args.threadId, state: 'sent' }, error: null }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+  const release = intent(epoch, 'call.release', callId);
+  archive.retain('command', release.operationId, JSON.stringify({ intent: release, phase: 'result', receipt: reply(release) }));
+  assert.equal(journal.selectedSpeakerVoice(callId), 'ember');
+  (journal as unknown as { compact(): void }).compact();
+  assert.equal(journal.selectedSpeakerVoice(callId), 'ember');
+  assert.equal(journal.get(selection.operationId)?.intent.method, 'call.selectVoice');
+  journal.close();
+  assert.equal(f.open().selectedSpeakerVoice(callId), 'ember');
+});
+
 test('Phone archive queue excludes historical deletion evidence after reopen', t => {
   const f = fixture(t), journal = f.open(), epoch = randomUUID(); journal.beginEpoch(epoch);
   const admission = new PhoneAdmission({ incoming: [], recipients: [{ id: 'personal', destination: 'sip:fixture@127.0.0.1' }] });

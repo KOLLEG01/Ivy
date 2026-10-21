@@ -174,6 +174,10 @@ test("native question uses only the official existing Main notification path and
     "text",
   ]);
   assert.match(String(request["text"]), /five-minute deadline keeps running/);
+  assert.match(String(request["text"]), /phone_bridge_status/);
+  assert.ok(String(request["text"]).includes(f.work.threadId));
+  assert.doesNotMatch(String(request["text"]), /phone_bridge_work|phone_bridge_voice_inputs/);
+  assert.equal(f.calls.find(call => call.method === 'objects.write')!.args['contractVersion'], '1.1.0');
   assert.equal(await f.notice().notify(f.work, f.input, () => true), true);
   assert.equal(
     f.calls.filter((call) => call.method === "objects.write").length,

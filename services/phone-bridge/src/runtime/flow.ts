@@ -35,7 +35,7 @@ import type { PhoneSpeakerVoiceCatalog, PhoneVoiceModel, PhoneVoiceSelection } f
 import type { Agent } from "../../../../packages/sdk/src/node.js";
 
 type PhoneVoiceControl =
-  { action: "select"; selection: PhoneVoiceSelection } | { action: "restart" };
+  { action: "select"; selection: PhoneVoiceSelection; voiceId?: string } | { action: "restart" };
 export interface PhoneFlowSettings {
   incomingRoute?: "voice" | "windows";
   incomingInitialPrompt?: string;
@@ -644,6 +644,22 @@ export class PhoneFlow {
       .finally(() => this.work.delete(call.callId));
     this.work.set(call.callId, pending);
   }
+  async updateVoice(principalId: string, callId: string, operationId: string,
+    patch: Partial<PhoneVoiceSelection> & { voiceId?: string }): Promise<PhoneOperation> {
+    if (patch.model === undefined && patch.reasoningEffort === undefined) {
+      requireThat(patch.voiceId !== undefined, 'invalid_arguments', 'Provide model, reasoningEffort or voiceId.');
+      return this.selectSpeakerVoice(principalId, callId, operationId, patch.voiceId);
+    }
+    this.original(principalId, callId, 'read');
+    const prior = this.calls.journal.get(operationId);
+    // Resolve a replay against its original selection, even if a later update changed the call.
+    const base = prior?.intent.method === 'call.selectVoice' ? prior.intent : this.voiceSelection(callId);
+    return this.controlVoice(principalId, callId, operationId, {
+      action: 'select',
+      selection: { model: patch.model ?? base.model, reasoningEffort: patch.reasoningEffort ?? base.reasoningEffort },
+      ...(patch.voiceId === undefined ? {} : { voiceId: patch.voiceId }),
+    });
+  }
   async controlVoice(
     principalId: string,
     callId: string,
@@ -658,7 +674,8 @@ export class PhoneFlow {
           (control.action === "select"
             ? prior.intent.method === "call.selectVoice" &&
               prior.intent.model === control.selection.model &&
-              prior.intent.reasoningEffort === control.selection.reasoningEffort
+              prior.intent.reasoningEffort === control.selection.reasoningEffort &&
+              prior.intent.voiceId === control.voiceId
             : prior.intent.method === "call.restartVoice"),
         "mutation_conflict",
         "Voice operation belongs to another command or selection.",
@@ -680,7 +697,7 @@ export class PhoneFlow {
     const pending = Promise.resolve()
       .then(() =>
         control.action === "select"
-          ? this.applySelection(call, { operationId }, control.selection)
+          ? this.applySelection(call, { operationId, ...(control.voiceId === undefined ? {} : { voiceId: control.voiceId }) }, control.selection)
           : this.recycle(call, operationId),
       )
       .finally(() => this.work.delete(callId));
@@ -980,6 +997,11 @@ export class PhoneFlow {
     selection: PhoneVoiceSelection,
   ): Promise<void> {
     validatePhoneVoiceSelection(selection, await this.voiceModelCatalog());
+    if (command.voiceId !== undefined) {
+      const catalog = await this.speakerVoiceCatalog();
+      requireThat(catalog.voices.some(voice => voice.id === command.voiceId), 'phone_speaker_voice_invalid',
+        'Select a speaker voice advertised by phone_bridge_speaker_voices.');
+    }
     await this.confirmConnectedForVoice(call);
     const generation = this.calls.journal.latestVoiceGeneration(call.callId),
       threadId =

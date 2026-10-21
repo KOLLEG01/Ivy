@@ -11,7 +11,7 @@ import { digest, hashJson } from '../packages/contracts/src/canonical.js';
 import { toolDefinitionHash } from '../packages/contracts/src/tool-definition.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import { directDescriptors, directCall } from '../services/hive/src/mcp-catalog.js';
-import { toolPresentation } from '../services/hive/src/mcp-presentation.js';
+import { toolPresentation, compareMcpTools } from '../services/hive/src/mcp-presentation.js';
 import { SchemaValidators } from '../packages/contracts/src/schema.js';
 import { LiveRouting } from '../services/hive/src/live-routing.js';
 import type { PreparedCall } from '../services/hive/src/live-routing.js';
@@ -33,6 +33,16 @@ import { mcpDiscoveryResultBytes } from '../packages/contracts/src/limits.js';
 const client: ConnectionContext = { transport: 'http', credentialDigest: digest('discovery-client'), principalId: 'client' };
 const socket: ConnectionContext = { transport: 'ws', credentialDigest: digest('discovery-service'), principalId: 'service' };
 const errorCode = (code: string) => (error: unknown) => error instanceof IvyError && error.code === code;
+
+test('public discovery prioritizes daily tools and retains runtime extensions ahead of secondary controls', () => {
+  const names = ['phone_bridge_answer_voice_input', 'extension_action', 'agent_manager_read', 'task_read',
+    'phone_bridge_update', 'ivy_tool_schema', 'hive_schema_register', 'ivy_instructions', 'extension_status'];
+  const expected = ['ivy_instructions', 'ivy_tool_schema', 'task_read', 'phone_bridge_update',
+    'extension_action', 'extension_status', 'agent_manager_read', 'hive_schema_register', 'phone_bridge_answer_voice_input'];
+  const sorted = (values: string[]) => values.map(name => ({ name })).sort(compareMcpTools).map(tool => tool.name);
+  assert.deepEqual(sorted(names), expected);
+  assert.deepEqual(sorted([...names].reverse()), expected);
+});
 function fixture(t: TestContext) {
   const kernel = new HiveKernel({ filename: ':memory:', publicBaseUrl: 'https://hive.test', version: 'test', buildId: digest('test'),
     credentials: [{ principalId: 'client', digest: client.credentialDigest }, { principalId: 'service', digest: socket.credentialDigest }] });
@@ -319,7 +329,7 @@ test('the main service surfaces publish bounded complete direct schemas and keep
   const taskUpdate = descriptors.find(tool => tool.name === 'task_update')!;
   const alternatives = (schema: Record<string, unknown>) => (schema['allOf'] as { oneOf: unknown[] }[])[0]!.oneOf;
   assert.equal(alternatives(wikiUpdate.inputSchema).length, 3);
-  assert.equal(alternatives(taskUpdate.inputSchema).length, 7);
+  assert.equal(alternatives(taskUpdate.inputSchema).length, 8);
   assert.ok((wikiUpdate.inputSchema['properties'] as Record<string, unknown>)['objectId']);
   assert.ok((taskUpdate.inputSchema['properties'] as Record<string, unknown>)['input']);
   const taskCreateInput = ((descriptors.find(tool => tool.name === 'task_create')!.inputSchema['properties'] as Record<string, unknown>)['input'] as Record<string, unknown>);

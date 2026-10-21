@@ -141,7 +141,7 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   `codexVoice.voice` setting overrides the native `realtime.voice` configuration.
   With `callId`, the API reports selected/effective voice and `restartRequired`;
   active-call status also includes `speakerVoice` and discovery errors.
-  `phone_bridge_select_speaker_voice` takes `callId`, `voiceId` and `operationId`.
+  `phone_bridge_update` takes `callId`, `voiceId` and `operationId`.
   It retains a validated selection for that original call's next Voice session.
   It does not restart audio. An explicit `phone_bridge_restart_voice` applies the
   selection during the call, with its existing new-task/original-greeting behavior.
@@ -180,7 +180,7 @@ Implementation: [Codex client](../services/phone-bridge/src/runtime/codex-voice.
   ChatBridge Main notification path with a retained `phone-bridge/question`
   source and one operation per exact input. The five-minute deadline continues
   during user waits. No timeout or notification implies consent. Read
-  `phone_bridge_work` and `phone_bridge_voice_inputs` before answering with the
+  `phone_bridge_status` with `callId` (work and inputs) before answering with the
   exact `inputToken` through the owning PhoneBridge connection. Consumed inputs,
   changed native epochs and elapsed deadlines reject stale replies. Delivery has
   bounded retries; unavailable Main never causes a new conversation or callback.

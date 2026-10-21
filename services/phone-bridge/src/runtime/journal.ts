@@ -23,7 +23,7 @@ export type PhoneJournalIntent = PhoneIntent |
   (Omit<PhoneIntent, 'method'> & { method: 'call.createVoice'; model: string; reasoningEffort: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.bindVoice' | 'call.stopVoice'; threadId: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.promptVoice' | 'call.forwardVoice'; threadId: string; prompt: string; model?: string; reasoningEffort?: string }) |
-  (Omit<PhoneIntent, 'method'> & { method: 'call.selectVoice'; threadId: string; prompt: string; model: string; reasoningEffort: string; commandSequence?: number }) |
+  (Omit<PhoneIntent, 'method'> & { method: 'call.selectVoice'; threadId: string; prompt: string; model: string; reasoningEffort: string; commandSequence?: number; voiceId?: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.selectSpeakerVoice'; voiceId: string }) |
   (Omit<PhoneIntent, 'method'> & { method: 'call.restartVoice'; voiceGeneration: number; model: string; reasoningEffort: string });
 
@@ -76,6 +76,7 @@ function intentShape(intent: PhoneJournalIntent): void {
       'phone_archive_scope_conflict', 'A bound Voice archive plan must contain exactly its original task subtree.');
   if (intent.method === 'call.selectVoice') requireThat(intent.requestHash === digest(canonical({
     threadId: intent.threadId, prompt: intent.prompt, model: intent.model,
+    ...(intent.voiceId === undefined ? {} : { voiceId: intent.voiceId }),
     reasoningEffort: intent.reasoningEffort, ...(intent.commandSequence === undefined ? {} : { commandSequence: intent.commandSequence }),
   })), 'phone_voice_selection_changed', 'Voice selection intent must retain its exact original arguments.');
   if (intent.method === 'call.restartVoice') requireThat(intent.requestHash === digest(canonical({
@@ -336,6 +337,7 @@ export class PhoneJournal {
         WHERE a.kind='command' AND json_extract(a.value,'$.phase')='result'
           AND json_extract(a.value,'$.intent.method') NOT IN
             ('call.bindVoice','call.createVoice','call.selectSpeakerVoice','call.archiveVoice','call.release')
+          AND json_extract(a.value,'$.intent.voiceId') IS NULL
           AND NOT EXISTS(SELECT 1 FROM receipt_archive_history h WHERE h.kind=a.kind AND h.key=a.key)
           AND NOT EXISTS(SELECT 1 FROM json_tree(a.value) j WHERE
             j.key IN ('phase','state','ownerPhase','outcome','execution') AND j.value IN ('unknown','outcome_unknown','needs_attention') OR
@@ -715,8 +717,9 @@ export class PhoneJournal {
   }
   selectedSpeakerVoice(callId: string): string | null {
     validate('Uuid', callId);
-    const row = this.statement("SELECT value FROM commands WHERE call_id=? AND method='call.selectSpeakerVoice' AND phase='result' AND json_extract(value,'$.receipt.ok')=1 ORDER BY rowid DESC LIMIT 1").get(callId) ??
-      this.statement("SELECT value FROM receipt_archive WHERE kind='command' AND json_extract(value,'$.intent.callId')=? AND json_extract(value,'$.intent.method')='call.selectSpeakerVoice' AND json_extract(value,'$.receipt.ok')=1 ORDER BY rowid DESC LIMIT 1").get(callId);
+    const selected = "json_extract(value,'$.intent.voiceId') IS NOT NULL AND json_extract(value,'$.phase')='result' AND json_extract(value,'$.receipt.ok')=1 AND (json_extract(value,'$.intent.method')='call.selectSpeakerVoice' OR (json_extract(value,'$.intent.method')='call.selectVoice' AND json_extract(value,'$.receipt.result.state')='sent'))";
+    const row = this.statement(`SELECT value FROM commands WHERE call_id=? AND ${selected} ORDER BY rowid DESC LIMIT 1`).get(callId) ??
+      this.statement(`SELECT value FROM receipt_archive WHERE kind='command' AND json_extract(value,'$.intent.callId')=? AND ${selected} ORDER BY rowid DESC LIMIT 1`).get(callId);
     return row ? (JSON.parse(String(row['value'])) as PhoneOperation & { intent: { voiceId: string } }).intent.voiceId : null;
   }
   finishSpeakerVoiceSelection(intent: PhoneJournalIntent & { method: 'call.selectSpeakerVoice' }, result: unknown): PhoneOperation {

@@ -544,6 +544,7 @@ function fixture(
         threadId,
         prompt: "Voice task model selection",
         ...selection,
+        ...(command.voiceId === undefined ? {} : { voiceId: command.voiceId }),
         ...("commandSequence" in command
           ? { commandSequence: command.commandSequence }
           : {}),
@@ -928,6 +929,41 @@ test('Catalog failures leave readiness inspectable and cannot change a live task
   assert.equal(status.voiceModelsError, 'native_method_unavailable');
   assert.equal(status.busy, false);
   assert.deepEqual(f.selectionUpdates, []);
+});
+
+test('MCP update preserves omitted settings, combines speaker selection and replays the original update', async t => {
+  const f = fixture(t), flow = f.flow(), bridge = new PhoneBridge(flow, f.native);
+  const call = await flow.request('main', randomUUID(), 'personal', 'voice');
+  await until(() => !!f.journal.callCommand(call.callId, 'call.realtime.answer')?.receipt);
+  await tick();
+  const view = await bridge.invoke('call', { callId: call.callId }, context()) as { work: unknown; inputs: unknown[] };
+  assert.equal(view.work, null);
+  assert.deepEqual(view.inputs, []);
+  const args = { callId: call.callId, operationId: randomUUID(), reasoningEffort: 'max', voiceId: 'ember' };
+  const original = flow.voiceSelection(call.callId);
+  const selected = await bridge.invoke('update', args, context());
+  assert.deepEqual(flow.voiceSelection(call.callId), { ...original, reasoningEffort: 'max' });
+  assert.equal(f.journal.selectedSpeakerVoice(call.callId), 'ember');
+  assert.deepEqual(flow.speakerVoiceState(call.callId, await flow.speakerVoiceCatalog()), {
+    callId: call.callId, selectedVoiceId: 'ember', effectiveVoiceId: 'cove', restartRequired: true, appliesOn: 'next_voice_session',
+  });
+  await bridge.invoke('update', { callId: call.callId, operationId: randomUUID(), model: 'gpt-6-sol' }, context());
+  assert.deepEqual(flow.voiceSelection(call.callId), { model: 'gpt-6-sol', reasoningEffort: 'max' });
+  assert.equal(f.journal.selectedSpeakerVoice(call.callId), 'ember');
+  assert.deepEqual(await bridge.invoke('update', args, context()), selected);
+  assert.equal(f.selectionUpdates.length, 2);
+  assert.equal(f.prompts.length, 1);
+  const invalid = { ...args, operationId: randomUUID(), voiceId: 'missing' };
+  await assert.rejects(bridge.invoke('update', invalid, context()), { code: 'phone_speaker_voice_invalid' });
+  assert.equal(f.journal.get(invalid.operationId), null);
+  assert.equal(f.selectionUpdates.length, 2);
+  await assert.rejects(bridge.invoke('update', { ...args, voiceId: 'cove' }, context()), { code: 'mutation_conflict' });
+  await bridge.invoke('update', { callId: call.callId, operationId: randomUUID(), voiceId: 'cove' }, context());
+  assert.equal(f.journal.selectedSpeakerVoice(call.callId), 'cove');
+  assert.deepEqual(flow.voiceSelection(call.callId), { model: 'gpt-6-sol', reasoningEffort: 'max' });
+  await flow.hangup('main', call.callId);
+  assert.deepEqual(await bridge.invoke('update', args, context()), selected);
+  assert.equal(f.selectionUpdates.length, 2);
 });
 
 test('Speaker API distinguishes the selected catalog from its start protocol without a version allowlist', () => {

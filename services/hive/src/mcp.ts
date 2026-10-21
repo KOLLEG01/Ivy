@@ -32,6 +32,7 @@ import {
   hasStructuredOutput,
 } from "./mcp-catalog.js";
 import type { McpBinding } from "./discovery.js";
+import { compareMcpTools } from "./mcp-presentation.js";
 import { hiveMcpInstructions } from "../../../instructions/hive-mcp.js";
 import { ivyDevMcpInstructions } from "../../../instructions/ivy-dev-mcp.js";
 import { mcpIconPath } from "./mcp-branding.js";
@@ -208,6 +209,7 @@ export async function handleMcp(
             options.surface,
           );
           const descriptors = directDescriptors(bindings);
+          if (options.surface === 'ivy') descriptors.sort(compareMcpTools);
           const catalogHash = hashJson(descriptors);
           const identity = {
             method: "tools/list",

@@ -536,10 +536,11 @@ test('GPT-6.1 Sol selection reaches native settings and is retained for a fresh 
   const f = fixture(t), voice = f.voice(), call = f.admit();
   const original = await voice.prepare(call, 0, selection), operationId = randomUUID();
   const chosen = { model: 'gpt-6.1-sol', reasoningEffort: 'ultra' };
-  await voice.select(call, original, { operationId }, chosen, async () => {});
+  await voice.select(call, original, { operationId, voiceId: 'ember' }, chosen, async () => {});
   assert.deepEqual(f.requests.filter(item => item.method === 'thread/settings/update').at(-1)!.params,
     { threadId: original, model: chosen.model, effort: chosen.reasoningEffort });
   assert.equal(f.journal.get(operationId)?.receipt?.ok, true);
+  assert.equal(f.journal.selectedSpeakerVoice(call.callId), 'ember');
   assert.notEqual(await voice.prepare(call, 1, chosen), original);
   const prepared = f.requests.filter(item => item.method === 'thread/start').at(-1)!.params;
   assert.equal(prepared['model'], chosen.model);

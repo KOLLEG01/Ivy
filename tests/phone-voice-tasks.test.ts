@@ -197,8 +197,9 @@ test('model selection keeps the original chat; an explicit restart alone creates
   await tasks.select(f.call, f.databasePath, f.settings, f.voice, { commandSequence: 1 }, selection, async () => undefined);
   assert.equal(f.prompts.length, 1); assert.equal(f.prompts[0]!.id, f.voice); assert.equal(f.transfers.length, 0);
   const operationId = randomUUID();
-  await tasks.select(f.call, f.databasePath, f.settings, f.voice, { operationId }, selection, async () => undefined);
-  await tasks.select(f.call, f.databasePath, f.settings, f.voice, { operationId }, selection, async () => undefined);
+  await tasks.select(f.call, f.databasePath, f.settings, f.voice, { operationId, voiceId: 'ember' }, selection, async () => undefined);
+  await tasks.select(f.call, f.databasePath, f.settings, f.voice, { operationId, voiceId: 'ember' }, selection, async () => undefined);
+  assert.equal(f.journal.selectedSpeakerVoice(f.call.callId), 'ember');
   assert.equal(f.prompts.length, 2);
   await assert.rejects(tasks.select(f.call, f.databasePath, f.settings, f.voice, { operationId },
     { ...selection, reasoningEffort: 'low' }, async () => undefined), { code: 'mutation_conflict' });
