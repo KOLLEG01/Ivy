@@ -429,6 +429,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -449,6 +455,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -670,6 +677,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ivy-data-collector"
+version = "0.2.40"
+dependencies = [
+ "base64",
+ "bytes",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ivy-contracts",
+ "ivy-host-runtime",
+ "ivy-sdk",
+ "ivy-store",
+ "sha2",
+ "subtle",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "ivy-host-runtime"
 version = "0.2.40"
 dependencies = [
@@ -683,7 +711,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
+ "url",
  "uuid",
  "windows-sys 0.61.2",
 ]
@@ -697,6 +727,7 @@ dependencies = [
  "iana-time-zone",
  "ivy-contracts",
  "jiff-tzdb",
+ "libc",
  "reqwest",
  "serde_json",
  "tokio",
@@ -704,6 +735,7 @@ dependencies = [
  "tokio-util",
  "tz-rs",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

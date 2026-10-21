@@ -62,3 +62,9 @@ path = "../../../tests/rust/sdk-date-parse.rs"
 [[test]]
 name = "sdk-native-owner"
 path = "../../../tests/rust/sdk-native-owner.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
