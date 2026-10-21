@@ -2,18 +2,19 @@
 //! Validation, clock and condition-store dependencies remain explicit.
 use super::comment_reads::CommentReadPolicies;
 use crate::coordination::next_steps::NextStepPolicies;
-use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
+use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, error::JavaScriptException};
 
-pub type QuestionResolver<'a> = dyn Fn(&Json, Option<&JsString>) -> IvyResult<Vec<Json>> + 'a;
-pub type ReadCondition<'a> = dyn Fn(&Json, Option<&Json>) -> IvyResult<Json> + 'a;
+pub type QuestionResolver<'a, E = IvyError> =
+    dyn Fn(&Json, Option<&JsString>) -> Result<Vec<Json>, E> + 'a;
+pub type ReadCondition<'a, E = IvyError> = dyn Fn(&Json, Option<&Json>) -> Result<Json, E> + 'a;
 
 /// Explicit question, validation, clock and condition-store dependencies.
 /// `current` binds the SDK resolver while retaining the other owner bindings.
-pub struct ConversationPolicies<'a> {
-    pub questions: &'a QuestionResolver<'a>,
-    pub validate_next_step: &'a dyn Fn(&Json) -> IvyResult<()>,
+pub struct ConversationPolicies<'a, E = IvyError> {
+    pub questions: &'a QuestionResolver<'a, E>,
+    pub validate_next_step: &'a dyn Fn(&Json) -> Result<(), E>,
     pub now: &'a dyn Fn() -> JsString,
-    pub condition: &'a ReadCondition<'a>,
+    pub condition: &'a ReadCondition<'a, E>,
 }
 impl<'a> ConversationPolicies<'a> {
     /// Bind the current SDK resolver without changing its full-value or failure
@@ -31,19 +32,41 @@ impl<'a> ConversationPolicies<'a> {
         }
     }
 }
-impl NextStepPolicies for ConversationPolicies<'_> {
-    fn open_questions(&self, task: &Json) -> IvyResult<Vec<JsString>> {
+fn current_raw_questions<E: From<JavaScriptException>>(
+    task: &Json,
+    run_id: Option<&JsString>,
+) -> Result<Vec<Json>, E> {
+    ivy_contracts::task_board_questions::open_task_questions_raw(task, run_id).map_err(E::from)
+}
+impl<'a, E: From<JavaScriptException>> ConversationPolicies<'a, E> {
+    /// Bind the same Shared question core before its IvyResult compatibility
+    /// catch. Validator, Clock and condition dependencies remain mandatory.
+    pub fn current_raw(
+        validate_next_step: &'a dyn Fn(&Json) -> Result<(), E>,
+        now: &'a dyn Fn() -> JsString,
+        condition: &'a ReadCondition<'a, E>,
+    ) -> Self {
+        Self {
+            questions: &current_raw_questions::<E>,
+            validate_next_step,
+            now,
+            condition,
+        }
+    }
+}
+impl<E: From<IvyError>> NextStepPolicies<E> for ConversationPolicies<'_, E> {
+    fn open_questions(&self, task: &Json) -> Result<Vec<JsString>, E> {
         open_question_ids(self.questions, task)
     }
-    fn validate_next_step(&self, step: &Json) -> IvyResult<()> {
+    fn validate_next_step(&self, step: &Json) -> Result<(), E> {
         (self.validate_next_step)(step)
     }
 }
-impl CommentReadPolicies for ConversationPolicies<'_> {
+impl<E: From<IvyError>> CommentReadPolicies<E> for ConversationPolicies<'_, E> {
     fn now(&self) -> JsString {
         (self.now)()
     }
-    fn execution_condition(&self, task: &Json, steps: Option<&Json>) -> IvyResult<Json> {
+    fn execution_condition(&self, task: &Json, steps: Option<&Json>) -> Result<Json, E> {
         (self.condition)(task, steps)
     }
 }
@@ -135,8 +158,11 @@ pub fn run_handoff(task: &Json, run_id: &JsString) -> Option<Json> {
         .cloned()
 }
 
-pub fn open_question_ids(resolver: &QuestionResolver<'_>, task: &Json) -> IvyResult<Vec<JsString>> {
-    resolver(task, None)?
+pub fn open_question_ids<E: From<IvyError>>(
+    resolver: &QuestionResolver<'_, E>,
+    task: &Json,
+) -> Result<Vec<JsString>, E> {
+    Ok(resolver(task, None)?
         .iter()
         .map(|c| {
             c.required("commentId")?
@@ -144,14 +170,14 @@ pub fn open_question_ids(resolver: &QuestionResolver<'_>, task: &Json) -> IvyRes
                 .cloned()
                 .ok_or_else(IvyError::internal)
         })
-        .collect()
+        .collect::<IvyResult<_>>()?)
 }
 
-pub fn unanswered_question(
-    resolver: &QuestionResolver<'_>,
+pub fn unanswered_question<E>(
+    resolver: &QuestionResolver<'_, E>,
     task: &Json,
     run_id: &JsString,
-) -> IvyResult<bool> {
+) -> Result<bool, E> {
     Ok(!resolver(task, Some(run_id))?.is_empty())
 }
 

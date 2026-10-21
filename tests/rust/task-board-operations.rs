@@ -35,6 +35,8 @@ mod next_steps;
 mod persistent_reads;
 #[path = "../fixtures/task-board-program.rs"]
 mod publication;
+#[path = "../fixtures/task-board-read-ports.rs"]
+mod read_ports;
 #[path = "../fixtures/task-board-record-upgrades.rs"]
 mod record_upgrades;
 #[path = "../fixtures/task-board-recovery.rs"]

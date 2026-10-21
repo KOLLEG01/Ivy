@@ -1,7 +1,8 @@
 //! Service-owned conversation projections over the actual Shared tree reader.
 //! Failures stay lossless until the caller's corresponding original catch site.
 use crate::{
-    coordination::next_steps::NextStepPolicies, engine_read::comment_reads::comment_summary,
+    coordination::next_steps::{IvyPolicies, NextStepPolicies},
+    engine_read::comment_reads::comment_summary,
 };
 use ivy_contracts::{
     IvyError, IvyJson as Json, JsString,
@@ -162,22 +163,44 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         task_id: &JsString,
         policies: &P,
     ) -> Result<Option<Json>, CommentFailure<S::Error>> {
-        let Some(tree) = property(Some(value), "commentStore")?.filter(|v| super::truthy(v)) else {
+        self.read_tree_with(value, task_id, &IvyPolicies(policies), &|error| error)
+            .await
+    }
+    /// The same hydration/summary core with an explicit source-error binding.
+    /// This leaves raw policies and failures intact through owner read ports.
+    pub async fn read_tree_with<E: From<IvyError>, P: NextStepPolicies<E>>(
+        &self,
+        value: &Json,
+        task_id: &JsString,
+        policies: &P,
+        failure: &impl Fn(CommentFailure<S::Error>) -> E,
+    ) -> Result<Option<Json>, E> {
+        let Some(tree) = property::<S::Error>(Some(value), "commentStore")
+            .map_err(failure)?
+            .filter(|v| super::truthy(v))
+        else {
             return Ok(None);
         };
         if tree.get("kind").is_none() {
             return Ok(None);
         }
-        let entries = self.range(tree, task_id, None, None, None).await?;
+        let entries = self
+            .range(tree, task_id, None, None, None)
+            .await
+            .map_err(failure)?;
         let mut comments = Vec::new();
         let mut receipts = Vec::new();
         for entry in entries {
             comments.push(
-                property(Some(&entry), "comment")?
+                property::<S::Error>(Some(&entry), "comment")
+                    .map_err(failure)?
                     .cloned()
                     .unwrap_or(Json::Null),
             );
-            if let Some(receipt) = property(Some(&entry), "receipt")?.filter(|v| super::truthy(v)) {
+            if let Some(receipt) = property::<S::Error>(Some(&entry), "receipt")
+                .map_err(failure)?
+                .filter(|v| super::truthy(v))
+            {
                 receipts.push(receipt.clone());
             }
         }
@@ -188,7 +211,7 @@ impl<S: CommentSource + ?Sized> TaskComments<S> {
         if !tree.get("summary").is_some_and(super::truthy) {
             let summary = comment_summary(policies, &full, task_id)?;
             if stringify(&summary, usize::MAX)?.len() <= 64 * 1024 {
-                let key = summary_key(&full, tree, task_id)?;
+                let key = summary_key::<S::Error>(&full, tree, task_id).map_err(failure)?;
                 self.summaries
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())

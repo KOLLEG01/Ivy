@@ -10,6 +10,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     future::Future,
+    marker::PhantomData,
     task::Poll,
 };
 
@@ -19,15 +20,27 @@ use std::{
 /// The current comment-tree store adapter is an explicit composition boundary;
 /// the legacy Store cannot silently stand in for this header-capable reader.
 #[allow(async_fn_in_trait)]
-pub trait NextStepStore {
-    async fn read(&self, key: &str, address: &Json, header_only: bool) -> IvyResult<Json>;
+pub trait NextStepStore<E = IvyError> {
+    async fn read(&self, key: &str, address: &Json, header_only: bool) -> Result<Json, E>;
 }
 
 /// Bind the current question resolver and exact NextStep contract validator.
 /// An indexed header assessment never calls the conversation resolver.
-pub trait NextStepPolicies {
-    fn open_questions(&self, task: &Json) -> IvyResult<Vec<JsString>>;
-    fn validate_next_step(&self, step: &Json) -> IvyResult<()>;
+pub trait NextStepPolicies<E = IvyError> {
+    fn open_questions(&self, task: &Json) -> Result<Vec<JsString>, E>;
+    fn validate_next_step(&self, step: &Json) -> Result<(), E>;
+}
+
+/// Explicit lift for an existing typed policy. Raw policies bind their own
+/// resolver directly; this adapter never converts an error back to IvyError.
+pub struct IvyPolicies<'a, P: ?Sized>(pub &'a P);
+impl<E: From<IvyError>, P: NextStepPolicies + ?Sized> NextStepPolicies<E> for IvyPolicies<'_, P> {
+    fn open_questions(&self, task: &Json) -> Result<Vec<JsString>, E> {
+        self.0.open_questions(task).map_err(E::from)
+    }
+    fn validate_next_step(&self, step: &Json) -> Result<(), E> {
+        self.0.validate_next_step(step).map_err(E::from)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -92,13 +105,13 @@ fn question(condition: &Json) -> bool {
 fn dependency(condition: &Json) -> bool {
     is(condition, "kind", "task") || is(condition, "kind", "delivery")
 }
-type TaskReads<'a> = RefCell<HashMap<JsString, Shared<LocalBoxFuture<'a, IvyResult<Json>>>>>;
-fn source<'a, S: NextStepStore>(
+type TaskReads<'a, E> = RefCell<HashMap<JsString, Shared<LocalBoxFuture<'a, Result<Json, E>>>>>;
+fn source<'a, E: Clone + 'a, S: NextStepStore<E>>(
     store: &'a S,
-    sources: &TaskReads<'a>,
+    sources: &TaskReads<'a, E>,
     overrides: &HashMap<JsString, Json>,
     id: &JsString,
-) -> LocalBoxFuture<'a, IvyResult<Json>> {
+) -> LocalBoxFuture<'a, Result<Json, E>> {
     if let Some(value) = overrides.get(id) {
         return futures_util::future::ready(Ok(value.clone())).boxed_local();
     }
@@ -115,14 +128,18 @@ fn source<'a, S: NextStepStore>(
         .boxed_local()
 }
 
-pub async fn assess_steps<S: NextStepStore, P: NextStepPolicies>(
+pub async fn assess_steps<
+    E: Clone + From<IvyError>,
+    S: NextStepStore<E>,
+    P: NextStepPolicies<E>,
+>(
     store: &S,
     policies: &P,
     task: &Json,
     at: &JsString,
     overrides: &HashMap<JsString, Json>,
     index: Option<&[Json]>,
-) -> IvyResult<Vec<StepAssessment>> {
+) -> Result<Vec<StepAssessment>, E> {
     let open: HashSet<_> = if let Some(index) = index {
         index
             .iter()
@@ -149,7 +166,7 @@ pub async fn assess_steps<S: NextStepStore, P: NextStepPolicies>(
             let open = &open;
             let first_error = &first_error;
             async move {
-                let result: IvyResult<StepAssessment> = async {
+                let result: Result<StepAssessment, E> = async {
                     let mut pending = Vec::new();
                     let mut observations = Vec::new();
                     let mut outside_json = false;
@@ -362,16 +379,19 @@ pub fn consume_step(task: &Json, selected: &StepAssessment) -> Vec<Json> {
     values
 }
 
-struct Validation<'a, S, P> {
+struct Validation<'a, S, P, E> {
     store: &'a S,
     policies: &'a P,
     own: &'a JsString,
     at: &'a JsString,
     sources: HashMap<JsString, Json>,
     assessments: HashMap<JsString, Vec<StepAssessment>>,
+    error: PhantomData<fn() -> E>,
 }
-impl<S: NextStepStore, P: NextStepPolicies> Validation<'_, S, P> {
-    async fn pending(&mut self, id: &JsString, task: &Json) -> IvyResult<Vec<StepAssessment>> {
+impl<E: Clone + From<IvyError>, S: NextStepStore<E>, P: NextStepPolicies<E>>
+    Validation<'_, S, P, E>
+{
+    async fn pending(&mut self, id: &JsString, task: &Json) -> Result<Vec<StepAssessment>, E> {
         if !self.assessments.contains_key(id) {
             let values = assess_steps(
                 self.store,
@@ -389,7 +409,7 @@ impl<S: NextStepStore, P: NextStepPolicies> Validation<'_, S, P> {
         }
         Ok(self.assessments[id].clone())
     }
-    async fn closes_cycle(&mut self, id: &JsString) -> IvyResult<bool> {
+    async fn closes_cycle(&mut self, id: &JsString) -> Result<bool, E> {
         struct Frame {
             route: HashSet<JsString>,
             steps: Vec<Vec<JsString>>,
@@ -486,14 +506,18 @@ impl<S: NextStepStore, P: NextStepPolicies> Validation<'_, S, P> {
     }
 }
 
-pub async fn validate_next_steps<S: NextStepStore, P: NextStepPolicies>(
+pub async fn validate_next_steps<
+    E: Clone + From<IvyError>,
+    S: NextStepStore<E>,
+    P: NextStepPolicies<E>,
+>(
     store: &S,
     policies: &P,
     own: Option<&JsString>,
     steps: &[Json],
     task: Option<&Json>,
     at: &JsString,
-) -> IvyResult<()> {
+) -> Result<(), E> {
     let mut identities = Vec::new();
     for step in steps {
         let id = step.get("id");
@@ -514,6 +538,7 @@ pub async fn validate_next_steps<S: NextStepStore, P: NextStepPolicies>(
             at,
             sources: HashMap::from([(own.clone(), value.clone())]),
             assessments: HashMap::new(),
+            error: PhantomData,
         };
         let remaining = validation.pending(own, &value).await?;
         let mut all_cyclic = !remaining.is_empty();

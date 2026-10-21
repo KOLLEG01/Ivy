@@ -4,8 +4,8 @@ use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
 
 /// Supplies the exact current Store.failedHandoff result, including its already
 /// selected code/detail. No default lookup or legacy full-reader adapter exists.
-pub trait ConditionStore {
-    fn failed_handoff(&self, run_id: &JsString) -> IvyResult<Option<Json>>;
+pub trait ConditionStore<E = IvyError> {
+    fn failed_handoff(&self, run_id: &JsString) -> Result<Option<Json>, E>;
 }
 fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -170,11 +170,11 @@ fn execution_mode(request: &Json) -> &'static str {
 /// Matches the current Engine.condition caller, including its eager retained
 /// handoff lookup. This supplies the condition slot of CommentReadPolicies;
 /// current persistent-store/resolver/clock wiring is deliberately not installed.
-pub fn task_condition<S: ConditionStore>(
+pub fn task_condition<E: From<IvyError>, S: ConditionStore<E>>(
     store: &S,
     task: &Json,
     steps: Option<&Json>,
-) -> IvyResult<Json> {
+) -> Result<Json, E> {
     let issue = field(task, "completionIssue");
     let original = if truthy(issue) {
         store
@@ -239,5 +239,5 @@ pub fn task_condition<S: ConditionStore>(
             ]),
         );
     }
-    execution_condition(&facts)
+    execution_condition(&facts).map_err(E::from)
 }

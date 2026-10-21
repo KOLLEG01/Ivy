@@ -10,10 +10,14 @@ use ivy_sdk::rpc::{RequestOptions, RpcClient};
 use ivy_store::rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 
+#[path = "read_ports.rs"]
+pub mod read_ports;
 #[path = "record_upgrades.rs"]
 pub mod record_upgrades;
 #[path = "task_comments.rs"]
 pub mod task_comments;
+#[path = "verification_sizes.rs"]
+pub mod verification_sizes;
 
 fn property<'a>(value: &'a Json, key: &str) -> IvyResult<Option<&'a Json>> {
     if value.is_null() {
@@ -199,128 +203,19 @@ pub async fn read_legacy_conversation(
     Ok(Some(task))
 }
 
-fn property_mut<'a>(value: &'a mut Json, key: &str) -> Option<&'a mut Json> {
-    let Json::Object(items) = value else {
-        return None;
-    };
-    let name = JsString::from(key);
-    items.iter_mut().find(|(k, _)| k == &name).map(|(_, v)| v)
-}
-async fn fill_artifact(client: &dyn RpcClient, artifact: &mut Json) -> IvyResult<()> {
-    if property(artifact, "byteLength")?.is_some() {
-        return Ok(());
-    }
-    let saved = client
-        .request(
-            "objects.read",
-            needed(artifact, "object")?.clone(),
-            RequestOptions::default(),
-        )
-        .await?;
-    let revision = needed(&saved, "revision")?;
-    require(
-        property(revision, "contentHash")? == property(artifact, "contentHash")?
-            && property(revision, "mediaType")? == property(artifact, "mediaType")?,
-        "task_board_evidence_mismatch",
-        "Retained verification evidence differs from its immutable pin.",
-    )?;
-    if let Some(size) = revision.get("byteLength") {
-        if !matches!(artifact, Json::Object(_)) {
-            return Err(IvyError::internal());
-        }
-        artifact.insert("byteLength", size.clone());
-    }
-    Ok(())
-}
-async fn fill_findings(client: &dyn RpcClient, findings: &mut Json) -> IvyResult<()> {
-    if findings.is_null() {
-        return Ok(());
-    }
-    if matches!(findings, Json::String(_)) {
-        return Ok(());
-    }
-    let Json::Array(items) = findings else {
-        return Err(IvyError::internal());
-    };
-    for finding in items {
-        property(finding, "evidence")?;
-        if let Some(evidence) = property_mut(finding, "evidence") {
-            match evidence {
-                Json::Null => {}
-                Json::Array(artifacts) => {
-                    for artifact in artifacts {
-                        fill_artifact(client, artifact).await?;
-                    }
-                }
-                artifact => fill_artifact(client, artifact).await?,
-            }
-        }
-    }
-    Ok(())
-}
-fn gather_findings(value: Option<&Json>, findings: &mut Vec<Json>) -> IvyResult<()> {
-    match value {
-        None | Some(Json::Null | Json::String(_)) => Ok(()),
-        Some(Json::Array(items)) => {
-            findings.extend_from_slice(items);
-            Ok(())
-        }
-        _ => Err(IvyError::internal()),
-    }
-}
-/// Fill only the service-owned retained verification sizes. The actual Shared
-/// record upgrader must still run afterward on remote materialized records.
+/// Compatibility API for existing typed callers. Lossless read ports use the
+/// same core with their original optional-parameter reader and raw failures.
 pub async fn fill_verification_sizes(
     client: &dyn RpcClient,
     key: &str,
     value: &Json,
 ) -> IvyResult<Json> {
-    let mut stored = value.clone();
-    if key != "task-board/task" {
-        return Ok(stored);
-    }
-    // The original gathers every finding/evidence list before its first read.
-    let mut findings = Vec::new();
-    gather_findings(property(&stored, "latestChecks")?, &mut findings)?;
-    if let Some(content) = stored.get("content").filter(|v| !v.is_null()) {
-        gather_findings(property(content, "checks")?, &mut findings)?;
-    }
-    if let Some(comments) = stored.get("comments").filter(|v| !v.is_null()) {
-        for comment in comments.as_array().ok_or_else(IvyError::internal)? {
-            if let Some(handoff) = property(comment, "handoff")?.filter(|v| !v.is_null()) {
-                gather_findings(property(handoff, "checks")?, &mut findings)?;
-            }
-        }
-    }
-    for finding in &findings {
-        property(finding, "evidence")?;
-    }
-    if let Some(checks) = property_mut(&mut stored, "latestChecks") {
-        fill_findings(client, checks).await?;
-    }
-    if let Some(content) = property_mut(&mut stored, "content") {
-        if !content.is_null() {
-            if let Some(checks) = property_mut(content, "checks") {
-                fill_findings(client, checks).await?;
-            }
-        }
-    }
-    if let Some(comments) = property_mut(&mut stored, "comments") {
-        if !comments.is_null() {
-            let Json::Array(comments) = comments else {
-                return Err(IvyError::internal());
-            };
-            for comment in comments {
-                property(comment, "handoff")?;
-                if let Some(handoff) = property_mut(comment, "handoff") {
-                    if !handoff.is_null() {
-                        if let Some(checks) = property_mut(handoff, "checks") {
-                            fill_findings(client, checks).await?;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(stored)
+    verification_sizes::fill_verification_sizes_with(key, value, |params| {
+        record_upgrades::read_verification(client, params)
+    })
+    .await
+    .map_err(|error| match error {
+        record_upgrades::RecordFailure::Ivy(error) => error,
+        record_upgrades::RecordFailure::JavaScript(_) => IvyError::internal(),
+    })
 }

@@ -2,7 +2,7 @@
 //! precedence remain explicit owner bindings; no legacy full-reader default.
 use super::conversation::cross_agent_comment as cross_agent;
 use crate::coordination::next_steps::{
-    NextStepPolicies, NextStepStore, assess_steps, next_step_time, step_condition,
+    IvyPolicies, NextStepPolicies, NextStepStore, assess_steps, next_step_time, step_condition,
 };
 use futures_util::future::{join_all, poll_fn};
 use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString};
@@ -17,24 +17,34 @@ use std::{
 /// range verbatim. A missing indexed summary explicitly selects the retained
 /// full-record fallback; it never means that this ticket has no questions.
 #[allow(async_fn_in_trait)]
-pub trait CommentReadStore: NextStepStore {
+pub trait CommentReadStore<E = IvyError>: NextStepStore<E> {
     fn comment_summary(
         &self,
         task: &Json,
         tree: &Json,
         task_id: &JsString,
-    ) -> IvyResult<Option<Json>>;
+    ) -> Result<Option<Json>, E>;
     async fn comment_range(
         &self,
         tree: &Json,
         task_id: &JsString,
         start: usize,
         end: usize,
-    ) -> IvyResult<Vec<Json>>;
+    ) -> Result<Vec<Json>, E>;
 }
-pub trait CommentReadPolicies: NextStepPolicies {
+pub trait CommentReadPolicies<E = IvyError>: NextStepPolicies<E> {
     fn now(&self) -> JsString;
-    fn execution_condition(&self, task: &Json, steps: Option<&Json>) -> IvyResult<Json>;
+    fn execution_condition(&self, task: &Json, steps: Option<&Json>) -> Result<Json, E>;
+}
+impl<E: From<IvyError>, P: CommentReadPolicies + ?Sized> CommentReadPolicies<E>
+    for IvyPolicies<'_, P>
+{
+    fn now(&self) -> JsString {
+        self.0.now()
+    }
+    fn execution_condition(&self, task: &Json, steps: Option<&Json>) -> Result<Json, E> {
+        self.0.execution_condition(task, steps).map_err(E::from)
+    }
 }
 fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
     static NULL: Json = Json::Null;
@@ -74,11 +84,11 @@ fn optional_number(value: &Json, key: &str, default: usize) -> IvyResult<usize> 
         .map(number)
         .unwrap_or(Ok(default))
 }
-pub fn comment_summary<P: NextStepPolicies>(
+pub fn comment_summary<E: From<IvyError>, P: NextStepPolicies<E>>(
     policies: &P,
     task: &Json,
     task_id: &JsString,
-) -> IvyResult<Json> {
+) -> Result<Json, E> {
     let open: HashSet<_> = policies.open_questions(task)?.into_iter().collect();
     let referenced: HashSet<_> = array(field(task, "nextSteps"))
         .iter()
@@ -117,9 +127,9 @@ pub fn comment_summary<P: NextStepPolicies>(
 
 /// Poll every initiated read before propagating the first completed error, as
 /// Promise.all does; a stalled peer read cannot hide an available failure.
-async fn batch<T>(
-    reads: impl IntoIterator<Item = impl Future<Output = IvyResult<T>>>,
-) -> IvyResult<Vec<T>> {
+async fn batch<T, E: Clone>(
+    reads: impl IntoIterator<Item = impl Future<Output = Result<T, E>>>,
+) -> Result<Vec<T>, E> {
     let first_error = RefCell::new(None);
     let mut reads = Box::pin(join_all(reads.into_iter().map(|read| {
         let first_error = &first_error;
@@ -143,14 +153,14 @@ async fn batch<T>(
     })
     .await
 }
-async fn range<S: CommentReadStore>(
+async fn range<E, S: CommentReadStore<E>>(
     store: &S,
     indexed: Option<&Json>,
     task: &Json,
     task_id: &JsString,
     start: usize,
     end: usize,
-) -> IvyResult<Vec<Json>> {
+) -> Result<Vec<Json>, E> {
     if let Some(tree) = indexed {
         return store.comment_range(tree, task_id, start, end).await;
     }
@@ -172,12 +182,16 @@ async fn range<S: CommentReadStore>(
     )
 }
 
-pub async fn read_task<S: CommentReadStore, P: CommentReadPolicies>(
+pub async fn read_task<
+    E: Clone + From<IvyError>,
+    S: CommentReadStore<E>,
+    P: CommentReadPolicies<E>,
+>(
     store: &S,
     policies: &P,
     header: &Json,
     query: &Json,
-) -> IvyResult<Json> {
+) -> Result<Json, E> {
     let pin = header.required("pin")?;
     let task_id = string(pin, "objectId")?;
     let original = header.required("value")?;
@@ -302,15 +316,15 @@ pub async fn read_task<S: CommentReadStore, P: CommentReadPolicies>(
                     if let Some(entry) = selected.iter().find(|entry| {
                         field(field(entry, "comment"), "commentId") == field(question, "commentId")
                     }) {
-                        return Ok(field(entry, "comment").clone());
+                        return Ok::<Json, E>(field(entry, "comment").clone());
                     }
                     let sequence = number(question.required("sequence")?)?;
                     let entries = range(store, tree, task, task_id, sequence - 1, sequence).await?;
-                    entries
+                    Ok(entries
                         .first()
                         .and_then(|entry| entry.get("comment"))
                         .cloned()
-                        .ok_or_else(IvyError::internal)
+                        .ok_or_else(IvyError::internal)?)
                 }
             }))
             .await?,
@@ -392,12 +406,12 @@ pub async fn read_task<S: CommentReadStore, P: CommentReadPolicies>(
     Ok(result)
 }
 
-pub fn task_card<P: NextStepPolicies>(
+pub fn task_card<E: From<IvyError>, P: NextStepPolicies<E>>(
     policies: &P,
     view: &Json,
     summary: Option<&Json>,
     total: Option<usize>,
-) -> IvyResult<Json> {
+) -> Result<Json, E> {
     let task = view.required("task")?;
     let comments = array(field(task, "comments"));
     let mut fields = Json::object([] as [(&str, Json); 0]);
@@ -479,11 +493,11 @@ pub fn task_card<P: NextStepPolicies>(
     ]))
 }
 
-pub fn task_view_page<P: NextStepPolicies>(
+pub fn task_view_page<E: From<IvyError>, P: NextStepPolicies<E>>(
     policies: &P,
     view: &Json,
     query: &Json,
-) -> IvyResult<Json> {
+) -> Result<Json, E> {
     let task = view.required("task")?;
     let comments = array(field(task, "comments"));
     let q = field(query, "comments");

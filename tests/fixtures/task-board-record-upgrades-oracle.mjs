@@ -8,6 +8,7 @@ import {pathToFileURL} from 'node:url';
 
 const {values} = parseArgs({options: {
   'source-root': {type: 'string'}, output: {type: 'string'}, proof: {type: 'string'}, reuse: {type: 'string'},
+  'backfill-cases': {type: 'boolean'},
 }});
 for (const key of ['source-root', 'output', 'proof']) assert.ok(values[key], key);
 const root = path.resolve(values['source-root']);
@@ -88,6 +89,27 @@ add('current configuration keeps original identity', {defaults: {executionRequir
 add('other contract array keeps original identity', ['\ud800', {unknown: '\udfff'}], [], 'task-board/run');
 add('current result remains an owned record', {content: {summary: 'Unchanged content.', artifacts: []},
   unknown: '\udfff'}, [], 'task-board/result');
+if (values['backfill-cases']) {
+  add('raw backfill null Task', null);
+  for (const value of [0, true, {}]) add('raw latestChecks noniterable ' + JSON.stringify(value), task({latestChecks: value}));
+  add('raw latestChecks string is spread before Shared', task({nextSteps: [], latestChecks: 'x\ud800'}));
+  add('raw content checks noniterable', task({content: {checks: {}}}));
+  add('raw content primitive optional access', task({nextSteps: [], content: 7}));
+  for (const value of [{}, false, '']) add('raw comments flatMap ' + JSON.stringify(value), task({comments: value}));
+  add('raw null comment precedes earlier evidence reads', task({latestChecks: [finding([artifact('unread')])], comments: [null]}), [read('unread')]);
+  add('raw handoff checks flatMap accepts single finding', task({nextSteps: [], comments: [{commentId: 'c',
+    sequence: 1, authorKind: 'agent', author: {principalId: 'original'}, requests: [], responses: [], attachments: [],
+    handoff: {workflowState: 'todo', nextSteps: [], checks: finding([artifact('a')])}}]}), [read('a')]);
+  add('raw null finding precedes earlier evidence reads', task({latestChecks: [finding([artifact('unread')]), null]}), [read('unread')]);
+  add('raw null artifact access', task({latestChecks: [finding([null])]}));
+  add('raw null evidence coalesces before Shared', task({nextSteps: [], latestChecks: [finding(null)]}));
+  for (const value of [7, false, 'x\ud800', []]) add('raw primitive artifact ' + JSON.stringify(value),
+    task({nextSteps: [], latestChecks: [finding([value])]}), [{value: {revision: {}}}]);
+  add('raw missing artifact pin preserves undefined argument', task({nextSteps: [], latestChecks: [finding([{}])]}), [{value: {revision: {byteLength: 11}}}]);
+  add('raw null artifact pin stays null', task({nextSteps: [], latestChecks: [finding([{object: null}])]}), [{value: {revision: {byteLength: 11}}}]);
+  for (const value of [null, {}, {revision: null}]) add('raw malformed evidence response ' + JSON.stringify(value),
+    task({latestChecks: [finding([artifact('a')])]}), [{value}]);
+}
 const cases = [];
 const reuse = values.reuse ? JSON.parse(fs.readFileSync(values.reuse)) : null;
 let executed = 0, reused = 0;

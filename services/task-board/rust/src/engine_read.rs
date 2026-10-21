@@ -16,6 +16,8 @@ pub mod comment_reads;
 pub mod condition_policy;
 #[path = "conversation.rs"]
 pub mod conversation;
+#[path = "read_failure.rs"]
+pub mod read_failure;
 
 #[allow(async_fn_in_trait)]
 pub trait EngineReadRuntime {
