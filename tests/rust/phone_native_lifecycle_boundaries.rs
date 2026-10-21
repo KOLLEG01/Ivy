@@ -150,7 +150,7 @@ fn project(method: &str, reply: &NativeReply) -> IvyJson {
     }
 }
 async fn partial(mode: usize, close_mode: usize) -> IvyJson {
-    let (owner, factory, routes, base) = actual_owner(58000, 58998);
+    let (owner, factory, routes, base) = actual_owner(45000, 45998);
     let params = params(base);
     let endpoint = Arc::new(OnceLock::new());
     let device = Arc::new(Device {
@@ -207,6 +207,11 @@ async fn partial(mode: usize, close_mode: usize) -> IvyJson {
     let prepared = dispatcher
         .execute(command("call.prepare", &selected, 2, 5))
         .await;
+    assert_eq!(
+        prepared.outcome().error_code(),
+        None,
+        "fixture media must construct"
+    );
     rows.push(project("call.prepare", &prepared));
     rows.push(project(
         "call.prepare",
@@ -260,7 +265,7 @@ async fn partial(mode: usize, close_mode: usize) -> IvyJson {
     ])
 }
 async fn concurrent(mode: usize) -> IvyJson {
-    let (owner, factory, _, base) = actual_owner(58000, 58998);
+    let (owner, factory, _, base) = actual_owner(45000, 45998);
     let params = params(base);
     let gate = Arc::new(Gate::default());
     let entered = gate.clone();
@@ -313,6 +318,11 @@ async fn concurrent(mode: usize) -> IvyJson {
     let prepared = dispatcher
         .execute(command("call.prepare", &selected, 2, 5))
         .await;
+    assert_eq!(
+        prepared.outcome().error_code(),
+        None,
+        "fixture media must construct"
+    );
     let replay = dispatcher
         .execute(command("call.prepare", &selected, 2, 6))
         .await;
@@ -340,7 +350,7 @@ async fn concurrent(mode: usize) -> IvyJson {
 #[cfg(windows)]
 #[tokio::test]
 async fn original_entered_configuration_admission_partial_start_and_disposal_agree() {
-    let base = params(BASE.replace("57000", "58000").replace("57998", "58998"));
+    let base = params(BASE.replace("57000", "45000").replace("57998", "45998"));
     let mut inputs = Vec::new();
     let mut partial_rows = Vec::new();
     let mut concurrent_rows = Vec::new();
@@ -378,7 +388,7 @@ async fn original_entered_configuration_admission_partial_start_and_disposal_agr
 
 #[tokio::test]
 async fn stopping_waits_for_the_entered_setup_prefix_without_cancelling_it() {
-    let (owner, _, _, params) = actual_owner(58000, 58998);
+    let (owner, _, _, params) = actual_owner(45000, 45998);
     let gate = Arc::new(Gate::default());
     let setup = gate.clone();
     let caller = Arc::new(Remaining::default());

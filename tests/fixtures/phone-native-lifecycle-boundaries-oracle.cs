@@ -91,6 +91,7 @@ public static class PhoneNativeLifecycleBoundariesOracle {
         rows.Add(Project("configure",rpc.ExecuteAsync(Request("configure",Args("{}"),3,3)).GetAwaiter().GetResult()));
         rows.Add(Project("status",rpc.ExecuteAsync(Request("status",Args("{}"),0,4)).GetAwaiter().GetResult()));
         var prepared=rpc.ExecuteAsync(Request("call.prepare",selected,2,5)).GetAwaiter().GetResult();
+        if(!prepared.Ok) throw new Exception("Original fixture media must construct: "+prepared.Error);
         rows.Add(Project("call.prepare",prepared));
         var preparedReplay=rpc.ExecuteAsync(Request("call.prepare",selected,2,6)).GetAwaiter().GetResult();
         rows.Add(Project("call.prepare",preparedReplay));
@@ -134,6 +135,7 @@ public static class PhoneNativeLifecycleBoundariesOracle {
         release.Set();
         var configured=configuring.GetAwaiter().GetResult();
         var prepared=second.GetAwaiter().GetResult();
+        if(!prepared.Ok) throw new Exception("Original fixture media must construct: "+prepared.Error);
         var replay=rpc.ExecuteAsync(Request("call.prepare",selected,2,3)).GetAwaiter().GetResult();
         bool replaySame=prepared.Ok==replay.Ok && prepared.Error==replay.Error && prepared.Result?.GetRawText()==replay.Result?.GetRawText();
         rpc.ExecuteAsync(Request("call.release",selected,4,4)).GetAwaiter().GetResult();
