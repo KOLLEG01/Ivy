@@ -76,6 +76,7 @@ const hive = new HiveServer({filename:join(root,'hive.sqlite'), packageRoot:join
   version:'test', buildId:digest('isolated-hive'), credentials:[{principalId:'manager',digest:digest(token)}]});
 let manager;
 let dispatcherOwner;
+let dispatcherProof;
 let executorTimer;
 
 // Read only the exact owned PID and its parents; never enumerate other trees.
@@ -129,10 +130,15 @@ async function qualifyDispatcherOwner() {
   assert.equal(helper.ParentProcessId,child.pid);
   assert.notEqual(health.pid,dispatcher.ProcessId,'Health identifies the native child of the retained Node dispatcher');
   assert.equal(health.buildId,hash);assert.ok(health.bootId);
+  dispatcherProof = {health,native,dispatcher,helper};
 
   // The manifest health command is a direct read-only probe, with no service Job.
   const controlPath = join(managerData,'control.json');
-  const beforeControl = await readFile(controlPath,'utf8');
+  const readControl = () => readFile(controlPath,'utf8').catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  const beforeControl = await readControl();
   const probe = spawn(process.execPath,[...plan.readiness.command.args,'--config',instancePath],
     {cwd:artifact,env:{...process.env,IVY_NODE_EXECUTABLE:'intentionally-invalid-node'},windowsHide:true,stdio:['ignore','pipe','pipe']});
   let stdout='',stderr='';probe.stdout.on('data',bytes=>{stdout+=bytes;});probe.stderr.on('data',bytes=>{stderr+=bytes;});
@@ -140,7 +146,7 @@ async function qualifyDispatcherOwner() {
   assert.equal(probeExit,0,stderr);assert.equal(stderr,'');
   const observed = JSON.parse(stdout.trim());
   assert.deepEqual(observed,{ok:true,buildId:hash,generation:health.generation});
-  assert.equal(await readFile(controlPath,'utf8'),beforeControl);
+  assert.equal(await readControl(),beforeControl);
   results.push('real RuntimeOwner/Job/Node/native Manager chain and direct native health dispatcher');
 
   await rm(join(payload,'ivy-health.exe'));
@@ -152,7 +158,7 @@ async function qualifyDispatcherOwner() {
   });
   const retained=JSON.parse(await readFile(join(managerData,'health.json'),'utf8'));
   assert.equal(retained.pid,health.pid);assert.equal(retained.bootId,health.bootId);assert.equal(retained.launchId,target.revision);
-  assert.equal(await readFile(controlPath,'utf8'),beforeControl);
+  assert.equal(await readControl(),beforeControl);
   assert.ok(windowsProcess(health.pid));
   results.push('frozen-manifest native preflight refuses missing payload before draining the ready Manager');
 
@@ -168,6 +174,7 @@ async function qualifyDispatcherOwner() {
   const control = JSON.parse(await readFile(controlPath,'utf8'));
   assert.equal(control.launchId,target.revision);assert.equal(control.bootId,health.bootId);
   for (const pid of [health.pid,dispatcher.ProcessId,helper.ProcessId]) assert.equal(windowsProcess(pid),null,'Owned dispatcher tree survived cleanup');
+  dispatcherProof.retiredPids = [health.pid,dispatcher.ProcessId,helper.ProcessId];
   assert.equal(journal.observations().manager.state,'stopped');
   dispatcherOwner = null;
   results.push('RuntimeOwner cooperative boot-bound shutdown retires the complete dispatcher Job tree');
@@ -316,7 +323,7 @@ try {
   results.push('host reload refusal, control binding, process replacement replay');
   }
   if (process.platform==='win32') await qualifyDispatcherOwner();
-  console.log(JSON.stringify({ok:true,results,...(releaseIdentity ? {mode,identity:releaseIdentity,componentStamp:{schemaVersion:1,componentId:'service-manager',version,buildId:hash}} : {}),limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
+  console.log(JSON.stringify({ok:true,results,...(releaseIdentity ? {mode,identity:releaseIdentity,componentStamp:{schemaVersion:1,componentId:'service-manager',version,buildId:hash},processProof:dispatcherProof} : {}),limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
 } finally {
   clearInterval(executorTimer);
   try {await stopDispatcherOwner();await stop();} finally {await hive.close();journal.close();}
