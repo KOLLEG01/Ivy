@@ -470,16 +470,16 @@ async fn component_service_startup(
                     status.status.lock().unwrap().push(value);
                     Box::pin(async { Ok(()) })
                 }),
-                close_auth: Arc::new(move || {
-                    assert!(owned_journal.access(|_| Ok(())).is_err());
-                    auth.auth.fetch_add(1, Ordering::SeqCst);
-                    auth.events.lock().unwrap().push("auth-closed".into());
-                    Ok(())
-                }),
-                close_lock: Arc::new(move || {
-                    lock.lock.fetch_add(1, Ordering::SeqCst);
-                    lock.events.lock().unwrap().push("lock-closed".into());
-                    Ok(())
+                retire_account: Arc::new(move || {
+                    let (auth, lock, journal) = (auth.clone(), lock.clone(), owned_journal.clone());
+                    Box::pin(async move {
+                        assert!(journal.access(|_| Ok(())).is_err());
+                        auth.auth.fetch_add(1, Ordering::SeqCst);
+                        auth.events.lock().unwrap().push("auth-closed".into());
+                        lock.lock.fetch_add(1, Ordering::SeqCst);
+                        lock.events.lock().unwrap().push("lock-closed".into());
+                        Ok(())
+                    })
                 }),
             },
             admitted_artifact: root.join("admitted-component"),
@@ -755,16 +755,16 @@ async fn concrete_runtime_assembly_preserves_failed_attachment_and_generation_li
                     status.status.lock().unwrap().push(value);
                     Box::pin(async { Ok(()) })
                 }),
-                close_auth: Arc::new(move || {
-                    assert!(auth_journal.access(|_| Ok(())).is_err());
-                    auth.auth.fetch_add(1, Ordering::SeqCst);
-                    auth.events.lock().unwrap().push("auth-closed".into());
-                    Ok(())
-                }),
-                close_lock: Arc::new(move || {
-                    lock.lock.fetch_add(1, Ordering::SeqCst);
-                    lock.events.lock().unwrap().push("lock-closed".into());
-                    Ok(())
+                retire_account: Arc::new(move || {
+                    let (auth, lock, journal) = (auth.clone(), lock.clone(), auth_journal.clone());
+                    Box::pin(async move {
+                        assert!(journal.access(|_| Ok(())).is_err());
+                        auth.auth.fetch_add(1, Ordering::SeqCst);
+                        auth.events.lock().unwrap().push("auth-closed".into());
+                        lock.lock.fetch_add(1, Ordering::SeqCst);
+                        lock.events.lock().unwrap().push("lock-closed".into());
+                        Ok(())
+                    })
                 }),
             },
         },

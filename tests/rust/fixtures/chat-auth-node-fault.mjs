@@ -1,8 +1,14 @@
 // Fault injection for the isolated auth child, not part of the runtime adapter.
-import {existsSync,writeFileSync} from 'node:fs';
+import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
 import {setTimeout as delay} from 'node:timers/promises';
 const mode=process.env.IVY_CHAT_AUTH_FAULT, gate=process.env.IVY_CHAT_AUTH_GATE;
 const originalWrite=process.stdout.write.bind(process.stdout);
+const retirement=mode?.startsWith('retire-');
+function trace(value) { if(retirement)appendFileSync(gate+'.trace',JSON.stringify(value)+'\n'); }
+async function released() { while(!existsSync(gate+'.release'))await delay(10); }
+trace({event:'started',pid:process.pid});
+// Keep the actual child/tree alive after its ACK while stderr is drained.
+const alive=mode==='retire-exit-gate'?setInterval(()=>{},1000):null;
 function packet(frame) {
   const bytes=Buffer.from(JSON.stringify(frame)), header=Buffer.alloc(4);
   header.writeUInt32BE(bytes.length); return Buffer.concat([header,bytes]);
@@ -10,6 +16,23 @@ function packet(frame) {
 process.stdout.write=function(bytes,...args) {
   if (Buffer.isBuffer(bytes) && bytes.length>=4 && bytes.readUInt32BE()===bytes.length-4) {
     const frame=JSON.parse(bytes.subarray(4));
+    if (retirement && frame.p===0 && frame.e) {
+      const body=JSON.parse(Buffer.from(frame.b,'base64'));
+      if(body.kind==='stopped') {
+        trace({event:'stopped',request:frame.r,operationId:body.operationId});
+        if(mode==='retire-stop-loss')process.exit(75);
+        if(mode==='retire-stop-gate') {
+          writeFileSync(gate+'.observed','stop-ack-withheld');
+          void released().then(()=>originalWrite(bytes,...args));
+          return true;
+        }
+        if(mode==='retire-exit-gate') {
+          process.stderr.write(Buffer.alloc(256*1024,0x64));
+          writeFileSync(gate+'.observed','stop-ack-sent-child-live');
+          void released().then(()=>clearInterval(alive));
+        }
+      }
+    }
     if (frame.r==='2' && frame.p===0 && frame.e) {
       const body=JSON.parse(Buffer.from(frame.b,'base64'));
       if (body.kind==='set') {
@@ -33,11 +56,15 @@ process.stdin[Symbol.asyncIterator]=async function*() {
     while (bytes.length>=4 && bytes.length>=bytes.readUInt32BE()+4) {
       const count=bytes.readUInt32BE()+4, value=bytes.subarray(0,count); bytes=bytes.subarray(count);
       const frame=JSON.parse(value.subarray(4));
+      if(retirement && frame.p===0 && frame.e) {
+        const body=JSON.parse(Buffer.from(frame.b,'base64'));
+        if(['init','call','stop'].includes(body.kind))trace({event:'request',kind:body.kind,request:frame.r,operationId:body.operationId});
+      }
       if (frame.r==='2' && frame.p===0 && frame.e) {
         const body=JSON.parse(Buffer.from(frame.b,'base64'));
         if (body.kind==='committed') {
           if (mode==='commit-ack-loss') process.exit(73);
-          if (mode==='hold-commit-ack') {
+          if (mode==='hold-commit-ack' || mode==='retire-commit-gate') {
             writeFileSync(gate+'.observed','committed');
             while (!existsSync(gate+'.release')) await delay(10);
           }

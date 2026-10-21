@@ -7,6 +7,8 @@ mod auth_compat;
 mod auth_native;
 #[path = "chat-auth-node-cases.rs"]
 mod auth_node;
+#[path = "chat-account-auth-cases.rs"]
+mod account_auth;
 #[path = "chat-store-cases.rs"]
 mod chat_store;
 #[path = "chat-store-hive-cases.rs"]

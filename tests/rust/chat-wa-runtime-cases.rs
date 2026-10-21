@@ -648,8 +648,7 @@ async fn original_runtime_lanes_input_events_and_shutdown_match() {
             host_id:"host".into(),journal:journal.clone(),socket:socket.clone(),media:Arc::new(Media(probe.clone())),factory:Arc::new(Factory),
             resources:RuntimeResources{
                 status:Arc::new(move |value|{let probe=status.clone();Box::pin(async move {probe.call("status".into(),vec![value],Json::Null).await?;Ok(())})}),
-                close_auth:Arc::new(move ||{auth.emit("authClose",vec![auth_journal.access(|_|Ok(())).is_err().into()]);unwrap(auth.take("authClose",Json::Null))?;Ok(())}),
-                close_lock:Arc::new(move ||{lock.sync("lockClose",vec![],Json::Null)?;Ok(())})},
+                retire_account:Arc::new(move ||{let auth=auth.clone();let lock=lock.clone();let journal=auth_journal.clone();Box::pin(async move {auth.emit("authClose",vec![journal.access(|_|Ok(())).is_err().into()]);unwrap(auth.take("authClose",Json::Null))?;lock.sync("lockClose",vec![],Json::Null)?;Ok(())})})},
             translator:Translator::new(spec.get("language").and_then(Json::as_js_string)),
         },probe.clone(),timers.clone());
         runtime.attach(Some(make(&probe, "A")));

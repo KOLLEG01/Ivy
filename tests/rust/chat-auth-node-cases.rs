@@ -26,7 +26,7 @@ fn artifact() -> PathBuf {
 fn read(path: impl AsRef<Path>) -> Json {
     parse(&fs::read_to_string(path).unwrap(), usize::MAX).unwrap()
 }
-fn encode(value: &Json) -> String {
+pub(super) fn encode(value: &Json) -> String {
     stringify(value, usize::MAX).unwrap()
 }
 fn buffer(bytes: &[u8]) -> Json {
@@ -35,7 +35,7 @@ fn buffer(bytes: &[u8]) -> Json {
         ("data", STANDARD.encode(bytes).into()),
     ])
 }
-fn raw(db: &Path, category: &str, id: &str) -> Option<String> {
+pub(super) fn raw(db: &Path, category: &str, id: &str) -> Option<String> {
     AuthStore::open(db).unwrap().get(category, id).unwrap()
 }
 fn session(db: &Path) -> String {
@@ -63,7 +63,7 @@ fn current_root(encoded: &str) -> Json {
         .unwrap()
         .clone()
 }
-fn fixture(name: &str) -> PathBuf {
+pub(super) fn fixture(name: &str) -> PathBuf {
     let parent = std::env::var_os("IVY_CHAT_AUTH_NODE_SCRATCH")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
@@ -92,14 +92,14 @@ fn fixture(name: &str) -> PathBuf {
     }
     root
 }
-fn account(root: &Path) -> AuthAccount {
+pub(super) fn account(root: &Path) -> AuthAccount {
     AuthAccount::acquire(
         &root.join("auth.sqlite"),
         &root.join("whatsapp-owner/executor-lock.sqlite"),
     )
     .unwrap()
 }
-fn launch(root: &Path, fault: Option<&str>) -> AuthLaunch {
+pub(super) fn launch(root: &Path, fault: Option<&str>) -> AuthLaunch {
     let mut environment = BTreeMap::new();
     let mut node_options = std::env::var("NODE_OPTIONS").unwrap_or_default();
     let (node, loader, fault_loader) = node_fixture();
@@ -190,7 +190,7 @@ fn original(mode: &str, root: &Path) -> Json {
     );
     parse(std::str::from_utf8(&result.stdout).unwrap(), usize::MAX).unwrap()
 }
-fn lock_held(root: &Path) -> bool {
+pub(super) fn lock_held(root: &Path) -> bool {
     original("lock", root)
         .get("acquired")
         .and_then(Json::as_bool)

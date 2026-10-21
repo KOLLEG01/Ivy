@@ -59,8 +59,7 @@ pub struct RuntimeCallbacks {
 }
 pub struct RuntimeResources {
     pub status: Arc<dyn Fn(Json) -> ServiceFuture<()> + Send + Sync>,
-    pub close_auth: Arc<dyn Fn() -> IvyResult<()> + Send + Sync>,
-    pub close_lock: Arc<dyn Fn() -> IvyResult<()> + Send + Sync>,
+    pub retire_account: Arc<dyn Fn() -> ServiceFuture<()> + Send + Sync>,
 }
 pub trait RuntimeTimer: Send + Sync {
     fn clear(&self);
@@ -502,11 +501,10 @@ impl WhatsAppRuntime {
             owner.settled().await;
             owner.0.state.lock().unwrap().attached = None;
             let journal = owner.0.journal.close().await;
-            // Preserve finally precedence, including auth failure skipping lock.
-            let result = match (owner.0.resources.close_auth)() {
-                Err(e) => Err(e),
-                Ok(()) => (owner.0.resources.close_lock)().and(journal).and(socket),
-            };
+            // The account owner closes auth before releasing its lock. Preserve
+            // finally precedence while awaiting its actual child retirement.
+            let account = (owner.0.resources.retire_account)().await;
+            let result = account.and(journal).and(socket);
             done.send_replace(Some(result));
         });
         Box::pin(completed(receive))

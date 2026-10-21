@@ -12,16 +12,19 @@ use ivy_host_runtime::{
     portable_native_files::NativeHelperLayout,
     process::{self, Command, LaunchContext, OwnedProcess},
 };
+use ivy_sdk::service::ServiceFuture;
 use ivy_store::sqlite::OwnerLock;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::{ChildStdin, ChildStdout},
+    sync::{Mutex as AsyncMutex, watch},
     task::JoinHandle,
 };
 
@@ -103,6 +106,86 @@ pub struct AuthLaunch {
     /// Explicit host/test workload environment; ambient Node options are not added.
     pub environment: BTreeMap<OsString, OsString>,
     pub deadline: Duration,
+}
+
+type Retirement = watch::Receiver<Option<IvyResult<()>>>;
+struct AccountAuthInner {
+    node: AsyncMutex<AuthNode>,
+    retirement: Mutex<Option<Retirement>>,
+}
+
+/// Shared account lifetime; callers still supply and retain operation identities.
+/// A retirement observer never owns or cancels the actual child retirement.
+#[derive(Clone)]
+pub struct AccountAuth(Arc<AccountAuthInner>);
+impl AccountAuth {
+    pub async fn launch(
+        account: AuthAccount,
+        generation: u64,
+        init_operation: JsString,
+        launch: AuthLaunch,
+    ) -> IvyResult<Self> {
+        let node = AuthNode::launch(account, generation, init_operation, launch).await?;
+        Ok(Self(Arc::new(AccountAuthInner {
+            node: AsyncMutex::new(node),
+            retirement: Mutex::new(None),
+        })))
+    }
+
+    pub fn call(
+        &self,
+        operation: JsString,
+        method: AuthMethod,
+        encoded_arguments: String,
+    ) -> ServiceFuture<AuthReply> {
+        let owner = self.clone();
+        Box::pin(async move {
+            owner.admit()?;
+            let mut node = owner.0.node.lock().await;
+            // A queued call may acquire this guard after retire was invoked.
+            owner.admit()?;
+            node.call(operation, method, encoded_arguments).await
+        })
+    }
+
+    fn admit(&self) -> IvyResult<()> {
+        if self.0.retirement.lock().unwrap().is_some() {
+            Err(
+                IvyError::new("auth_retiring", "Authentication account is retiring.")
+                    .with_outcome(Outcome::NotExecuted),
+            )
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn retire(&self) -> ServiceFuture<()> {
+        let mut retirement = self.0.retirement.lock().unwrap();
+        let receive = if let Some(receive) = &*retirement {
+            receive.clone()
+        } else {
+            let (done, receive) = watch::channel(None);
+            // Set admission synchronously, even for a never-polled observer.
+            *retirement = Some(receive.clone());
+            let owner = self.clone();
+            tokio::spawn(async move {
+                let result = owner.0.node.lock().await.shutdown().await;
+                done.send_replace(Some(result));
+            });
+            receive
+        };
+        Box::pin(account_retired(receive))
+    }
+}
+
+async fn account_retired(mut receive: Retirement) -> IvyResult<()> {
+    loop {
+        if let Some(result) = receive.borrow_and_update().clone() {
+            return result;
+        }
+        // A lost cleanup owner is not proof of stop or ownership release.
+        receive.changed().await.map_err(|_| unknown())?;
+    }
 }
 
 #[derive(Clone, Copy)]
