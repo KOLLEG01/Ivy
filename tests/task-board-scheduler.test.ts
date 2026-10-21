@@ -53,6 +53,20 @@ test('scheduler recovers its pending admission across comment revisions and rest
   assert.equal((await f.second.store.read('task-board/task', planned.task.objectId)).value.comments.at(-1)?.body, 'A correction while allocation waits.');
 });
 
+test('an unfinished admission does not lock an unrelated ticket', async t => {
+  const f = taskBoardFixture(t), first = await f.planned('agent'), other = await f.planned('agent');
+  const operation = await f.first.operations.begin({ action: 'start', operationId: randomUUID(),
+    taskId: first.task.objectId, expectedRevision: first.task.revision, target: first.target,
+    intent: first.plan, workspace: first.workspace, commentIds: [] },
+  { principalId: f.settings.principalId, ...f.first.owner, source: 'scheduler' });
+  await f.first.coordination.acquire(operation);
+  const independent = await new TaskBoardScheduler(f.second).task(other.task.objectId);
+  assert.ok(independent?.run);
+  const original = await f.first.recoverOperation(operation.pin.objectId);
+  assert.ok(original.run);
+  assert.notEqual(original.run.objectId, independent.run.objectId);
+});
+
 test("scheduler allocates a Todo Task and retains one prepared attempt", async (t) => {
   const f = taskBoardFixture(t),
     scheduler = new TaskBoardScheduler(f.first),
@@ -257,7 +271,7 @@ test("shared directory queues another task while a peer is running", async (t) =
     owner = await f.planned("agent", { kind: "directory_path", path: String(f.plan.threadStart.cwd) }),
     blocked = await f.planned("agent", { kind: "directory_path", path: String(f.plan.threadStart.cwd) });
   assert.ok((await scheduler.task(owner.task.objectId))?.run);
-  // A rebuilt reservation index falls back to ticket headers, never their conversation.
+  // A rebuilt reservation index uses projected fields, not separate ticket reads.
   f.first.store.workspaceOwner = async () => null;
   const read = f.first.store.read.bind(f.first.store); let peerHeaders = 0;
   f.first.store.read = (async (...args: Parameters<typeof read>) => {
@@ -273,7 +287,7 @@ test("shared directory queues another task while a peer is running", async (t) =
   assert.equal(task.value.runtimeWait?.reason, "workspace");
   assert.deepEqual(task.value.dependencies, []);
   assert.equal(outcome?.run, null);
-  assert.ok(peerHeaders > 0);
+  assert.equal(peerHeaders, 0);
   await scheduler.task(blocked.task.objectId);
   const waiting = await f.first.store.read("task-board/task", blocked.task.objectId);
   for (let pass = 0; pass < 3; pass++) assert.equal(await scheduler.task(blocked.task.objectId), null);

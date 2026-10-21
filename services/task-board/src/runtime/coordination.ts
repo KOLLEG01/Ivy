@@ -1,10 +1,14 @@
-import { canonical } from "../../../../packages/sdk/src/node.js";
+import { canonical, hashJson } from "../../../../packages/sdk/src/node.js";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
 import type { TaskBoard } from "../../../../packages/sdk/src/node.js";
 import { mutation, TaskBoardStore } from "./store.js";
 import type { Document } from "./store.js";
+import { sharedProjectKey } from './checks.js';
 
-/** Root gate for shared indexes; Task gates allow independent publications to proceed. */
+export const publicationContention = (error: unknown): boolean => error instanceof IvyError &&
+  ['revision_conflict', 'task_board_publication_busy', 'task_board_handoff_pending', 'task_board_contention'].includes(error.code);
+
+/** Serialize only changes to the same ticket, shared index or workspace. */
 export class TaskBoardCoordination {
   constructor(
     readonly store: TaskBoardStore,
@@ -19,19 +23,19 @@ export class TaskBoardCoordination {
       return ["TaskBoard publication gate"];
     }
     const task = "TaskBoard publication gate " + request.taskId;
-    if (!["edit", "start", "continue", "transition", "review", "cancel", "defer", "nativeUpdate"].includes(request.action)) {
-      this.store.retainOperationGates(operation.pin.objectId, [task]);
-      return [task];
+    const names = [task];
+    if (request.action === 'edit' || request.action === 'start' || request.action === 'continue') {
+      const previous = await this.store.read('task-board/task', {
+        objectId: request.taskId, revision: request.expectedRevision,
+      }, true, false, true);
+      if (request.action === 'edit') {
+        if (request.parentTaskId !== undefined || request.fields.category !== previous.value.fields.category)
+          names.unshift('TaskBoard publication gate');
+      } else {
+        const key = sharedProjectKey(previous.value.fields.workspaceRequirement, request.workspace);
+        if (key) names.unshift('TaskBoard workspace gate ' + hashJson({ host: request.target.hostId, key }));
+      }
     }
-    const previous = await this.store.read("task-board/task", {
-      objectId: request.taskId,
-      revision: request.expectedRevision,
-    });
-    const shared = request.action === 'edit' && (request.parentTaskId !== undefined || request.fields.category !== previous.value.fields.category) ||
-      request.action === 'transition' || request.action === 'review' || request.action === 'cancel' ||
-      request.action === 'start' || request.action === 'continue' ||
-      request.action === 'nativeUpdate' && ['completion', 'transcript', 'snapshot'].includes(request.change.kind);
-    const names = shared ? ["TaskBoard publication gate", task] : [task];
     this.store.retainOperationGates(operation.pin.objectId, names);
     return names;
   }
@@ -116,6 +120,8 @@ export class TaskBoardCoordination {
       "task-board/task",
       first.payload.object,
       false,
+      false,
+      true,
     );
     requireThat(
       payload.value.publication?.objectId === operation.pin.objectId &&
@@ -135,11 +141,7 @@ export class TaskBoardCoordination {
     const operation = await this.store.read("task-board/operation", operationId);
     const taskReserved = reserved && (await this.reserved(operation));
     for (const name of await this.gates(operation)) {
-      // Keep capacity checks serialized until admission creates its Run and native
-      // completion finishes it. Ordinary edits expose their state in the reservation.
-      if (taskReserved && name === 'TaskBoard publication gate' &&
-          ['start', 'continue', 'nativeUpdate'].includes(operation.value.request.action) &&
-          !['succeeded', 'failed'].includes(operation.value.phase)) continue;
+      // The durable Task reservation already exposes its claim and workspace.
       const current = await this.current(name);
       if (current.value.activeOperation?.objectId !== operationId) continue;
       requireThat(

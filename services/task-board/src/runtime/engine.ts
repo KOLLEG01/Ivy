@@ -269,7 +269,7 @@ export class TaskBoardEngine {
     await this.verifyOwner();
     let publicationTask: TaskBoard.ObjectPin | undefined;
     if (request.change.kind === 'completion' || request.change.kind === 'transcript' || request.change.kind === 'snapshot') {
-      const before = await this.store.read('task-board/task', request.taskId);
+      const before = await this.store.read('task-board/task', request.taskId, true, false, true);
       const original = await this.operations.find(this.settings.principalId, request.operationId);
       for (const intent of await this.operations.pendingHandoffs(request.run.objectId)) {
         try { await this.execute(intent); }
@@ -279,7 +279,7 @@ export class TaskBoardEngine {
         }
       }
       if (!original && before.pin.revision === request.expectedRevision) {
-        const after = await this.store.read('task-board/task', request.taskId);
+        const after = await this.store.read('task-board/task', request.taskId, true, false, true);
         if (after.pin.revision !== before.pin.revision) publicationTask = after.pin;
       }
     }
@@ -653,7 +653,7 @@ export class TaskBoardEngine {
       }
     }
     if (operation.value.handoffRun && operation.value.writes.length === 0 && 'taskId' in request) {
-      const current = await this.store.read('task-board/task', request.taskId);
+      const current = await this.store.read('task-board/task', request.taskId, true, false, true);
       if (current.value.publication) throw new IvyError('task_board_publication_busy', 'Reconcile the recorded publication before applying this retained handoff.', 'unknown');
     }
     // Busy or ambiguous gate acquisition is not a failed domain action. Its accepted intent remains.

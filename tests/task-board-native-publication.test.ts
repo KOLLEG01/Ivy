@@ -202,9 +202,22 @@ test("native publication recovers an ambiguous first Task reservation without du
   );
 });
 
+test('intermediate completion does not inspect the workspace or contact Git', async t => {
+  const w = await nativeWorkflow(t); await w.running();
+  let workspaceReads = 0;
+  w.f.nativeTools(async call => {
+    if (call.definition.name === 'resolveWorkspace') workspaceReads++;
+    throw new Error('Intermediate completion needs no remote workspace inspection.');
+  });
+  const outcome = await w.f.first.nativeUpdate(await w.snapshot('completed'));
+  assert.equal((await w.f.first.store.read('task-board/run', outcome.run!)).value.phase, 'completed');
+  assert.equal(workspaceReads, 0);
+});
+
 test("native publication retains owner-observed repository reachability provenance", async (t) => {
   const w = await nativeWorkflow(t);
   await w.running();
+  await w.handoff();
   const repository = {
     name: "ivy",
     branch: "main",

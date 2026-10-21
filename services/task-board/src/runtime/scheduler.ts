@@ -231,6 +231,9 @@ export class TaskBoardScheduler {
     });
     let selected: (typeof candidates)[number] | undefined;
     for (const candidate of candidates) {
+      // Continuation keeps its existing workspace. Admission checks it once under
+      // that workspace's gate; allocation does not prepare or change it.
+      if (continuation) { selected = candidate; break; }
       const owner = reservesWorkspace(task.value.fields.workspaceRequirement)
         ? await this.engine.store.workspaceOwner(candidate.node.hostId, candidate.workspace.intendedPath, task.pin.objectId)
         : await sharedProjectOwner(this.engine.store, task.value, task.pin.objectId,
@@ -256,11 +259,6 @@ export class TaskBoardScheduler {
       },
       operationId,
     )) as Agent.WorkspaceResolution;
-    const owner = reservesWorkspace(task.value.fields.workspaceRequirement) ? await this.engine.store.workspaceOwner(
-      selected.node.hostId, workspace.intendedPath, task.pin.objectId,
-    ) : await sharedProjectOwner(this.engine.store, task.value, task.pin.objectId,
-      { hostId: selected.node.hostId, serviceNodeId: selected.node.serviceNodeId }, workspace);
-    if (owner) throw new IvyError("task_board_workspace_reserved", `Workspace is already reserved by Task ${owner}.`, "not_executed", { blockerTaskId: owner });
     if (recovery) requireThat(workspace.canonicalCwd === recovery.workspace.canonicalCwd && workspace.intendedPath === recovery.workspace.intendedPath,
       'task_board_workspace_mismatch', 'Fresh recovery must retain the original workspace after preparation.');
     const names = [
@@ -457,13 +455,8 @@ export class TaskBoardScheduler {
       value = task.value;
     // A comment or storage upgrade can advance the Task while admission waits for a gate.
     // Recover that durable intent before allocating anything for the newer revision.
-    const pending = await store.page('task-board/operation', { limit: 1, where: { op: 'and', args: [
-      { op: 'eq', field: 'data:/request/taskId', value: taskId },
-      { op: 'eq', field: 'data:/callerPrincipalId', value: this.engine.settings.principalId },
-      { op: 'eq', field: 'data:/actor/source', value: 'scheduler' },
-      { op: 'in', field: 'data:/phase', value: ['accepted', 'preparing', 'publishing', 'needs_attention'] },
-    ] } });
-    if (pending.items[0]) return this.engine.recoverOperation(pending.items[0].objectId);
+    const pending = store.pendingOperation(taskId, 'scheduler');
+    if (pending) return this.engine.recoverOperation(pending);
     await forwardDelegatedReview(this.engine, task);
     if (value.claim?.run && !value.publication) {
       const run = await store.read('task-board/run', value.claim.run.objectId);

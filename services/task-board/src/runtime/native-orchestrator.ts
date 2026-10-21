@@ -17,6 +17,7 @@ import { claimedWorkflowState } from "./condition.js";
 import { mutation } from "./store.js";
 import type { Document } from "./store.js";
 import { syncNativeComments } from './native-comments.js';
+import { publicationContention } from './coordination.js';
 import { NativeProgress } from './native-progress.js';
 
 /** One bounded reconciliation pass. Persisted calls and evidence authorize every next action. */
@@ -105,7 +106,11 @@ export class TaskBoardNativeOrchestrator {
       !["succeeded", "failed"].includes(latest.value.ownerPhase ?? "")
     );
   }
-  private postpone(runId: string): void {
+  private postpone(runId: string, error?: unknown): void {
+    if (publicationContention(error)) {
+      this.retries.set(runId, { count: 0, after: Date.now() + 250 });
+      return;
+    }
     const count = Math.min((this.retries.get(runId)?.count ?? 0) + 1, 5);
     if (this.retries.size >= 1024 && !this.retries.has(runId))
       this.retries.delete(this.retries.keys().next().value!);
@@ -119,7 +124,7 @@ export class TaskBoardNativeOrchestrator {
       for (let count = 0; count < 8; count++) {
         const before = await this.engine.store.read("task-board/run", runId);
         try { await this.step(runId); }
-        catch (error) { this.postpone(runId); throw error; }
+        catch (error) { this.postpone(runId, error); throw error; }
         const after = await this.engine.store.read("task-board/run", runId);
         if (finishedRun(after.value)) { this.threads.delete(runId); this.retries.delete(runId); }
         else if (after.value.primaryResourceRef) {
@@ -151,6 +156,11 @@ export class TaskBoardNativeOrchestrator {
     const store = this.engine.store,
       run = await store.read("task-board/run", runId);
     if (finishedRun(run.value)) { this.progress.forget(runId); return; }
+    const pending = store.pendingOperation(run.value.taskId, 'native', runId);
+    if (pending) {
+      await this.engine.recoverOperation(pending);
+      return;
+    }
     const task = await store.read("task-board/task", run.value.taskId),
       active = task.value.claim?.run?.objectId === runId;
     requireThat(

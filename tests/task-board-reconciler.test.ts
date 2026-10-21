@@ -58,7 +58,7 @@ test('a conclusively rejected stale publication clears its recovery warning whil
   assert.equal(attempts, 1, 'Both recovery lanes must respect the retry delay.');
   assert.equal(runtime.recovered, true, 'A failed publication must not hold unrelated startup work.');
   f.first.recoverOperation = recover;
-  now += 30_001;
+  now += 251;
   await step(runtime);
   const terminal = await f.first.store.read('task-board/operation', operation.pin.objectId);
   assert.equal(terminal.value.phase, 'failed'); assert.equal(terminal.value.error?.execution, 'not_executed');

@@ -337,9 +337,13 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   const outcome: TaskBoard.ActionOutcome = { operationId: request.operationId, task: null, plan: null, run: null, history: null, result: null, review: null, attachment: null };
   if (completion) {
     try {
-      const observed = await new BoundToolClient(engine.store.client, next.target.serviceNodeId, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).call('agent.resolveWorkspace', { taskKey: task.value.taskKey, requirement: task.value.fields.workspaceRequirement, prepare: false, verifyOrigin: true }) as Agent.WorkspaceResolution;
-      const { nativeProjectId: _nativeProjectId, ...workspace } = observed;
-      if (workspace.hostId === next.target.hostId && workspace.serviceNodeId === next.target.serviceNodeId && workspace.intendedPath === next.workspace.intendedPath) next.workspace = workspace;
+      // Repository provenance is useful for final review, not every intermediate
+      // reply or waiting turn. The task reservation has already released its gates.
+      if (declaredHandoff?.workflowState === 'review') {
+        const observed = await new BoundToolClient(engine.store.client, next.target.serviceNodeId, [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).call('agent.resolveWorkspace', { taskKey: task.value.taskKey, requirement: task.value.fields.workspaceRequirement, prepare: false, verifyOrigin: true }) as Agent.WorkspaceResolution;
+        const { nativeProjectId: _nativeProjectId, ...workspace } = observed;
+        if (workspace.hostId === next.target.hostId && workspace.serviceNodeId === next.target.serviceNodeId && workspace.intendedPath === next.workspace.intendedPath) next.workspace = workspace;
+      }
     } catch { /* The retained allocation still identifies the material host and limitation. */ }
     const evidence = completion.evidence && !store.localKey(completion.evidence.object.objectId) ? [completion.evidence] : [];
     const content: TaskBoard.ResultContent = { summary: completion.summary, artifacts: evidence,

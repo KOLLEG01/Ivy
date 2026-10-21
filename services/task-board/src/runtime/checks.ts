@@ -27,20 +27,37 @@ export async function sharedProjectOwner(store: TaskBoardStore, task: TaskBoard.
   if (reserved) return reserved;
   let cursor: string | undefined;
   do {
-    const page = await store.page('task-board/task', { limit: 100,
-      where: { op: 'in', field: 'data:/workflowState', value: ['in_progress', 'waiting'] },
+    // Query all stored versions: optional fields absent in older records project as null.
+    const page = await store.page('task-board/task', { limit: 100, contractVersions: null,
+      where: { op: 'and', args: [
+        { op: 'in', field: 'data:/workflowState', value: ['in_progress', 'waiting'] },
+        ...(task.fields.allowParallel ? [{ op: 'not' as const,
+          arg: { op: 'eq' as const, field: 'data:/fields/allowParallel', value: true } }] : []),
+      ] },
+      select: ['data:/fields/workspaceRequirement/kind', 'data:/fields/workspaceRequirement/projectId',
+        'data:/fields/workspaceRequirement/useWorktree', 'data:/workflowState',
+        'data:/claim/target/hostId', 'data:/claim/workspace/canonicalCwd', 'data:/runtimeWait/reason',
+        'data:/lastRun/objectId', 'data:/lastRun/revision'],
       ...(cursor ? { cursor } : {}) });
     for (const item of page.items) {
       if (item.objectId === taskId) continue;
-      const peer = (await store.read('task-board/task', item.objectId, true, false, true)).value;
-      if (task.fields.allowParallel && peer.fields.allowParallel) continue;
-      if (peer.workflowState === 'waiting' && (peer.runtimeWait?.reason === 'workspace' || !peer.lastRun)) continue;
-      const run = peer.claim ? null : peer.lastRun ? (await store.read('task-board/run', peer.lastRun)).value : null;
-      if (!peer.claim && (!run || ['completed', 'failed', 'cancelled'].includes(run.phase))) continue;
-      const peerTarget = peer.claim?.target ?? run?.target;
-      const peerWorkspace = peer.claim?.workspace ?? run?.workspace;
-      if (peerTarget?.hostId !== target.hostId || !peerWorkspace) continue;
-      if (sharedProjectKey(peer.fields.workspaceRequirement, peerWorkspace) === key) return item.objectId;
+      const values = item.values as Record<string, unknown>;
+      const claimedHost = values['data:/claim/target/hostId'] as string | null;
+      const lastRunId = values['data:/lastRun/objectId'] as string | null;
+      if (values['data:/workflowState'] === 'waiting' &&
+          (values['data:/runtimeWait/reason'] === 'workspace' || !lastRunId)) continue;
+      const run = claimedHost || !lastRunId ? null : (await store.read('task-board/run', {
+        objectId: lastRunId, revision: values['data:/lastRun/revision'] as number,
+      })).value;
+      if (!claimedHost && (!run || ['completed', 'failed', 'cancelled'].includes(run.phase))) continue;
+      const peerHost = claimedHost ?? run?.target.hostId;
+      const cwd = values['data:/claim/workspace/canonicalCwd'] ?? run?.workspace.canonicalCwd;
+      if (peerHost !== target.hostId || !cwd) continue;
+      const kind = values['data:/fields/workspaceRequirement/kind'];
+      const peerKey = kind === 'existing_project' && !values['data:/fields/workspaceRequirement/useWorktree']
+        ? `project:${values['data:/fields/workspaceRequirement/projectId']}`
+        : kind === 'directory_path' ? `directory:${cwd}` : null;
+      if (peerKey === key) return item.objectId;
     }
     cursor = page.nextCursor ?? undefined;
   } while (cursor);

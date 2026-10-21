@@ -211,6 +211,8 @@ export class TaskBoardStore {
       .exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; PRAGMA auto_vacuum=INCREMENTAL;
       CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,key TEXT NOT NULL,name TEXT NOT NULL,parent_id TEXT,current_revision INTEGER NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(key,name,parent_id));
       CREATE TABLE IF NOT EXISTS revisions(id TEXT NOT NULL,revision INTEGER NOT NULL,value_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(id,revision));
+      CREATE INDEX IF NOT EXISTS pending_task_operations ON revisions(json_extract(value_json,'$.request.taskId'),json_extract(value_json,'$.actor.source'))
+        WHERE json_extract(value_json,'$.phase') IN ('accepted','preparing','publishing','needs_attention');
       CREATE TABLE IF NOT EXISTS blobs(id TEXT PRIMARY KEY,key TEXT NOT NULL,name TEXT NOT NULL,parent_id TEXT,bytes BLOB NOT NULL,UNIQUE(key,name,parent_id));
       CREATE TABLE IF NOT EXISTS markers(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cleanup_roots(root_id TEXT PRIMARY KEY,delete_after TEXT NOT NULL);
@@ -278,6 +280,16 @@ export class TaskBoardStore {
   operationGates(operationId: string): string[] {
     return this.local.prepare("SELECT gate_name FROM operation_gates WHERE operation_id=? ORDER BY gate_name")
       .all(operationId).map(row => String(row["gate_name"]));
+  }
+  pendingOperation(taskId: string, source: 'native' | 'scheduler', runId?: string): string | null {
+    const row = this.local.prepare(`SELECT d.id FROM revisions r INDEXED BY pending_task_operations
+      JOIN documents d ON d.id=r.id AND d.current_revision=r.revision
+      WHERE json_extract(r.value_json,'$.request.taskId')=? AND json_extract(r.value_json,'$.actor.source')=?
+        AND json_extract(r.value_json,'$.phase') IN ('accepted','preparing','publishing','needs_attention')
+        AND d.key='task-board/operation'
+        ${runId ? "AND json_extract(r.value_json,'$.request.run.objectId')=?" : ''}
+      ORDER BY d.created_at,d.id LIMIT 1`).get(...(runId ? [taskId, source, runId] : [taskId, source]));
+    return row ? String(row['id']) : null;
   }
   retainOperationGates(operationId: string, names: string[]): void {
     this.local.exec("BEGIN IMMEDIATE");
@@ -665,7 +677,7 @@ export class TaskBoardStore {
     const owner = String(row["task_id"]);
     let task: Document<"task-board/task"> | null = null;
     try {
-      task = await this.read("task-board/task", owner, true, true);
+      task = await this.read("task-board/task", owner, true, true, true);
     } catch (error) {
       if (!(error instanceof IvyError && error.code === "not_found")) throw error;
     }
@@ -1226,7 +1238,7 @@ export class TaskBoardStore {
       where?: Wire.QueryPredicate;
       orderBy?: Wire.ObjectQuery["orderBy"];
       select?: string[];
-      contractVersions?: string[];
+      contractVersions?: string[] | null;
     } = {},
   ) {
     if (localContractKeys.has(key)) {
@@ -1329,7 +1341,7 @@ export class TaskBoardStore {
         : { op: "eq", field: "object.parentId", value: this.rootObjectId };
     return this.client.request("objects.query", {
       contractKey: key,
-      contractVersions: options.contractVersions ?? readableVersions(key),
+      ...(options.contractVersions === null ? {} : { contractVersions: options.contractVersions ?? readableVersions(key) }),
       where: options.where ? { op: "and", args: [root, options.where] } : root,
       orderBy: options.orderBy ?? [{ field: "object.id", direction: "asc" }],
       limit: options.limit ?? 50,

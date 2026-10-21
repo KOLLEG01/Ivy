@@ -512,6 +512,42 @@ test('completion refuses a nonterminal snapshot and final output from another ep
   assert.equal((await f.current()).value.phase, 'completed');
 });
 
+for (const restart of [false, true])
+test(`a busy completion resumes its original publication ${restart ? 'after restart' : 'after a short retry'} without rereading native output`, async t => {
+  const f = await fixture(t); await f.first.drain(f.runId);
+  const engine = f.f.w.f.first, acquire = engine.coordination.acquire.bind(engine.coordination);
+  let now = Date.now(), blocked = true;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(engine.coordination, 'acquire', async (operation: Parameters<typeof acquire>[0]) => {
+    if (blocked && operation.value.request.action === 'nativeUpdate' && operation.value.request.change.kind === 'completion')
+      throw new IvyError('task_board_publication_busy', 'Another publication still owns this ticket.', 'unknown');
+    return acquire(operation);
+  });
+  f.status('completed');
+  await assert.rejects(f.first.drain(f.runId), /Another publication/);
+  const taskId = f.f.w.state().task.objectId, original = engine.store.pendingOperation(taskId, 'native', f.runId);
+  assert.ok(original);
+  const task = await engine.store.read('task-board/task', taskId);
+  await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId, expectedRevision: task.pin.revision,
+    commentId: randomUUID(), body: 'Keep this late correction.', agentDelivery: 'none',
+    requests: [], responses: [], attachments: [], replyTo: null });
+  blocked = false;
+  if (!restart) assert.equal(await f.first.drain(f.runId), false);
+  now += 251;
+  const reads = f.f.frames.length;
+  await (restart ? f.second : f.first).drain(f.runId);
+  assert.equal((await f.current()).value.phase, 'completed');
+  assert.equal((await engine.store.read('task-board/operation', original)).value.phase, 'succeeded');
+  assert.equal(engine.store.pendingOperation(taskId, 'native', f.runId), null);
+  assert.equal(f.f.frames.length, reads, 'Recovery must use the saved completion evidence.');
+  assert.equal((await engine.store.read('task-board/task', taskId)).value.comments.some(c => c.body === 'Keep this late correction.'), true);
+  const completions = await engine.store.page('task-board/operation', { where: { op: 'and', args: [
+    { op: 'eq', field: 'data:/request/run/objectId', value: f.runId },
+    { op: 'eq', field: 'data:/request/change/kind', value: 'completion' },
+  ] } });
+  assert.equal(completions.items.length, 1);
+});
+
 test('completion replays its saved final read after a lost publication receipt without reading output again', async t => {
   const f = await fixture(t); await f.first.drain(f.runId); f.status('completed'); await f.first.step(f.runId);
   const engine = f.f.w.f.first, finish = engine.operations.finish.bind(engine.operations);

@@ -22,7 +22,7 @@ export class TaskBoardNativeDriver {
   constructor(readonly engine: TaskBoardEngine) {}
   private async current(runId: string) {
     await this.engine.verifyOwner();
-    const run = await this.engine.store.read('task-board/run', runId), task = await this.engine.store.read('task-board/task', run.value.taskId);
+    const run = await this.engine.store.read('task-board/run', runId), task = await this.engine.store.read('task-board/task', run.value.taskId, true, false, true);
     requireThat(!finishedRun(run.value) && !task.value.publication, 'task_board_native_order', 'Native execution requires an unfinished Run and no pending task publication.');
     const active = task.value.claim?.run?.objectId === runId;
     requireThat(!active || same(task.value.claim!.run, run.pin), 'revision_conflict', 'Native execution requires the exact current claimed Run revision.');
