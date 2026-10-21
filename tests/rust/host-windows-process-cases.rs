@@ -1,10 +1,34 @@
-use ivy_host_runtime::platform::windows_process::{process_exited, process_identity};
+use ivy_host_runtime::platform::windows_process::{
+    current_process_created_filetime, process_exited, process_identity,
+};
 use std::{
     io,
     os::windows::{io::AsRawHandle, process::CommandExt},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+
+#[test]
+fn current_pseudo_handle_creation_time_matches_the_retained_current_identity() {
+    let current = process_identity(std::process::id()).unwrap().unwrap();
+    let created = current_process_created_filetime().unwrap();
+    assert_ne!(created, 0);
+    assert_eq!(created, current.created_filetime);
+    for _ in 0..16 {
+        assert_eq!(current_process_created_filetime().unwrap(), created);
+    }
+    assert_eq!(
+        std::thread::spawn(current_process_created_filetime)
+            .join()
+            .unwrap()
+            .unwrap(),
+        created
+    );
+    assert!(!process_exited(current.pid, created).unwrap());
+    if let Some(path) = std::env::var_os("IVY_CURRENT_FILETIME_OBSERVATION") {
+        std::fs::write(path, format!("{} {}", current.pid, created)).unwrap();
+    }
+}
 
 #[test]
 fn predecessor_admission_absence_and_identity_mismatch() {
