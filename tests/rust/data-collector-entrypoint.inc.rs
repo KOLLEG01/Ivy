@@ -62,6 +62,9 @@ fn payload(fixture: &Fixture) -> PathBuf {
         .join(format!("artifact/dist/native/{}-{arch}", platform()))
 }
 async fn stage(fixture: &Fixture) {
+    stage_executable(fixture, &std::env::current_exe().unwrap()).await;
+}
+async fn stage_executable(fixture: &Fixture, executable: &std::path::Path) {
     let status = Command::new(node())
         .arg("tests/fixtures/data-collector-dispatchers.mjs")
         .arg(fixture.root.join("artifact/dist"))
@@ -72,11 +75,7 @@ async fn stage(fixture: &Fixture) {
     assert!(status.success());
     let target = payload(fixture);
     std::fs::create_dir_all(&target).unwrap();
-    std::fs::copy(
-        std::env::current_exe().unwrap(),
-        target.join(binary("ivy-data-collector")),
-    )
-    .unwrap();
+    std::fs::copy(executable, target.join(binary("ivy-data-collector"))).unwrap();
     std::fs::copy(
         std::env::var_os("IVY_TEST_HEALTH_CHECKER").expect("compiled Host health helper"),
         target.join(binary("ivy-health")),
@@ -117,13 +116,31 @@ async fn launch_configuration(
     timeout_ms: u64,
     configuration: &std::path::Path,
 ) -> OwnedProcess {
+    launch_mode(
+        fixture,
+        health,
+        environment_config,
+        timeout_ms,
+        configuration,
+        true,
+    )
+    .await
+}
+async fn launch_mode(
+    fixture: &Fixture,
+    health: bool,
+    environment_config: bool,
+    timeout_ms: u64,
+    configuration: &std::path::Path,
+    test_driver: bool,
+) -> OwnedProcess {
     let entry = if health {
         "packages/host-runtime/src/health.js"
     } else {
         "services/data-collector/src/main.js"
     };
     let mut args: Vec<OsString> = vec![fixture.root.join("artifact/dist").join(entry).into()];
-    if !health {
+    if !health && test_driver {
         args.extend(["--exact", DRIVER, "--nocapture", "--"].map(OsString::from));
     }
     if !environment_config {
@@ -212,6 +229,15 @@ async fn ready(
 
 #[tokio::test]
 async fn native_dispatcher_composes_process_entry_health_control_and_workload_helpers() {
+    check_dispatcher(false).await;
+}
+
+#[tokio::test]
+async fn production_executable_requires_locale_runtime_and_runs_native_service() {
+    check_dispatcher(true).await;
+}
+
+async fn check_dispatcher(production: bool) {
     tokio::time::timeout(Duration::from_secs(90), async {
         for offline in [false, true] {
             let mut peer = None;
@@ -246,14 +272,74 @@ async fn native_dispatcher_composes_process_entry_health_control_and_workload_he
                 );
                 peer = Some(child);
             }
-            stage(&fixture).await;
+            if production {
+                stage_executable(
+                    &fixture,
+                    std::path::Path::new(env!("CARGO_BIN_EXE_ivy-data-collector")),
+                )
+                .await;
+                let runtime = PathBuf::from(
+                    std::env::var_os("IVY_TEST_LOCALE_RUNTIME")
+                        .expect("qualified locale runtime fixture"),
+                );
+                let files = if cfg!(windows) {
+                    ["icudt78.dll", "icuuc78.dll", "icuin78.dll", "LICENSE.icu"]
+                } else {
+                    [
+                        "libicudata.so.78",
+                        "libicuuc.so.78",
+                        "libicui18n.so.78",
+                        "LICENSE.icu",
+                    ]
+                };
+                for name in files {
+                    std::fs::copy(runtime.join(name), payload(&fixture).join(name)).unwrap();
+                }
+                if !offline {
+                    std::fs::remove_file(payload(&fixture).join(files[2])).unwrap();
+                    let rejected = launch_mode(
+                        &fixture,
+                        false,
+                        false,
+                        30_000,
+                        &fixture.root.join("config.json"),
+                        false,
+                    )
+                    .await;
+                    let result = complete(&rejected).await;
+                    assert_eq!(result.exit_code, Some(1), "{result:?}");
+                    assert_eq!(result.error_code, None, "{result:?}");
+                    assert_eq!(result.stdout, "", "{result:?}");
+                    assert_eq!(
+                        parse(result.stderr.trim(), 1024).unwrap(),
+                        IvyJson::object([
+                            ("code", "locale_unavailable".into()),
+                            ("message", "DataCollector failed to start.".into()),
+                        ])
+                    );
+                    assert!(fixture.health().is_none());
+                    assert!(!fixture.root.join("data/data-collector.sqlite").exists());
+                    std::fs::copy(runtime.join(files[2]), payload(&fixture).join(files[2]))
+                        .unwrap();
+                }
+            } else {
+                stage(&fixture).await;
+            }
             // Exercise real startup failure and argument-over-environment precedence.
             let mut invalid = config.clone();
             invalid.insert("componentId", "other".into());
             atomic_json(fixture.root.join("config.json"), invalid)
                 .await
                 .unwrap();
-            let rejected = launch(&fixture, false, false).await;
+            let rejected = launch_mode(
+                &fixture,
+                false,
+                false,
+                30_000,
+                &fixture.root.join("config.json"),
+                !production,
+            )
+            .await;
             let result = complete(&rejected).await;
             assert_eq!(result.exit_code, Some(1), "{result:?}");
             assert_eq!(
@@ -270,28 +356,39 @@ async fn native_dispatcher_composes_process_entry_health_control_and_workload_he
                 .unwrap();
             let mut previous = None;
             for environment_config in [false, true] {
-                let child = launch(&fixture, false, environment_config).await;
-                let value = ready(&fixture, &child, previous.as_ref()).await;
-                let identity = parse(
-                    &std::fs::read_to_string(fixture.root.join("entry-identity.json")).unwrap(),
-                    usize::MAX,
+                let child = launch_mode(
+                    &fixture,
+                    false,
+                    environment_config,
+                    30_000,
+                    &fixture.root.join("config.json"),
+                    !production,
                 )
-                .unwrap();
-                assert_eq!(value.get("pid"), identity.get("pid"));
+                .await;
+                let value = ready(&fixture, &child, previous.as_ref()).await;
                 assert_ne!(model::number(&value, "pid").unwrap() as u32, child.pid);
                 assert_eq!(
                     value.get("launchId"),
                     Some(&"collector-dispatch-fixture".into())
                 );
-                assert_eq!(
-                    std::fs::canonicalize(model::text(&identity, "node").unwrap()).unwrap(),
-                    std::fs::canonicalize(node()).unwrap()
-                );
-                assert_eq!(
-                    std::fs::canonicalize(model::text(&identity, "executable").unwrap()).unwrap(),
-                    std::fs::canonicalize(payload(&fixture).join(binary("ivy-data-collector")))
-                        .unwrap()
-                );
+                if !production {
+                    let identity = parse(
+                        &std::fs::read_to_string(fixture.root.join("entry-identity.json")).unwrap(),
+                        usize::MAX,
+                    )
+                    .unwrap();
+                    assert_eq!(value.get("pid"), identity.get("pid"));
+                    assert_eq!(
+                        std::fs::canonicalize(model::text(&identity, "node").unwrap()).unwrap(),
+                        std::fs::canonicalize(node()).unwrap()
+                    );
+                    assert_eq!(
+                        std::fs::canonicalize(model::text(&identity, "executable").unwrap())
+                            .unwrap(),
+                        std::fs::canonicalize(payload(&fixture).join(binary("ivy-data-collector")))
+                            .unwrap()
+                    );
+                }
                 if offline {
                     assert_eq!(value.get("generation"), Some(&IvyJson::Null));
                     assert_eq!(

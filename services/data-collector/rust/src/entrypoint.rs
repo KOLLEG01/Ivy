@@ -5,7 +5,8 @@ use crate::{
 };
 use ivy_contracts::{IvyError, IvyJson, IvyResult};
 use ivy_host_runtime::config::configuration_path;
-use std::{io::Write, process::ExitCode};
+use ivy_sdk::collation::LocaleRuntime;
+use std::{io::Write, process::ExitCode, sync::Arc};
 
 struct StopSignals {
     #[cfg(unix)]
@@ -78,7 +79,23 @@ pub async fn run(compare_names: CompareNames) -> IvyResult<()> {
 
 /// Keep startup diagnostics bounded and free of configuration or secret values.
 pub async fn main(compare_names: CompareNames) -> ExitCode {
-    match run(compare_names).await {
+    finish(run(compare_names).await)
+}
+
+/// The packaged service requires the qualified runtime beside its executable.
+/// The captured comparator retains the loaded libraries for the service lifetime.
+pub async fn packaged_main() -> ExitCode {
+    let comparator =
+        LocaleRuntime::from_current_executable().and_then(|runtime| runtime.executing_default());
+    let result = match comparator {
+        Ok(comparator) => run(Arc::new(move |left, right| comparator.compare(left, right))).await,
+        Err(error) => Err(error),
+    };
+    finish(result)
+}
+
+fn finish(result: IvyResult<()>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let value = IvyJson::object([
