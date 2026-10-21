@@ -6,8 +6,8 @@ use windows_sys::Win32::{
         WAIT_TIMEOUT,
     },
     System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-        QueryFullProcessImageNameW, WaitForSingleObject,
+        GetCurrentProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
     },
 };
 
@@ -28,16 +28,21 @@ impl Drop for Handle {
     }
 }
 
-fn creation_time(process: &Handle) -> io::Result<u64> {
+fn creation_time(process: HANDLE) -> io::Result<u64> {
     let mut created: FILETIME = unsafe { std::mem::zeroed() };
     let mut exited = created;
     let mut kernel = created;
     let mut user = created;
-    if unsafe { GetProcessTimes(process.0, &mut created, &mut exited, &mut kernel, &mut user) } == 0
-    {
+    if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
         return Err(io::Error::last_os_error());
     }
     Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// Read the current process's exact creation FILETIME without opening a process
+/// or inspecting its image. The pseudo-handle is borrowed and is never closed.
+pub fn current_process_created_filetime() -> io::Result<u64> {
+    creation_time(unsafe { GetCurrentProcess() })
 }
 
 /// Check the exact predecessor identity without waiting or inspecting its image.
@@ -66,7 +71,7 @@ pub fn process_exited(pid: u32, created_filetime: u64) -> io::Result<bool> {
         };
     }
     let process = Handle(raw);
-    if creation_time(&process)? != created_filetime {
+    if creation_time(process.0)? != created_filetime {
         return Ok(true);
     }
     match unsafe { WaitForSingleObject(process.0, 0) } {
@@ -90,7 +95,7 @@ pub fn process_identity(pid: u32) -> io::Result<Option<ProcessIdentity>> {
         };
     }
     let process = Handle(raw);
-    let created_filetime = creation_time(&process)?;
+    let created_filetime = creation_time(process.0)?;
     let mut name = vec![0u16; 32768];
     let mut size = name.len() as u32;
     if unsafe { QueryFullProcessImageNameW(process.0, 0, name.as_mut_ptr(), &mut size) } == 0 {
