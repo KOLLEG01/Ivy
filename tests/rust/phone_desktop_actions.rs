@@ -908,16 +908,21 @@ fn reentrant() -> IvyJson {
 }
 #[test]
 fn original_launch_input_focus_and_invoke_policy_agree() {
-    struct Quiet(Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>>);
-    impl Drop for Quiet {
-        fn drop(&mut self) {
-            if let Some(hook) = self.0.take() {
-                std::panic::set_hook(hook);
-            }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        if info.payload().downcast_ref::<&str>() != Some(&"fixture") {
+            eprintln!("{info}");
         }
+    }));
+    let result = std::panic::catch_unwind(compare_original_actions);
+    // Changing a hook during unwinding itself panics. Restore after the caught
+    // test outcome, retaining the original failure instead of aborting twice.
+    std::panic::set_hook(previous);
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
     }
-    let _quiet = Quiet(Some(std::panic::take_hook()));
-    std::panic::set_hook(Box::new(|_| {}));
+}
+fn compare_original_actions() {
     assert_eq!(std::mem::size_of::<Input>(), 40);
     assert_eq!(std::mem::offset_of!(Input, key), 8);
     assert_eq!(std::mem::offset_of!(Input, extra), 24);

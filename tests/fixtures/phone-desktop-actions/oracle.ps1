@@ -93,5 +93,14 @@ static object Reentrant(){var trace=new List<string>();var launch=DesktopLaunch.
 public static string Run(string input){using var doc=JsonDocument.Parse(input);var r=doc.RootElement;string path=r.GetProperty("image").GetString();return JsonSerializer.Serialize(new{inputSha256=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(input))),reentrant=Reentrant(),applications=r.GetProperty("applications").EnumerateArray().Select(v=>Capture(()=>{DesktopLaunch.ValidateApplication(v.GetString());Target(path,v.GetString());return true;})).ToArray(),plans=r.GetProperty("plans").EnumerateArray().Select(Plans).ToArray(),chords=r.GetProperty("chords").EnumerateArray().Select(Chord).ToArray(),launches=r.GetProperty("launches").EnumerateArray().Select(v=>Launch(v,path)).ToArray(),focus=r.GetProperty("focus").EnumerateArray().Select(Focus).ToArray(),invokes=r.GetProperty("invokes").EnumerateArray().Select(Invoke).ToArray(),native=r.GetProperty("native").EnumerateArray().Select(Native).ToArray()},Json);}
 }}
 '@
+# Add-Type assemblies have no on-disk location. Bind only this fixture's four
+# imports to its exact path so PowerShell's relative native loader is not used.
+$fixture=(Resolve-Path -LiteralPath $env:IVY_PHONE_ACTIONS_FIXTURE).Path.Replace('\','\\').Replace('"','\"')
+$definition=$definition.Replace('"phone_desktop_actions_fixture.dll"','"'+$fixture+'"')
 Add-Type -TypeDefinition $definition
-[Console]::Out.Write([Ivy.PhoneBridge.DesktopActionsOracle]::Run([Console]::In.ReadToEnd()))
+try {
+ [Console]::Out.Write([Ivy.PhoneBridge.DesktopActionsOracle]::Run([Console]::In.ReadToEnd()))
+} catch {
+ [Console]::Error.WriteLine($_.Exception.ToString())
+ exit 1
+}
