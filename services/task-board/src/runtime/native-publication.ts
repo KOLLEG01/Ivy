@@ -177,7 +177,9 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
         requireThat(active && !run.cancellation && !!run.turnId && call.value.state === 'prepared' && origin?.kind === 'steer' && same(origin.predecessor, run.calls.steer ?? null),
           'task_board_native_order', 'Steering requires the active turn and exact predecessor.');
         if (run.calls.steer) requireThat(['succeeded', 'failed'].includes((await observedCall(run.calls.steer, 'steer')).observation.phase), 'task_board_outcome_unresolved', 'Resolve the original steering receipt before preparing another.');
-        requireThat(origin.workRevision === task.value.workRevision && origin.commentIds.every(id => task.value.commentDeliveries.some(delivery => delivery.commentId === id && delivery.state === 'queued')),
+        // Later edits do not invalidate this ticket-update prompt. Only the captured
+        // input is acknowledged; newer work remains pending for the next pass.
+        requireThat(origin.workRevision <= task.value.workRevision && origin.commentIds.every(id => task.value.commentDeliveries.some(delivery => delivery.commentId === id && delivery.state === 'queued')),
           'task_board_native_intent_mismatch', 'Steering must identify current queued input.');
         const intended = await intendedCall(store, run, 'steer', origin);
         requireThat(same(await resolveNativeRequest(store, call.value.request), intended.request) && call.value.expectedDefinitionHash === intended.expectedDefinitionHash,

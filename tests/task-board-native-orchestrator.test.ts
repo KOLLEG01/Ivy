@@ -1049,6 +1049,39 @@ test('terminal publication rereads a native answer received after the earlier in
   assert.equal(task.comments.filter(comment => comment.nativeInput?.state === 'answered').length, 1);
 });
 
+test('a comment arriving while a steer is prepared stays queued until its own delivery', async t => {
+  const f = await fixture(t); await f.first.drain(f.runId);
+  const engine = f.f.w.f.first, run = await f.current();
+  const before = await engine.store.read('task-board/task', run.value.taskId), commentId = randomUUID();
+  const origin: Extract<TaskBoard.NativeCallOrigin, { kind: 'steer' }> = { kind: 'steer', commentIds: [], workRevision: before.value.workRevision,
+    observedDependencies: before.value.observedDependencies ?? {}, wakeAt: null, peersHash: hashJson([]), predecessor: null };
+  const update = engine.nativeUpdate.bind(engine); let injected = false;
+  t.mock.method(engine, 'nativeUpdate', async (request: TaskBoard.NativeUpdateRequest) => {
+    if (!injected && request.change.kind === 'attachCall' && request.change.slot === 'steer') {
+      injected = true;
+      await f.f.w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: before.pin.objectId,
+        expectedRevision: before.pin.revision, commentId, body: 'A newer update arrived during preparation.',
+        requests: [], responses: [], attachments: [], replyTo: null });
+    }
+    return update(request);
+  });
+  await f.first.driver.prepare(f.runId, 'steer', origin);
+  await f.first.driver.advance(f.runId, 'steer');
+  const current = () => engine.store.read('task-board/task', before.pin.objectId);
+  assert.equal((await current()).value.commentDeliveries.find(c => c.commentId === commentId)?.state, 'queued');
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/steer').length, 1);
+  await f.first.drain(f.runId); await f.second.drain(f.runId);
+  const task = await current(), latest = await f.current();
+  assert.equal(task.value.commentDeliveries.find(c => c.commentId === commentId)?.state, 'delivered');
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/steer').length, 2);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
+  // A future revision or already acknowledged input still cannot authorize a call.
+  for (const invalid of [{ workRevision: task.value.workRevision + 1, commentIds: [] },
+    { workRevision: task.value.workRevision, commentIds: [commentId] }])
+    await assert.rejects(f.first.driver.prepare(f.runId, 'steer', { ...origin, ...invalid, predecessor: latest.value.calls.steer! }),
+      { code: 'task_board_native_intent_mismatch' });
+});
+
 test('running updates steer once across a lost reply and reconciliation by another owner', async t => {
   const f = await fixture(t); await f.first.drain(f.runId);
   const task = await f.f.w.f.first.store.read('task-board/task', (await f.current()).value.taskId);
