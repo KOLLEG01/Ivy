@@ -1,4 +1,6 @@
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $imports = @'
 using System;
 using System.IO;
@@ -61,6 +63,7 @@ public static class MicroWireOracle {
         }
         var strings = Enumerable.Range(-1, 258).Select(i => MicroUsbDescriptors.String(i)).Select(b => b == null ? null : Convert.ToHexString(b)).ToArray();
         return JsonSerializer.Serialize(new {
+            inputSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(input))),
             descriptors = new { report = Convert.ToHexString(MicroUsbDescriptors.Report()), device = Convert.ToHexString(MicroUsbDescriptors.Device()),
                 configuration = Convert.ToHexString(MicroUsbDescriptors.Configuration()), export = Convert.ToHexString(MicroUsbDescriptors.Export()), strings,
                 busId = MicroUsbDescriptors.BusId, serial = MicroUsbDescriptors.Serial, deviceId = MicroUsbDescriptors.DeviceId },
