@@ -16,7 +16,8 @@ public static class NativeOwnerOracle {
                 using var stream = new MemoryStream(bytes.ToArray());
                 using var record = JsonDocument.Parse(stream, new JsonDocumentOptions { MaxDepth = 4 });
                 var owner = (NativeOwnerLease.Owner)read.Invoke(null, new object[] { record.RootElement })!;
-                results.Add(new { ok = true, epoch = owner.Epoch, pid = owner.Pid, creationFileTime = owner.CreationFileTime, originalExited = (bool)exited.Invoke(null, new object[] { owner })! });
+                var encoded = JsonSerializer.Serialize(owner, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                results.Add(new { ok = true, epoch = owner.Epoch, pid = owner.Pid, creationFileTime = owner.CreationFileTime, originalExited = (bool)exited.Invoke(null, new object[] { owner })!, encoded });
             } catch { results.Add(new { ok = false }); }
         }
         return JsonSerializer.Serialize(results);

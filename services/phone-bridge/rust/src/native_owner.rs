@@ -9,6 +9,10 @@ use std::io;
 
 const RECORD_BYTES: usize = 4096;
 
+#[cfg(all(test, windows))]
+#[path = "native_owner_lease_tests.rs"]
+mod lease_tests;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeOwner {
     epoch: String,
@@ -104,9 +108,8 @@ impl NativeOwner {
         }
     }
 
-    #[cfg(test)]
     fn encode(&self) -> io::Result<Vec<u8>> {
-        ivy_contracts::json::stringify(
+        let json = ivy_contracts::json::stringify(
             &IvyJson::Object(vec![
                 ("schemaVersion".into(), IvyJson::Number(1.0)),
                 ("epoch".into(), IvyJson::from(self.epoch.clone())),
@@ -118,8 +121,117 @@ impl NativeOwner {
             ]),
             RECORD_BYTES,
         )
-        .map(String::into_bytes)
-        .map_err(|_| unavailable())
+        .map_err(|_| unavailable())?;
+        // The only string inputs are a validated D GUID (plus surrounding
+        // whitespace) and decimal FILETIME. Preserve System.Text.Json's default
+        // ASCII/uppercase escaping on this bounded domain, using shared JSON for
+        // all structure and ordinary string escaping.
+        let mut bytes = String::new();
+        for ch in json.chars() {
+            if ch.is_ascii() {
+                bytes.push(ch);
+            } else {
+                use std::fmt::Write;
+                for unit in ch.encode_utf16(&mut [0; 2]) {
+                    write!(bytes, "\\u{unit:04X}").unwrap();
+                }
+            }
+        }
+        Ok(bytes.replace("\\u000b", "\\u000B").into_bytes())
+    }
+}
+
+/// Successful admission is retained in a process-global static, not in the
+/// returned record. Dropping a result or returning from Main cannot release it.
+pub struct NativeOwnerLease;
+
+impl NativeOwnerLease {
+    pub fn acquire(root: &std::path::Path, epoch: &str) -> io::Result<NativeOwner> {
+        if !cfg!(windows) || !root.is_absolute() || !root.is_dir() || !guid_d(epoch) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Exact native owner directory and epoch required.",
+            ));
+        }
+        #[cfg(windows)]
+        {
+            windows::acquire(root, epoch)
+        }
+        #[cfg(not(windows))]
+        {
+            unreachable!()
+        }
+    }
+}
+
+#[cfg(windows)]
+mod windows {
+    use super::*;
+    use std::{
+        fs::{File, OpenOptions},
+        io::{Read, Write},
+        os::windows::fs::OpenOptionsExt,
+        path::Path,
+        sync::Mutex,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ};
+    static RETAINED: Mutex<Option<File>> = Mutex::new(None);
+
+    pub(super) fn acquire(root: &Path, epoch: &str) -> io::Result<NativeOwner> {
+        let mut retained = RETAINED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if retained.is_some() {
+            return Err(io::Error::other("Native process already owns a directory."));
+        }
+        let lease = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_WRITE_THROUGH)
+            .open(root.join("phone-native.lock"))?;
+        let record_path = root.join("phone-native-owner.json");
+        match OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&record_path)
+        {
+            Ok(mut previous) => {
+                if !(2..=RECORD_BYTES as u64).contains(&previous.metadata()?.len()) {
+                    return Err(unavailable());
+                }
+                let mut bytes = Vec::new();
+                previous.read_to_end(&mut bytes)?;
+                NativeOwner::parse(&bytes)?.ensure_predecessor_exited()?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error),
+        }
+        let current = NativeOwner {
+            epoch: epoch.into(),
+            pid: std::process::id() as i32,
+            creation_filetime:
+                ivy_host_runtime::platform::windows_process::current_process_created_filetime()?
+                    as i64,
+        };
+        let temporary = root.join(format!("phone-native-owner.json.{epoch}.tmp"));
+        {
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .share_mode(0)
+                .custom_flags(FILE_FLAG_WRITE_THROUGH)
+                .open(&temporary)?;
+            output.write_all(&current.encode()?)?;
+            output.sync_all()?;
+        }
+        // Failed publication deliberately retains the temporary, matching the
+        // original CreateNew retry fence. Only an admitted lease is kept alive.
+        std::fs::rename(&temporary, &record_path)?;
+        *retained = Some(lease);
+        Ok(current)
     }
 }
 
@@ -480,6 +592,16 @@ mod tests {
                     String::from_utf8_lossy(bytes)
                 );
                 if let Ok(owner) = native {
+                    assert_eq!(
+                        owner.encode().unwrap(),
+                        original
+                            .get("encoded")
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .as_bytes(),
+                        "Original serialized owner for record {index}"
+                    );
                     assert_eq!(
                         owner.ensure_predecessor_exited().is_ok(),
                         original.get("originalExited").unwrap().as_bool().unwrap(),
