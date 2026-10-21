@@ -54,17 +54,26 @@ export function validateTaskContent(task: TaskBoard.Task, taskId: string): void 
 export class TaskComments {
   private readonly reader: CommentReader;
   private readonly pins = new Map<string, TaskBoard.ObjectPin>();
-  // Only fingerprints survive body-cache eviction; ticket status writes reuse the exact immutable tree.
-  private readonly fingerprints = new Map<string, string>();
+  // Small fingerprints and attachment references survive body-cache eviction, not conversation bodies.
+  private readonly fingerprints = new Map<string, { hash: string; attachments?: TaskBoard.ObjectPin[] }>();
   private treeKey(tree: CommentTree, taskId: string): string {
     return hashJson({ taskId, root: tree.root, length: tree.length });
   }
   private fingerprint(task: TaskBoard.Task): string {
     return hashJson({ comments: task.comments.map(hashJson), receipts: task.commentDeliveries.map(hashJson) });
   }
-  private rememberTree(tree: CommentTree, taskId: string, fingerprint: string): void {
+  private rememberTree(tree: CommentTree, taskId: string, task: TaskBoard.Task, hash = this.fingerprint(task)): void {
+    const attachments = [...new Map(task.comments.flatMap(comment => comment.attachments.map(attachment =>
+      [hashJson(attachment.object), { ...attachment.object }] as const))).values()];
     if (this.fingerprints.size >= 128) this.fingerprints.delete(this.fingerprints.keys().next().value!);
-    this.fingerprints.set(this.treeKey(tree, taskId), fingerprint);
+    this.fingerprints.set(this.treeKey(tree, taskId), { hash,
+      ...(Buffer.byteLength(JSON.stringify(attachments)) <= 64 * 1024 ? { attachments } : {}) });
+  }
+  /** Prepared writes already validated the immutable history; retain its attachment references without hydrating it again. */
+  preparedAttachments(task: TaskBoard.Task, taskId: string): TaskBoard.ObjectPin[] | undefined {
+    const tree = (task as TreeTask).commentStore;
+    if (tree?.kind !== 'tree' || task.comments.length || task.commentDeliveries.length) return undefined;
+    return this.fingerprints.get(this.treeKey(tree, taskId))?.attachments?.map(pin => ({ ...pin }));
   }
   // Active runs may retain the previous header contract until their next publication.
   // Cache only small projections, keyed by immutable history and the referenced gates.
@@ -101,7 +110,7 @@ export class TaskComments {
       const entries = await this.reader.range(commentStore, taskId);
       const full = { ...header, comments: entries.map(entry => entry.comment),
         commentDeliveries: entries.flatMap(entry => entry.receipt ? [entry.receipt] : []) };
-      this.rememberTree(commentStore, taskId, this.fingerprint(full));
+      this.rememberTree(commentStore, taskId, full);
       if (!commentStore.summary) {
         const summary = commentSummary(full, taskId);
         if (Buffer.byteLength(JSON.stringify(summary)) <= 64 * 1024) {
@@ -156,7 +165,7 @@ export class TaskComments {
     const header = current.content.value as unknown as TreeTask;
     const fingerprint = this.fingerprint(task);
     const unchanged = () => !retired && !archivedBodies && current.revision.contractVersion === contractVersion &&
-      header.commentStore?.kind === 'tree' && this.fingerprints.get(this.treeKey(header.commentStore, taskId)) === fingerprint;
+      header.commentStore?.kind === 'tree' && this.fingerprints.get(this.treeKey(header.commentStore, taskId))?.hash === fingerprint;
     const reuse = (): TreeTask => ({ ...task, comments: [], commentDeliveries: [], commentStore: header.commentStore });
     if (unchanged()) return reuse();
     const prior = await this.read(current.content.value, taskId);
@@ -228,7 +237,7 @@ export class TaskComments {
     }
     const commentStore: CommentTree = { kind: 'tree', root: level[0] ?? null, length: task.comments.length,
       ...(['2.3.0', '3.0.0'].includes(contractVersion) ? { summary: commentSummary(task, taskId) } : {}) };
-    this.rememberTree(commentStore, taskId, fingerprint);
+    this.rememberTree(commentStore, taskId, task, fingerprint);
     return { ...task, comments: [], commentDeliveries: [], commentStore };
   }
 

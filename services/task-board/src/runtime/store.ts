@@ -955,8 +955,10 @@ export class TaskBoardStore {
     retainedIdentity: boolean,
     selectedVersion: TaskBoard.PreparedWrite['contractVersion'] = contractVersion(key),
   ): Promise<TaskBoard.ObjectPin> {
+    const preparedAttachments = key === 'task-board/task' && retainedIdentity && !('create' in destination)
+      ? this.comments.preparedAttachments(value as TaskBoard.Task, destination.objectId) : undefined;
     if (key === 'task-board/task' && !('create' in destination) &&
-        'commentStore' in (value as TaskBoard.Task))
+        'commentStore' in (value as TaskBoard.Task) && preparedAttachments === undefined)
       value = await this.comments.read(value as unknown as Wire.Json, destination.objectId) as ContractValues[K];
     if (!retainedIdentity) value = await this.upgradeStored(key, value);
     if (
@@ -1063,7 +1065,7 @@ export class TaskBoardStore {
     }
     const content: Wire.Content = {
       encoding: "json",
-      value: (key === 'task-board/task' && !('create' in destination)
+      value: (key === 'task-board/task' && !('create' in destination) && preparedAttachments === undefined
         ? await this.comments.write(value as TaskBoard.Task, destination.objectId, mutationId, selectedVersion)
         : value) as Wire.Json,
     };
@@ -1080,7 +1082,7 @@ export class TaskBoardStore {
         const recoveryRun = await this.recoveryReference(task.completionIssue.run);
         if (recoveryRun) references['recovery-run'] = recoveryRun;
       }
-      const attachments = taskAttachmentPins(task);
+      const attachments = [...taskAttachmentPins(task), ...(preparedAttachments ?? [])];
       if ('create' in destination) {
         requireThat(attachments.length + Object.keys(references).length <= 256,
           'limit_exceeded', 'An initial Task exceeds its exact reference capacity.');

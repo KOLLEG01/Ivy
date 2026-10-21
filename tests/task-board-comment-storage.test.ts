@@ -238,6 +238,29 @@ test('conversation metadata snapshots and lost append replies preserve the origi
   assert.deepEqual((await store.read('task-board/task', pin)).value.comments, [comment(1)]);
 });
 
+test('prepared status writes retain comment-only attachments without hydrating their history again', async t => {
+  const f = taskBoardFixture(t), created = await f.create(), store = f.first.store, taskId = created.task!.objectId;
+  const uploaded = await f.invoke({ action: 'uploadAttachment', operationId: 'comment-proof', taskId,
+    expectedRevision: created.task!.revision, attachmentId: 'comment-proof', filename: 'proof.txt', mediaType: 'text/plain',
+    bytesBase64: Buffer.from('comment proof').toString('base64') });
+  const initial = await store.read('task-board/task', uploaded.task!);
+  const attached = { ...comment(1), attachments: [uploaded.attachment!] };
+  const saved = await store.write('task-board/task', { ...initial.value, attachments: [], comments: [attached] }, 'comment-only',
+    { objectId: taskId, expectedRevision: initial.pin.revision });
+  const loaded = await store.read('task-board/task', saved);
+  const prepared = await store.prepareTaskSnapshot({ ...loaded.value, workRevision: loaded.value.workRevision + 1 }, taskId, 'prepared-status');
+  const reads = t.mock.method(TaskComments.prototype, 'read');
+  const applied = await store.writePrepared('task-board/task', prepared, await store.preparedMutationId('prepared-status'),
+    { objectId: taskId, expectedRevision: saved.revision });
+  assert.equal(reads.mock.callCount(), 0, 'the prepared history is already verified');
+  reads.mock.restore();
+  const raw = await store.client.request('objects.read', applied);
+  assert.equal(hashJson(raw.content.value), hashJson(prepared), 'apply preserves the exact prepared payload');
+  assert.ok(Object.values(raw.revision.references).some(pin => hashJson(pin) === hashJson(uploaded.attachment!.object)),
+    'attachments held only by comments remain protected from retention');
+  assert.deepEqual((await f.second.store.read('task-board/task', applied)).value.comments, [attached]);
+});
+
 test('storage backfill includes archived tickets and preserves inline historical snapshots', async t => {
   const f = taskBoardFixture(t), created = await f.create(), store = f.first.store;
   const initial = await store.read('task-board/task', created.task!.objectId);
