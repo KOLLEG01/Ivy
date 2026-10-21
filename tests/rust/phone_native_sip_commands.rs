@@ -9,6 +9,9 @@ mod feedback;
 mod incoming;
 #[path = "phone_native_info.rs"]
 mod info;
+#[cfg(windows)]
+#[path = "phone_native_lifecycle_boundaries.rs"]
+mod lifecycle_boundaries;
 #[path = "phone_native_notifications.rs"]
 mod notifications;
 #[path = "phone_native_registration.rs"]
@@ -515,10 +518,13 @@ async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse()
     cancel(dispatcher.execute(command("configure", &params, 1, 1))).await;
     until(|| setup.entered.load(Ordering::SeqCst)).await;
     let selected = format!(r#"{{"callId":"{CALL}"}}"#);
-    let early = dispatcher
-        .execute(command("call.prepare", &selected, 2, 2))
-        .await;
-    assert_eq!(early.outcome().error_code(), Some("runtime_not_ready"));
+    cancel(dispatcher.execute(command("call.prepare", &selected, 2, 2))).await;
+    sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        dispatcher.receipt_count(),
+        1,
+        "entered setup retains admission"
+    );
     assert_eq!(factory.starts.load(Ordering::SeqCst), 0);
     assert!(
         timeout(
@@ -540,17 +546,9 @@ async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse()
         .parse::<SocketAddr>()
         .unwrap();
     assert_eq!(setups.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        dispatcher
-            .execute(command("call.prepare", &selected, 2, 5))
-            .await
-            .outcome()
-            .error_code(),
-        Some("runtime_not_ready")
-    );
-    cancel(dispatcher.execute(command("call.prepare", &selected, 3, 6))).await;
+    cancel(dispatcher.execute(command("call.prepare", &selected, 2, 5))).await;
     let prepared = dispatcher
-        .execute(command("call.prepare", &selected, 3, 7))
+        .execute(command("call.prepare", &selected, 2, 7))
         .await;
     assert_eq!(prepared.request_id(), 7);
     assert_eq!(
@@ -568,7 +566,7 @@ async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse()
     assert_eq!(factory.starts.load(Ordering::SeqCst), 1);
     assert_eq!(handler.cleanup_slots(), 4);
     let conflict = dispatcher
-        .execute(command("call.prepare", "{\"callId\":null}", 3, 8))
+        .execute(command("call.prepare", "{\"callId\":null}", 2, 8))
         .await;
     assert_eq!(conflict.outcome().error_code(), Some("operation_conflict"));
     assert_eq!(media.create_offer().unwrap().to_sdp(), offer);
@@ -638,7 +636,7 @@ async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse()
         IvyJson::object([
             ("setupInvocations", n(1)),
             ("factoryInvocations", n(2)),
-            ("retainedNegativeReceipt", true.into()),
+            ("retainedPositiveReceiptAfterEnteredSetup", true.into()),
             ("originalIdentityOnReplay", true.into()),
             ("oldReleaseCannotCloseReplacement", true.into()),
             ("callerShutdownInvocations", n(1)),
@@ -648,7 +646,7 @@ async fn concrete_native_lifecycle_receipts_survive_observer_loss_and_id_reuse()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_command_shutdown_finally_drains_caller_after_sip_failure_and_retains_uncertainty() {
+async fn native_command_shutdown_drains_host_after_setup_failure_then_retains_caller_failure() {
     let mut rows = Vec::new();
     for mode in 0..=3 {
         let (owner, _, _, params) = actual_owner(46000, 46998);
@@ -666,19 +664,15 @@ async fn native_command_shutdown_finally_drains_caller_after_sip_failure_and_ret
         let endpoint = owner.observation().endpoint.unwrap();
         let stop = handler.shutdown();
         drop(stop);
-        assert_eq!(
-            handler.shutdown().await,
+        let expected = if mode == 0 {
+            Ok(())
+        } else {
             Err(NativeShutdownError::OutcomeUnknown)
-        );
-        assert_eq!(
-            handler.shutdown().await,
-            Err(NativeShutdownError::OutcomeUnknown)
-        );
+        };
+        assert_eq!(handler.shutdown().await, expected);
+        assert_eq!(handler.shutdown().await, expected);
         assert_eq!(remaining.closes.load(Ordering::SeqCst), 1);
-        assert!(
-            std::net::UdpSocket::bind(endpoint).is_err(),
-            "unconfirmed SIP setup retains its fence"
-        );
+        drop(std::net::UdpSocket::bind(endpoint).expect("host closes before caller cleanup"));
         assert_eq!(
             handler
                 .invoke(command("call.prepare", "{}", 2, 2))
@@ -689,7 +683,8 @@ async fn native_command_shutdown_finally_drains_caller_after_sip_failure_and_ret
         rows.push(IvyJson::object([
             ("callerMode", n(mode)),
             ("oneCallerCleanup", true.into()),
-            ("sipFailureRetained", true.into()),
+            ("setupFailureDoesNotPreventHostCleanup", true.into()),
+            ("callerFailureRetained", (mode != 0).into()),
         ]));
     }
     trace("native-lifecycle-shutdown", IvyJson::Array(rows));

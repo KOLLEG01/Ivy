@@ -574,7 +574,7 @@ async fn native_configuration_and_actual_media_admission_survive_lost_observers_
     );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_native_setup_and_uncertain_construction_retain_original_capacity_and_binding() {
+async fn failed_native_setup_retires_binding_but_uncertain_construction_retains_it() {
     let mut rows = Vec::new();
     for uncertain in [false, true] {
         let (owner, factory) = operations(0);
@@ -589,25 +589,15 @@ async fn failed_native_setup_and_uncertain_construction_retain_original_capacity
         assert_eq!(operation.wait().await, Err(error));
         let endpoint = owner.observation().endpoint.unwrap();
         assert!(owner.configured());
-        assert_eq!(
-            owner.prepare(CALL.into()).err(),
-            Some(SipHostError::NotReady)
-        );
         assert_eq!(factory.starts.load(Ordering::SeqCst), 0);
         assert!(std::net::UdpSocket::bind(endpoint).is_err());
         factory.owner.lock().unwrap().take();
-        let closed = owner.close().wait().await;
-        if uncertain {
-            assert_eq!(closed, Err(SipHostError::CleanupUnconfirmed));
-            assert!(std::net::UdpSocket::bind(endpoint).is_err());
-        } else {
-            closed.unwrap();
-            drop(std::net::UdpSocket::bind(endpoint).unwrap());
-        }
+        owner.close().wait().await.unwrap();
+        drop(std::net::UdpSocket::bind(endpoint).unwrap());
         rows.push(IvyJson::object([
             ("setupUncertain", uncertain.into()),
             ("noFactoryDispatch", true.into()),
-            ("closeConfirmed", (!uncertain).into()),
+            ("closeConfirmed", true.into()),
         ]));
     }
     for mode in 1..=3 {

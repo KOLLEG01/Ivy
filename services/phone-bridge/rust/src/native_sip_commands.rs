@@ -6,7 +6,9 @@ use crate::{
     native_media_settings::{NativeAudioSettings, NativeScreeningSettings},
     native_pipe::{NativeRuntime, NativeShutdown, NativeShutdownError},
     native_registration::registration_json,
-    native_rpc::{NativeHandler, NativeInvocation, NativeOutcome, NativeRequest},
+    native_rpc::{
+        NativeHandler, NativeInvocation, NativeInvocationStart, NativeOutcome, NativeRequest,
+    },
     native_sip::{NativeSipError, NativeSipOperation, NativeSipOperations, retained},
     native_sip_status::{NativeSipViews, call_json, status_json},
     sip::SipHostError,
@@ -102,12 +104,9 @@ impl NativeSipCommands {
                 }
             }));
         }
-        // A partial/failed setup cannot grant authority to construct media.
-        if self
-            .owner
-            .configuration_result()
-            .is_none_or(|result| result.is_err())
-        {
+        // The original configured/host latches precede optional setup. A thrown
+        // Micro/registration constructor does not undo an already created host.
+        if !state.configured || state.endpoint.is_none() {
             return Err(SipHostError::NotReady.into());
         }
         let fields = request
@@ -377,6 +376,21 @@ fn failed(error: NativeSipError) -> NativeOutcome {
     NativeOutcome::error(error.code())
 }
 impl NativeHandler for NativeSipCommands {
+    fn start(&self, request: NativeRequest) -> NativeInvocationStart {
+        let configuring = request.method() == "configure";
+        let action = self.invoke(request);
+        Box::pin(async move {
+            if configuring {
+                // NativeRpc's original invocation lock spans synchronous host,
+                // Micro and registration setup. Retain it across the equivalent
+                // asynchronous Rust work, without blocking a runtime worker.
+                let outcome = action.await;
+                Box::pin(async move { outcome }) as NativeInvocation
+            } else {
+                action
+            }
+        })
+    }
     fn cleanup_slots(&self) -> usize {
         (self.owner.observation().calls.len() * 4).max(4)
     }

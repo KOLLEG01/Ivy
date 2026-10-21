@@ -3,8 +3,8 @@
 use crate::{
     ipc::{FrameError, FrameReader, MAX_RECEIPTS, has_pipe_capacity},
     native_rpc::{
-        NativeDispatcher, NativeHandler, NativeInvocation, NativeOutcome, NativeReply,
-        NativeRequest,
+        NativeDispatcher, NativeHandler, NativeInvocation, NativeInvocationStart, NativeOutcome,
+        NativeReply, NativeRequest,
     },
 };
 use std::{
@@ -105,6 +105,14 @@ struct PipeHandler {
     stop: Arc<Stop>,
 }
 impl NativeHandler for PipeHandler {
+    fn start(&self, request: NativeRequest) -> NativeInvocationStart {
+        if matches!(request.method(), "heartbeat" | "shutdown") {
+            let action = self.invoke(request);
+            Box::pin(async move { action })
+        } else {
+            self.runtime.start(request)
+        }
+    }
     fn cleanup_slots(&self) -> usize {
         self.runtime.cleanup_slots()
     }
@@ -260,14 +268,14 @@ async fn run<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                 }
                 continue;
             }
-            let response = dispatcher.begin(request);
+            let response = dispatcher.begin(request).await;
             let output = output.clone();
             let stop = stop.clone();
             active.spawn(async move { write_reply(&output, response.await, &stop).await });
         }
         buffer[..count].fill(0);
     }
-    dispatcher.stop();
+    dispatcher.stop().await;
     stop.token.cancel();
     let _ = reader.finish(); // Original EOF silently discards a partial frame.
     buffer.fill(0);

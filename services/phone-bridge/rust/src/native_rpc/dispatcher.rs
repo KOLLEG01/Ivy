@@ -4,12 +4,20 @@ use super::*;
 use std::{future::Future, pin::Pin, sync::Mutex};
 
 pub type NativeInvocation = Pin<Box<dyn Future<Output = NativeOutcome> + Send + 'static>>;
+pub type NativeInvocationStart = Pin<Box<dyn Future<Output = NativeInvocation> + Send + 'static>>;
 pub trait NativeHandler: Send + Sync + 'static {
     /// Called under admission serialization after the stopping recheck.
     /// Construct owned work without blocking or re-entering the dispatcher.
     /// Validation/typed errors belong in the safe NativeOutcome; raw stack or
     /// protected request details must never become result/error diagnostics.
     fn invoke(&self, request: NativeRequest) -> NativeInvocation;
+    /// Preserve the original synchronous invocation prefix under the same gate
+    /// as receipt admission. Async Rust startup may suspend here; only the
+    /// returned action runs after releasing that gate.
+    fn start(&self, request: NativeRequest) -> NativeInvocationStart {
+        let action = self.invoke(request);
+        Box::pin(async move { action })
+    }
     fn cleanup_slots(&self) -> usize;
 }
 
@@ -61,6 +69,7 @@ impl NativeReply {
 }
 struct Shared {
     receipts: Mutex<NativeReceipts>,
+    admission: Arc<tokio::sync::Mutex<()>>,
     epoch: String,
     handler: Arc<dyn NativeHandler>,
 }
@@ -74,33 +83,59 @@ impl NativeDispatcher {
     ) -> Result<Self, FrameError> {
         Ok(Self(Arc::new(Shared {
             receipts: Mutex::new(NativeReceipts::new(epoch.clone(), capacity)?),
+            admission: Arc::new(tokio::sync::Mutex::new(())),
             epoch,
             handler,
         })))
     }
-    pub fn stop(&self) {
+    pub async fn stop(&self) {
+        let _gate = self.0.admission.lock().await;
         self.0.receipts.lock().unwrap().stop();
     }
     pub fn receipt_count(&self) -> usize {
         self.0.receipts.lock().unwrap().len()
     }
     pub async fn execute(&self, request: NativeRequest) -> NativeReply {
-        self.begin(request).await
+        self.begin(request).await.await
     }
     /// Admit before the pipe reads its next frame, independently of when its
     /// response observer is scheduled. Actual invocation still rechecks stop.
-    pub(crate) fn begin(
+    pub(crate) async fn begin(
         &self,
         request: NativeRequest,
     ) -> impl Future<Output = NativeReply> + Send + use<> {
         let request_id = request.request_id();
+        let receipt = match self.0.admission.clone().try_lock_owned() {
+            Ok(_gate) => self.admit(request),
+            Err(_) => {
+                // Once entered, admission belongs to the dispatcher even when
+                // its observer leaves while an original synchronous prefix runs.
+                let owner = self.clone();
+                tokio::spawn(async move {
+                    let _gate = owner.0.admission.lock().await;
+                    owner.admit(request)
+                })
+                .await
+                .unwrap_or_else(|_| Err(NativeOutcome::error("operation_outcome_unknown")))
+            }
+        };
+        let owner = self.clone();
+        async move {
+            let outcome = match receipt {
+                Ok(receipt) => receipt.wait().await,
+                Err(outcome) => outcome,
+            };
+            owner.reply(request_id, outcome)
+        }
+    }
+    fn admit(&self, request: NativeRequest) -> Result<Arc<NativeReceipt>, NativeOutcome> {
         let admission = self
             .0
             .receipts
             .lock()
             .unwrap()
             .admit_with(&request, || self.0.handler.cleanup_slots());
-        let receipt = match admission {
+        match admission {
             Admission::Reject(error) => Err(NativeOutcome::error(error)),
             Admission::Replay(receipt) => Ok(receipt),
             Admission::Dispatch(receipt) => {
@@ -119,13 +154,16 @@ impl NativeDispatcher {
                     let invocation = tokio::spawn(async move {
                         tokio::task::yield_now().await;
                         let pending = {
-                            let state = owner.receipts.lock().unwrap();
-                            if !state.may_invoke() {
+                            let _gate = owner.admission.lock().await;
+                            if !owner.receipts.lock().unwrap().may_invoke() {
                                 return NativeOutcome::error("runtime_stopping");
                             }
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                owner.handler.invoke(request)
-                            }))
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                owner.handler.start(request)
+                            })) {
+                                Ok(start) => Ok(start.await),
+                                Err(error) => Err(error),
+                            }
                         };
                         match pending {
                             Ok(pending) => pending.await,
@@ -139,14 +177,6 @@ impl NativeDispatcher {
                 });
                 Ok(receipt)
             }
-        };
-        let owner = self.clone();
-        async move {
-            let outcome = match receipt {
-                Ok(receipt) => receipt.wait().await,
-                Err(outcome) => outcome,
-            };
-            owner.reply(request_id, outcome)
         }
     }
     pub(crate) fn reply(&self, request_id: u64, outcome: NativeOutcome) -> NativeReply {

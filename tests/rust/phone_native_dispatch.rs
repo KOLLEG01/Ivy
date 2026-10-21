@@ -246,7 +246,7 @@ async fn stop_between_admission_and_invocation_is_checked_before_any_handler_eff
     let handler = Handler::new(Behavior::Success);
     let dispatcher = NativeDispatcher::new(EPOCH.into(), 16, handler.clone()).unwrap();
     cancel_observer(dispatcher.execute(request("call.prepare", Some(OP), "{}", 1))).await;
-    dispatcher.stop();
+    dispatcher.stop().await;
     let result = dispatcher
         .execute(request("call.prepare", Some(OP), "{}", 2))
         .await;

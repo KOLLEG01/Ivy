@@ -371,14 +371,16 @@ impl NativeSipOperations {
         let host = self.0.host.clone();
         let incoming_owner = Arc::downgrade(&self.0);
         let operation = retained(async move {
-            let endpoint = host
+            let result = host
                 .configure_with_setup(parts.host, move || setup(parts.micro))
-                .await?;
-            host.start_requests(Arc::new(move |transaction, source| {
-                let owner = incoming_owner.clone();
-                Box::pin(async move { Self::receive_request(owner, transaction, source).await })
-            }))?;
-            Ok(endpoint)
+                .await;
+            if host.observation().endpoint.is_some() {
+                host.start_requests(Arc::new(move |transaction, source| {
+                    let owner = incoming_owner.clone();
+                    Box::pin(async move { Self::receive_request(owner, transaction, source).await })
+                }))?;
+            }
+            result
         });
         state.configuring = Some(operation.clone());
         Ok(operation)
@@ -418,14 +420,13 @@ impl NativeSipOperations {
         if state.stopping {
             return Err(SipHostError::Stopping);
         }
-        // A retained socket alone is insufficient: setup/registration creation
-        // may have failed after bind. Only a successful saved configuration
-        // grants authority to construct any call media.
+        // Await entered setup, but preserve the original host after an optional
+        // constructor throws. Only a missing host prevents subsequent commands.
         if state
             .configuring
             .as_ref()
-            .and_then(NativeSipOperation::result)
-            .is_none_or(|r| r.is_err())
+            .is_none_or(|work| work.result().is_none())
+            || self.0.host.observation().endpoint.is_none()
         {
             return Err(SipHostError::NotReady);
         }
@@ -600,10 +601,10 @@ impl NativeSipOperations {
         };
         transaction.destination = source.clone();
         let configuring = owner.0.state.lock().unwrap().configuring.clone();
-        let configured = match configuring {
-            Some(work) => work.wait().await.is_ok(),
-            None => false,
-        };
+        if let Some(work) = configuring {
+            let _ = work.wait().await;
+        }
+        let configured = owner.0.host.observation().endpoint.is_some();
         let wire = transaction
             .original
             .call_id_header()
@@ -1302,12 +1303,10 @@ impl NativeSipOperations {
         let owner = self.clone();
         let configuring = state.configuring.clone();
         let operation = retained(async move {
-            // Failed optional setup can still own native resources. Its
-            // uncertainty must not become a confirmed close or free binding.
+            // Construction failure is distinct from failed cleanup. The original
+            // disposes the already-created host, then its caller-owned runtime.
             if let Some(configuring) = configuring {
-                if configuring.wait().await == Err(SipHostError::CleanupUnconfirmed) {
-                    return Err(SipHostError::CleanupUnconfirmed);
-                }
+                let _ = configuring.wait().await;
             }
             owner.0.host.close().await?;
             owner.0.state.lock().unwrap().calls.clear();

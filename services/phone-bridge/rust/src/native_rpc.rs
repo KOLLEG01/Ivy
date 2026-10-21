@@ -12,7 +12,9 @@ use std::{
 };
 use tokio::sync::Notify;
 mod dispatcher;
-pub use dispatcher::{NativeDispatcher, NativeHandler, NativeInvocation, NativeReply};
+pub use dispatcher::{
+    NativeDispatcher, NativeHandler, NativeInvocation, NativeInvocationStart, NativeReply,
+};
 
 /// Fields are private so only a bounded, fully validated envelope can be admitted.
 /// Raw params are retained for the native retry identity, not canonicalized.
