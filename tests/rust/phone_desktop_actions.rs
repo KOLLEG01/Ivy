@@ -801,6 +801,111 @@ fn corpus(image: &str) -> IvyJson {
         ("native", IvyJson::Array(native)),
     ])
 }
+fn reentrant() -> IvyJson {
+    struct App {
+        inner: bool,
+        trace: Trace,
+    }
+    impl DesktopApplication for App {
+        fn observe(&mut self) -> ActionResult<Option<DesktopObservation>> {
+            log(
+                &self.trace,
+                if self.inner {
+                    "inner.observe"
+                } else {
+                    "outer.observe"
+                },
+            );
+            if !self.inner {
+                let result = launch_desktop(
+                    &mut App {
+                        inner: true,
+                        trace: self.trace.clone(),
+                    },
+                    false,
+                );
+                log(&self.trace, format!("nested_launch:{}", result.phase));
+            }
+            Ok(Some(DesktopObservation::select(false, vec![])))
+        }
+        fn activate(&mut self) -> ActionResult<i32> {
+            log(&self.trace, "outer.activate");
+            Ok(123)
+        }
+    }
+    struct Owner;
+    impl DesktopOwner for Owner {
+        fn is_current(&mut self) -> ActionResult<bool> {
+            Ok(true)
+        }
+        fn try_focus(&mut self) -> ActionResult<bool> {
+            Ok(true)
+        }
+        fn is_focused(&mut self) -> ActionResult<bool> {
+            Ok(true)
+        }
+    }
+    struct Keyboard {
+        inner: bool,
+        trace: Trace,
+    }
+    impl KeyboardInput for Keyboard {
+        fn is_idle(&mut self) -> ActionResult<bool> {
+            Ok(true)
+        }
+        fn send(&mut self, keys: &[KeyStroke]) -> ActionResult<i32> {
+            log(
+                &self.trace,
+                format!(
+                    "{}.send:{}",
+                    if self.inner { "inner" } else { "outer" },
+                    keys.len()
+                ),
+            );
+            if !self.inner {
+                let result = dispatch_hotkey(
+                    &mut Owner,
+                    &mut Keyboard {
+                        inner: true,
+                        trace: self.trace.clone(),
+                    },
+                    &["control".into()],
+                    32,
+                    false,
+                    false,
+                )?;
+                log(&self.trace, format!("nested_hotkey:{}", result.phase));
+            }
+            Ok(keys.len() as i32)
+        }
+    }
+    let trace = Rc::new(RefCell::new(Vec::new()));
+    let launch = launch_desktop(
+        &mut App {
+            inner: false,
+            trace: trace.clone(),
+        },
+        true,
+    );
+    let hotkey = dispatch_hotkey(
+        &mut Owner,
+        &mut Keyboard {
+            inner: false,
+            trace: trace.clone(),
+        },
+        &["control".into()],
+        32,
+        false,
+        false,
+    )
+    .unwrap();
+    let events = trace.borrow().clone();
+    row([
+        ("launch", launch.phase.into()),
+        ("hotkey", hotkey.phase.into()),
+        ("trace", IvyJson::Array(events)),
+    ])
+}
 #[test]
 fn original_launch_input_focus_and_invoke_policy_agree() {
     struct Quiet(Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>>);
@@ -854,6 +959,7 @@ fn original_launch_input_focus_and_invoke_policy_agree() {
         array(input.get(key).unwrap().as_array().unwrap().iter().map(f))
     };
     let actual = row([
+        ("reentrant", reentrant()),
         (
             "applications",
             apply("applications", &|v| {
@@ -885,7 +991,8 @@ fn original_launch_input_focus_and_invoke_policy_agree() {
         stringify(&actual, LIMIT).unwrap(),
     )
     .unwrap();
-    let mut total = 0;
+    assert_eq!(actual.get("reentrant"), original.get("reentrant"));
+    let mut total = 2;
     for key in [
         "applications",
         "plans",

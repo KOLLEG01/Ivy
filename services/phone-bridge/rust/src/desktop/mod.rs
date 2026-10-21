@@ -13,7 +13,7 @@ pub use actions::{
     ActionResult, CurrentApplication, CurrentDesktopOwner, DesktopActionError, DesktopApplication,
     DesktopInvokePhase, DesktopLaunchResult, DesktopObservation, DesktopOwner, HotkeyResult,
     InvokeSource, KeyStroke, KeyboardInput, confirm_activation, dispatch_hotkey, invoke_voice,
-    launch_desktop, validate_application,
+    launch_desktop, plan_hotkey, validate_application,
 };
 #[cfg(all(windows, target_pointer_width = "64"))]
 pub use windows_input::WindowsKeyboardInput;
