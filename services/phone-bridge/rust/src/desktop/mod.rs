@@ -15,4 +15,5 @@ pub use voice::{
 pub use voice_session::{DesktopVoiceSession, TimedVoiceControlObservation, VoiceSource};
 
 #[cfg(all(test, windows))]
+#[path = "../../../../../tests/rust/phone_desktop_controls.rs"]
 mod tests;
