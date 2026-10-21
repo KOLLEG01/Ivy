@@ -6,6 +6,13 @@ UI requirements: [UI](UI.md).
 
 ## Work and allocation
 
+- Model, reasoning and speed remain editable during execution. Save the desired settings
+  and request that the current turn yield at a safe stopping point through the existing
+  steering channel. After confirmed completion, continue the same conversation with the
+  latest settings; consume the pending marker with the durable start claim and reuse normal
+  retries. The yield does not publish a final result or notify the parent/user. Cancellation
+  wins. Idle settings edits do not wake tickets or invalidate their results.
+
 - Questions explicitly address `user` or a task ID. Task questions remain canonical in the
   sender ticket and are relayed once through durable comments to the recipient. An answer
   names that recipient in `sourceTaskId` and the original question in `replyTo`. Internal

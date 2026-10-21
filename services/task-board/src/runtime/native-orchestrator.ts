@@ -295,8 +295,10 @@ export class TaskBoardNativeOrchestrator {
           const observedDependencies = await dependencySnapshot(store, task.value);
           const wakeAt = task.value.wakeAt && task.value.wakeAt <= new Date().toISOString() ? task.value.wakeAt : null;
           if (task.value.workRevision !== baseline.workRevision || commentIds.some(id => !baseline.commentIds.includes(id)) ||
-              dependenciesChanged(task.value, observedDependencies) || wakeAt) {
-            await this.driver.prepare(runId, 'steer', { kind: 'steer', commentIds, observedDependencies, wakeAt, workRevision: task.value.workRevision, peersHash: hashJson([]), predecessor: run.value.calls.steer ?? null });
+              dependenciesChanged(task.value, observedDependencies) || wakeAt ||
+              task.value.executionChangeRequested && !(previous?.kind === 'steer' && previous.executionChangeRequested)) {
+            await this.driver.prepare(runId, 'steer', { kind: 'steer', commentIds, observedDependencies, wakeAt, workRevision: task.value.workRevision, peersHash: hashJson([]), predecessor: run.value.calls.steer ?? null,
+              ...(task.value.executionChangeRequested ? { executionChangeRequested: true } : {}) });
             return;
           }
         }

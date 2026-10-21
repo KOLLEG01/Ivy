@@ -926,14 +926,25 @@ export class TaskBoardEngine {
     if (first && operation.value.handoffRun) {
       const current = operation.value.handoffWork ? base : await this.store.read('task-board/task', request.taskId);
       const expected = operation.value.handoffWork ?? handoffWork(base.value);
+      const observed = handoffWork(current.value);
+      if (observed.contentHash !== expected.contentHash && current.value.executionChangeRequested) {
+        // A settings edit does not invalidate already accepted work. Preserve the
+        // original hash format for retained handoffs and substitute only options.
+        const original = (await this.store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision })).value;
+        const fields = { ...current.value.fields };
+        if (original.fields.nativeOptions) fields.nativeOptions = original.fields.nativeOptions;
+        else delete fields.nativeOptions;
+        observed.contentHash = handoffWork({ ...current.value, fields }).contentHash;
+      }
       requireThat(current.value.claim?.run?.objectId === operation.value.handoffRun.objectId &&
-        same({ ...handoffWork(current.value), workRevision: 0 }, { ...expected, workRevision: 0 }),
+        same({ ...observed, workRevision: 0 }, { ...expected, workRevision: 0 }),
       'task_board_handoff_changed', 'The original handoff no longer belongs to the same unchanged work and execution claim.');
       base = current;
     }
     if (first && admission && base.pin.revision !== request.expectedRevision) {
       const original = (await this.store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision })).value;
       requireThat(!base.value.claim && base.value.workflowState === original.workflowState && sameAssignment(base.value.fields, original.fields) &&
+        same(base.value.fields.nativeOptions ?? null, original.fields.nativeOptions ?? null) &&
         same(base.value.primaryResourceRef, original.primaryResourceRef) && same(base.value.dependencies, original.dependencies) && base.value.wakeAt === original.wakeAt,
         'revision_conflict', 'The assignment or wake-up schedule changed during allocation.');
     }
@@ -967,6 +978,8 @@ export class TaskBoardEngine {
         next.observedDependencies = await dependencySnapshot(this.store, previous);
         if (next.wakeAt && next.wakeAt <= at) next.wakeAt = null;
         delete next.completionIssue;
+        // The retained start operation now owns the retry, including after a crash.
+        delete next.executionChangeRequested;
       }
       const claim: TaskBoard.Claim = {
         operationId: request.operationId,
@@ -1013,7 +1026,10 @@ export class TaskBoardEngine {
         next.dependencies = request.dependencies;
         next.observedDependencies = await dependencySnapshot(this.store, next);
       }
-      if (!same(previous.dependencies, next.dependencies) || previous.wakeAt !== next.wakeAt || !previous.claim && (request.parentTaskId === undefined || !same(previous.fields, next.fields))) next.workRevision++;
+      if (!same(previous.dependencies, next.dependencies) || previous.wakeAt !== next.wakeAt || !previous.claim &&
+          (!same({ ...previous.fields, nativeOptions: null }, { ...next.fields, nativeOptions: null }) || previous.parentTaskId !== next.parentTaskId)) next.workRevision++;
+      if (previous.claim && !same(previous.fields.nativeOptions ?? null, next.fields.nativeOptions ?? null))
+        next.executionChangeRequested = true;
     }
     if (request.action === "reassign" && first) {
       next = {
@@ -1089,7 +1105,7 @@ export class TaskBoardEngine {
           next.fields = { ...submitted, category: next.fields.category };
         const assignmentChanged = !sameAssignment(previous.fields, next.fields);
         const scheduleChanged = !same(previous.dependencies, next.dependencies) || previous.wakeAt !== next.wakeAt;
-        // An active claim permits only metadata edits, which must not queue another native turn.
+        // Settings changes use the current turn's yield marker; they do not create ticket input.
         if (
           assignmentChanged && next.fields.control === "agent" &&
           previous.workflowState !== "cancelled" &&
@@ -1135,6 +1151,7 @@ export class TaskBoardEngine {
       }
       case "transition":
         next.workflowState = request.workflowState;
+        if (['backlog', 'done', 'cancelled'].includes(request.workflowState)) delete next.executionChangeRequested;
         if (request.workflowState === 'todo' && previous.completionIssue) {
           delete next.completionIssue;
         }
@@ -1230,6 +1247,7 @@ export class TaskBoardEngine {
       }
       case "cancel": {
         detail = request.reason;
+        delete next.executionChangeRequested;
         if (!previous.claim) {
           next.workflowState = "cancelled";
           next.runtimeWait = null;
@@ -1510,18 +1528,19 @@ export class TaskBoardEngine {
     at: string,
     operationId: string,
   ): Promise<void> {
+    const commentRequest = (request.action === 'start' || request.action === 'continue') && triggeredByComments(request);
+    const executionChange = task.executionChangeRequested && ['start', 'continue', 'defer'].includes(request.action);
     requireThat(
-      !terminal(task) || (request.action === 'start' || request.action === 'continue') && triggeredByComments(request) ||
+      !terminal(task) || commentRequest || executionChange ||
         (["edit", "retargetQuestion", "comment", "uploadAttachment"].includes(request.action) || request.action === "transition" &&
           (request.workflowState === "backlog" || task.workflowState === "done" && request.workflowState === "todo")),
       "task_board_invalid_transition",
       "This task is terminal for the requested action.",
     );
-    const commentRequest = (request.action === 'start' || request.action === 'continue') && triggeredByComments(request);
     if (actor.source === 'scheduler') requireThat(
       ['start', 'continue', 'defer', 'transition'].includes(request.action) &&
-      (task.fields.control === 'agent' || commentRequest || request.action === 'defer' && commentsPending(task)),
-      'task_board_user_controlled', 'Automatic task work requires agent control; queued discussion remains independently available.');
+      (task.fields.control === 'agent' || commentRequest || executionChange || request.action === 'defer' && commentsPending(task)),
+      'task_board_user_controlled', 'Automatic allocation requires agent control or continuation of an explicitly triggered turn.');
     const noClaim = () =>
       requireThat(
         !task.claim,
@@ -1566,7 +1585,6 @@ export class TaskBoardEngine {
             "control",
             "requiredCapabilities",
             "executionRequirement",
-            "nativeOptions",
             "workspaceRequirement",
             "allowParallel",
           ] as const)
@@ -1618,7 +1636,7 @@ export class TaskBoardEngine {
       case "continue":
         noClaim();
         requireThat(
-          ['todo', 'waiting', 'review'].includes(task.workflowState) || commentRequest,
+          ['todo', 'waiting', 'review'].includes(task.workflowState) || commentRequest || executionChange,
           "task_board_invalid_transition",
           "Automatic execution starts from Todo or a resumable wait.",
         );
@@ -1629,7 +1647,7 @@ export class TaskBoardEngine {
             "Continuation requires the saved primary native context.",
           );
         requireThat(
-          (task.fields.control === "agent" || commentRequest) && actor.source === "scheduler",
+          (task.fields.control === "agent" || commentRequest || executionChange) && actor.source === "scheduler",
           "task_board_user_controlled",
           "Native Task allocation is automatic for agent-controlled work.",
         );

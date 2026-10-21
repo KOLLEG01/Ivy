@@ -27,7 +27,7 @@ export async function intendedCall(store: TaskBoardStore, run: TaskBoard.Run, sl
       'task_board_native_order', 'Steering requires the exact active native turn.');
     const task = await store.read('task-board/task', run.taskId);
     method = 'turn/steer'; params = { threadId: run.primaryResourceRef.nativeId, expectedTurnId: run.turnId,
-      input: [{ type: 'text', text: taskPrompt(task.value, run.owner.serviceNodeId), text_elements: [] }] };
+      input: [{ type: 'text', text: taskPrompt(task.value, run.owner.serviceNodeId, origin.executionChangeRequested), text_elements: [] }] };
   } else if (origin.kind === 'reattach') {
     const primary = run.primaryResourceRef;
     requireThat(slot === 'thread' && primary?.namespace === 'codex' && primary.kind === 'thread' && primary.serviceNodeId === run.target.serviceNodeId,

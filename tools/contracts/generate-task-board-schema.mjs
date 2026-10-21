@@ -204,7 +204,7 @@ Object.assign(defs, {
     attachments: array(ref('TaskAttachment'), 256), createdAt: timestamp, updatedAt: timestamp }),
   NativeCallOrigin: { oneOf: [obj({ kind: { const: 'initial' } }), obj({ kind: { const: 'reattach' }, predecessor: ref('ObjectPin'), preparedEpoch: id }),
     obj({ kind: { const: 'steer' }, commentIds: array(id, 512), workRevision: integer(), peersHash: hash, predecessor: nullable(ref('ObjectPin')),
-      observedDependencies: { type: 'object', additionalProperties: hash, maxProperties: 128 }, wakeAt: nullable(timestamp) }, ['kind', 'commentIds', 'workRevision', 'peersHash', 'predecessor'])] },
+      observedDependencies: { type: 'object', additionalProperties: hash, maxProperties: 128 }, wakeAt: nullable(timestamp), executionChangeRequested: bool }, ['kind', 'commentIds', 'workRevision', 'peersHash', 'predecessor'])] },
   NativeCall: obj({ operationId: id, request: ref('NativeRequest'), expectedDefinitionHash: hash, origin: ref('NativeCallOrigin'),
     state: { enum: ['prepared', 'observed', 'outcome_unknown'] }, preparedAt: timestamp, observedAt: nullable(timestamp),
     ownerPhase: nullable({ enum: ['accepted', 'dispatched', 'succeeded', 'failed', 'outcome_unknown'] }),
@@ -345,7 +345,8 @@ const wakeFields = { wakeAt: nullable(timestamp), dependencies: { ...array(id, 1
 defs.RuntimeWait = obj({ reason: { enum: ['host', 'capability', 'workspace', 'external_outcome', 'publication'] },
   detail: str(16384, 1), since: timestamp, retryAt: nullable(timestamp) }, ['reason', 'detail', 'since']);
 Object.assign(defs.Task.properties, wakeFields, { runtimeWait: nullable(ref('RuntimeWait')),
-  observedDependencies: { type: 'object', additionalProperties: hash, maxProperties: 128 } });
+  observedDependencies: { type: 'object', additionalProperties: hash, maxProperties: 128 },
+  executionChangeRequested: { type: 'boolean', description: 'A running turn is yielding so the same conversation can continue with the latest execution settings. Consumed with its durable follow-up claim.' } });
 defs.Task.required.push('wakeAt', 'dependencies', 'runtimeWait');
 Object.assign(defs.TaskCard.properties, { runtimeWait: nullable(ref('RuntimeWait')) });
 defs.TaskCard.required.push('runtimeWait');
@@ -369,8 +370,8 @@ defs.StoredContinueRequest.properties.recoveryFor = ref('ObjectPin');
 defs.StoredExecutionRequest = { oneOf: [ref('StoredStartRequest'), ref('StoredContinueRequest')] };
 defs.Run.properties.originalRequest = ref('StoredExecutionRequest');
 defs.Claim.properties.request = ref('StoredExecutionRequest');
-contractVersions.task = '3.0.0';
-defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0', '3.0.0');
+contractVersions.task = '3.1.0';
+defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0', '3.0.0', '3.1.0');
 // Exact evidence pins are already paged; the ticket metadata byte budget is the storage bound.
 delete defs.Task.properties.attachments.maxItems;
 contractVersions.run = '3.0.0';

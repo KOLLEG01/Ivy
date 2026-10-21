@@ -35,6 +35,7 @@ export const dependenciesChanged = (task: TaskBoard.Task, current: Record<string
 export async function shouldWake(store: TaskBoardStore, task: TaskBoard.Task, at: string): Promise<boolean> {
   if (task.claim || task.publication || task.runtimeWait?.retryAt && task.runtimeWait.retryAt > at) return false;
   if (commentsPending(task)) return true;
+  if (task.executionChangeRequested) return !task.completionIssue || !!task.completionIssue.retryAt && task.completionIssue.retryAt <= at;
   if (task.fields.control !== 'agent' || ['backlog', 'done', 'cancelled'].includes(task.workflowState)) return false;
   if (task.completionIssue) return !!task.completionIssue.retryAt && task.completionIssue.retryAt <= at;
   if (missingWakeTrigger(task)) return Date.parse(at) >= Date.parse(task.updatedAt) + 30_000;

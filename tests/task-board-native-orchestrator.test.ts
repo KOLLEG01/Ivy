@@ -37,7 +37,7 @@ async function fixture(t: TestContext, catalogSourceHash?: string) {
     }
     if (frame['method'] === 'turn/steer') return rejectedSteers-- > 0
       ? { error: { code: -32000, message: 'Temporarily unable to accept the turn update.' } }
-      : { result: { turnId: 'native-turn' } };
+      : { result: { turnId: directTurnId ?? 'native-turn' } };
     if (frame['method'] === 'turn/interrupt') { status = 'interrupted'; return { result: {} }; }
     if (frame['method'] === 'thread/read') return { result: { thread: { ...f.w.nativeThread([], archived || unloaded || lazyMetadata && !started ? { type: 'notLoaded' } : started && status === 'inProgress' ? { type: 'active', activeFlags: [] } : { type: 'idle' }),
       canAcceptDirectInput: !archived && !unloaded,
@@ -75,6 +75,160 @@ async function fixture(t: TestContext, catalogSourceHash?: string) {
     prefixTurns: (values: Wire.Json[]) => { pagePrefix = values; },
     current: () => f.w.f.first.store.read('task-board/run', runId) };
 }
+
+async function changeExecution(f: Awaited<ReturnType<typeof fixture>>, options: TaskBoard.NativeOptions) {
+  const engine = f.f.w.f.first, task = await engine.store.read('task-board/task', (await f.current()).value.taskId);
+  return f.f.w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId: task.pin.objectId,
+    expectedRevision: task.pin.revision, fields: { ...task.value.fields, nativeOptions: options } });
+}
+
+test('execution settings yield once, coalesce changes and continue the same chat without a final notification', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  await f.first.drain(f.runId);
+  const before = await engine.store.read('task-board/task', (await f.current()).value.taskId), originalPlan = (await f.current()).value.plan;
+  const first = { model: 'gpt-fixture', reasoningEffort: 'low', serviceTier: 'fast' } as const;
+  await changeExecution(f, first);
+  let task = await engine.store.read('task-board/task', before.pin.objectId);
+  assert.equal(task.value.executionChangeRequested, true);
+  assert.equal(task.value.workflowState, 'in_progress');
+  assert.equal(task.value.workRevision, before.value.workRevision);
+  assert.deepEqual(task.value.comments, before.value.comments);
+  assert.deepEqual((await f.current()).value.plan, originalPlan);
+  f.rejectSteers(1);
+  for (let i = 0; i < 4; i++) await f.first.drain(f.runId);
+  const last = { model: 'fixture-model', reasoningEffort: 'xhigh', serviceTier: 'flex' } as const;
+  await changeExecution(f, last); await changeExecution(f, last);
+  await f.second.drain(f.runId);
+  const steers = f.f.frames.filter(frame => frame['method'] === 'turn/steer');
+  assert.equal(steers.length, 2, 'One rejected delivery is retried; later setting edits reuse the pending yield.');
+  assert.match(JSON.stringify(steers.at(-1)), /safe stopping point/);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
+  await f.f.w.handoff('Yielding for the settings change.');
+  f.status('completed'); await f.second.drain(f.runId);
+  task = await engine.store.read('task-board/task', before.pin.objectId);
+  assert.equal(task.value.claim, null); assert.equal(task.value.executionChangeRequested, true);
+  assert.notEqual(task.value.workflowState, 'review');
+  const result = await engine.store.read('task-board/result', (await f.current()).value.result!);
+  assert.equal(result.value.kind, 'intermediate');
+  assert.equal((await engine.store.page('task-board/delivery')).items.length, 0);
+  const next = await new TaskBoardScheduler(engine).task(task.pin.objectId);
+  assert.ok(next?.run);
+  task = await engine.store.read('task-board/task', task.pin.objectId);
+  assert.equal(task.value.executionChangeRequested, undefined);
+  const run = await engine.store.read('task-board/run', next.run);
+  assert.deepEqual(run.value.primaryResourceRef, before.value.primaryResourceRef);
+  assert.equal(run.value.plan.turnStart.model, last.model);
+  assert.equal(run.value.plan.turnStart.effort, last.reasoningEffort);
+  assert.equal(run.value.plan.turnStart.serviceTier, last.serviceTier);
+  await f.second.drain(next.run.objectId);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/start').length, 1);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 2);
+  assert.doesNotMatch(JSON.stringify(f.f.frames.filter(frame => frame['method'] === 'turn/start').at(-1)), /safe stopping point/);
+  assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
+});
+
+for (const control of ['agent', 'user'] as const)
+test(`execution settings survive a rejected follow-up start on ${control} tasks and cancellation wins`, async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  await f.first.drain(f.runId);
+  const options = { model: 'gpt-fixture', reasoningEffort: 'low', serviceTier: 'fast' } as const;
+  await changeExecution(f, options); await f.first.drain(f.runId);
+  f.status('completed'); await f.first.drain(f.runId);
+  const taskId = (await f.current()).value.taskId;
+  if (control === 'user') {
+    const idle = await engine.store.read('task-board/task', taskId);
+    await f.f.w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId, expectedRevision: idle.pin.revision,
+      fields: { ...idle.value.fields, control } });
+  }
+  const next = await new TaskBoardScheduler(engine).task(taskId); assert.ok(next?.run);
+  assert.equal((await engine.store.read('task-board/task', taskId)).value.executionChangeRequested, undefined);
+  f.rejectStart('Server is overloaded. Please try again.');
+  await f.second.drain(next.run.objectId);
+  let task = await engine.store.read('task-board/task', taskId);
+  assert.equal(task.value.executionChangeRequested, true);
+  assert.ok(task.value.completionIssue?.retryAt);
+  f.rejectStart(null);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(task.value.completionIssue!.retryAt!) + 1 });
+  const retry = await new TaskBoardScheduler(engine).task(taskId);
+  assert.ok(retry?.run);
+  assert.equal((await engine.store.read('task-board/run', retry.run)).value.plan.turnStart.serviceTier, 'fast');
+  await f.second.drain(retry.run.objectId);
+  await changeExecution(f, { ...options, serviceTier: 'standard' });
+  task = await engine.store.read('task-board/task', taskId);
+  await f.f.w.f.invoke({ action: 'cancel', operationId: randomUUID(), taskId, expectedRevision: task.pin.revision, reason: 'User cancellation wins.' });
+  await f.second.drain(retry.run.objectId);
+  task = await engine.store.read('task-board/task', taskId);
+  assert.equal(task.value.workflowState, 'cancelled');
+  assert.equal(task.value.executionChangeRequested, undefined);
+  assert.equal(await new TaskBoardScheduler(engine).task(taskId), null);
+});
+
+test('idle execution settings preserve review, results and dependency revisions without waking work', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  await f.first.drain(f.runId); await f.f.w.handoff(); f.status('completed'); await f.first.drain(f.runId);
+  const before = await engine.store.read('task-board/task', (await f.current()).value.taskId);
+  const options = { model: 'gpt-fixture', reasoningEffort: 'low', serviceTier: 'fast' } as const;
+  await changeExecution(f, options);
+  const after = await engine.store.read('task-board/task', before.pin.objectId);
+  for (const key of ['workflowState', 'latestResult', 'acceptedReview', 'workRevision', 'comments', 'commentDeliveries'] as const)
+    assert.deepEqual(after.value[key], before.value[key], key);
+  assert.equal(after.value.executionChangeRequested, undefined);
+  assert.equal(await new TaskBoardScheduler(engine).task(after.pin.objectId), null);
+  await assert.rejects(changeExecution(f, { ...options, reasoningEffort: 'unsupported-effort' }), { code: 'task_board_model_unavailable' });
+});
+
+test('execution settings continue a directly started turn on a completed ticket in the same conversation', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first, taskId = f.f.w.state().task.objectId;
+  await f.first.drain(f.runId); await f.f.w.handoff(); f.status('completed'); await f.first.drain(f.runId);
+  const review = await engine.store.read('task-board/task', taskId);
+  await f.f.w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId,
+    expectedRevision: review.pin.revision, workflowState: 'done', detail: null });
+  f.directTurn('direct-settings-turn');
+  const adopted = await adoptDirectTurn(engine, taskId); assert.ok(adopted?.run);
+  await changeExecution(f, { model: 'gpt-fixture', reasoningEffort: 'low', serviceTier: 'fast' });
+  await f.second.drain(adopted.run.objectId);
+  f.status('completed'); await f.second.drain(adopted.run.objectId);
+  const yielded = await engine.store.read('task-board/task', taskId);
+  assert.equal(yielded.value.workflowState, 'done');
+  assert.equal(yielded.value.executionChangeRequested, true);
+  const continued = await new TaskBoardScheduler(engine).task(taskId); assert.ok(continued?.run);
+  const run = await engine.store.read('task-board/run', continued.run);
+  assert.deepEqual(run.value.primaryResourceRef, yielded.value.primaryResourceRef);
+  assert.equal(run.value.plan.turnStart.serviceTier, 'fast');
+});
+
+test('execution settings reject stale allocation and recover a lost follow-up claim without losing a newer change', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first;
+  await f.first.drain(f.runId);
+  const options = { model: 'fixture-model', reasoningEffort: 'low', serviceTier: 'fast' } as const;
+  await changeExecution(f, options); f.status('completed'); await f.first.drain(f.runId);
+  const taskId = (await f.current()).value.taskId, before = await engine.store.read('task-board/task', taskId);
+  const scheduler = new TaskBoardScheduler(engine), operationId = randomUUID();
+  const allocation = await scheduler.allocate(before, operationId, 'Continue the ticket.', true);
+  await changeExecution(f, { ...options, serviceTier: 'standard' });
+  await assert.rejects(engine.schedule({ action: 'continue', operationId, taskId, expectedRevision: before.pin.revision,
+    ...allocation, feedback: 'Continue the ticket.', commentIds: [] }), { code: 'revision_conflict' });
+  const current = await engine.store.read('task-board/task', taskId), nextId = randomUUID();
+  const fresh = await scheduler.allocate(current, nextId, 'Continue the ticket.', true);
+  const request: TaskBoard.ContinueRequest = { action: 'continue', operationId: nextId, taskId, expectedRevision: current.pin.revision,
+    ...fresh, feedback: 'Continue the ticket.', commentIds: [] };
+  let lost = false;
+  f.f.w.f.intercept(params => {
+    if (!lost && !('create' in params) && params.objectId === taskId) {
+      lost = true; throw new IvyError('response_lost', 'Claim committed before its reply was lost.', 'unknown');
+    }
+  });
+  await assert.rejects(engine.schedule(request), { code: 'response_lost' });
+  f.f.w.f.intercept(null);
+  const resumed = await f.f.w.f.second.schedule(request);
+  assert.ok(resumed.run);
+  assert.equal((await engine.store.read('task-board/task', taskId)).value.executionChangeRequested, undefined);
+  assert.equal((await engine.store.read('task-board/run', resumed.run)).value.plan.turnStart.serviceTier, null);
+  await changeExecution(f, { ...options, serviceTier: 'flex' });
+  assert.deepEqual(await f.f.w.f.second.schedule(request), resumed);
+  assert.equal((await engine.store.read('task-board/task', taskId)).value.executionChangeRequested, true,
+    'Replaying the prior start must not clear a newer request.');
+});
 
 for (const platform of ['local', 'remote'] as const)
 test(`direct turns on ${platform} platforms are adopted once, survive recovery and finish without starting or notifying themselves`, async t => {

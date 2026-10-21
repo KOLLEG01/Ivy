@@ -371,7 +371,7 @@ export class TaskBoardScheduler {
       .slice(0, 256).map(item => item.commentId);
     const feedback = taskPrompt(value, this.engine.owner.serviceNodeId);
     try {
-      const allocation = await this.allocate(task, operationId, feedback, hasComments);
+      const allocation = await this.allocate(task, operationId, feedback, hasComments || !!value.executionChangeRequested);
       return value.primaryResourceRef
         ? { action: 'continue', ...base, ...allocation, feedback, commentIds }
         : { action: 'start', ...base, ...allocation, commentIds };

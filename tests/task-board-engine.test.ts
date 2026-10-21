@@ -1713,7 +1713,7 @@ test("contact edits during an active claim preserve the running assignment with 
   assert.equal(after.workflowState, "in_progress");
   for (const key of ["claim", "lastRun", "primaryResourceRef", "attemptCount", "runtimeWait", "workRevision", "commentDeliveries"] as const)
     assert.deepEqual(after[key], before.value[key], key);
-  for (const change of [{ requiredCapabilities: ["audio"] }, { nativeOptions: { model: null, reasoningEffort: "low", serviceTier: null } }]) {
+  for (const change of [{ requiredCapabilities: ["audio"] }]) {
     await assert.rejects(f.invoke({
       ...request, operationId: randomUUID(), expectedRevision: edited.task!.revision,
       fields: { ...after.fields, ...change },

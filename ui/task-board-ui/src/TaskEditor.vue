@@ -306,7 +306,7 @@ const hostAgents = computed(
 );
 const hostAgent = computed(() => hostAgents.value[0]);
 
-// Native options show the effective value; a value equal to the default is stored as inherited.
+// Unchanged values can inherit; explicit selections must survive a previous Run's defaults.
 const nativeModel = ref(form.value.nativeOptions?.model ?? ""),
   reasoningEffort = ref(form.value.nativeOptions?.reasoningEffort ?? ""),
   serviceTier = ref(form.value.nativeOptions?.serviceTier ?? "");
@@ -338,20 +338,20 @@ const serviceTierAvailable = computed(() =>
   executionSpeedAvailable(hostAgents.value, shownModel.value, shownEffort.value),
 );
 const chooseModel = (value: string) => {
-  nativeModel.value = value === defaultModel.value ? "" : value;
+  nativeModel.value = value;
 };
 const chooseEffort = (value: string) => {
-  reasoningEffort.value = value === defaultEffort.value ? "" : value;
+  reasoningEffort.value = value;
 };
 const chooseSpeed = (value: string) => {
-  serviceTier.value = value === defaultSpeed.value ? "" : value;
+  serviceTier.value = value;
 };
 watch([shownModel, host], () => {
   if (
     reasoningEffort.value &&
     !nativeEfforts.value.includes(reasoningEffort.value)
   )
-    reasoningEffort.value = "";
+    reasoningEffort.value = defaultEffort.value;
   if (nativeChoices.value.length && !serviceTierAvailable.value && ['fast', 'flex'].includes(shownSpeed.value))
     serviceTier.value = "standard";
 });
@@ -827,7 +827,7 @@ const cancel = () => {
                 id="task-model"
                 class="w-full"
                 :model-value="shownModel"
-                :disabled="locked || fixed || !nativeChoices.length"
+                :disabled="locked || !nativeChoices.length"
                 :placeholder="hostAgents.length ? 'Host default' : 'Host not ready'"
                 @update:model-value="chooseModel"
                 ><option
@@ -866,7 +866,7 @@ const cancel = () => {
                 :model-value="shownSpeed"
                 label="Speed"
                 :options="speedOptions"
-                :disabled="locked || fixed"
+                :disabled="locked"
                 @update:model-value="chooseSpeed"
             /></Field>
           </div>
@@ -876,9 +876,13 @@ const cancel = () => {
               :model-value="shownEffort"
               label="Reasoning"
               :options="effortOptions"
-              :disabled="locked || fixed"
+              :disabled="locked"
               @update:model-value="chooseEffort"
           /></Field>
+          <FieldDescription v-if="fixed">{{ tr(
+            'Änderungen werden gespeichert. Der Agent beendet den laufenden Turn an einem geeigneten Punkt und arbeitet im selben Chat mit den neuen Einstellungen weiter.',
+            'Changes are saved immediately. The agent finishes its current turn at a safe stopping point and continues in the same chat with the new settings.',
+          ) }}</FieldDescription>
           <Alert v-if="environments.error.value" variant="destructive"
             ><AlertTitle>Hosts unavailable</AlertTitle
             ><AlertDescription>{{

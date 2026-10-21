@@ -6,6 +6,7 @@ export const triggeredByComments = (request: Pick<TaskBoard.ExecutionRequest, 'c
 export function nextExecutionMode(task: TaskBoard.Task, at: string): 'execution' | null {
   if (task.claim || task.publication) return null;
   if (commentsPending(task)) return 'execution';
+  if (task.executionChangeRequested) return task.completionIssue && (!task.completionIssue.retryAt || task.completionIssue.retryAt > at) ? null : 'execution';
   if (task.fields.control !== 'agent' || ['backlog', 'done', 'cancelled'].includes(task.workflowState)) return null;
   return task.completionIssue && (!task.completionIssue.retryAt || task.completionIssue.retryAt > at) ? null : 'execution';
 }

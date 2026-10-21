@@ -787,6 +787,13 @@ const showArrived = () => {
       @retry="task.refresh"
     />
     <template v-if="task.value.value">
+      <Alert v-if="task.value.value.value.executionChangeRequested" class="mt-4">
+        <AlertTitle>{{ tr('Einstellungswechsel ausstehend', 'Settings change pending') }}</AlertTitle>
+        <AlertDescription>{{ tr(
+          'Die angezeigte Auswahl ist gespeichert. Nach dem Ende des laufenden Turns geht es im selben Chat mit diesen Einstellungen weiter.',
+          'The displayed selection is saved. After the current turn ends, work continues in the same chat with these settings.',
+        ) }}</AlertDescription>
+      </Alert>
       <Alert
         v-if="
           taskView.value.value && !(tab === 'chat' && task.value.value.value.publication) && task.value.value.value.workflowState !== 'review' &&

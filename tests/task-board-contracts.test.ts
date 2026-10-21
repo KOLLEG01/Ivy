@@ -29,6 +29,13 @@ test('deployed 2.1 conversation contracts remain immutable', () => {
   });
 });
 
+test('deployed 3.0 tasks and runs remain immutable when execution changes are introduced', () => {
+  for (const [key, expected] of [
+    ['task-board/task', 'sha256:1ffca68bd9415e633569ade421d574cef7acbd51932588efb4c2f1f3e21959a0'],
+    ['task-board/run', 'sha256:ee900ccff074b348673ec6f7d846bfa2731e340639e11331d73a3f1ab0994c8e'],
+  ]) assert.equal(hashJson(taskBoardContracts().find(value => value.key === key && value.version === '3.0.0')!), expected);
+});
+
 test('published finding-bearing contracts remain immutable after checks are removed', () => {
   assert.deepEqual(Object.fromEntries(taskBoardContracts().filter(contract => contract.version === '2.0.0' && contract.key !== 'task-board/comment-node')
     .map(contract => [contract.key, hashJson(contract)])), {
@@ -63,7 +70,7 @@ test('findings in older handoffs survive conversion to wake-up settings', () => 
 });
 
 test('published Task contract definitions stay stable when tool descriptions change', () => {
-  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0', '3.0.0'].includes(value.version));
+  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0', '3.0.0', '3.1.0'].includes(value.version));
   assert.deepEqual(Object.fromEntries(contracts.map(value => [value.version, hashJson(value)])), {
     '1.9.0': 'sha256:d77cdc4472e267298847aed6fa7f207d546fbe96afadc1a379c5a886961164ff',
     '1.8.0': 'sha256:00a22238b737fc5e1f178c5dd239b88aaa2467220c103bf7ff3094772cc70db7',

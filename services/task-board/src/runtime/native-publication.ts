@@ -340,7 +340,8 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   const handoffComment = runHandoff(finalTask, request.run.objectId);
   // A directly started turn has no scheduler-owned follow-up to repeat. Without
   // an explicit handoff its completed result awaits review, never another start.
-  const declaredHandoff = handoffComment?.handoff ?? (run.owner.source === 'native' &&
+  const changingExecution = active && task.value.executionChangeRequested && !run.cancellation;
+  const declaredHandoff = changingExecution ? undefined : handoffComment?.handoff ?? (run.owner.source === 'native' &&
     !['done', 'cancelled'].includes(initial.workflowState) ? { workflowState: 'review' as const } : undefined);
   // All semantic/evidence checks precede reservation; deterministic replay below uses original pins.
   const reserved = await steps.write('task-board/task', finalTask, { objectId: request.taskId, expectedRevision: task.pin.revision });
@@ -389,6 +390,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   outcome.run = await steps.write('task-board/run', next, { objectId: request.run.objectId, expectedRevision: request.run.revision });
   if (active) {
     if (completion) {
+      if (run.cancellation) delete finalTask.executionChangeRequested;
       const handoffIntent = declaredHandoff;
       const ready = completion.state === 'succeeded' && handoffIntent?.workflowState === 'review';
       if (ready) finalTask.workRevision++;
@@ -398,7 +400,10 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       }
       finalTask = { ...finalTask, claim: null, runtimeWait: null, primaryResourceRef: next.primaryResourceRef, lastRun: outcome.run };
       const publicationError = store.failedHandoff(request.run.objectId);
-      if (completion.state === 'cancelled') finalTask.workflowState = 'cancelled';
+      if (completion.state === 'cancelled') {
+        finalTask.workflowState = 'cancelled';
+        delete finalTask.executionChangeRequested;
+      }
       else if (completion.state === 'succeeded') {
         delete finalTask.completionIssue;
         finalTask.workflowState = handoffIntent?.workflowState ?? (initial.workflowState === 'in_progress' ? 'todo' : initial.workflowState);
@@ -410,12 +415,18 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
           finalTask.acceptedReview = initial.acceptedReview;
         }
       } else {
-        const retryAt = completion.retryAt ?? (!next.turnId ? new Date(Date.parse(at) + 30_000).toISOString() : null);
+        const retryAt = completion.retryAt ?? (!next.turnId || changingExecution ? new Date(Date.parse(at) + 30_000).toISOString() : null);
         finalTask.workflowState = initial.workflowState === 'in_progress' ? 'todo' : initial.workflowState;
         finalTask.latestResult = task.value.latestResult ?? outcome.result;
         finalTask.completionIssue = { code: completion.code ?? 'native_failed', detail: completion.summary.slice(0, 2048),
           run: request.run, operationId: request.operationId, retryAt };
         if (retryAt) {
+          if (!finalTask.executionChangeRequested && !run.cancellation) {
+            // A rejected continuation must retain its wake-up even for manual or
+            // terminal tickets. Its original claim consumed this exact marker.
+            const origin = await store.read('task-board/task', { objectId: run.taskId, revision: run.originalRequest.expectedRevision }, true, false, true);
+            if (origin.value.executionChangeRequested) finalTask.executionChangeRequested = true;
+          }
           finalTask.commentDeliveries = finalTask.commentDeliveries.map(value => run.originalRequest.commentIds.includes(value.commentId)
             ? { ...value, state: 'queued', updatedAt: at, code: completion.code } : value);
           finalTask.runtimeWait = { reason: 'host', detail: rateLimitWaitingDetail(retryAt), since: at, retryAt };

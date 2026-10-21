@@ -136,23 +136,23 @@ export class TaskComments {
     return { ...header, comments };
   }
 
-  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '3.0.0'): Promise<StoredTask | TreeTask> {
-    if (!['2.2.0', '2.3.0', '3.0.0'].includes(contractVersion)) return this.writeRetained(task, taskId, scope, contractVersion);
+  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '3.1.0'): Promise<StoredTask | TreeTask> {
+    if (!['2.2.0', '2.3.0', '3.0.0', '3.1.0'].includes(contractVersion)) return this.writeRetained(task, taskId, scope, contractVersion);
     return this.writeTree(task, taskId, scope, contractVersion);
   }
 
   /** Explicit storage maintenance may remove archived attachments, never conversation text or delivery state. */
   async retireAttachments(task: TaskBoard.Task, taskId: string, scope: string,
-    retired: ReadonlySet<string>, contractVersion = '3.0.0'): Promise<TreeTask> {
-    requireThat(['2.2.0', '2.3.0', '3.0.0'].includes(contractVersion),
+    retired: ReadonlySet<string>, contractVersion = '3.1.0'): Promise<TreeTask> {
+    requireThat(['2.2.0', '2.3.0', '3.0.0', '3.1.0'].includes(contractVersion),
       'task_board_contract_mismatch', 'Attachment retirement requires an indexed conversation.');
     return this.writeTree(task, taskId, scope, contractVersion, retired);
   }
 
   /** An exact verified export permits replacing generated import dumps, never ordinary comments. */
   async retireImportedBodies(task: TaskBoard.Task, taskId: string, scope: string,
-    archives: ReadonlyMap<string, ArchivedCommentBody>, contractVersion = '3.0.0'): Promise<TreeTask> {
-    requireThat(['2.2.0', '2.3.0', '3.0.0'].includes(contractVersion),
+    archives: ReadonlyMap<string, ArchivedCommentBody>, contractVersion = '3.1.0'): Promise<TreeTask> {
+    requireThat(['2.2.0', '2.3.0', '3.0.0', '3.1.0'].includes(contractVersion),
       'task_board_contract_mismatch', 'Comment archival requires an indexed conversation.');
     return this.writeTree(task, taskId, scope, contractVersion, undefined, archives);
   }
@@ -208,7 +208,7 @@ export class TaskComments {
           'task_board_evidence_mismatch', 'The immutable conversation record differs from its identity.');
       } else {
         const references = node.kind === 'page' ? Object.fromEntries(node.children.map((child, i) => ['child-' + i, child.object])) : {};
-        const saved = await this.client.request('objects.write', { contractVersion: contractVersion === '3.0.0' ? '2.0.0' : '1.0.0',
+        const saved = await this.client.request('objects.write', { contractVersion: ['3.0.0', '3.1.0'].includes(contractVersion) ? '2.0.0' : '1.0.0',
           mutationId: await this.identity('conversation:' + taskId + ':' + hash), references,
           create: { name, parentId: taskId, ownerObjectId: taskId, contractKey: commentNodeKey },
           content: { encoding: 'json', value: node as unknown as Wire.Json } });
@@ -236,7 +236,7 @@ export class TaskComments {
       level = parents;
     }
     const commentStore: CommentTree = { kind: 'tree', root: level[0] ?? null, length: task.comments.length,
-      ...(['2.3.0', '3.0.0'].includes(contractVersion) ? { summary: commentSummary(task, taskId) } : {}) };
+      ...(['2.3.0', '3.0.0', '3.1.0'].includes(contractVersion) ? { summary: commentSummary(task, taskId) } : {}) };
     this.rememberTree(commentStore, taskId, task, fingerprint);
     return { ...task, comments: [], commentDeliveries: [], commentStore };
   }

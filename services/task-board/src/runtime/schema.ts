@@ -16,8 +16,8 @@ import { freezePublishedWorkflowSchema, freezeRecoverySchema } from './workflow-
 import { referencePageKey } from './reference-pages.js';
 
 export const version = '1.0.0' as const;
-export const contractVersion = (key: ContractKey | 'task-board/comments' | 'task-board/comment-node'): '1.0.0' | '1.1.0' | '1.2.0' | '2.0.0' | '2.2.0' | '2.3.0' | '3.0.0' => ['task-board/task', 'task-board/run'].includes(key) ? '3.0.0' : key === 'task-board/comment-node' ? '2.0.0' : key === 'task-board/result' ? '2.2.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? '1.1.0' : version;
-export const readableVersions = (key: ContractKey | 'task-board/comments' | 'task-board/comment-node'): string[] => key === 'task-board/comment-node' ? ['1.0.0', '2.0.0'] : key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0', '3.0.0']
+export const contractVersion = (key: ContractKey | 'task-board/comments' | 'task-board/comment-node'): '1.0.0' | '1.1.0' | '1.2.0' | '2.0.0' | '2.2.0' | '2.3.0' | '3.0.0' | '3.1.0' => key === 'task-board/task' ? '3.1.0' : key === 'task-board/run' ? '3.0.0' : key === 'task-board/comment-node' ? '2.0.0' : key === 'task-board/result' ? '2.2.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? '1.1.0' : version;
+export const readableVersions = (key: ContractKey | 'task-board/comments' | 'task-board/comment-node'): string[] => key === 'task-board/comment-node' ? ['1.0.0', '2.0.0'] : key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0', '3.0.0', '3.1.0']
   : key === 'task-board/run' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '2.0.0', '2.1.0', '2.2.0', '3.0.0'] : key === 'task-board/result' ? ['1.0.0', '2.0.0', '2.1.0', '2.2.0'] : key === 'task-board/comments' ? ['1.0.0', '1.1.0', '2.0.0', '2.1.0'] : key === 'task-board/configuration' ? ['1.0.0', '1.1.0', '1.2.0'] : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? ['1.0.0', '1.1.0'] : [version];
 // Before task 1.5.0 and configuration 1.1.0, an execution requirement could name one capability instead of a host.
 const capabilityRequirement = { type: 'object', properties: { kind: { const: 'capability' }, capabilityKey: { $ref: '#/$defs/WireIdentifier' } }, required: ['kind', 'capabilityKey'], additionalProperties: false };
@@ -350,5 +350,12 @@ function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.
 
 export function taskBoardContracts(): Wire.DataContract[] {
   const retained = retainedContracts();
-  return [...workflowContracts(retained, '3.0.0'), ...workflowContracts(retained, '2.3.0'), ...workflowContracts(retained, '2.2.0'), ...workflowContracts(retained, '2.1.0'), ...workflowContracts(retained, '2.0.0'), ...retained];
+  const current = workflowContracts(retained, '3.0.0');
+  const task = current.find(value => value.key === 'task-board/task')!;
+  const previous = structuredClone(task);
+  delete (previous.jsonSchema as { properties: Record<string, unknown> }).properties.executionChangeRequested;
+  task.version = '3.1.0';
+  task.specMarkdown = task.specMarkdown.replace('task-board/task 3.0.0', 'task-board/task 3.1.0') +
+    '\n\nExecution settings can change during a Run. A yield marker retains the request until confirmed completion and a durable continuation claim; cancellation takes precedence.';
+  return [...current, previous, ...workflowContracts(retained, '2.3.0'), ...workflowContracts(retained, '2.2.0'), ...workflowContracts(retained, '2.1.0'), ...workflowContracts(retained, '2.0.0'), ...retained];
 }
