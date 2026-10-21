@@ -478,3 +478,4 @@ summary {
 .ivy-attachment-link::after { content: attr(data-file-size); font-size: .75rem; color: var(--muted-foreground); white-space: nowrap; }
 .ivy-attachment-link:hover { background: var(--accent); }
 [data-attention="question"] { border-color: var(--color-amber-500); box-shadow: 0 0 0 1px var(--color-amber-500); }
+[data-attention="error"] { border-color: var(--destructive); box-shadow: 0 0 0 1px var(--destructive); }

@@ -161,7 +161,7 @@ const items = computed(() => (pages.value.value?.items ?? []).map(item => ({ ...
   commentCount: showCrossAgent.value ? item.commentCount : item.directCommentCount,
 })));
 const groups = computed(() => props.column.id === 'waiting' && !props.archived
-  ? waitingGroups.map(group => ({ ...group, items: items.value.filter(item => item.group === group.id) }))
+  ? waitingGroups.map(group => ({ ...group, items: items.value.filter(item => item.group === group.id) })).filter(group => group.items.length > 0)
   : [{ id: '', title: '', items: items.value }]);
 // Neighbours within the same swimlane, so ranking never jumps across categories.
 const sameLane = (a: Item, b: Item | undefined) =>
@@ -290,7 +290,7 @@ defineExpose({ refresh: pages.refresh });
         </h3>
         <article
           class="task-item group relative min-w-0"
-          :data-attention="task.openQuestionCount ? 'question' : undefined"
+          :data-attention="task.condition === 'failed' ? 'error' : task.openQuestionCount ? 'question' : undefined"
           :class="[
             layout === 'list'
               ? 'flex items-center gap-3 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50'

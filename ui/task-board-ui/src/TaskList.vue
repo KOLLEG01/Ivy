@@ -374,9 +374,9 @@ const dropAction = (column: string): BoardTransition | undefined => {
   const action = (
     {
       backlog: "backlog",
-      todo: "todo",
       in_progress: "in_progress",
-      waiting: "waiting",
+      // Dropping into Waiting queues work; it does not invent a blocker.
+      waiting: "todo",
       done: "done",
     } as Record<string, BoardTransition>
   )[column];

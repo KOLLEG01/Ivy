@@ -339,6 +339,7 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
     runtimeWait: { reason: 'workspace', detail: 'Workspace is unavailable.', since: new Date().toISOString() } }, randomUUID(),
     { objectId: runtime.objectId, expectedRevision: runtimeTask.pin.revision });
   await create('Time wait', {}, { workflowState: 'waiting', wakeAt: '2099-01-01T12:00:00.000Z', dependencies: [] });
+  await create('Manual work to do');
   const ready = await create('Ready without a blocker', { control: 'agent' });
   await create('Due is not a restart', { control: 'agent', dueAt: '2099-01-01T12:00:00.000Z' });
   const unscheduled = await create('No restart set', { control: 'agent' }, { wakeAt: null, dependencies: [] });
@@ -355,12 +356,14 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
     wakeAt: null, dependencies: [] }, randomUUID(), { objectId: user.objectId, expectedRevision: current.pin.revision });
   await f.open('#/tasks?node=browser-task-board');
   const waiting = f.page.getByRole('region', { name: 'Waiting', exact: true });
-  for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['error', 'No restart set']]) {
+  for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['error', 'No restart set'], ['todo', 'Manual work to do']]) {
     await expect(waiting.locator('[data-waiting-group=' + group + ']').getByRole('link', { name: title, exact: true })).toBeVisible();
   }
-  const todo = f.page.getByRole('region', { name: 'Todo', exact: true });
+  await expect(f.page.locator('.board-lane > [aria-label="Todo"]')).toHaveCount(0);
   for (const title of ['Ready without a blocker', 'Due is not a restart'])
-    await expect(todo.getByRole('link', { name: title, exact: true })).toBeVisible();
+    await expect(waiting.locator('[data-waiting-group=preparing]').getByRole('link', { name: title, exact: true })).toBeVisible();
+  const errorCard = waiting.locator('article').filter({ hasText: 'No restart set' });
+  await expect(errorCard).toHaveAttribute('data-attention', 'error');
   await expect(waiting.locator('[data-waiting-group=ready], [data-waiting-group=unscheduled]')).toHaveCount(0);
   await expect(f.page.getByRole('region', { name: 'Blocked', exact: true })).toHaveCount(0);
   await expect(waiting.getByText('Needs you', { exact: true })).toHaveCount(0);
@@ -397,7 +400,7 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
   await expect(f.page.getByRole('textbox', { name: 'Comment', exact: true })).toBeEditable();
   await f.page.goto(f.url + routeTo(user.objectId));
   await expect(f.page.locator('[id="comment-Direct agent answer"]').getByText('Direct agent answer', { exact: true })).toBeVisible();
-  await expect(f.page.locator('[data-slot=task-board-background] .task-item')).toHaveCount(7);
+  await expect(f.page.locator('[data-slot=task-board-background] .task-item')).toHaveCount(8);
   const screenshots = process.env.IVY_TASKBOARD_SCREENSHOTS;
   for (const theme of ['light', 'dark']) {
     await f.page.evaluate(theme => { document.documentElement.classList.toggle('dark', theme === 'dark'); localStorage.setItem('ivy.theme', theme); }, theme);
@@ -405,11 +408,26 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   await f.page.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(f.page.getByRole('region', { name: 'Waiting', exact: true }).locator('article')).toHaveCount(5);
+  await expect(waiting.locator('article')).toHaveCount(8);
   await expect(f.page.getByRole('region', { name: 'Waiting', exact: true }).getByRole('link', { name: 'User feedback', exact: true })).toBeVisible();
-  if (screenshots) for (const theme of ['light', 'dark']) {
+  for (const theme of ['light', 'dark']) {
     await f.page.evaluate(theme => document.documentElement.classList.toggle('dark', theme === 'dark'), theme);
-    await f.page.screenshot({ path: join(screenshots, `board-${width}-${theme}.png`), fullPage: true, animations: 'disabled' });
+    await expect.poll(() => errorCard.evaluate(element => {
+      const probe = document.createElement('span');
+      probe.style.color = 'var(--destructive)'; element.append(probe);
+      const color = getComputedStyle(probe).color; probe.remove();
+      const style = getComputedStyle(element);
+      return style.borderColor === color && style.boxShadow.includes(color);
+    })).toBe(true);
+    if (screenshots) await f.page.screenshot({ path: join(screenshots, `board-${width}-${theme}.png`), fullPage: true, animations: 'disabled' });
   }
+  await f.page.getByRole('textbox', { name: 'Search tasks', exact: true }).fill('Manual work to do');
+  await f.page.getByRole('textbox', { name: 'Search tasks', exact: true }).press('Enter');
+  await expect(waiting.locator('[data-waiting-group]')).toHaveCount(1);
+  await expect(waiting.locator('[data-waiting-group]')).toHaveAttribute('data-waiting-group', 'todo');
+  await f.page.getByRole('textbox', { name: 'Search tasks', exact: true }).fill('Ready without a blocker');
+  await f.page.getByRole('textbox', { name: 'Search tasks', exact: true }).press('Enter');
+  await expect(waiting.locator('[data-waiting-group]')).toHaveCount(1);
+  await expect(waiting.locator('[data-waiting-group]')).toHaveAttribute('data-waiting-group', 'preparing');
   assert.deepEqual(f.pageErrors, []);
 });
