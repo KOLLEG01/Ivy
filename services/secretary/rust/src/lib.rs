@@ -25,6 +25,7 @@ pub mod browser_notice;
 pub mod config;
 pub mod document;
 pub mod document_worker;
+pub mod document_process;
 pub mod inbox_evidence;
 pub mod inbox_recovery;
 pub mod engine;
