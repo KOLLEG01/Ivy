@@ -167,13 +167,6 @@ mod tests {
                 .is_ok()
         );
         assert!(make(i32::MAX as u32, 1).ensure_predecessor_exited().is_ok());
-        assert_eq!(
-            make(4, 1)
-                .ensure_predecessor_exited()
-                .unwrap_err()
-                .raw_os_error(),
-            Some(5)
-        );
         struct Owned(Child);
         impl Drop for Owned {
             fn drop(&mut self) {
@@ -410,6 +403,26 @@ mod tests {
             format!("{RECORD}{}", " ".repeat(RECORD_BYTES - RECORD.len())).into_bytes(),
             format!("{RECORD}{}", " ".repeat(RECORD_BYTES + 1 - RECORD.len())).into_bytes(),
         ]);
+        let current =
+            ivy_host_runtime::platform::windows_process::process_identity(std::process::id())
+                .unwrap()
+                .unwrap();
+        for (pid, created) in [
+            (4, 1),
+            (current.pid, current.created_filetime),
+            (current.pid, current.created_filetime ^ 1),
+            (i32::MAX as u32, 1),
+        ] {
+            records.push(
+                NativeOwner {
+                    epoch: "00112233-4455-6677-8899-aabbccddeeff".into(),
+                    pid: i32::try_from(pid).unwrap(),
+                    creation_filetime: i64::try_from(created).unwrap(),
+                }
+                .encode()
+                .unwrap(),
+            );
+        }
         let input = stringify(
             &IvyJson::Array(
                 records
@@ -467,6 +480,11 @@ mod tests {
                     String::from_utf8_lossy(bytes)
                 );
                 if let Ok(owner) = native {
+                    assert_eq!(
+                        owner.ensure_predecessor_exited().is_ok(),
+                        original.get("originalExited").unwrap().as_bool().unwrap(),
+                        "OriginalExited for record {index}"
+                    );
                     assert_eq!(
                         owner.epoch(),
                         original.get("epoch").unwrap().as_str().unwrap()

@@ -6,6 +6,7 @@ public static class NativeOwnerOracle {
     public static string Run(string input) {
         using var document = JsonDocument.Parse(input);
         var read = typeof(NativeOwnerLease).GetMethod("Read", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var exited = typeof(NativeOwnerLease).GetMethod("OriginalExited", BindingFlags.NonPublic | BindingFlags.Static)!;
         var results = new List<object>();
         foreach (var item in document.RootElement.EnumerateArray()) {
             var bytes = new List<byte>();
@@ -15,7 +16,7 @@ public static class NativeOwnerOracle {
                 using var stream = new MemoryStream(bytes.ToArray());
                 using var record = JsonDocument.Parse(stream, new JsonDocumentOptions { MaxDepth = 4 });
                 var owner = (NativeOwnerLease.Owner)read.Invoke(null, new object[] { record.RootElement })!;
-                results.Add(new { ok = true, epoch = owner.Epoch, pid = owner.Pid, creationFileTime = owner.CreationFileTime });
+                results.Add(new { ok = true, epoch = owner.Epoch, pid = owner.Pid, creationFileTime = owner.CreationFileTime, originalExited = (bool)exited.Invoke(null, new object[] { owner })! });
             } catch { results.Add(new { ok = false }); }
         }
         return JsonSerializer.Serialize(results);
