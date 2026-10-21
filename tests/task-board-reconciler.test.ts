@@ -7,15 +7,20 @@ import { fields, taskBoardFixture } from "./fixtures/task-board.js";
 import { nativeWorkflow } from './fixtures/task-board-native.js';
 import { until } from './fixtures/host.js';
 
-test('an unavailable input owner does not prevent Run recovery', async t => {
+for (const outcome of ['advanced', 'backoff', 'failed'] as const)
+test(`native recovery precedes input mirroring when recovery ${outcome}`, async t => {
   const w = await nativeWorkflow(t); await w.running();
-  w.f.nativeTools(async () => { throw new IvyError('service_unavailable', 'The owner is offline.'); });
+  const calls: string[] = [];
+  w.f.nativeTools(async () => { calls.push('inputs'); throw new IvyError('service_unavailable', 'The owner is offline.'); });
   const runtime = new TaskBoardReconciler(w.f.first);
-  let reconciled = false;
-  runtime.native.drain = async () => { reconciled = true; return true; };
+  runtime.native.drain = async () => {
+    calls.push('recovery');
+    if (outcome === 'failed') throw new IvyError('service_unavailable', 'Native recovery is unavailable.');
+    return outcome === 'advanced';
+  };
   runtime.signals.step = async () => null;
   await (runtime as unknown as { process: (lane: 'runs', id: string) => Promise<void> }).process('runs', w.state().run.objectId);
-  assert.equal(reconciled, true);
+  assert.deepEqual(calls, ['recovery', 'inputs']);
   assert.ok(runtime.diagnostics.some(value => JSON.stringify(value.resource) === JSON.stringify({ objectId: 'inputs:' + w.state().run.objectId })));
 });
 

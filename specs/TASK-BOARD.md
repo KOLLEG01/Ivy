@@ -142,6 +142,9 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
 
 - Actions use stable operation identities and expected revisions. One CAS claim authorizes
   an attempt; timeouts or expired leases cannot steal work that may already be executing.
+  Publication gates cover the affected ticket, shared index or shared workspace; unrelated
+  tickets proceed independently. Local publication contention becomes retryable after 250 ms;
+  unavailable owners and uncertain native outcomes retain their longer recovery backoff.
 - Retain the Run and native start intent before dispatch. Save the returned native identity
   before a turn; uncertainty never creates a replacement thread/turn.
 - Before continuing a saved native context, restore it if it was archived outside TaskBoard.

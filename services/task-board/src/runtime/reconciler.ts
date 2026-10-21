@@ -175,11 +175,16 @@ export class TaskBoardReconciler {
           this.record(id); this.record('inputs:' + id); this.record('signals:' + id);
           this.failedRuns.delete(id); return;
         }
-        // Input mirroring must not prevent native recovery when a host is offline.
-        try { await syncNativeComments(this.engine, id); this.record('inputs:' + id); }
-        catch (error) { this.record('inputs:' + id, error); }
+        // Deliver pending work before the advisory input lookup; still mirror inputs
+        // when recovery fails or backs off so questions remain visible.
+        let progressed = false;
+        try { progressed = await this.native.drain(id); }
+        finally {
+          try { await syncNativeComments(this.engine, id); this.record('inputs:' + id); }
+          catch (error) { this.record('inputs:' + id, error); }
+        }
         // Backoff is not a successful recovery and must not clear its diagnostic.
-        if (!await this.native.drain(id)) return;
+        if (!progressed) return;
         try {
           await this.signals.step(id);
           this.record("signals:" + id);
