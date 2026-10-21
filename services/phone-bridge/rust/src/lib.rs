@@ -2,6 +2,7 @@
 pub mod call_features;
 mod call_slots;
 pub mod diagnostics;
+pub mod desktop;
 pub mod dtmf;
 pub mod dtmf_access;
 pub mod dtmf_detector;
