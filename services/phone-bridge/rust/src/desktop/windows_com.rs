@@ -120,6 +120,7 @@ unsafe extern "system" {
 #[link(name = "oleaut32")]
 unsafe extern "system" {
     fn VariantClear(value: *mut Variant) -> Hr;
+    fn VariantCopyInd(destination: *mut Variant, source: *const Variant) -> Hr;
     fn SysStringLen(value: *const u16) -> u32;
     fn SafeArrayGetDim(array: Raw) -> u32;
     fn SafeArrayGetLBound(array: Raw, dimension: u32, bound: *mut i32) -> Hr;
@@ -208,11 +209,18 @@ impl OwnedVariant {
         check(unsafe { VariantClear(&mut self.0) })
     }
     pub fn value(&mut self, references: &mut Vec<Reference>) -> Result<Value, ControlError> {
+        // CLR property type checks see the dereferenced value, rather than its
+        // VARIANT storage form. Let OLE copy it before the provider can reuse it.
+        if self.0.kind & 0x4000 != 0 {
+            let mut copied = Self::empty();
+            check(unsafe { VariantCopyInd(&mut copied.0, &self.0) })?;
+            return copied.value(references);
+        }
         // Every pointer and VARTYPE is supplied by the Windows COM marshaler.
         // Keep native unknown properties for the same enclosing source scope.
         Ok(unsafe {
             match self.0.kind {
-                3 => Value::Integer(self.0.data.integer),
+                3 | 22 => Value::Integer(self.0.data.integer),
                 11 => Value::Boolean(self.0.data.boolean != 0),
                 8 => {
                     let ptr = self.0.data.pointer as *const u16;
@@ -223,7 +231,7 @@ impl OwnedVariant {
                         std::slice::from_raw_parts(ptr, len).to_vec()
                     }))
                 }
-                0x2003 => {
+                0x2003 | 0x2016 => {
                     let ptr = self.0.data.pointer;
                     if ptr.is_null() || SafeArrayGetDim(ptr) != 1 {
                         return Ok(Value::Other);

@@ -269,7 +269,7 @@ fn sdk_com_cache_refresh_invoke_and_lifetime_match_original() {
     for action in ["read", "refresh", "invoke", "prepare_changed", "read_twice"] {
         input.push(case(0, action, 1, -1, 0, -1, -1, false));
     }
-    for mode in 0..24 {
+    for mode in 0..29 {
         for action in ["read", "refresh", "invoke"] {
             input.push(case(mode, action, 1, -1, 0, -1, -1, false));
         }

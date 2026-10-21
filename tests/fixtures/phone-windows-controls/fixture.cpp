@@ -39,6 +39,8 @@ static std::vector<HWND> windows;
 static std::string trace;
 static int mode=0, phase=0, calls=0, failure=-1, hideAt=-1, caches=0;
 static HRESULT failureHr=E_ACCESSDENIED;
+static VARIANT indirect{};
+static void byReference(VARIANT* out,VARTYPE kind){VariantClear(&indirect);indirect=*out;VariantInit(out);out->vt=VT_BYREF|kind;out->byref=kind==VT_VARIANT?static_cast<void*>(&indirect):static_cast<void*>(&indirect.lVal);}
 static HRESULT tick(std::string item) {
     trace+=item+";";
     int call=calls++;
@@ -90,6 +92,11 @@ static HRESULT getProperty(IUIAutomationElement* self,PROPERTYID property,BOOL i
     if(property==30022){out->vt=VT_BOOL;out->boolVal=(phase==1&&mode==19&&n==1)||(mode==13&&n==2)?VARIANT_TRUE:VARIANT_FALSE;}
     if(property==30086){if(mode==7||phase==1&&mode==20){out->vt=VT_UNKNOWN;out->punkVal=reinterpret_cast<IUnknown*>(&unknown);add(out->punkVal);}else if(n==1){out->vt=mode==22?VT_INT:mode==21?VT_I2:VT_I4;out->lVal=0;}}
     if(property==30020){out->vt=VT_I4;out->lVal=static_cast<LONG>(reinterpret_cast<INT_PTR>(windows[0]))+(phase==1&&mode==16?1:0);}
+    if(mode==24&&property==30086&&n==1)byReference(out,VT_I4);
+    if(mode==25&&property==30005)byReference(out,VT_BSTR);
+    if(mode==26&&property==30010)byReference(out,VT_BOOL);
+    if(mode==27&&property==30000)byReference(out,VT_ARRAY|VT_I4);
+    if(mode==28&&property==30086&&n==1)byReference(out,VT_VARIANT);
     return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE cached(IUIAutomationElement* self,PROPERTYID property,BOOL ignore,VARIANT* out){return getProperty(self,property,ignore,out,true);}
@@ -99,6 +106,7 @@ static HRESULT STDMETHODCALLTYPE invoke(IUIAutomationInvokePattern*){auto hr=tic
 template<class V,class T> static void base(V& table){table.QueryInterface=&query<T>;table.AddRef=&add<T>;table.Release=&release<T>;}
 static void object(Object& value,void* table,int id){value={table,1,id};objects.push_back(&value);}
 extern "C" __declspec(dllexport) int FixtureReset(int value,int count){
+    VariantClear(&indirect);
     for(auto window:windows)DestroyWindow(window);windows.clear();objects.clear();trace.clear();mode=value;phase=0;calls=0;failure=-1;hideAt=-1;caches=0;
     base<IUIAutomation2Vtbl,IUIAutomation2>(automationTable);automationTable.ElementFromHandle=elementFrom;automationTable.CreateCacheRequest=createCache;automationTable.CreatePropertyCondition=propertyCondition;automationTable.CreateTreeWalker=tree;automationTable.get_RawViewWalker=rawWalker;automationTable.put_AutoSetFocus=focus;automationTable.put_ConnectionTimeout=connection;automationTable.put_TransactionTimeout=transaction;
     base<IUIAutomationElementVtbl,IUIAutomationElement>(elementTable);elementTable.FindAllBuildCache=findAll;elementTable.BuildUpdatedCache=update;elementTable.GetCachedPropertyValueEx=cached;elementTable.GetCurrentPropertyValueEx=current;elementTable.GetCurrentPatternAs=getPattern;
@@ -117,4 +125,4 @@ extern "C" __declspec(dllexport) void FixturePhase(int value){phase=value;if(val
 extern "C" __declspec(dllexport) const char* FixtureTrace(){return trace.c_str();}
 extern "C" __declspec(dllexport) int FixtureReferences(){int refs=0;for(auto object:objects)refs+=object->refs-1;return refs;}
 extern "C" __declspec(dllexport) int FixtureWindowOrdinal(INT_PTR window){return ordinal(reinterpret_cast<UIA_HWND>(window));}
-extern "C" __declspec(dllexport) void FixtureDestroy(){for(auto window:windows)DestroyWindow(window);windows.clear();}
+extern "C" __declspec(dllexport) void FixtureDestroy(){VariantClear(&indirect);for(auto window:windows)DestroyWindow(window);windows.clear();}
