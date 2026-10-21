@@ -84,12 +84,12 @@ static void integers(VARIANT* out,int value,LONG lower=0){out->vt=VT_ARRAY|VT_I4
 static void text(VARIANT* out,const wchar_t* value){out->vt=VT_BSTR;out->bstrVal=SysAllocString(value);}
 static HRESULT getProperty(IUIAutomationElement* self,PROPERTYID property,BOOL ignore,VARIANT* out,bool cached){
     VariantInit(out);int n=id(self);auto hr=tick(std::string(cached?"cached:":"current:")+number(n)+":"+number(property)+":"+number(ignore));if(hr!=S_OK)return hr;
-    if(property==30000){if(mode==3&&n==1){out->vt=VT_I4;out->lVal=1;}else integers(out,phase==1&&mode==1&&n==1?99:n==69?(phase==1&&mode==2?99:0):n,mode==4?1:0);}
-    if(property==30005){if(mode==5&&n==1){out->vt=VT_I4;out->lVal=1;}else text(out,mode==12||n==1?(phase==1&&mode==4?L"Changed":L"Mute microphone"):n==2?L"Stop voice chat":L"Other");}
-    if(property==30010){if(mode==6&&n==1)text(out,L"true");else{out->vt=VT_BOOL;out->boolVal=phase==1&&mode==5&&n==1?VARIANT_FALSE:VARIANT_TRUE;}}
-    if(property==30022){out->vt=VT_BOOL;out->boolVal=(phase==1&&mode==6&&n==1)||(mode==13&&n==2)?VARIANT_TRUE:VARIANT_FALSE;}
-    if(property==30086){if(mode==7||phase==1&&mode==7){out->vt=VT_UNKNOWN;out->punkVal=reinterpret_cast<IUnknown*>(&unknown);add(out->punkVal);}else if(n==1){out->vt=VT_I4;out->lVal=0;}}
-    if(property==30020){out->vt=VT_I4;out->lVal=static_cast<LONG>(reinterpret_cast<INT_PTR>(windows[0]))+(phase==1&&mode==3?1:0);}
+    if(property==30000){if(mode==3&&n==1){out->vt=VT_I4;out->lVal=1;}else{integers(out,phase==1&&mode==1&&n==1?99:n==69?(phase==1&&mode==2?99:0):n,mode==4?1:0);if(mode==23)out->vt=VT_ARRAY|VT_INT;}}
+    if(property==30005){if(mode==5&&n==1){out->vt=VT_I4;out->lVal=1;}else text(out,mode==12||n==1?(phase==1&&mode==17?L"Changed":L"Mute microphone"):n==2?L"Stop voice chat":L"Other");}
+    if(property==30010){if(mode==6&&n==1)text(out,L"true");else{out->vt=VT_BOOL;out->boolVal=phase==1&&mode==18&&n==1?VARIANT_FALSE:VARIANT_TRUE;}}
+    if(property==30022){out->vt=VT_BOOL;out->boolVal=(phase==1&&mode==19&&n==1)||(mode==13&&n==2)?VARIANT_TRUE:VARIANT_FALSE;}
+    if(property==30086){if(mode==7||phase==1&&mode==20){out->vt=VT_UNKNOWN;out->punkVal=reinterpret_cast<IUnknown*>(&unknown);add(out->punkVal);}else if(n==1){out->vt=mode==22?VT_INT:mode==21?VT_I2:VT_I4;out->lVal=0;}}
+    if(property==30020){out->vt=VT_I4;out->lVal=static_cast<LONG>(reinterpret_cast<INT_PTR>(windows[0]))+(phase==1&&mode==16?1:0);}
     return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE cached(IUIAutomationElement* self,PROPERTYID property,BOOL ignore,VARIANT* out){return getProperty(self,property,ignore,out,true);}

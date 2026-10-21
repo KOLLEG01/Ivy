@@ -135,10 +135,13 @@ impl Fixture {
                 before = (self.references)();
             }
             let operation = capture(|| {
+                let original = read
+                    .first()
+                    .ok_or_else(|| invalid("Fixture read has no original window."))?;
                 if action == "refresh" {
                     return source
                         .refresh(VoiceControlIdentity {
-                            window: read[0].handle.clone(),
+                            window: original.handle.clone(),
                             parent_id: vec![42, 0],
                             microphone_id: vec![42, 1],
                             stop_id: vec![42, 2],
@@ -148,11 +151,18 @@ impl Fixture {
                 let current = Cell::new(0);
                 let stop = n("currentStop");
                 source
-                    .invoke(&read[0].handle, &read[0].controls[0], &|| {
-                        let i = current.get();
-                        current.set(i + 1);
-                        i != stop
-                    })
+                    .invoke(
+                        &original.handle,
+                        original
+                            .controls
+                            .first()
+                            .ok_or_else(|| invalid("Fixture read has no original control."))?,
+                        &|| {
+                            let i = current.get();
+                            current.set(i + 1);
+                            i != stop
+                        },
+                    )
                     .map(|r| r.as_str().into())
             });
             after = unsafe { (self.references)() };
@@ -259,7 +269,7 @@ fn sdk_com_cache_refresh_invoke_and_lifetime_match_original() {
     for action in ["read", "refresh", "invoke", "prepare_changed", "read_twice"] {
         input.push(case(0, action, 1, -1, 0, -1, -1, false));
     }
-    for mode in 0..16 {
+    for mode in 0..24 {
         for action in ["read", "refresh", "invoke"] {
             input.push(case(mode, action, 1, -1, 0, -1, -1, false));
         }
