@@ -11,6 +11,8 @@ mod auth_node;
 mod account_auth;
 #[path = "chat-auth-protocol-cases.rs"]
 mod auth_protocol;
+#[path = "chat-auth-candidate-cases.rs"]
+mod auth_candidate;
 #[path = "chat-store-cases.rs"]
 mod chat_store;
 #[path = "chat-store-hive-cases.rs"]
