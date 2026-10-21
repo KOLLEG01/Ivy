@@ -8,3 +8,6 @@ pub(crate) mod windows_launch;
 
 #[cfg(windows)]
 pub mod windows_process;
+
+#[cfg(windows)]
+pub mod windows_process_inspection;
