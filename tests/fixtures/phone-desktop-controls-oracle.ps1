@@ -43,7 +43,7 @@ public static class DesktopControlsOracle {
         var clock=new Clock();var source=new Voice{Time=clock};bool current=true;
         var session=DesktopVoiceSession.Open(()=>source,()=>current,clock);
         var rows=new List<object>();
-        TimedVoiceControlObservation Read(string action) {var r=session.Read();rows.Add(new{action,timestamp=r.Timestamp,observation=r.Observation,discoveries=source.Discoveries,refreshes=source.Refreshes,disposals=source.Disposals});return r;}
+        TimedVoiceControlObservation Read(string action) {var r=session.Read();rows.Add(JsonSerializer.SerializeToElement(new{action,timestamp=r.Timestamp,observation=r.Observation,discoveries=source.Discoveries,refreshes=source.Refreshes,disposals=source.Disposals},Json));return r;}
         source.Delta=40;var first=Read("active");first.Observation.Identity.MicrophoneId[1]=90;source.Received.MicrophoneId[1]=91;
         Read("snapshot_mutations");source.Windows[0].Controls[0]=source.Windows[0].Controls[0] with {Name="Unmute microphone",Toggle=1};source.Delta=0;Read("muted");
         source.Windows=Base();source.Delta=499;Read("under_limit");source.Delta=500;Read("at_limit");source.Delta=501;Read("over_limit");
