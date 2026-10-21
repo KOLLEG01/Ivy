@@ -1,7 +1,7 @@
 use super::*;
 use ivy_contracts::{
     IvyJson,
-    json::{parse, stringify},
+    json::{parse as decode, stringify as encode},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -10,6 +10,13 @@ use std::{
     process::{Command, Stdio},
     rc::Rc,
 };
+
+fn stringify(value: &IvyJson) -> String {
+    encode(value, 16 * 1024 * 1024).unwrap()
+}
+fn parse(text: &str) -> IvyJson {
+    decode(text, 16 * 1024 * 1024).unwrap()
+}
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -308,7 +315,7 @@ fn sdk_com_cache_refresh_invoke_and_lifetime_match_original() {
         "original source: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let original = parse(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    let original = parse(&String::from_utf8(output.stdout).unwrap());
     let actual: IvyJson = IvyJson::Array(
         input
             .as_array()

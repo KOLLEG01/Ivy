@@ -297,7 +297,7 @@ impl WindowsControlSource {
                 return Ok(DesktopInvokePhase::NotSubmitted);
             }
             let windows = self.windows()?;
-            let &(hwnd, minimized) = windows
+            let &(_, minimized) = windows
                 .iter()
                 .find(|(h, _)| JsString::from(h.to_string()) == *window)
                 .ok_or_else(|| invalid("Original Voice window unavailable."))?;
