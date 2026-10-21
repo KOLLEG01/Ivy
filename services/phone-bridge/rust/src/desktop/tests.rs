@@ -580,7 +580,10 @@ fn original_control_boundaries_classification_and_thread_bound_session_agree() {
             "sameParent" => w[0].controls[0].parent_id = w[0].controls[0].id.clone(),
             "sameId" => w[0].controls[1].id = w[0].controls[0].id.clone(),
             "duplicateWindow" => w.push(w[0].clone()),
-            "duplicateControl" => w[0].controls.push(w[0].controls[0].clone()),
+            "duplicateControl" => {
+                let duplicate = w[0].controls[0].clone();
+                w[0].controls.push(duplicate);
+            }
             "splitWindows" => {
                 let control = w[0].controls.pop().unwrap();
                 w.push(ControlWindow {

@@ -88,7 +88,7 @@ pub fn classify_voice(observation: Option<&ControlsObservation>) -> VoiceControl
             .iter()
             .any(|s| name.0.iter().copied().eq(s.encode_utf16()))
     };
-    let visible = |window: &ControlWindow, offscreen| !window.minimized && !offscreen;
+    let visible = |window: &ControlWindow, offscreen: bool| !window.minimized && !offscreen;
     let voice: Vec<_> = items
         .iter()
         .filter(|(_, c)| !is(START_LABELS, &c.name))
