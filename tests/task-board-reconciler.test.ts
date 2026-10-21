@@ -227,6 +227,25 @@ test("Todo scans preserve priority order across pages", async (t) => {
   assert.ok(seen.includes(low.task!.objectId));
 });
 
+test("frequent ticket changes do not starve later scan pages", async t => {
+  const f = taskBoardFixture(t);
+  f.settings.scheduler.pageSize = 1;
+  const low = await f.create({ control: "agent", priority: 1 }),
+    high = await f.create({ control: "agent", priority: 4 });
+  await todo(f, low.task!); await todo(f, high.task!);
+  const runtime = new TaskBoardReconciler(f.first), seen: string[] = [];
+  t.after(() => runtime.stop());
+  runtime.scheduler.task = async id => { seen.push(id); return null; };
+  await step(runtime); await step(runtime);
+  assert.equal(runtime.recovered, true);
+  for (let pass = 0; pass < 12; pass++) {
+    runtime.taskChanged(high.task!.objectId);
+    await step(runtime);
+  }
+  assert.equal(seen[0], high.task!.objectId);
+  assert.ok(seen.includes(low.task!.objectId), "Updates to the first ticket must not restart every background page.");
+});
+
 test("operation reconciliation progresses an independent Task past a blocked marked publication", async (t) => {
   const f = taskBoardFixture(t),
     blocked = await f.create(),

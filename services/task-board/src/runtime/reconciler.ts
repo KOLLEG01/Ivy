@@ -78,7 +78,6 @@ export class TaskBoardReconciler {
   private recovering: "operations" | "runs" | null = "operations";
   private recoveryScanned = false;
   private lane = 0;
-  private taskChanges = 0;
   private busy = false;
   private lastCleanupAt = 0;
   private gateCursor: string | null = null;
@@ -90,7 +89,7 @@ export class TaskBoardReconciler {
   private readonly changedTasks = new Set<string>();
   private readonly primaries = new Map<string, { serviceNodeId: string; threadId: string }>();
   private readonly nativeChecks = new Map<string, { runId: string | null; after: number }>();
-  private readonly pages = new Map<Lane, { ids: string[]; next: string | null; taskChanges: number }>();
+  private readonly pages = new Map<Lane, { ids: string[]; next: string | null }>();
   private readonly cursors = new Map<Lane, string | null>();
   private readonly failures = new Map<string, Wire.Diagnostic>();
   private readonly failedRuns = new Set<string>();
@@ -121,9 +120,8 @@ export class TaskBoardReconciler {
     return relevant;
   }
   taskChanged(taskId?: string): void {
-    this.taskChanges++;
-    this.cursors.delete("tasks");
-    this.pages.delete("tasks");
+    // Changed tickets have their own immediate queue. Keep the background scan's
+    // position so busy early tickets cannot starve later pages.
     if (taskId && !this.stopped) {
       this.nativeChecks.delete(taskId);
       // Coalesce bursts per ticket; the durable scan covers overflow and restarts.
@@ -327,7 +325,6 @@ export class TaskBoardReconciler {
     }
   }
   private async scan(lane: Lane): Promise<boolean> {
-    const taskChanges = this.taskChanges;
     const store = this.engine.store,
       query = queries[lane],
       limit = this.engine.settings.scheduler.pageSize;
@@ -368,7 +365,7 @@ export class TaskBoardReconciler {
         }
         ids.add(id);
       }
-      pending = { ids: [...ids], next: page.nextCursor, taskChanges };
+      pending = { ids: [...ids], next: page.nextCursor };
       this.pages.set(lane, pending);
     }
     const count = pending.ids.length;
@@ -387,8 +384,7 @@ export class TaskBoardReconciler {
     }
     if (this.stopped || pending.ids.length) return false;
     if (this.pages.get(lane) === pending) this.pages.delete(lane);
-    if (lane !== "tasks" || pending.taskChanges === this.taskChanges)
-      this.cursors.set(lane, pending.next);
+    this.cursors.set(lane, pending.next);
     return pending.next === null;
   }
   async tick(): Promise<void> {
