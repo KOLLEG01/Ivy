@@ -8,7 +8,12 @@ publish.workspace = true
 
 [dependencies]
 ivy-contracts.workspace = true
+ivy-hive.workspace = true
 ivy-host-runtime.workspace = true
 ivy-sdk.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[[test]]
+name = "host-reset-storage"
+path = "../../../tests/rust/host-reset-storage.rs"

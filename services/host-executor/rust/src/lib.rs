@@ -1,5 +1,7 @@
 //! Service admission and lifecycle. Production effects are mandatory inputs;
 //! no locale/parser/transport or managed-process owner is substituted here.
+pub mod reset_storage;
+
 use ivy_contracts::{IvyError, IvyJson, IvyResult, JsString};
 use ivy_host_runtime::{
     bootstrap_auto_worker::AutomaticBootstrapWorker,
