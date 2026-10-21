@@ -15,7 +15,6 @@ use std::{
     },
 };
 use tokio::sync::{Notify, oneshot};
-use tokio_util::sync::CancellationToken;
 
 // Deliberately implements none of Clone/Debug/Display/Error.
 struct Raw {

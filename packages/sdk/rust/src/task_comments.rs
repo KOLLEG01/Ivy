@@ -15,7 +15,7 @@ use std::{
     task::Poll,
 };
 use tokio::runtime::Handle;
-use tokio_util::sync::CancellationToken;
+pub use tokio_util::sync::CancellationToken;
 
 pub const COMMENT_NODE_KEY: &str = "task-board/comment-node";
 const SNAPSHOT: &str = "The conversation snapshot belongs to another ticket.";
