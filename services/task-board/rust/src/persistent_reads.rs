@@ -1,5 +1,4 @@
-//! Current service-owned persistence reads. Immutable tree traversal and record
-//! upgrades remain separate Shared bindings; no legacy reader supplies them.
+//! Current service-owned persistence reads and explicit Shared bindings.
 use super::JournalStore;
 use crate::engine_read::condition_policy::ConditionStore;
 use ivy_contracts::{
@@ -11,6 +10,8 @@ use ivy_sdk::rpc::{RequestOptions, RpcClient};
 use ivy_store::rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 
+#[path = "record_upgrades.rs"]
+pub mod record_upgrades;
 #[path = "task_comments.rs"]
 pub mod task_comments;
 

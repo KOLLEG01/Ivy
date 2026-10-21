@@ -15,32 +15,34 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
-#[path = "../fixtures/task-board-configuration.rs"]
-mod configuration;
-#[path = "../fixtures/task-board-program.rs"]
-mod publication;
-#[path = "../fixtures/task-board-recovery.rs"]
-mod recovery;
-#[path = "../fixtures/task-board-keys.rs"]
-mod task_keys;
-#[path = "../fixtures/task-board-lifecycle.rs"]
-mod lifecycle;
-#[path = "../fixtures/task-board-scheduler.rs"]
-mod scheduler;
-#[path = "../fixtures/task-board-deliveries.rs"]
-mod deliveries;
-#[path = "../fixtures/task-board-next-steps.rs"]
-mod next_steps;
 #[path = "../fixtures/task-board-comment-reads.rs"]
 mod comment_reads;
 #[path = "../fixtures/task-board-condition.rs"]
 mod condition_policy;
+#[path = "../fixtures/task-board-configuration.rs"]
+mod configuration;
 #[path = "../fixtures/task-board-conversation.rs"]
 mod conversation_policy;
+#[path = "../fixtures/task-board-deliveries.rs"]
+mod deliveries;
 #[path = "../fixtures/task-board-durable-admission.rs"]
 mod durable_admission;
+#[path = "../fixtures/task-board-lifecycle.rs"]
+mod lifecycle;
+#[path = "../fixtures/task-board-next-steps.rs"]
+mod next_steps;
 #[path = "../fixtures/task-board-persistent-reads.rs"]
 mod persistent_reads;
+#[path = "../fixtures/task-board-program.rs"]
+mod publication;
+#[path = "../fixtures/task-board-record-upgrades.rs"]
+mod record_upgrades;
+#[path = "../fixtures/task-board-recovery.rs"]
+mod recovery;
+#[path = "../fixtures/task-board-scheduler.rs"]
+mod scheduler;
+#[path = "../fixtures/task-board-keys.rs"]
+mod task_keys;
 #[path = "../fixtures/task-board-tree-comments.rs"]
 mod tree_comments;
 
