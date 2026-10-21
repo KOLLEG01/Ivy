@@ -15,6 +15,7 @@ import { initialDelivery } from './deliveries.js';
 import { BoundToolClient } from '../../../../packages/sdk/src/client.js';
 import { nativeErrorRetryAt, nativeRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
 import { triggeredByComments } from './execution-mode.js';
+import { publishAdoptedTurn } from './native-adoption.js';
 
 export const finishedRun = (run: TaskBoard.Run): boolean => ['completed', 'failed', 'cancelled'].includes(run.phase);
 type Completion = { state: 'succeeded' | 'failed' | 'cancelled'; summary: string; evidence: TaskBoard.Artifact | null; code: string | null; retryAt?: string | null };
@@ -65,6 +66,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   const request = operation.value.request;
   requireThat(request.action === 'nativeUpdate' && operation.value.actor.source === 'native' && operation.value.callerPrincipalId === engine.settings.principalId,
     'task_board_forbidden', 'Only the authenticated logical owner can publish native observations.');
+  if (request.change.kind === 'adoptTurn') return publishAdoptedTurn(engine, operation, steps);
   const store = engine.store, at = operation.value.createdAt, first = operation.value.writes.length === 0;
   const reservation = operation.value.writes[0]?.destination;
   const taskPin = reservation && 'expectedRevision' in reservation
@@ -326,7 +328,10 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   const initial = run.executionContext ?? {
     workflowState: 'todo' as const, latestResult: task.value.latestResult, acceptedReview: task.value.acceptedReview };
   const handoffComment = runHandoff(finalTask, request.run.objectId);
-  const declaredHandoff = handoffComment?.handoff;
+  // A directly started turn has no scheduler-owned follow-up to repeat. Without
+  // an explicit handoff its completed result awaits review, never another start.
+  const declaredHandoff = handoffComment?.handoff ?? (run.owner.source === 'native' &&
+    !['done', 'cancelled'].includes(initial.workflowState) ? { workflowState: 'review' as const } : undefined);
   // All semantic/evidence checks precede reservation; deterministic replay below uses original pins.
   const reserved = await steps.write('task-board/task', finalTask, { objectId: request.taskId, expectedRevision: task.pin.revision });
   const outcome: TaskBoard.ActionOutcome = { operationId: request.operationId, task: null, plan: null, run: null, history: null, result: null, review: null, attachment: null };

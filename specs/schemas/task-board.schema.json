@@ -4964,6 +4964,26 @@
               "type": "object",
               "properties": {
                 "kind": {
+                  "const": "adoptTurn"
+                },
+                "metadata": {
+                  "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/ReadObservation"
+                },
+                "turns": {
+                  "$ref": "https://ivy.invalid/schemas/agent.schema.json#/$defs/ReadObservation"
+                }
+              },
+              "required": [
+                "kind",
+                "metadata",
+                "turns"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
                   "const": "attachCall"
                 },
                 "slot": {

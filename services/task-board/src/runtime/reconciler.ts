@@ -1,5 +1,5 @@
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
-import type { TaskBoard, Wire } from "../../../../packages/sdk/src/node.js";
+import type { TaskBoard, Transport, Wire } from "../../../../packages/sdk/src/node.js";
 import type { TaskBoardEngine } from "./engine.js";
 import { TaskBoardNativeOrchestrator } from "./native-orchestrator.js";
 import { TaskBoardScheduler } from "./scheduler.js";
@@ -9,6 +9,8 @@ import { syncNativeComments } from './native-comments.js';
 import { finishedRun } from './native-publication.js';
 import { routeTaskQuestions } from './question-routing.js';
 import { missingWakeTrigger, wakeCondition } from './wake.js';
+import { adoptDirectTurn } from './native-adoption.js';
+import { nativeRecord, nativeString } from './native-intent.js';
 
 type Lane = TaskBoard.ScanCursor["lane"];
 const lanes: Lane[] = ["operations", "runs", "tasks", "deliveries"];
@@ -85,6 +87,8 @@ export class TaskBoardReconciler {
   private revisionProtectionAt = Date.now() + 15 * 60_000;
   private readonly activeTasks = new Map<string, Promise<void>>();
   private readonly changedTasks = new Set<string>();
+  private readonly primaries = new Map<string, { serviceNodeId: string; threadId: string }>();
+  private readonly nativeChecks = new Map<string, { runId: string | null; after: number }>();
   private readonly pages = new Map<Lane, { ids: string[]; next: string | null; taskChanges: number }>();
   private readonly cursors = new Map<Lane, string | null>();
   private readonly failures = new Map<string, Wire.Diagnostic>();
@@ -103,11 +107,24 @@ export class TaskBoardReconciler {
   get recovered(): boolean {
     return this.recovering === null;
   }
+  notification(value: Transport.ProviderNotification): boolean {
+    let relevant = this.native.notification(value);
+    const event = nativeRecord(value.params.payload), body = nativeRecord(event['params']);
+    if (['turn/started', 'turn/completed', 'thread/status/changed'].includes(nativeString(event['method']))) {
+      for (const [taskId, primary] of this.primaries) {
+        if (primary.serviceNodeId === value.params.serviceNodeId && primary.threadId === body['threadId']) {
+          this.taskChanged(taskId); relevant = true;
+        }
+      }
+    }
+    return relevant;
+  }
   taskChanged(taskId?: string): void {
     this.taskChanges++;
     this.cursors.delete("tasks");
     this.pages.delete("tasks");
     if (taskId && !this.stopped) {
+      this.nativeChecks.delete(taskId);
       // Coalesce bursts per ticket; the durable scan covers overflow and restarts.
       if (this.changedTasks.size < 1024) this.changedTasks.add(taskId);
       this.dispatchChanged();
@@ -175,6 +192,25 @@ export class TaskBoardReconciler {
           "Complete startup recovery before new automatic claims.",
         );
         await routeTaskQuestions(this.engine, id);
+        const before = await this.engine.store.read('task-board/task', id, true, true, true);
+        if (before.metadata.effectivelyArchived) { this.primaries.delete(id); this.nativeChecks.delete(id); return; }
+        const primary = before.value.primaryResourceRef;
+        if (primary && before.value.fields.control === 'agent') {
+          if (this.primaries.size >= 1024 && !this.primaries.has(id)) {
+            const oldest = this.primaries.keys().next().value!;
+            this.primaries.delete(oldest); this.nativeChecks.delete(oldest);
+          }
+          this.primaries.set(id, { serviceNodeId: primary.serviceNodeId, threadId: primary.nativeId });
+          const checked = this.nativeChecks.get(id), runId = before.value.lastRun?.objectId ?? null;
+          // Notifications trigger an immediate check; bounded polling repairs lost
+          // notifications and reconnects without repeatedly reading idle history.
+          if (!before.value.claim && (!checked || checked.runId !== runId || checked.after <= Date.now() ||
+              before.value.workflowState === 'todo' || before.value.commentDeliveries.some(value => value.state === 'queued'))) {
+            const adopted = await adoptDirectTurn(this.engine, id);
+            this.nativeChecks.set(id, { runId: adopted?.run?.objectId ?? runId, after: Date.now() + 30_000 });
+            if (adopted?.run) await this.process('runs', adopted.run.objectId);
+          }
+        } else { this.primaries.delete(id); this.nativeChecks.delete(id); }
         await this.scheduler.task(id);
         const task = await this.engine.store.read('task-board/task', id);
         if (task.value.completionIssue) {

@@ -84,7 +84,7 @@ export async function startTaskBoard(path: string) {
     identity: { serviceNodeId: config.serviceNodeId, serviceName: 'task-board', instanceMode: 'singleton', hostId: config.hostId, version: config.version, buildId: config.buildId, hiveProtocol: 1 },
     registry: taskBoardRegistry, handlers, heartbeatMs: 2000,
     notificationFilters: () => [{ namespace: 'agent', name: 'notification', version: '1.0.0' }],
-    onNotification: value => { if (runtime?.native.notification(value)) kick(); },
+    onNotification: value => { if (runtime?.notification(value)) kick(); },
     reconcile: async connection => {
       await retireRuntime();
       const next = new TaskBoardEngine(new TaskBoardStore(connection, settings.rootObjectId, config.dataRoot), settings, { serviceNodeId: config.serviceNodeId, generation: connection.generation });

@@ -16,8 +16,8 @@ import { TaskBoardNativeDriver } from '../../services/task-board/src/runtime/nat
 import { nativeWorkflow } from './task-board-native.js';
 import { fixtureModels } from './task-board.js';
 
-export async function nativeDriverFixture(t: TestContext, nativeVersion: '0.154.0' = '0.154.0', maxJournalBytes = 64 * 1024 * 1024) {
-  const w = await nativeWorkflow(t, nativeVersion), catalog = catalogFor(nativeVersion).catalog;
+export async function nativeDriverFixture(t: TestContext, nativeVersion: '0.154.0' = '0.154.0', maxJournalBytes = 64 * 1024 * 1024, catalogSourceHash?: string) {
+  const w = await nativeWorkflow(t, nativeVersion, false, catalogSourceHash), catalog = catalogFor(nativeVersion, { sourceHash: w.f.plan.catalogSourceHash }).catalog;
   const root = mkdtempSync(join(tmpdir(), 'ivy-native-driver-'));
   const limits = { maxOperations: 100, maxJournalBytes, maxPendingInputs: 16, maxNotificationBytes: 1048576 };
   const journal = new NativeJournal({ serviceNodeId: 'native-agent', hostId: 'fixture-host', nativeVersion: catalog.version, nativeExecutableHash: catalog.nativeExecutableHash }, limits);

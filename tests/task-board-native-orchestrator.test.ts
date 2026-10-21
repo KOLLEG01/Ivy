@@ -2,6 +2,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { hashJson } from '../packages/contracts/src/canonical.js';
 import type { TaskBoard, Wire } from '../packages/contracts/src/generated.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
@@ -16,14 +17,17 @@ import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler
 import { unstartedArchivedContext, unstartedMissingContext } from '../services/task-board/src/runtime/native-recovery.js';
 import { TaskBoardReconciler } from '../services/task-board/src/runtime/reconciler.js';
 import { nativeRateLimitRetryAt } from '../services/task-board/src/runtime/native-rate-limit.js';
+import { adoptDirectTurn } from '../services/task-board/src/runtime/native-adoption.js';
 
-async function fixture(t: TestContext) {
-  const f = await nativeDriverFixture(t); let status = 'inProgress', started = false, readFailed = false, archived = false, unloaded = false, lazyMetadata = false, largeResume = false, outputError: number | null = null;
+async function fixture(t: TestContext, catalogSourceHash?: string) {
+  const f = await nativeDriverFixture(t, '0.154.0', 64 * 1024 * 1024, catalogSourceHash); let status = 'inProgress', started = false, readFailed = false, archived = false, unloaded = false, lazyMetadata = false, largeResume = false, outputError: number | null = null;
   const nativeThread = f.w.nativeThread;
   f.w.nativeThread = (turns = [], status = { type: 'idle' }) =>
     ({ ...nativeThread(turns, status), cwd: f.w.planned.workspace.canonicalCwd });
   let outputItems: Wire.Json[] = [{ id: 'two', type: 'agentMessage', phase: 'final_answer', text: 'Second' }];
   let turnError: Wire.Json = null, completedAt: number | null = null, startReplyStatus: string | null = null, rejectedStart: string | null = null, rejectedSteers = 0;
+  let directTurnId: string | null = null;
+  let pagePrefix: Wire.Json[] = [];
   f.reply(frame => {
     if (readFailed && frame['method'] === 'thread/turns/list') return { error: { code: -32000, message: 'Temporary native read failure.' } };
     if (frame['method'] === 'turn/start') {
@@ -47,14 +51,14 @@ async function fixture(t: TestContext) {
         approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly' }, reasoningEffort: 'high' } };
     }
     if (frame['method'] === 'thread/unarchive') { archived = false; return { result: { thread: f.w.nativeThread() } }; }
-    if (frame['method'] === 'thread/turns/list') return { result: { data: [{ ...nativeRecord(f.w.turn(status)), ...(turnError ? { error: turnError } : {}),
+    if (frame['method'] === 'thread/turns/list') return { result: { data: [...pagePrefix, { ...nativeRecord(f.w.turn(status)), ...(directTurnId ? { id: directTurnId, startedAt: Date.now() / 1000 } : {}), ...(turnError ? { error: turnError } : {}),
       ...(completedAt === null ? {} : { completedAt }), items: [], itemsView: 'notLoaded' }], nextCursor: null } };
     if (frame['method'] === 'thread/items/list') {
       const params = nativeRecord(frame['params']);
       assert.equal(params['limit'], 1); assert.equal(params['sortDirection'], 'desc');
       if (outputError !== null) return { error: { code: outputError, message: 'Output unavailable.' } };
       const index = params['cursor'] === null ? 0 : Number(params['cursor']);
-      return { result: { data: outputItems[index] ? [{ turnId: 'native-turn', item: outputItems[index]! }] : [], nextCursor: index + 1 < outputItems.length ? String(index + 1) : null } };
+      return { result: { data: outputItems[index] ? [{ turnId: directTurnId ?? 'native-turn', item: outputItems[index]! }] : [], nextCursor: index + 1 < outputItems.length ? String(index + 1) : null } };
     }
     return;
   });
@@ -63,12 +67,91 @@ async function fixture(t: TestContext) {
     startReply: (value: string) => { startReplyStatus = value; },
     rejectStart: (value: string | null) => { rejectedStart = value; },
     rejectSteers: (count: number) => { rejectedSteers = count; },
-    archive: () => { archived = true; }, unload: (lazy = false) => { unloaded = true; lazyMetadata = lazy; }, inactive: () => { started = false; },
+    archive: (value = true) => { archived = value; }, unload: (lazy = false) => { unloaded = true; lazyMetadata = lazy; }, inactive: () => { started = false; },
     largeResume: () => { largeResume = true; },
     outputs: (items: Wire.Json[]) => { outputItems = items; }, outputError: (code: number) => { outputError = code; },
     error: (value: Wire.Json, at: number | null = null) => { turnError = value; completedAt = at; },
+    directTurn: (id: string, state = 'inProgress', at: number | null = null) => { directTurnId = id; started = true; status = state; completedAt = at; },
+    prefixTurns: (values: Wire.Json[]) => { pagePrefix = values; },
     current: () => f.w.f.first.store.read('task-board/run', runId) };
 }
+
+for (const platform of ['local', 'remote'] as const)
+test(`direct turns on ${platform} platforms are adopted once, survive recovery and finish without starting or notifying themselves`, async t => {
+  const otherCatalog = JSON.parse(readFileSync('specs/native/codex-0.154.0/catalog' + (process.platform === 'linux' ? '' : '.linux-x64') + '.json', 'utf8'));
+  const f = await fixture(t, platform === 'remote' ? otherCatalog.sourceHash : undefined), engine = f.f.w.f.first, taskId = f.f.w.state().task.objectId;
+  await f.first.drain(f.runId); await f.f.w.handoff(); f.status('completed'); await f.first.drain(f.runId);
+  const before = await engine.store.read('task-board/task', taskId);
+  f.directTurn('direct-native-turn');
+  const frames = f.f.frames.length;
+  const adopted = await adoptDirectTurn(engine, taskId);
+  assert.ok(adopted?.run);
+  const running = await engine.store.read('task-board/task', taskId), run = await engine.store.read('task-board/run', adopted.run);
+  assert.equal(running.value.workflowState, 'in_progress'); assert.equal(running.value.claim?.run?.objectId, run.pin.objectId);
+  assert.equal(run.value.turnId, 'direct-native-turn'); assert.deepEqual(run.value.primaryResourceRef, before.value.primaryResourceRef);
+  assert.equal(run.value.owner.source, 'native'); assert.deepEqual(run.value.calls, { thread: null, turn: null, interrupt: null });
+  assert.equal(await adoptDirectTurn(engine, taskId), null);
+  const operation = await engine.operations.find(engine.settings.principalId, adopted.operationId);
+  assert.deepEqual(await engine.recoverOperation(operation!.pin.objectId), adopted);
+  // A fresh orchestrator uses only the persisted claim and native identity.
+  await f.second.drain(adopted.run.objectId);
+  f.status('completed'); f.outputs([{ id: 'direct-final', type: 'agentMessage', phase: 'final_answer', text: 'Direct turn result.' }]);
+  await f.second.drain(adopted.run.objectId);
+  const finished = await engine.store.read('task-board/task', taskId);
+  assert.equal(finished.value.workflowState, 'review'); assert.equal(finished.value.claim, null);
+  assert.equal((await engine.store.read('task-board/run', adopted.run.objectId)).value.phase, 'completed');
+  assert.equal((await engine.store.read('task-board/result', finished.value.latestResult!)).value.content.summary, 'Direct turn result.');
+  for (let index = 0; index < 3; index++) {
+    assert.equal(await adoptDirectTurn(engine, taskId), null);
+    assert.equal(await new TaskBoardScheduler(engine).task(taskId), null);
+  }
+  assert.equal((await engine.store.read('task-board/task', taskId)).pin.revision, finished.pin.revision);
+  assert.equal(finished.value.attemptCount, before.value.attemptCount + 1);
+  assert.equal(finished.value.commentDeliveries.length, before.value.commentDeliveries.length);
+  assert.equal(f.f.frames.slice(frames).filter(frame => ['thread/start', 'thread/resume', 'turn/start', 'turn/steer'].includes(String(frame['method']))).length, 0);
+});
+
+test('direct turn discovery recovers a short completed turn but ignores old history and archived native contexts', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first, taskId = f.f.w.state().task.objectId;
+  await f.first.drain(f.runId); await f.f.w.handoff(); f.status('completed'); await f.first.drain(f.runId);
+  f.directTurn('old-direct-turn', 'completed', 1);
+  assert.equal(await adoptDirectTurn(engine, taskId), null);
+  f.directTurn('short-direct-turn', 'completed', Date.now() / 1000 + 1);
+  f.archive(); assert.equal(await adoptDirectTurn(engine, taskId), null);
+  f.archive(false);
+  f.prefixTurns([{ ...nativeRecord(f.f.w.turn('completed')), startedAt: 1, completedAt: 2, items: [], itemsView: 'notLoaded' }]);
+  const adopted = await adoptDirectTurn(engine, taskId); assert.ok(adopted?.run);
+  await f.second.drain(adopted.run.objectId);
+  assert.equal((await engine.store.read('task-board/task', taskId)).value.workflowState, 'review');
+  assert.equal(await adoptDirectTurn(engine, taskId), null);
+});
+
+test('direct turn notifications track the owning ticket through completion without another scan or self-wake', async t => {
+  const f = await fixture(t), engine = f.f.w.f.first, taskId = f.f.w.state().task.objectId;
+  await f.first.drain(f.runId); await f.f.w.handoff(); f.status('completed'); await f.first.drain(f.runId);
+  const runtime = new TaskBoardReconciler(engine); t.after(() => runtime.stop());
+  for (let pass = 0; !runtime.recovered && pass < 10; pass++) { await runtime.tick(); await runtime.settled(); }
+  assert.equal(runtime.recovered, true);
+  runtime.taskChanged(taskId); await runtime.settled();
+  const starts = f.f.frames.filter(frame => frame['method'] === 'turn/start').length;
+  f.directTurn('notified-direct-turn');
+  const event = { jsonrpc: '2.0' as const, method: 'notifications.provider' as const, params: { namespace: 'agent', name: 'notification', version: '1.0.0',
+    serviceNodeId: 'native-agent', generation: 1, payload: { method: 'turn/started', params: { threadId: 'native-primary' } } } };
+  assert.equal(runtime.notification({ ...event, params: { ...event.params, serviceNodeId: 'unrelated-agent' } }), false);
+  assert.equal(runtime.notification(event), true); assert.equal(runtime.notification(event), true);
+  await runtime.settled();
+  const active = await engine.store.read('task-board/task', taskId);
+  assert.equal(active.value.workflowState, 'in_progress', JSON.stringify(runtime.diagnostics));
+  assert.equal((await engine.store.read('task-board/run', active.value.claim!.run!)).value.turnId, 'notified-direct-turn');
+  f.status('completed'); event.params.payload.method = 'turn/completed';
+  runtime.notification(event); await runtime.settled();
+  const finished = await engine.store.read('task-board/task', taskId);
+  assert.equal(finished.value.workflowState, 'review'); assert.equal(finished.value.claim, null);
+  runtime.notification(event); await runtime.settled();
+  assert.equal((await engine.store.read('task-board/task', taskId)).pin.revision, finished.pin.revision);
+  assert.deepEqual(runtime.diagnostics, []);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, starts);
+});
 
 test('native quota retries use the reported reset and timezone, with delayed retries when reset data is absent', () => {
   const turn = (message: string, codexErrorInfo: Wire.Json = null) => ({ status: 'failed', error: { message, codexErrorInfo } });

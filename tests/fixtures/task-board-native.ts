@@ -6,8 +6,8 @@ import { evidenceIdentity, intendedCall, retainNativeRequest, resolveNativeReque
 import type { NativeSlot } from '../../services/task-board/src/runtime/native-intent.js';
 import { taskBoardFixture } from './task-board.js';
 
-export async function nativeWorkflow(t: { after: (fn: () => void) => void }, nativeVersion: '0.154.0' = '0.154.0', projectWorkspace = false) {
-  const f = taskBoardFixture(t, nativeVersion), planned = await f.planned('agent', projectWorkspace
+export async function nativeWorkflow(t: { after: (fn: () => void) => void }, nativeVersion: '0.154.0' = '0.154.0', projectWorkspace = false, catalogSourceHash?: string) {
+  const f = taskBoardFixture(t, nativeVersion, catalogSourceHash), planned = await f.planned('agent', projectWorkspace
     ? { kind: 'directory_path', path: String(f.plan.threadStart.cwd) } : { kind: 'task_workspace' });
   const startRequest: TaskBoard.StartRequest = { action: 'start', operationId: randomUUID(), taskId: planned.task.objectId, expectedRevision: planned.task.revision, intent: planned.plan, target: planned.target, workspace: planned.workspace, commentIds: [],  };
   const started = await f.invoke(startRequest);
@@ -19,7 +19,7 @@ export async function nativeWorkflow(t: { after: (fn: () => void) => void }, nat
   };
   const ownerOperation = (method: string, params: Wire.Json, reply: Agent.Reply | null, operationId: string = randomUUID(), phase: Agent.Operation['phase'] = 'succeeded'): Agent.Operation => {
     const now = new Date().toISOString();
-    return { schemaVersion: 1, operationId, callerPrincipalId: f.settings.principalId, serviceNodeId: 'native-agent', nativeVersion, nativeExecutableHash: catalogFor(nativeVersion).catalog.nativeExecutableHash, method, params,
+    return { schemaVersion: 1, operationId, callerPrincipalId: f.settings.principalId, serviceNodeId: 'native-agent', nativeVersion, nativeExecutableHash: catalogFor(nativeVersion, { sourceHash: f.plan.catalogSourceHash }).catalog.nativeExecutableHash, method, params,
       requestHash: hashJson({ method, params }), phase, createdAt: now, updatedAt: now, epoch: 'fixture-epoch', requestId: 'fixture-request-' + operationId, reply, code: phase === 'outcome_unknown' ? 'native_epoch_lost' : phase === 'failed' ? 'native_error' : null };
   };
   const evidence = new TaskBoardEvidence(f.first.store);

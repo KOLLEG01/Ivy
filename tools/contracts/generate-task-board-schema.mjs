@@ -243,6 +243,7 @@ const contractVersions = { task: '1.9.0', run: '1.2.0', configuration: '1.2.0', 
 // Internal owner observations are durable actions, but are never public service tools or accepted
 // as a user/worker ActionRequest. Their referenced bytes precede every resulting publication.
 defs.NativeUpdateRequest = obj({ action: { const: 'nativeUpdate' }, ...existing, run: ref('ObjectPin'), change: { oneOf: [
+  obj({ kind: { const: 'adoptTurn' }, metadata: agent('ReadObservation'), turns: agent('ReadObservation') }),
   obj({ kind: { const: 'attachCall' }, slot: { enum: ['thread', 'turn', 'interrupt', 'steer'] }, call: ref('ObjectPin') }),
   obj({ kind: { const: 'reattachCall' }, call: ref('ObjectPin') }),
   obj({ kind: { const: 'observeCall' }, slot: { enum: ['thread', 'turn', 'interrupt', 'steer'] }, call: ref('ObjectPin') }),
