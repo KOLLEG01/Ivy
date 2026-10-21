@@ -30,7 +30,7 @@ export class TaskBoardNativeOrchestrator {
     string,
     { serviceNodeId: string; threadId: string }
   >();
-  private readonly retries = new Map<string, { count: number; after: number }>();
+  private readonly retries = new Map<string, number>();
   notification(value: Transport.ProviderNotification): boolean {
     const params = value.params,
       event = nativeRecord(params.payload),
@@ -107,17 +107,14 @@ export class TaskBoardNativeOrchestrator {
     );
   }
   private postpone(runId: string, error?: unknown): void {
-    if (publicationContention(error)) {
-      this.retries.set(runId, { count: 0, after: Date.now() + 250 });
-      return;
-    }
-    const count = Math.min((this.retries.get(runId)?.count ?? 0) + 1, 5);
     if (this.retries.size >= 1024 && !this.retries.has(runId))
       this.retries.delete(this.retries.keys().next().value!);
-    this.retries.set(runId, { count, after: Date.now() + Math.min(300_000, 30_000 * 2 ** (count - 1)) });
+    // Recovery only observes retained work. A past outage must not leave a
+    // restored provider waiting for a growing, five-minute retry interval.
+    this.retries.set(runId, Date.now() + (publicationContention(error) ? 250 : 30_000));
   }
   async drain(runId: string): Promise<boolean> {
-    if ((this.retries.get(runId)?.after ?? 0) > Date.now()) return false;
+    if ((this.retries.get(runId) ?? 0) > Date.now()) return false;
     await this.engine.store.withReadCache(async () => {
       // Dispatch a newly prepared steer in this pass, just like a start.
       // Unchanged or uncertain native work still yields to normal recovery.

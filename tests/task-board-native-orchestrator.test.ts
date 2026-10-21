@@ -705,7 +705,7 @@ test('closed provider retains in progress with visible automatic recovery and bo
   await f.first.drain(f.runId);
   assert.ok(f.f.ownerCalls > firstCalls);
   f.f.providerClosed(false);
-  now += 60_001;
+  now += 30_001;
   await f.first.drain(f.runId);
   run = await f.current();
   task = await f.f.w.f.first.store.read('task-board/task', run.value.taskId);
@@ -714,6 +714,29 @@ test('closed provider retains in progress with visible automatic recovery and bo
   assert.equal(task.value.runtimeWait, null);
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/start').length, 1);
   assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
+});
+
+for (const restarted of [false, true]) test(`an interrupted turn ${restarted ? 'retries in its saved conversation after owner replacement' : 'stays stopped in the same owner'}`, async t => {
+  const f = await fixture(t); await f.first.drain(f.runId);
+  const engine = f.f.w.f.first, original = await f.current();
+  if (restarted) f.f.restart();
+  f.status('interrupted'); f.inactive();
+  await f.first.drain(f.runId);
+  const failed = await f.current(), task = await engine.store.read('task-board/task', failed.value.taskId);
+  assert.equal(failed.value.phase, 'failed');
+  assert.equal(task.value.completionIssue?.code, 'native_interrupted');
+  assert.equal(task.value.completionIssue?.retryAt ?? null, restarted ? new Date(Date.parse(failed.value.finishedAt!) + 30_000).toISOString() : null);
+  assert.equal(await new TaskBoardScheduler(engine).task(task.pin.objectId), null);
+  if (!restarted) return;
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(task.value.completionIssue!.retryAt!) + 1 });
+  f.status('inProgress');
+  const retry = await new TaskBoardScheduler(engine).task(task.pin.objectId);
+  assert.ok(retry?.run); await f.second.drain(retry.run.objectId);
+  const resumed = await engine.store.read('task-board/run', retry.run.objectId);
+  assert.equal(resumed.value.phase, 'running');
+  assert.deepEqual(resumed.value.primaryResourceRef, original.value.primaryResourceRef);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'thread/start').length, 1);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 2);
 });
 
 test('periodic reconciliation recovers completed work after provider loss and a definition update without editing the ticket', async t => {

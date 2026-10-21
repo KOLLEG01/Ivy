@@ -91,7 +91,15 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   let runtimeWait: TaskBoard.RuntimeWait | null = null, detail = '', kind: TaskBoard.History['kind'] = 'recovered';
   let steeredComments: string[] = [];
   let acknowledgedWake: Extract<TaskBoard.NativeCallOrigin, { kind: 'steer' }> | null = null;
-  const retryAt = (turn: Record<string, Wire.Json>) => run.cancellation ? null : nativeRateLimitRetryAt(turn, at);
+  const retryAt = (turn: Record<string, Wire.Json>, epoch: string | null) => {
+    if (run.cancellation) return null;
+    // A replacement owner can conclusively report the old turn interrupted.
+    // Continue the saved conversation; never infer this from silence or replay
+    // an uncertain turn. Interruptions in the same connection remain stopped.
+    if (turn['status'] === 'interrupted' && epoch && run.nativeEpoch && epoch !== run.nativeEpoch)
+      return new Date(Date.parse(at) + 30_000).toISOString();
+    return nativeRateLimitRetryAt(turn, at);
+  };
   const validateCall = (pin: TaskBoard.ObjectPin, _slot: keyof TaskBoard.Run['calls']) => store.read('task-board/native-call', pin);
   const observedCall = async (pin: TaskBoard.ObjectPin, slot: keyof TaskBoard.Run['calls']) => {
     const call = await validateCall(pin, slot);
@@ -100,11 +108,11 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     requireThat(call.value.ownerPhase === observation.phase && call.value.epoch === observation.epoch && call.value.code === observation.code, 'task_board_evidence_mismatch', 'NativeCall observation fields must agree with its verified owner evidence.');
     return { call, observation, artifact: call.value.evidence };
   };
-  const finishTurn = (turn: Record<string, Wire.Json>, proof: TaskBoard.Artifact): Completion | null => {
+  const finishTurn = (turn: Record<string, Wire.Json>, proof: TaskBoard.Artifact, epoch: string | null): Completion | null => {
     requireThat(nativeString(turn['id']) === next.turnId, 'task_board_turn_mismatch', 'A native snapshot cannot substitute another turn for the saved execution identity.');
     const status = nativeString(turn['status']);
     if (!['completed', 'failed', 'interrupted'].includes(status)) { requireThat(status === 'inProgress', 'task_board_native_state_unsupported', 'The native turn has an unsupported state.'); return null; }
-    return { state: status === 'completed' ? 'succeeded' : status === 'interrupted' && !!next.cancellation ? 'cancelled' : 'failed', summary: outputSummary(turn, status), evidence: proof, code: status === 'completed' ? null : 'native_' + status, retryAt: retryAt(turn) };
+    return { state: status === 'completed' ? 'succeeded' : status === 'interrupted' && !!next.cancellation ? 'cancelled' : 'failed', summary: outputSummary(turn, status), evidence: proof, code: status === 'completed' ? null : 'native_' + status, retryAt: retryAt(turn, epoch) };
   };
   switch (request.change.kind) {
     case 'readSnapshot': {
@@ -126,7 +134,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       const handoff = runHandoff(task.value, request.run.objectId);
       const turn = verified.snapshot.turn;
       completion = { state: observedOutcome.state as Completion['state'], summary: verified.status === 'failed' && nativeString(nativeRecord(turn['error'])['message'])
-        ? outputSummary(turn, verified.status) : handoff?.body ?? verified.summary, evidence: change.snapshot, code: observedOutcome.code, retryAt: retryAt(turn) };
+        ? outputSummary(turn, verified.status) : handoff?.body ?? verified.summary, evidence: change.snapshot, code: observedOutcome.code, retryAt: retryAt(turn, verified.snapshot.document.value.epoch) };
       break;
     }
     case 'transcript': {
@@ -139,7 +147,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       requireThat(['succeeded', 'failed', 'cancelled'].includes(observedOutcome.state), 'task_board_native_state_changed', 'A transcript must identify a terminal native outcome.');
       const turn = transcript.snapshot.turn;
       completion = { state: observedOutcome.state as Completion['state'], summary: transcript.status === 'failed' && nativeString(nativeRecord(turn['error'])['message'])
-        ? outputSummary(turn, transcript.status) : transcript.summary, evidence: change.evidence, code: observedOutcome.code, retryAt: retryAt(turn) };
+        ? outputSummary(turn, transcript.status) : transcript.summary, evidence: change.evidence, code: observedOutcome.code, retryAt: retryAt(turn, transcript.snapshot.document.value.epoch) };
       break;
     }
     case 'reattachCall': {
@@ -255,7 +263,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       const turn = nativeArray(thread['turns']).map(nativeRecord).find(value => value['id'] === run.turnId);
       requireThat(turn, 'task_board_turn_unavailable', 'The owner snapshot does not contain the saved turn; do not infer completion.');
       requireThat(change.notificationCursor >= run.notificationCursor, 'task_board_cursor_regression', 'Native notification progress cannot move backwards.');
-      next.notificationCursor = change.notificationCursor; completion = finishTurn(turn, change.evidence);
+      next.notificationCursor = change.notificationCursor; completion = finishTurn(turn, change.evidence, observation.epoch);
       const state = readOutcome(run, nativeString(turn['status']));
       if (completion) completion = { ...completion, state: state.state as Completion['state'], code: state.code };
       if (!completion) {
