@@ -959,6 +959,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ivy-host-executor"
+version = "0.2.40"
+dependencies = [
+ "ivy-contracts",
+ "ivy-hive",
+ "ivy-host-runtime",
+ "ivy-sdk",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "ivy-host-runtime"
 version = "0.2.40"
 dependencies = [

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["packages/contracts/rust", "packages/store", "packages/sdk/rust", "packages/host-runtime/rust", "packages/cli/rust", "services/hive/rust"]
+members = ["packages/contracts/rust", "packages/store", "packages/sdk/rust", "packages/host-runtime/rust", "packages/cli/rust", "services/hive/rust", "services/host-executor/rust"]
 
 [workspace.package]
 version = "0.2.40"
