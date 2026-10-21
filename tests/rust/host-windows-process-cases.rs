@@ -3,7 +3,10 @@ use ivy_host_runtime::platform::windows_process::{
 };
 use std::{
     io,
-    os::windows::{io::AsRawHandle, process::CommandExt},
+    os::windows::{
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        process::CommandExt,
+    },
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -47,13 +50,75 @@ fn predecessor_admission_absence_and_identity_mismatch() {
 }
 
 #[test]
-fn predecessor_access_denial_is_not_retirement() {
-    // The Windows System process is protected even from ordinary elevated callers.
-    let error = process_exited(4, 1).unwrap_err();
-    assert_eq!(
-        error.raw_os_error(),
-        Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
-    );
+fn predecessor_system_inspection_preserves_observed_native_outcome() {
+    use windows_sys::Win32::{
+        Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME},
+        System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        },
+    };
+
+    // System inspection permissions differ between hosts. Probe the same rights
+    // independently so an API that swallows a real denial cannot pass this case.
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            4,
+        )
+    };
+    let (opened, native_error, native_created) = if raw.is_null() {
+        (false, io::Error::last_os_error().raw_os_error(), None)
+    } else {
+        let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut created: FILETIME = unsafe { std::mem::zeroed() };
+        let mut exited = created;
+        let mut kernel = created;
+        let mut user = created;
+        if unsafe {
+            GetProcessTimes(
+                process.as_raw_handle(),
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+        } == 0
+        {
+            (true, io::Error::last_os_error().raw_os_error(), None)
+        } else {
+            (
+                true,
+                None,
+                Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime)),
+            )
+        }
+    };
+    if let Some(code) = native_error {
+        if !opened && code == ERROR_INVALID_PARAMETER as i32 {
+            assert!(process_exited(4, 1).unwrap());
+        } else {
+            assert_eq!(process_exited(4, 1).unwrap_err().raw_os_error(), Some(code));
+        }
+    } else {
+        assert_ne!(native_created.unwrap(), 1);
+        assert!(process_exited(4, 1).unwrap());
+    }
+    if let Some(path) = std::env::var_os("IVY_PREDECESSOR_PERMISSION_OBSERVATION") {
+        let observation = serde_json::json!({
+            "pid": 4,
+            "recordedFiletime": "1",
+            "processOpened": opened,
+            "nativeError": native_error,
+            "nativeCreatedFiletime": native_created.map(|value| value.to_string()),
+            "accessDenialCoverage": if native_error == Some(ERROR_ACCESS_DENIED as i32) {
+                "observed"
+            } else {
+                "unavailable"
+            },
+        });
+        std::fs::write(path, serde_json::to_vec(&observation).unwrap()).unwrap();
+    }
 }
 
 struct OwnedFixture(Child);
