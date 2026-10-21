@@ -18,7 +18,7 @@ use ivy_contracts::{IvyError, IvyJson as Json, IvyResult, JsString, Outcome};
 use ivy_sdk::{rpc::RequestFuture, service::ServiceFuture};
 use std::{fs, path::Path, sync::Arc, time::Duration};
 
-struct CloseOnly;
+pub(super) struct CloseOnly;
 impl RuntimeSocket for CloseOnly {
     fn bind(&self, _: RuntimeCallbacks) {}
     fn start(&self) {

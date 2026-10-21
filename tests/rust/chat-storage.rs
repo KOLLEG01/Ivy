@@ -9,6 +9,8 @@ mod auth_native;
 mod auth_node;
 #[path = "chat-account-auth-cases.rs"]
 mod account_auth;
+#[path = "chat-auth-protocol-cases.rs"]
+mod auth_protocol;
 #[path = "chat-store-cases.rs"]
 mod chat_store;
 #[path = "chat-store-hive-cases.rs"]

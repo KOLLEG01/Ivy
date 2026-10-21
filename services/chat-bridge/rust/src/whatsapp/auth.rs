@@ -7,7 +7,7 @@ const SCHEMA: &str = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA b
 CREATE TABLE IF NOT EXISTS auth(category TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(category,id));";
 
 pub struct AuthStore {
-    db: Connection,
+    pub(super) db: Connection,
 }
 
 impl AuthStore {
@@ -85,7 +85,12 @@ pub struct AuthMutation<'a> {
     pub value: Option<&'a str>,
 }
 
-fn set(db: &Connection, category: &str, id: &str, value: Option<&str>) -> rusqlite::Result<()> {
+pub(super) fn set(
+    db: &Connection,
+    category: &str,
+    id: &str,
+    value: Option<&str>,
+) -> rusqlite::Result<()> {
     // The original store skips identical values, including inside keys.set.
     // Check each ordered mutation in the transaction so duplicates and deletes
     // observe earlier entries, without firing triggers for an unchanged row.
