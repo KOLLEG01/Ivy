@@ -98,7 +98,7 @@ impl Fixture {
         .unwrap();
         // Swap only the provider after real CoInitializeEx/activation. The original
         // managed oracle makes the same private-field replacement, without editing its bodies.
-        let automation = source.keep(unsafe { (self.automation)() }).unwrap();
+        let automation = source.keep(Reference::take(unsafe { (self.automation)() }).unwrap());
         source.automation = Some(automation);
         unsafe {
             (self.failure)(n("failure"), n("hr"), n("hide"));
@@ -160,6 +160,9 @@ impl Fixture {
                         &|| {
                             let i = current.get();
                             current.set(i + 1);
+                            if stop <= -2 && i == -(stop + 2) {
+                                panic!("fixture current");
+                            }
                             i != stop
                         },
                     )
@@ -277,7 +280,7 @@ fn sdk_com_cache_refresh_invoke_and_lifetime_match_original() {
     for windows in [0, 2, 32, 33] {
         input.push(case(0, "read", windows, -1, 0, -1, -1, false));
     }
-    for stop in [0, 1, 2, 3] {
+    for stop in [-4, -3, -2, 0, 1, 2, 3] {
         input.push(case(0, "invoke", 1, -1, 0, -1, stop, false));
     }
     input.push(case(0, "read", 1, -1, 0, -1, -1, true));
@@ -365,6 +368,31 @@ fn sdk_com_cache_refresh_invoke_and_lifetime_match_original() {
         original.get("rows").unwrap().as_array().unwrap().len(),
         input.as_array().unwrap().len()
     );
+    // A failing out call may still return a reference. Retire it immediately and
+    // preserve the native failure code; null results still require success.
+    assert_eq!(unsafe { (fixture.reset)(0, 0) }, 1);
+    let mut source = WindowsControlSource::new(std::process::id() as i32, false, None).unwrap();
+    for status in [0x80070005u32 as i32, 1] {
+        let result = source.out(|out| unsafe {
+            *out = (fixture.automation)();
+            status
+        });
+        let error = match result {
+            Err(ControlError::Provider(error)) => error,
+            _ => panic!("native error required"),
+        };
+        assert_eq!(
+            error.downcast_ref::<AccessibilityError>().unwrap().hresult,
+            if status < 0 {
+                status
+            } else {
+                0x80004005u32 as i32
+            }
+        );
+        assert_eq!(unsafe { (fixture.references)() }, 0);
+    }
+    assert!(source.out(|_| 0).is_err());
+    source.close().unwrap();
     // An existing STA must reject the source without stealing apartment ownership.
     std::thread::spawn(|| unsafe {
         assert_eq!(com::CoInitializeEx(std::ptr::null_mut(), 2), 0);

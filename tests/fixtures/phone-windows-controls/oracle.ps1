@@ -60,7 +60,7 @@ public static partial class WindowsDesktopControls {
                 object operation=Capture(()=>{
                     if(action=="refresh")return Windows(source.Refresh(new(read[0].Handle,[42,0],[42,1],[42,2])));
                     int current=0,stop=item.GetProperty("currentStop").GetInt32();
-                    return source.Invoke(read[0].Handle,read[0].Controls[0],()=>current++!=stop).Phase;
+                    return source.Invoke(read[0].Handle,read[0].Controls[0],()=>{int i=current++;if(stop<=-2&&i==-(stop+2))throw new Exception("fixture current");return i!=stop;}).Phase;
                 });
                 refsAfter=FixtureReferences();return new{operation};
             });

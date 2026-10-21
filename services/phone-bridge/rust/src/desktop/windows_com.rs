@@ -190,8 +190,11 @@ impl Drop for Reference {
 pub(super) fn create() -> Result<Reference, ControlError> {
     let mut pointer = std::ptr::null_mut();
     // CLSCTX_SERVER matches the original COM activation; no remote machine is supplied.
-    check(unsafe { CoCreateInstance(&CLSID, std::ptr::null_mut(), 0x15, &IID, &mut pointer) })?;
-    Reference::take(pointer)
+    let status =
+        unsafe { CoCreateInstance(&CLSID, std::ptr::null_mut(), 0x15, &IID, &mut pointer) };
+    let owned = Reference::take(pointer);
+    check(status)?;
+    owned
 }
 pub(super) enum Value {
     Integer(i32),

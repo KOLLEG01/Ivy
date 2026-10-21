@@ -137,16 +137,18 @@ impl WindowsControlSource {
             Ok(())
         }
     }
-    fn keep(&mut self, pointer: Raw) -> Result<Handle, ControlError> {
-        let owned = Reference::take(pointer)?;
+    fn keep(&mut self, owned: Reference) -> Handle {
         let handle = owned.handle();
         self.references.push(owned);
-        Ok(handle)
+        handle
     }
     fn out(&mut self, call: impl FnOnce(*mut Raw) -> i32) -> Result<Handle, ControlError> {
         let mut pointer = std::ptr::null_mut();
-        check(call(&mut pointer))?;
-        self.keep(pointer)
+        let status = call(&mut pointer);
+        // Own any returned reference before checking HRESULT, including failures.
+        let owned = Reference::take(pointer);
+        check(status)?;
+        Ok(self.keep(owned?))
     }
     fn windows(&self) -> Result<Vec<(isize, bool)>, ControlError> {
         struct Inventory {
@@ -292,7 +294,7 @@ impl WindowsControlSource {
     ) -> Result<DesktopInvokePhase, ControlError> {
         self.check_thread()?;
         let retained = self.references.len();
-        let result = (|| {
+        let result = super::controls::guarded(|| {
             if !current() {
                 return Ok(DesktopInvokePhase::NotSubmitted);
             }
@@ -336,7 +338,7 @@ impl WindowsControlSource {
                     DesktopInvokePhase::OutcomeUnknown
                 },
             )
-        })();
+        });
         self.release_since(retained);
         result
     }
