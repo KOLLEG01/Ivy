@@ -1,5 +1,5 @@
-import { commentsPending, peerComment, workspaceIdentity } from './task-coordination.js';
-import { assessSteps, consumeStep, stepCondition, validateNextSteps } from './next-steps.js';
+import { commentsPending, peerComment, queuedInput, workspaceIdentity } from './task-coordination.js';
+import { dependencySnapshot, validateDependencies, wakeCondition } from './wake.js';
 import { publishBrowserNotice } from '../../../../packages/sdk/src/node.js';
 import { digest, hashJson } from "../../../../packages/sdk/src/node.js";
 import { connectionOwner } from "../../../../packages/sdk/src/connection-owner.js";
@@ -36,7 +36,7 @@ import { failedRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-li
 import { crossAgentComment, openQuestions, queuedTaskEdits, queuedUserInput, unreadComments } from './conversation.js';
 import { operationReceipt } from './operation-receipt.js';
 import { readTask } from './task-read.js';
-import { executionMode, missingHandoff, nextExecutionMode, triggeredByComments } from './execution-mode.js';
+import { nextExecutionMode, triggeredByComments } from './execution-mode.js';
 import { validateTaskContent } from './comment-store.js';
 import { sameAssignment } from './handoff.js';
 import { requireExecutionCapacity } from './execution-capacity.js';
@@ -243,7 +243,6 @@ export class TaskBoardEngine {
         requireThat(!request.sourceTaskId, 'task_board_handoff_source', 'Omit sourceTaskId on your own handoff; it is only for a directed message to another task.');
         const task = await this.store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision });
         await this.validateAction(request, task.value, actor, new Date().toISOString(), request.operationId);
-        requireThat(task.metadata.currentRevision === request.expectedRevision, 'revision_conflict', 'Read the current ticket before declaring its completion intent.');
         return { run: task.value.claim!.run!, work: handoffWork(task.value) };
       } : undefined));
   }
@@ -348,21 +347,20 @@ export class TaskBoardEngine {
     );
     return receiptOnly ? operationReceipt(operation.value) : operation.value;
   }
-  condition(task: TaskBoard.Task, steps?: TaskBoard.ExecutionCondition): TaskBoard.ExecutionCondition {
+  condition(task: TaskBoard.Task, wake?: TaskBoard.ExecutionCondition): TaskBoard.ExecutionCondition {
     const originalError = task.completionIssue && this.store.failedHandoff(task.completionIssue.run.objectId);
     return executionCondition({
       workflowState: task.workflowState,
       control: task.fields.control,
       publication: !!task.publication,
       claim: task.claim
-        ? { phase: task.claim.phase, hostId: task.claim.target.hostId, mode: executionMode(task.claim.request) }
+        ? { phase: task.claim.phase, hostId: task.claim.target.hostId }
         : null,
       runtimeWait: task.runtimeWait,
       executionRequirement: task.fields.executionRequirement,
       requiredCapabilities: task.fields.requiredCapabilities,
       completionIssue: originalError ? originalError.code + ': ' + originalError.detail : task.completionIssue?.detail,
-      steps,
-      recovery: missingHandoff(task) && task.fields.control === 'agent' && !!task.primaryResourceRef ? { attempts: task.completionIssue?.attempts ?? 0, retryAt: task.completionIssue?.retryAt ?? null } : undefined,
+      wake,
     });
   }
   private async taskDocument(
@@ -419,12 +417,12 @@ export class TaskBoardEngine {
     principalId: string,
   ): Promise<TaskBoard.TaskView & { unreadAgentComments: number; unreadDirectAgentComments: number }> {
     const document = await this.taskDocument(query);
-    const steps = document.value.claim || document.value.publication ? undefined :
-      stepCondition(await assessSteps(this.store, document.value, new Date().toISOString()));
+    const wake = document.value.claim || document.value.publication ? undefined :
+      wakeCondition(document.value);
     return {
       object: document.pin,
       task: document.value,
-      executionCondition: this.condition(document.value, steps),
+      executionCondition: this.condition(document.value, wake),
       ...await this.unreadAgentComments(
         document,
         principalId,
@@ -921,17 +919,25 @@ export class TaskBoardEngine {
       return outcome;
     }
     const reservation = operation.value.writes[0]?.destination;
-    let base = first && operation.value.handoffWork ? await this.store.read('task-board/task', request.taskId) : await this.store.read("task-board/task", {
+    const appendOnly = request.action === 'comment' || request.action === 'uploadAttachment';
+    const admission = request.action === 'start' || request.action === 'continue' || actor.source === 'scheduler' && request.action === 'defer';
+    let base = first && (operation.value.handoffWork || appendOnly || admission) ? await this.store.read('task-board/task', request.taskId) : await this.store.read("task-board/task", {
         objectId: request.taskId,
-        revision: operation.value.handoffRun && reservation && 'expectedRevision' in reservation ? reservation.expectedRevision : request.expectedRevision,
+        revision: reservation && 'expectedRevision' in reservation ? reservation.expectedRevision : request.expectedRevision,
       });
     if (first && operation.value.handoffRun) {
       const current = operation.value.handoffWork ? base : await this.store.read('task-board/task', request.taskId);
       const expected = operation.value.handoffWork ?? handoffWork(base.value);
       requireThat(current.value.claim?.run?.objectId === operation.value.handoffRun.objectId &&
-        same(handoffWork(current.value), expected),
+        same({ ...handoffWork(current.value), workRevision: 0 }, { ...expected, workRevision: 0 }),
       'task_board_handoff_changed', 'The original handoff no longer belongs to the same unchanged work and execution claim.');
       base = current;
+    }
+    if (first && admission && base.pin.revision !== request.expectedRevision) {
+      const original = (await this.store.read('task-board/task', { objectId: request.taskId, revision: request.expectedRevision })).value;
+      requireThat(!base.value.claim && base.value.workflowState === original.workflowState && sameAssignment(base.value.fields, original.fields) &&
+        same(base.value.primaryResourceRef, original.primaryResourceRef) && same(base.value.dependencies, original.dependencies) && base.value.wakeAt === original.wakeAt,
+        'revision_conflict', 'The assignment or wake-up schedule changed during allocation.');
     }
     const previous = base.value;
     if (first) {
@@ -959,11 +965,9 @@ export class TaskBoardEngine {
     // Start claims precede Run creation, even though publication is still pending. The gate and
     // marker prevent a native observer or another action from using a half-published claim.
     if (request.action === "start" || request.action === "continue") {
-      const mode = executionMode(request);
-      if (first && mode === 'execution' && !triggeredByComments(request)) {
-        const selected = (await assessSteps(this.store, previous, at)).find(value => value.step.id === request.nextStepId && value.ready);
-        requireThat(selected, 'task_board_input_required', 'The selected next step is no longer ready.');
-        next.consumedSteps = consumeStep(previous, selected);
+      if (first) {
+        next.observedDependencies = await dependencySnapshot(this.store, previous);
+        if (next.wakeAt && next.wakeAt <= at) next.wakeAt = null;
         delete next.completionIssue;
       }
       const claim: TaskBoard.Claim = {
@@ -1006,8 +1010,12 @@ export class TaskBoardEngine {
         ...submitted,
         category: submitted.category === null ? null : normalizedCategory!,
       };
-      if (request.nextSteps) next.nextSteps = request.nextSteps;
-      if (!same(previous.nextSteps, next.nextSteps) || !previous.claim && (request.parentTaskId === undefined || !same(previous.fields, next.fields))) next.workRevision++;
+      if (request.wakeAt !== undefined) next.wakeAt = request.wakeAt;
+      if (request.dependencies) {
+        next.dependencies = request.dependencies;
+        next.observedDependencies = await dependencySnapshot(this.store, next);
+      }
+      if (!same(previous.dependencies, next.dependencies) || previous.wakeAt !== next.wakeAt || !previous.claim && (request.parentTaskId === undefined || !same(previous.fields, next.fields))) next.workRevision++;
     }
     if (request.action === "reassign" && first) {
       next = {
@@ -1021,10 +1029,15 @@ export class TaskBoardEngine {
         runtimeWait: null,
         claim: null,
         primaryResourceRef: null,
-        consumedSteps: [],
       };
     }
     if (request.action === "comment" && first) {
+      // Scheduling intent is saved with the comment, so later edits cannot be overwritten at completion.
+      if (request.handoff?.wakeAt !== undefined) next.wakeAt = request.handoff.wakeAt;
+      if (request.handoff?.dependencies) {
+        next.dependencies = request.handoff.dependencies;
+        next.observedDependencies = await dependencySnapshot(this.store, next);
+      }
       const authorKind = actor.source === "user" ? "user" : actor.source === "worker" || actor.source === 'native' && request.sourceTaskId || request.nativeInput && !request.replyTo ? "agent" : "system";
       const comment: TaskBoard.Comment = {
         commentId: request.commentId, sequence: previous.comments.length + 1, author: actor, authorKind,
@@ -1077,7 +1090,7 @@ export class TaskBoardEngine {
         if (first)
           next.fields = { ...submitted, category: next.fields.category };
         const assignmentChanged = !sameAssignment(previous.fields, next.fields);
-        const stepsChanged = !same(previous.nextSteps, next.nextSteps);
+        const scheduleChanged = !same(previous.dependencies, next.dependencies) || previous.wakeAt !== next.wakeAt;
         // An active claim permits only metadata edits, which must not queue another native turn.
         if (
           assignmentChanged && next.fields.control === "agent" &&
@@ -1113,27 +1126,19 @@ export class TaskBoardEngine {
           ];
         }
         if (
-          (assignmentChanged || stepsChanged) && next.fields.control === "agent" &&
+          (assignmentChanged || scheduleChanged) && next.fields.control === "agent" &&
           ["review", "done"].includes(previous.workflowState)
         ) {
           next.workflowState = "todo";
           next.acceptedReview = null;
-          if (!next.nextSteps.length && request.nextSteps === undefined)
-            next.nextSteps = [{ id: 'main', scope: next.fields.description || next.fields.title, requires: [] }];
-          next.consumedSteps = [];
         }
         detail = "Updated editable task fields.";
         break;
       }
       case "transition":
         next.workflowState = request.workflowState;
-        if (request.workflowState === 'todo') {
-          if (!next.nextSteps.length) next.nextSteps = [{ id: 'main', scope: next.fields.description || next.fields.title, requires: [] }];
-          next.consumedSteps = [];
-        }
         if (request.workflowState === 'todo' && previous.completionIssue) {
-          if (missingHandoff(previous)) next.completionIssue = { ...previous.completionIssue, attempts: 0, retryAt: null };
-          else delete next.completionIssue;
+          delete next.completionIssue;
         }
         next.runtimeWait = null;
         kind =
@@ -1147,17 +1152,22 @@ export class TaskBoardEngine {
         detail = request.detail ?? `Moved to ${request.workflowState}.`;
         break;
       case "defer":
-        if ('recoveryRetryAt' in request) {
-          next.completionIssue = { ...(previous.completionIssue ?? { run: previous.lastRun!, operationId: request.operationId }),
-            code: request.recoveryRetryAt === null ? 'task_board_recovery_evidence_missing' : 'task_board_handoff_missing',
-            retryAt: request.recoveryRetryAt ?? null, detail: request.runtimeWait?.detail.slice(0, 2048) ?? 'The original completion intent needs reconciliation.' };
+        if (request.wakeAt !== undefined) next.wakeAt = request.wakeAt;
+        if (request.dependencies) {
+          next.dependencies = request.dependencies;
+          next.observedDependencies = await dependencySnapshot(this.store, next);
         }
-        next.nextSteps = request.nextSteps;
-        if ('checks' in request) next = upgradeRecord('task-board/task', { ...next, latestChecks: request.checks } as TaskBoard.Task);
-        if (!same(previous.nextSteps, next.nextSteps)) next.workRevision++;
         next.runtimeWait = request.runtimeWait === undefined ? previous.runtimeWait : request.runtimeWait;
-        if (!previous.claim && !['review', 'done', 'cancelled', 'backlog'].includes(previous.workflowState)) next.workflowState = 'waiting';
-        kind = 'deferred'; detail = request.runtimeWait?.detail ?? 'Updated the concrete next-step conditions.';
+        if (!previous.claim && !request.runtimeWait && !['review', 'done', 'cancelled', 'backlog'].includes(previous.workflowState)) next.workflowState = 'waiting';
+        if (previous.claim && actor.source === 'worker' && !request.runtimeWait) {
+          next.comments = [...next.comments, { commentId: request.operationId, sequence: next.comments.length + 1,
+            author: actor, authorKind: 'agent', purpose: 'handoff', handoff: { workflowState: 'waiting' },
+            body: 'Waiting for new input, a watched ticket change or the next appointment.',
+            requests: [], responses: [], attachments: [], run: previous.claim.run, turnId: null, replyTo: null,
+            delivery: null, operationId: request.operationId, createdAt: at }];
+          next.agentCommentCount++;
+        }
+        kind = 'deferred'; detail = request.runtimeWait?.detail ?? 'Updated the wake-up schedule.';
         break;
       case "reassign":
         next = {
@@ -1171,7 +1181,6 @@ export class TaskBoardEngine {
           runtimeWait: null,
           claim: null,
           primaryResourceRef: null,
-          consumedSteps: [],
         };
         kind = "reassigned";
         detail = request.reason;
@@ -1187,7 +1196,7 @@ export class TaskBoardEngine {
           operationId: request.operationId,
           callerPrincipalId: operation.value.callerPrincipalId,
           originalRequest: request,
-          executionContext: { workflowState: previous.workflowState, nextSteps: previous.nextSteps, latestResult: previous.latestResult, acceptedReview: previous.acceptedReview },
+          executionContext: { workflowState: previous.workflowState, latestResult: previous.latestResult, acceptedReview: previous.acceptedReview },
           requestHash: hashJson(request),
           target: claim.target,
           workspace: claim.workspace,
@@ -1277,6 +1286,7 @@ export class TaskBoardEngine {
         detail = request.acceptance;
         break;
       case "saveResult":
+        next.workRevision++;
         outcome.result = await steps.create(
           "task-board/result",
           {
@@ -1409,8 +1419,6 @@ export class TaskBoardEngine {
         }
         if (previous.workflowState === 'done' && request.moveToTodo) {
           next.workflowState = 'todo'; next.runtimeWait = null; next.acceptedReview = null;
-          if (!next.nextSteps.length) next.nextSteps = [{ id: 'main', scope: next.fields.description || next.fields.title, requires: [] }];
-          next.consumedSteps = [];
         }
         break;
       }
@@ -1504,13 +1512,6 @@ export class TaskBoardEngine {
     at: string,
     operationId: string,
   ): Promise<void> {
-    if (actor.source === 'worker' && task.claim) {
-      const mode = executionMode(task.claim.request);
-      requireThat(mode !== 'recovery' || ['comment', 'uploadAttachment', 'cancel'].includes(request.action),
-        'task_board_recovery_scope', 'Handoff recovery may record existing evidence and a completion intent; it cannot perform business workflow edits.');
-      if (mode === 'recovery' && request.action === 'comment') requireThat(request.authorKind !== 'user' && request.purpose !== 'question' && !request.contactUser,
-        'task_board_recovery_scope', 'Recovery records agent evidence; it cannot fabricate user input or a new approval question.');
-    }
     requireThat(
       !terminal(task) || (request.action === 'start' || request.action === 'continue') && triggeredByComments(request) ||
         (["edit", "retargetQuestion", "comment", "uploadAttachment"].includes(request.action) || request.action === "transition" &&
@@ -1518,8 +1519,6 @@ export class TaskBoardEngine {
       "task_board_invalid_transition",
       "This task is terminal for the requested action.",
     );
-    const handoffRecovery = (request.action === 'continue' && !!request.recoveryFor ||
-      request.action === 'defer' && 'recoveryRetryAt' in request) && nextExecutionMode(task, at) === 'recovery';
     const commentRequest = (request.action === 'start' || request.action === 'continue') && triggeredByComments(request);
     if (actor.source === 'scheduler') requireThat(
       ['start', 'continue', 'defer', 'transition'].includes(request.action) &&
@@ -1579,7 +1578,8 @@ export class TaskBoardEngine {
               "An active claim prevents changes to the running assignment.",
             );
         await this.checks.fields(fields, request.taskId);
-        if (request.nextSteps) await validateNextSteps(this.store, request.taskId, request.nextSteps, task);
+        date(request.wakeAt ?? null);
+        if (request.dependencies) await validateDependencies(this.store, request.taskId, request.dependencies);
         if (fields.control !== task.fields.control ||
           !same(fields.executionRequirement, task.fields.executionRequirement) ||
           !same(fields.nativeOptions ?? null, task.fields.nativeOptions ?? null))
@@ -1603,7 +1603,8 @@ export class TaskBoardEngine {
           cancelled: ["backlog"],
         };
         requireThat(
-          legal[task.workflowState].includes(request.workflowState),
+          legal[task.workflowState].includes(request.workflowState) ||
+            request.workflowState === 'todo' && task.workflowState === 'todo' && !!(task.completionIssue || task.runtimeWait),
           "task_board_invalid_transition",
           "Requested workflow destination is not legal from the current state.",
         );
@@ -1620,7 +1621,7 @@ export class TaskBoardEngine {
         noClaim();
         await requireExecutionCapacity(this.store, this.settings);
         requireThat(
-          ['todo', 'waiting', 'review'].includes(task.workflowState) || handoffRecovery || commentRequest,
+          ['todo', 'waiting', 'review'].includes(task.workflowState) || commentRequest,
           "task_board_invalid_transition",
           "Automatic execution starts from Todo or a resumable wait.",
         );
@@ -1636,20 +1637,9 @@ export class TaskBoardEngine {
           "Native Task allocation is automatic for agent-controlled work.",
         );
         {
-          const mode = executionMode(request);
-          const recoveryOnly = mode === 'recovery';
-          if (recoveryOnly && request.action === 'continue') {
-            const origin = await this.store.read('task-board/run', request.recoveryFor!.objectId);
-            requireThat(nextExecutionMode(task, at) === 'recovery' &&
-              request.commentIds.length === 0 && same(request.recoveryFor, task.completionIssue?.run ?? task.lastRun) &&
-              origin.value.taskId === request.taskId && ['completed', 'failed'].includes(origin.value.phase) &&
-              ['succeeded', 'failed'].includes(origin.value.externalOutcome.state) && !origin.value.cancellation &&
-              same(origin.value.primaryResourceRef, task.primaryResourceRef), 'task_board_recovery_evidence_missing',
-              'Recovery requires its exact terminal original Run and the unchanged native context.');
-          }
           if (commentRequest) requireThat(commentsPending(task) &&
             request.commentIds.every(id => task.commentDeliveries.some(delivery => delivery.commentId === id && delivery.state === 'queued') &&
-              task.comments.some(comment => comment.commentId === id && (comment.authorKind === 'user' || peerComment(comment)))),
+              task.comments.some(comment => comment.commentId === id && queuedInput(comment))),
             'task_board_invalid_transition', 'A comment-triggered turn requires queued external comments.');
           const plan = await this.checks.execution(
             task,
@@ -1658,9 +1648,6 @@ export class TaskBoardEngine {
             at,
             request.target,
             request.workspace,
-            commentRequest,
-            recoveryOnly,
-            request.nextStepId,
           );
           const input = plan.turnStart.input;
           requireThat(
@@ -1706,7 +1693,7 @@ export class TaskBoardEngine {
         break;
       case "defer":
         requireThat(!task.claim || actor.source === 'worker',
-          'task_board_claim_active', 'Only the active worker can change its next-step plan.');
+          'task_board_claim_active', 'Only the active worker can change its wake-up schedule.');
         requireThat(!request.runtimeWait || actor.source === 'scheduler' || actor.source === 'recovery',
           'task_board_forbidden', 'Runtime availability is owned by the execution system.');
         await this.checks.deferral(request, request.taskId, at);
@@ -1802,6 +1789,7 @@ export class TaskBoardEngine {
         }
         break;
       case "comment":
+        requireThat(request.body.length <= 65536, 'invalid_arguments', 'A comment must not exceed 65536 characters.');
         requireThat(request.purpose !== 'question' || actor.source === 'native' || !!request.recipient,
           'invalid_arguments', 'A question must identify its recipient: user or a specific task.');
         requireThat(!request.recipient || request.purpose === 'question', 'invalid_arguments', 'Only questions declare a recipient.');
@@ -1820,13 +1808,8 @@ export class TaskBoardEngine {
           'task_board_handoff_required', 'A worker handoff must explicitly declare review readiness or waiting.');
         if (request.handoff) {
           const handoff = request.handoff;
-          await validateNextSteps(this.store, request.taskId, handoff.nextSteps, task);
-          requireThat(handoff.workflowState === 'review' || handoff.nextSteps.length > 0,
-            'invalid_arguments', 'Unfinished work needs concrete next steps.');
-          for (const delivery of handoff.deliveries ?? []) await this.checks.content({ summary: 'Delivered work.', artifacts: delivery.artifacts,
-            codeReferences: delivery.codeReferences, repositoryResult: null, limitations: [] });
-          requireThat(!(handoff.deliveries ?? []).some(delivery => delivery.artifacts.some(artifact => !!this.store.localKey(artifact.object.objectId))),
-            'task_board_invalid_reference', 'Named deliveries must identify published artifacts, not local workflow evidence.');
+          date(handoff.wakeAt ?? null);
+          if (handoff.dependencies) await validateDependencies(this.store, request.taskId, handoff.dependencies);
         }
         for (const id of request.resolvesQuestions ?? []) requireThat(task.comments.some(comment => comment.commentId === id && comment.purpose === 'question' && !comment.nativeInput && !comment.sourceTaskId &&
           (comment.recipient?.kind !== 'task' || actor.source === 'user' || request.sourceTaskId === comment.recipient.taskId || !request.sourceTaskId)),
@@ -1838,8 +1821,6 @@ export class TaskBoardEngine {
             comment.commentId === request.questionSource!.commentId && comment.purpose === 'question' &&
             comment.recipient?.kind === 'task' && comment.recipient.taskId === request.taskId);
           requireThat(!request.questionSource || !!routedQuestion, 'task_board_forbidden', 'The canonical question is not addressed to this task.');
-          if (source.value.claim) requireThat(executionMode(source.value.claim.request) !== 'recovery',
-            'task_board_recovery_scope', 'A handoff recovery cannot initiate directed business work.');
           if (actor.source === 'native') await this.checks.aggregate(source.value, request.sourceTaskId);
           requireThat(source.value.fields.control === 'agent' && (actor.source === 'native'
             ? !!routedQuestion || source.value.parentTaskId === request.taskId && source.value.workflowState === 'review' && !!source.value.latestResult && !source.value.claim && !source.value.publication

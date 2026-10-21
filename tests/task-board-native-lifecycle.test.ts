@@ -9,7 +9,7 @@ import { nativeWorkflow } from './fixtures/task-board-native.js';
 import { catalogFor } from '../services/task-board/src/runtime/evidence.js';
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
 import { readPlan } from '../services/task-board/src/runtime/native-plan.js';
-import { assessSteps, validateNextSteps } from '../services/task-board/src/runtime/next-steps.js';
+import { shouldWake, wakeCondition, dependencySnapshot, validateDependencies } from '../services/task-board/src/runtime/wake.js';
 
 async function lifecycle(t: { after: (fn: () => void) => void }) {
   const w = await nativeWorkflow(t);
@@ -107,7 +107,7 @@ test('an uncertain automatic restore retains the original operation before claim
   f.w.f.retainOperation({ ...pending, phase: 'succeeded', code: null,
     updatedAt: new Date(Date.parse(pending.updatedAt) + 1).toISOString(), reply: { result: { thread: f.w.nativeThread() } } });
   const resumed = await f.w.f.invoke(input, 'user', f.w.f.second), current = await f.current();
-  assert.ok(resumed.run); assert.equal(current.value.workflowState, 'todo');
+  assert.ok(resumed.run); assert.equal(current.value.workflowState, 'in_progress');
   assert.deepEqual(current.value.primaryResourceRef, task.value.primaryResourceRef);
   assert.deepEqual(current.value.commentDeliveries, task.value.commentDeliveries);
   assert.equal(current.value.attemptCount, task.value.attemptCount + 1);
@@ -244,8 +244,8 @@ test('archiving accepted delegated work preserves its parent and closes the chil
   for (const until of ['idle', 'done'] as const) {
     const steps = [{ id: 'accepted-child', scope: 'Review the accepted child.', requires: [{ kind: 'task' as const, taskId: child.pin.objectId, until }] }];
     const owner = (await f.w.f.first.store.read('task-board/task', parent.task)).value;
-    assert.equal((await assessSteps(f.w.f.first.store, { ...owner, nextSteps: steps }, new Date().toISOString()))[0]!.ready, true);
-    await validateNextSteps(f.w.f.first.store, parent.task.objectId, steps, owner);
+    assert.ok((await dependencySnapshot(f.w.f.first.store, { dependencies: [child.pin.objectId] }))[child.pin.objectId]);
+    await validateDependencies(f.w.f.first.store, parent.task.objectId, [child.pin.objectId]);
   }
 });
 
@@ -259,7 +259,7 @@ test('an archived cancelled child is idle but never satisfies an accepted-result
   await f.w.f.first.archive(input, context(input.operationId));
   for (const until of ['idle', 'done'] as const) {
     const steps = [{ id: 'child', scope: 'Wait for the child.', requires: [{ kind: 'task' as const, taskId: task.pin.objectId, until }] }];
-    assert.equal((await assessSteps(f.w.f.first.store, { ...task.value, nextSteps: steps }, new Date().toISOString()))[0]!.ready, until === 'idle');
+    assert.ok((await dependencySnapshot(f.w.f.first.store, { dependencies: [task.pin.objectId] }))[task.pin.objectId]);
   }
 });
 
@@ -328,7 +328,7 @@ test('explicit new native work queues Todo and ordinary continuation reuses the 
   assert.ok(JSON.stringify(plan.turnStart).includes(task.value.taskKey));
   assert.ok(JSON.stringify(plan.turnStart).includes('Read the ticket and new comments'));
   const continuation = await f.w.f.invoke({ action: 'continue', operationId: randomUUID(), taskId: task.pin.objectId,
-    expectedRevision: task.pin.revision, target: allocation.target, workspace: allocation.workspace, intent: allocation.intent, feedback: 'Continue the current ticket.', commentIds: [], nextStepId: 'main' });
+    expectedRevision: task.pin.revision, target: allocation.target, workspace: allocation.workspace, intent: allocation.intent, feedback: 'Continue the current ticket.', commentIds: [],  });
   const run = await f.w.f.first.store.read('task-board/run', continuation.run!);
   assert.deepEqual(run.value.primaryResourceRef, task.value.primaryResourceRef);
   assert.equal(f.calls.filter(call => call.method === 'thread/start').length, 1, 'Ordinary continuation never requests another fresh context.');

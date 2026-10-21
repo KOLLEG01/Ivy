@@ -151,16 +151,14 @@ test("invalid attachment input is rejected before reserving a Task", async (t) =
   assert.deepEqual((await f.first.store.read("task-board/task", base.taskId)).pin, created.task);
 });
 
-test("attachment identities do not become Hive reference names and uploaded file counts stay bounded", async (t) => {
+test("attachment identities do not become Hive reference names and long attachment lists remain writable", async (t) => {
   const f = taskBoardFixture(t), created = await f.create();
   const uploaded = await f.invoke({ action: "uploadAttachment", operationId: "attachment-reference", taskId: created.task!.objectId,
     expectedRevision: created.task!.revision, attachmentId: "file: " + "x".repeat(200), filename: "file.txt", mediaType: "text/plain",
     bytesBase64: Buffer.from("saved content").toString("base64") });
   assert.equal(uploaded.attachment?.filename, "file.txt");
   const current = await f.first.store.read("task-board/task", uploaded.task!);
-  const attachments = Array.from({ length: 256 }, (_, index) => ({ ...uploaded.attachment!, attachmentId: "file-" + index,
-    object: { objectId: "capacity-file-" + index, revision: 1 } }));
-  // Capacity validation runs before any attempt to dereference or upload these files.
+  const attachments = Array.from({ length: 256 }, (_, index) => ({ ...uploaded.attachment!, attachmentId: "file-" + index }));
   f.first.checks.aggregate = async () => undefined;
   const read = f.first.store.read.bind(f.first.store);
   f.first.store.read = (async (...args) => {
@@ -169,9 +167,9 @@ test("attachment identities do not become Hive reference names and uploaded file
       return { ...document, value: { ...current.value, attachments } };
     return document;
   }) as typeof f.first.store.read;
-  await assert.rejects(f.invoke({ action: "uploadAttachment", operationId: "attachment-capacity", taskId: current.pin.objectId,
-    expectedRevision: current.pin.revision, attachmentId: "overflow", filename: "overflow.txt", mediaType: "text/plain", bytesBase64: "" }), code("limit_exceeded"));
-  assert.deepEqual((await read("task-board/task", current.pin.objectId)).pin, current.pin);
+  await f.invoke({ action: "uploadAttachment", operationId: "attachment-capacity", taskId: current.pin.objectId,
+    expectedRevision: current.pin.revision, attachmentId: "overflow", filename: "overflow.txt", mediaType: "text/plain", bytesBase64: "" });
+  assert.equal((await read("task-board/task", current.pin.objectId)).value.attachments.length, 257);
 });
 
 test("attachment publication recovers a lost upload reply with a new workflow owner and rejects changed bytes", async t => {
@@ -214,9 +212,9 @@ for (const bound of ["count", "bytes"] as const) {
     assert.equal(saved.value.publication, null);
     assert.equal(saved.value.workflowState, "review");
     assert.deepEqual(saved.value.comments.slice(0, comments.length), comments);
-    assert.equal(saved.value.comments.length, comments.length + (bound === "count" ? 1 : 0));
+    assert.equal(saved.value.comments.length, comments.length + 1);
     assert.equal((await f.first.store.read("task-board/result", result.result!)).value.content.summary, summary);
-    assert.equal((await f.first.store.page("task-board/delivery")).items.length, bound === "count" ? 1 : 0);
+    assert.equal((await f.first.store.page("task-board/delivery")).items.length, 1);
   });
 }
 
@@ -443,7 +441,7 @@ test("category projection bounds results and avoids full-family scans after a 10
       fields: { ...fields, category: "Updated " + (id % 300) },
       workflowState: "backlog",
       runtimeWait: null,
-      nextSteps: [],
+      wakeAt: null, dependencies: [],
       publication: null,
       primaryResourceRef: null,
       claim: null,
@@ -675,23 +673,19 @@ test("category catch-up drains more than eight unrelated event pages to its capt
   assert.equal(subscribeCalls - before, 12);
 });
 
-test("an oversized comment fails before the Task publication marker is reserved", async (t) => {
+test("large histories remain writable and an oversized individual comment does not reserve a Task", async (t) => {
   const f = taskBoardFixture(t), created = await f.create({ control: "user" });
   let current = await f.first.store.read("task-board/task", created.task!);
-  let rejected = false;
   for (let index = 0; index < 20; index++) {
-    try {
       const result = await f.invoke({ action: "comment", operationId: randomUUID(), taskId: current.pin.objectId,
         expectedRevision: current.pin.revision, commentId: randomUUID(), body: "x".repeat(65536),
         requests: [], responses: [], attachments: [], replyTo: null });
       current = await f.first.store.read("task-board/task", result.task!);
-    } catch (error) {
-      assert.ok(error instanceof IvyError && error.code === "content_too_large" && error.outcome === "not_executed");
-      rejected = true;
-      break;
-    }
   }
-  assert.equal(rejected, true);
+  assert.equal(current.value.comments.length, 20);
+  await assert.rejects(f.invoke({ action: 'comment', operationId: randomUUID(), taskId: current.pin.objectId,
+    expectedRevision: current.pin.revision, commentId: randomUUID(), body: 'x'.repeat(65537),
+    requests: [], responses: [], attachments: [], replyTo: null }), code('invalid_arguments'));
   current = await f.first.store.read("task-board/task", current.pin.objectId);
   assert.equal(current.value.publication, null);
   const cancelled = await f.invoke({ action: "transition", operationId: randomUUID(), taskId: current.pin.objectId,
@@ -1032,7 +1026,7 @@ test("Backlog-to-Todo is explicit and agent execution is scheduler-owned", async
   );
   assert.deepEqual(f.first.condition(automaticTask.value), {
     state: "queued",
-    detail: "Waiting for an authorized next step.",
+    detail: "Waiting for the agent to continue.",
   });
   await assert.rejects(
     f.first.schedule({
@@ -1054,7 +1048,7 @@ test("Backlog-to-Todo is explicit and agent execution is scheduler-owned", async
         useWorktree: false,
         repository: null,
       },
-      commentIds: [], nextStepId: 'main',
+      commentIds: [],
     }),
     code("task_board_invalid_transition"),
   );
@@ -1140,7 +1134,7 @@ test("comments are immutable task material without scheduling user-controlled wo
   });
   const task = await f.first.store.read("task-board/task", comment.task!);
   assert.equal(task.value.workflowState, "done");
-  assert.equal(task.value.workRevision, 1);
+  assert.equal(task.value.workRevision, 2);
   assert.equal(task.value.comments.at(-1)?.body, "Please improve this.");
   assert.equal(task.value.commentDeliveries.at(-1)?.state, "queued");
 });
@@ -1168,7 +1162,7 @@ test("scheduler start retains resolved target, workspace and inline plan", async
     intent: planned.plan,
     target: planned.target,
     workspace: planned.workspace,
-    commentIds: [], nextStepId: 'main',
+    commentIds: [],
   };
   const started = await f.first.schedule(request);
   const run = await f.first.store.read("task-board/run", started.run!);
@@ -1186,7 +1180,7 @@ test("failed actions only release their own workspace reservation", async (t) =>
   const f = taskBoardFixture(t), planned = await f.planned("agent", { kind: "directory_path", path: String(f.plan.threadStart.cwd) }), other = await f.create();
   const request: TaskBoard.StartRequest = { action: "start", operationId: "shared-workspace-operation",
     taskId: planned.task.objectId, expectedRevision: planned.task.revision, intent: planned.plan,
-    target: planned.target, workspace: planned.workspace, commentIds: [], nextStepId: 'main' };
+    target: planned.target, workspace: planned.workspace, commentIds: [],  };
   const write = f.first.store.writePrepared.bind(f.first.store);
   f.first.store.writePrepared = async (...args: Parameters<TaskBoardStore["writePrepared"]>) => {
     if (args[0] === "task-board/task") throw new IvyError("revision_conflict", "Concurrent Task write.");
@@ -1227,7 +1221,7 @@ test("parallel opt-in admits another Task and explicit reservations still transf
     intent: value.plan,
     target: value.target,
     workspace: value.workspace,
-    commentIds: [], nextStepId: 'main',
+    commentIds: [],
   });
   const active = await f.first.schedule(start(first, "first-workspace"));
   const concurrent = await f.first.schedule(start(second, "second-workspace"));
@@ -1426,7 +1420,7 @@ test("an ambiguous first Task write does not block another Task", async (t) => {
   );
 });
 
-test("dependency intents become visible in the first Task reservation and reject a concurrent cycle", async (t) => {
+test("mutual watches publish independently without a board-wide graph lock", async (t) => {
   const f = taskBoardFixture(t),
     a = await f.create(),
     b = await f.create();
@@ -1453,7 +1447,7 @@ test("dependency intents become visible in the first Task reservation and reject
     taskId: a.task!.objectId,
     expectedRevision: a.task!.revision,
     fields,
-    nextSteps: [{ id: 'peer', scope: 'Wait for B.', requires: [{ kind: 'task', taskId: b.task!.objectId, until: 'done' }] }],
+    wakeAt: null, dependencies: [b.task!.objectId],
   });
   await reservationEntered;
   const editB = f.invoke({
@@ -1462,25 +1456,18 @@ test("dependency intents become visible in the first Task reservation and reject
     taskId: b.task!.objectId,
     expectedRevision: b.task!.revision,
     fields,
-    nextSteps: [{ id: 'peer', scope: 'Wait for A.', requires: [{ kind: 'task', taskId: a.task!.objectId, until: 'done' }] }],
+    wakeAt: null, dependencies: [a.task!.objectId],
   });
-  await assert.rejects(editB, code("task_board_publication_busy"));
-  release();
+  try { await editB; } finally { release(); }
   await editA;
   f.intercept(null);
-  await assert.rejects(
-    f.first.recoverOperation(
-      (await f.first.operations.find("user", bId))!.pin.objectId,
-    ),
-    code("task_board_dependency_cycle"),
-  );
   assert.deepEqual(
-    (await f.first.store.read("task-board/task", a.task!.objectId)).value.nextSteps[0]?.requires.map(condition => 'taskId' in condition ? condition.taskId : null) ?? [],
+    (await f.first.store.read("task-board/task", a.task!.objectId)).value.dependencies,
     [b.task!.objectId],
   );
   assert.deepEqual(
-    (await f.first.store.read("task-board/task", b.task!.objectId)).value.nextSteps[0]?.requires.map(condition => 'taskId' in condition ? condition.taskId : null) ?? [],
-    [],
+    (await f.first.store.read("task-board/task", b.task!.objectId)).value.dependencies,
+    [a.task!.objectId],
   );
 });
 
@@ -1578,7 +1565,7 @@ test("a plain worker question needs no typed request and any user comment resume
   const repliedTask = await f.first.store.read("task-board/task", replied.task!);
   assert.equal(repliedTask.value.workflowState, "waiting");
   assert.equal(repliedTask.value.openQuestionCount, 0);
-  assert.deepEqual(repliedTask.value.nextSteps, askedTask.value.nextSteps);
+  assert.deepEqual(repliedTask.value.dependencies, askedTask.value.dependencies);
   assert.equal(repliedTask.value.runtimeWait, null);
   assert.equal(
     repliedTask.value.commentDeliveries.at(-1)?.commentId,
@@ -1688,7 +1675,7 @@ test("material field edits during an active claim are rejected", async (t) => {
     intent: planned.plan,
     target: planned.target,
     workspace: planned.workspace,
-    commentIds: [], nextStepId: 'main',
+    commentIds: [],
   });
   const task = await f.first.store.read("task-board/task", started.task!);
   await assert.rejects(
@@ -1708,7 +1695,7 @@ test("contact edits during an active claim preserve the running assignment with 
   const started = await f.first.schedule({
     action: "start", operationId: "contact-claim", taskId: planned.task.objectId,
     expectedRevision: planned.task.revision, intent: planned.plan, target: planned.target,
-    workspace: planned.workspace, commentIds: [], nextStepId: 'main',
+    workspace: planned.workspace, commentIds: [],
   });
   const before = await f.first.store.read("task-board/task", started.task!);
   assert.equal(before.value.workflowState, "in_progress");

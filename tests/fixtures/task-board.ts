@@ -431,7 +431,7 @@ export function taskBoardFixture(
 }
 
 export function retainedTaskFixture(task: TaskBoard.Task) {
-  const { nextSteps: _steps, runtimeWait: _runtime, consumedSteps: _consumed, ...previous } = task;
+  const { wakeAt: _wake, dependencies: _dependencies, observedDependencies: _observed, runtimeWait: _runtime, ...previous } = task;
   const claim = previous.claim;
   if (claim) {
     const { nextStepId: _step, ...request } = claim.request;

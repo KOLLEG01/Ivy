@@ -9,18 +9,18 @@ UI requirements: [UI](UI.md).
 - Questions explicitly address `user` or a task ID. Task questions remain canonical in the
   sender ticket and are relayed once through durable comments to the recipient. An answer
   names that recipient in `sourceTaskId` and the original question in `replyTo`. Internal
-  questions never produce user question badges or contact notifications. A local `question`
-  prerequisite waits for its answer without blocking other steps. Escalating to a human
+  questions never produce user question badges or contact notifications. The agent decides
+  whether an answer permits further work. Escalating to a human
   requires a separate explicit user question.
 - Failed completion/publication is an execution error with its retained cause and a central
   Hive error diagnostic. A storage refusal is not a missing handoff and does not trigger
-  repeated agent recovery attempts. Exhausted handoff recovery is also shown as a failure.
+  repeated agent recovery attempts.
 
 - A Task is the durable ticket; Runs are execution attempts. Its stable task key also identifies
   per-task output directories. Workflow state, execution condition and user/agent control are separate.
   Category is organizational metadata, not a capability or execution target.
 - Creation stores its selected workflow state directly; omission means Todo for every caller.
-  Explicit Backlog preserves unscheduled preparation. Waiting requires concrete `nextSteps` with scoped prerequisites.
+  Explicit Backlog preserves unscheduled preparation. Waiting resumes on external comments, watched ticket changes or an optional `wakeAt` appointment.
   Manual In Progress creates no native execution. Manual Review requires an initial final Result;
   initial final material may also accompany manual Done. Agent In Progress and Review require
   their real native claim/completion workflows and cannot be fabricated by creation. Done and
@@ -69,8 +69,8 @@ UI requirements: [UI](UI.md).
 - Explicit `newThread` work creates a new Codex task and queues the existing ticket in Todo.
   Previous contexts remain linked until ticket archival. It requires resolved execution; ordinary continuation reuses the
   current native task. Ticket content, comments, attachments and previous Runs remain available.
-- User-controlled task work never starts autonomously. Agent-controlled Todo work is eligible only
-  when dependencies, timing, an available host and workspace conditions permit it. A missing
+- User-controlled task work never starts autonomously. Agent-controlled Todo requests work;
+  admission requires an available host, workspace and execution capacity. A missing
   execution requirement inherits the TaskBoard execution default; an explicit automatic
   requirement allocates to the least busy eligible AgentManager;
   an explicit host narrows that pool. Required capabilities (shown as the Task's dependencies)
@@ -106,20 +106,17 @@ UI requirements: [UI](UI.md).
   workspaces. Unrelated peer state changes do not inject turns or require board-wide polling.
   Agents coordinate overlapping changes,
   commits and deployments through directed ticket comments; unrelated changes must be preserved.
-  Tasks defer through scoped next-step conditions. Closed dependency cycles are rejected while independent progress paths remain available.
-  Waiting describes prerequisites, not a pause. Backlog suspends automatic task work;
-  agent waits are edited through their concrete next steps. Fulfilled deliveries and consumed
-  steps do not create future dependency edges. Completion revalidates its next-step graph under
-  the shared publication gate and preserves newer assignments instead of overwriting them.
+  Waiting resumes when comments arrive, watched tickets change or the next appointment is due.
+  Watches are notifications and may be mutual; they do not gate execution. Backlog suspends
+  automatic work. Completion preserves newer appointments and assignments.
   Confirmed native usage-limit failures defer agent work until the reported reset, with a one-minute
   grace period. Without a usable reset time, retry after fifteen minutes. Confirmed model-capacity,
   rate and transient connection failures retry after one minute, including rejected turn starts.
   A terminal interruption may refine to the same turn's actual failure. Cancellation and permanent
   authorization errors never trigger automatic retries. Continue with the same model and context; repeated temporary
   failures defer again, including the original conversation comment batch. General failures and
-  cancellation require intervention; an own user condition gates only its applicable scope,
-  including questions posted as replies to another comment.
-  When the condition clears, the scheduler rechecks time, dependencies, host and workspace before
+  cancellation require intervention. Questions remain visible until answered or resolved by the
+  agent; ordinary comments can supply the answer. Before starting, the scheduler checks host and workspace before
   continuing. User-controlled work and Backlog remain unscheduled. A task waiting for a host
   names why each AgentManager was skipped. Manual rank in any board column is the ticket's Hive
   sibling order; it orders the board only, and scheduling still follows priority.
@@ -129,7 +126,7 @@ UI requirements: [UI](UI.md).
   minutes) without observed native progress, diagnostics warn while preserving the original
   claim. Native activity clears the warning; explicit user-input waits do not count as stalls.
 - Metadata edits preserve Review and Done. Changing an agent assignment reopens those states
-  with an executable next step. Manual Done may retain intermediate material; only Review
+  in Todo. Manual Done may retain intermediate material; only Review
   requires a final Result. Subsequent comments and edits remain valid after manual closure.
 - The agent performs Git lifecycle work from the ticket's explicit workspace/worktree intent.
   TaskBoard and AgentManager do not silently clone, switch branches or alter repositories.
@@ -152,6 +149,10 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   authorize replacement contexts or duplicate turns.
 - Resume and pre-turn reattachment request metadata without hydrating the complete history;
   retain every prepared request unchanged and use paginated reads for turn inspection.
+  A confirmed attachment that was unloaded may resume again in the same owner epoch;
+  the original prepared turn is preserved and still requires fresh input capability with
+  no active turn. Explicit input capability also permits resumed `notLoaded` metadata;
+  absent or false capability requires attachment instead of dispatch.
 - A confirmed missing thread may recover automatically only when every attempt in that context
   is conclusively unstarted: any prepared turn needs its original prevention receipt. Recheck
   restoration through a retained operation before queuing one fresh Run, preserving the owner,
@@ -163,7 +164,7 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   only when a fresh owner read confirms the same durable thread. The original receipt stays
   retained; the successor resumes that thread before the prepared turn is sent. Unavailable
   owners retain In progress with an automatic recovery condition and capped backoff.
-  Claimed recovery and result publication stay In progress; requests for user input remain Blocked.
+  Claimed recovery and result publication stay In progress; actual native input requests wait for their owner-bound response.
 - Initial starts, scheduled wake-ups and comment updates use the same concise English prompt
   identifying the Task and owning service through Ivy MCP. It asks the agent to read the ticket
   and decide what to do; it never assigns a next-step ID or repeats the general workflow guide.
@@ -192,37 +193,35 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
   never copy ticket fields or comment bodies. Running turns receive `turn/steer` with their exact
   expected turn ID. Retained operation receipts acknowledge the original comment batch only.
   Unknown receipts are reconciled before another delivery; a failed steer leaves comments queued
-  for the same primary's next turn. Event wakeups and periodic reconciliation share this path.
+  for retry against the same active turn or the same primary's next turn. Event wakeups and periodic reconciliation share this path.
 - Ordinary agent updates never wake their author. Messages with sourceTaskId queue delivery
   by default, just like user comments; agentDelivery=none explicitly records without waking.
-- Agents own their work planning and coordination from the current ticket. `nextSteps` records
-  requests for another turn: id identifies the request, scope briefly explains the wake-up and
-  requires determines when to wake (AND within a request, OR across requests). A selected request
-  is internal scheduling evidence, not an instruction limiting the turn to one work item.
-  Keep the work description in the ticket; do not duplicate it as an exhaustive structured plan.
-  Conditions are time, task idle/done, named delivery and own user question. Automatic paths take
-  precedence over User. No cross-ticket question gate or work/check mode exists. Comment processing
-  preserves existing prerequisites.
-- Questions remain local and open until an addressed answer or explained resolution. All cards with
-  own pending questions have a yellow border. Full pending questions stay at the bottom above the composer.
+- Agents own planning and coordination from the current ticket. `wakeAt` is the next optional
+  UTC appointment; `dependencies` contains watched ticket IDs. Their material changes wake the
+  agent without prerequisite predicates or a structured step plan. Runtime claim and receipt
+  churn does not wake dependent tickets. Archive and deletion count as changes.
+  Multiple future appointments belong in ordinary ticket context; renew the next appointment
+  after its attempt. Omitted scheduling fields preserve the current values.
+- Questions remain local and open until an addressed answer or explained resolution. Cards with
+  pending questions addressed to the user have a yellow border. Those questions stay above the composer.
 - Verification findings, execution errors and unavailable evidence belong in ordinary result text,
   comments and attachments, not structured check lists or board badges. Preserve earlier findings and
   exact evidence references when reading retained records. Repeated observations explicitly publish
-  their next time condition; unrelated comments never shift it.
+  their next wakeAt; unrelated comments never shift it.
 - Delegated tasks retain parentTaskId. Parents review exact child results at idle, accept and archive
-  completed children. Named deliveries can unblock independent scopes before overall completion.
-- A confirmed native completion applies its structured handoff with workflowState and nextSteps.
-  Only overall Review readiness notifies the user. Missing handoffs recover in the same context.
+  completed children. Saved results wake watching tasks before overall completion.
+- A confirmed native completion applies an optional handoff workflowState. Only overall Review
+  readiness notifies the user. Without a handoff, active work continues; replies to waiting or
+  reviewed tickets preserve that state and result. Absence of a handoff is not an error.
 - Serialize publication per Task until the first Task write has durably retained the owning
-  Operation marker. Root coordination additionally covers shared category and dependency graph
-  changes. That marker and Task CAS then protect the unfinished publication while up to twenty
+  Operation marker. Root coordination additionally covers shared category indexes and execution admission. That marker and Task CAS then protect the unfinished publication while up to twenty
   independent Tasks reconcile concurrently. Free slots continue reconciling while another Task
   awaits its owner; scans retain bounded pending pages. An ambiguous first write retains its Task gate until
-  exact replay proves the marker; recovery must finish the original prepared writes. Dependency
-  checks include committed marked intents, and optional worktree reservations remain unique by
+  exact replay proves the marker; recovery must finish the original prepared writes. Optional worktree reservations remain unique by
   host and canonical path. Shared checkouts serialize active work unless both tasks allow parallel execution.
   Failed publication recovery yields before retrying so unrelated Tasks can progress. Advisory native
   signals retain only their current checkpoint; immutable execution receipts and evidence remain separate.
+  New ticket revisions do not replace a pending scheduler action; finish its original admission first.
 - Final comments retain actual verification, limitations and artifact/Git links. Internal Run outcome
   records remain available for recovery; they are not a second user-facing result or acceptance workflow.
   Unavailable evidence is not success; local commits are not represented as confirmed remote commits.
@@ -244,20 +243,17 @@ Sources: [allocation](../services/task-board/src/runtime/scheduler.ts),
 
 ## Recovery and contact
 
-- New external comments start a normal turn without requiring a ready scheduled step.
-  Their arrival alone does not remove recovery evidence or work prerequisites.
-  Recover the original accepted publication first. After confirmed native termination, a
-  recovery-only continuation reuses the same context to publish existing work, never to repeat
-  implementation or uncertain effects. Its original Run and necessary evidence remain protected.
-  A legacy pre-closure pin already pruned before protection may use the same original Run's
-  confirmed terminal revision; this never authorizes replay or a replacement Run identity.
-  Two completed unusable recovery attempts require inspection; transport backoff does not reset
-  the durable attempt count. Explicit stops, user control and genuine questions remain binding.
-  An explicit move to Todo rearms the bounded handoff recovery in the existing context,
-  or clears a terminal execution error so the original work can be retried.
-- A handoff may select Todo with concrete nextSteps to continue authorized work. Each unchanged step
-  fingerprint is consumed once; agents publish changed scope, prerequisites or deliveries to resume.
-  Technical failures do not replace previously saved results. Recovery failures remain independently visible.
+- User and directed task comments wake the same agent turn. Waiting questions do not gate them.
+  A reconnect can rebind a still-active exact thread/turn after fresh owner evidence, unless the
+  previous owned process is confirmed stopped. A rejected steer is retried with a successor
+  identity only after its original receipt is conclusively failed. Unknown outcomes keep their
+  original identity until reconciled.
+- Comments, attachments and native projections rebase on the latest Task under its publication
+  gate. Original operation bytes and receipts remain immutable. Assignment changes retain CAS
+  protection; unrelated runtime revisions do not invalidate allocation.
+- Optional handoffs select todo, waiting or review. Scheduling intent is persisted with the
+  handoff comment; later user edits survive native completion. Technical failures preserve saved
+  results and remain visible with their retry time when retryable.
 
 - Reconcile unfinished claims/publications before fresh work. Fair bounded scans recover missed
   claims whose Run is terminal through their original completion operation; age alone never clears

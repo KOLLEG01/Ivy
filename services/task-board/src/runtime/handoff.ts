@@ -8,5 +8,5 @@ export function sameAssignment(left: Omit<TaskBoard.TaskFields, 'userContact'>, 
 }
 
 export function applyHandoff(task: TaskBoard.Task, handoff: TaskBoard.Handoff, at: string): TaskBoard.Task {
-  return { ...task, workflowState: handoff.workflowState, nextSteps: handoff.nextSteps, runtimeWait: null, updatedAt: at };
+  return { ...task, workflowState: handoff.workflowState, runtimeWait: null, updatedAt: at };
 }

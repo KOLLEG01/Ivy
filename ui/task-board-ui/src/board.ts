@@ -62,6 +62,3 @@ export const stateIcons = { backlog: CircleDashed, todo: Circle, in_progress: Ci
 export const stateColors: Record<string, string> = { in_progress: 'text-amber-500', review: 'text-sky-500', done: 'text-emerald-500', cancelled: 'text-muted-foreground' };
 /** Where a Task is ranked: before another Task or at the end (null), after another Task, or first among the given column states. */
 export type Placement = { before: string | null } | { after: string } | { top: string[] };
-
-export const nextStepTime = (task: Pick<TaskBoard.Task, 'nextSteps'>): string | null =>
-  task.nextSteps.flatMap(step => step.requires.filter(condition => condition.kind === 'time').map(condition => condition.at)).sort()[0] ?? null;

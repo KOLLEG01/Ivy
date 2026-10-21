@@ -1,3 +1,4 @@
+import { dependenciesChanged, dependencySnapshot } from './wake.js';
 import { hashJson } from "../../../../packages/sdk/src/node.js";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
 import type { TaskBoard, Transport } from "../../../../packages/sdk/src/node.js";
@@ -272,13 +273,17 @@ export class TaskBoardNativeOrchestrator {
         }
       }
       if (status === "inProgress") {
-        if (active && !run.value.cancellation &&   !(run.value.originalRequest.action === 'continue' && run.value.originalRequest.recoveryFor) && inspection.turns.epoch === run.value.nativeEpoch) {
-          const previous = run.value.calls.steer ? (await store.read('task-board/native-call', run.value.calls.steer)).value.origin : null;
+        if (active && !run.value.cancellation && inspection.turns.epoch === run.value.nativeEpoch) {
+          const previousCall = run.value.calls.steer ? (await store.read('task-board/native-call', run.value.calls.steer)).value : null;
+          const previous = previousCall?.ownerPhase === 'succeeded' ? previousCall.origin : null;
           const initial = (await store.read('task-board/task', { objectId: run.value.taskId, revision: run.value.originalRequest.expectedRevision })).value;
           const commentIds = task.value.commentDeliveries.filter(value => value.state === 'queued' && !run.value.originalRequest.commentIds.includes(value.commentId)).map(value => value.commentId);
           const baseline = previous?.kind === 'steer' ? previous : { workRevision: initial.workRevision, commentIds: [] as string[] };
-          if (task.value.workRevision !== baseline.workRevision || commentIds.some(id => !baseline.commentIds.includes(id))) {
-            await this.driver.prepare(runId, 'steer', { kind: 'steer', commentIds, workRevision: task.value.workRevision, peersHash: hashJson([]), predecessor: run.value.calls.steer ?? null });
+          const observedDependencies = await dependencySnapshot(store, task.value);
+          const wakeAt = task.value.wakeAt && task.value.wakeAt <= new Date().toISOString() ? task.value.wakeAt : null;
+          if (task.value.workRevision !== baseline.workRevision || commentIds.some(id => !baseline.commentIds.includes(id)) ||
+              dependenciesChanged(task.value, observedDependencies) || wakeAt) {
+            await this.driver.prepare(runId, 'steer', { kind: 'steer', commentIds, observedDependencies, wakeAt, workRevision: task.value.workRevision, peersHash: hashJson([]), predecessor: run.value.calls.steer ?? null });
             return;
           }
         }
@@ -301,6 +306,7 @@ export class TaskBoardNativeOrchestrator {
         const projectedWaiting = projection.runtimeWait;
         const workflowState = projection.phase === 'waiting_input' ? 'waiting' : claimedWorkflowState(projection.runtimeWait);
         if (
+          (projection.externalOutcome.state !== 'active' || inspection.turns.epoch === run.value.nativeEpoch) &&
           projection.phase === run.value.phase &&
           projection.externalOutcome.state ===
             run.value.externalOutcome.state &&

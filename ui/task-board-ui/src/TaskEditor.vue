@@ -27,7 +27,7 @@ import {
 import type { UploadedAttachment } from "@ivy/ui";
 import { Plus } from "@lucide/vue";
 import { priorityLabels, stateLabel, stateLabels, taskStarted } from "./board";
-import { base, client, readDocument, taskRoute } from "./runtime";
+import { base, client, readDocument, taskRoute, tr } from "./runtime";
 import { canonical } from "../../../packages/sdk/src/client.js";
 import { route } from "../../../packages/ui-client/src/runtime";
 import type { Document, TaskBoard, Wire } from "./runtime";
@@ -35,8 +35,6 @@ import { useAction } from "./action";
 import ActionState from "./ActionState.vue";
 import TaskLocationPicker from "./TaskLocationPicker.vue";
 import WikiLinkPicker from "./WikiLinkPicker.vue";
-import NextStepsEditor from "./NextStepsEditor.vue";
-import { openTaskQuestions } from "../../../packages/sdk/src/client.js";
 import { nativeRead } from "../../../packages/ui-client/src/native";
 import {
   executionEnvironments,
@@ -74,8 +72,8 @@ const form = ref<TaskBoard.TaskFields>(
   structuredClone(props.task?.value.fields ?? defaults),
 );
 const initialState = ref<TaskBoard.Task['workflowState']>('todo');
-const nextSteps = ref<TaskBoard.NextStep[]>(structuredClone(props.task?.value.nextSteps ?? []));
-const ownQuestions = computed(() => props.questions ?? openTaskQuestions({ comments: props.task?.value.comments ?? [] }));
+const wakeAt = ref<string | null>(props.task?.value.wakeAt ?? null);
+const dependencies = ref<string[]>([...props.task?.value.dependencies ?? []]);
 const initialSummary = ref('');
 const revision = ref(props.task?.pin.revision ?? null),
   baseFields = ref<TaskBoard.TaskFields | null>(
@@ -104,7 +102,8 @@ try {
       form.value = retained.fields;
       delete (form.value as unknown as Record<string, unknown>).dependencies;
       delete (form.value as unknown as Record<string, unknown>).nextReviewAt;
-      nextSteps.value = retained.nextSteps ?? retained.initial?.nextSteps ?? nextSteps.value;
+      wakeAt.value = retained.wakeAt ?? retained.initial?.wakeAt ?? wakeAt.value;
+      dependencies.value = retained.dependencies ?? retained.initial?.dependencies ?? dependencies.value;
       revision.value = retained.revision;
       baseFields.value = retained.baseFields ??
         (retained.revision === props.task?.pin.revision ? baseFields.value : null);
@@ -414,9 +413,9 @@ const normalizedFields = (): TaskBoard.TaskFields => {
   return fields;
 };
 let retainDraft = true;
-const initialFields = (): Pick<TaskBoard.CreateRequest, 'workflowState' | 'nextSteps' | 'initialResult'> => ({
+const initialFields = (): Pick<TaskBoard.CreateRequest, 'workflowState' | 'wakeAt' | 'dependencies' | 'initialResult'> => ({
   workflowState: initialState.value,
-  ...(nextSteps.value.length ? { nextSteps: nextSteps.value } : {}),
+  wakeAt: wakeAt.value, dependencies: dependencies.value,
   ...(form.value.control === 'user' && ['review', 'done'].includes(initialState.value) && initialSummary.value.trim()
     ? { initialResult: { summary: initialSummary.value.trim(), artifacts: [], codeReferences: [], repositoryResult: null, limitations: [] } } : {}),
 });
@@ -426,7 +425,7 @@ const clearDraft = () => {
 };
 watch(
   [form, revision, baseFields, capabilities, host, category, nativeModel, reasoningEffort, serviceTier,
-    initialState, nextSteps, initialSummary],
+    initialState, wakeAt, dependencies, initialSummary],
   () => {
     if (!retainDraft) return;
     try {
@@ -434,7 +433,7 @@ watch(
         key,
         JSON.stringify({
           fields: normalizedFields(),
-          nextSteps: nextSteps.value,
+          wakeAt: wakeAt.value, dependencies: dependencies.value,
           revision: revision.value,
           baseFields: baseFields.value,
           ...(!props.task ? { initial: initialFields() } : {}),
@@ -462,7 +461,6 @@ const initialProblem = computed(() => {
       ['todo', 'waiting'].includes(initialState.value))
     return 'Create this task in Backlog to finish uploading its files before an agent can start. Move it to Todo when ready.';
   if (initialState.value === 'review' && !initialSummary.value.trim()) return 'Review needs a final result.';
-  if (initialState.value === 'waiting' && !nextSteps.value.length) return 'Add a next step and its conditions.';
   return '';
 });
 const images = useAttachmentImages(
@@ -562,13 +560,13 @@ const save = async () => {
         }
       }
       let pin: TaskBoard.ObjectPin | null = current.pin;
-      if (!sameFields(fields, current.value.fields) || JSON.stringify(nextSteps.value) !== JSON.stringify(current.value.nextSteps)) {
+      if (!sameFields(fields, current.value.fields) || wakeAt.value !== current.value.wakeAt || JSON.stringify(dependencies.value) !== JSON.stringify(current.value.dependencies)) {
         const outcome = await action.start("Save task changes", {
           action: "edit",
           taskId: current.pin.objectId,
           expectedRevision: current.pin.revision,
           fields,
-          nextSteps: nextSteps.value,
+          wakeAt: wakeAt.value, dependencies: dependencies.value,
         });
         pin = outcome?.task ?? null;
       }
@@ -691,7 +689,7 @@ const cancel = () => {
             <OptionSelect id="task-initial-state" v-model="initialState" :disabled="locked">
               <option v-for="option in initialStateOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
             </OptionSelect>
-            <FieldDescription>{{ form.control === 'user' ? 'Manual tasks never start an agent.' : 'Todo queues agent work when its host and dependencies are ready.' }}</FieldDescription>
+            <FieldDescription>{{ form.control === 'user' ? 'Manual tasks never start an agent.' : tr('Todo queues work for the agent. Backlog keeps it unscheduled.', 'Todo gibt die Aufgabe für den Agenten frei. Im Backlog bleibt sie ungeplant.') }}</FieldDescription>
           </Field>
           <div class="grid gap-6 sm:grid-cols-2">
             <Field
@@ -891,8 +889,18 @@ const cancel = () => {
       </FieldSet>
 
       <FieldSet>
-        <FieldLegend>Next steps</FieldLegend>
-        <NextStepsEditor v-model="nextSteps" :questions="ownQuestions" :tasks="blockerOptions" :disabled="locked || fixed" />
+        <FieldLegend>{{ tr('Aufwecken', 'Wake-ups') }}</FieldLegend>
+        <FieldGroup>
+          <Field><Label for="task-wake-at">{{ tr('Nächster Termin', 'Next appointment') }}</Label>
+            <Input id="task-wake-at" type="datetime-local" :model-value="localDate(wakeAt)" :disabled="locked || fixed"
+              @change="wakeAt = ($event.target as HTMLInputElement).value ? new Date(($event.target as HTMLInputElement).value).toISOString() : null" />
+            <FieldDescription>{{ tr('Optional. Der Agent entscheidet beim Aufwecken, was zu tun ist.', 'Optional. The agent decides what to do when it wakes.') }}</FieldDescription>
+          </Field>
+          <Field><Label>{{ tr('Beobachtete Tickets', 'Watched tickets') }}</Label>
+            <TagPicker :label="tr('Beobachtete Tickets', 'Watched tickets')" v-model="dependencies" :options="blockerOptions" :disabled="locked || fixed" />
+            <FieldDescription>{{ tr('Änderungen an diesen Tickets wecken den Agenten.', 'Changes to these tickets wake the agent.') }}</FieldDescription>
+          </Field>
+        </FieldGroup>
       </FieldSet>
 
       <Alert v-if="error" variant="destructive"

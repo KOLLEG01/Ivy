@@ -31,6 +31,28 @@ test("scheduler ignores Backlog and user-controlled Tasks", async (t) => {
   assert.equal((await f.first.store.page("task-board/run")).items.length, 0);
 });
 
+test('scheduler recovers its pending admission across comment revisions and restart', async t => {
+  const f = taskBoardFixture(t), planned = await f.planned('agent');
+  const acquire = f.first.coordination.acquire.bind(f.first.coordination);
+  f.first.coordination.acquire = async () => { throw new IvyError('task_board_publication_busy', 'Another ticket is publishing.', 'unknown'); };
+  await assert.rejects(new TaskBoardScheduler(f.first).task(planned.task.objectId), /Another ticket is publishing/);
+  f.first.coordination.acquire = acquire;
+  const operations = await f.first.store.page('task-board/operation', { where: { op: 'eq', field: 'data:/phase', value: 'accepted' } });
+  assert.equal(operations.items.length, 1);
+  const original = await f.first.store.read('task-board/operation', operations.items[0]!.objectId);
+  await f.invoke({ action: 'comment', operationId: randomUUID(), taskId: planned.task.objectId,
+    expectedRevision: planned.task.revision, commentId: randomUUID(), body: 'A correction while allocation waits.',
+    requests: [], responses: [], attachments: [], replyTo: null });
+  const outcome = await new TaskBoardScheduler(f.second).task(planned.task.objectId);
+  assert.ok(outcome?.run);
+  const run = await f.second.store.read('task-board/run', outcome.run);
+  assert.equal(run.value.operationId, original.value.operationId);
+  assert.equal(run.value.originalRequest.expectedRevision, planned.task.revision);
+  assert.equal((await f.second.store.page('task-board/scheduler-attempt')).items.length, 1);
+  assert.equal((await f.second.store.read('task-board/operation', original.pin.objectId)).value.phase, 'succeeded');
+  assert.equal((await f.second.store.read('task-board/task', planned.task.objectId)).value.comments.at(-1)?.body, 'A correction while allocation waits.');
+});
+
 test("scheduler allocates a Todo Task and retains one prepared attempt", async (t) => {
   const f = taskBoardFixture(t),
     scheduler = new TaskBoardScheduler(f.first),
@@ -155,7 +177,7 @@ test("missing capability leaves first-attempt work visibly blocked before its fi
   const outcome = await scheduler.task(moved.task!.objectId);
   assert.ok(outcome?.task);
   const task = await f.first.store.read("task-board/task", outcome!.task!);
-  assert.equal(task.value.workflowState, "waiting");
+  assert.equal(task.value.workflowState, "todo");
   assert.equal(task.value.claim, null);
   assert.equal(task.value.runtimeWait?.reason, "capability");
   assert.match(task.value.runtimeWait?.detail ?? "", /video-editing/);
@@ -181,7 +203,7 @@ test("a host missing a required capability keeps the Task in Blocked", async (t)
   assert.equal(f.first.condition((await f.first.store.read("task-board/task", moved.task!)).value).state, "queued");
   const outcome = await scheduler.task(moved.task!.objectId);
   const task = await f.first.store.read("task-board/task", outcome!.task!);
-  assert.equal(task.value.workflowState, "waiting");
+  assert.equal(task.value.workflowState, "todo");
   assert.equal(task.value.runtimeWait?.reason, "capability");
   assert.match(task.value.runtimeWait?.detail ?? "", /fixture-host does not advertise video-editing/);
 });
@@ -209,12 +231,12 @@ test("an unexpected host failure is named in the waiting detail", async (t) => {
   assert.match(task.value.runtimeWait?.detail ?? "", /No ready AgentManager is available on fixture-host\. fixture-host: .*absolute/);
 });
 
-test('time and dependency prerequisites do not allocate before they are ready', async t => {
+test('appointments and watched tickets wait for their next event', async t => {
   const now = new Date('2026-09-14T06:00:00.000Z'), f = taskBoardFixture(t), scheduler = new TaskBoardScheduler(f.first, () => now);
   const dependency = await f.create({ control: 'user' });
-  for (const condition of [{ kind: 'time' as const, at: '2099-09-14T07:00:00.000Z' }, { kind: 'task' as const, taskId: dependency.task!.objectId, until: 'done' as const }]) {
+  for (const condition of [{ kind: 'time' as const, at: '2099-09-14T07:00:00.000Z' }, { kind: 'task' as const, taskId: dependency.task!.objectId }]) {
     const created = await f.invoke({ action: 'create', operationId: randomUUID(), fields: { ...fields, control: 'agent' }, workflowState: 'waiting',
-      nextSteps: [{ id: 'pending', scope: 'Continue after the actual prerequisite.', requires: [condition] }] });
+      wakeAt: condition.kind === 'time' ? condition.at : null, dependencies: condition.kind === 'task' ? [condition.taskId] : [] });
     assert.equal(await scheduler.task(created.task!.objectId), null);
     const task = await f.first.task({ task: created.task!.objectId }, 'user');
     assert.equal(task.executionCondition.state, condition.kind === 'time' ? 'deferred' : 'blocked_dependency');
@@ -228,12 +250,23 @@ test("shared directory queues another task while a peer is running", async (t) =
     owner = await f.planned("agent", { kind: "directory_path", path: String(f.plan.threadStart.cwd) }),
     blocked = await f.planned("agent", { kind: "directory_path", path: String(f.plan.threadStart.cwd) });
   assert.ok((await scheduler.task(owner.task.objectId))?.run);
+  // A rebuilt reservation index falls back to ticket headers, never their conversation.
+  f.first.store.workspaceOwner = async () => null;
+  const read = f.first.store.read.bind(f.first.store); let peerHeaders = 0;
+  f.first.store.read = (async (...args: Parameters<typeof read>) => {
+    if (args[0] === 'task-board/task' && (typeof args[1] === 'string' ? args[1] : args[1].objectId) === owner.task.objectId) {
+      assert.equal(args[4], true, 'Workspace conflict detection must not hydrate a foreign comment history.');
+      peerHeaders++;
+    }
+    return read(...args);
+  }) as typeof read;
   const outcome = await scheduler.task(blocked.task.objectId),
     task = await f.first.store.read("task-board/task", outcome!.task!);
-  assert.equal(task.value.workflowState, "waiting");
+  assert.equal(task.value.workflowState, "todo");
   assert.equal(task.value.runtimeWait?.reason, "workspace");
-  assert.equal(task.value.nextSteps[0]?.requires.length, 0);
+  assert.deepEqual(task.value.dependencies, []);
   assert.equal(outcome?.run, null);
+  assert.ok(peerHeaders > 0);
   await scheduler.task(blocked.task.objectId);
   const waiting = await f.first.store.read("task-board/task", blocked.task.objectId);
   for (let pass = 0; pass < 3; pass++) assert.equal(await scheduler.task(blocked.task.objectId), null);

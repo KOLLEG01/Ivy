@@ -9,7 +9,7 @@ import { IvyError, canonical, hashJson } from '../packages/sdk/src/node.js';
 import { routeTaskQuestions } from '../services/task-board/src/runtime/question-routing.js';
 import { openQuestions } from '../services/task-board/src/runtime/conversation.js';
 import { taskCard, taskViewPage } from '../services/task-board/src/runtime/task-card.js';
-import { assessSteps, stepCondition } from '../services/task-board/src/runtime/next-steps.js';
+import { shouldWake, wakeCondition, dependencySnapshot, validateDependencies } from '../services/task-board/src/runtime/wake.js';
 import { executionCondition } from '../services/task-board/src/runtime/condition.js';
 import { nextExecutionMode } from '../services/task-board/src/runtime/execution-mode.js';
 import { TaskBoardStore } from '../services/task-board/src/runtime/store.js';
@@ -44,6 +44,13 @@ test('public cards skip history and read tracking; descending cursors read bound
   assert.equal(card.task.openQuestionCount, 1);
   assert.equal('unreadAgentComments' in card, false);
   assert.equal('nextSteps' in card.task, false);
+  const { wakeAt: _wake, dependencies: _dependencies, observedDependencies: _observed, ...retained } = header.value;
+  const oldHeader = { ...header, value: { ...retained, workflowState: 'waiting',
+    nextSteps: [{ id: 'appointment', scope: 'Check the provider.', requires: [{ kind: 'time', at: '2099-01-01T00:00:00.000Z' }] }],
+  } as unknown as TaskBoard.Task };
+  const oldCard = await readTask(cold, oldHeader, { task: saved.objectId, view: 'card' }, f.first.condition.bind(f.first)) as TaskBoard.TaskCardView;
+  assert.equal(oldCard.task.wakeAt, '2099-01-01T00:00:00.000Z');
+  assert.deepEqual(reads, [saved.objectId], 'Retained compact cards normalize without hydrating comments.');
   const first = await readTask(cold, header, { task: saved.objectId, comments: { limit: 10 } }, f.first.condition.bind(f.first)) as TaskBoard.TaskView;
   assert.deepEqual(first.task.comments.map(comment => comment.sequence), [120,119,118,117,116,115,114,113,112,111]);
   assert.equal(first.commentPage!.nextBefore, 111);
@@ -66,7 +73,8 @@ test('active retained headers reuse a bounded summary without repeatedly hydrati
   const comments = Array.from({ length: 80 }, (_, index) => ({ ...comment(index + 1), body: 'Message ' + (index + 1) }));
   comments[0] = { ...comments[0]!, purpose: 'question', recipient: { kind: 'user' } };
   comments[1] = { ...comments[1]!, resolvesQuestions: [comments[0]!.commentId] };
-  const retainedTask = { ...initial.value, taskKey: 'TASK-9000', parentTaskId: initial.pin.objectId, comments };
+  const { wakeAt: _wake, dependencies: _dependencies, observedDependencies: _observed, ...oldTask } = initial.value;
+  const retainedTask = { ...oldTask, nextSteps: [], taskKey: 'TASK-9000', parentTaskId: initial.pin.objectId, comments } as unknown as TaskBoard.Task;
   const retained = await store.client.request('objects.write', {
     create: { name: 'Retained active header', contractKey: 'task-board/task', parentId: store.rootObjectId, ownerObjectId: null },
     contractVersion: '2.2.0', references: {}, mutationId: await store.preparedMutationId('retained-inline-history'),
@@ -96,16 +104,14 @@ test('active retained headers reuse a bounded summary without repeatedly hydrati
     f.first.condition.bind(f.first)) as TaskBoard.TaskView;
   assert.deepEqual(page.task.comments.map(comment => comment.sequence), [80, 79, 78, 77, 76]);
   assert.equal(hydrated, 1);
-  // A gate can newly reference an already resolved question without changing the history.
-  const gated = await store.writePrepared('task-board/task', { ...retainedTask, nextSteps: [
-    { id: 'answered', scope: 'Continue after the answer.', requires: [{ kind: 'question', questionId: comments[0]!.commentId }] },
-  ] }, await store.preparedMutationId('retained-gate-change'),
+  // Header-only updates preserve the summary cache for the same immutable conversation.
+  const gated = await store.writePrepared('task-board/task', { ...retainedTask, nextSteps: [] } as unknown as TaskBoard.Task, await store.preparedMutationId('retained-gate-change'),
   { objectId: saved.objectId, expectedRevision: saved.revision }, '2.2.0');
   const changed = await cold.read('task-board/task', gated, true, true, true);
   await readTask(cold, changed, query, f.first.condition.bind(f.first));
-  assert.equal(hydrated, 2);
+  assert.equal(hydrated, 1);
   await readTask(cold, changed, query, f.first.condition.bind(f.first));
-  assert.equal(hydrated, 2);
+  assert.equal(hydrated, 1);
 });
 
 test('uploading attachment 257 uses the existing evidence retention and metadata byte budget', async t => {
@@ -242,10 +248,8 @@ test('dependency status checks do not load the foreign ticket conversation', asy
     return result;
   } }, null);
   t.after(() => checking.close());
-  const assessments = await assessSteps(checking, { ...own.value, nextSteps: [
-    { id: 'after-peer', scope: 'Review the idle peer.', requires: [{ kind: 'task', taskId: foreign.pin.objectId, until: 'idle' }] },
-  ] }, new Date().toISOString());
-  assert.equal(assessments[0]?.ready, true);
+  const snapshot = await dependencySnapshot(checking, { dependencies: [foreign.pin.objectId] });
+  assert.ok(snapshot[foreign.pin.objectId]);
   assert.equal(headerReads, 1);
   assert.equal(conversationReads, 0);
 });
@@ -313,9 +317,8 @@ test('task questions route once, stay out of user badges and are answered by the
   assert.equal(taskCard(view).task.openQuestionCount, 0);
   assert.equal(taskCard(view).directCommentCount, 0);
   assert.equal(taskViewPage(view, { task: source.pin.objectId }).openQuestions!.length, 0);
-  const gated = { ...view.task, nextSteps: [{ id: 'answer', scope: 'Use the contract.',
-    requires: [{ kind: 'question' as const, questionId: 'internal-question' }] }] };
-  assert.equal(stepCondition(await assessSteps(store, gated, new Date().toISOString())).state, 'blocked_dependency');
+  const gated = { ...view.task, wakeAt: null, dependencies: [] };
+  assert.equal(wakeCondition(gated).state, 'idle');
   const answered = { ...view.task, comments: [...view.task.comments, { ...comment(2), authorKind: 'agent' as const,
     sourceTaskId: target.task!.objectId, replyTo: 'internal-question' }] };
   assert.equal(openQuestions(answered).length, 0);
@@ -328,7 +331,7 @@ test('a permanent completion error is a failure and exhausted recovery is never 
   const facts = { workflowState: 'waiting' as const, control: 'agent' as const, claim: null,
     publication: false, runtimeWait: null, executionRequirement: null, completionIssue: 'content_too_large: handoff refused' };
   assert.equal(executionCondition(facts).state, 'failed');
-  assert.equal(executionCondition({ ...facts, recovery: { attempts: 2, retryAt: null } }).state, 'failed');
+  assert.equal(executionCondition(facts).state, 'failed');
 });
 
 test('a retained storage refusal survives completion instead of triggering missing-handoff recovery', async t => {
@@ -337,7 +340,7 @@ test('a retained storage refusal survives completion instead of triggering missi
   const { priority: _priority, dueAt: _due, userContact: _contact, ...fields } = task.value.fields;
   const request: TaskBoard.CommentActionRequest = { action: 'comment', operationId: 'refused-handoff',
     taskId: task.pin.objectId, expectedRevision: task.pin.revision, commentId: 'refused',
-    purpose: 'handoff', authorKind: 'agent', body: 'Completed work.', handoff: { workflowState: 'review', nextSteps: [] },
+    purpose: 'handoff', authorKind: 'agent', body: 'Completed work.', handoff: { workflowState: 'review', wakeAt: null, dependencies: [] },
     requests: [], responses: [], attachments: [], replyTo: null };
   const operation = await engine.operations.begin(request, { ...engine.owner, principalId: 'worker', source: 'worker' },
     async () => ({ run: w.state().run, work: { claimOperationId: task.value.claim!.operationId,

@@ -242,9 +242,7 @@ export class TaskBoardNativeLifecycle {
       ...(startWork ? { workflowState: 'todo' as const, runtimeWait: null, acceptedReview: null,
         fields: { ...task.value.fields, control: 'agent' as const } } : {}) };
     if (startWork && operation.value.request.action === 'newThread') {
-      delete value.completionIssue; delete value.continuation;
-      value.consumedSteps = [];
-      if (!value.nextSteps.length) value.nextSteps = [{ id: 'main', scope: value.fields.description || value.fields.title, requires: [] }];
+      delete value.completionIssue;
     }
     const reserved = await steps.write('task-board/task', value, { objectId: task.pin.objectId, expectedRevision: task.pin.revision });
     const request = operation.value.request;

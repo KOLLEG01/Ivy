@@ -5,7 +5,7 @@ import { IvyError } from '../packages/contracts/src/errors.js';
 import type { TaskBoard, Wire } from '../packages/contracts/src/generated.js';
 import { TaskBoardEvidence } from '../services/task-board/src/runtime/evidence.js';
 import { openQuestions } from '../services/task-board/src/runtime/conversation.js';
-import { assessSteps } from '../services/task-board/src/runtime/next-steps.js';
+import { shouldWake, wakeCondition, dependencySnapshot, validateDependencies } from '../services/task-board/src/runtime/wake.js';
 import { NativeProgress } from '../services/task-board/src/runtime/native-progress.js';
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
 import { nativeWorkflow } from './fixtures/task-board-native.js';
@@ -14,7 +14,7 @@ import { taskBoardFixture } from './fixtures/task-board.js';
 type Workflow = Awaited<ReturnType<typeof nativeWorkflow>>;
 const future = () => new Date(Date.now() + 3600_000).toISOString();
 const waiting = (): TaskBoard.Handoff => ({ workflowState: 'waiting',
-  nextSteps: [{ id: 'later', scope: 'Check the authorized result later.', requires: [{ kind: 'time', at: future() }] }] });
+  wakeAt: future(), dependencies: [] });
 async function comment(w: Workflow, values: Partial<TaskBoard.CommentActionRequest> = {}) {
   await w.refresh();
   const { task } = w.state();
@@ -55,16 +55,14 @@ test('a question replying to a comment remains a prerequisite until that questio
   const w = await nativeWorkflow(t); await w.running();
   await comment(w, { commentId: 'request', authorKind: 'user', agentDelivery: 'none' });
   await comment(w, { commentId: 'question', purpose: 'question', recipient: { kind: 'user' }, replyTo: 'request' });
-  const task = await finish(w, { workflowState: 'waiting', nextSteps: [
-    { id: 'answer', scope: 'Use the answer.', requires: [{ kind: 'user', questionId: 'question' }] },
-  ] });
+  const task = await finish(w, { workflowState: 'waiting', wakeAt: null, dependencies: [] });
   assert.deepEqual(openQuestions(task.value).map(value => value.commentId), ['question']);
-  assert.equal((await assessSteps(w.f.first.store, task.value, new Date().toISOString()))[0]!.ready, false);
+  assert.equal(await shouldWake(w.f.first.store, task.value, new Date().toISOString()), false);
   assert.equal(await new TaskBoardScheduler(w.f.first).task(task.pin.objectId), null);
   await comment(w, { authorKind: 'user', replyTo: 'question', agentDelivery: 'none' });
   const answered = await w.f.first.store.read('task-board/task', w.state().task);
   assert.equal(openQuestions(answered.value).length, 0);
-  assert.equal((await assessSteps(w.f.first.store, answered.value, new Date().toISOString()))[0]!.ready, true);
+  assert.equal(await shouldWake(w.f.first.store, answered.value, new Date().toISOString()), false);
 });
 
 test('manually completing an intermediate result keeps the ticket editable', async t => {
@@ -81,7 +79,7 @@ test('manually completing an intermediate result keeps the ticket editable', asy
 
 test('metadata preserves Review and Done; a changed assignment reopens with an executable step', async t => {
   const w = await nativeWorkflow(t); await w.running();
-  let task = await finish(w, { workflowState: 'review', nextSteps: [] });
+  let task = await finish(w, { workflowState: 'review', wakeAt: null, dependencies: [] });
   for (const state of ['review', 'done'] as const) {
     if (state === 'done') {
       const result = await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: task.pin.objectId,
@@ -99,63 +97,48 @@ test('metadata preserves Review and Done; a changed assignment reopens with an e
     expectedRevision: task.pin.revision, fields: { ...task.value.fields, description: 'Implement the changed requirement.' } });
   task = await w.f.first.store.read('task-board/task', edited.task!);
   assert.equal(task.value.workflowState, 'todo');
-  assert.equal((await assessSteps(w.f.first.store, task.value, new Date().toISOString())).some(value => value.ready), true);
+  assert.equal(await shouldWake(w.f.first.store, task.value, new Date().toISOString()), true);
 });
 
-test('native completion preserves a newer next-step plan and exposes the obsolete handoff', async t => {
+test('native completion preserves a newer appointment without a workflow error', async t => {
   const w = await nativeWorkflow(t); await w.running();
   await comment(w, { purpose: 'handoff', handoff: waiting() });
   const task = await w.f.first.store.read('task-board/task', w.state().task);
-  const nextSteps: TaskBoard.NextStep[] = [{ id: 'replacement', scope: 'A newer authorized plan.', requires: [{ kind: 'time', at: future() }] }];
+  const wakeAt = future();
   await w.f.invoke({ action: 'edit', operationId: randomUUID(), taskId: task.pin.objectId,
-    expectedRevision: task.pin.revision, fields: task.value.fields, nextSteps });
+    expectedRevision: task.pin.revision, fields: task.value.fields, wakeAt });
   const done = await finish(w);
-  assert.deepEqual(done.value.nextSteps, nextSteps);
+  assert.equal(done.value.wakeAt, wakeAt);
   assert.equal(done.value.claim, null);
   assert.equal(done.value.publication, null);
-  assert.equal(done.value.completionIssue?.code, 'task_board_handoff_changed');
+  assert.equal(done.value.completionIssue, undefined);
   assert.ok((await w.f.first.store.read('task-board/run', done.value.lastRun!)).value.result);
 });
 
-test('an already published delivery is an independent path through an apparent cycle', async t => {
-  const w = await nativeWorkflow(t); await w.running();
-  const b = await w.f.planned();
-  const a = await finish(w, { workflowState: 'waiting', deliveries: [{ key: 'a', artifacts: [],
-    codeReferences: [{ kind: 'commit', url: 'https://example.test/commit/a', label: 'A', commit: 'a' }] }],
-    nextSteps: [{ id: 'b', scope: 'Use B.', requires: [{ kind: 'delivery', taskId: b.task.objectId, key: 'b' }] }] });
-  const result = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: b.task.objectId,
-    expectedRevision: b.task.revision,
-    nextSteps: [{ id: 'a', scope: 'Use A.', requires: [{ kind: 'delivery', taskId: a.pin.objectId, key: 'a' }] }] });
-  const task = await w.f.first.store.read('task-board/task', result.task!);
-  assert.equal((await assessSteps(w.f.first.store, task.value, new Date().toISOString()))[0]!.ready, true);
-});
-
-test('two admitted handoffs cannot silently publish a mutual dependency deadlock', async t => {
+test('mutual watchers are allowed because watches do not gate work', async t => {
   const w = await nativeWorkflow(t); await running(w, 'thread-a', 'turn-a');
   const a = w.state(), b = await w.f.planned();
   w.adopt(await w.f.invoke({ action: 'start', operationId: randomUUID(), taskId: b.task.objectId,
-    expectedRevision: b.task.revision, intent: b.plan, target: b.target, workspace: b.workspace, commentIds: [], nextStepId: 'main' }));
+    expectedRevision: b.task.revision, intent: b.plan, target: b.target, workspace: b.workspace, commentIds: [],  }));
   await running(w, 'thread-b', 'turn-b');
-  await comment(w, { purpose: 'handoff', handoff: { workflowState: 'waiting', nextSteps: [
-    { id: 'a', scope: 'Wait for A.', requires: [{ kind: 'delivery', taskId: a.task.objectId, key: 'a' }] },
-  ] } });
+  await comment(w, { purpose: 'handoff', handoff: { workflowState: 'waiting', wakeAt: null, dependencies: [a.task.objectId] } });
   const bState = w.state();
   w.adopt({ ...w.started, task: a.task, run: a.run }); await w.refresh();
-  await comment(w, { purpose: 'handoff', handoff: { workflowState: 'waiting', nextSteps: [
-    { id: 'b', scope: 'Wait for B.', requires: [{ kind: 'delivery', taskId: b.task.objectId, key: 'b' }] },
-  ] } });
+  await comment(w, { purpose: 'handoff', handoff: { workflowState: 'waiting', wakeAt: null, dependencies: [b.task.objectId] } });
   const first = await snapshot(w, 'thread-a', 'turn-a');
   assert.equal(first.value.completionIssue, undefined);
   w.adopt({ ...w.started, task: bState.task, run: bState.run }); await w.refresh();
   const second = await snapshot(w, 'thread-b', 'turn-b');
-  assert.equal(second.value.completionIssue?.code, 'task_board_dependency_cycle');
+  assert.equal(second.value.completionIssue, undefined);
   assert.equal(second.value.claim, null);
   assert.equal(second.value.publication, null);
+  assert.equal(await shouldWake(w.f.first.store, first.value, new Date().toISOString()), false);
+  assert.equal(await shouldWake(w.f.first.store, second.value, new Date().toISOString()), false);
 });
 
 test('capacity failures retry the original conversation after backoff without reopening work', async t => {
   const w = await nativeWorkflow(t); await w.running();
-  const reviewed = await finish(w, { workflowState: 'review', nextSteps: [] });
+  const reviewed = await finish(w, { workflowState: 'review', wakeAt: null, dependencies: [] });
   await comment(w, { authorKind: 'user', commentId: 'retry-message', agentDelivery: 'queue' });
   const next = await new TaskBoardScheduler(w.f.first).task(w.state().task.objectId);
   assert.ok(next?.run); w.adopt(next); await w.running();
@@ -189,7 +172,7 @@ test('execution slots cover existing Runs and are checked again at admission', a
   for (let index = 0; index < 3; index++) {
     const p = await f.planned();
     const request: TaskBoard.StartRequest = { action: 'start', operationId: randomUUID(), taskId: p.task.objectId,
-      expectedRevision: p.task.revision, intent: p.plan, target: p.target, workspace: p.workspace, commentIds: [], nextStepId: 'main' };
+      expectedRevision: p.task.revision, intent: p.plan, target: p.target, workspace: p.workspace, commentIds: [],  };
     if (index < 2) assert.ok((await f.invoke(request)).run);
     else {
       await assert.rejects(f.invoke(request), error => error instanceof IvyError && error.code === 'task_board_execution_capacity');
@@ -229,7 +212,7 @@ test('an unfinished claim reservation keeps the capacity gate until its Run is p
   });
   const start = (p: typeof a): TaskBoard.StartRequest => ({ action: 'start', operationId: randomUUID(),
     taskId: p.task.objectId, expectedRevision: p.task.revision, intent: p.plan, target: p.target,
-    workspace: p.workspace, commentIds: [], nextStepId: 'main' });
+    workspace: p.workspace, commentIds: [],  });
   const pending = f.invoke(start(a));
   await reserved;
   const other = start(b);
@@ -244,7 +227,7 @@ test('an unfinished claim reservation keeps the capacity gate until its Run is p
 
 test('journal pressure retains the admitted handoff baseline until native completion', async t => {
   const w = await nativeWorkflow(t); await w.running();
-  await comment(w, { purpose: 'handoff', handoff: { workflowState: 'review', nextSteps: [] } });
+  await comment(w, { purpose: 'handoff', handoff: { workflowState: 'review', wakeAt: null, dependencies: [] } });
   const store = w.f.first.store;
   await store.collectLocal(Date.now(), 0, store.historyLimits.count);
   const done = await finish(w);

@@ -44,12 +44,10 @@ export const identityHash = (callerPrincipalId: string, operationId: string) =>
 export const mutation = (scope: string, step: string) =>
   "task-board:" + hashJson({ scope, step }).slice("sha256:".length);
 
-export const taskAttachmentPins = (task: Pick<TaskBoard.Task, "attachments" | "comments"> & Partial<Pick<TaskBoard.Task, 'deliveries'>>) =>
+export const taskAttachmentPins = (task: Pick<TaskBoard.Task, "attachments" | "comments">) =>
   [...new Map([
     ...task.attachments.map(attachment => attachment.object),
     ...task.comments.flatMap(comment => comment.attachments.map(attachment => attachment.object)),
-    ...task.comments.flatMap(comment => comment.handoff?.deliveries?.flatMap(delivery => delivery.artifacts.map(artifact => artifact.object)) ?? []),
-    ...(task.deliveries ?? []).flatMap(receipt => [receipt.result, ...receipt.delivery.artifacts.map(artifact => artifact.object)]),
   ].map(pin => [hashJson(pin), pin])).values()];
 
 // The journal may run on Linux while reserving a Windows host's workspace.
@@ -168,11 +166,13 @@ export class TaskBoardStore {
   async upgradeStored<K extends ContractKey>(key: K, value: ContractValues[K]): Promise<ContractValues[K]> {
     if (key !== 'task-board/task') return upgradeRecord(key, value);
     const stored = structuredClone(value) as unknown as { latestChecks?: { evidence?: TaskBoard.Artifact[] }[];
+      deliveries?: { delivery: { artifacts: TaskBoard.Artifact[] } }[];
       comments?: { handoff?: { checks?: { evidence?: TaskBoard.Artifact[] }[] } }[];
       content?: { checks?: { evidence?: TaskBoard.Artifact[] }[] } };
     const findings = [...stored.latestChecks ?? [], ...stored.content?.checks ?? [],
       ...(stored.comments ?? []).flatMap(comment => comment.handoff?.checks ?? [])];
-    for (const artifact of findings.flatMap(finding => finding.evidence ?? [])) {
+    for (const artifact of [...findings.flatMap(finding => finding.evidence ?? []),
+      ...(stored.deliveries ?? []).flatMap(receipt => receipt.delivery.artifacts)]) {
       if (artifact.byteLength !== undefined) continue;
       const read = await this.client.request('objects.read', artifact.object);
       requireThat(read.revision.contentHash === artifact.contentHash && read.revision.mediaType === artifact.mediaType,

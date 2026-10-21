@@ -41,7 +41,7 @@ export async function chatNativeFixture(t: TestContext, version: Chat.NativePlan
   let afterWrite: ((params: Params<'objects.write'>, result: Result<'objects.write'>) => void | Promise<void>) | null = null;
   let beforeNative: ((call: PreparedCall) => Promise<void>) | null = null;
   let reply: Agent.Reply | ((frame: Record<string, Wire.Json>) => Agent.Reply | undefined) | null = null;
-  let threadStatus: Wire.Json = { type: 'idle' };
+  let threadStatus: Wire.Json = { type: 'idle' }, threadAcceptsInput = true;
   const frames: Record<string, Wire.Json>[] = [], methods: string[] = [], accesses: string[] = [];
   const mutationIds = new Map<string, string>();
   const normalizeMutation = <M extends OperationName>(method: M, params: Params<M>): Params<M> => {
@@ -57,10 +57,10 @@ export async function chatNativeFixture(t: TestContext, version: Chat.NativePlan
     interactions=new NativeInteractions(rpc,epoch);
     input.on('data', (bytes: Buffer) => {
       const frame = JSON.parse(bytes.toString('utf8')) as Record<string, Wire.Json>; frames.push(frame); if (held === frame['method']) return;
-      if (frame['method'] === 'thread/resume') threadStatus = { type: 'idle' };
+      if (frame['method'] === 'thread/resume') { threadStatus = { type: 'idle' }; threadAcceptsInput = true; }
       const params = frame['params'] as Record<string, Wire.Json>, id = String(params['threadId'] ?? 'native-main-' + frames.length);
       const thread = { cliVersion: version, createdAt: 1788690000, cwd: '/fixture', ephemeral: false, id, modelProvider: 'openai', preview: 'Chat fixture',
-        projectId: null, sessionId: id, source: 'appServer', status: threadStatus, turns: [], updatedAt: 1788690000, canAcceptDirectInput: true, name: 'Fixture' };
+        projectId: null, sessionId: id, source: 'appServer', status: threadStatus, turns: [], updatedAt: 1788690000, canAcceptDirectInput: threadAcceptsInput, name: 'Fixture' };
       const result = frame['method'] === 'account/read' ? { requiresOpenaiAuth: false, account: null } : frame['method'] === 'turn/interrupt' ? {} : frame['method'] === 'thread/read' ? { thread } : frame['method'] === 'turn/start' ? { turn: { id: 'native-turn-' + frames.length, status: 'inProgress', items: [] } }
         : { thread, cwd: '/fixture', model: 'fixture-model', modelProvider: 'openai', approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly' }, reasoningEffort: 'high' };
       output.write(JSON.stringify({ id: frame['id'], ...((typeof reply === 'function' ? reply(frame) : reply) ?? { result }) }) + '\n');
@@ -163,7 +163,7 @@ const invoke = call.definition.namespace === 'agent' && call.definition.name ===
   return { first: main(first), second: main(second), clients: { first, second, agent }, kernel, routing, journal, frames, methods, accesses, projects, admission, request, operation, channel, dataRoot: root,
     intercept: (callback: typeof afterWrite) => { afterWrite = callback; }, beforeNative: (callback: typeof beforeNative) => { beforeNative = callback; },
     reply: (value: typeof reply) => { reply = value; }, hold: (method = 'thread/start') => { held = method; }, loseReply: (method?: string) => { loseReply = method ?? true; },
-    threadStatus: (value: Wire.Json) => { threadStatus = value; },
+    threadStatus: (value: Wire.Json, acceptsInput = (value as { type?: string }).type !== 'notLoaded') => { threadStatus = value; threadAcceptsInput = acceptsInput; },
     absence: (value: typeof absence) => { absence = value; }, unavailable: (value: boolean) => { unavailable = value; },
     restart: () => { rpc.close('fixture_restart'); input.destroy(); output.destroy(); epoch = randomUUID(); launch(); } };
 }

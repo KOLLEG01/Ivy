@@ -320,7 +320,7 @@ const chatEntries = computed(() => displayComments.value.map((comment, index) =>
   const gap = previous ? Math.abs(Date.parse(comment.createdAt) - Date.parse(previous.createdAt)) : Infinity;
   return { comment, kind: chatKind(comment), stamp: gap > 10 * minute ? stampLabel(comment.createdAt) : null };
 }));
-const dependencyIds = computed(() => [...new Set(task.value.value?.value.nextSteps.flatMap(step => step.requires.flatMap(condition => condition.kind === 'task' || condition.kind === 'delivery' ? [condition.taskId] : [])) ?? [])]);
+const dependencyIds = computed(() => task.value.value?.value.dependencies ?? []);
 const dependencyPage = ref(0),
   dependencies = useRemote(async (signal) =>
       await Promise.all(
@@ -815,14 +815,8 @@ const showArrived = () => {
         class="mt-4"
         @changed="refresh"
       />
-      <Alert v-if="task.value.value.value.completionIssue && taskView.value.value?.executionCondition.state === 'needs_user'" class="mt-4">
-        <CircleAlert aria-hidden="true" />
-        <AlertTitle>{{ tr('Übergabe prüfen', 'Workflow needs attention') }}</AlertTitle>
-        <AlertDescription>{{ task.value.value.value.completionIssue.detail }}</AlertDescription>
-      </Alert>
-      <p v-if="task.value.value.value.completionIssue?.code === 'task_board_handoff_missing'" class="mt-2 text-sm text-muted-foreground" role="status">
-        {{ tr('Abgeschlossene Reparaturversuche:', 'Completed recovery attempts:') }} {{ task.value.value.value.completionIssue.attempts ?? 0 }}/2.
-        <span v-if="task.value.value.value.completionIssue.retryAt">{{ tr('Nächster Versuch:', 'Next attempt:') }} {{ new Date(task.value.value.value.completionIssue.retryAt).toLocaleString() }}.</span>
+      <p v-if="task.value.value.value.completionIssue?.retryAt" class="mt-2 text-sm text-muted-foreground" role="status">
+        {{ tr('Nächster Versuch:', 'Next attempt:') }} {{ new Date(task.value.value.value.completionIssue.retryAt).toLocaleString() }}.
       </p>
       <p
         v-if="tab !== 'chat' && (error || archive.error.value)"
@@ -972,11 +966,8 @@ const showArrived = () => {
                     new Date(task.value.value.value.fields.dueAt).toLocaleString()
                   }}</PropertyItem
                 >
-                <PropertyItem v-if="task.value.value.value.nextSteps.length" :label="tr('Nächste Schritte', 'Next steps')">
-                  <ul class="space-y-2"><li v-for="step in task.value.value.value.nextSteps" :key="step.id">
-                    <p class="break-words">{{ step.scope }}</p>
-                    <ul class="text-xs text-muted-foreground"><li v-for="(condition, index) in step.requires" :key="index">{{ condition.kind === 'time' ? new Date(condition.at).toLocaleString() : (condition.kind === 'user' || condition.kind === 'question') ? tr('Antwort auf eigene Frage', 'Answer to own question') : condition.kind === 'delivery' ? condition.key : condition.until }}</li></ul>
-                  </li></ul>
+                <PropertyItem v-if="task.value.value.value.wakeAt" :label="tr('Nächster Termin', 'Next appointment')">
+                  {{ new Date(task.value.value.value.wakeAt).toLocaleString() }}
                 </PropertyItem>
                 <PropertyItem label="Updates">{{
                   {

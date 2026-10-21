@@ -1,4 +1,4 @@
-import { assessSteps, validateNextSteps } from './next-steps.js';
+import { dependencySnapshot, shouldWake, validateDependencies } from './wake.js';
 import { canonical, digest, hashJson } from '../../../../packages/sdk/src/node.js';
 import { IvyError, requireThat } from '../../../../packages/sdk/src/node.js';
 import type { Agent, TaskBoard } from '../../../../packages/sdk/src/node.js';
@@ -32,7 +32,7 @@ export async function sharedProjectOwner(store: TaskBoardStore, task: TaskBoard.
       ...(cursor ? { cursor } : {}) });
     for (const item of page.items) {
       if (item.objectId === taskId) continue;
-      const peer = (await store.read('task-board/task', item.objectId)).value;
+      const peer = (await store.read('task-board/task', item.objectId, true, false, true)).value;
       if (task.fields.allowParallel && peer.fields.allowParallel) continue;
       if (peer.workflowState === 'waiting' && (peer.runtimeWait?.reason === 'workspace' || !peer.lastRun)) continue;
       const run = peer.claim ? null : peer.lastRun ? (await store.read('task-board/run', peer.lastRun)).value : null;
@@ -132,7 +132,7 @@ export class TaskBoardChecks {
     }
   }
   async initialState(request: TaskBoard.CreateRequest, fields: TaskBoard.TaskFields, actor: TaskBoard.Actor, at: string): Promise<{
-    workflowState: TaskBoard.Task['workflowState']; nextSteps: TaskBoard.NextStep[]; runtimeWait: null;
+    workflowState: TaskBoard.Task['workflowState']; wakeAt: string | null; dependencies: string[]; observedDependencies: Record<string, string>; runtimeWait: null;
   }> {
     const workflowState = request.workflowState ?? 'todo';
     requireThat(workflowState !== 'in_progress' || fields.control === 'user',
@@ -147,16 +147,16 @@ export class TaskBoardChecks {
       await this.content(request.initialResult);
     }
     requireThat(workflowState !== 'review' || !!request.initialResult, 'task_board_result_required', 'Manual Review needs an initial final Result.');
-    const nextSteps = request.nextSteps ?? (['todo', 'in_progress'].includes(workflowState) ? [{ id: 'main', scope: fields.description || fields.title, requires: [] }] : []);
-    await validateNextSteps(this.store, null, nextSteps);
-    requireThat(workflowState !== 'waiting' || nextSteps.length > 0, 'invalid_arguments', 'Waiting needs concrete next-step conditions.');
-    return { workflowState, nextSteps, runtimeWait: null };
+    date(request.wakeAt ?? null);
+    await validateDependencies(this.store, null, request.dependencies ?? []);
+    return { workflowState, wakeAt: request.wakeAt ?? null, dependencies: request.dependencies ?? [], observedDependencies: await dependencySnapshot(this.store, { dependencies: request.dependencies ?? [] }), runtimeWait: null };
   }
   async deferral(request: TaskBoard.DeferRequest, self: string | null, at: string): Promise<void> {
-    const task = self ? (await this.store.read('task-board/task', self)).value : undefined;
-    await validateNextSteps(this.store, self, request.nextSteps, task);
+    date(request.wakeAt ?? null);
+    if (request.dependencies) await validateDependencies(this.store, self, request.dependencies);
     if (request.runtimeWait?.retryAt) date(request.runtimeWait.retryAt);
   }
+
   async executionOptions(fields: TaskBoard.TaskFields, task?: TaskBoard.Task, allowUnavailable = false): Promise<void> {
     const options = fields.nativeOptions;
     if (fields.control !== 'agent' && !options?.model && !options?.reasoningEffort &&
@@ -168,16 +168,13 @@ export class TaskBoardChecks {
       (task ? (await freshContextRecovery(this.store, task))?.target.serviceNodeId : undefined);
     await checkConfiguration(this.store, { schemaVersion: 1, defaults }, serviceNodeId, allowUnavailable);
   }
-  async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution, hasComments = false, recoveryOnly = false, nextStepId?: string | null): Promise<Agent.PlanDraft> {
+  async execution(task: TaskBoard.Task, intent: TaskBoard.ObjectPin, taskId: string, now: string, target?: TaskBoard.Target, workspace?: TaskBoard.WorkspaceResolution): Promise<Agent.PlanDraft> {
     requireThat(target && workspace && target.hostId === workspace.hostId && target.serviceNodeId === workspace.serviceNodeId,
       'task_board_execution_plan_required', 'Start must retain one resolved native owner and workspace.');
     const recovery = await freshContextRecovery(this.store, task);
     if (recovery) requireThat(same(target, recovery.target) && workspace.canonicalCwd === recovery.workspace.canonicalCwd && workspace.intendedPath === recovery.workspace.intendedPath,
       'task_board_workspace_mismatch', 'Fresh recovery must retain the original owner and workspace.');
-    if (!hasComments && !recoveryOnly) {
-      const selected = (await assessSteps(this.store, task, now)).find(value => value.step.id === nextStepId && value.ready);
-      requireThat(selected, 'task_board_input_required', 'The selected next step is not ready under its actual conditions.');
-    }
+    requireThat(await shouldWake(this.store, task, now), 'task_board_input_required', 'No work or new input is pending.');
     const plan = await readPlan(this.store, intent); planSemantics(plan);
     if (plan.location) {
       requireThat(plan.location.serviceNodeId === target.serviceNodeId && plan.location.hostId === target.hostId && plan.location.cwd === workspace.canonicalCwd,

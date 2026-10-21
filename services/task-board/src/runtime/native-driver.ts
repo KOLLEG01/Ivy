@@ -135,14 +135,18 @@ export class TaskBoardNativeDriver {
             const snapshot = await this.management(run.value.target.serviceNodeId, 'read', { nativeVersion: call.value.request.nativeVersion, method: 'thread/read', params });
             validateNativeRead(snapshot, { ...owner.target, callerPrincipalId: this.engine.settings.principalId, epoch: status.epoch!, method: 'thread/read', params }, 'task_board_native_unavailable');
             requireThat('result' in snapshot.reply, 'task_board_native_unavailable', 'Turn dispatch requires a successful fresh native primary observation.');
-            const { thread, canStartTurn } = nativeThreadState(catalogFor(snapshot.nativeVersion, { catalogHash: snapshot.catalogHash }).contract, snapshot.reply.result);
-            requireThat(thread['id'] === run.value.primaryResourceRef!.nativeId && thread['ephemeral'] === false && canStartTurn,
+            const { thread, canStartTurn, state } = nativeThreadState(catalogFor(snapshot.nativeVersion, { catalogHash: snapshot.catalogHash }).contract, snapshot.reply.result);
+            requireThat(thread['id'] === run.value.primaryResourceRef!.nativeId && thread['ephemeral'] === false,
+              'task_board_primary_mismatch', 'Turn dispatch must observe the same saved durable thread.');
+            requireThat(state !== 'notLoaded' || canStartTurn, 'task_board_reattach_required', 'The saved primary was unloaded and must be resumed before turn dispatch.');
+            requireThat(canStartTurn,
               'task_board_native_not_idle', 'The native primary must be currently attached, accept input and have no active turn before its turn starts.');
           }
           if (slot === 'interrupt') requireThat(status.epoch === run.value.nativeEpoch, 'task_board_native_epoch_changed', 'An old turn cannot be interrupted as if the replacement owner controlled it.');
           return owner.dispatch(original, async () => {
             const fresh = await this.current(runId);
-            requireThat(same(fresh.run.pin, run.pin) && same(fresh.task.pin, task.pin), 'revision_conflict', 'Task or Run changed before native dispatch; reconcile it before sending.');
+            requireThat(same(fresh.run.pin, run.pin) && !fresh.task.value.publication &&
+              (slot === 'interrupt' || same(fresh.task.value.claim?.run, run.pin)), 'revision_conflict', 'Task or Run changed before native dispatch; reconcile it before sending.');
             await this.engine.verifyOwner();
           });
         }

@@ -5,7 +5,7 @@ import { hashJson } from '../packages/contracts/src/canonical.js';
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
 import { intendedCall, resolveNativeRequest } from '../services/task-board/src/runtime/native-intent.js';
 import { workspaceIdentity } from '../services/task-board/src/runtime/task-coordination.js';
-import { assessSteps } from '../services/task-board/src/runtime/next-steps.js';
+import { shouldWake, wakeCondition, dependencySnapshot, validateDependencies } from '../services/task-board/src/runtime/wake.js';
 import { nativeWorkflow } from './fixtures/task-board-native.js';
 import { forwardDelegatedReview } from '../services/task-board/src/runtime/task-delegation.js';
 
@@ -64,25 +64,21 @@ test('unknown steering receipts cannot be replaced and acknowledge only after ex
   assert.equal((await w.f.first.store.read('task-board/task', w.state().task)).value.commentDeliveries[0]?.state, 'delivered');
 });
 
-test('completion dependencies resume after acceptance and reject closed cycles', async t => {
+test('watched tickets wake on a saved result without waiting for acceptance and may watch each other', async t => {
   const w = await nativeWorkflow(t); await w.running();
   const other = await w.f.planned('agent');
-  const block = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: other.task.objectId, expectedRevision: other.task.revision, nextSteps: [{ id: 'next', scope: 'Waiting for peer acceptance.', requires: [{ kind: 'task', taskId: w.state().task.objectId, until: 'done' }] }] });
+  const block = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: other.task.objectId, expectedRevision: other.task.revision, wakeAt: null, dependencies: [w.state().task.objectId] });
   assert.equal((await w.f.first.store.read('task-board/task', block.task!)).value.workflowState, 'waiting');
   const scheduler = new TaskBoardScheduler(w.f.first);
   await scheduler.task(other.task.objectId);
   assert.equal((await w.f.first.store.read('task-board/task', other.task.objectId)).value.claim, null);
   await w.refresh();
-  await assert.rejects(w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision, nextSteps: [{ id: 'next', scope: 'Cycle.', requires: [{ kind: 'task', taskId: other.task.objectId, until: 'done' }] }] }, w.f.settings.principalId), /indirectly/);
+  await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision, wakeAt: null, dependencies: [other.task.objectId] }, w.f.settings.principalId);
   await w.handoff();
   const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
-  assert.equal(await scheduler.task(other.task.objectId), null);
-  await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: finished.task!.objectId,
-    expectedRevision: finished.task!.revision, workflowState: 'done', detail: 'The result is accepted.' });
   assert.ok((await scheduler.task(other.task.objectId))?.run);
-  assert.equal((await w.f.first.store.read('task-board/task', other.task.objectId)).value.nextSteps[0]?.requires[0]?.kind, 'task');
+  assert.deepEqual((await w.f.first.store.read('task-board/task', other.task.objectId)).value.dependencies, [w.state().task.objectId]);
   const blocked = await w.f.first.store.read('task-board/task', other.task.objectId);
-  assert.equal((await assessSteps(w.f.first.store, { ...blocked.value, nextSteps: [{ id: 'accepted', scope: 'Wait for acceptance.', requires: [{ kind: 'task', taskId: w.state().task.objectId, until: 'done' }] }] }, new Date().toISOString()))[0]!.ready, true);
 });
 
 for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a blocked task' : 'review'} for a normal turn, while ordinary agent comments stay quiet`, async t => {
@@ -96,10 +92,9 @@ for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a
     const queued = await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: task.pin.objectId,
       expectedRevision: task.pin.revision, workflowState: 'todo', detail: 'Queue the completed task before retaining its dependency wait.' });
     task = await w.f.first.store.read('task-board/task', queued.task!);
-    const deferred = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision, nextSteps: [{ id: 'next', scope: 'Wait for the active child.', requires: [{ kind: 'task', taskId: source.task.objectId, until: 'idle' }] }] });
+    const deferred = await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision, wakeAt: null, dependencies: [source.task.objectId] });
     task = await w.f.first.store.read('task-board/task', deferred.task!);
-    assert.equal((await assessSteps(w.f.first.store, task.value, new Date().toISOString()))[0]!.ready, false);
-  }
+    }
   const send = async (directed: boolean) => {
     const outcome = await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision,
       commentId: randomUUID(), body: 'Please coordinate the next change.', authorKind: 'agent', agentDelivery: 'queue',
@@ -135,7 +130,7 @@ for (const blocked of [false, true]) test(`directed messages wake ${blocked ? 'a
   const ended = await w.f.first.nativeUpdate(await w.snapshot('completed', 'Coordination answer.'));
   const after = (await w.f.first.store.read('task-board/task', ended.task!)).value;
   assert.equal(after.workflowState, blocked ? 'waiting' : 'review'); assert.deepEqual(after.latestResult, task.value.latestResult);
-  assert.deepEqual(after.nextSteps, task.value.nextSteps);
+  assert.deepEqual(after.dependencies, task.value.dependencies);
   assert.equal(after.comments.filter(c => c.purpose === 'handoff').length, task.value.comments.filter(c => c.purpose === 'handoff').length);
   assert.equal(await scheduler.task(task.pin.objectId), null);
 });
@@ -203,9 +198,9 @@ test('automatic peers share the canonical directory and host; separate worktrees
 
 test('a running task can leave an explicit blocker and ends in Blocked instead of Review', async t => {
   const w = await nativeWorkflow(t); await w.running(); const other = await w.f.planned('user');
-  await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision, nextSteps: [{ id: 'next', scope: 'Waiting for peer completion.', requires: [{ kind: 'task', taskId: other.task.objectId, until: 'done' }] }] }, w.f.settings.principalId);
+  await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: w.state().task.objectId, expectedRevision: w.state().task.revision, wakeAt: null, dependencies: [other.task.objectId] }, w.f.settings.principalId);
   await w.refresh(); const finished = await w.f.first.nativeUpdate(await w.snapshot('completed'));
   const blocked = (await w.f.first.store.read('task-board/task', finished.task!)).value;
   assert.equal(blocked.workflowState, 'waiting'); assert.equal(blocked.runtimeWait, null);
-  assert.equal(blocked.claim, null); assert.equal(blocked.nextSteps[0]?.requires[0]?.kind, 'task');
+  assert.equal(blocked.claim, null); assert.deepEqual(blocked.dependencies, [other.task.objectId]);
 });

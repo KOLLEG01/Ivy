@@ -125,7 +125,7 @@ const pages = usePage(async (signal, cursor) => {
       requestedEnvironment: fields.executionRequirement?.kind === 'host' ? fields.executionRequirement.hostId : '',
       resolvedHost: task.claim?.target.hostId ?? '', condition: view.executionCondition.state,
       conditionDetail: view.executionCondition.detail, openQuestionCount: task.openQuestionCount ?? 0,
-      nextReviewAt: task.nextStepAt ?? '', dueAt: fields.dueAt ?? '',
+      nextReviewAt: task.wakeAt ?? '', dueAt: fields.dueAt ?? '',
       commentCount: view.commentCount, directCommentCount: view.directCommentCount,
       group: waiting ? waitingGroup(task, view.executionCondition) : '',
       context: { workflowState: task.workflowState, control: fields.control, claimed: !!task.claim,

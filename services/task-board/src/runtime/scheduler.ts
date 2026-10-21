@@ -1,7 +1,7 @@
 import { taskPrompt } from './task-prompt.js';
 import { forwardDelegatedReview } from './task-delegation.js';
-import { commentsPending, peerComment } from './task-coordination.js';
-import { assessSteps } from './next-steps.js';
+import { commentsPending, peerComment, queuedInput } from './task-coordination.js';
+import { shouldWake } from './wake.js';
 import { hashJson } from "../../../../packages/sdk/src/node.js";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
 import type { TaskBoard } from "../../../../packages/sdk/src/node.js";
@@ -366,27 +366,17 @@ export class TaskBoardScheduler {
     if (recoverThread) return { action: 'recoverThread', ...base, run: value.lastRun! };
     if (value.runtimeWait?.retryAt && value.runtimeWait.retryAt > at) return null;
     const hasComments = commentsPending(value);
-    const selected = mode === 'execution' && !hasComments ? (await assessSteps(this.engine.store, value, at)).find(step => step.ready) : undefined;
-    if (mode === 'execution' && !hasComments && !selected) return null;
-    const recoveryFor = mode === 'recovery' ? value.completionIssue?.run ?? value.lastRun : null;
-    if (mode === 'recovery') {
-      requireThat(recoveryFor, 'task_board_recovery_evidence_missing', 'Recovery needs its exact original Run.');
-      const original = (await this.engine.store.read('task-board/run', recoveryFor.objectId)).value;
-      requireThat(['completed', 'failed'].includes(original.phase) && ['succeeded', 'failed'].includes(original.externalOutcome.state) &&
-        !original.cancellation && same(original.primaryResourceRef, value.primaryResourceRef),
-        'task_board_recovery_evidence_missing', 'Reconcile the exact original native outcome before recovering its completion intent.');
-    }
-    const commentIds = recoveryFor ? [] : value.commentDeliveries.filter(item => item.state === 'queued')
-      .filter(item => value.comments.some(comment => comment.commentId === item.commentId && (comment.authorKind === 'user' || peerComment(comment))))
+    if (!await shouldWake(this.engine.store, value, at)) return null;
+    const commentIds = value.commentDeliveries.filter(item => item.state === 'queued')
+      .filter(item => value.comments.some(comment => comment.commentId === item.commentId && queuedInput(comment)))
       .slice(0, 256).map(item => item.commentId);
-    const feedback = taskPrompt(value, this.engine.owner.serviceNodeId, !!recoveryFor);
+    const feedback = taskPrompt(value, this.engine.owner.serviceNodeId);
     try {
       await requireExecutionCapacity(this.engine.store, this.engine.settings);
       const allocation = await this.allocate(task, operationId, feedback, hasComments);
       return value.primaryResourceRef
-        ? { action: 'continue', ...base, ...allocation, feedback, commentIds, nextStepId: selected?.step.id ?? null,
-          ...(recoveryFor ? { recoveryFor } : {}) }
-        : { action: 'start', ...base, ...allocation, commentIds, nextStepId: selected?.step.id ?? null };
+        ? { action: 'continue', ...base, ...allocation, feedback, commentIds }
+        : { action: 'start', ...base, ...allocation, commentIds };
     } catch (cause) {
       const failure = IvyError.from(cause);
       const reason: TaskBoard.RuntimeWait['reason'] = ['task_board_project_unavailable', 'task_board_workspace_mismatch', 'task_board_workspace_conflict', 'task_board_workspace_reserved', 'target_conflict', 'not_found'].includes(failure.code) ? 'workspace' :
@@ -394,8 +384,7 @@ export class TaskBoardScheduler {
       const runtimeWait: TaskBoard.RuntimeWait = { reason, detail: failure.message.slice(0, 2048), since: value.runtimeWait?.since ?? at,
         retryAt: rateLimitRetryAt ?? new Date(this.now().getTime() + 30_000).toISOString() };
       if (value.runtimeWait?.retryAt && value.runtimeWait.retryAt > at && value.runtimeWait.detail === runtimeWait.detail) return null;
-      return { action: 'defer', ...base, nextSteps: value.nextSteps, runtimeWait,
-        ...(recoveryFor ? { recoveryRetryAt: runtimeWait.retryAt } : {}) };
+      return { action: 'defer', ...base, runtimeWait };
     }
   }
   private async verifyAttempt(
@@ -466,6 +455,15 @@ export class TaskBoardScheduler {
     const store = this.engine.store,
       task = await store.read("task-board/task", taskId),
       value = task.value;
+    // A comment or storage upgrade can advance the Task while admission waits for a gate.
+    // Recover that durable intent before allocating anything for the newer revision.
+    const pending = await store.page('task-board/operation', { limit: 1, where: { op: 'and', args: [
+      { op: 'eq', field: 'data:/request/taskId', value: taskId },
+      { op: 'eq', field: 'data:/callerPrincipalId', value: this.engine.settings.principalId },
+      { op: 'eq', field: 'data:/actor/source', value: 'scheduler' },
+      { op: 'in', field: 'data:/phase', value: ['accepted', 'preparing', 'publishing', 'needs_attention'] },
+    ] } });
+    if (pending.items[0]) return this.engine.recoverOperation(pending.items[0].objectId);
     await forwardDelegatedReview(this.engine, task);
     if (value.claim?.run && !value.publication) {
       const run = await store.read('task-board/run', value.claim.run.objectId);
@@ -485,12 +483,10 @@ export class TaskBoardScheduler {
     const mode = nextExecutionMode(value, this.now().toISOString());
     if (!mode) return null;
     if (value.runtimeWait?.retryAt && value.runtimeWait.retryAt > this.now().toISOString()) return null;
-    if (mode === 'execution' && !commentsPending(value) &&
-      !(await assessSteps(store, value, this.now().toISOString())).some(step => step.ready)) return null;
-    const recoveryAllowed = mode !== 'recovery';
-    const recoverThread = recoveryAllowed && await unstartedMissingContext(this.engine, task);
-    const restoreArchived = recoveryAllowed && !recoverThread && await unstartedArchivedContext(this.engine, task);
-    const rateLimitRetryAt = recoveryAllowed && !recoverThread && !restoreArchived ? await failedRateLimitRetryAt(this.engine, task) : null;
+    if (!await shouldWake(store, value, this.now().toISOString())) return null;
+    const recoverThread = await unstartedMissingContext(this.engine, task);
+    const restoreArchived = !recoverThread && await unstartedArchivedContext(this.engine, task);
+    const rateLimitRetryAt = !recoverThread && !restoreArchived ? await failedRateLimitRetryAt(this.engine, task) : null;
     if (rateLimitRetryAt && rateLimitRetryAt > this.now().toISOString()) return null;
     if (recoverThread || restoreArchived) {
       const run = await store.read('task-board/run', value.lastRun!);

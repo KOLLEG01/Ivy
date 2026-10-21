@@ -42,7 +42,7 @@ for (const width of [1440, 390]) test(`task drafts and comments keep keyboard fo
       const requests = Array.isArray(body) ? body : [body];
       return requests.some(request => label !== 'Comment'
         ? request.method === 'tools.call' && request.params.qualifiedName === 'task-board.workspace'
-        : request.method === 'objects.read' && request.params.objectId === id)
+        : request.method === 'tools.call' && request.params.qualifiedName === 'task-board.read' && request.params.arguments.task === id)
         ? route.abort() : route.continue();
     });
     await f.page.evaluate(() => window.dispatchEvent(new Event('online')));
@@ -184,7 +184,7 @@ for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     const latest = cards.filter({ hasText: "Newest long comment" });
     const editor = f.page.getByLabel("Comment", { exact: true });
     const ordered = async () => cards.evaluateAll(elements => elements.map(element => element.textContent));
-    // The composer stays in reading order before or after the messages even while it sticks to the bottom.
+    // The composer remains below the conversation for either comment order.
     const composerPosition = async () => editor.evaluate(input => {
       const messages = [...document.querySelectorAll('[data-slot="conversation-message"]')];
       return { before: !!(input.compareDocumentPosition(messages[0]) & Node.DOCUMENT_POSITION_FOLLOWING),
@@ -216,7 +216,7 @@ for (const [layout, viewport] of [["desktop", { width: 1440, height: 1000 }], ["
     await f.page.goto(f.url + route);
     await expect(cards.first()).toContainText("Newest long comment");
     await expect(cards.last()).toContainText("Older long comment");
-    await expect.poll(async () => (await composerPosition()).before).toBe(true);
+    await expect.poll(async () => (await composerPosition()).after).toBe(true);
     await expect(more).toHaveCount(0);
     await expect(older.getByText("End of older comment", { exact: true })).toBeVisible();
     assert.equal((await ordered()).length, 3);
@@ -374,7 +374,8 @@ test("automatic native recovery stays in progress while user input stays blocked
   await expect(f.page.getByRole("region", { name: /^(Waiting|Wartend)$/, exact: true }).getByText("Needs you", { exact: true })).toHaveCount(0);
   const waiting = await f.task(created.task.objectId);
   assert.equal(waiting.workflowState, "waiting");
-  assert.equal(waiting.waiting.reason, "user");
+  assert.equal(waiting.claim.phase, "waiting_input");
+  assert.equal(waiting.runtimeWait, null);
   assert.equal(waiting.attemptCount, original.attemptCount);
   assert.deepEqual(waiting.primaryResourceRef, original.primaryResourceRef);
   for (const method of ["thread/start", "turn/start"]) assert.equal(f.current().sent.filter(frame => frame.method === method).length, 1);
@@ -733,21 +734,19 @@ test(
     const blocked = await f.invoke({
       action: "create",
       fields: fields("Blocked by the first task"),
-      nextSteps: [{ id: "dependency", scope: "Wait for the first task.", requires: [{ kind: "task", taskId: first.task.objectId, until: "done" }] }],
+      wakeAt: null, dependencies: [first.task.objectId],
     });
     await f.page.getByRole("link", { name: /First category task/ }).first().click();
     await expect(f.page.getByRole("dialog", { name: "Task details", exact: true })).toBeVisible();
     await expect(f.page.getByRole("button", { name: "Close", exact: true })).toBeVisible();
     await f.page.getByRole("button", { name: "Edit task", exact: true }).click();
-    const steps = f.page.getByRole("group", { name: "Next steps", exact: true });
-    await steps.getByLabel("Next step", { exact: true }).fill("Wait for the second task.");
-    await steps.getByRole("button", { name: "Add condition", exact: true }).click();
-    await choose(steps.getByRole("combobox").nth(0), "task");
-    await choose(steps.getByRole("combobox").nth(1), second.task.objectId);
+    await f.page.getByRole('combobox', { name: 'Watched tickets', exact: true }).click();
+    await f.page.getByRole('option', { name: /Second category task/ }).click();
+    await f.page.keyboard.press('Escape');
     await f.page.getByRole("button", { name: "Save changes", exact: true }).click();
     await expect
-      .poll(async () => (await f.task(first.task.objectId)).nextSteps[0].requires)
-      .toEqual([{ kind: "task", taskId: second.task.objectId, until: "done" }]);
+      .poll(async () => (await f.task(first.task.objectId)).dependencies)
+      .toEqual([second.task.objectId]);
     assert.ok(blocked.task);
     assert.deepEqual(f.pageErrors, []);
     assert.deepEqual(f.externalRequests, []);

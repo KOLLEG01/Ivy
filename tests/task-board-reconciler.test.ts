@@ -22,7 +22,7 @@ test('an unavailable input owner does not prevent Run recovery', async t => {
 test('periodic scans give recovery a turn even when the same waiting Task is always schedulable', async t => {
   const w = await nativeWorkflow(t); await w.running();
   const waiting = await w.f.planned('agent');
-  await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: waiting.task.objectId, expectedRevision: waiting.task.revision, nextSteps: [{ id: 'next', scope: 'Provider connection is closed.', requires: [] }] });
+  await w.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: waiting.task.objectId, expectedRevision: waiting.task.revision, wakeAt: null, dependencies: [] });
   const runtime = new TaskBoardReconciler(w.f.first);
   let recovered = 0, scheduled = 0;
   runtime.native.drain = async () => { recovered++; return true; };
@@ -162,6 +162,7 @@ test('a completed Run clears its previous recovery failure after leaving the act
   runtime.native.step = async () => { attempts++; throw new IvyError('fixture_recovery_error', 'The original Run read failed.'); };
   await (runtime as unknown as { process: (lane: 'runs', id: string) => Promise<void> }).process('runs', w.state().run.objectId);
   assert.ok(runtime.diagnostics.some(value => value.code === 'fixture_recovery_error'));
+  await w.handoff();
   const finished = await w.f.second.nativeUpdate(await w.snapshot('completed'));
   assert.equal((await w.f.first.store.read('task-board/run', finished.run!)).value.phase, 'completed');
   for (let pass = 0; pass < 8; pass++) await step(runtime);

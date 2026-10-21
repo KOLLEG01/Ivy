@@ -4,10 +4,20 @@ import { validateTaskBoard } from '../packages/contracts/src/task-board-validati
 import { hashJson } from '../packages/contracts/src/canonical.js';
 import type { TaskBoard } from '../packages/contracts/src/generated.js';
 import { taskBoardContracts, upgradeRecord } from '../services/task-board/src/runtime/schema.js';
+import { taskBoardRegistry } from '../services/task-board/src/runtime/registry.js';
 import { fields, content } from './fixtures/task-board.js';
 
 const time = '2026-05-01T12:00:00.000Z';
 const actor = { principalId: 'user', serviceNodeId: 'task-board', generation: 1, source: 'user' as const };
+
+test('registry reconnect can read every retained and newly written contract version', () => {
+  const registry = taskBoardRegistry();
+  for (const contract of registry.contracts) {
+    const requirement = registry.requiredContracts.find(value => value.key === contract.key);
+    assert.ok(requirement?.readVersions.includes(contract.version), contract.key + '@' + contract.version);
+  }
+  assert.deepEqual(registry.requiredContracts.find(value => value.key === 'task-board/comment-node')?.writeVersions, ['2.0.0']);
+});
 
 test('deployed 2.1 conversation contracts remain immutable', () => {
   assert.deepEqual(Object.fromEntries(taskBoardContracts().filter(contract => contract.version === '2.1.0')
@@ -20,7 +30,7 @@ test('deployed 2.1 conversation contracts remain immutable', () => {
 });
 
 test('published finding-bearing contracts remain immutable after checks are removed', () => {
-  assert.deepEqual(Object.fromEntries(taskBoardContracts().filter(contract => contract.version === '2.0.0')
+  assert.deepEqual(Object.fromEntries(taskBoardContracts().filter(contract => contract.version === '2.0.0' && contract.key !== 'task-board/comment-node')
     .map(contract => [contract.key, hashJson(contract)])), {
     'task-board/task': 'sha256:1bfe05ce9a0f34418b00b0080d0c0131e2f168fa2041ec48f2c002a40c5c6a30',
     'task-board/run': 'sha256:3ca0353a7d44c18a15f4ea4df16e51fabef40834fbced5f73f906d0a745be5d8',
@@ -28,12 +38,12 @@ test('published finding-bearing contracts remain immutable after checks are remo
     'task-board/comments': 'sha256:0a8312bb4f8c372bbadb3fe7753e86d9c092c4314e4d68d9c5c1136a098a01a1',
   });
   assert.throws(() => validateTaskBoard('ResultContent', { ...content, checks: [] }));
-  assert.throws(() => validateTaskBoard('Handoff', { workflowState: 'review', nextSteps: [], checks: [] }));
+  assert.throws(() => validateTaskBoard('Handoff', { workflowState: 'review', wakeAt: null, dependencies: [], checks: [] }));
   assert.throws(() => validateTaskBoard('DeferRequest', { action: 'defer', taskId: 'task', operationId: 'defer',
-    expectedRevision: 1, nextSteps: [], checks: [] }));
+    expectedRevision: 1, wakeAt: null, dependencies: [], checks: [] }));
 });
 
-test('findings in older handoffs survive conversion to next steps', () => {
+test('findings in older handoffs survive conversion to wake-up settings', () => {
   const findings = [{ key: 'approval', status: 'pending', detail: 'Still awaiting approval.', evidence: [] }];
   const originalComment = { commentId: 'prior-handoff', sequence: 1, author: actor, authorKind: 'agent', body: 'Original handoff.',
     purpose: 'handoff', handoff: { workflowState: 'waiting', nextReviewAt: '2099-01-01T00:00:00.000Z', checks: findings },
@@ -53,7 +63,7 @@ test('findings in older handoffs survive conversion to next steps', () => {
 });
 
 test('published Task contract definitions stay stable when tool descriptions change', () => {
-  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0'].includes(value.version));
+  const contracts = taskBoardContracts().filter(value => value.key === 'task-board/task' && !['1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0', '3.0.0'].includes(value.version));
   assert.deepEqual(Object.fromEntries(contracts.map(value => [value.version, hashJson(value)])), {
     '1.9.0': 'sha256:d77cdc4472e267298847aed6fa7f207d546fbe96afadc1a379c5a886961164ff',
     '1.8.0': 'sha256:00a22238b737fc5e1f178c5dd239b88aaa2467220c103bf7ff3094772cc70db7',
@@ -102,7 +112,7 @@ test('older capability requirements read as automatic placement with a required 
 });
 
 test('new workflow contracts accept Task keys, states, comments and workspace requirements', () => {
-  const task = { schemaVersion: 1 as const, taskKey: 'TASK-0001', fields, workflowState: 'backlog' as const, nextSteps: [], runtimeWait: null, publication: null, primaryResourceRef: null, claim: null,
+  const task = { schemaVersion: 1 as const, taskKey: 'TASK-0001', fields, workflowState: 'backlog' as const, wakeAt: null, dependencies: [], runtimeWait: null, publication: null, primaryResourceRef: null, claim: null,
     attemptCount: 0, lastRun: null, lastHistory: null, latestResult: null, acceptedReview: null, comments: [], commentDeliveries: [], agentCommentCount: 0, workRevision: 0, attachments: [], createdAt: time, updatedAt: time };
   assert.doesNotThrow(() => validateTaskBoard('Task', task));
   assert.throws(() => validateTaskBoard('Task', { ...task, taskKey: 'task-1' }));

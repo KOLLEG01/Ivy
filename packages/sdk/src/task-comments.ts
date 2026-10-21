@@ -1,3 +1,4 @@
+import { upgradeCommentRecord } from '../../contracts/src/task-board-records.js';
 import type { TaskBoard } from '../../contracts/src/generated.js';
 import type { RpcClient } from './client.js';
 
@@ -33,7 +34,7 @@ export class CommentReader {
     let node = this.cache.get(key)?.node;
     if (!node) {
       const saved = await this.client.request('objects.read', pin, signal ? { signal } : {});
-      if (saved.object.contractKey !== commentNodeKey || saved.revision.contractVersion !== '1.0.0' ||
+      if (saved.object.contractKey !== commentNodeKey || !['1.0.0', '2.0.0'].includes(saved.revision.contractVersion) ||
           saved.object.parentId !== taskId || saved.object.ownerObjectId !== taskId ||
           saved.content.encoding !== 'json' || saved.revision.revision !== pin.revision)
         throw new Error('The conversation snapshot belongs to another ticket.');
@@ -65,7 +66,7 @@ export class CommentReader {
         let offset = initial;
         if (node.kind === 'comment') {
           if (index.length !== 1 || node.entry.comment.sequence !== offset + 1) throw new Error('The conversation sequence is invalid.');
-          result[offset - start] = structuredClone(node.entry);
+          result[offset - start] = { ...structuredClone(node.entry), comment: upgradeCommentRecord(node.entry.comment) };
         } else {
           if (!node.children.length || node.children.reduce((sum, child) => sum + child.length, 0) !== index.length)
             throw new Error('The conversation index is incomplete.');

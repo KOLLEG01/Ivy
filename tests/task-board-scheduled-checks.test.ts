@@ -9,22 +9,19 @@ import { taskBoardTools } from '../services/task-board/src/runtime/registry.js';
 import { admitSchema } from '../packages/contracts/src/schema.js';
 import { validateTaskBoard } from '../packages/contracts/src/task-board-validation.js';
 import { openQuestions } from '../services/task-board/src/runtime/conversation.js';
-import { assessSteps, stepCondition } from '../services/task-board/src/runtime/next-steps.js';
+import { shouldWake, wakeCondition, dependencySnapshot, validateDependencies } from '../services/task-board/src/runtime/wake.js';
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
 import { nativeWorkflow } from './fixtures/task-board-native.js';
 import { taskBoardFixture } from './fixtures/task-board.js';
 
 type Workflow = Awaited<ReturnType<typeof nativeWorkflow>>;
 const later = () => new Date(Date.now() + 6 * 60 * 60_000).toISOString();
-const appointment = (at = later()): TaskBoard.Handoff => ({ workflowState: 'waiting', nextSteps: [
-  { id: 'approval-observation', scope: 'Read external approval status; do not publish or bypass login.', requires: [{ kind: 'time', at }] },
-] });
+const appointment = (at = later()): TaskBoard.Handoff => ({ workflowState: 'waiting', wakeAt: at, dependencies: [] });
 
 test('real work after Review can declare remaining work and return to Waiting', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
-  const first = await finish(workflow, { workflowState: 'review', nextSteps: [
-    { id: 'scheduled-followup', scope: 'Collect a fresh observation before acceptance.', requires: [] },
-  ] });
+  const first = await finish(workflow, { workflowState: 'review', wakeAt: null, dependencies: [] });
+  await comment(workflow, { authorKind: 'user', body: 'There is additional work to do.' });
   const outcome = await new TaskBoardScheduler(workflow.f.second).task(workflow.state().task.objectId);
   assert.ok(outcome?.run); workflow.adopt(outcome);
   await workflow.running();
@@ -32,7 +29,7 @@ test('real work after Review can declare remaining work and return to Waiting', 
   assert.equal(after.workflowState, 'waiting');
   assert.notDeepEqual(after.latestResult, first.latestResult);
   assert.equal(after.acceptedReview, null);
-  assert.equal(stepCondition(await assessSteps(workflow.f.first.store, after, new Date().toISOString())).state, 'deferred');
+  assert.equal(wakeCondition(after).state, 'deferred');
 });
 async function comment(workflow: Workflow, values: Partial<TaskBoard.CommentActionRequest>) {
   await workflow.refresh();
@@ -42,7 +39,7 @@ async function comment(workflow: Workflow, values: Partial<TaskBoard.CommentActi
   await workflow.refresh(); return result;
 }
 async function finish(workflow: Workflow, handoff?: TaskBoard.Handoff) {
-  if (handoff) await comment(workflow, { purpose: 'handoff', body: 'The overall task follows the declared next steps.', handoff });
+  if (handoff) await comment(workflow, { purpose: 'handoff', body: 'The agent reports its current outcome.', handoff });
   const result = await workflow.f.first.nativeUpdate(await workflow.snapshot());
   workflow.adopt(result);
   return (await workflow.f.first.store.read('task-board/task', result.task!)).value;
@@ -52,9 +49,7 @@ for (const authorKind of ['user', 'agent'] as const) test(`${authorKind} input c
   const workflow = await nativeWorkflow(context); await workflow.running();
   await comment(workflow, { purpose: 'question', recipient: { kind: 'user' }, commentId: 'access-question',
     body: 'Is access available for the remaining work?' });
-  const waiting = await finish(workflow, { workflowState: 'waiting', nextSteps: [
-    { id: 'verify-access', scope: 'Verify access and finish the requested work.', requires: [{ kind: 'user', questionId: 'access-question' }] },
-  ] });
+  const waiting = await finish(workflow, { workflowState: 'waiting', wakeAt: null, dependencies: [] });
   const source = authorKind === 'agent' ? await workflow.f.planned('agent') : null;
   if (source) await new TaskBoardScheduler(workflow.f.first).task(source.task.objectId);
   await comment(workflow, { authorKind, commentId: 'access-update', body: 'Access is available now.',
@@ -64,7 +59,7 @@ for (const authorKind of ['user', 'agent'] as const) test(`${authorKind} input c
   assert.ok(outcome?.run); workflow.adopt(outcome);
   const run = (await workflow.f.first.store.read('task-board/run', outcome.run)).value;
   assert.equal(run.originalRequest.coordinationOnly, undefined);
-  assert.equal(run.originalRequest.nextStepId, null);
+  assert.equal(run.originalRequest.nextStepId, undefined);
   assert.deepEqual(run.primaryResourceRef, waiting.primaryResourceRef);
   assert.deepEqual(run.originalRequest.commentIds, ['access-update']);
   assert.match(JSON.stringify(run.plan.turnStart.input), /Decide from the current ticket whether to reply, continue work or wait/);
@@ -73,7 +68,7 @@ for (const authorKind of ['user', 'agent'] as const) test(`${authorKind} input c
   // An ordinary comment needs no Answer button: the worker recognizes and records the answer.
   await comment(workflow, { resolvesQuestions: ['access-question'], purpose: 'handoff',
     body: 'The update supplied the prerequisite. Access was verified and the requested work completed in this turn.',
-    handoff: { workflowState: 'review', nextSteps: [] } });
+    handoff: { workflowState: 'review', wakeAt: null, dependencies: [] } });
   const completed = await finish(workflow);
   assert.equal(completed.workflowState, 'review');
   assert.equal(completed.openQuestionCount, 0);
@@ -86,7 +81,7 @@ for (const authorKind of ['user', 'agent'] as const) test(`${authorKind} input c
 
 test('a failed comment-triggered turn reports an execution error instead of completing as a reply', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
-  const reviewed = await finish(workflow, { workflowState: 'review', nextSteps: [] });
+  const reviewed = await finish(workflow, { workflowState: 'review', wakeAt: null, dependencies: [] });
   await comment(workflow, { authorKind: 'user', body: 'Check the result once more.' });
   const outcome = await new TaskBoardScheduler(workflow.f.first).task(workflow.state().task.objectId);
   assert.ok(outcome?.run); workflow.adopt(outcome); await workflow.running();
@@ -104,41 +99,39 @@ test('time paths remain independent from own questions and publish only after na
   await comment(workflow, { purpose: 'handoff', handoff });
   const active = (await workflow.f.first.store.read('task-board/task', workflow.state().task)).value;
   assert.equal(active.workflowState, 'in_progress'); assert.ok(active.claim);
-  assert.notDeepEqual(active.nextSteps, handoff.nextSteps);
+  assert.equal(active.wakeAt, handoff.wakeAt);
   const task = await finish(workflow);
-  assert.deepEqual(task.nextSteps, handoff.nextSteps);
+  assert.equal(task.wakeAt, handoff.wakeAt);
   assert.equal(openQuestions(task).length, 1);
-  assert.equal(stepCondition(await assessSteps(workflow.f.first.store, task, new Date().toISOString())).state, 'deferred');
+  assert.equal(wakeCondition(task).state, 'needs_user');
   const card = await workflow.f.first.task({ task: workflow.state().task.objectId }, 'user');
   assert.equal(card.task.openQuestionCount, 1);
-  assert.equal(card.executionCondition.state, 'deferred');
+  assert.equal(card.executionCondition.state, 'needs_user');
   assert.equal(task.runtimeWait, null);
 });
 
-test('a due step restarts once without work/check modes and renews through its next time condition', async context => {
+test('a due appointment wakes once and can be renewed for another date', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
   await comment(workflow, { purpose: 'question', recipient: { kind: 'user' }, commentId: 'login-choice', body: 'Choose a login.' });
   const task = await finish(workflow, appointment());
-  const at = task.nextSteps[0]!.requires[0]!;
-  assert.equal(at.kind, 'time');
-  context.mock.timers.enable({ apis: ['Date'], now: Date.parse(at.kind === 'time' ? at.at : '') + 1000 });
+  context.mock.timers.enable({ apis: ['Date'], now: Date.parse(task.wakeAt!) + 1000 });
   const result = await new TaskBoardScheduler(workflow.f.second).task(workflow.state().task.objectId);
   assert.ok(result?.run); workflow.adopt(result);
   const run = (await workflow.f.first.store.read('task-board/run', result.run)).value;
-  assert.equal(run.originalRequest.nextStepId, 'approval-observation');
+  assert.equal(run.originalRequest.nextStepId, undefined);
   assert.equal('checkOnly' in run.originalRequest, false);
   assert.equal(await new TaskBoardScheduler(workflow.f.first).task(workflow.state().task.objectId), null);
   await workflow.running();
   const after = await finish(workflow, appointment());
   assert.equal(openQuestions(after).length, 1);
-  assert.equal(stepCondition(await assessSteps(workflow.f.first.store, after, new Date().toISOString())).state, 'deferred');
+  assert.equal(wakeCondition(after).state, 'needs_user');
 });
 
 test('new comments bypass work conditions, preserve schedules and finish without a work handoff', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
   const original = await finish(workflow, appointment());
   await workflow.f.first.schedule({ action: 'defer', operationId: randomUUID(), taskId: workflow.state().task.objectId,
-    expectedRevision: workflow.state().task.revision, nextSteps: original.nextSteps,
+    expectedRevision: workflow.state().task.revision, wakeAt: original.wakeAt, dependencies: original.dependencies,
     runtimeWait: { reason: 'host', detail: 'Previous host observation failed.', since: new Date().toISOString(), retryAt: later() } });
   let unavailable = true, attempts = 0;
   workflow.f.nativeTools(async call => {
@@ -156,7 +149,7 @@ test('new comments bypass work conditions, preserve schedules and finish without
   assert.equal(deferred?.run, null);
   const waiting = (await workflow.f.first.store.read('task-board/task', workflow.state().task.objectId)).value;
   assert.equal(waiting.commentDeliveries.find(value => value.commentId === 'status-request')?.state, 'queued');
-  assert.deepEqual(waiting.nextSteps, original.nextSteps);
+  assert.equal(waiting.wakeAt, original.wakeAt);
   assert.ok(waiting.runtimeWait?.retryAt);
   const before = attempts;
   assert.equal(await new TaskBoardScheduler(workflow.f.first).task(workflow.state().task.objectId), null);
@@ -172,7 +165,7 @@ test('new comments bypass work conditions, preserve schedules and finish without
   assert.equal(run.primaryResourceRef?.nativeId, 'native-primary');
   await workflow.running();
   const after = await finish(workflow);
-  assert.deepEqual(after.nextSteps, original.nextSteps);
+  assert.equal(after.wakeAt, original.wakeAt);
   assert.deepEqual(after.latestResult, original.latestResult);
   assert.equal(after.workflowState, original.workflowState);
   assert.equal(after.completionIssue, undefined);
@@ -203,23 +196,7 @@ test('conversation workspace reuse rejects a changed native working directory wi
 });
 
 
-test('conditions are AND within a step and independent automatic paths outrank User', async context => {
-  const fixture = taskBoardFixture(context), created = await fixture.planned();
-  let task = await fixture.first.store.read('task-board/task', created.task);
-  const question = { commentId: 'own-question', sequence: 1, author: { principalId: 'worker', serviceNodeId: fixture.first.owner.serviceNodeId, generation: 1, source: 'worker' as const },
-    authorKind: 'agent' as const, purpose: 'question' as const, body: 'Choose the account.', requests: [], responses: [], delivery: null, attachments: [],
-    run: null, turnId: null, replyTo: null, createdAt: new Date().toISOString(), operationId: randomUUID() };
-  const steps: TaskBoard.NextStep[] = [
-    { id: 'publish', scope: 'Publish after the answer.', requires: [{ kind: 'time', at: later() }, { kind: 'user', questionId: question.commentId }] },
-    { id: 'observe', scope: 'Read status independently.', requires: [{ kind: 'time', at: later() }] },
-  ];
-  task = { ...task, value: { ...task.value, comments: [question], nextSteps: steps } };
-  assert.equal(stepCondition(await assessSteps(fixture.first.store, task.value, new Date().toISOString())).state, 'deferred');
-  assert.equal(stepCondition(await assessSteps(fixture.first.store, { ...task.value, nextSteps: [steps[0]!] }, new Date().toISOString())).state, 'needs_user');
-  const other = await fixture.planned();
-  await assert.rejects(fixture.invoke({ action: 'defer', operationId: randomUUID(), taskId: other.task.objectId, expectedRevision: other.task.revision,
-    nextSteps: [{ id: 'foreign', scope: 'Wrong question owner.', requires: [{ kind: 'user', questionId: 'own-question' }] }] }), { code: 'task_board_comment_mismatch' });
-});
+
 
 test('the 513th comment is retained and replaying its original operation does not duplicate it', async context => {
   const fixture = taskBoardFixture(context), created = await fixture.create();
@@ -242,7 +219,7 @@ test('the 513th comment is retained and replaying its original operation does no
 
 test('comments on Done are processed without reopening implementation or replacing its final result', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
-  await finish(workflow, { workflowState: 'review', nextSteps: [] });
+  await finish(workflow, { workflowState: 'review', wakeAt: null, dependencies: [] });
   const current = workflow.state().task;
   await workflow.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: current.objectId, expectedRevision: current.revision, workflowState: 'done', detail: null });
   await comment(workflow, { authorKind: 'user', body: 'Explain the saved result.', commentId: 'done-comment' });
@@ -260,24 +237,6 @@ test('all public TaskBoard tool schemas stay below the existing admission bound'
     assert.doesNotThrow(() => admitSchema(tool[field]), tool.name + ' ' + field);
 });
 
-test('the 65th named delivery preserves all earlier exact receipts and result references', async context => {
-  const workflow = await nativeWorkflow(context); await workflow.running();
-  const store = workflow.f.first.store, document = await store.read('task-board/task', workflow.state().task);
-  const result = await store.write('task-board/result', { schemaVersion: 1, taskId: document.pin.objectId, run: workflow.state().run,
-    kind: 'intermediate', content, actor: document.value.claim!.owner, createdAt: new Date().toISOString(), operationId: randomUUID() },
-    randomUUID(), { create: { parentId: store.rootObjectId, name: 'Retained delivery proof' } });
-  const deliveries = Array.from({ length: 64 }, (_, index) => {
-    const delivery = { key: 'retained-' + index, artifacts: [], codeReferences: [{ kind: 'commit' as const, url: 'https://example.test/commit/existing', label: 'Existing qualified output', commit: 'existing' }] };
-    return { delivery, identity: hashJson({ taskId: document.pin.objectId, delivery }), result };
-  });
-  await store.write('task-board/task', { ...document.value, deliveries }, randomUUID(), { objectId: document.pin.objectId, expectedRevision: document.pin.revision });
-  await workflow.refresh();
-  const after = await finish(workflow, { workflowState: 'review', nextSteps: [],
-    deliveries: [{ key: 'delivery-65', artifacts: [], codeReferences: [{ kind: 'commit', url: 'https://example.test/commit/new', label: 'New qualified output', commit: 'new' }] }] });
-  assert.equal(after.deliveries?.length, 65);
-  assert.deepEqual(after.deliveries?.slice(0, 64), deliveries);
-});
-
 test('the actual native owner can update conditions during conversation processing without a work handoff', async context => {
   const workflow = await nativeWorkflow(context); await workflow.running();
   await finish(workflow, appointment());
@@ -285,13 +244,13 @@ test('the actual native owner can update conditions during conversation processi
   const outcome = await new TaskBoardScheduler(workflow.f.first).task(workflow.state().task.objectId);
   assert.ok(outcome?.run); workflow.adopt(outcome); await workflow.running();
   const task = await workflow.f.first.store.read('task-board/task', workflow.state().task);
-  const nextSteps = task.value.nextSteps.map(step => ({ ...step, scope: 'Use the corrected authorized scope at the unchanged appointment.' }));
-  await workflow.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision, nextSteps },
+  const wakeAt = later();
+  await workflow.f.invoke({ action: 'defer', operationId: randomUUID(), taskId: task.pin.objectId, expectedRevision: task.pin.revision, wakeAt },
     workflow.f.settings.principalId);
   await workflow.refresh();
   const after = await finish(workflow);
-  assert.deepEqual(after.nextSteps, nextSteps);
-  assert.ok(after.workRevision > task.value.workRevision);
+  assert.equal(after.wakeAt, wakeAt);
+  assert.equal(after.completionIssue, undefined);
   assert.equal(after.runtimeWait, null);
   assert.equal(after.completionIssue, undefined);
 });

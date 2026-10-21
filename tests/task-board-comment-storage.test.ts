@@ -39,21 +39,23 @@ test('finding migration preserves exact results, comment bodies, evidence and sc
     requires: [{ kind: 'time' as const, at: '2099-01-01T00:00:00.000Z' }] }];
   const firstComment = { ...comment(1), authorKind: 'agent' as const, purpose: 'handoff' as const,
     handoff: { workflowState: 'waiting' as const, nextSteps, checks: findings } };
+  const { wakeAt: _wake, dependencies: _dependencies, observedDependencies: _observed, ...oldTask } = original.value;
   const retainedTask = await store.client.request('objects.write', { contractVersion: '2.0.0',
     create: { contractKey: 'task-board/task', parentId: store.rootObjectId, ownerObjectId: null, name: 'Finding-bearing ticket' },
     references: { result: resultPin }, mutationId: await store.preparedMutationId('retained-findings-task'),
-    content: { encoding: 'json', value: { ...original.value, taskKey: 'TASK-8000', workflowState: 'waiting', nextSteps,
+    content: { encoding: 'json', value: { ...oldTask, taskKey: 'TASK-8000', workflowState: 'waiting', nextSteps,
       latestChecks: findings, latestResult: resultPin, comments: [firstComment], agentCommentCount: 1 } as never } });
   for (let pass = 0; pass < 5 && !await store.compactComments(100); pass++) {}
   const migrated = await store.read('task-board/task', retainedTask.object.id);
   assert.equal('latestChecks' in migrated.value, false);
   assert.equal('checks' in migrated.value.comments[0]!.handoff!, false);
   assert.equal(migrated.value.comments[0]!.body, firstComment.body);
-  assert.equal(migrated.value.comments.length, 3);
-  const notes = migrated.value.comments.slice(1);
+  assert.equal(migrated.value.comments.length, 4);
+  const notes = migrated.value.comments.slice(1, 3);
+  assert.match(migrated.value.comments[3]!.body, /Read the next provider observation/);
   assert.ok(notes.every(note => note.authorKind === 'system' && note.body.includes('Review pending.') && note.body.includes('connection_lost')));
   assert.ok(notes.flatMap(note => note.attachments).every(attachment => attachment.byteLength === proofRecord.revision.byteLength));
-  assert.deepEqual(migrated.value.nextSteps, nextSteps);
+  assert.equal(migrated.value.wakeAt, '2099-01-01T00:00:00.000Z');
   assert.deepEqual(migrated.value.latestResult, resultPin);
   assert.deepEqual(migrated.value.commentDeliveries, original.value.commentDeliveries);
   assert.equal(migrated.value.workRevision, original.value.workRevision);
@@ -61,7 +63,7 @@ test('finding migration preserves exact results, comment bodies, evidence and sc
   assert.equal(migrated.value.workflowState, 'waiting');
   assert.equal((await store.page('task-board/run')).items.length, 0);
   assert.equal(await store.compactComments(100), true);
-  assert.equal((await store.read('task-board/task', retainedTask.object.id)).value.comments.length, 3);
+  assert.equal((await store.read('task-board/task', retainedTask.object.id)).value.comments.length, 4);
   const result = await store.read('task-board/result', retainedResult.object.id);
   assert.equal('checks' in result.value.content, false);
   assert.ok(result.value.content.summary.startsWith(content.summary));
@@ -70,7 +72,7 @@ test('finding migration preserves exact results, comment bodies, evidence and sc
   assert.equal(result.value.content.artifacts.length, 1);
   assert.deepEqual(result.value.content.artifacts[0]!.object, proof);
   const raw = await store.client.request('objects.read', { objectId: retainedTask.object.id });
-  assert.equal(raw.revision.contractVersion, '2.3.0');
+  assert.equal(raw.revision.contractVersion, '3.0.0');
   assert.equal('latestChecks' in (raw.content as { value: object }).value, false);
 });
 
@@ -78,10 +80,11 @@ test('finding-bearing results migrate while an active ticket waits for safe stor
   const workflow = await nativeWorkflow(context); await workflow.running();
   const store = workflow.f.first.store;
   const task = await store.read('task-board/task', workflow.state().task.objectId);
+  const { wakeAt: _wake, dependencies: _dependencies, observedDependencies: _observed, ...oldTask } = task.value;
   const legacy = await store.client.request('objects.write', { create: { contractKey: 'task-board/task',
     parentId: store.rootObjectId, ownerObjectId: null, name: 'Active legacy ticket' },
     contractVersion: '2.0.0', mutationId: await store.preparedMutationId('active-legacy-ticket'),
-    references: task.revision.references, content: { encoding: 'json', value: { ...task.value, taskKey: 'TASK-8001', latestChecks: [] } as never } });
+    references: task.revision.references, content: { encoding: 'json', value: { ...oldTask, taskKey: 'TASK-8001', nextSteps: [], latestChecks: [] } as never } });
   const result = await store.client.request('objects.write', { create: { contractKey: 'task-board/result',
     parentId: store.rootObjectId, ownerObjectId: null, name: 'Active ticket finding' }, contractVersion: '2.0.0', references: {},
     mutationId: await store.preparedMutationId('active-ticket-finding'), content: { encoding: 'json', value: {
@@ -235,7 +238,7 @@ test('storage backfill includes archived tickets and preserves inline historical
   await store.client.request('objects.archive', { objectId: taskId, archived: true, mutationId: await store.preparedMutationId('archive-old-ticket') });
   assert.equal(await store.compactComments(2), true);
   const raw = await store.client.request('objects.read', { objectId: taskId });
-  assert.equal(raw.revision.contractVersion, '2.3.0');
+  assert.equal(raw.revision.contractVersion, '3.0.0');
   assert.equal(raw.object.effectivelyArchived, true);
   assert.deepEqual((await store.read('task-board/task', taskId, true, true)).value.comments, [comment(1)]);
   assert.deepEqual((await store.read('task-board/task', { objectId: taskId, revision: old.revision.revision }, true, true)).value.comments, [comment(1)]);
@@ -245,7 +248,7 @@ test('deployment protects legacy Run sources before retention and survives a los
   const w = await nativeWorkflow(t); await w.running();
   const store = w.f.first.store, client = store.client;
   const template = await store.read('task-board/task', w.state().task.objectId);
-  const { completionIssue: _issue, deliveries: _deliveries, ...legacyTask } = retainedTaskFixture(template.value);
+  const { completionIssue: _issue, ...legacyTask } = retainedTaskFixture(template.value);
   const created = await client.request('objects.write', { create: { contractKey: 'task-board/task', parentId: store.rootObjectId,
     ownerObjectId: null, name: 'Legacy source ticket' }, contractVersion: '1.9.0', references: {},
     mutationId: await store.preparedMutationId('legacy-source'), content: { encoding: 'json', value: {
@@ -268,7 +271,7 @@ test('deployment protects legacy Run sources before retention and survives a los
     } as never } });
   const legacyRead = await client.request('objects.read', { objectId: legacy.object.id });
   const at = Date.now() + 2 * 86400000;
-  w.f.kernel.store.setMetadata('retention_owner_ready:task-board/task:2.3.0', '');
+  w.f.kernel.store.setMetadata('retention_owner_ready:task-board/task:3.0.0', '');
   const registry = w.f.kernel.registry.getRegistry(w.f.first.owner.serviceNodeId)!;
   const oldRegistry = structuredClone(registry);
   oldRegistry.requiredContracts.find(c => c.key === 'task-board/task')!.writeVersions = ['1.10.0'];
@@ -327,6 +330,6 @@ test('comment migration retries tickets skipped during an accepted publication',
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   t.mock.timers.tick(60_001);
   assert.equal(await store.compactComments(100), true);
-  assert.equal((await store.client.request('objects.read', { objectId: old.object.id })).revision.contractVersion, '2.3.0');
+  assert.equal((await store.client.request('objects.read', { objectId: old.object.id })).revision.contractVersion, '3.0.0');
   assert.deepEqual((await store.read('task-board/task', old.object.id)).value.comments, [comment(1)]);
 });

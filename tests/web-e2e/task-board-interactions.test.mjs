@@ -84,7 +84,7 @@ for (const width of [1440, 390]) test(`posting with an open question stays writa
   await editor.fill('An ordinary comment while the question stays open');
   await send.click();
   await editor.fill('The next draft remains writable');
-  await expect.poll(async () => (await f.task(id)).comments.some(comment => comment.body === 'An ordinary comment while the question stays open')).toBe(true);
+  await expect.poll(async () => (await f.task(id)).comments.some(comment => comment.body === 'An ordinary comment while the question stays open'), { timeout: 20000 }).toBe(true);
   await expect(send).toBeEnabled();
   await expect(editor).toContainText('The next draft remains writable');
   await expect(questions).toContainText('Which implementation should continue?');
@@ -191,7 +191,7 @@ for (const width of [1440, 390]) test(`a retained capacity rejection does not lo
   assert.deepEqual(f.pageErrors, []);
 });
 
-test('definitive failure retries the retained message and missing receipts resume the exact original identity', { timeout: 240000 }, async t => {
+test('concurrent comments rebase without user retries and missing receipts resume the exact original identity', { timeout: 240000 }, async t => {
   const f = await taskBoardFixture(t);
   const created = await f.invoke({ action: 'create', fields: fields('Retry conversation') }), id = created.task.objectId;
   await f.invoke({ action: 'comment', taskId: id, expectedRevision: created.task.revision, authorKind: 'agent', purpose: 'question',
@@ -216,14 +216,15 @@ test('definitive failure retries the retained message and missing receipts resum
   await f.page.locator('input[type=file]').setInputFiles({ name: 'retained.txt', mimeType: 'text/plain', buffer: Buffer.from('Retained file') });
   await expect(editor.locator('a')).toHaveCount(1, { timeout: 30000 });
   await f.page.getByRole('button', { name: 'Add comment', exact: true }).click();
-  const failed = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Retain on failure' });
-  await expect(failed.getByRole('button', { name: 'Retry message', exact: true })).toBeVisible({ timeout: 30000 });
-  await failed.getByRole('button', { name: 'Retry message', exact: true }).click();
-  await expect.poll(async () => (await f.task(id)).comments.filter(comment => comment.commentId === firstId).length).toBe(1);
+  const saved = f.page.locator('[data-slot=conversation-message]').filter({ hasText: 'Retain on failure' });
+  await expect.poll(async () => (await f.task(id)).comments.filter(comment => comment.commentId === firstId).length, { timeout: 20000 }).toBe(1);
+  await expect(saved.getByRole('button', { name: 'Retry message', exact: true })).toHaveCount(0);
+  assert.equal(attempt, 1);
   const comment = (await f.task(id)).comments.find(comment => comment.commentId === firstId);
   assert.equal(comment.attachments[0].filename, 'retained.txt');
   assert.equal(comment.replyTo, 'original-question');
-  await expect(failed).toHaveCount(1);
+  assert.equal((await f.task(id)).comments.filter(comment => comment.body === 'Concurrent update').length, 1);
+  await expect(saved).toHaveCount(1);
   await f.page.unroute('**/api/v1/rpc');
   let original, calls = 0;
   await f.page.route('**/api/v1/rpc', route => {
@@ -329,32 +330,32 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
   const f = await taskBoardFixture(t, { native: true, viewport: { width, height: 900 } });
   const create = async (title, changes = {}, rest = {}) => (await f.invoke({ action: 'create', fields: { ...fields(title), ...changes }, ...rest })).task;
   const user = await create('User feedback');
-  const dependency = await create('Dependency wait', {}, { nextSteps: [{ id: 'dependency', scope: 'Wait for the first ticket.', requires: [{ kind: 'task', taskId: user.objectId, until: 'done' }] }] });
+  const dependency = await create('Dependency wait', {}, { workflowState: 'waiting', wakeAt: null, dependencies: [user.objectId] });
   const runtime = await create('Runtime wait');
   const store = f.taskBoard().runtime.engine.store;
   const runtimeTask = await store.read('task-board/task', runtime.objectId);
   await store.write('task-board/task', { ...runtimeTask.value, workflowState: 'waiting',
-    nextSteps: [{ id: 'resume', scope: 'Resume when the workspace returns.', requires: [] }],
+    wakeAt: null, dependencies: [],
     runtimeWait: { reason: 'workspace', detail: 'Workspace is unavailable.', since: new Date().toISOString() } }, randomUUID(),
     { objectId: runtime.objectId, expectedRevision: runtimeTask.pin.revision });
-  await create('Time wait', {}, { workflowState: 'waiting', nextSteps: [{ id: 'appointment', scope: 'Resume on the scheduled date.', requires: [{ kind: 'time', at: '2099-01-01T12:00:00.000Z' }] }] });
+  await create('Time wait', {}, { workflowState: 'waiting', wakeAt: '2099-01-01T12:00:00.000Z', dependencies: [] });
   const ready = await create('Ready without a blocker', { control: 'agent' });
   await create('Due is not a restart', { control: 'agent', dueAt: '2099-01-01T12:00:00.000Z' });
-  const unscheduled = await create('No restart set', {}, { nextSteps: [] });
+  const unscheduled = await create('No restart set', {}, { wakeAt: null, dependencies: [] });
   // Real retained mixed comments exercise visibility without per-user read tracking.
   const current = await store.read('task-board/task', user.objectId);
   const noDate = await store.read('task-board/task', unscheduled.objectId);
-  await store.write('task-board/task', { ...noDate.value, workflowState: 'waiting', nextSteps: [] }, randomUUID(),
+  await store.write('task-board/task', { ...noDate.value, workflowState: 'waiting', wakeAt: null, dependencies: [] }, randomUUID(),
     { objectId: noDate.pin.objectId, expectedRevision: noDate.pin.revision });
   const now = new Date().toISOString();
   const comment = (id, authorKind, sourceTaskId) => ({ commentId: id, sequence: 0, author: { principalId: 'browser-fixture', serviceNodeId: 'browser-task-board', source: 'worker', generation: 1 },
     authorKind, body: id, requests: [], responses: [], delivery: null, attachments: [], run: null, turnId: null, replyTo: null, createdAt: now, operationId: id, ...(sourceTaskId ? { sourceTaskId } : {}) });
   const comments = [comment('User message', 'user'), comment('Direct agent answer', 'agent'), comment('Cross-agent note', 'agent', dependency.objectId)].map((value, i) => ({ ...value, sequence: i + 1 }));
-  await store.write('task-board/task', { ...current.value, comments: comments.map(value => value.commentId === 'Direct agent answer' ? { ...value, purpose: 'question' } : value), agentCommentCount: 2, openQuestionCount: 1,
-    nextSteps: [{ id: 'own-answer', scope: 'Wait for the own answer.', requires: [{ kind: 'user', questionId: 'Direct agent answer' }] }] }, randomUUID(), { objectId: user.objectId, expectedRevision: current.pin.revision });
+  await store.write('task-board/task', { ...current.value, workflowState: 'waiting', comments: comments.map(value => value.commentId === 'Direct agent answer' ? { ...value, purpose: 'question', recipient: { kind: 'user' } } : value), agentCommentCount: 2, openQuestionCount: 1,
+    wakeAt: null, dependencies: [] }, randomUUID(), { objectId: user.objectId, expectedRevision: current.pin.revision });
   await f.open('#/tasks?node=browser-task-board');
   const waiting = f.page.getByRole('region', { name: 'Waiting', exact: true });
-  for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['ready', 'Ready without a blocker'], ['ready', 'Due is not a restart'], ['runtime', 'No restart set']]) {
+  for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['ready', 'Ready without a blocker'], ['ready', 'Due is not a restart'], ['unscheduled', 'No restart set']]) {
     await expect(waiting.locator('[data-waiting-group=' + group + ']').getByRole('link', { name: title, exact: true })).toBeVisible();
   }
   await expect(f.page.getByRole('region', { name: 'Todo', exact: true })).toHaveCount(0);

@@ -36,7 +36,10 @@ export function nativeThreadState(contract: NativeContract, result: unknown): {
   }
   const thread = record(record(result)['thread']) as Record<string, Wire.Json>, state = record(thread['status'])['type'];
   requireThat(typeof state === 'string', 'native_observation_shape_unsupported', 'Native thread status requires its actual discriminator.');
-  return { thread: structuredClone(thread), state, canStartTurn: ['idle', 'systemError'].includes(state) && (!selected.directInputFlag || thread['canAcceptDirectInput'] === true) };
+  // A resumed context can retain notLoaded metadata while explicitly accepting input.
+  // Missing/false capability still requires attachment; an active turn is never idle.
+  const idle = ['idle', 'systemError'].includes(state) || state === 'notLoaded' && selected.directInputFlag && thread['canAcceptDirectInput'] === true;
+  return { thread: structuredClone(thread), state, canStartTurn: idle && (!selected.directInputFlag || thread['canAcceptDirectInput'] === true) };
 }
 
 /** Interpret a complete page; wrapped entries must each name the exact requested turn. */

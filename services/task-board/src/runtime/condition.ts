@@ -9,12 +9,11 @@ export interface ExecutionFacts {
   executionRequirement: TaskBoard.ExecutionRequirement | null;
   requiredCapabilities?: string[] | undefined;
   completionIssue?: string | undefined;
-  steps?: TaskBoard.ExecutionCondition | undefined;
-  recovery?: { attempts: number; retryAt: string | null } | undefined;
+  wake?: TaskBoard.ExecutionCondition | undefined;
 }
 
 export function claimedWorkflowState(runtimeWait: Pick<TaskBoard.RuntimeWait, 'reason'> | null): 'waiting' | 'in_progress' {
-  return runtimeWait?.reason === 'workflow' ? 'waiting' : 'in_progress';
+  return 'in_progress';
 }
 
 export function executionCondition(task: ExecutionFacts): TaskBoard.ExecutionCondition {
@@ -26,12 +25,10 @@ export function executionCondition(task: ExecutionFacts): TaskBoard.ExecutionCon
       detail: 'Working on ' + task.claim.hostId + '.' };
   }
   if (['backlog', 'done', 'cancelled'].includes(task.workflowState)) return { state: 'idle', detail: 'No task work is scheduled.' };
-  if (task.recovery) return { state: task.recovery.attempts < 2 ? 'recovering' : 'failed',
-    detail: task.completionIssue ?? 'The original completion intent needs reconciliation.' };
   if (task.completionIssue) return { state: 'failed', detail: task.completionIssue };
-  if (task.runtimeWait) return { state: task.runtimeWait.reason === 'external_outcome' ? 'recovering' : task.runtimeWait.reason === 'workflow' ? 'workflow_attention' : 'blocked_environment',
+  if (task.runtimeWait) return { state: task.runtimeWait.reason === 'external_outcome' ? 'recovering' : 'blocked_environment',
     detail: task.runtimeWait.detail };
   if (task.workflowState === 'review') return { state: 'needs_user', detail: 'The final result is ready for review.' };
-  if (task.steps) return task.steps;
-  return { state: task.control === 'user' ? 'needs_user' : 'queued', detail: task.control === 'user' ? 'Ready for manual work.' : 'Waiting for an authorized next step.' };
+  if (task.wake) return task.wake;
+  return { state: task.control === 'user' ? 'needs_user' : 'queued', detail: task.control === 'user' ? 'Ready for manual work.' : 'Waiting for the agent to continue.' };
 }

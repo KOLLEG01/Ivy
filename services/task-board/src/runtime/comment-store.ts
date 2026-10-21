@@ -10,16 +10,13 @@ type CommentState = Pick<TaskBoard.Comment, 'commentId' | 'nativeInput' | 'hando
 type CommentReference = { objectId: string; length: number; nativeInputs: CommentState[] };
 type StoredTask = TaskBoard.Task & { commentStore?: CommentReference };
 type TreeTask = TaskBoard.Task & { commentStore: CommentTree };
-const referencedQuestions = (task: TaskBoard.Task) => task.nextSteps.flatMap(step => step.requires.flatMap(condition =>
-  condition.kind === 'question' || condition.kind === 'user' ? [condition.questionId] : []));
 
 export function commentSummary(task: TaskBoard.Task, taskId: string): CommentSummary {
   const open = new Set(openQuestions(task).map(question => question.commentId));
-  const referenced = new Set(referencedQuestions(task));
   return {
     directCount: task.comments.filter(comment => !crossAgentComment(comment, taskId)).length,
     questions: task.comments.filter(comment => comment.purpose === 'question' && !comment.sourceTaskId &&
-      (open.has(comment.commentId) || referenced.has(comment.commentId))).map(comment => ({
+      open.has(comment.commentId)).map(comment => ({
         commentId: comment.commentId, sequence: comment.sequence, open: open.has(comment.commentId),
         ...(comment.recipient ? { recipient: comment.recipient } : {}),
       })),
@@ -48,7 +45,7 @@ export class TaskComments {
   // Cache only small projections, keyed by immutable history and the referenced gates.
   private readonly summaries = new Map<string, CommentSummary>();
   private summaryKey(task: TaskBoard.Task, tree: CommentTree, taskId: string) {
-    return hashJson({ taskId, root: tree.root, questions: [...new Set(referencedQuestions(task))].sort() });
+    return hashJson({ taskId, root: tree.root, model: 3 });
   }
   summary(task: TaskBoard.Task, tree: CommentTree, taskId: string): CommentSummary | undefined {
     return tree.summary ?? this.summaries.get(this.summaryKey(task, tree, taskId));
@@ -104,8 +101,8 @@ export class TaskComments {
     return { ...header, comments };
   }
 
-  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '2.3.0'): Promise<StoredTask | TreeTask> {
-    if (!['2.2.0', '2.3.0'].includes(contractVersion)) return this.writeRetained(task, taskId, scope, contractVersion);
+  async write(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string = '3.0.0'): Promise<StoredTask | TreeTask> {
+    if (!['2.2.0', '2.3.0', '3.0.0'].includes(contractVersion)) return this.writeRetained(task, taskId, scope, contractVersion);
     const current = await this.client.request('objects.read', { objectId: taskId });
     requireThat(current.content.encoding === 'json' && current.object.contractKey === 'task-board/task',
       'task_board_contract_mismatch', 'A conversation needs its owning ticket.');
@@ -129,7 +126,7 @@ export class TaskComments {
           'task_board_evidence_mismatch', 'The immutable conversation record differs from its identity.');
       } else {
         const references = node.kind === 'page' ? Object.fromEntries(node.children.map((child, i) => ['child-' + i, child.object])) : {};
-        const saved = await this.client.request('objects.write', { contractVersion: '1.0.0',
+        const saved = await this.client.request('objects.write', { contractVersion: contractVersion === '3.0.0' ? '2.0.0' : '1.0.0',
           mutationId: await this.identity('conversation:' + taskId + ':' + hash), references,
           create: { name, parentId: taskId, ownerObjectId: taskId, contractKey: commentNodeKey },
           content: { encoding: 'json', value: node as unknown as Wire.Json } });
@@ -158,7 +155,7 @@ export class TaskComments {
     }
     return { ...task, comments: [], commentDeliveries: [],
       commentStore: { kind: 'tree', root: level[0] ?? null, length: task.comments.length,
-        ...(contractVersion === '2.3.0' ? { summary: commentSummary(task, taskId) } : {}) } };
+        ...(['2.3.0', '3.0.0'].includes(contractVersion) ? { summary: commentSummary(task, taskId) } : {}) } };
   }
 
   private async writeRetained(task: TaskBoard.Task, taskId: string, scope: string, contractVersion: string): Promise<StoredTask> {

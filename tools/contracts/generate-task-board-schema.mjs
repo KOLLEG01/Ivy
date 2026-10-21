@@ -154,7 +154,7 @@ Object.assign(defs, {
   TaskCard: obj({ taskKey: id, fields: ref('TaskCardFields'), workflowState: { enum: workflowStates },
     claim: nullable(obj({ phase: { enum: ['claimed', 'run_created', 'starting', 'running', 'waiting_input', 'publishing_result', 'cancel_requested', 'outcome_unknown'] }, target: ref('Target') })),
     publication: nullable(ref('ObjectPin')), latestResult: nullable(ref('ObjectPin')),
-    openQuestionCount: integer(), nextStepAt: nullable(timestamp) }),
+    openQuestionCount: integer(), wakeAt: nullable(timestamp) }),
   TaskCardView: obj({ object: ref('ObjectPin'), task: ref('TaskCard'), executionCondition: ref('ExecutionCondition'),
     commentCount: integer(), directCommentCount: integer() }),
   ReadResult: { anyOf: [ref('TaskView'), ref('TaskCardView')] },
@@ -178,21 +178,15 @@ defs.CommentActionRequest.allOf = [{
   if: { properties: { purpose: { const: 'question' } }, required: ['purpose'] },
   then: { anyOf: [{ required: ['recipient'] }, { required: ['nativeInput'] }] },
 }];
-defs.WorkDelivery = obj({ key: id, artifacts: array(ref('Artifact'), 32), codeReferences: array(ref('CodeReference'), 32) });
-defs.WorkDelivery.allOf = [{ anyOf: [{ properties: { artifacts: { minItems: 1 } } }, { properties: { codeReferences: { minItems: 1 } } }] }];
-defs.DeliveryReceipt = obj({ delivery: ref('WorkDelivery'), identity: hash, result: ref('ObjectPin') });
 defs.CompletionIssue = obj({ code: id, detail: str(2048, 1), run: ref('ObjectPin'), operationId: id,
-  attempts: integer(0, 2), retryAt: nullable(timestamp) }, ['code', 'detail', 'run', 'operationId']);
+  retryAt: nullable(timestamp) }, ['code', 'detail', 'run', 'operationId']);
 defs.Comment.properties.handoff = ref('Handoff');
 defs.Comment.properties.resolvesQuestions = { ...array(id, 32), uniqueItems: true };
-defs.DeferRequest.properties.recoveryRetryAt = nullable(timestamp);
 Object.assign(defs.CreateRequest.properties, {
   workflowState: { type: 'string', enum: workflowStates,
     description: 'Initial workflow state; omitted means todo. Agent in_progress requires a real scheduler claim and cannot be created directly. Review requires an initial manual final Result.' },
   initialResult: { ...ref('ResultContent'), description: 'Manual final material for a user-controlled review or done task. Required for review; does not claim native execution.' },
 });
-defs.ContinueRequest.properties.coordinationOnly = bool;
-defs.ContinueRequest.properties.recoveryFor = ref('ObjectPin');
 defs.ExecutionRequest = { oneOf: [ref('StartRequest'), ref('ContinueRequest')] };
 defs.ActionRequest = { oneOf: ['Configure', 'SavePlan', 'Create', 'Edit', 'RetargetQuestion', 'Transition', 'Defer', 'Reassign', 'NewThread', 'Cancel', 'Review', 'SaveResult', 'CommentAction', 'UploadAttachment'].map(name => ref(name + 'Request')) };
 defs.ActionInput = { oneOf: defs.ActionRequest.oneOf.map(value => value.$ref.endsWith('/SavePlanRequest') ? ref('SavePlanInput') : value) };
@@ -209,7 +203,8 @@ Object.assign(defs, {
     comments: { type: 'array', items: ref('Comment') }, commentDeliveries: { type: 'array', items: ref('CommentDelivery') }, agentCommentCount: integer(), workRevision: integer(),
     attachments: array(ref('TaskAttachment'), 256), createdAt: timestamp, updatedAt: timestamp }),
   NativeCallOrigin: { oneOf: [obj({ kind: { const: 'initial' } }), obj({ kind: { const: 'reattach' }, predecessor: ref('ObjectPin'), preparedEpoch: id }),
-    obj({ kind: { const: 'steer' }, commentIds: array(id, 512), workRevision: integer(), peersHash: hash, predecessor: nullable(ref('ObjectPin')) })] },
+    obj({ kind: { const: 'steer' }, commentIds: array(id, 512), workRevision: integer(), peersHash: hash, predecessor: nullable(ref('ObjectPin')),
+      observedDependencies: { type: 'object', additionalProperties: hash, maxProperties: 128 }, wakeAt: nullable(timestamp) }, ['kind', 'commentIds', 'workRevision', 'peersHash', 'predecessor'])] },
   NativeCall: obj({ operationId: id, request: ref('NativeRequest'), expectedDefinitionHash: hash, origin: ref('NativeCallOrigin'),
     state: { enum: ['prepared', 'observed', 'outcome_unknown'] }, preparedAt: timestamp, observedAt: nullable(timestamp),
     ownerPhase: nullable({ enum: ['accepted', 'dispatched', 'succeeded', 'failed', 'outcome_unknown'] }),
@@ -240,8 +235,6 @@ Object.assign(defs, {
 defs.Task.properties.parentTaskId = id;
 defs.Task.properties.openQuestionCount = integer();
 defs.Task.properties.completionIssue = ref('CompletionIssue');
-defs.Task.properties.continuation = obj({ fingerprint: hash, stalls: integer(0, 2) });
-defs.Task.properties.deliveries = { type: 'array', items: ref('DeliveryReceipt') };
 // Domain Objects are strict, distinct contracts. Large native schemas stay behind exact revision
 // pins. Publication bytes are a hash-checked JSON artifact, validated against contractKey both
 // before staging and before dispatch; the destination Hive write validates them again.
@@ -347,41 +340,40 @@ defs.NativeFullTurnTranscript = obj({ schemaVersion: { const: 1 }, collectionId:
   unsupportedItems: ref('ReadEvidenceRef'), fullTurn: ref('ReadEvidenceRef'), fullTurnCursor: nativeCursor,
   fullTurnBytes: integer(1, 16777216), verification: ref('ReadEvidenceRef'), verificationCursor: nativeCursor, createdAt: timestamp });
 
-defs.Condition = { oneOf: [
-  obj({ kind: { const: 'time' }, at: timestamp }),
-  obj({ kind: { const: 'task' }, taskId: id, until: { enum: ['idle', 'done'] } }),
-  obj({ kind: { const: 'delivery' }, taskId: id, key: id, after: hash }, ['kind', 'taskId', 'key']),
-  obj({ kind: { const: 'user' }, questionId: id }),
-  obj({ kind: { const: 'question' }, questionId: id }),
-] };
-defs.NextStep = obj({ id, scope: str(16384, 1), requires: array(ref('Condition'), 32) });
-defs.StepObservation = obj({ stepId: id, fingerprint: hash });
-defs.RuntimeWait = obj({ reason: { enum: ['host', 'capability', 'workspace', 'external_outcome', 'publication', 'workflow'] },
+// Agents plan work from the ticket. Scheduling records only external wake-up sources.
+const wakeFields = { wakeAt: nullable(timestamp), dependencies: { ...array(id, 128), uniqueItems: true } };
+defs.RuntimeWait = obj({ reason: { enum: ['host', 'capability', 'workspace', 'external_outcome', 'publication'] },
   detail: str(16384, 1), since: timestamp, retryAt: nullable(timestamp) }, ['reason', 'detail', 'since']);
-Object.assign(defs.Task.properties, { nextSteps: array(ref('NextStep'), 32), runtimeWait: nullable(ref('RuntimeWait')),
-  consumedSteps: array(ref('StepObservation'), 64) });
-defs.Task.required.push('nextSteps', 'runtimeWait');
+Object.assign(defs.Task.properties, wakeFields, { runtimeWait: nullable(ref('RuntimeWait')),
+  observedDependencies: { type: 'object', additionalProperties: hash, maxProperties: 128 } });
+defs.Task.required.push('wakeAt', 'dependencies', 'runtimeWait');
 Object.assign(defs.TaskCard.properties, { runtimeWait: nullable(ref('RuntimeWait')) });
 defs.TaskCard.required.push('runtimeWait');
-defs.Handoff = obj({ workflowState: { enum: ['review', 'waiting', 'todo'] }, nextSteps: array(ref('NextStep'), 32),
-  deliveries: array(ref('WorkDelivery'), 32) }, ['workflowState', 'nextSteps']);
+defs.Handoff = obj({ workflowState: { enum: ['review', 'waiting', 'todo'] }, ...wakeFields }, ['workflowState']);
 defs.Comment.properties.handoff = ref('Handoff');
-defs.CreateRequest.properties.nextSteps = array(ref('NextStep'), 32);
-defs.EditRequest.properties.nextSteps = array(ref('NextStep'), 32);
-defs.DeferRequest = action('defer', { nextSteps: array(ref('NextStep'), 32), runtimeWait: nullable(ref('RuntimeWait')), recoveryRetryAt: nullable(timestamp) });
-defs.DeferRequest.required = defs.DeferRequest.required.filter(key => !['runtimeWait', 'recoveryRetryAt'].includes(key));
-for (const name of ['StartRequest', 'ContinueRequest']) {
-  defs[name].properties.coordinationOnly = bool;
-  defs[name].properties.nextStepId = nullable(id);
-}
-defs.ExecutionContext = obj({ workflowState: { enum: workflowStates }, nextSteps: array(ref('NextStep'), 32),
+Object.assign(defs.CreateRequest.properties, wakeFields);
+Object.assign(defs.EditRequest.properties, wakeFields);
+defs.DeferRequest = action('defer', { ...wakeFields, runtimeWait: nullable(ref('RuntimeWait')) });
+defs.DeferRequest.required = defs.DeferRequest.required.filter(key => !['wakeAt', 'dependencies', 'runtimeWait'].includes(key));
+defs.ExecutionContext = obj({ workflowState: { enum: workflowStates },
   latestResult: nullable(ref('ObjectPin')), acceptedReview: nullable(ref('ObjectPin')) });
 defs.Run.properties.executionContext = ref('ExecutionContext');
-contractVersions.task = '2.3.0';
-defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0');
+// Immutable original requests in existing claims and Runs retain their identity/hash.
+// These fields are absent from all newly accepted scheduler and public requests.
+defs.StoredStartRequest = structuredClone(defs.StartRequest);
+defs.StoredContinueRequest = structuredClone(defs.ContinueRequest);
+for (const name of ['StoredStartRequest', 'StoredContinueRequest']) {
+  Object.assign(defs[name].properties, { nextStepId: nullable(id), coordinationOnly: bool });
+}
+defs.StoredContinueRequest.properties.recoveryFor = ref('ObjectPin');
+defs.StoredExecutionRequest = { oneOf: [ref('StoredStartRequest'), ref('StoredContinueRequest')] };
+defs.Run.properties.originalRequest = ref('StoredExecutionRequest');
+defs.Claim.properties.request = ref('StoredExecutionRequest');
+contractVersions.task = '3.0.0';
+defs.PreparedWrite.properties.contractVersion.enum.push('2.3.0', '3.0.0');
 // Exact evidence pins are already paged; the ticket metadata byte budget is the storage bound.
 delete defs.Task.properties.attachments.maxItems;
-contractVersions.run = '2.2.0';
+contractVersions.run = '3.0.0';
 contractVersions.result = '2.2.0';
 defs.TaskView.properties.commentPage = obj({ total: integer(), offset: integer(), nextOffset: nullable(integer()),
   nextBefore: nullable(integer(1)), order: { enum: ['asc', 'desc'] } }, ['total', 'offset', 'nextOffset']);

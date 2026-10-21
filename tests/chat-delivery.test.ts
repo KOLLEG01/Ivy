@@ -36,8 +36,9 @@ for (const version of ['0.154.0'] as const) test('Chat ' + version + ' queue hea
   assert.equal((await f.second.queue.send('alice', f.request)).phase, 'succeeded');
 });
 
-test('fresh loaded Chat Main delivers without resuming a nonexistent rollout', async t => {
+for (const state of ['idle', 'notLoaded']) test(`input-capable Chat Main with ${state} metadata delivers without resuming a nonexistent rollout`, async t => {
   const f = await queued(t);
+  f.threadStatus({ type: state }, true);
   for(const main of [f.first,f.second])main.native.evidence.saveRead=async()=>{throw Error('Transient availability must not be persisted');};
   f.reply(frame => frame['method'] === 'thread/resume' ? { error: { code: -32600, message: 'no rollout found for thread id ' + f.primary } } : undefined);
   await f.worker.step(); const prepared = await f.current();

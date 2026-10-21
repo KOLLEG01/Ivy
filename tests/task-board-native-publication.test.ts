@@ -22,7 +22,7 @@ for (const failureAt of ["task", "receipt"] as const) {
     await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: active.pin.objectId,
       expectedRevision: active.pin.revision, commentId: randomUUID(), authorKind: 'agent', purpose: 'handoff',
       body: 'The work is ready for review.', requests: [], responses: [], attachments: [], replyTo: null,
-      handoff: { workflowState: 'review', nextSteps: [] } });
+      handoff: { workflowState: 'review', wakeAt: null, dependencies: [] } });
     await w.refresh();
     const request = await w.snapshot("completed", "Keep this result in the ticket.");
     const store = w.f.first.store, client = store.client, original = client.request.bind(client);
@@ -70,7 +70,7 @@ for (const bound of ["count", "bytes"] as const) {
     const outcome = await w.f.first.nativeUpdate(await w.snapshot("completed", summary));
     const saved = await store.read("task-board/task", outcome.task!);
     assert.equal(saved.value.publication, null);
-    assert.equal(saved.value.workflowState, "waiting");
+    assert.equal(saved.value.workflowState, "todo");
     assert.deepEqual(saved.value.comments.slice(0, comments.length), comments);
     assert.equal(saved.value.comments.length, comments.length + 1);
     assert.equal((await store.read("task-board/result", outcome.result!)).value.content.summary, summary);
@@ -342,7 +342,7 @@ test("a user comment arriving during active work schedules one continuation on t
   );
 });
 
-test("a queued comment does not restart an attempt that failed before its first turn", async (t) => {
+test("a queued comment retries after a rejected initial attempt without losing its input", async (t) => {
   const w = await nativeWorkflow(t);
   const thread = await w.prepare("thread");
   const before = await w.f.first.store.read("task-board/task", w.state().task);
@@ -353,10 +353,12 @@ test("a queued comment does not restart an attempt that failed before its first 
   await w.refresh();
   await w.observe("thread", thread, null, "failed");
   const task = await w.f.first.store.read("task-board/task", w.state().task);
-  assert.equal(task.value.workflowState, "waiting");
+  assert.equal(task.value.workflowState, "todo");
   assert.equal(task.value.claim, null);
   assert.equal(task.value.commentDeliveries.find(value => value.commentId === commentId)?.state, "queued");
   assert.equal(w.f.first.condition(task.value).state, 'failed');
+  assert.equal(await new TaskBoardScheduler(w.f.first).task(task.pin.objectId), null);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(task.value.runtimeWait!.retryAt!) + 1 });
   const conversation = await new TaskBoardScheduler(w.f.first).task(task.pin.objectId); assert.ok(conversation?.run);
   const conversationRun = await w.f.first.store.read('task-board/run', conversation.run);
   assert.equal(conversationRun.value.originalRequest.coordinationOnly, undefined);
@@ -364,9 +366,7 @@ test("a queued comment does not restart an attempt that failed before its first 
   w.adopt(conversation); await w.running();
   const ended = await w.f.first.nativeUpdate(await w.snapshot('completed'));
   const discussed = await w.f.first.store.read('task-board/task', ended.task!);
-  assert.deepEqual(discussed.value.completionIssue, task.value.completionIssue);
-  await w.f.invoke({ action: 'transition', operationId: randomUUID(), taskId: task.pin.objectId,
-    expectedRevision: discussed.pin.revision, workflowState: 'todo', detail: 'Retry after the original native context is available.' });
+  assert.equal(discussed.value.completionIssue, undefined);
   const resumed = await w.f.first.store.read('task-board/task', task.pin.objectId);
   assert.equal(resumed.value.completionIssue, undefined);
   assert.equal(resumed.value.commentDeliveries.find(value => value.commentId === commentId)?.state, 'delivered');
@@ -415,17 +415,17 @@ for (const state of ['done', 'cancelled', 'backlog'] as const) test(`transitioni
   assert.equal(w.f.first.store.reserveWorkspace("fixture-host", path, "other-task", "other-operation"), null);
 });
 
-for (const state of ['review', 'done', 'waiting'] as const) test(`periodic scheduling reclaims a stale shared reservation from ${state} without editing either ticket`, async t => {
+for (const state of ['review', 'done', 'todo'] as const) test(`periodic scheduling reclaims a stale shared reservation from ${state} without editing either ticket`, async t => {
   const w = await nativeWorkflow(t, '0.154.0', true); await w.running();
   const store = w.f.first.store, host = w.planned.target.hostId, path = w.planned.workspace.canonicalCwd;
   const key = 'directory:' + path, owner = w.state().task.objectId;
   const blocked = await w.f.planned('agent', { kind: 'directory_path', path });
   await new TaskBoardScheduler(w.f.first).task(blocked.task.objectId);
   assert.equal((await store.read('task-board/task', blocked.task.objectId)).value.runtimeWait?.reason, 'workspace');
-  if (state !== 'waiting') await w.handoff();
+  if (state !== 'todo') await w.handoff();
   await w.update({ kind: 'unavailable', reason: 'host', code: 'service_unavailable', detail: 'Owner temporarily unavailable.' });
   assert.equal(await store.workspaceOwner(host, key, blocked.task.objectId), owner, 'Unknown native work must keep its reservation.');
-  const completed = await w.f.first.nativeUpdate(await w.snapshot(state === 'waiting' ? 'failed' : 'completed'));
+  const completed = await w.f.first.nativeUpdate(await w.snapshot(state === 'todo' ? 'failed' : 'completed'));
   let task = await store.read('task-board/task', completed.task!);
   assert.equal(store.reserveWorkspace(host, key, 'probe', 'probe'), null, 'Completion must release shared admission immediately.');
   store.releaseWorkspace('probe');
@@ -462,7 +462,7 @@ for (const state of ['review', 'done', 'waiting'] as const) test(`periodic sched
   }
   const resumed = await store.read('task-board/task', blocked.task.objectId);
   assert.ok(resumed.value.claim); assert.equal(resumed.value.attemptCount, 1);
-  assert.equal(resumed.value.runtimeWait, null); assert.ok(resumed.value.nextSteps.length > 0);
+  assert.equal(resumed.value.runtimeWait, null); assert.equal(resumed.value.workflowState, 'in_progress');
   assert.deepEqual((await store.read('task-board/task', owner)).pin, task.pin, 'Reclaiming local admission must not revise the completed ticket.');
   await runtime.stop();
 });
@@ -578,7 +578,7 @@ test("native final material from a reassigned attempt cannot replace a newer cla
     intent: w.planned.plan,
     target: w.planned.target,
     workspace: w.planned.workspace,
-    commentIds: [], nextStepId: 'main',
+    commentIds: [],
   });
   await w.refresh();
   const result = await w.f.first.nativeUpdate(
@@ -661,14 +661,13 @@ for (const purpose of ['question', 'handoff'] as const) {
       expectedRevision: state.task.revision, commentId: 'worker-output', authorKind: 'agent', purpose,
       body: purpose === 'question' ? 'Which option should I use?' : 'Delivered the specification.',
       ...(purpose === 'question' ? { recipient: { kind: 'user' as const } } : {}),
-      ...(purpose === 'handoff' ? { handoff: { workflowState: 'review' as const, nextSteps: [] } } : {}),
+      ...(purpose === 'handoff' ? { handoff: { workflowState: 'review' as const, wakeAt: null, dependencies: [] } } : {}),
       requests: [], responses: [], attachments: [], replyTo: null });
     await w.refresh();
     if (purpose === 'question') {
       await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId,
         expectedRevision: w.state().task.revision, commentId: 'own-question-handoff', authorKind: 'agent', purpose: 'handoff',
-        body: 'Only the own answer gates this remaining scope.', handoff: { workflowState: 'waiting', nextSteps: [
-          { id: 'await-own-answer', scope: 'Continue after the requested choice.', requires: [{ kind: 'user', questionId: 'worker-output' }] }] },
+        body: 'Only the own answer gates this remaining scope.', handoff: { workflowState: 'waiting', wakeAt: null, dependencies: [] },
         requests: [], responses: [], attachments: [], replyTo: null });
       await w.refresh();
     }
@@ -695,11 +694,11 @@ for (const purpose of ['question', 'handoff'] as const) {
     }
   });
 }
-test('failed execution waits without a successful completion notification', async t => {
+test('failed execution exposes its error without a successful completion notification', async t => {
   const w = await nativeWorkflow(t); await w.running();
   const outcome = await w.f.first.nativeUpdate(await w.snapshot('failed', 'Execution failed.'));
   const task = (await w.f.first.store.read('task-board/task', outcome.task!)).value;
-  assert.equal(task.workflowState, 'waiting'); assert.equal(task.comments.at(-1)?.delivery, null);
+  assert.equal(w.f.first.condition(task).state, 'failed'); assert.equal(task.comments.at(-1)?.delivery, null);
 });
 
 test('native requests and answers are mirrored once with their exact identities', async t => {
@@ -742,7 +741,7 @@ test('ordinary worker updates stay in the ticket and handoff notification is pub
     await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId,
       expectedRevision: w.state().task.revision, commentId: purpose, authorKind: 'agent', purpose,
       body: purpose === 'handoff' ? 'Delivered.' : 'Useful progress.',
-      ...(purpose === 'handoff' ? { handoff: { workflowState: 'review' as const, nextSteps: [] } } : {}),
+      ...(purpose === 'handoff' ? { handoff: { workflowState: 'review' as const, wakeAt: null, dependencies: [] } } : {}),
       requests: [], responses: [], attachments: [], replyTo: null });
     await w.refresh();
     assert.equal(browserNotices().length, 0, 'Completion is announced only after the native turn actually ends.');
@@ -766,7 +765,7 @@ test('ticket-only questions and final results remain in the ticket without brows
       expectedRevision: w.state().task.revision, commentId: purpose, authorKind: 'agent', purpose,
       body: purpose === 'handoff' ? 'Delivered in the ticket.' : 'Please answer in the ticket.',
         ...(purpose === 'question' ? { recipient: { kind: 'user' as const } } : {}),
-      ...(purpose === 'handoff' ? { handoff: { workflowState: 'review' as const, nextSteps: [] } } : {}),
+      ...(purpose === 'handoff' ? { handoff: { workflowState: 'review' as const, wakeAt: null, dependencies: [] } } : {}),
       requests: [], responses: [], attachments: [], replyTo: null });
     await w.refresh();
   }

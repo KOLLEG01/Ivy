@@ -47,7 +47,8 @@ async function changes(before: TaskBoard.Task, after: TaskBoard.Task): Promise<F
   add("Model", a.nativeOptions?.model ?? "Default", b.nativeOptions?.model ?? "Default");
   add("Reasoning", a.nativeOptions?.reasoningEffort ?? "Default", b.nativeOptions?.reasoningEffort ?? "Default");
   add("Speed", a.nativeOptions?.serviceTier ?? "Default", b.nativeOptions?.serviceTier ?? "Default");
-  add("Next steps", JSON.stringify(before.nextSteps, null, 2), JSON.stringify(after.nextSteps, null, 2), true);
+  add("Next appointment", date(before.wakeAt), date(after.wakeAt));
+  add("Watched tickets", before.dependencies.join(", "), after.dependencies.join(", "));
   add("Updates", contacts[a.userContact] ?? a.userContact, contacts[b.userContact] ?? b.userContact);
   add("Project scheduling", a.allowParallel ? "Parallel" : "Sequential", b.allowParallel ? "Parallel" : "Sequential");
   add("Due", date(a.dueAt), date(b.dueAt));

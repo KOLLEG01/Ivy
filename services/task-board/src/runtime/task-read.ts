@@ -2,22 +2,23 @@ import type { TaskBoard } from '../../../../packages/sdk/src/node.js';
 import type { CommentTree } from '../../../../packages/sdk/src/task-comments.js';
 import type { Document, TaskBoardStore } from './store.js';
 import { commentSummary } from './comment-store.js';
-import { assessSteps, stepCondition } from './next-steps.js';
+import { wakeCondition } from './wake.js';
 import { taskCard } from './task-card.js';
+import { upgradeTaskRecord } from '../../../../packages/sdk/src/client.js';
 
 /** Read only the header and requested comment ranges. Sequence cursors survive appends. */
 export async function readTask(store: TaskBoardStore, header: Document<'task-board/task'>, query: TaskBoard.TaskQuery,
-  condition: (task: TaskBoard.Task, steps?: TaskBoard.ExecutionCondition) => TaskBoard.ExecutionCondition): Promise<TaskBoard.ReadResult> {
-  let task = header.value;
+  condition: (task: TaskBoard.Task, wake?: TaskBoard.ExecutionCondition) => TaskBoard.ExecutionCondition): Promise<TaskBoard.ReadResult> {
+  let task = upgradeTaskRecord(header.value);
   const tree = (task as TaskBoard.Task & { commentStore?: CommentTree }).commentStore;
   const indexed = tree?.kind === 'tree' && store.commentSummary(task, tree, header.pin.objectId);
   // Retained versions are readable while the bounded storage backfill finishes.
   if (!indexed) task = (await store.read('task-board/task', header.pin, true, true)).value;
   const summary = indexed || commentSummary(task, header.pin.objectId);
   const total = indexed ? tree.length : task.comments.length;
-  const steps = task.claim || task.publication ? undefined :
-    stepCondition(await assessSteps(store, task, new Date().toISOString(), undefined, summary.questions));
-  const executionCondition = condition(task, steps);
+  const wake = task.claim || task.publication ? undefined :
+    wakeCondition(task);
+  const executionCondition = condition(task, wake);
   const view: TaskBoard.TaskView = { object: header.pin, task, executionCondition, archived: header.metadata.effectivelyArchived };
   if (query.view === 'card') return taskCard(view, summary, total);
 

@@ -7,17 +7,18 @@ import retainedSchema from '../../../../specs/schemas/task-board-retained.schema
 import findingsRetainedSchema from '../../../../specs/schemas/task-board-findings-retained.schema.json' with { type: 'json' };
 import workflowRetainedSchema from '../../../../specs/schemas/task-board-2.1-retained.schema.json' with { type: 'json' };
 import conversationRetainedSchema from '../../../../specs/schemas/task-board-2.2-retained.schema.json' with { type: 'json' };
+import stepRetainedSchema from '../../../../specs/schemas/task-board-2.3-retained.schema.json' with { type: 'json' };
 import evidenceChunk from '../../../../specs/schemas/task-board.evidence-chunk.json' with { type: 'json' };
 import readEvidenceChunk from '../../../../specs/schemas/task-board.read-evidence-chunk.json' with { type: 'json' };
 import attachment from '../../../../specs/schemas/task-board.attachment.json' with { type: 'json' };
-import { upgradeConfigurationRecord, upgradeTaskRecord, upgradeResultRecord } from '../../../../packages/sdk/src/client.js';
+import { upgradeConfigurationRecord, upgradeTaskRecord, upgradeRunRecord, upgradeResultRecord } from '../../../../packages/sdk/src/client.js';
 import { freezePublishedWorkflowSchema, freezeRecoverySchema } from './workflow-schema.js';
 import { referencePageKey } from './reference-pages.js';
 
 export const version = '1.0.0' as const;
-export const contractVersion = (key: ContractKey | 'task-board/comments'): '1.0.0' | '1.1.0' | '1.2.0' | '2.2.0' | '2.3.0' => key === 'task-board/task' ? '2.3.0' : ['task-board/run', 'task-board/result'].includes(key) ? '2.2.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? '1.1.0' : version;
-export const readableVersions = (key: ContractKey | 'task-board/comments'): string[] => key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0']
-  : key === 'task-board/run' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '2.0.0', '2.1.0', '2.2.0'] : key === 'task-board/result' ? ['1.0.0', '2.0.0', '2.1.0', '2.2.0'] : key === 'task-board/comments' ? ['1.0.0', '1.1.0', '2.0.0', '2.1.0'] : key === 'task-board/configuration' ? ['1.0.0', '1.1.0', '1.2.0'] : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? ['1.0.0', '1.1.0'] : [version];
+export const contractVersion = (key: ContractKey | 'task-board/comments' | 'task-board/comment-node'): '1.0.0' | '1.1.0' | '1.2.0' | '2.0.0' | '2.2.0' | '2.3.0' | '3.0.0' => ['task-board/task', 'task-board/run'].includes(key) ? '3.0.0' : key === 'task-board/comment-node' ? '2.0.0' : key === 'task-board/result' ? '2.2.0' : key === 'task-board/configuration' ? '1.2.0' : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? '1.1.0' : version;
+export const readableVersions = (key: ContractKey | 'task-board/comments' | 'task-board/comment-node'): string[] => key === 'task-board/comment-node' ? ['1.0.0', '2.0.0'] : key === 'task-board/task' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0', '2.0.0', '2.1.0', '2.2.0', '2.3.0', '3.0.0']
+  : key === 'task-board/run' ? ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '2.0.0', '2.1.0', '2.2.0', '3.0.0'] : key === 'task-board/result' ? ['1.0.0', '2.0.0', '2.1.0', '2.2.0'] : key === 'task-board/comments' ? ['1.0.0', '1.1.0', '2.0.0', '2.1.0'] : key === 'task-board/configuration' ? ['1.0.0', '1.1.0', '1.2.0'] : key === 'task-board/delivery' || key === 'task-board/comment-read-state' ? ['1.0.0', '1.1.0'] : [version];
 // Before task 1.5.0 and configuration 1.1.0, an execution requirement could name one capability instead of a host.
 const capabilityRequirement = { type: 'object', properties: { kind: { const: 'capability' }, capabilityKey: { $ref: '#/$defs/WireIdentifier' } }, required: ['kind', 'capabilityKey'], additionalProperties: false };
 function withCapabilityRequirement(contract: Wire.DataContract, from: string, to: string, description?: string): Wire.DataContract {
@@ -57,6 +58,7 @@ export const localContractKeys = new Set<ContractKey>(['task-board/native-signal
 export function upgradeRecord<K extends ContractKey>(key: K, value: ContractValues[K]): ContractValues[K] {
   return (key === 'task-board/task' ? upgradeTaskRecord(value as TaskBoard.Task)
     : key === 'task-board/configuration' ? upgradeConfigurationRecord(value as TaskBoard.Configuration)
+    : key === 'task-board/run' ? upgradeRunRecord(value as TaskBoard.Run)
     : key === 'task-board/result' ? upgradeResultRecord(value as TaskBoard.Result) : value) as ContractValues[K];
 }
 export function validateDomain<K extends ContractKey>(key: K, value: unknown): asserts value is ContractValues[K] { validateTaskBoard(contractNames[key], value); }
@@ -267,18 +269,21 @@ function retainedContracts(): Wire.DataContract[] {
   return contracts;
 }
 
-function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.0' | '2.1.0' | '2.2.0' | '2.3.0'): Wire.DataContract[] {
+function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.0' | '2.1.0' | '2.2.0' | '2.3.0' | '3.0.0'): Wire.DataContract[] {
   const selectedSchema = (reference: string) => selectedVersion === '2.0.0'
     ? bundleSchema(reference, catalog.schema, { TaskBoard: findingsRetainedSchema }) : selectedVersion === '2.1.0'
       ? bundleSchema(reference, catalog.schema, { TaskBoard: workflowRetainedSchema }) : selectedVersion === '2.2.0'
-        ? bundleSchema(reference, catalog.schema, { TaskBoard: conversationRetainedSchema }) : bundleSchema(reference, catalog.schema);
+        ? bundleSchema(reference, catalog.schema, { TaskBoard: conversationRetainedSchema }) : selectedVersion === '2.3.0'
+          ? bundleSchema(reference, catalog.schema, { TaskBoard: stepRetainedSchema }) : bundleSchema(reference, catalog.schema);
   const current = catalog.contracts.filter(value => (selectedVersion === '2.3.0' ? ['task-board/task'] :
-    ['task-board/task', 'task-board/run', 'task-board/result']).includes(value.key)).map(value => ({
+    selectedVersion === '3.0.0' ? ['task-board/task', 'task-board/run'] : ['task-board/task', 'task-board/run', 'task-board/result']).includes(value.key)).map(value => ({
     key: value.key, version: selectedVersion, owner: { kind: 'service' as const, serviceName: 'task-board' }, mediaType: 'application/json',
     retention: value.key === 'task-board/task' ? { objects: { mode: 'retain' as const }, revisions: { mode: 'bounded' as const, maximumCount: 50 }, awaitOwnerReadiness: true } :
       { objects: { mode: 'retain' as const }, revisions: { mode: 'current' as const } },
     jsonSchema: selectedSchema(value.definition),
-    specMarkdown: '# ' + value.key + ' ' + selectedVersion + '\n\nTaskBoard owns scoped next steps, local questions and independent observations. Native claims and exact original receipts remain authoritative.',
+    specMarkdown: '# ' + value.key + ' ' + selectedVersion + (selectedVersion === '3.0.0'
+      ? '\n\nTaskBoard wakes agents for comments, watched ticket changes and appointments. Agents decide the work from the ticket. Native claims and exact original receipts remain authoritative.'
+      : '\n\nTaskBoard owns scoped next steps, local questions and independent observations. Native claims and exact original receipts remain authoritative.'),
   }));
   const task = current.find(value => value.key === 'task-board/task')!;
   const oldHeader = retained.find(value => value.key === 'task-board/task' && value.version === '1.12.0')!;
@@ -286,7 +291,7 @@ function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.
     structuredClone((oldHeader.jsonSchema as { properties: Record<string, unknown> }).properties.commentStore);
   const schema = task.jsonSchema as { properties: Record<string, any>; $defs: Record<string, unknown> };
   schema.properties.commentStore.properties.nativeInputs.items.properties.handoff = { $ref: '#/$defs/TaskBoardHandoff' };
-  if (selectedVersion === '2.2.0' || selectedVersion === '2.3.0') {
+  if (selectedVersion === '2.2.0' || selectedVersion === '2.3.0' || selectedVersion === '3.0.0') {
     const pin = { type: 'object', properties: { objectId: { type: 'string', minLength: 1, maxLength: 256 },
       revision: { type: 'integer', minimum: 1 } }, required: ['objectId', 'revision'], additionalProperties: false };
     const index = { type: 'object', properties: { object: pin, length: { type: 'integer', minimum: 1 } },
@@ -294,7 +299,7 @@ function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.
     schema.properties.commentStore = { type: 'object', properties: { kind: { const: 'tree' },
       root: { anyOf: [index, { type: 'null' }] }, length: { type: 'integer', minimum: 0 } },
       required: ['kind', 'root', 'length'], additionalProperties: false };
-    if (selectedVersion === '2.3.0') {
+    if (selectedVersion === '2.3.0' || selectedVersion === '3.0.0') {
       schema.properties.commentStore.properties.summary = { type: 'object', properties: {
         directCount: { type: 'integer', minimum: 0 },
         questions: { type: 'array', items: { type: 'object', properties: {
@@ -307,15 +312,17 @@ function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.
         }, required: ['commentId', 'sequence', 'open'], additionalProperties: false } },
       }, required: ['directCount', 'questions'], additionalProperties: false };
       schema.properties.commentStore.required.push('summary');
-      task.specMarkdown += '\n\nConversation summaries contain counts and unresolved or next-step-referenced question identities, derived atomically from this snapshot. Board reads never load conversation bodies or per-user read markers.';
-      return current;
+      task.specMarkdown += selectedVersion === '3.0.0'
+        ? '\n\nConversation summaries contain counts and unresolved question identities. Board reads never load conversation bodies or per-user read markers.'
+        : '\n\nConversation summaries contain counts and unresolved or next-step-referenced question identities, derived atomically from this snapshot. Board reads never load conversation bodies or per-user read markers.';
+      if (selectedVersion === '2.3.0') return current;
     }
     const entry = selectedSchema('#/$defs/Comment');
     const receipt = selectedSchema('#/$defs/CommentDelivery');
     const { $defs: definitions, ...comment } = entry;
     const { $defs: _receiptDefinitions, ...receiptItem } = receipt;
     return [...current, {
-      key: 'task-board/comment-node', version: '1.0.0', owner: task.owner, mediaType: 'application/json',
+      key: 'task-board/comment-node', version: selectedVersion === '3.0.0' ? '2.0.0' : '1.0.0', owner: task.owner, mediaType: 'application/json',
       retention: { objects: { mode: 'owned' }, revisions: { mode: 'current' } },
       jsonSchema: { type: 'object', properties: { schemaVersion: { const: 1 },
         taskId: { type: 'string', minLength: 1, maxLength: 256 }, kind: { enum: ['comment', 'page'] },
@@ -326,7 +333,7 @@ function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.
         oneOf: [{ properties: { kind: { const: 'comment' } }, required: ['entry'], not: { required: ['children'] } },
           { properties: { kind: { const: 'page' } }, required: ['children'], not: { required: ['entry'] } }],
         $defs: { ...(definitions as Record<string, Wire.Json>), ...(_receiptDefinitions as Record<string, Wire.Json>) } },
-      specMarkdown: '# task-board/comment-node 1.0.0\n\nImmutable ticket-owned conversation records and 64-way index pages. Exact pins preserve historical content and delivery state. A ticket pins one root; reads follow only the selected range. Publication uses the existing operation journal.',
+      specMarkdown: '# task-board/comment-node ' + (selectedVersion === '3.0.0' ? '2.0.0' : '1.0.0') + '\n\nImmutable ticket-owned conversation records and 64-way index pages. Exact pins preserve historical content and delivery state. A ticket pins one root; reads follow only the selected range. Publication uses the existing operation journal.',
     } as Wire.DataContract];
   }
   const commentSchema = selectedSchema('#/$defs/Comment');
@@ -343,5 +350,5 @@ function workflowContracts(retained: Wire.DataContract[], selectedVersion: '2.0.
 
 export function taskBoardContracts(): Wire.DataContract[] {
   const retained = retainedContracts();
-  return [...workflowContracts(retained, '2.3.0'), ...workflowContracts(retained, '2.2.0'), ...workflowContracts(retained, '2.1.0'), ...workflowContracts(retained, '2.0.0'), ...retained];
+  return [...workflowContracts(retained, '3.0.0'), ...workflowContracts(retained, '2.3.0'), ...workflowContracts(retained, '2.2.0'), ...workflowContracts(retained, '2.1.0'), ...workflowContracts(retained, '2.0.0'), ...retained];
 }

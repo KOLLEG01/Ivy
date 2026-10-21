@@ -1942,12 +1942,26 @@
           "$ref": "#/$defs/ResultContent",
           "description": "Manual final material for a user-controlled review or done task. Required for review; does not claim native execution."
         },
-        "nextSteps": {
+        "wakeAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependencies": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/NextStep"
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
           },
-          "maxItems": 32
+          "maxItems": 128,
+          "uniqueItems": true
         }
       },
       "required": [
@@ -1991,12 +2005,26 @@
           ],
           "description": "Assign or remove the delegating parent. Omit to preserve the current parent."
         },
-        "nextSteps": {
+        "wakeAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependencies": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/NextStep"
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
           },
-          "maxItems": 32
+          "maxItems": 128,
+          "uniqueItems": true
         }
       },
       "required": [
@@ -2162,19 +2190,6 @@
             "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
           },
           "maxItems": 256
-        },
-        "coordinationOnly": {
-          "type": "boolean"
-        },
-        "nextStepId": {
-          "anyOf": [
-            {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "required": [
@@ -2209,24 +2224,7 @@
         "expectedWorkspace": {
           "$ref": "#/$defs/ExpectedWorkspace"
         },
-        "nextSteps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NextStep"
-          },
-          "maxItems": 32
-        },
-        "runtimeWait": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RuntimeWait"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "recoveryRetryAt": {
+        "wakeAt": {
           "anyOf": [
             {
               "type": "string",
@@ -2238,14 +2236,31 @@
               "type": "null"
             }
           ]
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "runtimeWait": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeWait"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "action",
         "operationId",
         "taskId",
-        "expectedRevision",
-        "nextSteps"
+        "expectedRevision"
       ],
       "additionalProperties": false
     },
@@ -2496,22 +2511,6 @@
             "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
           },
           "maxItems": 256
-        },
-        "coordinationOnly": {
-          "type": "boolean"
-        },
-        "recoveryFor": {
-          "$ref": "#/$defs/ObjectPin"
-        },
-        "nextStepId": {
-          "anyOf": [
-            {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "required": [
@@ -3349,7 +3348,7 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
-        "nextStepAt": {
+        "wakeAt": {
           "anyOf": [
             {
               "type": "string",
@@ -3381,7 +3380,7 @@
         "publication",
         "latestResult",
         "openQuestionCount",
-        "nextStepAt",
+        "wakeAt",
         "runtimeWait"
       ],
       "additionalProperties": false
@@ -3428,74 +3427,6 @@
         }
       ]
     },
-    "WorkDelivery": {
-      "type": "object",
-      "properties": {
-        "key": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-        },
-        "artifacts": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Artifact"
-          },
-          "maxItems": 32
-        },
-        "codeReferences": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/CodeReference"
-          },
-          "maxItems": 32
-        }
-      },
-      "required": [
-        "key",
-        "artifacts",
-        "codeReferences"
-      ],
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "anyOf": [
-            {
-              "properties": {
-                "artifacts": {
-                  "minItems": 1
-                }
-              }
-            },
-            {
-              "properties": {
-                "codeReferences": {
-                  "minItems": 1
-                }
-              }
-            }
-          ]
-        }
-      ]
-    },
-    "DeliveryReceipt": {
-      "type": "object",
-      "properties": {
-        "delivery": {
-          "$ref": "#/$defs/WorkDelivery"
-        },
-        "identity": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
-        },
-        "result": {
-          "$ref": "#/$defs/ObjectPin"
-        }
-      },
-      "required": [
-        "delivery",
-        "identity",
-        "result"
-      ],
-      "additionalProperties": false
-    },
     "CompletionIssue": {
       "type": "object",
       "properties": {
@@ -3512,11 +3443,6 @@
         },
         "operationId": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-        },
-        "attempts": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 2
         },
         "retryAt": {
           "anyOf": [
@@ -3660,7 +3586,7 @@
           "$ref": "#/$defs/Actor"
         },
         "request": {
-          "$ref": "#/$defs/ExecutionRequest"
+          "$ref": "#/$defs/StoredExecutionRequest"
         },
         "requestHash": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
@@ -3877,36 +3803,26 @@
         "completionIssue": {
           "$ref": "#/$defs/CompletionIssue"
         },
-        "continuation": {
-          "type": "object",
-          "properties": {
-            "fingerprint": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+        "wakeAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
             },
-            "stalls": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 2
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "fingerprint",
-            "stalls"
-          ],
-          "additionalProperties": false
+          ]
         },
-        "deliveries": {
+        "dependencies": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/DeliveryReceipt"
-          }
-        },
-        "nextSteps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NextStep"
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
           },
-          "maxItems": 32
+          "maxItems": 128,
+          "uniqueItems": true
         },
         "runtimeWait": {
           "anyOf": [
@@ -3918,12 +3834,12 @@
             }
           ]
         },
-        "consumedSteps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/StepObservation"
+        "observedDependencies": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
           },
-          "maxItems": 64
+          "maxProperties": 128
         }
       },
       "required": [
@@ -3946,7 +3862,8 @@
         "attachments",
         "createdAt",
         "updatedAt",
-        "nextSteps",
+        "wakeAt",
+        "dependencies",
         "runtimeWait"
       ],
       "additionalProperties": false,
@@ -4035,6 +3952,26 @@
               "anyOf": [
                 {
                   "$ref": "#/$defs/ObjectPin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observedDependencies": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
+              },
+              "maxProperties": 128
+            },
+            "wakeAt": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 24,
+                  "maxLength": 24,
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
                 },
                 {
                   "type": "null"
@@ -4237,7 +4174,7 @@
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
         },
         "originalRequest": {
-          "$ref": "#/$defs/ExecutionRequest"
+          "$ref": "#/$defs/StoredExecutionRequest"
         },
         "requestHash": {
           "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
@@ -5406,7 +5343,8 @@
             "2.0.0",
             "2.1.0",
             "2.2.0",
-            "2.3.0"
+            "2.3.0",
+            "3.0.0"
           ]
         },
         "payload": {
@@ -7059,149 +6997,6 @@
       ],
       "additionalProperties": false
     },
-    "Condition": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "time"
-            },
-            "at": {
-              "type": "string",
-              "minLength": 24,
-              "maxLength": 24,
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
-            }
-          },
-          "required": [
-            "kind",
-            "at"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "task"
-            },
-            "taskId": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            "until": {
-              "enum": [
-                "idle",
-                "done"
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "taskId",
-            "until"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "delivery"
-            },
-            "taskId": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            "key": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            },
-            "after": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
-            }
-          },
-          "required": [
-            "kind",
-            "taskId",
-            "key"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "user"
-            },
-            "questionId": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            }
-          },
-          "required": [
-            "kind",
-            "questionId"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "const": "question"
-            },
-            "questionId": {
-              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-            }
-          },
-          "required": [
-            "kind",
-            "questionId"
-          ],
-          "additionalProperties": false
-        }
-      ]
-    },
-    "NextStep": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-        },
-        "scope": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 16384
-        },
-        "requires": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Condition"
-          },
-          "maxItems": 32
-        }
-      },
-      "required": [
-        "id",
-        "scope",
-        "requires"
-      ],
-      "additionalProperties": false
-    },
-    "StepObservation": {
-      "type": "object",
-      "properties": {
-        "stepId": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
-        },
-        "fingerprint": {
-          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Hash"
-        }
-      },
-      "required": [
-        "stepId",
-        "fingerprint"
-      ],
-      "additionalProperties": false
-    },
     "RuntimeWait": {
       "type": "object",
       "properties": {
@@ -7211,8 +7006,7 @@
             "capability",
             "workspace",
             "external_outcome",
-            "publication",
-            "workflow"
+            "publication"
           ]
         },
         "detail": {
@@ -7257,24 +7051,30 @@
             "todo"
           ]
         },
-        "nextSteps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NextStep"
-          },
-          "maxItems": 32
+        "wakeAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 24,
+              "maxLength": 24,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "deliveries": {
+        "dependencies": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/WorkDelivery"
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
           },
-          "maxItems": 32
+          "maxItems": 128,
+          "uniqueItems": true
         }
       },
       "required": [
-        "workflowState",
-        "nextSteps"
+        "workflowState"
       ],
       "additionalProperties": false
     },
@@ -7291,13 +7091,6 @@
             "done",
             "cancelled"
           ]
-        },
-        "nextSteps": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NextStep"
-          },
-          "maxItems": 32
         },
         "latestResult": {
           "anyOf": [
@@ -7322,11 +7115,153 @@
       },
       "required": [
         "workflowState",
-        "nextSteps",
         "latestResult",
         "acceptedReview"
       ],
       "additionalProperties": false
+    },
+    "StoredStartRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "start"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "taskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "intent": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceResolution"
+        },
+        "commentIds": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "maxItems": 256
+        },
+        "nextStepId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coordinationOnly": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "taskId",
+        "expectedRevision",
+        "target",
+        "intent",
+        "workspace",
+        "commentIds"
+      ],
+      "additionalProperties": false
+    },
+    "StoredContinueRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "continue"
+        },
+        "operationId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "taskId": {
+          "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedWorkspace": {
+          "$ref": "#/$defs/ExpectedWorkspace"
+        },
+        "feedback": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "intent": {
+          "$ref": "#/$defs/ObjectPin"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspaceResolution"
+        },
+        "commentIds": {
+          "type": "array",
+          "items": {
+            "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+          },
+          "maxItems": 256
+        },
+        "nextStepId": {
+          "anyOf": [
+            {
+              "$ref": "https://ivy.invalid/schemas/hive-wire.schema.json#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coordinationOnly": {
+          "type": "boolean"
+        },
+        "recoveryFor": {
+          "$ref": "#/$defs/ObjectPin"
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "taskId",
+        "expectedRevision",
+        "feedback",
+        "target",
+        "intent",
+        "workspace",
+        "commentIds"
+      ],
+      "additionalProperties": false
+    },
+    "StoredExecutionRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/StoredStartRequest"
+        },
+        {
+          "$ref": "#/$defs/StoredContinueRequest"
+        }
+      ]
     }
   }
 }

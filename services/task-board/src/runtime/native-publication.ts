@@ -1,6 +1,5 @@
 import { openQuestions, queuedUserInput, runHandoff, unansweredQuestion } from './conversation.js';
 import { applyHandoff, sameAssignment } from './handoff.js';
-import { assessSteps, stepCondition, validateNextSteps } from './next-steps.js';
 import { claimedWorkflowState } from './condition.js';
 import { hashJson } from '../../../../packages/sdk/src/node.js';
 import { IvyError, requireThat } from '../../../../packages/sdk/src/node.js';
@@ -15,7 +14,7 @@ import type { verifyNativeTranscript } from './full-turn-evidence.js';
 import { initialDelivery } from './deliveries.js';
 import { BoundToolClient } from '../../../../packages/sdk/src/client.js';
 import { nativeErrorRetryAt, nativeRateLimitRetryAt, rateLimitWaitingDetail } from './native-rate-limit.js';
-import { executionMode, triggeredByComments } from './execution-mode.js';
+import { triggeredByComments } from './execution-mode.js';
 
 export const finishedRun = (run: TaskBoard.Run): boolean => ['completed', 'failed', 'cancelled'].includes(run.phase);
 type Completion = { state: 'succeeded' | 'failed' | 'cancelled'; summary: string; evidence: TaskBoard.Artifact | null; code: string | null; retryAt?: string | null };
@@ -38,7 +37,7 @@ export function projectNativeState(run: TaskBoard.Run, status: string, epoch: st
   let externalOutcome: TaskBoard.Run['externalOutcome'] = { ...readOutcome(run, status), observedAt: at, evidence };
   if (status === 'inProgress') {
     const nativeStatus = nativeRecord(thread['status']), flags = nativeArray(nativeStatus['activeFlags']);
-    if (epoch !== run.nativeEpoch || nativeStatus['type'] !== 'active') {
+    if (!epoch || nativeStatus['type'] !== 'active') {
       phase = run.cancellation ? 'cancel_requested' : 'outcome_unknown';
       externalOutcome = { state: 'unknown', observedAt: at, evidence, code: 'native_active_owner_unconfirmed' };
       runtimeWait = { reason: 'external_outcome', detail: 'The stored unfinished turn is visible, but its original native owner has not confirmed active execution.', since: at };
@@ -67,7 +66,11 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   requireThat(request.action === 'nativeUpdate' && operation.value.actor.source === 'native' && operation.value.callerPrincipalId === engine.settings.principalId,
     'task_board_forbidden', 'Only the authenticated logical owner can publish native observations.');
   const store = engine.store, at = operation.value.createdAt, first = operation.value.writes.length === 0;
-  const taskPin = operation.value.publicationTask ?? { objectId: request.taskId, revision: request.expectedRevision };
+  const reservation = operation.value.writes[0]?.destination;
+  const taskPin = reservation && 'expectedRevision' in reservation
+    ? { objectId: request.taskId, revision: reservation.expectedRevision }
+    : first ? (await store.read('task-board/task', request.taskId)).pin
+    : operation.value.publicationTask ?? { objectId: request.taskId, revision: request.expectedRevision };
   requireThat(taskPin.objectId === request.taskId, 'task_board_identity_conflict', 'The completion publication snapshot must belong to its original Task.');
   const task = await store.read('task-board/task', taskPin), originalRun = await store.read('task-board/run', request.run);
   const run = originalRun.value, active = task.value.claim?.run?.objectId === request.run.objectId, evidence = new TaskBoardEvidence(store);
@@ -85,6 +88,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
   let next: TaskBoard.Run = { ...run, calls: { ...run.calls }, updatedAt: at }, completion: Completion | null = null;
   let runtimeWait: TaskBoard.RuntimeWait | null = null, detail = '', kind: TaskBoard.History['kind'] = 'recovered';
   let steeredComments: string[] = [];
+  let acknowledgedWake: Extract<TaskBoard.NativeCallOrigin, { kind: 'steer' }> | null = null;
   const retryAt = (turn: Record<string, Wire.Json>) => run.cancellation ? null : nativeRateLimitRetryAt(turn, at);
   const validateCall = (pin: TaskBoard.ObjectPin, _slot: keyof TaskBoard.Run['calls']) => store.read('task-board/native-call', pin);
   const observedCall = async (pin: TaskBoard.ObjectPin, slot: keyof TaskBoard.Run['calls']) => {
@@ -107,6 +111,8 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       next.notificationCursor = change.notificationCursor;
       const projected = projectNativeState(run, snapshot.document.value.status, snapshot.document.value.epoch, snapshot.thread, at, change.snapshot);
       next.phase = projected.phase; next.externalOutcome = projected.externalOutcome; runtimeWait = projected.runtimeWait;
+      if (snapshot.document.value.status === 'inProgress' && snapshot.thread['id'] === run.primaryResourceRef?.nativeId &&
+          nativeRecord(snapshot.thread['status'])['type'] === 'active') next.nativeEpoch = snapshot.document.value.epoch;
       detail = 'Saved the exact native turn state with separate read evidence.'; break;
     }
     case 'completion': {
@@ -141,11 +147,11 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       const call = await validateCall(change.call, 'thread'), origin = call.value.origin;
       requireThat(call.value.state === 'prepared' && origin?.kind === 'reattach' && same(origin.predecessor, run.calls.thread) &&
         change.call.objectId !== run.calls.thread.objectId,
-        'task_board_native_intent_mismatch', 'Reattachment must be a new prepared call for a replacement epoch with the exact retained predecessor.');
+        'task_board_native_intent_mismatch', 'Reattachment must be a new prepared call with the exact retained predecessor.');
       const previous = await observedCall(run.calls.thread, 'thread');
       const priorEpoch = previous.observation.epoch;
-      requireThat(!!priorEpoch && origin.preparedEpoch !== priorEpoch,
-        'task_board_native_intent_mismatch', 'Reattachment requires a replacement native owner epoch.');
+      requireThat(!!priorEpoch && (origin.preparedEpoch !== priorEpoch || previous.observation.phase === 'succeeded'),
+        'task_board_native_intent_mismatch', 'An uncertain attachment requires a replacement native owner epoch.');
       requireThat(
         (previous.observation.phase === 'succeeded' && priorEpoch === run.nativeEpoch ||
           previous.observation.phase === 'outcome_unknown' &&
@@ -160,7 +166,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
           'task_board_outcome_unresolved', 'An observed turn operation cannot be replaced or treated as unstarted by reattachment.');
       }
       next.calls.thread = change.call; next.phase = 'starting';
-      detail = 'Attached a retained resume intent for the saved primary on a replacement native owner.'; break;
+      detail = 'Attached a retained resume intent for the saved primary.'; break;
     }
     case 'attachCall': {
       const change = request.change, call = await validateCall(change.call, change.slot);
@@ -201,6 +207,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
           requireThat(observation.reply && 'result' in observation.reply && nativeRecord(observation.reply.result)['turnId'] === run.turnId && observation.epoch === run.nativeEpoch && call.value.origin?.kind === 'steer',
             'task_board_turn_mismatch', 'Steering acknowledgment must identify the original native turn and epoch.');
           steeredComments = call.value.origin.commentIds;
+          acknowledgedWake = call.value.origin;
         }
         // Failure/unknown describes delivery, never the execution outcome. Queued input is
         // retried only after a conclusive failure; unresolved receipts fence turn completion.
@@ -313,45 +320,13 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     'task_board_outcome_unresolved', 'Resolve the original steering receipt before closing its turn.');
   let finalTask: TaskBoard.Task = { ...task.value, updatedAt: at, publication: steps.pin,
     commentDeliveries: task.value.commentDeliveries.map(value => steeredComments.includes(value.commentId) ? { ...value, state: 'delivered', updatedAt: at, code: null } : value) };
-  const mode = executionMode(run.originalRequest);
+  if (acknowledgedWake?.observedDependencies) finalTask.observedDependencies = acknowledgedWake.observedDependencies;
+  if (acknowledgedWake?.wakeAt && finalTask.wakeAt === acknowledgedWake.wakeAt) finalTask.wakeAt = null;
   const hasComments = triggeredByComments(run.originalRequest);
-  const recoveryOnly = mode === 'recovery';
   const initial = run.executionContext ?? {
-    workflowState: task.value.workflowState, nextSteps: task.value.nextSteps,
-    latestResult: task.value.latestResult, acceptedReview: task.value.acceptedReview };
-  const recoveryInitial = recoveryOnly ? (await store.read('task-board/task', { objectId: run.taskId, revision: run.originalRequest.expectedRevision })).value : null;
-  const recoveryUnchanged = !recoveryInitial || same(recoveryInitial.primaryResourceRef, task.value.primaryResourceRef) &&
-    same(recoveryInitial.nextSteps, task.value.nextSteps) &&
-    sameAssignment(recoveryInitial.fields, task.value.fields);
+    workflowState: 'todo' as const, latestResult: task.value.latestResult, acceptedReview: task.value.acceptedReview };
   const handoffComment = runHandoff(finalTask, request.run.objectId);
-  let declaredHandoff = recoveryUnchanged ? handoffComment?.handoff : undefined;
-  let handoffIssue: { code: string; detail: string } | null = null;
-  if (completion?.state === 'succeeded' && declaredHandoff && handoffComment) {
-    const admission = await engine.operations.find(handoffComment.author.principalId, handoffComment.operationId).catch(error => {
-      if (error instanceof IvyError && error.code === 'operation_expired') return null;
-      throw error;
-    });
-    const reservation = admission?.value.writes[0];
-    const baseline = reservation?.contractKey === 'task-board/task'
-      ? (await store.read('task-board/task', reservation.payload.object, false)).value : null;
-    if (!baseline)
-      handoffIssue = { code: 'task_board_handoff_evidence_missing', detail: 'The original handoff reservation is unavailable. Its result and the current next steps were preserved for inspection.' };
-    else if (!same(baseline.nextSteps, finalTask.nextSteps) || !sameAssignment(baseline.fields, finalTask.fields))
-      handoffIssue = { code: 'task_board_handoff_changed', detail: 'The authorized work changed after this handoff. The current next steps were preserved; inspect the completed result before continuing.' };
-    else {
-      // Include material deliveries published by this completion when assessing the graph.
-      const deliveries = new Map((finalTask.deliveries ?? []).map(value => [value.delivery.key, value]));
-      for (const delivery of declaredHandoff.deliveries ?? []) deliveries.set(delivery.key, {
-        delivery, identity: hashJson({ taskId: request.taskId, delivery }), result: request.run });
-      try {
-        await validateNextSteps(store, request.taskId, declaredHandoff.nextSteps, { ...finalTask, deliveries: [...deliveries.values()] }, at);
-      } catch (error) {
-        if (!(error instanceof IvyError && error.code === 'task_board_dependency_cycle')) throw error;
-        handoffIssue = { code: error.code, detail: 'The completed handoff would close a dependency cycle. Its result was saved; provide an independent next step.' };
-      }
-    }
-    if (handoffIssue) declaredHandoff = undefined;
-  }
+  const declaredHandoff = handoffComment?.handoff;
   // All semantic/evidence checks precede reservation; deterministic replay below uses original pins.
   const reserved = await steps.write('task-board/task', finalTask, { objectId: request.taskId, expectedRevision: task.pin.revision });
   const outcome: TaskBoard.ActionOutcome = { operationId: request.operationId, task: null, plan: null, run: null, history: null, result: null, review: null, attachment: null };
@@ -397,54 +372,39 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
     if (completion) {
       const handoffIntent = declaredHandoff;
       const ready = completion.state === 'succeeded' && handoffIntent?.workflowState === 'review';
+      if (ready) finalTask.workRevision++;
       if (completion.state === 'succeeded' && handoffIntent) {
         finalTask = applyHandoff(finalTask, handoffIntent, at);
         delete finalTask.completionIssue;
-        if (handoffIntent.deliveries?.length) {
-          const deliveries = new Map((finalTask.deliveries ?? []).map(value => [value.delivery.key, value]));
-          for (const delivery of handoffIntent.deliveries) deliveries.set(delivery.key, {
-            delivery, identity: hashJson({ taskId: request.taskId, delivery }), result: outcome.result! });
-          finalTask.deliveries = [...deliveries.values()];
-        }
       }
       finalTask = { ...finalTask, claim: null, runtimeWait: null, primaryResourceRef: next.primaryResourceRef, lastRun: outcome.run };
       const publicationError = store.failedHandoff(request.run.objectId);
       if (completion.state === 'cancelled') finalTask.workflowState = 'cancelled';
-      else if (hasComments && !handoffIntent && !handoffIssue && !publicationError &&
-        (completion.state === 'succeeded' || completion.retryAt)) {
-        finalTask.workflowState = initial.workflowState;
-        finalTask.latestResult = initial.latestResult;
-        finalTask.acceptedReview = initial.acceptedReview;
-        if (completion.retryAt) {
+      else if (completion.state === 'succeeded') {
+        delete finalTask.completionIssue;
+        finalTask.workflowState = handoffIntent?.workflowState ?? (initial.workflowState === 'in_progress' ? 'todo' : initial.workflowState);
+        if (handoffIntent || initial.workflowState === 'todo') {
+          finalTask.latestResult = outcome.result;
+          finalTask.acceptedReview = null;
+        } else {
+          finalTask.latestResult = initial.latestResult;
+          finalTask.acceptedReview = initial.acceptedReview;
+        }
+      } else {
+        const retryAt = completion.retryAt ?? (!next.turnId ? new Date(Date.parse(at) + 30_000).toISOString() : null);
+        finalTask.workflowState = initial.workflowState === 'in_progress' ? 'todo' : initial.workflowState;
+        finalTask.latestResult = task.value.latestResult ?? outcome.result;
+        finalTask.completionIssue = { code: completion.code ?? 'native_failed', detail: completion.summary.slice(0, 2048),
+          run: request.run, operationId: request.operationId, retryAt };
+        if (retryAt) {
           finalTask.commentDeliveries = finalTask.commentDeliveries.map(value => run.originalRequest.commentIds.includes(value.commentId)
             ? { ...value, state: 'queued', updatedAt: at, code: completion.code } : value);
-          finalTask.runtimeWait = { reason: 'host', detail: rateLimitWaitingDetail(completion.retryAt), since: at, retryAt: completion.retryAt };
+          finalTask.runtimeWait = { reason: 'host', detail: rateLimitWaitingDetail(retryAt), since: at, retryAt };
         }
-      } else if (completion.state === 'succeeded' && handoffIntent) {
-        finalTask.latestResult = recoveryOnly && !ready ? task.value.latestResult : outcome.result;
-        finalTask.acceptedReview = null;
-        if (!ready) finalTask.workflowState = (await assessSteps(store, finalTask, at)).some(value => value.ready) ? 'todo' : 'waiting';
-      } else {
-        finalTask.latestResult = task.value.latestResult ?? (recoveryOnly ? null : outcome.result);
-        finalTask.workflowState = initial.workflowState === 'review' ? 'review' : 'waiting';
-        const original = recoveryInitial?.completionIssue;
-        const contextUnavailable = recoveryOnly && !next.turnId && completion.state === 'failed' && !completion.retryAt;
-        const attempts = recoveryOnly ? Math.min(2, (original?.attempts ?? 0) + (next.turnId && !completion.retryAt ? 1 : 0)) : 0;
-        finalTask.completionIssue = { code: contextUnavailable ? 'task_board_recovery_context_unavailable' : recoveryOnly ? original?.code ?? 'task_board_handoff_missing' :
-            completion.state === 'failed' ? completion.code ?? 'native_failed' : 'task_board_handoff_missing',
-          detail: contextUnavailable ? 'The original context could not resume before recovery started: ' + completion.summary.slice(0, 1700) :
-            recoveryOnly && !recoveryUnchanged ? 'The authorized next steps changed during handoff recovery. Inspect the current ticket before continuing.' :
-            recoveryOnly && attempts >= 2 ? 'Two recovery attempts produced no valid completion intent. Inspect the original result and owner receipts.' :
-            completion.state === 'failed' ? completion.summary.slice(0, 2048) : 'The original execution needs its structured completion intent.',
-          run: original?.run ?? request.run, operationId: original?.operationId ?? request.operationId,
-          attempts, retryAt: contextUnavailable ? null : completion.retryAt ?? (recoveryOnly && attempts < 2 ? new Date(Date.parse(at) + 30_000).toISOString() : null) };
-        if (completion.retryAt && !recoveryOnly && !handoffIssue && !publicationError) {
-          delete finalTask.completionIssue;
-          finalTask.consumedSteps = (finalTask.consumedSteps ?? []).filter(value => value.stepId !== run.originalRequest.nextStepId);
-          finalTask.runtimeWait = { reason: 'host', detail: rateLimitWaitingDetail(completion.retryAt), since: at, retryAt: completion.retryAt };
-        }
-        if (handoffIssue) finalTask.completionIssue = { ...finalTask.completionIssue!, ...handoffIssue, retryAt: null };
-        if (publicationError) finalTask.completionIssue = { ...finalTask.completionIssue!, ...publicationError, retryAt: null };
+      }
+      if (publicationError) {
+        finalTask.completionIssue = { ...publicationError, run: request.run, retryAt: null };
+        finalTask.runtimeWait = null;
       }
       if (completion.state !== 'cancelled') {
         const handoff = runHandoff(finalTask, request.run.objectId);
@@ -487,22 +447,7 @@ export async function publishNative(engine: TaskBoardEngine, operation: Document
       store.completeLocalWorkflow(root.objectId, publishedAt, operation.pin.objectId);
     if (next.owner.source === 'scheduler' && store.localKey(next.originalRequest.intent.objectId) === 'task-board/native-plan')
       store.completeLocalWorkflow(next.originalRequest.intent.objectId, publishedAt, operation.pin.objectId);
-    if (recoveryInitial?.completionIssue) {
-      const origin = await store.retainedRecoveryRun(recoveryInitial.completionIssue.run);
-      store.completeLocalWorkflow(origin.pin.objectId, publishedAt, operation.pin.objectId);
-      const calls = Object.values(origin.value.calls).filter((pin): pin is TaskBoard.ObjectPin => !!pin);
-      const seen = new Set<string>();
-      for (const pin of calls) {
-        if (seen.has(pin.objectId)) continue;
-        requireThat(seen.size < 2048, 'task_board_evidence_mismatch', 'The recovered call lineage exceeds its limit.');
-        seen.add(pin.objectId); store.completeLocalWorkflow(pin.objectId, publishedAt, operation.pin.objectId);
-        try {
-          const call = await store.read('task-board/native-call', pin.objectId), previous = call.value.origin;
-          if (previous && previous.kind !== 'initial' && previous.predecessor) calls.push(previous.predecessor);
-        } catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'not_found')) throw error; }
-      }
-      if (store.localKey(origin.value.originalRequest.intent.objectId)) store.completeLocalWorkflow(origin.value.originalRequest.intent.objectId, publishedAt, operation.pin.objectId);
-    }
   }
+
   return outcome;
 }

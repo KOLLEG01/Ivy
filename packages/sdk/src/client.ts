@@ -40,7 +40,7 @@ export type {
   Wire,
 } from "../../contracts/src/generated.js";
 export { IvyError, requireThat } from "../../contracts/src/errors.js";
-export { upgradeTaskRecord, upgradeConfigurationRecord, upgradeResultRecord, upgradeResultContent } from "../../contracts/src/task-board-records.js";
+export { upgradeTaskRecord, upgradeRunRecord, upgradeCommentRecord, upgradeConfigurationRecord, upgradeResultRecord, upgradeResultContent } from "../../contracts/src/task-board-records.js";
 export { openTaskQuestions } from "../../contracts/src/task-board-questions.js";
 export {
   canonical,

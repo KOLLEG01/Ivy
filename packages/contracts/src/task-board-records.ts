@@ -9,19 +9,28 @@ export function upgradeRequirement(requirement: StoredRequirement): TaskBoard.Ex
   return requirement?.kind === 'capability' ? { kind: 'automatic' } : requirement;
 }
 
-/** Reads a Task revision in the current field model; revisions without a capability requirement are unchanged. */
-type PriorCondition = { taskId: string; until: 'idle' | 'done' | 'delivery'; key?: string };
-type PriorTask = TaskBoard.Task & {
-  fields: TaskBoard.TaskFields & { dependencies?: string[]; nextReviewAt?: string | null };
-  waiting?: { reason: string; detail: string; since: string } | null;
-  blocker?: PriorCondition;
-  questionWait?: { taskId: string; commentId: string };
-  scheduledCheck?: { scope: string; failure?: { code: string; detail: string; at: string } };
-  consumedBlockers?: { blocker: PriorCondition; fingerprint: string }[];
-};
-type PriorHandoff = { workflowState: 'review' | 'waiting' | 'todo'; nextReviewAt?: string | null;
-  waiting?: { reason: string; detail: string; blocker?: PriorCondition }; checkScope?: string;
-  nextStep?: string; deliveries?: TaskBoard.WorkDelivery[] };
+type StoredCondition = { kind: string; taskId?: string; at?: string };
+type StoredStep = { id: string; scope: string; requires: StoredCondition[] };
+type StoredSchedule = { nextSteps?: StoredStep[]; nextReviewAt?: string | null;
+  waiting?: { reason: string; detail: string; since: string; blocker?: { taskId: string } } | null;
+  deliveries?: unknown[]; nextStep?: string; checkScope?: string };
+
+function schedule(value: StoredSchedule): { wakeAt: string | null; dependencies: string[] } {
+  const conditions = value.nextSteps?.flatMap(step => step.requires) ?? [];
+  return { wakeAt: conditions.flatMap(c => c.kind === 'time' && c.at ? [c.at] : []).sort()[0] ?? value.nextReviewAt ?? null,
+    dependencies: [...new Set([...conditions.flatMap(c => c.taskId ? [c.taskId] : []),
+      ...(value.waiting?.blocker ? [value.waiting.blocker.taskId] : [])])] };
+}
+
+/** Historical structured planning becomes ordinary context; it never gates execution. */
+export function upgradeCommentRecord(comment: TaskBoard.Comment): TaskBoard.Comment {
+  if (!comment.handoff) return comment;
+  const handoff = comment.handoff as TaskBoard.Handoff & StoredSchedule;
+  if (!('nextSteps' in handoff || 'nextReviewAt' in handoff || 'waiting' in handoff)) return comment;
+  return { ...comment, handoff: { workflowState: handoff.workflowState,
+    ...schedule(handoff), ...(handoff.wakeAt !== undefined ? { wakeAt: handoff.wakeAt } : {}),
+    ...(handoff.dependencies ? { dependencies: handoff.dependencies } : {}) } };
+}
 
 type StoredFinding = { evidence?: TaskBoard.Artifact[]; [key: string]: unknown };
 
@@ -39,6 +48,10 @@ function preserveTaskFindings(task: TaskBoard.Task): TaskBoard.Task {
   const { latestChecks, ...current } = task as TaskBoard.Task & { latestChecks?: StoredFinding[] };
   const groups: { source: string; findings: StoredFinding[] }[] = [];
   if (latestChecks?.length) groups.push({ source: 'task', findings: latestChecks });
+  const deliveries = (task as TaskBoard.Task & { deliveries?: { delivery: { artifacts: TaskBoard.Artifact[]; codeReferences: TaskBoard.CodeReference[] }; result: TaskBoard.ObjectPin }[] }).deliveries;
+  if (deliveries?.length) groups.push({ source: 'saved-material', findings: deliveries.map(receipt => ({
+    result: receipt.result, codeReferences: receipt.delivery.codeReferences, evidence: receipt.delivery.artifacts,
+  })) });
   const comments = current.comments.map(comment => {
     if (!comment.handoff) return comment;
     const { checks, ...handoff } = comment.handoff as TaskBoard.Handoff & { checks?: StoredFinding[] };
@@ -73,57 +86,55 @@ function preserveTaskFindings(task: TaskBoard.Task): TaskBoard.Task {
   return { ...current, comments };
 }
 
-function importedConditions(task: PriorTask, blocker?: PriorCondition): TaskBoard.Condition[] {
-  const conditions: TaskBoard.Condition[] = (task.fields.dependencies ?? []).map(taskId => ({ kind: 'task', taskId, until: 'done' }));
-  if (blocker) {
-    if (blocker.until === 'delivery') {
-      const consumed = task.consumedBlockers?.find(value => value.blocker.taskId === blocker.taskId && value.blocker.key === blocker.key)?.fingerprint;
-      conditions.push({ kind: 'delivery', taskId: blocker.taskId, key: blocker.key!, ...(consumed ? { after: consumed } : {}) });
-    } else conditions.push({ kind: 'task', taskId: blocker.taskId, until: blocker.until });
-  }
-  return conditions;
-}
-
-function importHandoff(value: unknown, task: PriorTask, identity: string): TaskBoard.Handoff {
-  const previous = value as PriorHandoff & Partial<TaskBoard.Handoff>;
-  if (Array.isArray(previous.nextSteps)) return previous as TaskBoard.Handoff;
-  const conditions = importedConditions(task, previous.waiting?.blocker);
-  const questions = openTaskQuestions(task).map(question => ({ kind: 'user' as const, questionId: question.commentId }));
-  const nextSteps: TaskBoard.NextStep[] = [];
-  if (previous.nextReviewAt) nextSteps.push({ id: identity + '-appointment',
-    scope: previous.checkScope ?? previous.waiting?.detail ?? 'Continue the authorized task at its appointment.',
-    requires: [...conditions, { kind: 'time', at: previous.nextReviewAt }] });
-  else if (previous.workflowState !== 'review' && !task.questionWait) nextSteps.push({ id: identity,
-    scope: previous.nextStep ?? previous.waiting?.detail ?? 'Continue the authorized task described in this ticket.',
-    requires: [...conditions, ...(previous.waiting?.reason === 'user' ? questions : [])] });
-  return { workflowState: previous.workflowState, nextSteps, ...(previous.deliveries ? { deliveries: previous.deliveries } : {}) };
-}
-
 export function upgradeTaskRecord(value: TaskBoard.Task): TaskBoard.Task {
-  const prior = preserveTaskFindings(value) as PriorTask;
-  if (Array.isArray(prior.nextSteps)) return prior;
-  const requirement = prior.fields.executionRequirement as StoredRequirement;
-  const { dependencies: _dependencies, nextReviewAt: _appointment, ...fields } = prior.fields;
-  const { waiting, blocker, questionWait, scheduledCheck, consumedBlockers: _consumed, ...base } = prior;
-  const ownQuestions = openTaskQuestions(prior);
-  const nextSteps: TaskBoard.NextStep[] = [];
-  const conditions = importedConditions(prior, blocker);
-  if (prior.fields.nextReviewAt) nextSteps.push({ id: 'imported-appointment',
-    scope: scheduledCheck?.scope ?? waiting?.detail ?? 'Continue the authorized task at its appointment.',
-    requires: [...conditions, { kind: 'time', at: prior.fields.nextReviewAt }] });
-  if (!questionWait && !scheduledCheck && !['backlog', 'review', 'done', 'cancelled'].includes(prior.workflowState)) nextSteps.push({
-    id: 'imported-work', scope: waiting?.detail ?? 'Continue the authorized task described in this ticket; identify and preserve any answer-dependent prerequisites.',
-    requires: [...conditions, ...(waiting?.reason === 'user' ? ownQuestions.map(question => ({ kind: 'user' as const, questionId: question.commentId })) : [])],
-  });
-  const technical = waiting && ['host', 'capability', 'workspace', 'external_outcome', 'publication', 'workflow'].includes(waiting.reason)
-    ? { reason: waiting.reason as TaskBoard.RuntimeWait['reason'], detail: waiting.detail, since: waiting.since,
-      retryAt: ['host', 'capability', 'workspace'].includes(waiting.reason) ? new Date(Date.parse(waiting.since) + 30_000).toISOString() : null }
-    : questionWait ? { reason: 'workflow' as const, detail: 'The former cross-ticket user wait needs an explicit task delivery or a genuine own question.', since: prior.updatedAt, retryAt: null } : null;
-  return { ...base, fields: { ...fields, executionRequirement: upgradeRequirement(requirement),
+  const prior = preserveTaskFindings(value) as TaskBoard.Task & StoredSchedule & {
+    fields: TaskBoard.TaskFields & { dependencies?: string[]; nextReviewAt?: string | null };
+    blocker?: { taskId: string }; questionWait?: unknown; scheduledCheck?: unknown;
+    consumedBlockers?: unknown; consumedSteps?: unknown; continuation?: unknown; commentStore?: unknown;
+  };
+  const { nextSteps, consumedSteps, deliveries, waiting, blocker, questionWait, scheduledCheck,
+    consumedBlockers, continuation, ...base } = prior;
+  const { dependencies: fieldDependencies, nextReviewAt, ...fields } = prior.fields;
+  const requirement = fields.executionRequirement as StoredRequirement;
+  const imported = schedule({ ...(nextSteps ? { nextSteps } : {}), nextReviewAt: nextReviewAt ?? null,
+    ...(waiting ? { waiting } : {}) });
+  const comments = prior.comments.map(upgradeCommentRecord);
+  if (!prior.commentStore && nextSteps?.length) {
+    const context = 'Previous scheduling notes (context only; decide the work from the ticket):\n\n' +
+      nextSteps.map(step => step.scope + (step.requires.length ? '\n' + JSON.stringify(step.requires) : '')).join('\n\n') +
+      (deliveries?.length ? '\n\nSaved material references:\n' + JSON.stringify(deliveries) : '');
+    for (let offset = 0; offset < context.length; offset += 48000) {
+      const commentId = 'schedule-context-' + prior.updatedAt + '-' + offset;
+      if (comments.some(comment => comment.commentId === commentId)) continue;
+      comments.push({ commentId, sequence: comments.length + 1,
+        author: { principalId: 'task-board-record-upgrade', serviceNodeId: 'task-board', generation: 1, source: 'recovery' },
+        authorKind: 'system', purpose: 'update', body: context.slice(offset, offset + 48000),
+        requests: [], responses: [], attachments: [], run: null, turnId: null, replyTo: null,
+        delivery: null, createdAt: prior.updatedAt, operationId: commentId });
+    }
+  }
+  const obsoleteIssue = prior.completionIssue?.code.startsWith('task_board_handoff_') ||
+    prior.completionIssue?.code.startsWith('task_board_recovery_');
+  const task: TaskBoard.Task = { ...base,
+    fields: { ...fields, executionRequirement: upgradeRequirement(requirement),
       ...(requirement?.kind === 'capability' ? { requiredCapabilities: [...new Set([...(fields.requiredCapabilities ?? []), requirement.capabilityKey])] } : {}) },
-    nextSteps, runtimeWait: technical, consumedSteps: [],
-    comments: prior.comments.map(comment => comment.handoff ? { ...comment, handoff: importHandoff(comment.handoff, prior, 'imported-' + comment.sequence) } : comment),
-    openQuestionCount: ownQuestions.length };
+    wakeAt: prior.wakeAt === undefined ? imported.wakeAt : prior.wakeAt,
+    dependencies: prior.dependencies ?? [...new Set([...imported.dependencies, ...fieldDependencies ?? [], ...(blocker ? [blocker.taskId] : [])])],
+    runtimeWait: prior.runtimeWait && (prior.runtimeWait.reason as string) !== 'workflow' ? prior.runtimeWait : null,
+    comments };
+  if (obsoleteIssue) { delete task.completionIssue; if (!task.claim && task.workflowState === 'waiting') task.workflowState = 'todo'; }
+  if (task.completionIssue) {
+    const { attempts: _attempts, ...issue } = task.completionIssue as TaskBoard.CompletionIssue & { attempts?: number };
+    task.completionIssue = issue;
+  }
+  if (task.workflowState === 'in_progress' && !task.claim && task.fields.control === 'agent') task.workflowState = 'todo';
+  return task;
+}
+
+export function upgradeRunRecord(run: TaskBoard.Run): TaskBoard.Run {
+  if (!run.executionContext) return run;
+  const { workflowState, latestResult, acceptedReview } = run.executionContext;
+  return { ...run, executionContext: { workflowState, latestResult, acceptedReview } };
 }
 
 export function upgradeConfigurationRecord(configuration: TaskBoard.Configuration): TaskBoard.Configuration {

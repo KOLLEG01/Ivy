@@ -10,12 +10,12 @@
     },
     {
       "key": "task-board/task",
-      "version": "2.3.0",
+      "version": "3.0.0",
       "definition": "#/$defs/Task"
     },
     {
       "key": "task-board/run",
-      "version": "2.2.0",
+      "version": "3.0.0",
       "definition": "#/$defs/Run"
     },
     {
