@@ -1,4 +1,4 @@
-use ivy_contracts::{IvyError, IvyJson, JsString, json::parse};
+use ivy_contracts::{IvyError, IvyJson, JsString, Outcome, json::parse};
 use ivy_hive::store::Store;
 use ivy_host_executor::reset_storage::{ResetBootstrap, ResetStorage, hive_reset_storage};
 use std::{
@@ -109,6 +109,13 @@ fn bootstrapped(path: &Path) -> bool {
     roots == 2 && contracts == 1
 }
 
+fn stored_epoch(path: &Path) -> String {
+    let store = Store::open(path).unwrap();
+    let epoch = store.metadata("runtime_epoch").unwrap().unwrap();
+    store.close().unwrap();
+    epoch
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn real_owner_arguments_late_clock_and_errors_cross_the_service_boundary() {
     fn send_sync<T: Send + Sync>() {}
@@ -124,9 +131,7 @@ async fn real_owner_arguments_late_clock_and_errors_cross_the_service_boundary()
     assert!(!path.exists());
 
     let runtime_thread = std::thread::current().id();
-    let clock_path = path.clone();
     let epoch = input.required("epoch").unwrap().as_str().unwrap();
-    let expected = input.required("values").unwrap().clone();
     let at = input
         .required("at")
         .unwrap()
@@ -139,21 +144,12 @@ async fn real_owner_arguments_late_clock_and_errors_cross_the_service_boundary()
         .rebootstrap(request(path.clone(), &input, move || {
             assert_ne!(std::thread::current().id(), runtime_thread);
             clock_calls.fetch_add(1, Ordering::SeqCst);
-            let store = Store::open(&clock_path).unwrap();
-            assert_eq!(
-                store.metadata("runtime_epoch").unwrap(),
-                Some(epoch.clone())
-            );
-            store.close().unwrap();
-            assert_eq!(
-                ivy_hive::runtime_reset::saved_instructions(&clock_path).unwrap(),
-                expected
-            );
             Ok(at.clone())
         }))
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(stored_epoch(&path), epoch);
     assert_eq!(
         binding.saved_instructions(path.clone()).await.unwrap(),
         input.required("values").unwrap().clone()
@@ -161,16 +157,21 @@ async fn real_owner_arguments_late_clock_and_errors_cross_the_service_boundary()
     assert!(bootstrapped(&path));
 
     let failed = temp.0.join("clock-failure.sqlite");
+    let clock_error = IvyError::new("fixture_clock", "Retain the original owner error.")
+        .with_outcome(Outcome::Unknown)
+        .with_details(IvyJson::object([("boundary", "root-clock".into())]));
+    let returned_error = clock_error.clone();
     let error = binding
-        .rebootstrap(request(failed.clone(), &input, || {
-            Err(IvyError::new(
-                "fixture_clock",
-                "Retain the original owner error.",
-            ))
+        .rebootstrap(request(failed.clone(), &input, move || {
+            Err(returned_error.clone())
         }))
         .await
         .unwrap_err();
-    assert_eq!(error.code, "fixture_clock");
+    assert_eq!(error, clock_error);
+    // Inspect only after Hive closes its Store. The retained epoch/instructions
+    // and absent bootstrap prove the clock failed after restore, without
+    // reentering the exclusive storage owner from inside its clock callback.
+    assert_eq!(stored_epoch(&failed), epoch);
     assert_eq!(
         binding.saved_instructions(failed.clone()).await.unwrap(),
         input.required("values").unwrap().clone()
