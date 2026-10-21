@@ -7,7 +7,7 @@ import type { TaskBoardEngine } from './engine.js';
 export async function syncNativeComments(engine: TaskBoardEngine, runId: string): Promise<void> {
   const run = await engine.store.read('task-board/run', runId);
   if (!run.value.primaryResourceRef || !run.value.turnId) return;
-  const current = await engine.store.read('task-board/task', run.value.taskId);
+  const current = await engine.store.read('task-board/task', run.value.taskId, true, false, true);
   if (current.value.claim?.run?.objectId !== runId) return;
   const page = await serviceTools(engine.store.client, run.value.target.serviceNodeId,
     [{ namespace: 'agent', interfaceVersion: '1.0.0' }]).read('agent.inputs', { includeExpired: true, limit: 128 }) as Agent.PendingInputPage;

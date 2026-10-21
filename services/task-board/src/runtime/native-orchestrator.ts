@@ -264,19 +264,25 @@ export class TaskBoardNativeOrchestrator {
           store.localKey(prior.object.objectId) ===
           "task-board/native-turn-snapshot"
         ) {
-          const saved = await this.evidence.snapshot(run.pin, prior);
-          if (
-            saved.document.value.status === status &&
-            saved.document.value.epoch === inspection.turns.epoch
-          )
-            snapshot = prior;
+          try {
+            const saved = await this.evidence.snapshot(run.pin, prior);
+            if (
+              saved.document.value.status === status &&
+              saved.document.value.epoch === inspection.turns.epoch
+            )
+              snapshot = prior;
+          } catch (error) {
+            // An old observation can outlive its Run revision. Reconfirm the same
+            // native turn from the fresh inspection instead of retrying stale proof.
+            if (!(error instanceof IvyError) || error.code !== 'revision_pruned') throw error;
+          }
         }
       }
       if (status === "inProgress") {
         if (active && !run.value.cancellation && inspection.turns.epoch === run.value.nativeEpoch) {
           const previousCall = run.value.calls.steer ? (await store.read('task-board/native-call', run.value.calls.steer)).value : null;
           const previous = previousCall?.ownerPhase === 'succeeded' ? previousCall.origin : null;
-          const initial = (await store.read('task-board/task', { objectId: run.value.taskId, revision: run.value.originalRequest.expectedRevision })).value;
+          const initial = (await store.read('task-board/task', { objectId: run.value.taskId, revision: run.value.originalRequest.expectedRevision }, true, false, true)).value;
           const commentIds = task.value.commentDeliveries.filter(value => value.state === 'queued' && !run.value.originalRequest.commentIds.includes(value.commentId)).map(value => value.commentId);
           const baseline = previous?.kind === 'steer' ? previous : { workRevision: initial.workRevision, commentIds: [] as string[] };
           const observedDependencies = await dependencySnapshot(store, task.value);

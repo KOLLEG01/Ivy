@@ -107,14 +107,14 @@ export class TaskBoardScheduler {
           skipped.push(`${node.hostId}: native agent is ${status.state}`);
           continue;
         }
-        const profile = (await tools.read(
+        const profile = requiredCapabilities.length ? (await tools.read(
           "agent.capabilities",
           {},
-        )) as Agent.CapabilityProfile;
+        )) as Agent.CapabilityProfile : null;
         if (requirement?.kind === "host" && node.hostId !== requirement.hostId)
           continue;
         const missing = requiredCapabilities.filter(
-          (key) => !profile.capabilities.some((value) => value.key === key),
+          (key) => !profile!.capabilities.some((value) => value.key === key),
         );
         if (missing.length) {
           capabilityGap ??= { hostId: node.hostId, missing };
@@ -180,7 +180,8 @@ export class TaskBoardScheduler {
     );
     const runs = new Map<string, number>();
     let cursor: string | undefined;
-    do {
+    // Load balancing cannot change the choice when only one host is eligible.
+    while (candidates.length > 1) {
       const page = await this.engine.store.page("task-board/run", {
         limit: 50,
         where: {
@@ -208,7 +209,8 @@ export class TaskBoardScheduler {
         );
       }
       cursor = page.nextCursor ?? undefined;
-    } while (cursor);
+      if (!cursor) break;
+    }
     candidates.sort((a, b) => {
       const aProject =
         task.value.fields.workspaceRequirement.kind === "existing_project" &&

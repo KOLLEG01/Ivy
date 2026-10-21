@@ -95,6 +95,10 @@ export class TaskBoardReconciler {
     this.scheduler = new TaskBoardScheduler(engine);
     this.signals = new TaskBoardNativeSignals(engine);
     engine.onTaskChanged = id => this.taskChanged(id);
+    engine.runIssue = id => {
+      const failure = this.failures.get(id);
+      return failure ? failure.code + ': ' + failure.message : undefined;
+    };
   }
   get recovered(): boolean {
     return this.recovering === null;

@@ -329,6 +329,35 @@ test('Run orchestration starts once, leaves unchanged polls ephemeral and comple
   const finalFrames = f.f.frames.length; await f.first.step(f.runId); assert.equal(f.f.frames.length, finalFrames);
 });
 
+for (const priorStatus of ['inProgress', 'completed'])
+test(`completion refreshes a ${priorStatus} observation whose Run revision was pruned`, async t => {
+  const f = await fixture(t); await f.first.drain(f.runId);
+  const engine = f.f.w.f.first, original = await f.current();
+  f.status(priorStatus);
+  const inspection = await f.first.inspector.find(original.pin);
+  assert.equal(inspection.kind, 'found'); if (inspection.kind !== 'found') throw new Error('Missing fixture turn.');
+  const snapshot = await f.first.evidence.saveSnapshot(original.pin, inspection.metadata, inspection.turns);
+  const task = await engine.store.read('task-board/task', original.value.taskId);
+  await engine.nativeUpdate({ action: 'nativeUpdate', operationId: randomUUID(), taskId: task.pin.objectId,
+    expectedRevision: task.pin.revision, run: original.pin, change: { kind: 'readSnapshot', snapshot, notificationCursor: 0 } });
+  const read = engine.store.read.bind(engine.store);
+  let prunedReads = 0;
+  t.mock.method(engine.store, 'read', async (...args: Parameters<typeof read>) => {
+    const [key, pin] = args;
+    if (key === 'task-board/run' && typeof pin !== 'string' && pin.objectId === original.pin.objectId && pin.revision === original.pin.revision) {
+      prunedReads++; throw new IvyError('revision_pruned', 'The obsolete observation revision was collected.');
+    }
+    return read(...args);
+  });
+  f.status('completed'); await f.first.drain(f.runId);
+  const completed = await f.current();
+  assert.equal(completed.value.phase, 'completed'); assert.equal(prunedReads, 1);
+  assert.equal((await engine.store.read('task-board/result', completed.value.result!)).value.content.summary, 'Second');
+  assert.equal((await engine.store.read('task-board/task', task.pin.objectId)).value.claim, null);
+  assert.equal(f.f.frames.filter(frame => frame['method'] === 'turn/start').length, 1);
+  assert.equal((await engine.store.page('task-board/result', { limit: 2 })).items.length, 1);
+});
+
 test('a ticket handoff completes without requesting any output history', async t => {
   const f = await fixture(t); await f.first.drain(f.runId);
   const engine = f.f.w.f.first, task = await engine.store.read('task-board/task', (await f.current()).value.taskId);

@@ -57,8 +57,15 @@ test("scheduler allocates a Todo Task and retains one prepared attempt", async (
   const f = taskBoardFixture(t),
     scheduler = new TaskBoardScheduler(f.first),
     planned = await f.planned("agent");
+  const page = f.first.store.page.bind(f.first.store);
+  let runScans = 0;
+  t.mock.method(f.first.store, 'page', async (...args: Parameters<typeof page>) => {
+    if (args[0] === 'task-board/run') runScans++;
+    return page(...args);
+  });
   const outcome = await scheduler.task(planned.task.objectId);
   assert.ok(outcome?.run);
+  assert.equal(runScans, 0, 'A single eligible host needs no load-balancing scan.');
   const task = await f.first.store.read("task-board/task", outcome.task!);
   const run = await f.first.store.read("task-board/run", outcome.run!);
   assert.equal(task.value.workflowState, "in_progress");

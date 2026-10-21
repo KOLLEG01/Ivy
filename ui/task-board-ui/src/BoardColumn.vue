@@ -15,7 +15,7 @@ import {
   Tag,
   User,
 } from "@lucide/vue";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   Button,
   DropdownMenu,
@@ -28,10 +28,10 @@ import {
   StatusBadge,
 } from "@ivy/ui";
 import { usePage } from "../../../packages/ui-client/src/runtime";
-import { readCard } from './card-read';
+import { invalidateRuntimeCards, readCard } from './card-read';
 import { mapConcurrent } from '../../../packages/ui-client/src/concurrency';
 import { useCommentVisibility } from './comment-visibility';
-import { and, base, client, taskContractVersions, tr } from "./runtime";
+import { and, base, client, notifications, taskContractVersions, tr } from "./runtime";
 import type { TaskBoard } from "./runtime";
 import { taskFilter } from "./task-filter";
 import {
@@ -91,6 +91,10 @@ const toggleOrder = () => {
 const manual = computed(() => !props.archived && order.value === "manual");
 const ranked = computed(() => manual.value && props.workspace.role === "user");
 const showCrossAgent = useCommentVisibility();
+const serviceScope = (node: string) => 'services/task-board/' + node;
+watch(() => props.workspace.serviceNodeId, (node, _previous, cleanup) => {
+  cleanup(notifications.subscribeChanges([serviceScope(node)], () => invalidateRuntimeCards(node)));
+}, { immediate: true });
 const pages = usePage(async (signal, cursor) => {
   const waiting = props.column.id === 'waiting' && !props.archived;
   const load = (cursor: string | null) => client.request('objects.query', {
@@ -136,7 +140,8 @@ const pages = usePage(async (signal, cursor) => {
   return { nextCursor: result.nextCursor, items };
 }, 15000, () => 'ivy.task-board.column:' + JSON.stringify([base.href, order.value, props.workspace.serviceNodeId,
   props.workspace.callerPrincipalId, props.column.id, !!props.archived, props.swimlane,
-  ['q', 'status', 'control', 'host', 'category', 'project'].map(key => props.query.get(key))]), ['objects/task-board/task']);
+  ['q', 'status', 'control', 'host', 'category', 'project'].map(key => props.query.get(key))]),
+  () => ['objects/task-board/task', serviceScope(props.workspace.serviceNodeId)]);
 
 type Item = { id: string; category: string; group: string; context: TransitionContext };
 const dragging = ref<Item | null>(null),

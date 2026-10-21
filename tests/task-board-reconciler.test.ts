@@ -137,9 +137,13 @@ test('recovery errors stay visible through backoff and clear only after a succes
   await process(); await process();
   assert.equal(attempts, 1);
   assert.ok(runtime.diagnostics.some(value => value.code === 'fixture_recovery_error'));
+  const task = (await w.f.first.store.read('task-board/task', w.state().task.objectId)).value;
+  assert.equal(w.f.first.condition(task).state, 'failed');
+  assert.match(w.f.first.condition(task).detail, /Read failed.*retry/);
   now += 30_001; await process();
   assert.equal(attempts, 2);
   assert.deepEqual(runtime.diagnostics, []);
+  assert.notEqual(w.f.first.condition(task).state, 'failed', 'A successful retry clears the card error without changing the workflow.');
 });
 
 const todo = async (

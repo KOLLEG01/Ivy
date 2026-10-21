@@ -4,6 +4,10 @@ import type { TaskBoard } from './runtime';
 
 // Global task hints refresh the query, but unchanged card revisions need no provider call.
 const cards = new Map<string, { revision: number; expires: number; view: TaskBoard.TaskCardView }>();
+export function invalidateRuntimeCards(node: string): void {
+  for (const [key, card] of cards)
+    if (key.startsWith(node + ':') && card.view.task.claim) cards.delete(key);
+}
 export async function readCard(node: string, id: string, revision: number, signal: AbortSignal): Promise<TaskBoard.TaskCardView> {
   const key = node + ':' + id, cached = cards.get(key);
   if (cached?.revision === revision && cached.expires > Date.now()) return cached.view;

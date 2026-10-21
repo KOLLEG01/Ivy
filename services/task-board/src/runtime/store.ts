@@ -24,6 +24,7 @@ import type { ContractKey, ContractValues } from "./schema.js";
 import { TaskComments } from './comment-store.js';
 import { operationReceipt } from './operation-receipt.js';
 import { protectRunSources } from './revision-protection.js';
+import { connectionOwner } from '../../../../packages/sdk/src/connection-owner.js';
 import { taskReferences } from './reference-pages.js';
 
 export interface Document<K extends ContractKey> {
@@ -184,8 +185,12 @@ export class TaskBoardStore {
   withReadCache<T>(work: () => Promise<T>): Promise<T> {
     return this.reads.getStore() ? work() : this.reads.run(new Map(), work);
   }
+  connectionOwner(serviceNodeId: string) {
+    // Preserve the SDK's per-connection identity cache and disconnect fence.
+    return connectionOwner(this.connection, serviceNodeId);
+  }
   constructor(
-    client: RpcClient,
+    private readonly connection: RpcClient,
     readonly rootObjectId: string | null,
     dataRoot?: string,
     readonly historyLimits = { count: 10_000, bytes: 256 * 1024 * 1024 },
@@ -195,7 +200,7 @@ export class TaskBoardStore {
     const requests = new RequestQueue(48, 16, 512), idleSignal = new AbortController().signal;
     this.client = { request: async (method, params, options) => {
       const release = await requests.acquire(method === 'tools.call' || method === 'discovery.call', options?.signal ?? idleSignal);
-      try { return await client.request(method, params, options); }
+      try { return await connection.request(method, params, options); }
       finally { release(); }
     } };
     this.dataRoot = dataRoot ?? null;

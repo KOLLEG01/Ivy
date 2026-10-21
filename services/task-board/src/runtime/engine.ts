@@ -2,7 +2,6 @@ import { commentsPending, peerComment, queuedInput, workspaceIdentity } from './
 import { dependencySnapshot, validateDependencies, wakeCondition } from './wake.js';
 import { publishBrowserNotice } from '../../../../packages/sdk/src/node.js';
 import { digest, hashJson } from "../../../../packages/sdk/src/node.js";
-import { connectionOwner } from "../../../../packages/sdk/src/connection-owner.js";
 import { IvyError, requireThat } from "../../../../packages/sdk/src/node.js";
 import { validateTaskBoard } from "../../../../packages/sdk/src/node.js";
 import type { TaskBoard, Wire } from "../../../../packages/sdk/src/node.js";
@@ -114,6 +113,7 @@ export class Publication {
 /** Authenticated transitions and durable claim/Run creation. Native execution is a separate observer. */
 export class TaskBoardEngine {
   onTaskChanged?: (taskId: string) => void;
+  runIssue?: (runId: string) => string | undefined;
   readonly operations: TaskBoardOperations;
   readonly coordination: TaskBoardCoordination;
   readonly checks: TaskBoardChecks;
@@ -142,10 +142,7 @@ export class TaskBoardEngine {
     );
   }
   async verifyOwner(): Promise<void> {
-    const node = await connectionOwner(
-      this.store.client,
-      this.owner.serviceNodeId,
-    );
+    const node = await this.store.connectionOwner(this.owner.serviceNodeId);
     requireThat(
       node.principalId === this.settings.principalId &&
         node.serviceName === "task-board" &&
@@ -347,6 +344,8 @@ export class TaskBoardEngine {
     return receiptOnly ? operationReceipt(operation.value) : operation.value;
   }
   condition(task: TaskBoard.Task, wake?: TaskBoard.ExecutionCondition): TaskBoard.ExecutionCondition {
+    const issue = task.claim?.run && this.runIssue?.(task.claim.run.objectId);
+    if (issue) return { state: 'failed', detail: issue.slice(0, 2016) + ' Automatic recovery will retry.' };
     const originalError = task.completionIssue && this.store.failedHandoff(task.completionIssue.run.objectId);
     return executionCondition({
       workflowState: task.workflowState,

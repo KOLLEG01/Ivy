@@ -31,6 +31,15 @@ test('actual TaskBoard service serves manual tasks and retains caller outcomes a
     publicBaseUrl: base, dataRoot: join(root, 'service-state'), artifactRoot: resolve('.'), credential: token, settings };
   const path = join(root, 'task-board.json'); await atomicJson(path, config);
   const service = await startTaskBoard(path); cleanups.push(() => service.close()); await service.service.waitReady(); await until(() => service.runtime?.recovered === true);
+  const connection = service.service.connection, request = connection.request.bind(connection);
+  let ownerReads = 0;
+  const ownerProbe = t.mock.method(connection, 'request', async (...args: Parameters<typeof request>) => {
+    if (args[0] === 'serviceNodes.get') ownerReads++;
+    return request(...args);
+  });
+  for (let index = 0; index < 10; index++) await service.runtime!.engine.verifyOwner();
+  assert.equal(ownerReads, 0, 'The request queue must preserve the established connection ownership cache.');
+  ownerProbe.mock.restore();
   const user = new HiveClient(base, { credential: userToken }), worker = new HiveClient(base, { credential: workerToken });
   const tools = await user.request('tools.list', { namespace: 'task-board', serviceNodeId: 'task-board-test' }); assert.ok(tools.items.some(item => item.definition.name === 'read')); assert.ok(tools.items.some(item => item.definition.name === 'list')); assert.ok(tools.items.some(item => item.definition.name === 'categories'));
   const workspace = await callBound(user, await discover(user, 'task-board.workspace', { serviceNodeId: 'task-board-test' }), {}) as TaskBoard.WorkspaceInfo;
