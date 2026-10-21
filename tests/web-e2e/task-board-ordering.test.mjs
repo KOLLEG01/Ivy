@@ -7,7 +7,7 @@ import { choose } from './fixtures/select.mjs';
 for (const width of [1440, 390]) test(`category swimlanes keep every priority and manual column available at ${width}px`, { timeout: 120000 }, async t => {
   const f = await taskBoardFixture(t, { viewport: { width, height: 1000 } });
   const result = { summary: 'Retained manual result.', artifacts: [], codeReferences: [], limitations: [], repositoryResult: null };
-  const columns = [['Waiting', 'todo'], ['In progress', 'in_progress'], ['Review', 'review'], ['Done', 'done'], ['Backlog', 'backlog']];
+  const columns = [['Todo', 'todo'], ['Waiting', 'waiting'], ['In progress', 'in_progress'], ['Review', 'review'], ['Done', 'done'], ['Backlog', 'backlog']];
   for (const [label, workflowState] of columns) {
     for (const [suffix, category, priority] of [['A low', 'A', 1], ['B high', 'B', 4], ['A high', 'A', 4]]) {
       await f.invoke({ action: 'create', workflowState, ...(workflowState === 'review' ? { initialResult: result } : {}), fields: {

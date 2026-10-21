@@ -21,6 +21,9 @@ UI requirements: [UI](UI.md).
   Category is organizational metadata, not a capability or execution target.
 - Creation stores its selected workflow state directly; omission means Todo for every caller.
   Explicit Backlog preserves unscheduled preparation. Waiting resumes on external comments, watched ticket changes or an optional `wakeAt` appointment.
+  An idle agent wait without an open question, watched ticket or appointment is an execution error.
+  Retry it after thirty seconds until the agent continues work, submits for review or records a real wait.
+  This recovery does not restart manual work, Backlog, Review, terminal tickets or unresolved executions.
   Manual In Progress creates no native execution. Manual Review requires an initial final Result;
   initial final material may also accompany manual Done. Agent In Progress and Review require
   their real native claim/completion workflows and cannot be fabricated by creation. Done and
@@ -70,7 +73,7 @@ UI requirements: [UI](UI.md).
   Previous contexts remain linked until ticket archival. It requires resolved execution; ordinary continuation reuses the
   current native task. Ticket content, comments, attachments and previous Runs remain available.
 - User-controlled task work never starts autonomously. Agent-controlled Todo requests work;
-  admission requires an available host, workspace and execution capacity. A missing
+  admission requires an available host and workspace. A missing
   execution requirement inherits the TaskBoard execution default; an explicit automatic
   requirement allocates to the least busy eligible AgentManager;
   an explicit host narrows that pool. Required capabilities (shown as the Task's dependencies)
@@ -120,9 +123,8 @@ UI requirements: [UI](UI.md).
   continuing. User-controlled work and Backlog remain unscheduled. A task waiting for a host
   names why each AgentManager was skipped. Manual rank in any board column is the ticket's Hive
   sibling order; it orders the board only, and scheduling still follows priority.
-- Admission enforces `scheduler.maxConcurrentRuns` (default 10) across all unfinished Runs,
-  including conversations, recovery, user input and unknown outcomes. Reconciliation remains
-  available when execution capacity is full. After `scheduler.stallWarningMs` (default five
+- There is no global limit on concurrent Runs. Workspace reservations and native outcome
+  reconciliation still prevent conflicting or duplicate execution. After `scheduler.stallWarningMs` (default five
   minutes) without observed native progress, diagnostics warn while preserving the original
   claim. Native activity clears the warning; explicit user-input waits do not count as stalls.
 - Metadata edits preserve Review and Done. Changing an agent assignment reopens those states

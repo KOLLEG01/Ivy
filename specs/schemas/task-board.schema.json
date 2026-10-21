@@ -5817,12 +5817,6 @@
               "minimum": 1,
               "maximum": 50
             },
-            "maxConcurrentRuns": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 256,
-              "default": 10
-            },
             "stallWarningMs": {
               "type": "integer",
               "minimum": 60000,
@@ -5920,12 +5914,6 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 50
-            },
-            "maxConcurrentRuns": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 256,
-              "default": 10
             },
             "stallWarningMs": {
               "type": "integer",

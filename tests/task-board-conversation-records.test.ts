@@ -318,7 +318,7 @@ test('task questions route once, stay out of user badges and are answered by the
   assert.equal(taskCard(view).directCommentCount, 0);
   assert.equal(taskViewPage(view, { task: source.pin.objectId }).openQuestions!.length, 0);
   const gated = { ...view.task, wakeAt: null, dependencies: [] };
-  assert.equal(wakeCondition(gated).state, 'idle');
+  assert.equal(wakeCondition(gated).state, 'blocked_dependency');
   const answered = { ...view.task, comments: [...view.task.comments, { ...comment(2), authorKind: 'agent' as const,
     sourceTaskId: target.task!.objectId, replyTo: 'internal-question' }] };
   assert.equal(openQuestions(answered).length, 0);

@@ -2,7 +2,8 @@ import { Circle, CircleCheck, CircleDashed, CircleDot, CircleEllipsis, CirclePau
 import { tr, type TaskBoard } from './runtime';
 
 export const boardColumns = [
-  { id: 'waiting', title: tr('Wartend', 'Waiting'), states: ['todo', 'waiting'] },
+  { id: 'todo', title: 'Todo', states: ['todo'] },
+  { id: 'waiting', title: tr('Wartend', 'Waiting'), states: ['waiting'] },
   { id: 'in_progress', title: 'In progress', states: ['in_progress'] },
   { id: 'review', title: 'Review', states: ['review'] },
   { id: 'done', title: 'Done', states: ['done', 'cancelled'] },
@@ -13,16 +14,14 @@ export const waitingGroups = [
   { id: 'dependency', title: tr('Abhängigkeit', 'Dependency') },
   { id: 'runtime', title: tr('Laufzeit', 'Runtime') },
   { id: 'time', title: tr('Zeit', 'Time') },
-  { id: 'ready', title: tr('Bereit', 'Ready') },
-  { id: 'unscheduled', title: tr('Ohne Wiederanlauf', 'Unscheduled') },
 ] as const;
-export function waitingGroup(task: TaskBoard.TaskCard, condition: TaskBoard.ExecutionCondition, dependency = false, now = Date.now()) {
+export function waitingGroup(task: TaskBoard.TaskCard, condition: TaskBoard.ExecutionCondition) {
   if (condition.state === 'failed') return 'error';
   if (condition.state === 'deferred') return 'time';
   if (condition.state === 'blocked_dependency') return 'dependency';
   if (['blocked_environment', 'outcome_unknown', 'recovering', 'workflow_attention', 'publishing', 'starting', 'active'].includes(condition.state)) return 'runtime';
   if (condition.state === 'needs_user' || task.claim?.phase === 'waiting_input') return 'user';
-  return condition.state === 'queued' ? 'ready' : 'unscheduled';
+  return task.fields.control === 'user' ? 'user' : 'error';
 }
 /** Matches TaskBoard: after any attempt, claim, Run or native context the host and project are fixed. */
 export const taskStarted = (task: TaskBoard.Task) =>

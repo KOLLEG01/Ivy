@@ -376,8 +376,7 @@ const dropAction = (column: string): BoardTransition | undefined => {
       backlog: "backlog",
       todo: "todo",
       in_progress: "in_progress",
-      // Waiting contains several reasons; dropping here only queues Todo, never invents a blocker.
-      waiting: "todo",
+      waiting: "waiting",
       done: "done",
     } as Record<string, BoardTransition>
   )[column];

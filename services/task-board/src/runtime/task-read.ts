@@ -17,7 +17,7 @@ export async function readTask(store: TaskBoardStore, header: Document<'task-boa
   const summary = indexed || commentSummary(task, header.pin.objectId);
   const total = indexed ? tree.length : task.comments.length;
   const wake = task.claim || task.publication ? undefined :
-    wakeCondition(task);
+    wakeCondition(task, summary.questions.filter(question => question.open));
   const executionCondition = condition(task, wake);
   const view: TaskBoard.TaskView = { object: header.pin, task, executionCondition, archived: header.metadata.effectivelyArchived };
   if (query.view === 'card') return taskCard(view, summary, total);

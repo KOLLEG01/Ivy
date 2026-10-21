@@ -728,7 +728,7 @@ test(
     ).toHaveCount(0);
     await expect(
       f.page
-        .getByRole("region", { name: "Waiting", exact: true })
+        .getByRole("region", { name: "Todo", exact: true })
         .getByRole("heading", { name: "First category task", exact: true }),
     ).toBeVisible();
     const blocked = await f.invoke({
@@ -783,10 +783,10 @@ test(
     // Other columns follow priority until manual order is chosen; the choice persists in this browser.
     await f.invoke({ action: "create", workflowState: "todo", fields: { ...fields("Calm todo"), priority: 1 } });
     await f.invoke({ action: "create", workflowState: "todo", fields: { ...fields("Urgent todo"), priority: 4 } });
-    const todo = f.page.getByRole("region", { name: "Waiting", exact: true });
+    const todo = f.page.getByRole("region", { name: "Todo", exact: true });
     const todoOrder = () => todo.locator("article h3").allTextContents().then((values) => values.map((value) => value.trim()));
     await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
-    await todo.getByRole("button", { name: "Order Waiting by priority", exact: true }).click();
+    await todo.getByRole("button", { name: "Order Todo by priority", exact: true }).click();
     await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
     await todo.getByRole("button", { name: "Actions for Urgent todo" }).click();
     await f.page.getByRole("menuitem", { name: "Move to top", exact: true }).click();
@@ -796,7 +796,7 @@ test(
     await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
     await f.page.reload();
     await expect.poll(todoOrder).toEqual(["Calm todo", "Urgent todo"]);
-    await todo.getByRole("button", { name: "Order Waiting manually", exact: true }).click();
+    await todo.getByRole("button", { name: "Order Todo manually", exact: true }).click();
     await expect.poll(todoOrder).toEqual(["Urgent todo", "Calm todo"]);
     assert.deepEqual(f.pageErrors, []);
     assert.deepEqual(f.externalRequests, []);

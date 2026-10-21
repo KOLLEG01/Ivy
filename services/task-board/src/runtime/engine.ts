@@ -39,7 +39,6 @@ import { readTask } from './task-read.js';
 import { nextExecutionMode, triggeredByComments } from './execution-mode.js';
 import { validateTaskContent } from './comment-store.js';
 import { sameAssignment } from './handoff.js';
-import { requireExecutionCapacity } from './execution-capacity.js';
 
 /** A Task has run once it has any attempt, claim, Run or native context. */
 export const started = (task: TaskBoard.Task) =>
@@ -1619,7 +1618,6 @@ export class TaskBoardEngine {
       case "start":
       case "continue":
         noClaim();
-        await requireExecutionCapacity(this.store, this.settings);
         requireThat(
           ['todo', 'waiting', 'review'].includes(task.workflowState) || commentRequest,
           "task_board_invalid_transition",

@@ -28,7 +28,6 @@ import { openQuestions, queuedTaskEdits, queuedUserInput } from './conversation.
 import { nextExecutionMode } from './execution-mode.js';
 import { NativeOwner } from '../../../../packages/sdk/src/native-owner.js';
 import { nativeRecord, nativeString } from './native-intent.js';
-import { requireExecutionCapacity } from './execution-capacity.js';
 
 /** Retains an automatic action before invocation and never replaces an uncertain Operation. */
 export class TaskBoardScheduler {
@@ -372,7 +371,6 @@ export class TaskBoardScheduler {
       .slice(0, 256).map(item => item.commentId);
     const feedback = taskPrompt(value, this.engine.owner.serviceNodeId);
     try {
-      await requireExecutionCapacity(this.engine.store, this.engine.settings);
       const allocation = await this.allocate(task, operationId, feedback, hasComments);
       return value.primaryResourceRef
         ? { action: 'continue', ...base, ...allocation, feedback, commentIds }

@@ -279,7 +279,6 @@ defs.OperationReceipt.properties.submittedHash = hash;
 
 defs.Settings = obj({ principalId: id, rootObjectId: nullable(id),
   scheduler: obj({ enabled: bool, intervalMs: integer(1000, 3600000), pageSize: integer(1, 50),
-    maxConcurrentRuns: { ...integer(1, 256), default: 10 },
     stallWarningMs: { ...integer(60000, 86400000), default: 300000 } }, ['enabled', 'intervalMs', 'pageSize']),
   phoneTarget: nullable(ref('PhoneTarget')) });
 defs.WorkspaceQuery = obj({});

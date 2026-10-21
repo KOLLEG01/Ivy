@@ -167,22 +167,19 @@ test('cancellation prevents a later capacity failure from scheduling another tur
   assert.equal(await new TaskBoardScheduler(w.f.first).task(failed.pin.objectId), null);
 });
 
-test('execution slots cover existing Runs and are checked again at admission', async t => {
-  const f = taskBoardFixture(t); f.settings.scheduler.maxConcurrentRuns = 2;
-  for (let index = 0; index < 3; index++) {
+test('independent tasks have no global execution limit in admission or scheduling', async t => {
+  const f = taskBoardFixture(t);
+  for (let index = 0; index < 12; index++) {
     const p = await f.planned();
     const request: TaskBoard.StartRequest = { action: 'start', operationId: randomUUID(), taskId: p.task.objectId,
       expectedRevision: p.task.revision, intent: p.plan, target: p.target, workspace: p.workspace, commentIds: [],  };
-    if (index < 2) assert.ok((await f.invoke(request)).run);
-    else {
-      await assert.rejects(f.invoke(request), error => error instanceof IvyError && error.code === 'task_board_execution_capacity');
-      const scheduled = await new TaskBoardScheduler(f.first).task(p.task.objectId);
-      assert.ok(scheduled?.task);
-      const deferred = (await f.first.store.read('task-board/task', scheduled.task)).value;
-      assert.equal(deferred.claim, null);
-      assert.match(deferred.runtimeWait!.detail, /2 TaskBoard execution slots/);
-    }
+    const started = index === 11 ? await new TaskBoardScheduler(f.first).task(p.task.objectId) : await f.invoke(request);
+    assert.ok(started?.run);
+    const task = (await f.first.store.read('task-board/task', started.task!)).value;
+    assert.equal(task.workflowState, 'in_progress');
+    assert.equal(task.runtimeWait, null);
   }
+  assert.equal((await f.first.store.page('task-board/run', { limit: 50 })).items.length, 12);
 });
 
 test('silence warnings clear on real activity, user waits and completion without changing execution', () => {
@@ -198,8 +195,8 @@ test('silence warnings clear on real activity, user waits and completion without
   progress.forget('run'); assert.equal(progress.diagnostics.length, 0);
 });
 
-test('an unfinished claim reservation keeps the capacity gate until its Run is published', async t => {
-  const f = taskBoardFixture(t); f.settings.scheduler.maxConcurrentRuns = 1;
+test('admission publications serialize without limiting simultaneous Runs', async t => {
+  const f = taskBoardFixture(t);
   const a = await f.planned(), b = await f.planned();
   let release!: () => void, entered!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
@@ -221,8 +218,8 @@ test('an unfinished claim reservation keeps the capacity gate until its Run is p
   await pending; f.intercept(null);
   const operation = await f.first.operations.find(f.settings.principalId, other.operationId);
   assert.ok(operation);
-  await assert.rejects(f.first.recoverOperation(operation.pin.objectId),
-    error => error instanceof IvyError && error.code === 'task_board_execution_capacity');
+  assert.ok((await f.first.recoverOperation(operation.pin.objectId)).run);
+  assert.equal((await f.first.store.page('task-board/run', { limit: 50 })).items.length, 2);
 });
 
 test('journal pressure retains the admitted handoff baseline until native completion', async t => {

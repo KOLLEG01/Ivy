@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { taskBoardFixture, fields } from './fixtures/task-board.js';
 import { nativeWorkflow } from './fixtures/task-board-native.js';
 import { TaskBoardScheduler } from '../services/task-board/src/runtime/scheduler.js';
-import { dependencySnapshot, shouldWake } from '../services/task-board/src/runtime/wake.js';
+import { dependencySnapshot, shouldWake, wakeCondition } from '../services/task-board/src/runtime/wake.js';
 import { upgradeTaskRecord } from '../packages/contracts/src/task-board-records.js';
 import { IvyError } from '../packages/contracts/src/errors.js';
 import type { TaskBoard } from '../packages/contracts/src/generated.js';
@@ -32,6 +32,60 @@ test('a normal successful turn needs no step plan or handoff and active work can
   assert.equal(task.workflowState, 'todo'); assert.equal(task.completionIssue, undefined);
   assert.equal('nextSteps' in task, false);
   assert.ok((await new TaskBoardScheduler(w.f.first).task(ended.task!.objectId))?.run);
+});
+
+test('an agent wait without a trigger is an error and retries until it records a real wait', async t => {
+  const w = await nativeWorkflow(t); await w.running();
+  const finishWaiting = async (wakeAt: string | null) => {
+    await w.refresh();
+    await w.f.invoke({ action: 'comment', operationId: randomUUID(), taskId: w.state().task.objectId,
+      expectedRevision: w.state().task.revision, commentId: randomUUID(), authorKind: 'agent', purpose: 'handoff',
+      body: 'Current outcome.', handoff: { workflowState: 'waiting', wakeAt, dependencies: [] },
+      requests: [], responses: [], attachments: [], replyTo: null });
+    await w.refresh(); w.adopt(await w.f.first.nativeUpdate(await w.snapshot()));
+    return (await w.f.first.store.read('task-board/task', w.state().task)).value;
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const task = await finishWaiting(null), now = Date.parse(task.updatedAt);
+    const card = await w.f.first.read({ task: w.state().task.objectId, view: 'card' });
+    assert.equal(card.executionCondition.state, 'failed');
+    assert.equal(await shouldWake(w.f.first.store, task, new Date(now + 29_999).toISOString()), false);
+    assert.equal(await shouldWake(w.f.first.store, task, new Date(now + 30_000).toISOString()), true);
+    // Admission checks the real clock again; age the persisted wait for that independent check.
+    const pin = w.state().task;
+    await w.f.first.store.write('task-board/task', { ...task, updatedAt: new Date(Date.now() - 31_000).toISOString() }, randomUUID(),
+      { objectId: pin.objectId, expectedRevision: pin.revision });
+    const scheduler = new TaskBoardScheduler(w.f.first);
+    const started = await scheduler.task(w.state().task.objectId);
+    assert.ok(started?.run); w.adopt(started);
+    const run = (await w.f.first.store.read('task-board/run', started.run)).value;
+    assert.match(JSON.stringify(run.plan.turnStart.input), /waiting without a wake-up trigger/);
+    assert.equal(await scheduler.task(w.state().task.objectId), null);
+    await w.running();
+  }
+  const waiting = await finishWaiting('2099-01-01T00:00:00.000Z');
+  assert.equal(wakeCondition(waiting).state, 'deferred');
+  assert.equal(await shouldWake(w.f.first.store, waiting, new Date(Date.now() + 60_000).toISOString()), false);
+});
+
+test('wake recovery preserves explicit pauses, manual work and both question recipients', async t => {
+  const f = taskBoardFixture(t), created = await f.create({ control: 'agent' });
+  const original = (await f.first.store.read('task-board/task', created.task!)).value;
+  const task: TaskBoard.Task = { ...original, workflowState: 'waiting' };
+  const at = new Date(Date.parse(task.updatedAt) + 60_000).toISOString();
+  for (const workflowState of ['backlog', 'review', 'done', 'cancelled'] as const)
+    assert.equal(await shouldWake(f.first.store, { ...task, workflowState }, at), false);
+  const manual = { ...task, fields: { ...task.fields, control: 'user' as const } };
+  assert.equal(await shouldWake(f.first.store, manual, at), false);
+  assert.equal(wakeCondition(manual).state, 'needs_user');
+  for (const recipient of [{ kind: 'user' as const }, { kind: 'task' as const, taskId: 'peer' }]) {
+    const question: TaskBoard.Comment = { commentId: 'question', sequence: 1, author: { principalId: 'worker', serviceNodeId: 'board', generation: 1, source: 'worker' },
+      authorKind: 'agent', purpose: 'question', recipient, body: 'Please answer.', requests: [], responses: [],
+      delivery: null, attachments: [], run: null, turnId: null, replyTo: null, createdAt: task.updatedAt, operationId: 'question' };
+    const waiting = { ...task, comments: [question], openQuestionCount: recipient.kind === 'user' ? 1 : 0 };
+    assert.equal(await shouldWake(f.first.store, waiting, at), false);
+    assert.equal(wakeCondition(waiting).state, recipient.kind === 'user' ? 'needs_user' : 'blocked_dependency');
+  }
 });
 
 test('watched tickets wake on material changes, archive and deletion, not claim or receipt churn', async t => {

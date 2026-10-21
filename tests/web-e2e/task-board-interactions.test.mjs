@@ -341,7 +341,7 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
   await create('Time wait', {}, { workflowState: 'waiting', wakeAt: '2099-01-01T12:00:00.000Z', dependencies: [] });
   const ready = await create('Ready without a blocker', { control: 'agent' });
   await create('Due is not a restart', { control: 'agent', dueAt: '2099-01-01T12:00:00.000Z' });
-  const unscheduled = await create('No restart set', {}, { wakeAt: null, dependencies: [] });
+  const unscheduled = await create('No restart set', { control: 'agent' }, { wakeAt: null, dependencies: [] });
   // Real retained mixed comments exercise visibility without per-user read tracking.
   const current = await store.read('task-board/task', user.objectId);
   const noDate = await store.read('task-board/task', unscheduled.objectId);
@@ -355,10 +355,13 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
     wakeAt: null, dependencies: [] }, randomUUID(), { objectId: user.objectId, expectedRevision: current.pin.revision });
   await f.open('#/tasks?node=browser-task-board');
   const waiting = f.page.getByRole('region', { name: 'Waiting', exact: true });
-  for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['ready', 'Ready without a blocker'], ['ready', 'Due is not a restart'], ['unscheduled', 'No restart set']]) {
+  for (const [group, title] of [['user', 'User feedback'], ['dependency', 'Dependency wait'], ['runtime', 'Runtime wait'], ['time', 'Time wait'], ['error', 'No restart set']]) {
     await expect(waiting.locator('[data-waiting-group=' + group + ']').getByRole('link', { name: title, exact: true })).toBeVisible();
   }
-  await expect(f.page.getByRole('region', { name: 'Todo', exact: true })).toHaveCount(0);
+  const todo = f.page.getByRole('region', { name: 'Todo', exact: true });
+  for (const title of ['Ready without a blocker', 'Due is not a restart'])
+    await expect(todo.getByRole('link', { name: title, exact: true })).toBeVisible();
+  await expect(waiting.locator('[data-waiting-group=ready], [data-waiting-group=unscheduled]')).toHaveCount(0);
   await expect(f.page.getByRole('region', { name: 'Blocked', exact: true })).toHaveCount(0);
   await expect(waiting.getByText('Needs you', { exact: true })).toHaveCount(0);
   const toggle = f.page.getByRole('button', { name: 'Cross-agent communication', exact: true });
@@ -402,7 +405,7 @@ for (const width of [1440, 390]) test(`the common overlay, filtered counters and
     assert.equal(await f.page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   }
   await f.page.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(f.page.getByRole('region', { name: 'Waiting', exact: true }).locator('article')).toHaveCount(7);
+  await expect(f.page.getByRole('region', { name: 'Waiting', exact: true }).locator('article')).toHaveCount(5);
   await expect(f.page.getByRole('region', { name: 'Waiting', exact: true }).getByRole('link', { name: 'User feedback', exact: true })).toBeVisible();
   if (screenshots) for (const theme of ['light', 'dark']) {
     await f.page.evaluate(theme => document.documentElement.classList.toggle('dark', theme === 'dark'), theme);

@@ -8,6 +8,7 @@ import { TaskBoardDeliveries } from "./deliveries.js";
 import { syncNativeComments } from './native-comments.js';
 import { finishedRun } from './native-publication.js';
 import { routeTaskQuestions } from './question-routing.js';
+import { missingWakeTrigger, wakeCondition } from './wake.js';
 
 type Lane = TaskBoard.ScanCursor["lane"];
 const lanes: Lane[] = ["operations", "runs", "tasks", "deliveries"];
@@ -175,6 +176,10 @@ export class TaskBoardReconciler {
         if (task.value.completionIssue) {
           const issue = this.engine.store.failedHandoff(task.value.completionIssue.run.objectId) ?? task.value.completionIssue;
           this.record(id, new IvyError(issue.code, task.value.taskKey + ': ' + issue.detail));
+          return;
+        }
+        if (missingWakeTrigger(task.value)) {
+          this.record(id, new IvyError('task_board_missing_wake_trigger', task.value.taskKey + ': ' + wakeCondition(task.value).detail));
           return;
         }
       }
