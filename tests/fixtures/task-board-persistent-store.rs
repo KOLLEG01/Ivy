@@ -8,6 +8,7 @@ use ivy_contracts::{
     limits::MANAGEMENT_FRAME_BYTES,
     schema::{CompiledSchema, SchemaValidators},
 };
+use ivy_sdk::rpc::{RequestFuture, RequestOptions, RpcClient};
 use ivy_sdk::task_comments::{CancellationToken, CommentReadFuture, CommentSource};
 use ivy_store::rusqlite::{Connection, params};
 use ivy_task_board::{
@@ -19,7 +20,7 @@ use ivy_task_board::{
         read_failure::{ReadCause, ReadFailure},
     },
     journal_store::{
-        Contracts, ReadScopes,
+        Contracts, JournalStore, ReadScopes,
         persistent_reads::{
             local_reads::SqliteReads,
             store::{ObjectReads, PersistentReadStore},
@@ -27,9 +28,11 @@ use ivy_task_board::{
         },
     },
     local_journal::{LocalJournal, initialize},
+    local_retention::HistoryLimits,
+    operations::Store,
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     sync::{
         Arc, Mutex,
@@ -83,7 +86,7 @@ enum WireFailure {
 enum NativeFailure {
     Raw(Opaque),
     Sqlite(Box<ivy_store::rusqlite::Error>),
-    Parse(IvyError),
+    Parse(Box<IvyError>),
 }
 type Failure = ReadFailure<NativeFailure>;
 struct Source {
@@ -92,14 +95,24 @@ struct Source {
     identity: Arc<()>,
     payload: AtomicUsize,
     cause: AtomicUsize,
+    writes: AtomicUsize,
 }
 impl Source {
-    async fn rpc(&self, params: Option<Json>) -> Result<Json, WireFailure> {
-        let mut row = Json::object([("method", "objects.read".into())]);
+    async fn rpc(&self, method: &str, params: Option<Json>) -> Result<Json, WireFailure> {
+        let mut row = Json::object([("method", method.into())]);
         if let Some(params) = &params {
             row.insert("params", params.clone());
         }
         self.trace.lock().unwrap().push(row);
+        if method == "objects.write" {
+            let index = self.writes.fetch_add(1, Ordering::SeqCst);
+            let result = &items(f(&self.input, "writeResults"))[index];
+            if let Some(error) = result.get("error") {
+                return Err(WireFailure::Ivy(ivy(error)));
+            }
+            return Ok(result.clone());
+        }
+        assert_eq!(method, "objects.read");
         if yes(&self.input, "yieldReads") {
             tokio::task::yield_now().await;
         }
@@ -196,7 +209,29 @@ impl Source {
 }
 impl ObjectReads<Failure> for Source {
     async fn read(&self, params: Option<Json>) -> Result<Json, Failure> {
-        self.rpc(params).await.map_err(|error| self.bind(error))
+        self.rpc("objects.read", params)
+            .await
+            .map_err(|error| self.bind(error))
+    }
+}
+impl RpcClient for Source {
+    fn request<'a>(
+        &'a self,
+        method: &'a str,
+        params: Json,
+        options: RequestOptions,
+    ) -> RequestFuture<'a> {
+        Box::pin(async move {
+            assert!(!options.cancellation.is_cancelled() && options.bound_read.is_none());
+            self.rpc(method, Some(params))
+                .await
+                .map_err(|error| match error {
+                    WireFailure::Ivy(error) => error,
+                    WireFailure::Raw(_) => {
+                        panic!("Only typed prepared-write failures are exercised")
+                    }
+                })
+        })
     }
 }
 impl CommentSource for Source {
@@ -208,7 +243,7 @@ impl CommentSource for Source {
     ) -> CommentReadFuture<'a, Self::Error> {
         Box::pin(async move {
             assert!(cancellation.as_ref().is_none_or(|c| !c.is_cancelled()));
-            self.rpc(Some(pin)).await
+            self.rpc("objects.read", Some(pin)).await
         })
     }
 }
@@ -223,8 +258,23 @@ impl Contracts for Catalog {
     fn readable_version(&self, key: &str, version: &JsString) -> IvyResult<bool> {
         Ok(items(f(f(&self.0, key), "readable")).contains(&Json::String(version.clone())))
     }
-    fn validate_record(&self, _: &str, _: &JsString, _: &Json) -> IvyResult<()> {
-        panic!("The original read does not validate record bodies")
+    fn validate_record(&self, key: &str, version: &JsString, value: &Json) -> IvyResult<()> {
+        // Writes use the actual current definition. Reads never call this guard.
+        assert_eq!(key, "task-board/review");
+        let definitions = ivy_task_board::schema::task_board_contracts()?;
+        let definition = definitions
+            .iter()
+            .find(|d| {
+                f(d, "key") == &Json::from(key) && f(d, "version").as_js_string() == Some(version)
+            })
+            .unwrap();
+        canonical(value, MANAGEMENT_FRAME_BYTES)?;
+        assert!(
+            SchemaValidators::new()
+                .compile(f(definition, "jsonSchema"))?
+                .matches(value)?
+        );
+        Ok(())
     }
     fn validate_definition(&self, _: &str, _: &Json) -> IvyResult<()> {
         panic!("No default validation is supplied")
@@ -265,10 +315,8 @@ fn observe(result: Result<Json, Failure>, source: &Source, sql_cause: &Cell<usiz
                 )])
             }
             ReadCause::Source(NativeFailure::Parse(error)) => {
-                panic!(
-                    "Malformed stored JSON is outside these source-backed cases: {}",
-                    error.message
-                )
+                assert_eq!(&**error as *const _ as usize, sql_cause.get());
+                Json::object([("parserRejected", true.into()), ("identity", true.into())])
             }
         },
     }
@@ -379,6 +427,9 @@ fn seed(connection: &Connection, input: &Json) {
             )
             .unwrap();
     }
+    for sql in items(f(input, "sql")) {
+        connection.execute_batch(&text(sql)).unwrap();
+    }
     if yes(input, "missingTables") {
         connection
             .execute_batch("DROP TABLE revisions;DROP TABLE documents;")
@@ -402,9 +453,23 @@ fn validator() -> Arc<CompiledSchema> {
 }
 #[test]
 fn actual_persistent_store_matches_original_materialization_scope_and_cache() {
+    run_fixture(
+        "IVY_TASK_BOARD_PERSISTENT_STORE_FIXTURE",
+        "IVY_TASK_BOARD_PERSISTENT_STORE_NATIVE",
+        63,
+    );
+}
+#[test]
+fn actual_local_reads_prefix_and_write_cache_match_original() {
+    run_fixture(
+        "IVY_TASK_BOARD_READ_BOUNDARY_FIXTURE",
+        "IVY_TASK_BOARD_READ_BOUNDARY_NATIVE",
+        41,
+    );
+}
+fn run_fixture(fixture_env: &str, native_env: &str, expected_count: usize) {
     let fixture = parse(
-        &std::fs::read_to_string(std::env::var("IVY_TASK_BOARD_PERSISTENT_STORE_FIXTURE").unwrap())
-            .unwrap(),
+        &std::fs::read_to_string(std::env::var(fixture_env).unwrap()).unwrap(),
         MANAGEMENT_FRAME_BYTES,
     )
     .unwrap();
@@ -426,12 +491,21 @@ fn actual_persistent_store_matches_original_materialization_scope_and_cache() {
                 identity: Arc::new(()),
                 payload: AtomicUsize::new(0),
                 cause: AtomicUsize::new(0),
+                writes: AtomicUsize::new(0),
             });
             let catalog = Catalog(f(&fixture, "contracts").clone());
             let sql_cause = Cell::new(0);
+            let parser_observations = RefCell::new(Vec::new());
             let parse_record = |text: &str| {
-                parse(text, usize::MAX)
-                    .map_err(|error| Failure::source(NativeFailure::Parse(error)))
+                parse(text, usize::MAX).map_err(|error| {
+                    let error = Box::new(error);
+                    sql_cause.set(&*error as *const _ as usize);
+                    parser_observations.borrow_mut().push(Json::object([
+                        ("text", text.into()),
+                        ("nativeError", error.to_wire()),
+                    ]));
+                    Failure::source(NativeFailure::Parse(error))
+                })
             };
             let sqlite_failure = |error| {
                 let error = Box::new(error);
@@ -473,12 +547,34 @@ fn actual_persistent_store_matches_original_materialization_scope_and_cache() {
                 source_failure: &bind,
                 cache: Some(scopes.cache()),
             };
+            let writer = JournalStore {
+                journal: LocalJournal {
+                    connection: &connection,
+                    root_object_id: f(input, "root").as_js_string().cloned(),
+                },
+                client: source.clone(),
+                contracts: &catalog,
+                limits: HistoryLimits::default(),
+                now: || text(f(&fixture, "at")),
+                new_id: || panic!("Remote prepared writes must not allocate a local identity"),
+                cache: Some(scopes.cache()),
+            };
             let read_one = |item: Json| {
                 let store = &store;
+                let writer = &writer;
                 let policies = &policies;
                 let at = f(&fixture, "at").as_js_string().unwrap();
                 async move {
                     match text(f(&item, "kind")).as_str() {
+                        "write" => writer
+                            .write_prepared(
+                                &text(f(&item, "key")),
+                                f(&item, "value"),
+                                f(&item, "mutation").as_js_string().unwrap(),
+                                f(&item, "destination"),
+                            )
+                            .await
+                            .map_err(Failure::from),
                         "condition" => task_condition(store, f(&item, "task"), None),
                         "assess" => assess_steps(
                             store,
@@ -528,14 +624,29 @@ fn actual_persistent_store_matches_original_materialization_scope_and_cache() {
             let trace = Json::Array(source.trace.lock().unwrap().clone());
             same(&trace, f(case, "trace"), &name);
             same(input, &before, "Source input retained");
+            let parser_observations = parser_observations.into_inner();
+            let original_inputs = items(f(case, "parseErrors"))
+                .iter()
+                .map(|e| f(e, "text").clone())
+                .collect();
+            let native_inputs = parser_observations
+                .iter()
+                .map(|e| f(e, "text").clone())
+                .collect();
+            same(
+                &Json::Array(original_inputs),
+                &Json::Array(native_inputs),
+                "Original parser inputs retained",
+            );
             observations.push(Json::object([
                 ("name", name.into()),
                 ("result", result),
                 ("trace", trace),
+                ("parserDiagnostics", Json::Array(parser_observations)),
             ]));
         }
-        assert_eq!(observations.len(), 63);
-        if let Ok(path) = std::env::var("IVY_TASK_BOARD_PERSISTENT_STORE_NATIVE") {
+        assert_eq!(observations.len(), expected_count);
+        if let Ok(path) = std::env::var(native_env) {
             std::fs::write(
                 path,
                 stringify(&Json::Array(observations), MANAGEMENT_FRAME_BYTES).unwrap(),

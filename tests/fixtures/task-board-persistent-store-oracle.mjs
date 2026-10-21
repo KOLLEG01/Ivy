@@ -5,7 +5,7 @@ import {pathToFileURL} from 'node:url';
 import {parseArgs} from 'node:util';
 import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
-const {values} = parseArgs({options: {'source-root': {type: 'string'}, output: {type: 'string'}, proof: {type: 'string'}, reuse: {type: 'string'}}});
+const {values} = parseArgs({options: {'source-root': {type: 'string'}, output: {type: 'string'}, proof: {type: 'string'}, reuse: {type: 'string'}, suite: {type: 'string'}}});
 for (const k of ['source-root', 'output', 'proof']) assert.ok(values[k], k);
 const root = resolve(values['source-root']), load = p => import(pathToFileURL(resolve(root, p)));
 const [{TaskBoardStore}, {IvyError}, {TaskBoardEngine}, {assessSteps}, {readTask}] = await Promise.all([
@@ -131,6 +131,70 @@ add('concurrent independent action scopes keep separate pin maps', one(remote(),
 add('the cache limit counts UTF8 bytes of the materialized value', one(remote('task-board/review', {text: 'é'.repeat(32762) + 'x'}), [read(), read()], {scope: 'action'}));
 add('an arbitrary primitive source failure stays raw', {records: {}, rawSource: {id: 'self', value: 0}, steps: [read()]});
 
+if (values.suite === 'boundary') {
+  cases.length = 0;
+  const local = extra => ({rows: [row('local', 'task-board/operation', {retained: true})], records: {},
+    steps: [read({key: 'task-board/operation', address: 'local'})], ...extra});
+  for (const raw of ['{', '', 'undefined', '\ufeff{}']) add('stored JSON parse source ' + JSON.stringify(raw),
+    local({rows: [row('local', 'task-board/operation', {}, {raw})]}));
+  add('blob stored JSON reaches the same parser as String Uint8Array', local({sql: ["UPDATE revisions SET value_json=X'7b7d'"]}));
+  add('local scope precedes parsing malformed stored JSON', local({root: 'root', rows: [row('local', 'task-board/operation', {}, {raw: '{'})]}));
+  add('missing selected revision precedes malformed current JSON', local({rows: [row('local', 'task-board/operation', {}, {raw: '{'})],
+    steps: [read({key: 'task-board/operation', address: pin('local', 2)})]}));
+  add('invalid UTF8 SQL text is decoded before JSON parsing', local({sql: ["UPDATE revisions SET value_json=CAST(X'22ff22' AS TEXT)"]}));
+  add('local head and revision blob fields use original String conversions', local({sql: [
+    "UPDATE documents SET name=X'0102',parent_id=X'03',current_revision=X'01',created_at=X'0405',updated_at=X'06'",
+    "UPDATE revisions SET created_at=X'0708'"], steps: [read({key: 'task-board/operation', address: 'local', primary: false})]}));
+  add('a blob parent does not become a string during the primary scope check', local({root: '3',
+    sql: ["UPDATE documents SET parent_id=X'03'", "UPDATE revisions SET value_json='{'"]}));
+  add('unsafe SQL integer failure precedes the local scope guard', local({root: 'root',
+    sql: ['UPDATE documents SET current_revision=9007199254740992']}));
+  add('unsafe selected revision fails before its JSON is parsed', local({
+    sql: ["UPDATE revisions SET revision=9007199254740992,value_json='{'"],
+    steps: [read({key: 'task-board/operation', address: pin('local', 9007199254740992)})]}));
+  for (const address of [null, {revision: 1}, {objectId: false, revision: 1}, {objectId: [], revision: 1},
+    {objectId: {}, revision: 1}, {objectId: [1], revision: 1}, {objectId: {z: 1, 2: 1}, revision: 1},
+    {objectId: 'local'}, {objectId: 'local', revision: false}, {objectId: 'local', revision: null}]) {
+    add('local reference preserves raw property and SQLite binding order ' + JSON.stringify(address), local({
+      steps: [read({key: 'task-board/operation', address})]}));
+  }
+  add('preparing the SQL statement precedes invalid parameter binding', local({missingTables: true,
+    steps: [read({key: 'task-board/operation', address: {objectId: false, revision: 1}})]}));
+  add('local key projection converts a blob without inventing a local contract', {
+    rows: [row('self', 'task-board/operation', {})], sql: ["UPDATE documents SET key=X'01'"], ...one()});
+  const prefix = (comments, reference, extra = {}) => ({rows: [row('operation', 'task-board/operation', {request: {taskId: 'self'}}),
+    row('local', 'task-board/task', {fields: null, commentStore: reference}, {parentId: 'operation'})],
+    records: {log: logRecord(comments)}, steps: [read({key: 'task-board/task', address: 'local', primary: false})], ...extra});
+  const reference = extra => ({objectId: 'log', length: 1, nativeInputs: [], ...extra});
+  add('null retained prefix comment keeps its destructuring failure', prefix([null], reference({})));
+  add('retained prefix primitive comments keep object spread semantics', prefix(['A\ud800', 42], reference({length: 2})));
+  for (const nativeInputs of [null, {}, [null], [1], [{commentId: 'c', body: 'first'}, {commentId: 'c', body: 'last', unknown: '\udfff'}]]) {
+    add('raw retained prefix native snapshots ' + JSON.stringify(nativeInputs), prefix([comment({})], reference({nativeInputs})));
+  }
+  add('retained prefix missing native snapshots remains a raw property error', prefix([comment({})], {objectId: 'log', length: 1}));
+  add('an invalid prefix length fails before missing snapshot access', prefix([comment({})], {objectId: 'log', length: 2}));
+  add('retained log source failure keeps its exact identity', prefix([], reference({length: 0}), {
+    rawSource: {id: 'log', value: {raw: '\ud800'}}}));
+  const review = acceptance => ({schemaVersion: 1, taskId: 'task', result: pin('result', 1), acceptance,
+    createdAt: AT, actor: {principalId: 'fixture', serviceNodeId: 'fixture.agent-manager', generation: 1, source: 'worker'}, operationId: 'operation'});
+  const write = (extra = {}) => ({kind: 'write', key: 'task-board/review', value: review('Accepted.'), mutation: 'retained-mutation',
+    destination: {objectId: 'self', expectedRevision: 7}, ...extra});
+  const written = (id = 'self', revision = 8, byteLength = 123) => ({object: {id, parentId: null}, revision: {revision, byteLength}});
+  const mixed = (steps, extra = {}) => ({autoRecords: true, scope: 'action', steps, writeResults: [written()], ...extra});
+  add('successful writes invalidate every retained pin variant', mixed([...flags, write(), ...flags]));
+  add('failed writes preserve previously read pins', mixed([read(), write(), read()], {
+    writeResults: [{error: {code: 'storage_full', message: 'Retained write.', outcome: 'not_executed'}}]}));
+  add('another object write preserves unrelated cached pins', mixed([read(), write({destination: {objectId: 'other', expectedRevision: 7}}), read(), read({address: pin('other', 8)})],
+    {writeResults: [written('other')]}));
+  add('write seeds consume a slot but never satisfy a pinned read', mixed([write(), read({address: pin('self', 8)}), read({address: pin('self', 8)})]));
+  const capacity = [write(), ...many.slice(0, 256), read({address: pin('id255')})];
+  add('small canonical writes seed even when reported byteLength is large', mixed(capacity, {writeResults: [written('self', 8, 999999)]}));
+  add('large canonical writes do not seed when reported byteLength is small', mixed([
+    write({value: review('é'.repeat(32768))}), ...many.slice(0, 256), read({address: pin('id255')})], {writeResults: [written('self', 8, 1)]}));
+  add('repeated writes replace the same unmatched seed', mixed([write(), write({destination: {objectId: 'self', expectedRevision: 8}}),
+    ...many.slice(0, 255), read({address: pin('id254')})], {writeResults: [written(), written('self', 9)]}));
+}
+
 const pins = ['services/task-board/src/runtime/store.js', 'services/task-board/src/runtime/comment-store.js',
   'services/task-board/src/runtime/schema.js', 'services/task-board/src/runtime/task-read.js', 'services/task-board/src/runtime/engine.js',
   'services/task-board/src/runtime/next-steps.js', 'packages/sdk/src/task-comments.js', 'packages/contracts/src/task-board-records.js',
@@ -143,9 +207,15 @@ for (const entry of cases) {
   if (prior) {assert.deepEqual(prior.input, entry.input); results.push(prior); reusedCount++; continue;}
   executed++;
   const input = structuredClone(entry.input), before = JSON.stringify(input), trace = [], raw = structuredClone(input.rawSource?.value);
+  const parseErrors = []; let parsedFailure, writes = 0;
   const client = {async request(method, params) {
-    assert.equal(method, 'objects.read');
     const record = {method}; if (params !== undefined) record.params = structuredClone(params); trace.push(record);
+    if (method === 'objects.write') {
+      const result = input.writeResults[writes++]; assert.ok(result, 'Unexpected write');
+      if (result.error) throw new IvyError(result.error.code, result.error.message, result.error.outcome, result.error.details);
+      return structuredClone(result);
+    }
+    assert.equal(method, 'objects.read');
     if (input.yieldReads) await Promise.resolve();
     const id = params?.objectId;
     if (id === input.rawSource?.id && input.rawSource) throw raw;
@@ -156,6 +226,7 @@ for (const entry of cases) {
     const result = remote(); result.object.id = id; result.revision.revision = params.revision; return result;
   }};
   const store = new TaskBoardStore(client, input.root ?? null);
+  const parse = JSON.parse;
   try {
     for (const r of input.rows ?? []) {
       store.local.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?,?)').run(r.id, r.key, r.name, r.parentId, r.revision, r.createdAt, r.updatedAt);
@@ -163,7 +234,14 @@ for (const entry of cases) {
       for (const old of r.older ?? []) store.local.prepare('INSERT INTO revisions VALUES(?,?,?,?)').run(r.id, old.revision, old.raw, old.createdAt);
     }
     for (const r of input.blobs ?? []) store.local.prepare('INSERT INTO blobs VALUES(?,?,?,?,?)').run(r.id, r.key, r.id, null, Buffer.alloc(0));
+    for (const sql of input.sql ?? []) store.local.exec(sql);
     if (input.missingTables) store.local.exec('DROP TABLE revisions; DROP TABLE documents;');
+    // Observe parser provenance without replacing the original parser or catch.
+    JSON.parse = function(text, ...args) {
+      try {return parse(text, ...args);} catch (error) {
+        parsedFailure = error; parseErrors.push({text, kind: error.name, message: error.message}); throw error;
+      }
+    };
     async function steps(items) {
       const observations = [];
       for (const item of items) {
@@ -171,6 +249,7 @@ for (const entry of cases) {
         try {
           if (item.kind === 'action' || item.kind === 'nested') result = await store.withReadCache(() => steps(item.steps));
           else if (item.kind === 'parallel') result = await Promise.all(item.steps.map(s => steps([s]).then(r => r[0])));
+          else if (item.kind === 'write') result = await store.writePrepared(item.key, item.value, item.mutation, item.destination);
           else if (item.kind === 'condition') result = TaskBoardEngine.prototype.condition.call({store}, item.task);
           else if (item.kind === 'assess') result = await assessSteps(store, item.task, AT);
           else if (item.kind === 'view') {
@@ -180,7 +259,8 @@ for (const entry of cases) {
           observations.push({value: structuredClone(result)});
           if (item.mutate) {result.value = {changed: true}; result.metadata.extra = 'changed'; result.revision.contentHash = 'changed';}
         } catch (error) {
-          if (input.rawSource && error === raw) observations.push({source: structuredClone(raw), identity: true});
+          if (parsedFailure !== undefined && error === parsedFailure) observations.push({parserRejected: true, identity: true});
+          else if (input.rawSource && error === raw) observations.push({source: structuredClone(raw), identity: true});
           else if (error instanceof IvyError) observations.push({ivy: error.toWire()});
           else {assert.notEqual(error.name, 'ReferenceError'); observations.push({javascript: {kind: error.name, message: error.message}});}
         }
@@ -189,8 +269,8 @@ for (const entry of cases) {
     }
     const expected = input.scope === 'action' ? await store.withReadCache(() => steps(input.steps)) : await steps(input.steps);
     assert.equal(JSON.stringify(input), before);
-    results.push({...entry, expected, trace});
-  } finally {store.close();}
+    results.push({...entry, expected, trace, ...(parseErrors.length ? {parseErrors} : {})});
+  } finally {JSON.parse = parse; store.close();}
 }
 const keys = [...new Set(cases.flatMap(c => [
   ...(c.input.rows ?? []).map(r => r.key),
@@ -201,5 +281,7 @@ const contracts = Object.fromEntries(keys.map(key => [key, {version: schema.cont
 fs.writeFileSync(values.output, JSON.stringify({format: 'task-board-current-persistent-store-original-v1', at: AT, pins, contracts, cases: results}, null, 2) + '\n');
 fs.writeFileSync(values.proof, JSON.stringify({at: new RealDate().toISOString(), node: process.version, pins, executed, reused: reusedCount,
   fixture: {byteLength: fs.statSync(values.output).size, contentHash: hash(fs.readFileSync(values.output))},
-  scope: 'Actual Store/TaskComments/read/condition/next-step methods with isolated in-memory SQLite and finite read-only RPCs. No service constructor, socket, live Hive, write/publication/recovery, deployment or global SDK wire policy is exercised.'}, null, 2) + '\n');
+  scope: values.suite === 'boundary'
+    ? 'Actual Store local reads, raw retained prefixes and prepared remote write/cache methods with isolated in-memory SQLite and finite mock RPCs. Parser diagnostics are retained separately; only rejection and cause identity are compared across parsers. No live writes, service constructor, socket, publication/recovery, deployment or SDK catch policy is exercised.'
+    : 'Actual Store/TaskComments/read/condition/next-step methods with isolated in-memory SQLite and finite read-only RPCs. No service constructor, socket, live Hive, write/publication/recovery, deployment or global SDK wire policy is exercised.'}, null, 2) + '\n');
 console.log(JSON.stringify({cases: results.length, executed, reused: reusedCount, originalRpcCalls: results.reduce((n, c) => n + c.trace.length, 0)}));

@@ -806,14 +806,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
             let id = result.required("object")?.required("id")?;
             let mut entries = cache.borrow_mut();
             entries.retain(|(_, record)| &record.object_id != id);
-            if result
-                .required("revision")?
-                .required("byteLength")?
-                .as_f64()
-                .ok_or_else(IvyError::internal)?
-                <= 65536.0
-                && entries.len() < 256
-            {
+            if canonical(value, usize::MAX)?.len() <= 65536 && entries.len() < 256 {
                 let object = result.required("object")?;
                 // The original write key omits includeArchived. It consumes a
                 // bounded slot but pinned reads use a different key; preserve it.
