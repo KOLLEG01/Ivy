@@ -11,6 +11,9 @@ use ivy_sdk::rpc::{RequestOptions, RpcClient};
 use ivy_store::rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 
+#[path = "task_comments.rs"]
+pub mod task_comments;
+
 fn property<'a>(value: &'a Json, key: &str) -> IvyResult<Option<&'a Json>> {
     if value.is_null() {
         return Err(IvyError::internal());

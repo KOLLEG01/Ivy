@@ -41,6 +41,8 @@ mod conversation_policy;
 mod durable_admission;
 #[path = "../fixtures/task-board-persistent-reads.rs"]
 mod persistent_reads;
+#[path = "../fixtures/task-board-tree-comments.rs"]
+mod tree_comments;
 
 fn s(value: &Json, key: &str) -> JsString {
     value.required(key).unwrap().as_js_string().unwrap().clone()
