@@ -122,7 +122,9 @@ impl VoiceInputClock for Time {
 }
 fn settings(which: i64, fallback: bool) -> NativeVoiceInput {
     let micro=(which!=0).then(||{
-  let raw=format!("{{\"micro\":{{\"usbipExecutable\":\"C:/fixture/usbip.exe\",\"executableHash\":\"sha256:{}\",\"port\":{}}}}","a".repeat(64),1023+which);
+        let raw = r#"{"micro":{"usbipExecutable":"C:/fixture/usbip.exe","executableHash":"sha256:HASH","port":PORT}}"#
+            .replace("HASH", &"a".repeat(64))
+            .replace("PORT", &(1023 + which).to_string());
   NativeVoiceInput::read(&parse(&raw,65536).unwrap(),&raw).unwrap().micro().unwrap().clone()
  });
     NativeVoiceInput::new(
