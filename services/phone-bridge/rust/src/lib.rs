@@ -7,6 +7,7 @@ pub mod dtmf_access;
 pub mod dtmf_detector;
 pub mod ipc;
 pub mod media;
+pub mod micro;
 pub mod native_config;
 pub mod native_entry;
 mod native_dial;
