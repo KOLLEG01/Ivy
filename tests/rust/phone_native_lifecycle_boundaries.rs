@@ -67,9 +67,9 @@ impl MicroVoiceInput for Device {
         panic!("No input authorized")
     }
 }
-struct Caller {
-    input: VoiceInputOwner,
-    closes: AtomicUsize,
+pub(super) struct Caller {
+    pub(super) input: VoiceInputOwner,
+    pub(super) closes: AtomicUsize,
 }
 impl NativeHandler for Caller {
     fn cleanup_slots(&self) -> usize {
@@ -106,7 +106,7 @@ fn input_owner(mode: usize, device: Arc<Device>, factories: Arc<AtomicUsize>) ->
         }
     })
 }
-fn micro_json(input: &VoiceInputOwner) -> Result<String, NativeSipError> {
+pub(super) fn micro_json(input: &VoiceInputOwner) -> Result<String, NativeSipError> {
     let status = input.micro_status().map_err(|e| classify(e.as_ref()))?;
     let value = status.map_or(IvyJson::Null, |s| {
         IvyJson::object([

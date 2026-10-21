@@ -48,7 +48,9 @@ impl DelayedInviteMedia for Media {
     fn failed(&self) -> bool {
         false
     }
-    fn accept_answer(&self, _: &str) -> bool { false }
+    fn accept_answer(&self, _: &str) -> bool {
+        false
+    }
     fn negotiate_offer(&self, offer: &str) -> Option<String> {
         (offer == OFFER).then(|| ANSWER.into())
     }
@@ -395,14 +397,8 @@ async fn async_media_admission_precedes_factory_and_owns_late_result_after_waite
         Err(SipHostError::OperationConflict)
     );
     assert_eq!(
-        host.dial_delayed(
-            &original,
-            invite(local),
-            local.into(),
-            None,
-            1
-        )
-        .await,
+        host.dial_delayed(&original, invite(local), local.into(), None, 1)
+            .await,
         Err(SipHostError::NotReady)
     );
     assert!(!original.observation().attempted);
@@ -460,17 +456,9 @@ async fn async_factory_failure_or_panic_cannot_silently_return_an_uncertain_slot
         };
         assert_eq!(original.prepared().await, Err(error));
         assert_eq!(original.observation().phase, SipHostCallPhase::LocalEnded);
-        assert_eq!(host.observation().calls.len(), 1);
-        assert!(matches!(
-            host.prepare_async(ID.into(), || async {
-                panic!("failure retains original ID")
-            }),
-            Err(SipHostError::OperationConflict)
-        ));
-        let released = host.release(&original).await;
         if failure == 0 {
-            released.unwrap();
             assert!(host.observation().calls.is_empty());
+            assert_eq!(host.release(&original).await, Err(SipHostError::NotReady));
             let next = host
                 .prepare_async(ID.into(), || async {
                     Ok(Media::new(1, false) as Arc<dyn HostedSipMedia>)
@@ -481,6 +469,14 @@ async fn async_factory_failure_or_panic_cannot_silently_return_an_uncertain_slot
             host.close().await.unwrap();
             assert!(UdpSocket::bind(local).await.is_ok());
         } else {
+            assert_eq!(host.observation().calls.len(), 1);
+            assert!(matches!(
+                host.prepare_async(ID.into(), || async {
+                    panic!("uncertainty retains original ID")
+                }),
+                Err(SipHostError::OperationConflict)
+            ));
+            let released = host.release(&original).await;
             assert_eq!(released, Err(SipHostError::CleanupUnconfirmed));
             assert_eq!(host.release(&original).await, released);
             assert_eq!(host.close().await, released);

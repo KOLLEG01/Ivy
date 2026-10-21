@@ -5,7 +5,9 @@ use ivy_phone_bridge::{
         NativePipeServer, NativePipeSession, NativeRuntime, NativeServerReport, NativeShutdown,
         NativeShutdownStatus, NativeStopReason, run_owned_native_stdio,
     },
-    native_rpc::{NativeHandler, NativeInvocation, NativeOutcome, NativeRequest},
+    native_rpc::{
+        NativeHandler, NativeInvocation, NativeInvocationStart, NativeOutcome, NativeRequest,
+    },
     sip::{SipHost, SipHostBinding, SipHostConfiguration},
 };
 use std::{
@@ -96,7 +98,7 @@ struct Peer {
     reader: BufReader<ReadHalf<DuplexStream>>,
     session: NativePipeSession,
 }
-fn peer(runtime: Arc<Runtime>, bytes: usize) -> Peer {
+fn peer(runtime: Arc<dyn NativeRuntime>, bytes: usize) -> Peer {
     let (parent, child) = tokio::io::duplex(bytes);
     let (input, output) = tokio::io::split(child);
     let (reader, writer) = tokio::io::split(parent);
@@ -148,6 +150,70 @@ async fn bind(host: &SipHost) -> std::net::SocketAddr {
         .await
         .unwrap();
     host.observation().endpoint.unwrap()
+}
+
+struct PrefixRuntime {
+    inner: Arc<Runtime>,
+    entered: Arc<AtomicBool>,
+    gate: Arc<Semaphore>,
+}
+impl NativeHandler for PrefixRuntime {
+    fn cleanup_slots(&self) -> usize {
+        self.inner.cleanup_slots()
+    }
+    fn start(&self, request: NativeRequest) -> NativeInvocationStart {
+        let (inner, entered, gate) = (self.inner.clone(), self.entered.clone(), self.gate.clone());
+        Box::pin(async move {
+            if request.method() == "heartbeat" {
+                entered.store(true, Ordering::Release);
+                gate.acquire().await.unwrap().forget();
+            }
+            inner.invoke(request)
+        })
+    }
+    fn invoke(&self, request: NativeRequest) -> NativeInvocation {
+        self.inner.invoke(request)
+    }
+}
+impl NativeRuntime for PrefixRuntime {
+    fn shutdown(&self) -> NativeShutdown {
+        self.inner.shutdown()
+    }
+}
+#[tokio::test]
+async fn heartbeat_keeps_the_runtime_prefix_before_admitting_the_next_command() {
+    let inner = Runtime::new();
+    let entered = Arc::new(AtomicBool::new(false));
+    let gate = Arc::new(Semaphore::new(0));
+    let mut peer = peer(
+        Arc::new(PrefixRuntime {
+            inner: inner.clone(),
+            entered: entered.clone(),
+            gate: gate.clone(),
+        }),
+        8192,
+    );
+    send(&mut peer, "heartbeat", None, "{}", 1).await;
+    until(|| entered.load(Ordering::Acquire)).await;
+    send(&mut peer, "configure", Some(OP), "{}", 2).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(inner.invoked.load(Ordering::Acquire), 0);
+    gate.add_permits(1);
+    let first = reply(&mut peer).await;
+    let second = reply(&mut peer).await;
+    assert_eq!(first.get("ok").unwrap().as_bool(), Some(true));
+    assert_eq!(second.get("ok").unwrap().as_bool(), Some(true));
+    let mut ids = [
+        first.get("requestId").unwrap().as_f64().unwrap() as u64,
+        second.get("requestId").unwrap().as_f64().unwrap() as u64,
+    ];
+    ids.sort();
+    assert_eq!(ids, [1, 2]);
+    assert_eq!(inner.invoked.load(Ordering::Acquire), 2);
+    peer.writer.shutdown().await.unwrap();
+    let result = report(&mut peer).await;
+    assert_eq!(result.reason, NativeStopReason::Eof);
+    assert_eq!(result.shutdown, NativeShutdownStatus::Confirmed);
 }
 
 #[tokio::test]

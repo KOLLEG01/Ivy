@@ -287,7 +287,7 @@ async fn production_factory_retains_one_identity_attempt_and_clean_entropy_failu
         Err(SipHostError::InitializationFailed)
     );
     assert!(failed.media().is_none());
-    owner.release(&failed).unwrap().wait().await.unwrap();
+    assert_eq!(owner.release(&failed).err(), Some(SipHostError::NotReady));
     assert!(owner.find(CALL).is_none());
     entropy.fail.store(false, Ordering::SeqCst);
     let next = owner.prepare(CALL.into()).unwrap();
@@ -619,17 +619,23 @@ async fn failed_native_setup_retires_binding_but_uncertain_construction_retains_
             SipHostError::CleanupUnconfirmed
         };
         assert_eq!(prepared, Err(expected));
-        assert_eq!(
-            owner.prepare(CALL.into()).err(),
-            Some(SipHostError::OperationConflict)
-        );
-        let released = owner.release(&call).unwrap().wait().await;
         if mode == 1 {
-            released.unwrap();
             assert!(owner.observation().calls.is_empty());
+            assert_eq!(owner.release(&call).err(), Some(SipHostError::NotReady));
+            factory.mode.store(0, Ordering::SeqCst);
+            let replacement = owner.prepare(CALL.into()).unwrap();
+            replacement.prepared().await.unwrap();
+            assert_eq!(owner.hangup(&call).err(), Some(SipHostError::NotReady));
+            assert!(!replacement.media().unwrap().observation().closed);
+            owner.release(&replacement).unwrap().wait().await.unwrap();
             owner.close().wait().await.unwrap();
             drop(std::net::UdpSocket::bind(endpoint).unwrap());
         } else {
+            assert_eq!(
+                owner.prepare(CALL.into()).err(),
+                Some(SipHostError::OperationConflict)
+            );
+            let released = owner.release(&call).unwrap().wait().await;
             assert_eq!(released, Err(SipHostError::CleanupUnconfirmed));
             assert_eq!(owner.observation().calls.len(), 1);
             assert_eq!(

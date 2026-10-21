@@ -375,15 +375,53 @@ fn result(value: IvyJson) -> NativeOutcome {
 fn failed(error: NativeSipError) -> NativeOutcome {
     NativeOutcome::error(error.code())
 }
+fn lifecycle_method(method: &str) -> bool {
+    matches!(
+        method,
+        "configure"
+            | "status"
+            | "heartbeat"
+            | "call.prepare"
+            | "call.dial"
+            | "call.claim"
+            | "call.answer"
+            | "call.hangup"
+            | "call.release"
+            | "registration.reconnect"
+            | "call.features"
+            | "call.waiting.end"
+            | "call.command.feedback"
+            | "call.screening.prepare"
+            | "call.screening.bridge"
+            | "call.windows.connect"
+            | "call.codec.upgrade"
+    )
+}
 impl NativeHandler for NativeSipCommands {
     fn start(&self, request: NativeRequest) -> NativeInvocationStart {
-        let configuring = request.method() == "configure";
+        if !lifecycle_method(request.method()) {
+            return self.remaining.start(request);
+        }
+        let synchronous = matches!(
+            request.method(),
+            "configure"
+                | "status"
+                | "heartbeat"
+                | "call.prepare"
+                | "call.claim"
+                | "call.features"
+                | "call.waiting.end"
+                | "call.command.feedback"
+                | "call.hangup"
+                | "call.screening.prepare"
+        );
         let action = self.invoke(request);
         Box::pin(async move {
-            if configuring {
-                // NativeRpc's original invocation lock spans synchronous host,
-                // Micro and registration setup. Retain it across the equivalent
-                // asynchronous Rust work, without blocking a runtime worker.
+            if synchronous {
+                // These original branches return their result before InvokeAsync
+                // reaches an await. Preserve that invocation/admission boundary;
+                // dial/answer/release and other asynchronous actions keep running
+                // independently after their synchronous entry returns.
                 let outcome = action.await;
                 Box::pin(async move { outcome }) as NativeInvocation
             } else {
@@ -395,26 +433,7 @@ impl NativeHandler for NativeSipCommands {
         (self.owner.observation().calls.len() * 4).max(4)
     }
     fn invoke(&self, request: NativeRequest) -> NativeInvocation {
-        if !matches!(
-            request.method(),
-            "configure"
-                | "status"
-                | "heartbeat"
-                | "call.prepare"
-                | "call.dial"
-                | "call.claim"
-                | "call.answer"
-                | "call.hangup"
-                | "call.release"
-                | "registration.reconnect"
-                | "call.features"
-                | "call.waiting.end"
-                | "call.command.feedback"
-                | "call.screening.prepare"
-                | "call.screening.bridge"
-                | "call.windows.connect"
-                | "call.codec.upgrade"
-        ) {
+        if !lifecycle_method(request.method()) {
             return self.remaining.invoke(request);
         }
         match self.lifecycle(request) {

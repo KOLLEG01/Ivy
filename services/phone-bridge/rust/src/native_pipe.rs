@@ -104,10 +104,26 @@ struct PipeHandler {
     heartbeat: Arc<Mutex<Instant>>,
     stop: Arc<Stop>,
 }
+impl PipeHandler {
+    fn control(&self, request: &NativeRequest) -> Option<NativeInvocation> {
+        if matches!(request.method(), "heartbeat" | "shutdown") {
+            if !request.params().as_object().unwrap().is_empty() {
+                return Some(Box::pin(async { NativeOutcome::error("invalid_request") }));
+            }
+            if request.method() == "shutdown" {
+                self.stop.request(NativeStopReason::Requested);
+                return Some(Box::pin(async {
+                    NativeOutcome::result("{\"stopping\":true}".into())
+                }));
+            }
+            *self.heartbeat.lock().unwrap() = Instant::now();
+        }
+        None
+    }
+}
 impl NativeHandler for PipeHandler {
     fn start(&self, request: NativeRequest) -> NativeInvocationStart {
-        if matches!(request.method(), "heartbeat" | "shutdown") {
-            let action = self.invoke(request);
+        if let Some(action) = self.control(&request) {
             Box::pin(async move { action })
         } else {
             self.runtime.start(request)
@@ -117,15 +133,8 @@ impl NativeHandler for PipeHandler {
         self.runtime.cleanup_slots()
     }
     fn invoke(&self, request: NativeRequest) -> NativeInvocation {
-        if matches!(request.method(), "heartbeat" | "shutdown") {
-            if !request.params().as_object().unwrap().is_empty() {
-                return Box::pin(async { NativeOutcome::error("invalid_request") });
-            }
-            if request.method() == "shutdown" {
-                self.stop.request(NativeStopReason::Requested);
-                return Box::pin(async { NativeOutcome::result("{\"stopping\":true}".into()) });
-            }
-            *self.heartbeat.lock().unwrap() = Instant::now();
+        if let Some(action) = self.control(&request) {
+            return action;
         }
         self.runtime.invoke(request)
     }

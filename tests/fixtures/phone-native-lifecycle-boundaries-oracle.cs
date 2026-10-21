@@ -12,7 +12,7 @@ using Ivy.PhoneBridge;
 
 // The original DLL owns all RPC, SIP/configuration and Desktop input behavior.
 // Only Micro construction/status/disposal and the closed PCM port are supplied.
-public static class PhoneNativeLifecycleBoundariesOracle {
+public static partial class PhoneNativeLifecycleBoundariesOracle {
     const string Epoch="11111111-1111-4111-8111-111111111111";
     sealed class Port : IPcmAudioPort {
         public bool IsOpen=>false;

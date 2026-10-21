@@ -623,9 +623,9 @@ impl SipHost {
             let result = tokio::spawn(async move { create().await })
                 .await
                 .unwrap_or(Err(SipHostError::CleanupUnconfirmed));
-            let mut state = original.state.lock().unwrap();
             let result = match result {
                 Ok(media) => {
+                    let state = original.state.lock().unwrap();
                     let _ = original.signalling_view.set(observers.observe(&wire_id));
                     // Hangup/release may have arrived while the original
                     // constructor was suspended. Revoke before publication.
@@ -636,7 +636,18 @@ impl SipHost {
                     Ok(())
                 }
                 Err(error) => {
-                    state.failed_before_send = true;
+                    original.state.lock().unwrap().failed_before_send = true;
+                    if error != SipHostError::CleanupUnconfirmed {
+                        // No original call was published by a failed synchronous
+                        // constructor. Only a confirmed, resource-free failure
+                        // can return this reservation before signalling it.
+                        if let Some(host) = original.host.upgrade() {
+                            host.lock()
+                                .unwrap()
+                                .calls
+                                .retain(|call| !Arc::ptr_eq(call, &original));
+                        }
+                    }
                     Err(error)
                 }
             };

@@ -449,6 +449,8 @@ impl NativeSipOperations {
         let original_slot = Arc::new(OnceLock::<std::sync::Weak<Call>>::new());
         let hangup_slot = original_slot.clone();
         let failure_slot = original_slot.clone();
+        let construction_slot = original_slot.clone();
+        let construction_owner = Arc::downgrade(&self.0);
         let features = PhoneCallFeatures::new(
             self.0.limiter.clone(),
             self.0.feature_time.clone(),
@@ -464,7 +466,29 @@ impl NativeSipOperations {
         .map_err(|_| SipHostError::NotReady)?;
         let media_features = features.clone();
         let create = move || async move {
-            let session = factory.create(original_id, configuration).await?;
+            let session = match factory.create(original_id, configuration).await {
+                Ok(session) => session,
+                Err(error) => {
+                    if error != SipHostError::CleanupUnconfirmed {
+                        if let Some(owner) = construction_owner.upgrade() {
+                            // prepare_call holds this mutex until the weak handle
+                            // and reservation are published, including an immediate
+                            // constructor failure on another runtime worker.
+                            let mut state = owner.state.lock().unwrap();
+                            if let Some(call) =
+                                construction_slot.get().and_then(std::sync::Weak::upgrade)
+                            {
+                                state
+                                    .calls
+                                    .retain(|original| !Arc::ptr_eq(&original.0, &call));
+                                drop(state);
+                                call.features.dispose();
+                            }
+                        }
+                    }
+                    return Err(error);
+                }
+            };
             // Publish the exact session even if policy attachment is uncertain;
             // it must remain fenced for explicit original-call cleanup.
             let _ = saved.set(session.clone());
