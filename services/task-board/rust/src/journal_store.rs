@@ -74,6 +74,7 @@ struct ReadRecord {
 struct CachedRecord {
     object_id: Json,
     document: Option<ReadRecord>,
+    materialized: Option<Json>,
 }
 type CacheEntries = Rc<RefCell<Vec<(Json, CachedRecord)>>>;
 enum CacheBinding {
@@ -504,6 +505,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                 let cached = CachedRecord {
                     object_id: record.document.pin.required("objectId")?.clone(),
                     document: Some(record.clone()),
+                    materialized: None,
                 };
                 if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == &cache_key) {
                     *existing = cached;
@@ -824,6 +826,7 @@ impl<R: RpcClient + 'static, P: Contracts, C: Fn() -> String, I: Fn() -> JsStrin
                         // No read can select the original unmatched seed. Only
                         // its identity and bounded-slot accounting are observed.
                         document: None,
+                        materialized: None,
                     },
                 ));
             }

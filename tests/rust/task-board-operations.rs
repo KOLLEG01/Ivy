@@ -33,6 +33,8 @@ mod lifecycle;
 mod next_steps;
 #[path = "../fixtures/task-board-persistent-reads.rs"]
 mod persistent_reads;
+#[path = "../fixtures/task-board-persistent-store.rs"]
+mod persistent_store;
 #[path = "../fixtures/task-board-program.rs"]
 mod publication;
 #[path = "../fixtures/task-board-read-ports.rs"]
