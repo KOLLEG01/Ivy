@@ -20,11 +20,11 @@ if (releaseIdentity) {
   assert.equal(process.platform, 'win32');
   assert.equal(releaseIdentity.schemaVersion, 1);
   assert.match(releaseIdentity.buildId, /^sha256:[0-9a-f]{64}$/);
-  assert.equal(releaseIdentity.version, JSON.parse(await readFile('services/service-manager/deploy.json', 'utf8')).version);
+  assert.equal(releaseIdentity.version, JSON.parse(await readFile('package.json', 'utf8')).version);
 }
 const token = 'isolated-native-manager-fixture';
 const hash = releaseIdentity?.buildId ?? digest('isolated-manager-artifact');
-const version = releaseIdentity?.version ?? '1.0.0';
+const version = releaseIdentity ? JSON.parse(await readFile('services/service-manager/deploy.json', 'utf8')).version : '1.0.0';
 const configPath = join(root, 'host.json');
 const artifact = join(root, 'artifacts', 'manager');
 const managerData = join(root, 'state', 'instances', 'manager', 'data');
@@ -316,7 +316,7 @@ try {
   results.push('host reload refusal, control binding, process replacement replay');
   }
   if (process.platform==='win32') await qualifyDispatcherOwner();
-  console.log(JSON.stringify({ok:true,results,...(releaseIdentity ? {mode,identity:releaseIdentity} : {}),limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
+  console.log(JSON.stringify({ok:true,results,...(releaseIdentity ? {mode,identity:releaseIdentity,componentStamp:{schemaVersion:1,componentId:'service-manager',version,buildId:hash}} : {}),limitations:['Executor status is a fixture; no native deployment executor or archive/platform acceptance.']}));
 } finally {
   clearInterval(executorTimer);
   try {await stopDispatcherOwner();await stop();} finally {await hive.close();journal.close();}
