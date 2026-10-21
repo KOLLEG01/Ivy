@@ -29,6 +29,22 @@ function runCargo(args, options) {
  * This is a builder input to universal package assembly, not a release archive or
  * proof that other advertised targets and host readiness helpers are available. */
 export function compileRustBackend({ component, target, root = process.cwd(), identity, cargo = runCargo, runtimeFiles = [] } = {}) {
+  return compileRustBinaries({ component, target, root, identity, cargo, runtimeFiles });
+}
+
+/** Compile only explicitly selected registered helper bins into the same payload
+ * format. A helper payload never substitutes for the component service. */
+export function compileRustHelpers({ binaries, ...options } = {}) {
+  if (!Array.isArray(binaries) || !binaries.length ||
+      binaries.some(name => typeof name !== 'string' || !/^[A-Za-z0-9_-]+$/.test(name)) ||
+      new Set(binaries.map(name => name.toLowerCase())).size !== binaries.length) {
+    throw new Error('Native helpers require distinct safe executable names.');
+  }
+  if (binaries.includes(`ivy-${options.component}`)) throw new Error('The native service executable is not a helper.');
+  return compileRustBinaries(options, binaries);
+}
+
+function compileRustBinaries({ component, target, root = process.cwd(), identity, cargo = runCargo, runtimeFiles = [] }, helperNames) {
   if (!/^[a-z][a-z0-9-]*$/.test(component ?? '')) throw new Error('A component name is required.');
   const platform = typeof target === 'string' && Object.hasOwn(rustBackendTargets, target) ? rustBackendTargets[target] : undefined;
   if (!platform) throw new Error('An explicit supported Rust target is required.');
@@ -53,8 +69,13 @@ export function compileRustBackend({ component, target, root = process.cwd(), id
   const metadata = JSON.parse(cargo(['metadata', '--locked', '--no-deps', '--format-version', '1', '--manifest-path', manifest], options));
   const selected = metadata.packages.find(pkg => resolve(pkg.manifest_path) === manifest);
   if (!selected || !metadata.workspace_members.includes(selected.id)) throw new Error('Register the delivered component in the Rust workspace before building it.');
-  const binaries = selected.targets.filter(t => t.kind.includes('bin'));
-  if (!binaries.some(t => t.name === `ivy-${component}`)) throw new Error('The component has no native service executable; a library is not a backend.');
+  const declared = selected.targets.filter(t => t.kind.includes('bin'));
+  const binaries = helperNames ? helperNames.map(name => {
+    const matches = declared.filter(binary => binary.name === name);
+    if (matches.length !== 1) throw new Error(`Register the exact native helper bin: ${name}.`);
+    return matches[0];
+  }) : declared;
+  if (!helperNames && !binaries.some(t => t.name === `ivy-${component}`)) throw new Error('The component has no native service executable; a library is not a backend.');
   for (const binary of binaries) if (!/^[A-Za-z0-9_-]+$/.test(binary.name)) throw new Error('Invalid native executable name.');
   const features = [...new Set(binaries.flatMap(t => t['required-features'] ?? []))];
   // Explicit required features also include optional binary targets; default
@@ -65,6 +86,7 @@ export function compileRustBackend({ component, target, root = process.cwd(), id
   const artifacts = new Map();
   for (const message of messages) {
     if (message.reason !== 'compiler-artifact' || message.package_id !== selected.id || !message.executable || !message.target.kind.includes('bin')) continue;
+    if (helperNames && !helperNames.includes(message.target.name)) continue;
     const source = resolve(message.executable);
     if (!within(releaseDirectory, source) || realpathSync(source) !== source || !statSync(source).isFile()) throw new Error('Cargo executable escaped its selected target release directory.');
     artifacts.set(message.target.name, source);

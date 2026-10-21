@@ -44,7 +44,7 @@ function runtimeAssets(component, root) {
   return assets;
 }
 
-/** Assemble prebuilt component/helper records from compileRustBackend. The exact
+/** Assemble records from compileRustBackend and compileRustHelpers. The exact
  * advertised matrix is mandatory; this does not compile, qualify or archive it.
  * Callers declare extra required helper names by OS. Linux executable paths are
  * also returned for an archive writer assembling on a filesystem without Unix modes. */

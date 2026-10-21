@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { compileRustBackend } from '../tools/build/build-rust-backend.mjs';
+import { compileRustBackend, compileRustHelpers } from '../tools/build/build-rust-backend.mjs';
 
 function fixture(run, component = 'example') {
   const root = mkdtempSync(join(tmpdir(), 'ivy-rust-build-'));
@@ -27,7 +27,10 @@ function fixture(run, component = 'example') {
       return JSON.stringify({ reason: 'compiler-artifact', package_id: 'selected', target, executable });
     }).join('\n');
   };
-  try { run({ root, manifest, identity, targets, calls, cargo, build: extra => compileRustBackend({ root, component, target: 'x86_64-pc-windows-msvc', identity, cargo, ...extra }) }); }
+  const options = { root, component, target: 'x86_64-pc-windows-msvc', identity, cargo };
+  try { run({ root, manifest, identity, targets, calls, cargo,
+    build: extra => compileRustBackend({ ...options, ...extra }),
+    helpers: extra => compileRustHelpers({ ...options, binaries: [`ivy-${component}-helper`], ...extra }) }); }
   finally { rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -88,6 +91,50 @@ test('libraries and unregistered crates never fall back to TypeScript', () => fi
   assert.throws(() => f.build(), /no native service executable/);
   assert.equal(f.calls.length, 1);
   assert.throws(() => f.build({ cargo: () => JSON.stringify({ packages: [], workspace_members: [] }) }), /Register/);
+}));
+
+test('helper-only compilation selects exact bins and their features without requiring a service', () => fixture(f => {
+  f.targets.shift();
+  f.targets[0]['required-features'] = ['worker'];
+  f.targets.push({ name: 'other-helper', kind: ['bin'], 'required-features': ['unselected'] });
+  const runtime = join(f.root, 'example_runtime.dll'); writeFileSync(runtime, 'runtime');
+  const result = f.helpers({ runtimeFiles: [runtime] });
+  assert.equal(result.files.length, 1);
+  assert.equal(readFileSync(result.files[0], 'utf8'), 'fixture ivy-example-helper');
+  assert.deepEqual(result.runtimeFiles, [join(result.outputDirectory, 'example_runtime.dll')]);
+  assert.deepEqual(result.instructionFiles, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(result.outputDirectory, 'build-info.json'))), f.identity);
+  const { args } = f.calls[1];
+  assert.deepEqual(args.filter((_, i) => args[i - 1] === '--bin'), ['ivy-example-helper']);
+  assert.equal(args[args.indexOf('--features') + 1], 'worker');
+  assert.equal(args.includes('--no-default-features'), false);
+  assert.ok(args.includes('--locked') && args.includes('--release'));
+  assert.throws(() => f.build(), /no native service executable/);
+}));
+
+test('helper names must be distinct exact registered bins and exclude the service', () => fixture(f => {
+  for (const binaries of [undefined, null, [], 'ivy-example-helper', ['../helper'], ['helper.exe'],
+    ['ivy-example-helper', 'ivy-example-helper'], ['Helper', 'helper'], ['ivy-example'],
+    ['missing'], ['ivy_example'], ['IVY-example-helper']]) {
+    assert.throws(() => f.helpers({ binaries }), /helpers require|not a helper|exact native helper/);
+  }
+  assert.equal(f.calls.some(call => call.args[0] === 'build'), false);
+  assert.equal(existsSync(join(f.root, '.local/build')), false);
+}));
+
+test('helper artifacts are complete and contained before any old output is replaced', () => fixture(f => {
+  const output = join(f.root, '.local/build/rust/example/win32-x64/ivy-example-helper.exe');
+  mkdirSync(dirname(output), { recursive: true }); writeFileSync(output, 'previous helper');
+  const metadata = (args, options) => f.cargo(args, options);
+  const absent = (args, options) => args[0] === 'metadata' ? metadata(args, options) : '';
+  assert.throws(() => f.helpers({ cargo: absent }), /did not produce ivy-example-helper/);
+  const foreign = join(f.root, 'foreign.exe'); writeFileSync(foreign, 'foreign');
+  const escaped = (args, options) => args[0] === 'metadata' ? metadata(args, options) : JSON.stringify({
+    reason: 'compiler-artifact', package_id: 'selected', target: f.targets[1], executable: foreign,
+  });
+  assert.throws(() => f.helpers({ cargo: escaped }), /escaped/);
+  assert.equal(readFileSync(output, 'utf8'), 'previous helper');
+  assert.equal(existsSync(join(dirname(output), 'build-info.json')), false);
 }));
 
 test('missing compiler artifacts cannot reuse old staged executable bytes', () => fixture(f => {
