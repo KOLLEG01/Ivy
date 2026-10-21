@@ -1,4 +1,7 @@
 use ivy_contracts::{IvyJson as J, JsString, hash::digest, json::parse};
+use ivy_contracts::{
+    error::JavaScriptExceptionKind, task_board_questions::open_task_questions_raw,
+};
 use ivy_sdk::{IvyResult, open_task_questions};
 use std::path::{Path, PathBuf};
 
@@ -108,12 +111,46 @@ fn additional_source_oracle_boundaries_preserve_values_and_failure() {
             let expected = row.get("expected").unwrap().get(mode).unwrap();
             let mut boundary = expected.clone();
             boundary.remove("originalError");
+            boundary.remove("originalMessage");
+            let raw = match open_task_questions_raw(task, run_id) {
+                Ok(value) => J::object([("value", J::Array(value))]),
+                Err(error) => J::object([(
+                    "error",
+                    J::object([
+                        (
+                            "kind",
+                            match error.kind {
+                                JavaScriptExceptionKind::TypeError => "TypeError",
+                                JavaScriptExceptionKind::RangeError => "RangeError",
+                            }
+                            .into(),
+                        ),
+                        ("message", J::String(error.message)),
+                    ]),
+                )]),
+            };
+            let raw_expected = if expected.get("error").is_some() {
+                J::object([(
+                    "error",
+                    J::object([
+                        ("kind", expected.get("originalError").unwrap().clone()),
+                        ("message", expected.get("originalMessage").unwrap().clone()),
+                    ]),
+                )])
+            } else {
+                expected.clone()
+            };
             observations.push(J::object([
                 ("name", row.get("name").unwrap().clone()),
                 ("mode", mode.into()),
                 ("actual", actual.clone()),
                 ("expected", expected.clone()),
-                ("matches", (actual == boundary).into()),
+                ("raw", raw.clone()),
+                ("rawExpected", raw_expected.clone()),
+                (
+                    "matches",
+                    (actual == boundary && raw == raw_expected).into(),
+                ),
             ]));
         }
         assert_eq!(*task, before);

@@ -4,6 +4,30 @@ use std::fmt;
 
 pub type IvyResult<T> = Result<T, IvyError>;
 
+/// A JavaScript failure that has not reached an owner's Ivy error boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaScriptExceptionKind {
+    TypeError,
+    RangeError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaScriptException {
+    pub kind: JavaScriptExceptionKind,
+    pub message: JsString,
+}
+
+impl fmt::Display for JavaScriptException {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            JavaScriptExceptionKind::TypeError => "TypeError",
+            JavaScriptExceptionKind::RangeError => "RangeError",
+        };
+        write!(f, "{kind}: {}", String::from_utf16_lossy(&self.message.0))
+    }
+}
+impl std::error::Error for JavaScriptException {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {

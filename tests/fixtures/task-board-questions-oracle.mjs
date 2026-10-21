@@ -99,7 +99,7 @@ for (const row of cases) {
     try {
       row.expected[mode] = {value: openTaskQuestions(row.task, mode === 'run' ? row.runId : undefined)};
     } catch (error) {
-      row.expected[mode] = {error: IvyError.from(error).toWire(), originalError: error.name};
+      row.expected[mode] = {error: IvyError.from(error).toWire(), originalError: error.name, originalMessage: error.message};
     }
     assert.equal(JSON.stringify(row.task), before);
   }

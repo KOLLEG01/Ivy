@@ -100,3 +100,7 @@ path = "../../../tests/rust/task-board-questions.rs"
 [[test]]
 name = "sdk-comment-reader"
 path = "../../../tests/rust/sdk-comment-reader.rs"
+
+[[test]]
+name = "sdk-task-board-records"
+path = "../../../tests/rust/sdk-task-board-records.rs"
